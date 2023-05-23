@@ -18,6 +18,12 @@ else
 	ARCH_NAME := arm64
 endif
 
+# Default case for Linux sed, just use "-i"
+sedi := -i
+ifeq ($(OS_NAME),darwin)
+	sedi := -i ""
+endif
+
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
@@ -38,7 +44,7 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 		rbac:roleName=manager-role crd webhook paths="./..." \
 		output:crd:artifacts:config=helm/nibiru-operator/crds \
 		output:rbac:dir=helm/nibiru-operator/templates/rbac
-	@sed -i '' 's/name: manager-role/name: {{ .Release.Name }}/g' helm/nibiru-operator/templates/rbac/role.yaml
+	@sed $(sedi) 's/name: manager-role/name: {{ .Release.Name }}/g' helm/nibiru-operator/templates/rbac/role.yaml
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -113,7 +119,7 @@ undeploy: ## Undeploy controller from the K8s cluster
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
-	mkdir -p $(LOCALBIN)
+	@mkdir -p $(LOCALBIN)
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl
