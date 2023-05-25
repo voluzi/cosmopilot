@@ -12,19 +12,19 @@ You’ll need a Kubernetes cluster to run against. You can use [KIND](https://si
 1. Install Instances of Custom Resources:
 
 ```sh
-kubectl apply -f config/samples/
+make install
 ```
 
 2. Build and push your image to the location specified by `IMG`:
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/nibiru-operator:tag
+make docker-build docker-push VERSION=<your-tag>
 ```
 
 3. Deploy the controller to the cluster with the image specified by `IMG`:
 
 ```sh
-make deploy IMG=<some-registry>/nibiru-operator:tag
+make deploy VERSION=<your-tag>
 ```
 
 ### Uninstall CRDs

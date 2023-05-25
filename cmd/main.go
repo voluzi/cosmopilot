@@ -2,8 +2,10 @@ package main
 
 import (
 	"flag"
+	"log"
 	"os"
 
+	"k8s.io/client-go/kubernetes"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -16,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
-	"github.com/NibiruChain/nibiru-operator/internal/controller"
+	"github.com/NibiruChain/nibiru-operator/internal/chainnode"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -73,9 +75,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.ChainNodeReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		log.Fatalf("unable to create clientset: %v", err)
+	}
+
+	if err = (&chainnode.Reconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		ClientSet:  clientset,
+		RestConfig: mgr.GetConfig(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ChainNode")
 		os.Exit(1)

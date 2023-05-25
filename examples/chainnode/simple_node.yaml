@@ -1,0 +1,25 @@
+apiVersion: apps.k8s.nibiru.org/v1
+kind: ChainNode
+metadata:
+  name: nibiru-0
+spec:
+  genesis:
+    url: https://networks.itn.nibiru.fi/itn-1/genesis
+
+  app:
+    image: ghcr.io/nibiruchain/nibiru
+    version: 0.19.3
+    app: nibid
+
+  persistence:
+    size: 50Gi
+
+  config:
+    override:
+      app.toml:
+        minimum-gas-prices: 0.025unibi
+
+      config.toml:
+        p2p:
+          addr_book_strict: false
+          seeds: f6c4429af0c199f579d55b3b12b760e431db21d4@34.139.52.143:26656,613e133355a43be28b31d33d13c8814d6ea0c99f@34.75.8.154:26656,96542db3df6f535bcc4fb6508d3679450dcc50ff@34.23.0.207:26656

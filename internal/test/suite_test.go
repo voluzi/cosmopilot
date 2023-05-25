@@ -1,4 +1,4 @@
-package controller
+package test
 
 import (
 	"path/filepath"
@@ -33,7 +33,7 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "helm", "nibiru-operator", "crds")},
 		ErrorIfCRDPathMissing: true,
 	}
 

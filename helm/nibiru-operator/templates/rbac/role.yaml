@@ -6,9 +6,26 @@ metadata:
   name: {{ .Release.Name }}
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - pods/attach
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
   - apps.k8s.nibiru.org
   resources:
   - chainnodes
+  - configmaps
+  - persistentvolumeclaims
+  - pods
+  - secrets
   verbs:
   - create
   - delete

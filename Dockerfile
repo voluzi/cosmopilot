@@ -5,9 +5,9 @@ COPY go.mod go.sum* ./
 RUN go mod download
 
 # Copy the go source
-COPY cmd/main.go cmd/main.go
+COPY cmd/ cmd/
 COPY api/ api/
-COPY internal/controller/ internal/controller/
+COPY internal/ internal/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -a -o manager cmd/main.go
 
