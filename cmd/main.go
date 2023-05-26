@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
-	"github.com/NibiruChain/nibiru-operator/internal/chainnode"
+	"github.com/NibiruChain/nibiru-operator/internal/controllers/chainnode"
 	//+kubebuilder:scaffold:imports
 )
 

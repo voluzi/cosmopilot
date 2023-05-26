@@ -1,5 +1,5 @@
 # nibiru-operator
-// TODO(user): Add simple overview of use/purpose
+Kubernetes controllers to manage nibiru (and other cosmos nodes) on a Kubernetes cluster.
 
 ## Description
 // TODO(user): An in-depth paragraph about your project and overview of use
