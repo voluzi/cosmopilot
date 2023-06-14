@@ -13,7 +13,7 @@ import (
 	"github.com/NibiruChain/nibiru-operator/internal/k8s"
 )
 
-func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim, initCommands ...*InitCommand) error {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-init-data", a.owner.GetName()),
@@ -21,6 +21,11 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsUser:  pointer.Int64(nonRootId),
+				RunAsGroup: pointer.Int64(nonRootId),
+				FSGroup:    pointer.Int64(nonRootId),
+			},
 			Volumes: []corev1.Volume{
 				{
 					Name: "data",
@@ -30,8 +35,20 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 						},
 					},
 				},
+				{
+					Name: "home",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+				{
+					Name: "temp",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 			},
-			Containers: []corev1.Container{
+			InitContainers: []corev1.Container{
 				{
 					Name:            "app",
 					Image:           a.image,
@@ -40,15 +57,52 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 					Args:            []string{"init", "test", "--home", "/home/app"},
 					VolumeMounts: []corev1.VolumeMount{
 						{
+							Name:      "home",
+							MountPath: "/home/app",
+						},
+						{
 							Name:      "data",
 							MountPath: "/home/app/data",
 						},
 					},
 				},
 			},
+			Containers: []corev1.Container{
+				// no-op container
+				{
+					Name:    "busybox",
+					Image:   "busybox",
+					Command: []string{"echo"},
+				},
+			},
 			TerminationGracePeriodSeconds: pointer.Int64(0),
 		},
 	}
+
+	// Add additional commands
+	for i, cmd := range initCommands {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:    fmt.Sprintf("init-command-%d", i),
+			Image:   cmd.Image,
+			Command: cmd.Command,
+			Args:    cmd.Args,
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "home",
+					MountPath: "/home/app",
+				},
+				{
+					Name:      "data",
+					MountPath: "/home/app/data",
+				},
+				{
+					Name:      "temp",
+					MountPath: "/temp",
+				},
+			},
+		})
+	}
+
 	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {
 		return err
 	}
@@ -65,5 +119,5 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 	if err := ph.Create(ctx); err != nil {
 		return err
 	}
-	return ph.WaitForPodSucceeded(ctx, time.Minute)
+	return ph.WaitForPodSucceeded(ctx, 5*time.Minute)
 }

@@ -10,6 +10,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -34,14 +36,23 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("creating pod")
+			if err := r.updatePhase(ctx, chainNode, appsv1.PhaseStarting); err != nil {
+				return err
+			}
+
 			ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
 			if err := ph.Create(ctx); err != nil {
 				return err
 			}
-			if err := ph.WaitForPodRunning(ctx, timeoutPodRunning); err != nil {
+			if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, appContainerName); err != nil {
 				return err
 			}
-			return r.updatePhase(ctx, chainNode, appsv1.PhaseRunning)
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeNormal,
+				appsv1.ReasonNodeStarted,
+				"Node successfully started",
+			)
+			return r.setPhaseRunningOrSyncing(ctx, chainNode)
 		}
 		return err
 	}
@@ -64,7 +75,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 		return r.recreatePod(ctx, chainNode, pod)
 	}
 
-	return nil
+	return r.setPhaseRunningOrSyncing(ctx, chainNode)
 }
 
 func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode, configHash string) (*corev1.Pod, error) {
@@ -101,6 +112,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsUser:  pointer.Int64(nonRootId),
+				RunAsGroup: pointer.Int64(nonRootId),
+				FSGroup:    pointer.Int64(nonRootId),
+			},
 			Volumes: []corev1.Volume{
 				{
 					Name: "data",
@@ -138,10 +154,16 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 						},
 					},
 				},
+				{
+					Name: "secret",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 			},
 			Containers: []corev1.Container{
 				{
-					Name:            "app",
+					Name:            appContainerName,
 					Image:           chainNode.GetImage(),
 					ImagePullPolicy: chainNode.GetImagePullPolicy(),
 					Command:         []string{chainNode.Spec.App.App},
@@ -154,7 +176,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 						},
 						{
 							Name:          chainutils.RpcPortName,
-							ContainerPort: chainutils.Rpcport,
+							ContainerPort: chainutils.RpcPort,
 							Protocol:      corev1.ProtocolTCP,
 						},
 						{
@@ -178,11 +200,92 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 							MountPath: "/genesis",
 						},
 						{
+							Name:      "secret",
+							MountPath: "/secret",
+						},
+						{
 							Name:      "node-key",
 							MountPath: "/secret/" + nodeKeyFilename,
 							SubPath:   nodeKeyFilename,
 						},
 					}, configFilesMounts...),
+					StartupProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/health",
+								Port: intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: nodeUtilsPort,
+								},
+								Scheme: "HTTP",
+							},
+						},
+						PeriodSeconds:    5,
+						FailureThreshold: int32(startupTimeout.Seconds() / 5),
+					},
+					LivenessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/health",
+								Port: intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: nodeUtilsPort,
+								},
+								Scheme: "HTTP",
+							},
+						},
+						FailureThreshold: 2,
+						PeriodSeconds:    30,
+					},
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/ready",
+								Port: intstr.IntOrString{
+									Type:   intstr.Int,
+									IntVal: nodeUtilsPort,
+								},
+								Scheme: "HTTP",
+							},
+						},
+						FailureThreshold: 1,
+						PeriodSeconds:    10,
+					},
+				},
+				{
+					Name:            nodeUtilsContainerName,
+					Image:           r.nodeUtilsImage,
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Ports: []corev1.ContainerPort{
+						{
+							Name:          nodeUtilsPortName,
+							ContainerPort: 8000,
+							Protocol:      corev1.ProtocolTCP,
+						},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "data",
+							MountPath: "/home/app/data",
+							ReadOnly:  true,
+						},
+					},
+					Env: []corev1.EnvVar{
+						{
+							Name:  "BLOCK_THRESHOLD",
+							Value: chainNode.GetBlockThreshold(),
+						},
+					},
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    nodeUtilsCpuResources,
+							corev1.ResourceMemory: nodeUtilsMemoryResources,
+						},
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    nodeUtilsCpuResources,
+							corev1.ResourceMemory: nodeUtilsMemoryResources,
+						},
+					},
 				},
 			},
 		},
@@ -208,6 +311,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 					{
 						Name:      "data",
 						MountPath: *c.MountDataVolume,
+						ReadOnly:  true,
 					},
 				}
 			}
@@ -258,10 +362,15 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 		return err
 	}
 
-	if err := ph.WaitForPodRunning(ctx, timeoutPodRunning); err != nil {
+	if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, appContainerName); err != nil {
 		return err
 	}
-	return r.updatePhase(ctx, chainNode, appsv1.PhaseRunning)
+	r.recorder.Eventf(chainNode,
+		corev1.EventTypeNormal,
+		appsv1.ReasonNodeRestarted,
+		"Node restarted",
+	)
+	return r.setPhaseRunningOrSyncing(ctx, chainNode)
 }
 
 func podSpecChanged(existing, new *corev1.Pod) bool {
@@ -308,4 +417,39 @@ func removeFieldsForComparison(pod *corev1.Pod) {
 		}
 		pod.Spec.Containers[i].VolumeMounts = volumeMounts
 	}
+}
+
+func (r *Reconciler) setPhaseRunningOrSyncing(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	c, err := r.getQueryClient(chainNode)
+	if err != nil {
+		return err
+	}
+
+	syncing, err := c.IsNodeSyncing(ctx)
+	if err != nil {
+		return err
+	}
+
+	if syncing {
+		if chainNode.Status.Phase != appsv1.PhaseSyncing {
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeNormal,
+				appsv1.ReasonNodeSyncing,
+				"Node is syncing",
+			)
+			return r.updatePhase(ctx, chainNode, appsv1.PhaseSyncing)
+		}
+		return nil
+	}
+
+	if chainNode.Status.Phase != appsv1.PhaseRunning {
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeNormal,
+			appsv1.ReasonNodeRunning,
+			"Node is synced and running",
+		)
+		return r.updatePhase(ctx, chainNode, appsv1.PhaseRunning)
+	}
+
+	return nil
 }

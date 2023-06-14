@@ -2,20 +2,17 @@ package chainnode
 
 import (
 	"context"
-	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
-	"github.com/NibiruChain/nibiru-operator/internal/chainutils"
 )
 
 func (r *Reconciler) updateJailedStatus(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
-	client, err := chainutils.NewQueryClient(
-		fmt.Sprintf("%s.%s.svc.cluster.local:%d", chainNode.GetName(), chainNode.GetNamespace(), chainutils.GrpcPort),
-	)
+	client, err := r.getQueryClient(chainNode)
 	if err != nil {
 		return err
 	}
@@ -28,6 +25,19 @@ func (r *Reconciler) updateJailedStatus(ctx context.Context, chainNode *appsv1.C
 	if chainNode.Status.Jailed != validator.Jailed {
 		logger.Info("updating jailed status", "jailed", validator.Jailed)
 		chainNode.Status.Jailed = validator.Jailed
+		if validator.Jailed {
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeWarning,
+				appsv1.ReasonValidatorJailed,
+				"Validator is jailed",
+			)
+		} else {
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeNormal,
+				appsv1.ReasonValidatorUnjailed,
+				"Validator was successfully unjailed",
+			)
+		}
 		return r.Status().Update(ctx, chainNode)
 	}
 

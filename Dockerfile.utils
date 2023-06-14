@@ -10,11 +10,10 @@ COPY api/ api/
 COPY internal/ internal/
 COPY pkg/ pkg/
 
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o manager ./cmd/manager
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o nodeutils ./cmd/nodeutils
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static
 WORKDIR /
-COPY --from=builder /workspace/manager .
-USER 65532:65532
+COPY --from=builder /workspace/nodeutils .
 
-ENTRYPOINT ["/manager"]
+ENTRYPOINT ["/nodeutils"]

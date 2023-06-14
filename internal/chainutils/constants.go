@@ -5,11 +5,13 @@ const (
 	P2pPort     = 26656
 
 	RpcPortName = "rpc"
-	Rpcport     = 26657
+	RpcPort     = 26657
 
 	LcdPortName = "lcd"
 	LcdPort     = 1317
 
 	GrpcPortName = "grpc"
 	GrpcPort     = 9090
+
+	nonRootId = 1000
 )

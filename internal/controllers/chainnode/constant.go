@@ -1,6 +1,10 @@
 package chainnode
 
-import "time"
+import (
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+)
 
 const (
 	nodeKeyFilename    = "node_key.json"
@@ -14,8 +18,25 @@ const (
 	labelChainID   = "chain-id"
 	labelValidator = "validator"
 
-	annotationConfigHash = "apps.k8s.nibiru.org/config-hash"
+	annotationConfigHash      = "apps.k8s.nibiru.org/config-hash"
+	annotationDataInitialized = "apps.k8s.nibiru.org/data-initialized"
 
 	timeoutPodRunning = 5 * time.Minute
 	timeoutPodDeleted = 30 * time.Second
+
+	appContainerName = "app"
+
+	nodeUtilsContainerName = "node-utils"
+	nodeUtilsCPU           = "100m"
+	nodeUtilsMemory        = "100Mi"
+	nodeUtilsPortName      = "node-utils"
+	nodeUtilsPort          = 8000
+
+	startupTimeout = 5 * time.Minute
+	nonRootId      = 1000
+)
+
+var (
+	nodeUtilsCpuResources    = resource.MustParse(nodeUtilsCPU)
+	nodeUtilsMemoryResources = resource.MustParse(nodeUtilsMemory)
 )
