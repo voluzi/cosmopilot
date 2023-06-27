@@ -8,6 +8,22 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  - persistentvolumeclaims
+  - pods
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - nodes
   verbs:
   - get
@@ -26,11 +42,8 @@ rules:
   verbs:
   - get
 - apiGroups:
-  - apps.k8s.nibiru.org
+  - ""
   resources:
-  - chainnodes
-  - chainnodesets
-  - ingresses
   - services
   verbs:
   - create
@@ -44,11 +57,19 @@ rules:
   - apps.k8s.nibiru.org
   resources:
   - chainnodes
-  - configmaps
-  - persistentvolumeclaims
-  - pods
-  - secrets
-  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.k8s.nibiru.org
+  resources:
+  - chainnodes
+  - chainnodesets
   verbs:
   - create
   - delete
@@ -74,14 +95,25 @@ rules:
 - apiGroups:
   - apps.k8s.nibiru.org
   resources:
+  - chainnodes/status
+  - chainnodesets/status
+  verbs:
+  - get
+- apiGroups:
+  - apps.k8s.nibiru.org
+  resources:
   - chainnodesets/finalizers
   verbs:
   - update
 - apiGroups:
-  - apps.k8s.nibiru.org
+  - networking.k8s.io
   resources:
-  - chainnodesets/status
+  - ingresses
   verbs:
+  - create
+  - delete
   - get
+  - list
   - patch
   - update
+  - watch

@@ -115,7 +115,8 @@ uninstall: manifests kubectl ## Uninstall CRDs from the K8s cluster
 deploy: RELEASE_NAME?=nibiru-operator
 deploy: NAMESPACE?=nibiru-system
 deploy: SERVICE_MONITOR_ENABLED?=false
-deploy: manifests kubectl ## Deploy controller to the K8s cluster
+deploy: IMAGE_PULL_SECRETS?=
+deploy: manifests helm ## Deploy controller to the K8s cluster
 	@$(HELM) upgrade $(RELEASE_NAME) \
 		--install \
 		--create-namespace \
@@ -123,13 +124,14 @@ deploy: manifests kubectl ## Deploy controller to the K8s cluster
 		--set image=$(NAME) \
 		--set imageTag=$(VERSION:v%=%) \
 		--set nodeUtilsImage=$(NODE_UTILS_IMG) \
+		--set imagePullSecrets=$(IMAGE_PULL_SECRETS) \
 		--set serviceMonitorEnabled=$(SERVICE_MONITOR_ENABLED) \
 		helm/nibiru-operator
 
 .PHONY: undeploy
 undeploy: RELEASE_NAME?=nibiru-operator
 undeploy: NAMESPACE?=nibiru-system
-undeploy: ## Undeploy controller from the K8s cluster
+undeploy: helm ## Undeploy controller from the K8s cluster
 	@$(HELM) uninstall --namespace=$(NAMESPACE) $(RELEASE_NAME)
 
 ##@ Build Dependencies

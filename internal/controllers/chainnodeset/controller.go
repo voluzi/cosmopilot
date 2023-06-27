@@ -47,11 +47,11 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset) (*Reconciler, error)
 	return r, nil
 }
 
-//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets;chainnodes;ingresses;services,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets;chainnodes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets/status;chainnodes/status,verbs=get
 //+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets/finalizers,verbs=update
-//+kubebuilder:rbac:groups="",resources=pods/exec;pods/attach,verbs=create
-//+kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+//+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
