@@ -24,6 +24,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - nodes
   verbs:
   - get
@@ -95,15 +102,16 @@ rules:
 - apiGroups:
   - apps.k8s.nibiru.org
   resources:
-  - chainnodes/status
-  - chainnodesets/status
+  - chainnodesets/finalizers
   verbs:
-  - get
+  - update
 - apiGroups:
   - apps.k8s.nibiru.org
   resources:
-  - chainnodesets/finalizers
+  - chainnodesets/status
   verbs:
+  - get
+  - patch
   - update
 - apiGroups:
   - networking.k8s.io

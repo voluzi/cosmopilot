@@ -50,7 +50,7 @@ func (s *ServiceHelper) WaitForCondition(ctx context.Context, fn func(service *c
 	ctx, cfn := context.WithTimeout(ctx, timeout)
 	defer cfn()
 
-	last, err := watch.UntilWithSync(ctx, lw, &corev1.Pod{}, nil, func(event watchapi.Event) (bool, error) {
+	last, err := watch.UntilWithSync(ctx, lw, &corev1.Service{}, nil, func(event watchapi.Event) (bool, error) {
 		switch event.Type {
 		case watchapi.Error:
 			return false, fmt.Errorf("error watching service")
