@@ -18,6 +18,12 @@ spec:
       labels:
         {{- include "operator.labels" . | indent 8 }}
     spec:
+    {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+      {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+      {{- end }}
+    {{- end }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
