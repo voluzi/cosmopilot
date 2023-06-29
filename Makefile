@@ -79,7 +79,7 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: run
 run: manifests generate ## Run a controller from your host.
-	go run ./cmd/manager
+	go run ./cmd/manager --nodeutils-image="$(NODE_UTILS_IMG)"
 
 .PHONY: docker-build
 docker-build: test ## Build docker image with the manager.
