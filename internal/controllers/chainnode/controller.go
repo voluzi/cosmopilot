@@ -96,7 +96,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	)
 
 	// Create a private key for signing and an account for this node if it is a validator
-	if chainNode.IsValidator() {
+	// We also check for an existing chainID which means the genesis already exists (initialized
+	// by us or not) and so the account and private key can't be regenerated anyway.
+	if chainNode.Status.ChainID == "" && chainNode.IsValidator() {
 		if chainNode.ShouldCreatePrivKey() {
 			if err := r.ensureSigningKey(ctx, chainNode); err != nil {
 				return ctrl.Result{}, err
