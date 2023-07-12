@@ -141,6 +141,7 @@ SidecarSpec allow configuring additional containers to run alongside the node
 | command | Command to be run by this container. Defaults to entrypoint defined in image. | []string | false |
 | args | Args to be passed to this container. Defaults to cmd defined in image. | []string | false |
 | env | Env sets environment variables to be passed to this container. | []corev1.EnvVar | false |
+| securityContext | SecurityContext defines the security options the container should be run with. If set, the fields of SecurityContext override the equivalent fields of PodSecurityContext, which defaults to user ID 1000. | *corev1.SecurityContext | false |
 
 [Back to Custom Resources](#custom-resources)
 
