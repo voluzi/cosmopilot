@@ -153,7 +153,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Wait for node to be synced before continuing
 	if chainNode.Status.Phase == appsv1.PhaseChainNodeSyncing {
-		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
+		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, r.updateLatestHeight(ctx, chainNode)
 	}
 
 	// Update jailed status
