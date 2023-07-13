@@ -108,6 +108,10 @@ func (r *Reconciler) ensureTmkmsVaultUploadKey(ctx context.Context, chainNode *a
 		return err
 	}
 
+	if chainNode.Annotations == nil {
+		chainNode.Annotations = make(map[string]string)
+	}
+
 	chainNode.Annotations[annotationVaultKeyUploaded] = strconv.FormatBool(true)
 	return r.Update(ctx, chainNode)
 }
