@@ -2,6 +2,7 @@ package v1
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -15,6 +16,18 @@ const (
 	DefaultAutoResizeIncrement = "50Gi"
 	DefaultAutoResizeMaxSize   = "2Ti"
 )
+
+func (chainNode *ChainNode) Equal(n *ChainNode) bool {
+	if !reflect.DeepEqual(chainNode.Labels, n.Labels) {
+		return false
+	}
+
+	if !reflect.DeepEqual(chainNode.Spec, n.Spec) {
+		return false
+	}
+
+	return true
+}
 
 func (chainNode *ChainNode) GetReconcilePeriod() time.Duration {
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.ReconcilePeriod != nil {

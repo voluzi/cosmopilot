@@ -1,8 +1,6 @@
 package v1
 
 import (
-	"reflect"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -53,21 +51,6 @@ type ChainNode struct {
 
 	Spec   ChainNodeSpec   `json:"spec,omitempty"`
 	Status ChainNodeStatus `json:"status,omitempty"`
-}
-
-func (chainNode *ChainNode) Equal(n *ChainNode) bool {
-	if !reflect.DeepEqual(chainNode.Labels, n.Labels) {
-		return false
-	}
-	if !reflect.DeepEqual(chainNode.Annotations, n.Annotations) {
-		return false
-	}
-
-	if !reflect.DeepEqual(chainNode.Spec, n.Spec) {
-		return false
-	}
-
-	return true
 }
 
 // ChainNodeSpec defines the desired state of ChainNode
