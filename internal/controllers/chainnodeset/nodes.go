@@ -105,6 +105,7 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 	if !currentNode.Equal(node) {
 		logger.Info("updating chainnode", "chainnode", node.GetName())
 		node.ObjectMeta.ResourceVersion = currentNode.ObjectMeta.ResourceVersion
+		node.Annotations = currentNode.Annotations
 		if err := r.Update(ctx, node); err != nil {
 			return err
 		}
