@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -373,6 +374,14 @@ func (r *Reconciler) getChainPeers(ctx context.Context, chainNode *appsv1.ChainN
 		}
 		annotationsList = append(annotationsList, annotations)
 	}
+
+	sort.Slice(annotationsList, func(i, j int) bool {
+		return peers[i].ID < peers[j].ID
+	})
+
+	sort.Slice(peers, func(i, j int) bool {
+		return peers[i].ID < peers[j].ID
+	})
 
 	return peers, annotationsList, nil
 }

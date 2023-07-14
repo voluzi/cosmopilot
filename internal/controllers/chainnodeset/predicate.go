@@ -11,8 +11,6 @@ type GenerationChangedPredicate struct {
 	predicate.Funcs
 }
 
-var ignoreSuffixes = []string{"config-generator", "data-init", "genesis-init"}
-
 // Create implements default CreateEvent filter
 func (p GenerationChangedPredicate) Create(e event.CreateEvent) bool {
 	if e.Object == nil {
