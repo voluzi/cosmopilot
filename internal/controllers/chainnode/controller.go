@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
-	kappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -177,7 +176,6 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Watches(&source.Kind{Type: &corev1.Pod{}}, &handler.EnqueueRequestForOwner{OwnerType: &appsv1.ChainNode{}}).
 		Watches(&source.Kind{Type: &corev1.ConfigMap{}}, &handler.EnqueueRequestForOwner{OwnerType: &appsv1.ChainNode{}}).
 		Watches(&source.Kind{Type: &corev1.PersistentVolumeClaim{}}, &handler.EnqueueRequestForOwner{OwnerType: &appsv1.ChainNode{}}).
-		Watches(&source.Kind{Type: &kappsv1.Deployment{}}, &handler.EnqueueRequestForOwner{OwnerType: &appsv1.ChainNode{}}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		Complete(r)
 }
