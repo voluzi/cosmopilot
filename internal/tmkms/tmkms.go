@@ -214,6 +214,9 @@ func (kms *KMS) ensureDeployment(ctx context.Context) error {
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: pointer.Int32(1),
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					labelApp:   tmkmsAppName,
