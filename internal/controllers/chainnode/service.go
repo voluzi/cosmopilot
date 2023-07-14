@@ -42,7 +42,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 	}
 
 	// Ensure internal service
-	internal, err := r.getInternalServiceSpec(chainNode)
+	internal, err := r.getInternalServiceSpec(ctx, chainNode)
 	if err != nil {
 		return err
 	}
@@ -160,6 +160,69 @@ func (r *Reconciler) getServiceSpec(ctx context.Context, chainNode *appsv1.Chain
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      chainNode.GetName(),
 			Namespace: chainNode.GetNamespace(),
+			Labels:    chainNode.Labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:       chainutils.P2pPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.P2pPort,
+					TargetPort: intstr.FromInt(chainutils.P2pPort),
+				},
+				{
+					Name:       chainutils.RpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.RpcPort,
+					TargetPort: intstr.FromInt(chainutils.RpcPort),
+				},
+				{
+					Name:       chainutils.LcdPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.LcdPort,
+					TargetPort: intstr.FromInt(chainutils.LcdPort),
+				},
+				{
+					Name:       chainutils.GrpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.GrpcPort,
+					TargetPort: intstr.FromInt(chainutils.GrpcPort),
+				},
+				{
+					Name:       chainutils.PrivValPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.PrivValPort,
+					TargetPort: intstr.FromInt(chainutils.PrivValPort),
+				},
+				{
+					Name:       chainutils.PrometheusPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.PrometheusPort,
+					TargetPort: intstr.FromInt(chainutils.PrometheusPort),
+				},
+				{
+					Name:       nodeUtilsPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       nodeUtilsPort,
+					TargetPort: intstr.FromInt(nodeUtilsPort),
+				},
+			},
+			Selector: utils.MergeMaps(
+				map[string]string{
+					LabelNodeID:  chainNode.Status.NodeID,
+					LabelChainID: chainNode.Status.ChainID,
+				},
+				chainNode.Labels),
+		},
+	}
+	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
+}
+
+func (r *Reconciler) getInternalServiceSpec(ctx context.Context, chainNode *appsv1.ChainNode) (*corev1.Service, error) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-internal", chainNode.GetName()),
+			Namespace: chainNode.GetNamespace(),
 			Labels: utils.MergeMaps(
 				map[string]string{
 					LabelNodeID:    chainNode.Status.NodeID,
@@ -170,6 +233,7 @@ func (r *Reconciler) getServiceSpec(ctx context.Context, chainNode *appsv1.Chain
 			),
 		},
 		Spec: corev1.ServiceSpec{
+			PublishNotReadyAddresses: true,
 			Ports: []corev1.ServicePort{
 				{
 					Name:       chainutils.P2pPortName,
@@ -251,74 +315,12 @@ func (r *Reconciler) getServiceSpec(ctx context.Context, chainNode *appsv1.Chain
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
 }
 
-func (r *Reconciler) getInternalServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Service, error) {
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-internal", chainNode.GetName()),
-			Namespace: chainNode.GetNamespace(),
-		},
-		Spec: corev1.ServiceSpec{
-			PublishNotReadyAddresses: true,
-			Ports: []corev1.ServicePort{
-				{
-					Name:       chainutils.P2pPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       chainutils.P2pPort,
-					TargetPort: intstr.FromInt(chainutils.P2pPort),
-				},
-				{
-					Name:       chainutils.RpcPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       chainutils.RpcPort,
-					TargetPort: intstr.FromInt(chainutils.RpcPort),
-				},
-				{
-					Name:       chainutils.LcdPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       chainutils.LcdPort,
-					TargetPort: intstr.FromInt(chainutils.LcdPort),
-				},
-				{
-					Name:       chainutils.GrpcPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       chainutils.GrpcPort,
-					TargetPort: intstr.FromInt(chainutils.GrpcPort),
-				},
-				{
-					Name:       chainutils.PrivValPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       chainutils.PrivValPort,
-					TargetPort: intstr.FromInt(chainutils.PrivValPort),
-				},
-				{
-					Name:       chainutils.PrometheusPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       chainutils.PrometheusPort,
-					TargetPort: intstr.FromInt(chainutils.PrometheusPort),
-				},
-				{
-					Name:       nodeUtilsPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       nodeUtilsPort,
-					TargetPort: intstr.FromInt(nodeUtilsPort),
-				},
-			},
-			Selector: utils.MergeMaps(
-				map[string]string{
-					LabelNodeID:  chainNode.Status.NodeID,
-					LabelChainID: chainNode.Status.ChainID,
-				},
-				chainNode.Labels),
-		},
-	}
-	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
-}
-
 func (r *Reconciler) getP2pServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Service, error) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-p2p", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),
+			Labels:    chainNode.Labels,
 		},
 		Spec: corev1.ServiceSpec{
 			Type:                     chainNode.Spec.Expose.GetServiceType(),

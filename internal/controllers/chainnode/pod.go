@@ -45,7 +45,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 			if err := ph.Create(ctx); err != nil {
 				return err
 			}
-			if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, appContainerName); err != nil {
+			if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, chainNode.Spec.App.App); err != nil {
 				return err
 			}
 			r.recorder.Eventf(chainNode,
@@ -168,7 +168,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			},
 			Containers: []corev1.Container{
 				{
-					Name:            appContainerName,
+					Name:            chainNode.Spec.App.App,
 					Image:           chainNode.Spec.App.GetImage(),
 					ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
 					Command:         []string{chainNode.Spec.App.App},
@@ -380,7 +380,7 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 		return err
 	}
 
-	if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, appContainerName); err != nil {
+	if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, chainNode.Spec.App.App); err != nil {
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonNodeError,

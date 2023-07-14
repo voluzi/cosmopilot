@@ -200,6 +200,7 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      chainNode.GetName(),
 					Namespace: chainNode.GetNamespace(),
+					Labels:    chainNode.Labels,
 					Annotations: map[string]string{
 						annotationConfigHash: hash,
 					},
@@ -222,14 +223,15 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 		return "", err
 	}
 
-	var currentHash string
-	if cm.Annotations == nil {
-		cm.ObjectMeta.Annotations = make(map[string]string)
-	} else {
-		currentHash = cm.Annotations[annotationConfigHash]
+	var shouldUpdate bool
+	for file, data := range cmData {
+		if oldData, ok := cm.Data[file]; !ok || data != oldData {
+			shouldUpdate = true
+			break
+		}
 	}
 
-	if currentHash != hash {
+	if shouldUpdate {
 		logger.Info("updating configs configmap")
 		cm.Annotations[annotationConfigHash] = hash
 		cm.Data = cmData
@@ -355,7 +357,7 @@ func (r *Reconciler) getChainPeers(ctx context.Context, chainNode *appsv1.ChainN
 
 		peer := appsv1.Peer{
 			ID:            svc.Labels[LabelNodeID],
-			Address:       svc.Spec.ClusterIP,
+			Address:       svc.Name,
 			Port:          pointer.Int(chainutils.P2pPort),
 			Unconditional: pointer.Bool(true),
 		}

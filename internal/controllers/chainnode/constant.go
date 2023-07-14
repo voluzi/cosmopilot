@@ -28,8 +28,6 @@ const (
 	timeoutPodRunning = 5 * time.Minute
 	timeoutPodDeleted = 30 * time.Second
 
-	appContainerName = "app"
-
 	nodeUtilsContainerName = "node-utils"
 	nodeUtilsCPU           = "100m"
 	nodeUtilsMemory        = "100Mi"
