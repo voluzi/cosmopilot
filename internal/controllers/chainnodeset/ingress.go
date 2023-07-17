@@ -179,7 +179,7 @@ func (r *Reconciler) getIngressSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 	if group.Ingress.EnableGRPC {
 		// We just append the hostname to TLS config and add no rule as it will be handled by a separate ingress
 		// but will use the same certificate
-		ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, fmt.Sprintf("lcd.%s", group.Ingress.Host))
+		ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, fmt.Sprintf("grpc.%s", group.Ingress.Host))
 	}
 
 	return ingress, controllerutil.SetControllerReference(nodeSet, ingress, r.Scheme)
