@@ -162,6 +162,11 @@ type NodeGroupSpec struct {
 	// If specified, the pod's scheduling constraints
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// StateSyncRestore configures this node to find a state-sync snapshot on the network and restore from it.
+	// This is disabled by default.
+	// +optional
+	StateSyncRestore *bool `json:"stateSyncRestore,omitempty"`
 }
 
 // IngressConfig specifies configurations for ingress to expose API endpoints

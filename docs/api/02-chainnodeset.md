@@ -91,6 +91,7 @@ NodeGroupSpec sets chainnode configurations for a group
 | resources | Compute Resources required by the app container. | corev1.ResourceRequirements | false |
 | nodeSelector | NodeSelector is a selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. | map[string]string | false |
 | affinity | If specified, the pod's scheduling constraints | *corev1.Affinity | false |
+| stateSyncRestore | StateSyncRestore configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
 

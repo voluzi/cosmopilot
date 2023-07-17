@@ -1584,6 +1584,11 @@ spec:
                             https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                           type: object
                       type: object
+                    stateSyncRestore:
+                      description: StateSyncRestore configures this node to find a
+                        state-sync snapshot on the network and restore from it. This
+                        is disabled by default.
+                      type: boolean
                   required:
                   - name
                   type: object
