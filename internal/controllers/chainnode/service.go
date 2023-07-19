@@ -146,9 +146,7 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 		logger.Info("updating service", "name", svc.GetName())
 
 		svc.ObjectMeta.ResourceVersion = currentSvc.ObjectMeta.ResourceVersion
-		if err := r.Update(ctx, svc); err != nil {
-			return err
-		}
+		return r.Update(ctx, svc)
 	}
 
 	*svc = *currentSvc
