@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
@@ -73,6 +74,13 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 	// Recreate pod if it is in failed state
 	if podInFailedState(currentPod) {
 		logger.Info("pod is in failed state")
+		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
+		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
+		if err != nil {
+			return err
+		}
+		logLines := strings.Split(logs, "\n")
+		logger.Info("app error: " + strings.Join(logLines[len(logLines)-20:], "/n"))
 		return r.recreatePod(ctx, chainNode, pod)
 	}
 
