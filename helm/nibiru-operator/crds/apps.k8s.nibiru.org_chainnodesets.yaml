@@ -3256,12 +3256,17 @@ spec:
                       description: Public indicates whether this node can be accessed
                         publicly.
                       type: boolean
+                    seed:
+                      description: Seed indicates if this node is running in seed
+                        mode.
+                      type: boolean
                   required:
                   - address
                   - id
                   - name
                   - port
                   - public
+                  - seed
                   type: object
                 type: array
               phase:

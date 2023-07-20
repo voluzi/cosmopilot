@@ -44,6 +44,7 @@ ChainNodeSetList contains a list of ChainNodeSet
 | ----- | ----------- | ------ | -------- |
 | name | Name is the name of the node. | string | true |
 | public | Public indicates whether this node can be accessed publicly. | bool | true |
+| seed | Seed indicates if this node is running in seed mode. | bool | true |
 | id | ID is the node ID of this node. | string | true |
 | address | Address is the hostname or IP address to reach this node. | string | true |
 | port | Port is the P2P port for connecting to this node. | int | true |

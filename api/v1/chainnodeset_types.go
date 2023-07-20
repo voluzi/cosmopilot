@@ -88,6 +88,9 @@ type ChainNodeSetNodeStatus struct {
 	// Public indicates whether this node can be accessed publicly.
 	Public bool `json:"public"`
 
+	// Seed indicates if this node is running in seed mode.
+	Seed bool `json:"seed"`
+
 	// ID is the node ID of this node.
 	ID string `json:"id"`
 
