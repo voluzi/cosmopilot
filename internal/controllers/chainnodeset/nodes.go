@@ -3,6 +3,7 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -37,13 +38,16 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 		nodeSet.Status.Nodes = make([]appsv1.ChainNodeSetNodeStatus, 0)
 	}
 
+	nodeSetCopy := nodeSet.DeepCopy()
+	nodeSet.Status.Nodes = make([]appsv1.ChainNodeSetNodeStatus, 0)
 	for _, group := range nodeSet.Spec.Nodes {
 		if err := r.ensureNodeGroup(ctx, nodeSet, group); err != nil {
 			return err
 		}
 		totalInstances += group.GetInstances()
 	}
-	if nodeSet.Status.Instances != totalInstances {
+
+	if nodeSet.Status.Instances != totalInstances || !reflect.DeepEqual(nodeSet, nodeSetCopy) {
 		nodeSet.Status.Instances = totalInstances
 		return r.Status().Update(ctx, nodeSet)
 	}
