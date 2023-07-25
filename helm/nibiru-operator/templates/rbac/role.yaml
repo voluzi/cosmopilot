@@ -75,19 +75,6 @@ rules:
 - apiGroups:
   - apps.k8s.nibiru.org
   resources:
-  - chainnodes
-  - chainnodesets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps.k8s.nibiru.org
-  resources:
   - chainnodes/finalizers
   verbs:
   - update
@@ -99,6 +86,18 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - apps.k8s.nibiru.org
+  resources:
+  - chainnodesets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - apps.k8s.nibiru.org
   resources:

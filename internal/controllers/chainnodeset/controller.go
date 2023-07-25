@@ -2,9 +2,7 @@ package chainnodeset
 
 import (
 	"context"
-	"time"
 
-	"github.com/jellydator/ttlcache/v3"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -29,10 +27,6 @@ type Reconciler struct {
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset) (*Reconciler, error) {
-	cfgCache := ttlcache.New(
-		ttlcache.WithTTL[string, map[string]interface{}](24 * time.Hour),
-	)
-
 	r := &Reconciler{
 		Client:     mgr.GetClient(),
 		ClientSet:  clientSet,
@@ -43,11 +37,10 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset) (*Reconciler, error)
 	if err := r.setupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	go cfgCache.Start()
 	return r, nil
 }
 
-//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets;chainnodes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodesets/finalizers,verbs=update
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -100,7 +93,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		nodeSet.Status.Phase = appsv1.PhaseChainNodeSetRunning
 		return ctrl.Result{}, r.Status().Update(ctx, nodeSet)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 }
 
 func (r *Reconciler) updatePhase(ctx context.Context, nodeSet *appsv1.ChainNodeSet, phase appsv1.ChainNodeSetPhase) error {

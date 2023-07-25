@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -125,7 +127,7 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 				"ChainNode %s created",
 				node.GetName(),
 			)
-			return r.waitChainNodeRunning(node)
+			return r.waitChainNodeRunningOrSyncing(node)
 		}
 		return err
 	}
@@ -147,7 +149,7 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 		*node = *currentNode
 	}
 
-	return r.waitChainNodeRunning(node)
+	return r.waitChainNodeRunningOrSyncing(node)
 }
 
 func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec, index int) error {
@@ -194,9 +196,13 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 	return node, controllerutil.SetControllerReference(nodeSet, node, r.Scheme)
 }
 
-func (r *Reconciler) waitChainNodeRunning(node *appsv1.ChainNode) error {
+func (r *Reconciler) waitChainNodeRunningOrSyncing(node *appsv1.ChainNode) error {
 	if node.Status.Phase == appsv1.PhaseChainNodeRunning {
 		return nil
+	}
+
+	validateFunc := func(chainNode *appsv1.ChainNode) bool {
+		return chainNode.Status.Phase == appsv1.PhaseChainNodeRunning || chainNode.Status.Phase == appsv1.PhaseChainNodeSyncing
 	}
 
 	nodesInformer, err := informer.GetChainNodesInformer(r.RestConfig)
@@ -206,18 +212,38 @@ func (r *Reconciler) waitChainNodeRunning(node *appsv1.ChainNode) error {
 
 	var exitErr error
 	stopCh := make(chan struct{})
+	once := sync.Once{}
+
+	go func() {
+		time.Sleep(time.Minute)
+		exitErr = fmt.Errorf("timeout waiting for chainnode running or syncing status")
+		once.Do(func() { close(stopCh) })
+	}()
 
 	if _, err := nodesInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			chainNode := &appsv1.ChainNode{}
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.(*unstructured.Unstructured).UnstructuredContent(), chainNode); err != nil {
+				exitErr = fmt.Errorf("error casting object to chainnode")
+				once.Do(func() { close(stopCh) })
+			}
+			if chainNode.GetName() == node.GetName() && chainNode.GetNamespace() == node.GetNamespace() {
+				*node = *chainNode
+				if validateFunc(node) {
+					once.Do(func() { close(stopCh) })
+				}
+			}
+		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			chainNode := &appsv1.ChainNode{}
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(newObj.(*unstructured.Unstructured).UnstructuredContent(), chainNode); err != nil {
 				exitErr = fmt.Errorf("error casting object to chainnode")
-				close(stopCh)
+				once.Do(func() { close(stopCh) })
 			}
 			if chainNode.GetName() == node.GetName() && chainNode.GetNamespace() == node.GetNamespace() {
 				*node = *chainNode
-				if node.Status.Phase == appsv1.PhaseChainNodeRunning {
-					close(stopCh)
+				if validateFunc(node) {
+					once.Do(func() { close(stopCh) })
 				}
 			}
 		},
@@ -225,11 +251,11 @@ func (r *Reconciler) waitChainNodeRunning(node *appsv1.ChainNode) error {
 			chainNode := &appsv1.ChainNode{}
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.(*unstructured.Unstructured).UnstructuredContent(), chainNode); err != nil {
 				exitErr = fmt.Errorf("error casting object to chainnode")
-				close(stopCh)
+				once.Do(func() { close(stopCh) })
 			}
 			if chainNode.GetName() == node.GetName() && chainNode.GetNamespace() == node.GetNamespace() {
 				exitErr = fmt.Errorf("chainnode was deleted")
-				close(stopCh)
+				once.Do(func() { close(stopCh) })
 			}
 		},
 	}); err != nil {
