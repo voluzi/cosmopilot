@@ -330,6 +330,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 				Args:            c.Args,
 				Env:             c.Env,
 				SecurityContext: c.SecurityContext,
+				Resources:       c.Resources,
 			}
 
 			if c.MountDataVolume != nil {

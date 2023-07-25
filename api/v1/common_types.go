@@ -129,6 +129,10 @@ type SidecarSpec struct {
 	// user ID 1000.
 	// +optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// Compute Resources required by the sidecar container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ValidatorInfo contains information about this validator.
