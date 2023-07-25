@@ -80,7 +80,12 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 			return err
 		}
 		logLines := strings.Split(logs, "\n")
-		logger.Info("app error: " + strings.Join(logLines[len(logLines)-20:], "/n"))
+		if len(logLines) > 20 {
+			logger.Info("app error: " + strings.Join(logLines[len(logLines)-20:], "/n"))
+		} else {
+			logger.Info("app error: " + strings.Join(logLines, "/n"))
+		}
+
 		return r.recreatePod(ctx, chainNode, pod)
 	}
 
