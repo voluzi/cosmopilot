@@ -77,15 +77,15 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
 		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
 		if err != nil {
-			return err
-		}
-		logLines := strings.Split(logs, "\n")
-		if len(logLines) > 20 {
-			logger.Info("app error: " + strings.Join(logLines[len(logLines)-20:], "/n"))
+			logger.Info("could not retrieve logs: " + err.Error())
 		} else {
-			logger.Info("app error: " + strings.Join(logLines, "/n"))
+			logLines := strings.Split(logs, "\n")
+			if len(logLines) > 20 {
+				logger.Info("app error: " + strings.Join(logLines[len(logLines)-20:], "/n"))
+			} else {
+				logger.Info("app error: " + strings.Join(logLines, "/n"))
+			}
 		}
-
 		return r.recreatePod(ctx, chainNode, pod)
 	}
 
