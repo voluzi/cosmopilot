@@ -215,7 +215,7 @@ func (r *Reconciler) waitChainNodeRunningOrSyncing(node *appsv1.ChainNode) error
 	once := sync.Once{}
 
 	go func() {
-		time.Sleep(time.Minute)
+		time.Sleep(ChainNodeWaitTimeout)
 		exitErr = fmt.Errorf("timeout waiting for chainnode running or syncing status")
 		once.Do(func() { close(stopCh) })
 	}()

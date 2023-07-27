@@ -40,6 +40,7 @@ const (
 	privValidatorListenAddress = "tcp://0.0.0.0:26659"
 
 	defaultStateSyncTrustPeriod = "168h0m0s"
+	defaultLogsLineCount        = 50
 )
 
 var (

@@ -1,6 +1,10 @@
 package chainnodeset
 
+import "time"
+
 const (
+	ChainNodeWaitTimeout = 3 * time.Minute
+
 	LabelChainNodeSet          = "nodeset"
 	LabelChainNodeSetGroup     = "group"
 	LabelChainNodeSetValidator = "validator"

@@ -80,8 +80,8 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 			logger.Info("could not retrieve logs: " + err.Error())
 		} else {
 			logLines := strings.Split(logs, "\n")
-			if len(logLines) > 20 {
-				logger.Info("app error: " + strings.Join(logLines[len(logLines)-20:], "/n"))
+			if len(logLines) > defaultLogsLineCount {
+				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "/n"))
 			} else {
 				logger.Info("app error: " + strings.Join(logLines, "/n"))
 			}
@@ -442,7 +442,6 @@ func podSpecChanged(existing, new *corev1.Pod) bool {
 	if err != nil {
 		return false
 	}
-	fmt.Println(string(patchResult.Patch))
 	return !patchResult.IsEmpty()
 }
 
