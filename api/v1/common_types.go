@@ -91,6 +91,10 @@ type Config struct {
 	// SeedMode configures this node to run on seed mode. Defaults to `false`.
 	// +optional
 	SeedMode *bool `json:"seedMode,omitempty"`
+
+	// Env refers to the list of environment variables to set in the app container.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // SidecarSpec allow configuring additional containers to run alongside the node

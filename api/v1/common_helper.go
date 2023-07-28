@@ -79,6 +79,13 @@ func (cfg *Config) SeedModeEnabled() bool {
 	return false
 }
 
+func (cfg *Config) GetEnv() []corev1.EnvVar {
+	if cfg != nil && cfg.Env != nil {
+		return cfg.Env
+	}
+	return []corev1.EnvVar{}
+}
+
 // Peer helper methods
 
 func (peer *Peer) GetPort() int {

@@ -58,6 +58,7 @@ Config allows setting specific configurations for a chainnode such as overrides 
 | reconcilePeriod | ReconcilePeriod is the period at which a reconcile loop will happen for this ChainNode. Defaults to `1m`. | *string | false |
 | stateSync | StateSync configures statesync snapshots for this node. | *[StateSyncConfig](#statesyncconfig) | false |
 | seedMode | SeedMode configures this node to run on seed mode. Defaults to `false`. | *bool | false |
+| env | Env refers to the list of environment variables to set in the app container. | []corev1.EnvVar | false |
 
 [Back to Custom Resources](#custom-resources)
 

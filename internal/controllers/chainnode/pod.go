@@ -186,6 +186,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 					ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
 					Command:         []string{chainNode.Spec.App.App},
 					Args:            []string{"start", "--home", "/home/app"},
+					Env:             chainNode.Spec.Config.GetEnv(),
 					Ports: []corev1.ContainerPort{
 						{
 							Name:          chainutils.P2pPortName,
