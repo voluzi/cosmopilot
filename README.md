@@ -9,6 +9,19 @@ You’ll need a Kubernetes cluster to run against. You can use [KIND](https://si
 **Note:** Your controller will automatically use the current context in your kubeconfig file (i.e. whatever cluster `kubectl cluster-info` shows).
 
 ### Running on the cluster
+
+Before deploying, you need to have a `ghcr` secret in the `nibiru-system` namespace
+
+```sh
+kubectl create secret docker-registry ghcr --docker-server='ghcr.io' --docker-email='devops@nibiru.org' --docker-username='nibibot' --docker-password='<password>' --namespace='nibiru-system'
+```
+
+You can obtain the `<password>` from a `ghcr` secret from another cluster. For example,
+
+```sh
+kubectl get secret ghcr -n nibiru-system -o jsonpath='{.data.\.dockerconfigjson}' | base64 --decode
+```
+
 1. Install Instances of Custom Resources:
 
 ```sh
