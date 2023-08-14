@@ -29,8 +29,8 @@ const (
 	timeoutPodDeleted = 30 * time.Second
 
 	nodeUtilsContainerName = "node-utils"
-	nodeUtilsCPU           = "100m"
-	nodeUtilsMemory        = "100Mi"
+	nodeUtilsCPU           = "10m"
+	nodeUtilsMemory        = "20Mi"
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
 
