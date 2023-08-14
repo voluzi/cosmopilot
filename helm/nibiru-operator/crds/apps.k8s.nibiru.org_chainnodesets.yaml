@@ -3590,7 +3590,7 @@ spec:
                   properties:
                     address:
                       description: Address is the hostname or IP address to reach
-                        this node.
+                        this node internally.
                       type: string
                     id:
                       description: ID is the node ID of this node.
@@ -3605,6 +3605,10 @@ spec:
                       description: Public indicates whether this node can be accessed
                         publicly.
                       type: boolean
+                    publicAddress:
+                      description: PublicAddress is the hostname or IP address to
+                        reach this node publicly.
+                      type: string
                     seed:
                       description: Seed indicates if this node is running in seed
                         mode.
@@ -3620,6 +3624,11 @@ spec:
                 type: array
               phase:
                 description: Phase indicates the current phase for this ChainNodeSet.
+                type: string
+              validatorAddress:
+                description: ValidatorAddress is the valoper address of the validator
+                  in this ChainNodeSet if one is available. Omitted when no validator
+                  is present in the ChainNodeSet.
                 type: string
             type: object
         type: object

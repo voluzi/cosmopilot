@@ -46,7 +46,8 @@ ChainNodeSetList contains a list of ChainNodeSet
 | public | Public indicates whether this node can be accessed publicly. | bool | true |
 | seed | Seed indicates if this node is running in seed mode. | bool | true |
 | id | ID is the node ID of this node. | string | true |
-| address | Address is the hostname or IP address to reach this node. | string | true |
+| address | Address is the hostname or IP address to reach this node internally. | string | true |
+| publicAddress | PublicAddress is the hostname or IP address to reach this node publicly. | string | false |
 | port | Port is the P2P port for connecting to this node. | int | true |
 
 [Back to Custom Resources](#custom-resources)
@@ -75,6 +76,7 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet
 | instances | Instances indicates the total number of chainnode instances on this set | int | false |
 | appVersion | AppVersion is the application version currently deployed | string | false |
 | nodes | Nodes indicates which nodes are available on this nodeset. Excludes validator node. | [][ChainNodeSetNodeStatus](#chainnodesetnodestatus) | false |
+| validatorAddress | ValidatorAddress is the valoper address of the validator in this ChainNodeSet if one is available. Omitted when no validator is present in the ChainNodeSet. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 

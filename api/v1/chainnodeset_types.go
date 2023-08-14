@@ -79,6 +79,11 @@ type ChainNodeSetStatus struct {
 
 	// Nodes indicates which nodes are available on this nodeset. Excludes validator node.
 	Nodes []ChainNodeSetNodeStatus `json:"nodes,omitempty"`
+
+	// ValidatorAddress is the valoper address of the validator in this ChainNodeSet if one is available.
+	// Omitted when no validator is present in the ChainNodeSet.
+	// +optional
+	ValidatorAddress string `json:"validatorAddress,omitempty"`
 }
 
 type ChainNodeSetNodeStatus struct {
@@ -94,8 +99,12 @@ type ChainNodeSetNodeStatus struct {
 	// ID is the node ID of this node.
 	ID string `json:"id"`
 
-	// Address is the hostname or IP address to reach this node.
+	// Address is the hostname or IP address to reach this node internally.
 	Address string `json:"address"`
+
+	// PublicAddress is the hostname or IP address to reach this node publicly.
+	// +optional
+	PublicAddress string `json:"publicAddress,omitempty"`
 
 	// Port is the P2P port for connecting to this node.
 	Port int `json:"port"`

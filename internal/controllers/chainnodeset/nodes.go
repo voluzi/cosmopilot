@@ -32,16 +32,12 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 	}
 
 	totalInstances := 0
+	nodeSetCopy := nodeSet.DeepCopy()
+
 	if nodeSet.HasValidator() {
 		totalInstances += 1
 	}
 
-	if nodeSet.Status.Nodes == nil {
-		nodeSet.Status.Nodes = make([]appsv1.ChainNodeSetNodeStatus, 0)
-	}
-
-	nodeSetCopy := nodeSet.DeepCopy()
-	nodeSet.Status.Nodes = make([]appsv1.ChainNodeSetNodeStatus, 0)
 	for _, group := range nodeSet.Spec.Nodes {
 		if err := r.ensureNodeGroup(ctx, nodeSet, group); err != nil {
 			return err
@@ -49,7 +45,7 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 		totalInstances += group.GetInstances()
 	}
 
-	if nodeSet.Status.Instances != totalInstances || !reflect.DeepEqual(nodeSet, nodeSetCopy) {
+	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {
 		nodeSet.Status.Instances = totalInstances
 		return r.Status().Update(ctx, nodeSet)
 	}
@@ -102,11 +98,11 @@ func (r *Reconciler) ensureNodeGroup(ctx context.Context, nodeSet *appsv1.ChainN
 			if parts := strings.Split(node.Status.PublicAddress, ":"); len(parts) == 2 {
 				if parts = strings.Split(parts[0], "@"); len(parts) == 2 {
 					nodeStatus.Public = true
-					nodeStatus.Address = parts[1]
+					nodeStatus.PublicAddress = parts[1]
 				}
 			}
 		}
-		nodeSet.Status.Nodes = append(nodeSet.Status.Nodes, nodeStatus)
+		r.AddOrUpdateNodeStatus(nodeSet, nodeStatus)
 	}
 	return nil
 }

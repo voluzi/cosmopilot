@@ -3,12 +3,14 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
+	"github.com/NibiruChain/nibiru-operator/internal/chainutils"
 )
 
 func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
@@ -21,8 +23,19 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		return err
 	}
 
-	if nodeSet.Status.ChainID != validator.Status.ChainID {
+	nodeSetCopy := nodeSet.DeepCopy()
+	r.AddOrUpdateNodeStatus(nodeSet, appsv1.ChainNodeSetNodeStatus{
+		Name:    validator.Name,
+		ID:      validator.Status.NodeID,
+		Address: validator.Status.IP,
+		Port:    chainutils.P2pPort,
+		Seed:    validator.Status.SeedMode,
+		Public:  false,
+	})
+
+	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {
 		nodeSet.Status.ChainID = validator.Status.ChainID
+		nodeSet.Status.ValidatorAddress = validator.Status.ValidatorAddress
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
