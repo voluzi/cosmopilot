@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"time"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
@@ -70,7 +69,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 			// Wait for NodePort to be available
 			if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
 				return svc.Spec.Ports[0].NodePort > 0, nil
-			}, time.Minute); err != nil {
+			}, timeoutWaitServiceIP); err != nil {
 				return err
 			}
 			port := p2p.Spec.Ports[0].NodePort
@@ -101,7 +100,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 			// Wait for LoadBalancer to be available
 			if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
 				return svc.Status.LoadBalancer.Ingress != nil && len(svc.Status.LoadBalancer.Ingress) > 0, nil
-			}, 5*time.Minute); err != nil {
+			}, timeoutWaitServiceIP); err != nil {
 				return err
 			}
 			externalAddress = fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, p2p.Status.LoadBalancer.Ingress[0].IP, chainutils.P2pPort)

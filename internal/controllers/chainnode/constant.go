@@ -25,8 +25,10 @@ const (
 	annotationDataInitialized  = "apps.k8s.nibiru.org/data-initialized"
 	annotationVaultKeyUploaded = "apps.k8s.nibiru.org/vault-key-uploaded"
 
-	timeoutPodRunning = 5 * time.Minute
-	timeoutPodDeleted = 30 * time.Second
+	timeoutPodRunning    = 5 * time.Minute
+	timeoutPodDeleted    = 30 * time.Second
+	startupTimeout       = 5 * time.Minute
+	timeoutWaitServiceIP = 5 * time.Minute
 
 	nodeUtilsContainerName = "node-utils"
 	nodeUtilsCPU           = "10m"
@@ -34,8 +36,7 @@ const (
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
 
-	startupTimeout = 5 * time.Minute
-	nonRootId      = 1000
+	nonRootId = 1000
 
 	privValidatorListenAddress = "tcp://0.0.0.0:26659"
 

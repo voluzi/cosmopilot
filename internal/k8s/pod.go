@@ -78,7 +78,7 @@ func (p *PodHelper) WaitForPodDeleted(ctx context.Context, timeout time.Duration
 			return true, nil
 
 		default:
-			p.pod = event.Object.(*corev1.Pod)
+			*p.pod = *event.Object.(*corev1.Pod)
 			return false, nil
 		}
 	})
@@ -124,7 +124,7 @@ func (p *PodHelper) WaitForPodPhase(ctx context.Context, timeout time.Duration, 
 			return false, fmt.Errorf("pod %s/%s was deleted", p.pod.Namespace, p.pod.Name)
 
 		default:
-			p.pod = event.Object.(*corev1.Pod)
+			*p.pod = *event.Object.(*corev1.Pod)
 			if p.pod.Status.Phase == corev1.PodFailed {
 				return false, fmt.Errorf("pod failed: %s", p.getFailureReason(ctx))
 			}
@@ -169,7 +169,7 @@ func (p *PodHelper) WaitForInitContainerRunning(ctx context.Context, container s
 			return false, fmt.Errorf("pod %s/%s was deleted", p.pod.Namespace, p.pod.Name)
 
 		default:
-			p.pod = event.Object.(*corev1.Pod)
+			*p.pod = *event.Object.(*corev1.Pod)
 			if p.pod.Status.Phase == corev1.PodFailed {
 				return false, fmt.Errorf("pod failed")
 			}
@@ -281,7 +281,7 @@ func (p *PodHelper) WaitForContainerReady(ctx context.Context, timeout time.Dura
 			return false, fmt.Errorf("pod %s/%s was deleted", p.pod.Namespace, p.pod.Name)
 
 		default:
-			p.pod = event.Object.(*corev1.Pod)
+			*p.pod = *event.Object.(*corev1.Pod)
 			if p.pod.Status.Phase == corev1.PodFailed {
 				return false, fmt.Errorf("pod failed")
 			}
@@ -336,7 +336,7 @@ func (p *PodHelper) WaitForContainerStarted(ctx context.Context, timeout time.Du
 			return false, fmt.Errorf("pod %s/%s was deleted", p.pod.Namespace, p.pod.Name)
 
 		default:
-			p.pod = event.Object.(*corev1.Pod)
+			*p.pod = *event.Object.(*corev1.Pod)
 			if p.pod.Status.Phase == corev1.PodFailed {
 				return false, fmt.Errorf("pod failed")
 			}

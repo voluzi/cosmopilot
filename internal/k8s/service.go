@@ -59,7 +59,7 @@ func (s *ServiceHelper) WaitForCondition(ctx context.Context, fn func(service *c
 			return false, fmt.Errorf("service %s/%s was deleted", s.svc.Namespace, s.svc.Name)
 
 		default:
-			s.svc = event.Object.(*corev1.Service)
+			*s.svc = *event.Object.(*corev1.Service)
 			return fn(s.svc)
 		}
 	})
