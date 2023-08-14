@@ -1,10 +1,10 @@
 NAME 	?= ghcr.io/nibiruchain/nibiru-operator
-VERSION ?= $(shell git describe --tags --abbrev=0)
+VERSION ?= $(shell git describe --tags --exclude 'node-*/*' --abbrev=0)
 IMG 	?= $(NAME):$(VERSION:v%=%)
 
 NODE_UTILS_NAME    ?= ghcr.io/nibiruchain/node-utils
-NODE_UTILS_VERSION ?= $(shell git describe --tags --abbrev=0)
-NODE_UTILS_IMG 	   ?= $(NODE_UTILS_NAME):$(NODE_UTILS_VERSION:v%=%)
+NODE_UTILS_VERSION ?= $(shell git describe --tags --match 'node-utils/*' --abbrev=0)
+NODE_UTILS_IMG 	   ?= $(NODE_UTILS_NAME):$(NODE_UTILS_VERSION:node-utils/v%=%)
 
 ENVTEST_K8S_VERSION = 1.26.1
 
