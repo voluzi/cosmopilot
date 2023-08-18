@@ -120,30 +120,32 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 			}
 
 		default:
-			return "", fmt.Errorf("could not find other peers for this chain")
+			logger.Error(fmt.Errorf("could not find other peers for this chain"), "not restoring from state-sync")
 		}
 
-		trustHeight, trustHash := getMostRecentHeightFromServicesAnnotations(stateSyncAnnotations)
-		if trustHeight == 0 {
-			r.recorder.Event(chainNode,
-				corev1.EventTypeWarning,
-				appsv1.ReasonNoTrustHeight,
-				"no chainnode with valid trust height config is available",
-			)
-			return "", fmt.Errorf("could not find ChainNode with valid state-sync configs")
-		}
+		if len(rpcServers) >= 2 {
+			trustHeight, trustHash := getMostRecentHeightFromServicesAnnotations(stateSyncAnnotations)
+			if trustHeight == 0 {
+				r.recorder.Event(chainNode,
+					corev1.EventTypeWarning,
+					appsv1.ReasonNoTrustHeight,
+					"no chainnode with valid trust height config is available",
+				)
+				return "", fmt.Errorf("could not find ChainNode with valid state-sync configs")
+			}
 
-		configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
-			"statesync": map[string]interface{}{
-				"enable":       true,
-				"rpc_servers":  strings.Join(rpcServers, ","),
-				"trust_height": trustHeight,
-				"trust_hash":   trustHash,
-				"trust_period": defaultStateSyncTrustPeriod,
-			},
-		})
-		if err != nil {
-			return "", err
+			configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
+				"statesync": map[string]interface{}{
+					"enable":       true,
+					"rpc_servers":  strings.Join(rpcServers, ","),
+					"trust_height": trustHeight,
+					"trust_hash":   trustHash,
+					"trust_period": defaultStateSyncTrustPeriod,
+				},
+			})
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 
