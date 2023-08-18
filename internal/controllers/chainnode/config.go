@@ -137,7 +137,7 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 		return "", err
 	}
 
-	// Apply state-sync config
+	// Apply state-sync restore config
 	if chainNode.StateSyncRestoreEnabled() {
 		peers, stateSyncAnnotations, err := r.getChainPeers(ctx, chainNode, AnnotationStateSyncTrustHeight, AnnotationStateSyncTrustHash)
 		if err != nil {
@@ -169,20 +169,20 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 					appsv1.ReasonNoTrustHeight,
 					"no chainnode with valid trust height config is available",
 				)
-				return "", fmt.Errorf("could not find ChainNode with valid state-sync configs")
-			}
-
-			configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
-				"statesync": map[string]interface{}{
-					"enable":       true,
-					"rpc_servers":  strings.Join(rpcServers, ","),
-					"trust_height": trustHeight,
-					"trust_hash":   trustHash,
-					"trust_period": defaultStateSyncTrustPeriod,
-				},
-			})
-			if err != nil {
-				return "", err
+				logger.Error(fmt.Errorf("could not find ChainNode with valid state-sync configs"), "not restoring from state-sync")
+			} else {
+				configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
+					"statesync": map[string]interface{}{
+						"enable":       true,
+						"rpc_servers":  strings.Join(rpcServers, ","),
+						"trust_height": trustHeight,
+						"trust_hash":   trustHash,
+						"trust_period": defaultStateSyncTrustPeriod,
+					},
+				})
+				if err != nil {
+					return "", err
+				}
 			}
 		}
 	}
