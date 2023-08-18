@@ -100,6 +100,44 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 		}
 	}
 
+	// Apply validator configs
+	if chainNode.IsValidator() {
+		configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], validatorConfigToml)
+		if err != nil {
+			return "", err
+		}
+		if chainNode.UsesTmKms() {
+			configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
+				"priv_validator_laddr": privValidatorListenAddress,
+			})
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+
+	// Apply user specified configs
+	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Override != nil {
+		for filename, b := range *chainNode.Spec.Config.Override {
+			var data map[string]interface{}
+			if err := json.Unmarshal(b.Raw, &data); err != nil {
+				return "", err
+			}
+			if _, ok := configs[filename]; ok {
+				configs[filename], err = utils.Merge(configs[filename], data)
+			} else {
+				configs[filename] = data
+			}
+		}
+	}
+
+	// Get hash before adding peer configuration
+	hash, err := getConfigHash(configs)
+	if err != nil {
+		return "", err
+	}
+
+	// Apply state-sync config
 	if chainNode.StateSyncRestoreEnabled() {
 		peers, stateSyncAnnotations, err := r.getChainPeers(ctx, chainNode, AnnotationStateSyncTrustHeight, AnnotationStateSyncTrustHash)
 		if err != nil {
@@ -147,43 +185,6 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 				return "", err
 			}
 		}
-	}
-
-	// Apply validator configs
-	if chainNode.IsValidator() {
-		configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], validatorConfigToml)
-		if err != nil {
-			return "", err
-		}
-		if chainNode.UsesTmKms() {
-			configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
-				"priv_validator_laddr": privValidatorListenAddress,
-			})
-			if err != nil {
-				return "", err
-			}
-		}
-	}
-
-	// Apply user specified configs
-	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Override != nil {
-		for filename, b := range *chainNode.Spec.Config.Override {
-			var data map[string]interface{}
-			if err := json.Unmarshal(b.Raw, &data); err != nil {
-				return "", err
-			}
-			if _, ok := configs[filename]; ok {
-				configs[filename], err = utils.Merge(configs[filename], data)
-			} else {
-				configs[filename] = data
-			}
-		}
-	}
-
-	// Get hash before adding peer configuration
-	hash, err := getConfigHash(configs)
-	if err != nil {
-		return "", err
 	}
 
 	// Apply peer configuration
