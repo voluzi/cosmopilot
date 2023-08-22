@@ -513,10 +513,9 @@ func podInFailedState(pod *corev1.Pod) bool {
 
 	for _, c := range pod.Status.ContainerStatuses {
 		if !c.Ready && c.State.Terminated != nil {
-			if c.State.Terminated.ExitCode != 0 {
-				return true
-			}
+			return true
 		}
 	}
+
 	return false
 }
