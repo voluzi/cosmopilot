@@ -14,9 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
 	"github.com/NibiruChain/nibiru-operator/internal/chainutils"
@@ -64,6 +62,7 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, nodeUtilsImage strin
 //+kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;create;update;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -82,7 +81,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	logger.Info("starting reconcile")
 
-	// Eventual status updates
+	// Eventually update status seed mode
 	chainNode.Status.SeedMode = chainNode.Spec.Config.SeedModeEnabled()
 
 	// Create/update secret with node key for this node.
@@ -119,6 +118,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Create/update services for this node
 	if err := r.ensureServices(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Create/update service monitors for this node
+	if err := r.ensureServiceMonitors(ctx, chainNode); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -177,9 +181,9 @@ func (r *Reconciler) updatePhase(ctx context.Context, chainNode *appsv1.ChainNod
 func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.ChainNode{}).
-		Watches(&source.Kind{Type: &corev1.Pod{}}, &handler.EnqueueRequestForOwner{OwnerType: &appsv1.ChainNode{}}).
-		Watches(&source.Kind{Type: &corev1.ConfigMap{}}, &handler.EnqueueRequestForOwner{OwnerType: &appsv1.ChainNode{}}).
-		Watches(&source.Kind{Type: &corev1.Service{}}, &handler.EnqueueRequestForOwner{OwnerType: &appsv1.ChainNode{}}).
+		Owns(&corev1.Pod{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Service{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		Complete(r)
 }
