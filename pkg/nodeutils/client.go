@@ -26,5 +26,10 @@ func (c *Client) GetDataSize() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf(string(body))
+	}
+
 	return strconv.ParseInt(string(body), 10, 64)
 }

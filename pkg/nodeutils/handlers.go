@@ -82,7 +82,7 @@ func (s *Server) dataSize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	log.Info("retrieved data size", "size", size)
+	log.WithField("size", size).Info("retrieved data size")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(strconv.FormatInt(size, 10)))
 }
