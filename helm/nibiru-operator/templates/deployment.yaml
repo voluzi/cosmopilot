@@ -41,7 +41,7 @@ spec:
             - name: WORKER_NAME
               value: {{ .Values.workerName }}
             - name: WORKER_COUNT
-              value: {{ .Values.workerCount }}
+              value: "{{ .Values.workerCount }}"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
