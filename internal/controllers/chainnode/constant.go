@@ -29,7 +29,7 @@ const (
 
 	timeoutPodRunning    = 5 * time.Minute
 	timeoutPodDeleted    = 30 * time.Second
-	startupTimeout       = 5 * time.Minute
+	startupTimeout       = 1 * time.Hour
 	timeoutWaitServiceIP = 5 * time.Minute
 
 	prometheusScrapeInterval = "15s"
