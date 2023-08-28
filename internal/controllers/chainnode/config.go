@@ -147,8 +147,8 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 		return "", err
 	}
 
-	// Apply state-sync restore config
-	if chainNode.StateSyncRestoreEnabled() {
+	// Apply state-sync restore config if enabled and node hasn't started yet
+	if chainNode.StateSyncRestoreEnabled() && chainNode.Status.LatestHeight == 0 {
 		peers, stateSyncAnnotations, err := r.getChainPeers(ctx, chainNode, AnnotationStateSyncTrustHeight, AnnotationStateSyncTrustHash)
 		if err != nil {
 			return "", err

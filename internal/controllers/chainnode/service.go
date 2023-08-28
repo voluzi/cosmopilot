@@ -23,7 +23,7 @@ import (
 
 func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	// Ensure main service
-	svc, err := r.getServiceSpec(ctx, chainNode)
+	svc, err := r.getServiceSpec(chainNode)
 	if err != nil {
 		return err
 	}
@@ -152,7 +152,7 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 	return nil
 }
 
-func (r *Reconciler) getServiceSpec(ctx context.Context, chainNode *appsv1.ChainNode) (*corev1.Service, error) {
+func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Service, error) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      chainNode.GetName(),
