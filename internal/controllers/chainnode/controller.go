@@ -122,6 +122,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// If we don't have a PVC yet, lets create it before deploying the pod. But for any updates to the PVC
+	// we want to do it after the pod deployment because auto-resize feature requires the node running.
+	if chainNode.Status.PvcSize == "" {
+		if err := r.ensurePersistence(ctx, app, chainNode); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Get or initialize a genesis
+	if err := r.ensureGenesis(ctx, app, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Create/update services for this node
 	if err := r.ensureServices(ctx, chainNode); err != nil {
 		return ctrl.Result{}, err
@@ -135,19 +148,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Create/update configmap with config files
 	configHash, err := r.ensureConfig(ctx, app, chainNode)
 	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// If we don't have a PVC yet, lets create it before deploying the pod. But for any updates to the PVC
-	// we want to do it after the pod deployment because auto-resize feature requires the node running.
-	if chainNode.Status.PvcSize == "" {
-		if err := r.ensurePersistence(ctx, app, chainNode); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Get or initialize a genesis
-	if err := r.ensureGenesis(ctx, app, chainNode); err != nil {
 		return ctrl.Result{}, err
 	}
 
