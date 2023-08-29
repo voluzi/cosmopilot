@@ -269,29 +269,12 @@ func (r *Reconciler) getInternalServiceSpec(ctx context.Context, chainNode *apps
 		},
 	}
 
-	if chainNode.Spec.Config != nil &&
-		chainNode.Spec.Config.StateSync.Enabled() &&
-		chainNode.Status.LatestHeight > int64(chainNode.Spec.Config.StateSync.SnapshotInterval*3) {
-		c, err := r.getQueryClient(chainNode)
-		if err != nil {
-			return nil, err
-		}
-
-		snapshotInterval := chainNode.Spec.Config.StateSync.SnapshotInterval
-		trustHeight := (chainNode.Status.LatestHeight / int64(snapshotInterval) * int64(snapshotInterval)) - (int64(snapshotInterval) * 3)
-
-		if trustHeight > 0 {
-			trustHash, err := c.GetBlockHash(ctx, trustHeight)
-			if err != nil {
-				return nil, err
-			}
-
-			if svc.Annotations == nil {
-				svc.Annotations = make(map[string]string)
-			}
-			svc.Annotations[AnnotationStateSyncTrustHeight] = strconv.FormatInt(trustHeight, 10)
-			svc.Annotations[AnnotationStateSyncTrustHash] = trustHash
-		}
+	if err := r.maybeAddStateSyncAnnotations(ctx, chainNode, svc); err != nil {
+		r.recorder.Event(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonNoTrustHeight,
+			fmt.Sprintf("not adding state-sync details: %v", err),
+		)
 	}
 
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
@@ -325,4 +308,31 @@ func (r *Reconciler) getP2pServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Ser
 		},
 	}
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
+}
+
+func (r *Reconciler) maybeAddStateSyncAnnotations(ctx context.Context, chainNode *appsv1.ChainNode, svc *corev1.Service) error {
+	if chainNode.Spec.Config != nil && chainNode.Spec.Config.StateSync.Enabled() &&
+		chainNode.Status.LatestHeight > int64(chainNode.Spec.Config.StateSync.SnapshotInterval*3) {
+		c, err := r.getQueryClient(chainNode)
+		if err != nil {
+			return err
+		}
+
+		snapshotInterval := chainNode.Spec.Config.StateSync.SnapshotInterval
+		trustHeight := (chainNode.Status.LatestHeight / int64(snapshotInterval) * int64(snapshotInterval)) - (int64(snapshotInterval) * 3)
+
+		if trustHeight > 0 {
+			trustHash, err := c.GetBlockHash(ctx, trustHeight)
+			if err != nil {
+				return err
+			}
+
+			if svc.Annotations == nil {
+				svc.Annotations = make(map[string]string)
+			}
+			svc.Annotations[AnnotationStateSyncTrustHeight] = strconv.FormatInt(trustHeight, 10)
+			svc.Annotations[AnnotationStateSyncTrustHash] = trustHash
+		}
+	}
+	return nil
 }
