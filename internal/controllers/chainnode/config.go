@@ -83,6 +83,18 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 		return "", err
 	}
 
+	// Set external address if there is one
+	if addr, ok := getExternalAddress(chainNode); ok {
+		configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
+			"p2p": map[string]string{
+				"external_address": addr,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+
 	// Apply state-sync config
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.StateSync.Enabled() {
 		configs[appTomlFilename], err = utils.Merge(configs[appTomlFilename], map[string]interface{}{
@@ -440,4 +452,14 @@ func getMostRecentHeightFromServicesAnnotations(annotationsList []map[string]str
 	}
 
 	return trustHeight, trustHash
+}
+
+func getExternalAddress(chainNode *appsv1.ChainNode) (string, bool) {
+	if chainNode.Status.PublicAddress != "" {
+		parts := strings.Split(chainNode.Status.PublicAddress, "@")
+		if len(parts) == 2 {
+			return parts[1], true
+		}
+	}
+	return "", false
 }
