@@ -35,8 +35,8 @@ const (
 	prometheusScrapeInterval = "15s"
 
 	nodeUtilsContainerName = "node-utils"
-	nodeUtilsCPU           = "10m"
-	nodeUtilsMemory        = "20Mi"
+	nodeUtilsCPU           = "100m"
+	nodeUtilsMemory        = "100Mi"
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
 
