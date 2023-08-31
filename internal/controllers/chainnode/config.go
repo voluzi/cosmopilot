@@ -86,7 +86,7 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 	// Set external address if there is one
 	if addr, ok := getExternalAddress(chainNode); ok {
 		configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
-			"p2p": map[string]string{
+			"p2p": map[string]interface{}{
 				"external_address": addr,
 			},
 		})
