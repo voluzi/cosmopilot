@@ -37,6 +37,7 @@ var (
 		"instrumentation": map[string]interface{}{
 			"prometheus": true,
 		},
+		"log_format": "json",
 	}
 
 	validatorConfigToml = map[string]interface{}{
