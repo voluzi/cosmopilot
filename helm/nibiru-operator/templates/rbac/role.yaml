@@ -9,7 +9,6 @@ rules:
   - ""
   resources:
   - configmaps
-  - jobs
   - persistentvolumeclaims
   - pods
   - secrets
@@ -113,6 +112,18 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - monitoring.coreos.com
   resources:
