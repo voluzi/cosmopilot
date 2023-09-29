@@ -22,6 +22,7 @@ const (
 	PhaseChainNodeRestarting   ChainNodePhase = "Restarting"
 	PhaseChainNodeError        ChainNodePhase = "Error"
 	PhaseChainNodeSnapshotting ChainNodePhase = "Snapshotting"
+	PhaseChainNodeUpgrading    ChainNodePhase = "Upgrading"
 )
 
 //+kubebuilder:object:root=true
@@ -158,6 +159,9 @@ type ChainNodeStatus struct {
 
 	// SeedMode indicates if this node is running with seed mode enabled.
 	SeedMode bool `json:"seedMode,omitempty"`
+
+	// Upgrades contains all scheduled/completed upgrades performed by the operator on this ChainNode.
+	Upgrades []Upgrade `json:"upgrades,omitempty"`
 }
 
 // ValidatorConfig turns this node into a validator and specifies how it will do it.

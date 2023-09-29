@@ -102,12 +102,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	app := chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, chainNode,
+	app, err := chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, chainNode,
 		chainNode.Spec.App.GetSdkVersion(),
-		chainutils.WithImage(chainNode.Spec.App.GetImage()),
+		chainutils.WithImage(chainNode.GetAppImage()),
 		chainutils.WithImagePullPolicy(chainNode.Spec.App.ImagePullPolicy),
 		chainutils.WithBinary(chainNode.Spec.App.App),
 	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Create a private key for signing and an account for this node if it is a validator
 	// We also check for an existing chainID which means the genesis already exists (initialized
@@ -163,6 +166,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Create/update upgrades config
+	if err := r.ensureUpgrades(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Deploy TMKMS configs if configured
 	if err := r.ensureTmKMSConfig(ctx, chainNode); err != nil {
 		return ctrl.Result{}, err
@@ -180,19 +188,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// Wait for node to be synced before continuing
-	if chainNode.Status.Phase == appsv1.PhaseChainNodeSyncing {
-		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, r.updateLatestHeight(ctx, chainNode)
-	}
-
 	// Update jailed status
-	if chainNode.IsValidator() {
+	if chainNode.Status.Phase == appsv1.PhaseChainNodeRunning && chainNode.IsValidator() {
 		if err := r.updateJailedStatus(ctx, chainNode); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, r.updateLatestHeight(ctx, chainNode)
+	return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
 }
 
 func (r *Reconciler) updatePhase(ctx context.Context, chainNode *appsv1.ChainNode, phase appsv1.ChainNodePhase) error {
