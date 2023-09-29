@@ -397,10 +397,6 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 						},
 					},
 					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceCPU:    nodeUtilsCpuResources,
-							corev1.ResourceMemory: nodeUtilsMemoryResources,
-						},
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU:    nodeUtilsCpuResources,
 							corev1.ResourceMemory: nodeUtilsMemoryResources,
