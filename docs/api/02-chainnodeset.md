@@ -133,5 +133,6 @@ NodeSetValidatorConfig turns this node into a validator and specifies how it wil
 | affinity | If specified, the pod's scheduling constraints | *corev1.Affinity | false |
 | tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node. | *TmKMS | false |
 | stateSyncRestore | StateSyncRestore configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
+| createValidator | CreateValidator indicates that operator should run create-validator tx to make this node a validator. | *CreateValidatorConfig | false |
 
 [Back to Custom Resources](#custom-resources)

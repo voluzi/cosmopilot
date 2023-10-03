@@ -18,6 +18,9 @@ spec:
       stakeAmount: 100000000unibi
       unbondingTime: 86400s
       votingPeriod: 7200s
+      accounts:
+        - address: nibi1u8rznuuadxqhemznny5x6qn7hzvmw4ncdf05vh
+          assets: [ "1000000000000000unibi" ]
       additionalInitCommands:
         - image: ghcr.io/nibiruchain/node-tools
           command: [ "sh" , "-c" ]
@@ -56,7 +59,7 @@ spec:
 
     sidecars:
       - name: pricefeeder
-        image: ghcr.io/nibiruchain/pricefeeder:0.21.2
+        image: ghcr.io/nibiruchain/pricefeeder:0.21.6
         env:
           - name: FEEDER_MNEMONIC
             valueFrom:
@@ -70,7 +73,7 @@ spec:
           - name: WEBSOCKET_ENDPOINT
             value: ws://localhost:26657/websocket
           - name: EXCHANGE_SYMBOLS_MAP
-            value: '{"bitfinex":{"ubtc:unusd":"tBTCUSD","ueth:unusd":"tETHUSD","uusdc:unusd":"tUDCUSD"},"binance":{"ubtc:uusd":"BTCUSD","ueth:uusd":"ETHUSD","uusdt:uusd":"USDTUSD","uusdc:uusd":"USDCUSD","uatom:uusd":"ATOMUSD","ubnb:uusd":"BNBUSD","uavax:uusd":"AVAXUSD","usol:uusd":"SOLUSD","uada:uusd":"ADAUSD","ubtc:unusd":"BTCUSD","ueth:unusd":"ETHUSD","uusdt:unusd":"USDTUSD","uusdc:unusd":"USDCUSD","uatom:unusd":"ATOMUSD","ubnb:unusd":"BNBUSD","uavax:unusd":"AVAXUSD","usol:unusd":"SOLUSD","uada:unusd":"ADAUSD"}}'
+            value: '{"bitfinex": {"ubtc:unusd": "tBTCUSD","ubtc:uusd": "tBTCUSD","ueth:unusd": "tETHUSD","ueth:uusd": "tETHUSD","uusdc:uusd": "tUDCUSD","uusdc:unusd": "tUDCUSD",},"coingecko": {"ubtc:uusd": "bitcoin","ubtc:unusd": "bitcoin","ueth:uusd": "ethereum","ueth:unusd": "ethereum","uusdt:uusd": "tether","uusdt:unusd": "tether","uusdc:uusd": "usd-coin","uusdc:unusd": "usd-coin","uatom:uusd": "cosmos","uatom:unusd": "cosmos","ubnb:uusd": "binancecoin","ubnb:unusd": "binancecoin","uavax:uusd": "avalanche-2","uavax:unusd": "avalanche-2","usol:uusd": "solana","usol:unusd": "solana","uada:uusd": "cardano","uada:unusd": "cardano"}}'
 
     override:
       app.toml:

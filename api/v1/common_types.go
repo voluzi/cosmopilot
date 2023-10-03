@@ -594,6 +594,7 @@ type Upgrade struct {
 type CreateValidatorConfig struct {
 	// AccountMnemonicSecret is the name of the secret containing the mnemonic of the account to be used by
 	// this validator. Defaults to `<chainnode>-account`. Will be created if does not exist.
+	// +optional
 	AccountMnemonicSecret *string `json:"accountMnemonicSecret,omitempty"`
 
 	// AccountHDPath is the HD path for the validator account. Defaults to `m/44'/118'/0'/0/0`.

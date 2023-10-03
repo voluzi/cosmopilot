@@ -3431,6 +3431,56 @@ spec:
                         - snapshotInterval
                         type: object
                     type: object
+                  createValidator:
+                    description: CreateValidator indicates that operator should run
+                      create-validator tx to make this node a validator.
+                    properties:
+                      accountHDPath:
+                        description: AccountHDPath is the HD path for the validator
+                          account. Defaults to `m/44'/118'/0'/0/0`.
+                        type: string
+                      accountMnemonicSecret:
+                        description: AccountMnemonicSecret is the name of the secret
+                          containing the mnemonic of the account to be used by this
+                          validator. Defaults to `<chainnode>-account`. Will be created
+                          if does not exist.
+                        type: string
+                      accountPrefix:
+                        description: AccountPrefix is the prefix for accounts. Defaults
+                          to `nibi`.
+                        type: string
+                      commissionMaxChangeRate:
+                        description: CommissionMaxChangeRate is the maximum commission
+                          change rate percentage (per day). Defaults to `0.1`.
+                        type: string
+                      commissionMaxRate:
+                        description: CommissionMaxRate is the maximum commission rate
+                          percentage. Defaults to `0.1`.
+                        type: string
+                      commissionRate:
+                        description: CommissionRate is the initial commission rate
+                          percentage. Defaults to `0.1`.
+                        type: string
+                      gasPrices:
+                        description: GasPrices in decimal format to determine the
+                          transaction fee.
+                        type: string
+                      minSelfDelegation:
+                        description: MinSelfDelegation is the minimum self delegation
+                          required on the validator. Defaults to `1`.
+                        type: string
+                      stakeAmount:
+                        description: StakeAmount represents the amount to be staked
+                          by this validator.
+                        type: string
+                      valPrefix:
+                        description: ValPrefix is the prefix for validator accounts.
+                          Defaults to `nibivaloper`.
+                        type: string
+                    required:
+                    - gasPrices
+                    - stakeAmount
+                    type: object
                   info:
                     description: Info contains information details about this validator.
                     properties:
