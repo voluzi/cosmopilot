@@ -28,13 +28,15 @@ type Metadata struct {
 	StoreName   string `json:"store_name"`
 }
 
-func NewStoreTracer(path string) (*StoreTracer, error) {
-	f, err := fifo.OpenFifo(context.Background(), path, syscall.O_CREAT|syscall.O_RDONLY|syscall.O_NONBLOCK, 0655)
-	if err != nil {
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		return nil, err
+func NewStoreTracer(path string, createFifo bool) (*StoreTracer, error) {
+	if createFifo {
+		f, err := fifo.OpenFifo(context.Background(), path, syscall.O_CREAT|syscall.O_RDONLY|syscall.O_NONBLOCK, 0655)
+		if err != nil {
+			return nil, err
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
 	}
 
 	t, err := tail.TailFile(path, tail.Config{

@@ -41,4 +41,9 @@ func init() {
 		environ.GetString("LOG_LEVEL", "info"),
 		"log level",
 	)
+
+	flag.BoolVar(&createFifo, "create-fifo",
+		environ.GetBool("CREATE_FIFO", false),
+		"log level",
+	)
 }

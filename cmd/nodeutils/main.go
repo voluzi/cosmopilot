@@ -17,6 +17,7 @@ var (
 	blockThreshold time.Duration
 	traceStore     string
 	logLevel       string
+	createFifo     bool
 )
 
 func main() {
@@ -33,6 +34,7 @@ func main() {
 		nodeutils.WithDataPath(dataPath),
 		nodeutils.WithUpgradesConfig(upgradesConfig),
 		nodeutils.WithTraceStore(traceStore),
+		nodeutils.CreatFifo(createFifo),
 	)
 	if err != nil {
 		log.Fatal(err)

@@ -10,6 +10,7 @@ func defaultOptions() *Options {
 		BlockThreshold: 0,
 		UpgradesConfig: "/config/upgrades.json",
 		TraceStore:     "/trace/trace.fifo",
+		CreateFifo:     false,
 	}
 }
 
@@ -20,6 +21,7 @@ type Options struct {
 	BlockThreshold time.Duration
 	UpgradesConfig string
 	TraceStore     string
+	CreateFifo     bool
 }
 
 type Option func(*Options)
@@ -57,5 +59,11 @@ func WithBlockThreshold(n time.Duration) Option {
 func WithTraceStore(path string) Option {
 	return func(opts *Options) {
 		opts.TraceStore = path
+	}
+}
+
+func CreatFifo(create bool) Option {
+	return func(opts *Options) {
+		opts.CreateFifo = create
 	}
 }

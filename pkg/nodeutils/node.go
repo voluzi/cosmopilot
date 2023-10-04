@@ -33,7 +33,7 @@ func New(opts ...Option) (*NodeUtils, error) {
 		return nil, err
 	}
 
-	t, err := tracer.NewStoreTracer(options.TraceStore)
+	t, err := tracer.NewStoreTracer(options.TraceStore, options.CreateFifo)
 	if err != nil {
 		return nil, err
 	}
