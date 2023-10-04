@@ -85,7 +85,9 @@ func (u *UpgradeChecker) loadConfig() error {
 
 func (u *UpgradeChecker) ShouldUpgrade(height int64) bool {
 	for _, upgrade := range u.config.Upgrades {
-		if upgrade.Height == height && upgrade.Status != UpgradeCompleted {
+		if upgrade.Height == height &&
+			upgrade.Status != UpgradeCompleted &&
+			upgrade.Status != UpgradeOnGoing {
 			return true
 		}
 	}
