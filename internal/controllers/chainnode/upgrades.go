@@ -102,7 +102,7 @@ func (r *Reconciler) requiresUpgrade(chainNode *appsv1.ChainNode) (bool, error) 
 
 func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, height int64) *appsv1.Upgrade {
 	for _, upgrade := range chainNode.Status.Upgrades {
-		if upgrade.Height == height && (upgrade.Status == appsv1.UpgradeScheduled || upgrade.Status == appsv1.UpgradeFailed) {
+		if upgrade.Height == height && upgrade.Status == appsv1.UpgradeScheduled {
 			return &upgrade
 		}
 	}
@@ -113,10 +113,14 @@ func (r *Reconciler) setUpgradeStatus(ctx context.Context, chainNode *appsv1.Cha
 	for i, u := range chainNode.Status.Upgrades {
 		if u.Height == upgrade.Height {
 			chainNode.Status.Upgrades[i].Status = status
-			return r.Status().Update(ctx, chainNode)
+			if err := r.Status().Update(ctx, chainNode); err != nil {
+				return err
+			}
+			// always update upgrades configmap so node-utils is aware of upgrade status
+			return r.ensureUpgradesConfig(ctx, chainNode)
 		}
 	}
-	return fmt.Errorf("can update upgrade phase: upgrade not found")
+	return fmt.Errorf("cant update upgrade phase: upgrade not found")
 }
 
 func (r *Reconciler) getGovUpgrades(ctx context.Context, chainNode *appsv1.ChainNode) ([]appsv1.Upgrade, error) {

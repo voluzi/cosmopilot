@@ -58,11 +58,10 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 		return err
 	}
 
-	// Recreate pod if it is in failed state
-	if podInFailedState(currentPod) {
-		logger.Info("pod is in failed state")
+	if nodeUtilsIsInFailedState(pod) {
+		logger.Info("node-utils is in failed state")
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
-		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
+		logs, err := ph.GetLogs(ctx, nodeUtilsContainerName)
 		if err != nil {
 			logger.Info("could not retrieve logs: " + err.Error())
 		} else {
@@ -73,7 +72,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 				logger.Info("app error: " + strings.Join(logLines, "/n"))
 			}
 		}
-		return r.recreatePod(ctx, chainNode, pod, false)
+		return r.recreatePod(ctx, chainNode, pod)
 	}
 
 	if err := r.updateLatestHeight(ctx, chainNode); err != nil {
@@ -98,28 +97,28 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 				"Missing upgrade or image for upgrade at height %d",
 				chainNode.Status.LatestHeight,
 			)
-			return fmt.Errorf("missing upgrade for height %d", chainNode.Status.LatestHeight)
+			return fmt.Errorf("missing upgrade or image for height %d", chainNode.Status.LatestHeight)
 		}
 
 		logger.Info("upgrading node")
 		if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeOnGoing); err != nil {
 			return err
 		}
-		// Make sure we update the upgrades configmap before recreating the pod
-		if err := r.ensureUpgradesConfig(ctx, chainNode); err != nil {
-			return err
-		}
 
-		pod.Spec.Containers[0].Image = upgrade.Image
-		if err = r.recreatePod(ctx, chainNode, pod, true); err != nil {
+		if upgraded, err := r.upgradePod(ctx, chainNode, pod, upgrade.Image); err != nil {
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeWarning,
 				appsv1.ReasonUpgradeFailed,
-				"Upgrade failed: %v",
+				"Failed to start node after upgrade: %v",
 				err,
 			)
-			if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeFailed); err != nil {
-				logger.Error(err, "failed to update upgrade status")
+			if upgraded {
+				// If there was an error on pod start but the image was already switched, we marked the upgrade
+				// completed anyway
+				chainNode.Status.AppVersion = upgrade.GetVersion()
+				if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted); err != nil {
+					return err
+				}
 			}
 			return err
 		}
@@ -129,21 +128,38 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 			"Upgraded node to %s on height %d",
 			upgrade.Image, upgrade.Height,
 		)
-		// Update app version and upgrade status
 		chainNode.Status.AppVersion = upgrade.GetVersion()
 		return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
+	}
+
+	// Recreate pod if it is in failed state
+	if podInFailedState(currentPod) {
+		logger.Info("pod is in failed state")
+		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
+		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
+		if err != nil {
+			logger.Info("could not retrieve logs: " + err.Error())
+		} else {
+			logLines := strings.Split(logs, "\n")
+			if len(logLines) > defaultLogsLineCount {
+				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "/n"))
+			} else {
+				logger.Info("app error: " + strings.Join(logLines, "/n"))
+			}
+		}
+		return r.recreatePod(ctx, chainNode, pod)
 	}
 
 	// Re-create pod if spec changes
 	if podSpecChanged(currentPod, pod) {
 		logger.Info("pod spec changed")
-		return r.recreatePod(ctx, chainNode, pod, false)
+		return r.recreatePod(ctx, chainNode, pod)
 	}
 
 	// Re-create pod if config changed
 	if currentPod.Annotations[annotationConfigHash] != configHash {
 		logger.Info("config changed")
-		return r.recreatePod(ctx, chainNode, pod, false)
+		return r.recreatePod(ctx, chainNode, pod)
 	}
 
 	if volumeSnapshotInProgress(chainNode) {
@@ -525,14 +541,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	return pod, controllerutil.SetControllerReference(chainNode, pod, r.Scheme)
 }
 
-func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod, isUpgrade bool) error {
+func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
 
 	logger.Info("recreating pod")
 	phase := appsv1.PhaseChainNodeRestarting
-	if isUpgrade {
-		phase = appsv1.PhaseChainNodeUpgrading
-	}
 	if err := r.updatePhase(ctx, chainNode, phase); err != nil {
 		return err
 	}
@@ -567,6 +580,48 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 		"Node restarted",
 	)
 	return r.setPhaseRunningOrSyncing(ctx, chainNode)
+}
+
+func (r *Reconciler) upgradePod(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod, image string) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	logger.Info("upgrading pod")
+	phase := appsv1.PhaseChainNodeUpgrading
+	if err := r.updatePhase(ctx, chainNode, phase); err != nil {
+		return false, err
+	}
+
+	deletePod := pod.DeepCopy()
+	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, deletePod)
+	if err := ph.Delete(ctx); err != nil {
+		return false, err
+	}
+	if err := ph.WaitForPodDeleted(ctx, timeoutPodDeleted); err != nil {
+		return false, err
+	}
+
+	ph = k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
+	pod.Spec.Containers[0].Image = image
+	if err := ph.Create(ctx); err != nil {
+		return false, err
+	}
+
+	if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, chainNode.Spec.App.App); err != nil {
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonNodeError,
+			"Error: %v",
+			err,
+		)
+		_ = r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeError)
+		return true, err
+	}
+	r.recorder.Eventf(chainNode,
+		corev1.EventTypeNormal,
+		appsv1.ReasonNodeRestarted,
+		"Node upgraded",
+	)
+	return true, r.setPhaseRunningOrSyncing(ctx, chainNode)
 }
 
 func podSpecChanged(existing, new *corev1.Pod) bool {
@@ -658,6 +713,20 @@ func podInFailedState(pod *corev1.Pod) bool {
 
 	for _, c := range pod.Status.ContainerStatuses {
 		if !c.Ready && c.State.Terminated != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
+	if pod.Status.Phase == corev1.PodFailed {
+		return true
+	}
+
+	for _, c := range pod.Status.ContainerStatuses {
+		if c.Name == nodeUtilsContainerName && !c.Ready && c.State.Terminated != nil {
 			return true
 		}
 	}

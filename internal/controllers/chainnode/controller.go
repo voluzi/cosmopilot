@@ -237,6 +237,7 @@ func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.C
 	if err != nil {
 		return err
 	}
+	// If height is 0 then node-utils didn't grab latest height yet, so lets not update it.
 	if height == 0 {
 		return nil
 	}
