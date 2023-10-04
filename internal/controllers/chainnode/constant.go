@@ -36,7 +36,7 @@ const (
 	annotationExportingTarball      = "apps.k8s.nibiru.org/exporting-tarball"
 
 	timeoutPodRunning              = 5 * time.Minute
-	timeoutPodDeleted              = 30 * time.Second
+	timeoutPodDeleted              = 2 * time.Minute
 	startupTimeout                 = 1 * time.Hour
 	timeoutWaitServiceIP           = 5 * time.Minute
 	minimumTimeBeforeFirstSnapshot = 10 * time.Minute
