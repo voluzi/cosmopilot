@@ -70,6 +70,7 @@ func (s *NodeUtils) Start() error {
 				log.Errorf("error on trace: %v", trace.Err)
 				continue
 			}
+
 			if trace.Metadata != nil {
 				s.latestBlockHeight.Swap(trace.Metadata.BlockHeight)
 				if s.upgradeChecker.ShouldUpgrade(s.latestBlockHeight.Load()) {

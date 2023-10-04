@@ -237,6 +237,9 @@ func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.C
 	if err != nil {
 		return err
 	}
+	if height == 0 {
+		return nil
+	}
 	chainNode.Status.LatestHeight = height
 	return r.Status().Update(ctx, chainNode)
 }

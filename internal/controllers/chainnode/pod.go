@@ -20,7 +20,6 @@ import (
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
 	"github.com/NibiruChain/nibiru-operator/internal/chainutils"
 	"github.com/NibiruChain/nibiru-operator/internal/k8s"
-	"github.com/NibiruChain/nibiru-operator/pkg/nodeutils"
 )
 
 func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode, configHash string) error {
@@ -82,7 +81,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 	}
 
 	// Check if the node is waiting for an upgrade
-	requiresUpgrade, err := nodeutils.NewClient(chainNode.GetNodeFQDN()).RequiresUpgrade()
+	requiresUpgrade, err := r.requiresUpgrade(chainNode)
 	if err != nil {
 		return err
 	}
@@ -91,7 +90,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 		// Get upgrade from scheduled upgrades list
 		upgrade := r.getUpgrade(chainNode, chainNode.Status.LatestHeight)
 
-		// If we don't have upgrade info for this upgrade, or it is incomplete, lets through an error
+		// If we don't have upgrade info for this upgrade, or it is incomplete (no image), lets through an error
 		if upgrade == nil || upgrade.Status == appsv1.UpgradeImageMissing {
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeWarning,
@@ -119,7 +118,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 				"Upgrade failed: %v",
 				err,
 			)
-			if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.ReasonUpgradeFailed); err != nil {
+			if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeFailed); err != nil {
 				logger.Error(err, "failed to update upgrade status")
 			}
 			return err

@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
+	"github.com/NibiruChain/nibiru-operator/pkg/nodeutils"
 )
 
 func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -95,9 +96,13 @@ func (r *Reconciler) ensureUpgradesConfig(ctx context.Context, chainNode *appsv1
 	return nil
 }
 
+func (r *Reconciler) requiresUpgrade(chainNode *appsv1.ChainNode) (bool, error) {
+	return nodeutils.NewClient(chainNode.GetNodeFQDN()).RequiresUpgrade()
+}
+
 func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, height int64) *appsv1.Upgrade {
 	for _, upgrade := range chainNode.Status.Upgrades {
-		if upgrade.Height == height && upgrade.Status == appsv1.UpgradeScheduled {
+		if upgrade.Height == height && (upgrade.Status == appsv1.UpgradeScheduled || upgrade.Status == appsv1.UpgradeFailed) {
 			return &upgrade
 		}
 	}

@@ -27,7 +27,7 @@ const (
 func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
-	if !chainNode.SnapshotsEnabled() || chainNode.Status.PvcSize == "" {
+	if !chainNode.SnapshotsEnabled() || chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0 {
 		return nil
 	}
 

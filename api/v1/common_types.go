@@ -560,6 +560,7 @@ const (
 	UpgradeScheduled    UpgradePhase = "scheduled"
 	UpgradeOnGoing      UpgradePhase = "ongoing"
 	UpgradeCompleted    UpgradePhase = "completed"
+	UpgradeFailed       UpgradePhase = "failed"
 )
 
 type UpgradeSource string
