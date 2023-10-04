@@ -109,18 +109,19 @@ func (r *Reconciler) ensurePod(ctx context.Context, chainNode *appsv1.ChainNode,
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeWarning,
 				appsv1.ReasonUpgradeFailed,
-				"Failed to start node after upgrade: %v",
+				"Failed to restart for upgrade: %v",
 				err,
 			)
+			var upgradeStatus appsv1.UpgradePhase
 			if upgraded {
-				// If there was an error on pod start but the image was already switched, we marked the upgrade
-				// completed anyway
+				// If there was an error on pod creation or watching but the image was already switched, we marked the upgrade
+				// completed anyway to avoid downgrading and corrupt data.
 				chainNode.Status.AppVersion = upgrade.GetVersion()
-				if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted); err != nil {
-					return err
-				}
+				upgradeStatus = appsv1.UpgradeCompleted
+			} else {
+				upgradeStatus = appsv1.UpgradeScheduled
 			}
-			return err
+			return r.setUpgradeStatus(ctx, chainNode, upgrade, upgradeStatus)
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeNormal,
