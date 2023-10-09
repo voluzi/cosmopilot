@@ -12,6 +12,7 @@ const (
 	SnapshotSucceeded SnapshotStatus = "succeeded"
 	SnapshotFailed    SnapshotStatus = "failed"
 	SnapshotActive    SnapshotStatus = "active"
+	SnapshotNotFound  SnapshotStatus = "notfound"
 )
 
 type SnapshotProvider interface {

@@ -104,11 +104,6 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				if err := r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
-				r.recorder.Eventf(chainNode,
-					corev1.EventTypeNormal,
-					appsv1.ReasonTarballExportFinish,
-					"Finished exporting tarball %s", getTarballName(chainNode, &snapshot),
-				)
 			}
 
 		// Default case is checking if snapshot has expired. If tarball is also set for deletion on expire it is also
@@ -337,10 +332,26 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		return false, err
 	}
 
-	if status == datasnapshot.SnapshotSucceeded {
+	switch status {
+	case datasnapshot.SnapshotNotFound:
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonTarballExportError,
+			"Tarball %s export job not found", getTarballName(chainNode, snapshot),
+		)
 		return true, nil
+
+	case datasnapshot.SnapshotSucceeded:
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeNormal,
+			appsv1.ReasonTarballExportFinish,
+			"Finished exporting tarball %s", getTarballName(chainNode, snapshot),
+		)
+		return true, nil
+
+	default:
+		return false, nil
 	}
-	return false, nil
 }
 
 func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {

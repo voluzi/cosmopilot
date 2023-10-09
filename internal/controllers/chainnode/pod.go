@@ -688,7 +688,7 @@ func (r *Reconciler) setPhaseRunningOrSyncing(ctx context.Context, chainNode *ap
 				appsv1.ReasonNodeSyncing,
 				"Node is syncing",
 			)
-			chainNode.Status.AppVersion = chainNode.Spec.App.GetImageVersion()
+			chainNode.Status.AppVersion = chainNode.GetAppVersion()
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSyncing)
 		}
 		return nil
