@@ -1,7 +1,6 @@
 package nodeutils
 
 import (
-	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -64,15 +63,6 @@ func (s *NodeUtils) ready(w http.ResponseWriter, r *http.Request) {
 func (s *NodeUtils) health(w http.ResponseWriter, r *http.Request) {
 	// TODO: this only makes sure node is listening on gRPC.
 	// We should check for possible issues with the node.
-
-	// Ensure LCD endpoint is available
-	timeout := 1 * time.Second
-	_, err := net.DialTimeout("tcp", "127.0.0.1:1317", timeout)
-	if err != nil {
-		log.Errorf("lcd enpoint is unavailable: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
 	nodeInfo, err := s.client.NodeInfo(r.Context())
 	if err != nil {
