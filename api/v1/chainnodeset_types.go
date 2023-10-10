@@ -32,6 +32,7 @@ type ChainNodeSetList struct {
 //+kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.phase`
 //+kubebuilder:printcolumn:name="Version",type=string,JSONPath=`.status.appVersion`
 //+kubebuilder:printcolumn:name="ChainID",type=string,JSONPath=`.status.chainID`
+//+kubebuilder:printcolumn:name="LatestHeight",type=integer,JSONPath=`.status.latestHeight`
 //+kubebuilder:printcolumn:name="Instances",type=integer,JSONPath=`.status.instances`
 
 // ChainNodeSet is the Schema for the chainnodesets API
@@ -96,6 +97,13 @@ type ChainNodeSetStatus struct {
 	// PubKey of the validator.
 	// +optional
 	PubKey string `json:"pubKey,omitempty"`
+
+	// Upgrades contains all scheduled/completed upgrades performed by the operator on ChainNodes.
+	// +optional
+	Upgrades []Upgrade `json:"upgrades,omitempty"`
+
+	// LatestHeight is the last height read on the node by the operator.
+	LatestHeight int64 `json:"latestHeight,omitempty"`
 }
 
 type ChainNodeSetNodeStatus struct {

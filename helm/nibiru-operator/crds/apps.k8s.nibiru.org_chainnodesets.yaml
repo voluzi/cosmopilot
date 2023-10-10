@@ -25,6 +25,9 @@ spec:
     - jsonPath: .status.chainID
       name: ChainID
       type: string
+    - jsonPath: .status.latestHeight
+      name: LatestHeight
+      type: integer
     - jsonPath: .status.instances
       name: Instances
       type: integer
@@ -77,7 +80,7 @@ spec:
                     - v0.47
                     type: string
                   upgrades:
-                    description: Upgrades contains manually scheduled upgrades
+                    description: Upgrades contains manually scheduled upgrades.
                     items:
                       properties:
                         height:
@@ -93,8 +96,11 @@ spec:
                       type: object
                     type: array
                   version:
-                    description: Version is the image tag to be used. Defaults to
-                      `latest`.
+                    description: Version is the image tag to be used. Once there are
+                      completed or skipped upgrades this will be ignored. For a new
+                      node that will be state-synced, this will be the version used
+                      during state-sync. Only after that, the operator will switch
+                      to the version of last upgrade. Defaults to `latest`.
                     type: string
                 required:
                 - app
@@ -3936,6 +3942,11 @@ spec:
                 description: Instances indicates the total number of chainnode instances
                   on this set
                 type: integer
+              latestHeight:
+                description: LatestHeight is the last height read on the node by the
+                  operator.
+                format: int64
+                type: integer
               nodes:
                 description: Nodes indicates which nodes are available on this nodeset.
                   Excludes validator node.
@@ -3981,6 +3992,32 @@ spec:
               pubKey:
                 description: PubKey of the validator.
                 type: string
+              upgrades:
+                description: Upgrades contains all scheduled/completed upgrades performed
+                  by the operator on ChainNodes.
+                items:
+                  properties:
+                    height:
+                      description: Height at which the upgrade should occur.
+                      format: int64
+                      type: integer
+                    image:
+                      description: Image replacement to be used in the upgrade.
+                      type: string
+                    source:
+                      description: Source indicates where the operator got this upgrade
+                        from.
+                      type: string
+                    status:
+                      description: Status indicates the upgrade status.
+                      type: string
+                  required:
+                  - height
+                  - image
+                  - source
+                  - status
+                  type: object
+                type: array
               validatorAddress:
                 description: ValidatorAddress is the valoper address of the validator
                   in this ChainNodeSet if one is available. Omitted when no validator

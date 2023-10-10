@@ -22,6 +22,8 @@ require (
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.67.1
 	github.com/sirupsen/logrus v1.9.0
 	github.com/stretchr/testify v1.8.4
+	go.uber.org/automaxprocs v1.5.3
+	golang.org/x/mod v0.10.0
 	google.golang.org/grpc v1.56.2
 	k8s.io/api v0.27.2
 	k8s.io/apimachinery v0.27.2

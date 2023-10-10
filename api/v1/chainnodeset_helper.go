@@ -2,8 +2,11 @@ package v1
 
 import (
 	"fmt"
+	"sort"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/NibiruChain/nibiru-operator/internal/utils"
 )
 
 const (
@@ -16,6 +19,41 @@ func (nodeSet *ChainNodeSet) HasValidator() bool {
 
 func (nodeSet *ChainNodeSet) ShouldInitGenesis() bool {
 	return nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil
+}
+
+func (nodeSet *ChainNodeSet) GetLastUpgradeVersion() string {
+	version := nodeSet.Spec.App.GetImageVersion()
+	var h int64 = 0
+	for _, u := range nodeSet.Status.Upgrades {
+		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height > h && u.Height <= nodeSet.Status.LatestHeight {
+			h = u.Height
+			version = u.GetVersion()
+		}
+	}
+	return version
+}
+
+func (nodeSet *ChainNodeSet) GetAppSpecWithUpgrades() AppSpec {
+	spec := nodeSet.Spec.App.DeepCopy()
+
+	for _, u := range nodeSet.Status.Upgrades {
+		upgradeSpec := UpgradeSpec{
+			Height: u.Height,
+			Image:  u.Image,
+		}
+		if !utils.SliceContainsObj(spec.Upgrades, upgradeSpec, func(a UpgradeSpec, b UpgradeSpec) bool {
+			return a.Height == b.Height
+		}) {
+			spec.Upgrades = append(spec.Upgrades, upgradeSpec)
+		}
+	}
+
+	// Sort upgrades by height
+	sort.Slice(nodeSet.Status.Upgrades, func(i, j int) bool {
+		return nodeSet.Status.Upgrades[i].Height < nodeSet.Status.Upgrades[j].Height
+	})
+
+	return *spec
 }
 
 // Node group methods

@@ -31,18 +31,23 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 			logger.Error(err, "could not retrieve upgrade plans")
 		} else {
 			for _, upgrade := range govUpgrades {
-				chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, upgrade)
+				chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, upgrade, chainNode.Status.LatestHeight)
 			}
 		}
 	}
 
 	for _, upgrade := range chainNode.Spec.App.Upgrades {
-		chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, appsv1.Upgrade{
+		u := appsv1.Upgrade{
 			Height: upgrade.Height,
 			Image:  upgrade.Image,
 			Status: appsv1.UpgradeScheduled,
 			Source: appsv1.ManualUpgrade,
-		})
+		}
+		// If this upgrade is in the past, lets set it as skipped
+		if chainNode.Status.LatestHeight > u.Height {
+			u.Status = appsv1.UpgradeSkipped
+		}
+		chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, u, chainNode.Status.LatestHeight)
 	}
 
 	// Sort upgrades by height
@@ -157,15 +162,20 @@ func (r *Reconciler) getGovUpgrades(ctx context.Context, chainNode *appsv1.Chain
 	return upgrades, nil
 }
 
-func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []appsv1.Upgrade {
+func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade, currentHeight int64) []appsv1.Upgrade {
 	for i, u := range upgrades {
 		if u.Height == upgrade.Height {
-			// Only source and image can be updated, unless we are adding a missing image
-			// where we also update status.
-			upgrades[i].Source = upgrade.Source
-			upgrades[i].Image = upgrade.Image
+			// Update if we are adding a missing image
 			if u.Status == appsv1.UpgradeImageMissing && upgrade.Image != "" {
+				upgrades[i].Image = upgrade.Image
+				upgrades[i].Source = upgrade.Source
 				upgrades[i].Status = appsv1.UpgradeScheduled
+			}
+
+			// If we are updating an upgrade with a past height, and it was not completed, lets set it
+			// as skipped
+			if u.Status != appsv1.UpgradeCompleted && u.Height < currentHeight {
+				upgrades[i].Status = appsv1.UpgradeSkipped
 			}
 			return upgrades
 		}

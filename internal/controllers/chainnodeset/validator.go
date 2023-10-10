@@ -56,7 +56,7 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet) (*appsv1.Cha
 		},
 		Spec: appsv1.ChainNodeSpec{
 			Genesis:     nodeSet.Spec.Genesis,
-			App:         nodeSet.Spec.App,
+			App:         nodeSet.GetAppSpecWithUpgrades(),
 			Config:      nodeSet.Spec.Validator.Config,
 			Persistence: nodeSet.Spec.Validator.Persistence,
 			Validator: &appsv1.ValidatorConfig{

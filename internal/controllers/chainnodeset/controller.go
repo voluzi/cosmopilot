@@ -89,6 +89,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	if err := r.ensureUpgrades(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := r.ensureServices(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -97,9 +101,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	if nodeSet.Status.Phase != appsv1.PhaseChainNodeSetRunning || nodeSet.Status.AppVersion != nodeSet.Spec.App.GetImageVersion() {
-		nodeSet.Status.AppVersion = nodeSet.Spec.App.GetImageVersion()
+	if nodeSet.Status.Phase != appsv1.PhaseChainNodeSetRunning || nodeSet.GetLastUpgradeVersion() != nodeSet.Status.AppVersion {
 		nodeSet.Status.Phase = appsv1.PhaseChainNodeSetRunning
+		nodeSet.Status.AppVersion = nodeSet.GetLastUpgradeVersion()
 		return ctrl.Result{}, r.Status().Update(ctx, nodeSet)
 	}
 	return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil

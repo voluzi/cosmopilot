@@ -923,7 +923,7 @@ spec:
                     - v0.47
                     type: string
                   upgrades:
-                    description: Upgrades contains manually scheduled upgrades
+                    description: Upgrades contains manually scheduled upgrades.
                     items:
                       properties:
                         height:
@@ -939,8 +939,11 @@ spec:
                       type: object
                     type: array
                   version:
-                    description: Version is the image tag to be used. Defaults to
-                      `latest`.
+                    description: Version is the image tag to be used. Once there are
+                      completed or skipped upgrades this will be ignored. For a new
+                      node that will be state-synced, this will be the version used
+                      during state-sync. Only after that, the operator will switch
+                      to the version of last upgrade. Defaults to `latest`.
                     type: string
                 required:
                 - app

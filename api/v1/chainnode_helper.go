@@ -190,20 +190,16 @@ func (chainNode *ChainNode) GetMoniker() string {
 	return chainNode.GetName()
 }
 
-func (chainNode *ChainNode) HadUpgrades() bool {
-	for _, upgrade := range chainNode.Status.Upgrades {
-		if upgrade.Status == UpgradeCompleted {
-			return true
+func (chainNode *ChainNode) GetAppVersion() string {
+	version := chainNode.Spec.App.GetImageVersion()
+	var h int64 = 0
+	for _, u := range chainNode.Status.Upgrades {
+		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height > h && u.Height <= chainNode.Status.LatestHeight {
+			h = u.Height
+			version = u.GetVersion()
 		}
 	}
-	return false
-}
-
-func (chainNode *ChainNode) GetAppVersion() string {
-	if chainNode.HadUpgrades() {
-		return chainNode.Status.AppVersion
-	}
-	return chainNode.Spec.App.GetImageVersion()
+	return version
 }
 
 func (chainNode *ChainNode) GetAppImage() string {

@@ -48,12 +48,12 @@ AppSpec specifies the source image and binary name of the app to run
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | image | Image indicates the docker image to be used | string | true |
-| version | Version is the image tag to be used. Defaults to `latest`. | *string | false |
+| version | Version is the image tag to be used. Once there are completed or skipped upgrades this will be ignored. For a new node that will be state-synced, this will be the version used during state-sync. Only after that, the operator will switch to the version of last upgrade. Defaults to `latest`. | *string | false |
 | imagePullPolicy | ImagePullPolicy indicates the desired pull policy when creating nodes. Defaults to `Always` if `version` is `latest` and `IfNotPresent` otherwise. | corev1.PullPolicy | false |
 | app | App is the name of the binary of the application to be run | string | true |
 | sdkVersion | SdkVersion specifies the version of cosmos-sdk used by this app. Defaults to `v0.47`. | *SdkVersion | false |
 | checkGovUpgrades | CheckGovUpgrades indicates that operator should query gov proposals to find and schedule upgrades. Defaults to `true`. | *bool | false |
-| upgrades | Upgrades contains manually scheduled upgrades | [][UpgradeSpec](#upgradespec) | false |
+| upgrades | Upgrades contains manually scheduled upgrades. | [][UpgradeSpec](#upgradespec) | false |
 
 [Back to Custom Resources](#custom-resources)
 

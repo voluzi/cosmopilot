@@ -75,7 +75,10 @@ type AppSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
-	// Version is the image tag to be used. Defaults to `latest`.
+	// Version is the image tag to be used. Once there are completed or skipped upgrades this will be ignored.
+	// For a new node that will be state-synced, this will be the version used during state-sync. Only after
+	// that, the operator will switch to the version of last upgrade.
+	// Defaults to `latest`.
 	// +optional
 	// +default=latest
 	Version *string `json:"version,omitempty"`
@@ -99,7 +102,7 @@ type AppSpec struct {
 	// +default=true
 	CheckGovUpgrades *bool `json:"checkGovUpgrades,omitempty"`
 
-	// Upgrades contains manually scheduled upgrades
+	// Upgrades contains manually scheduled upgrades.
 	// +optional
 	Upgrades []UpgradeSpec `json:"upgrades,omitempty"`
 }
@@ -560,6 +563,7 @@ const (
 	UpgradeScheduled    UpgradePhase = "scheduled"
 	UpgradeOnGoing      UpgradePhase = "ongoing"
 	UpgradeCompleted    UpgradePhase = "completed"
+	UpgradeSkipped      UpgradePhase = "skipped"
 )
 
 type UpgradeSource string

@@ -80,6 +80,8 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet
 | validatorAddress | ValidatorAddress is the valoper address of the validator in this ChainNodeSet if one is available. Omitted when no validator is present in the ChainNodeSet. | string | false |
 | validatorStatus | ValidatorStatus indicates the current status of validator if this node is one. | ValidatorStatus | false |
 | pubKey | PubKey of the validator. | string | false |
+| upgrades | Upgrades contains all scheduled/completed upgrades performed by the operator on ChainNodes. | []Upgrade | false |
+| latestHeight | LatestHeight is the last height read on the node by the operator. | int64 | false |
 
 [Back to Custom Resources](#custom-resources)
 
