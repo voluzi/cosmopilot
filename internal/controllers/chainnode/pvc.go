@@ -133,9 +133,13 @@ func (r *Reconciler) ensurePvc(ctx context.Context, chainNode *appsv1.ChainNode)
 
 	case 1:
 		logger.Info("skipping pvc resize: new-size < old-size", "pvc", pvc.GetName(), "old-size", pvc.Spec.Resources.Requests.Storage(), "new-size", storageSize)
-		fallthrough
+		return pvc, nil
 
 	default:
+		if chainNode.Status.PvcSize != storageSize.String() {
+			chainNode.Status.PvcSize = storageSize.String()
+			return pvc, r.Status().Update(ctx, chainNode)
+		}
 		return pvc, nil
 	}
 }

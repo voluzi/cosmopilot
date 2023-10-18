@@ -202,10 +202,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// For updating the PVC we want to do it after the pod deployment because auto-resize feature requires the node running.
-	if chainNode.Status.PvcSize != "" {
-		if err := r.ensurePersistence(ctx, app, chainNode); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.ensurePersistence(ctx, app, chainNode); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if chainNode.ShouldCreateValidator() && chainNode.Status.ValidatorStatus == "" {
