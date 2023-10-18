@@ -33,7 +33,7 @@ webhooks:
       service:
         name: {{ .Release.Name }}-webhook
         namespace: {{ .Release.Namespace }}
-        path: /validate-apps-k8s-nibiru-fi-v1-chainnodeset
+        path: /validate-apps-k8s-nibiru-org-v1-chainnodeset
     failurePolicy: Fail
     matchPolicy: Exact
     sideEffects: None
