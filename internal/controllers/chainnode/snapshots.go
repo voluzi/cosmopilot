@@ -44,7 +44,10 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	tarballNames := make([]string, 0)
 
 	for _, snapshot := range list.Items {
-		tarballNames = append(tarballNames, getTarballName(chainNode, &snapshot))
+		if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
+			tarballNames = append(tarballNames, getTarballName(chainNode, &snapshot))
+		}
+
 		switch {
 
 		// If the snapshot does not have the ready annotation, we haven't processed it yet. So we check if it's ready
