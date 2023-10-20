@@ -43,7 +43,7 @@ spec:
           command:
             - /manager
           args:
-            - --leader-elect
+            - --enable-leader-election
           {{- if .Values.webHooksEnabled }}
           ports:
             - name: webhook-server
