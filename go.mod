@@ -12,6 +12,7 @@ require (
 	github.com/cosmos/cosmos-sdk v0.47.4
 	github.com/cosmos/go-bip39 v1.0.0
 	github.com/fsnotify/fsnotify v1.6.0
+	github.com/goccy/go-json v0.10.2
 	github.com/gorilla/mux v1.8.0
 	github.com/jellydator/ttlcache/v3 v3.0.1
 	github.com/kubernetes-csi/external-snapshotter/client/v6 v6.2.0

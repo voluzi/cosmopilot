@@ -2,9 +2,10 @@ package tracer
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"syscall"
+
+	"github.com/goccy/go-json"
 
 	"github.com/containerd/fifo"
 	"github.com/nxadm/tail"
