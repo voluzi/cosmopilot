@@ -1,5 +1,5 @@
 NAME 	?= ghcr.io/nibiruchain/nibiru-operator
-VERSION ?= $(shell git describe --tags --exclude 'node-*/*' --abbrev=0)
+VERSION ?= $(shell git describe --tags --exclude 'node-*/*' --exclude 'vault-*/*' --abbrev=0)
 IMG 	?= $(NAME):$(VERSION:v%=%)
 
 NODE_UTILS_NAME    ?= ghcr.io/nibiruchain/node-utils
