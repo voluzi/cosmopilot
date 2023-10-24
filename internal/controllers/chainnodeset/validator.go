@@ -39,6 +39,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		Port:    chainutils.P2pPort,
 		Seed:    validator.Status.SeedMode,
 		Public:  false,
+		Group:   validatorGroupName,
 	})
 
 	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {

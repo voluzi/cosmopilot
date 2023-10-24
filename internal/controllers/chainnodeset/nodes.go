@@ -40,18 +40,21 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 		totalInstances += 1
 	}
 
-	// Grab existing list of groups
+	// Grab list of all nodeset nodes
 	chainNodes, err := r.listNodeSetNodes(ctx, nodeSet)
 	if err != nil {
 		return err
 	}
 
+	// Create map of group nodes to track deleted ones
 	groupList := map[string]int{}
 	for _, node := range chainNodes.Items {
-		if group, ok := node.Annotations[LabelChainNodeSetGroup]; ok {
+		if group, ok := node.Labels[LabelChainNodeSetGroup]; ok {
 			groupList[group]++
 		}
 	}
+	// Exclude validator group
+	delete(groupList, validatorGroupName)
 
 	for _, group := range nodeSet.Spec.Nodes {
 		if err := r.ensureNodeGroup(ctx, nodeSet, group); err != nil {
