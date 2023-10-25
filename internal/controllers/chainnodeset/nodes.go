@@ -72,7 +72,6 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 			if err := r.removeNode(ctx, nodeSet, group, i); err != nil {
 				return err
 			}
-			DeleteNodeStatus(nodeSet, nodeName)
 		}
 	}
 
@@ -204,6 +203,7 @@ func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 	if err := r.Delete(ctx, &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: nodeSet.GetNamespace()}}); err != nil {
 		return err
 	}
+	DeleteNodeStatus(nodeSet, nodeName)
 
 	r.recorder.Eventf(nodeSet,
 		corev1.EventTypeNormal,
@@ -332,5 +332,6 @@ func (r *Reconciler) maybeDeleteNode(ctx context.Context, nodeSet *appsv1.ChainN
 			return err
 		}
 	}
+	DeleteNodeStatus(nodeSet, name)
 	return nil
 }
