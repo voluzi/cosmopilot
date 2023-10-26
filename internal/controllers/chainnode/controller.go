@@ -2,7 +2,6 @@ package chainnode
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -30,7 +29,7 @@ type Reconciler struct {
 	RestConfig       *rest.Config
 	Scheme           *runtime.Scheme
 	configCache      *ttlcache.Cache[string, map[string]interface{}]
-	queryClients     map[string]*chainutils.QueryClient
+	nodeClients      map[string]*chainutils.Client
 	recorder         record.EventRecorder
 	nodeUtilsImage   string
 	workerCount      int
@@ -49,7 +48,7 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 		RestConfig:       mgr.GetConfig(),
 		Scheme:           mgr.GetScheme(),
 		configCache:      cfgCache,
-		queryClients:     make(map[string]*chainutils.QueryClient),
+		nodeClients:      make(map[string]*chainutils.Client),
 		recorder:         mgr.GetEventRecorderFor("chainnode-controller"),
 		nodeUtilsImage:   opts.NodeUtilsImage,
 		workerCount:      opts.WorkerCount,
@@ -240,17 +239,13 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *Reconciler) getQueryClient(chainNode *appsv1.ChainNode) (*chainutils.QueryClient, error) {
-	address := fmt.Sprintf("%s:%d", chainNode.GetNodeFQDN(), chainutils.GrpcPort)
-	if _, ok := r.queryClients[address]; ok {
-		return r.queryClients[address], nil
-	}
-	c, err := chainutils.NewQueryClient(address)
+func (r *Reconciler) getClient(chainNode *appsv1.ChainNode) (*chainutils.Client, error) {
+	c, err := chainutils.NewClient(chainNode.GetNodeFQDN())
 	if err != nil {
 		return nil, err
 	}
-	r.queryClients[address] = c
-	return r.queryClients[address], nil
+	r.nodeClients[chainNode.GetNodeFQDN()] = c
+	return r.nodeClients[chainNode.GetNodeFQDN()], nil
 }
 
 func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode) error {

@@ -15,7 +15,7 @@ import (
 type NodeUtils struct {
 	router            *mux.Router
 	cfg               *Options
-	client            *chainutils.QueryClient
+	client            *chainutils.Client
 	tracer            *tracer.StoreTracer
 	latestBlockHeight atomic.Int64
 	upgradeChecker    *UpgradeChecker
@@ -28,7 +28,7 @@ func New(opts ...Option) (*NodeUtils, error) {
 		opt(options)
 	}
 
-	client, err := chainutils.NewQueryClient("127.0.0.1:9090")
+	client, err := chainutils.NewClient("127.0.0.1")
 	if err != nil {
 		return nil, err
 	}

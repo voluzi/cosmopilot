@@ -1,5 +1,7 @@
 package chainutils
 
+import "time"
+
 const (
 	P2pPortName = "p2p"
 	P2pPort     = 26656
@@ -27,4 +29,7 @@ const (
 	defaultData        = "data"
 	defaultConfig      = "config"
 	defaultGenesisFile = "config/genesis.json"
+
+	paginationLimit = 1000
+	httpTimeout     = 10 * time.Second
 )

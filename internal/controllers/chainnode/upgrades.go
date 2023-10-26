@@ -143,7 +143,7 @@ func (r *Reconciler) setUpgradeStatus(ctx context.Context, chainNode *appsv1.Cha
 }
 
 func (r *Reconciler) getGovUpgrades(ctx context.Context, chainNode *appsv1.ChainNode) ([]appsv1.Upgrade, error) {
-	c, err := r.getQueryClient(chainNode)
+	c, err := r.getClient(chainNode)
 	if err != nil {
 		return nil, err
 	}

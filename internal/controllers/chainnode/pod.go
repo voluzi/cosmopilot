@@ -671,7 +671,7 @@ func removeFieldsForComparison(pod *corev1.Pod) {
 }
 
 func (r *Reconciler) setPhaseRunningOrSyncing(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	c, err := r.getQueryClient(chainNode)
+	c, err := r.getClient(chainNode)
 	if err != nil {
 		return err
 	}

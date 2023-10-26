@@ -32,6 +32,10 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 	}
 
 	nodeSetCopy := nodeSet.DeepCopy()
+	nodeSet.Status.ChainID = validator.Status.ChainID
+	nodeSet.Status.ValidatorAddress = validator.Status.ValidatorAddress
+	nodeSet.Status.ValidatorStatus = validator.Status.ValidatorStatus
+	nodeSet.Status.PubKey = validator.Status.PubKey
 	AddOrUpdateNodeStatus(nodeSet, appsv1.ChainNodeSetNodeStatus{
 		Name:    validator.Name,
 		ID:      validator.Status.NodeID,
@@ -49,10 +53,6 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 			"validatorStatus", validator.Status.ValidatorStatus,
 			"pubKey", validator.Status.PubKey,
 		)
-		nodeSet.Status.ChainID = validator.Status.ChainID
-		nodeSet.Status.ValidatorAddress = validator.Status.ValidatorAddress
-		nodeSet.Status.ValidatorStatus = validator.Status.ValidatorStatus
-		nodeSet.Status.PubKey = validator.Status.PubKey
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil

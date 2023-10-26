@@ -1,6 +1,7 @@
 package chainnode
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -79,17 +80,52 @@ func (r *Reconciler) createValidator(ctx context.Context, app *chainutils.App, c
 func (r *Reconciler) updateJailedStatus(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
-	client, err := r.getQueryClient(chainNode)
+	client, err := r.getClient(chainNode)
 	if err != nil {
 		return err
 	}
 
-	validator, err := client.QueryValidator(ctx, chainNode.Status.ValidatorAddress)
-	if err != nil {
-		return err
+	var validator *stakingTypes.Validator
+	if chainNode.Status.ValidatorAddress == "" {
+		status, err := client.GetNodeStatus(ctx)
+		if err != nil {
+			return err
+		}
+
+		validators, err := client.GetValidators(ctx)
+		if err != nil {
+			return err
+		}
+
+		found := false
+		for _, val := range validators {
+			pk, err := cometbft.UnpackPubKey(val.ConsensusPubkey)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(status.ValidatorInfo.PubKey.Address().Bytes(), pk.Address().Bytes()) {
+				chainNode.Status.ValidatorAddress = val.OperatorAddress
+				validator = &val
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("validator not found")
+		}
+	} else {
+		validator, err = client.QueryValidator(ctx, chainNode.Status.ValidatorAddress)
+		if err != nil {
+			return err
+		}
 	}
 
 	pk, err := cometbft.UnpackPubKey(validator.ConsensusPubkey)
+	if err != nil {
+		return err
+	}
+
+	pkStr, err := cometbft.PubKeyToString(pk)
 	if err != nil {
 		return err
 	}
@@ -104,11 +140,12 @@ func (r *Reconciler) updateJailedStatus(ctx context.Context, chainNode *appsv1.C
 
 	validatorStatus := getValidatorStatus(validator.Status)
 
-	if chainNode.Status.ValidatorStatus != validatorStatus ||
+	if chainNode.Status.ValidatorAddress == "" ||
+		chainNode.Status.ValidatorStatus != validatorStatus ||
 		chainNode.Status.AccountAddress != accountAddr ||
 		chainNode.Status.ValidatorAddress != validator.OperatorAddress ||
 		chainNode.Status.Jailed != validator.Jailed ||
-		chainNode.Status.PubKey != pk {
+		chainNode.Status.PubKey != pkStr {
 		if chainNode.Status.Jailed != validator.Jailed {
 			logger.Info("updating jailed status", "jailed", validator.Jailed)
 
@@ -130,7 +167,7 @@ func (r *Reconciler) updateJailedStatus(ctx context.Context, chainNode *appsv1.C
 		chainNode.Status.AccountAddress = accountAddr
 		chainNode.Status.Jailed = validator.Jailed
 		chainNode.Status.ValidatorStatus = validatorStatus
-		chainNode.Status.PubKey = pk
+		chainNode.Status.PubKey = pkStr
 		return r.Status().Update(ctx, chainNode)
 	}
 

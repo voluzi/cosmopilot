@@ -63,15 +63,18 @@ func GetPubKey(keyb []byte) (string, error) {
 	return string(b), nil
 }
 
-func UnpackPubKey(x *types.Any) (string, error) {
+func UnpackPubKey(x *types.Any) (cryptotypes.PubKey, error) {
+	reg := types.NewInterfaceRegistry()
+	cryptocodec.RegisterInterfaces(reg)
+
+	var pk cryptotypes.PubKey
+	return pk, reg.UnpackAny(x, &pk)
+}
+
+func PubKeyToString(pk cryptotypes.PubKey) (string, error) {
 	reg := types.NewInterfaceRegistry()
 	cryptocodec.RegisterInterfaces(reg)
 	c := codec.NewProtoCodec(reg)
-
-	var pk cryptotypes.PubKey
-	if err := reg.UnpackAny(x, &pk); err != nil {
-		return "", err
-	}
 
 	b, err := c.MarshalInterfaceJSON(pk)
 	if err != nil {
