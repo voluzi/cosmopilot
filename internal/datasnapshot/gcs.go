@@ -312,7 +312,7 @@ func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
 
 	snapshotNames := make([]string, len(list.Items))
 	for i, job := range list.Items {
-		snapshotNames[i] = job.GetName()
+		snapshotNames[i] = strings.TrimSuffix(job.GetName(), "-upload")
 	}
 	return snapshotNames, nil
 }
