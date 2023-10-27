@@ -87,9 +87,9 @@ spec:
           resources:
             limits:
               cpu: 250m
-              memory: 128Mi
+              memory: 300Mi
             requests:
               cpu: 10m
-              memory: 64Mi
+              memory: 150Mi
       serviceAccountName: {{ .Release.Name }}
       terminationGracePeriodSeconds: 10
