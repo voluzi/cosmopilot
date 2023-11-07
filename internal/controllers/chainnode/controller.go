@@ -240,12 +240,15 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *Reconciler) getClient(chainNode *appsv1.ChainNode) (*chainutils.Client, error) {
+	if c, ok := r.nodeClients[chainNode.GetNodeFQDN()]; ok {
+		return c, nil
+	}
 	c, err := chainutils.NewClient(chainNode.GetNodeFQDN())
 	if err != nil {
 		return nil, err
 	}
 	r.nodeClients[chainNode.GetNodeFQDN()] = c
-	return r.nodeClients[chainNode.GetNodeFQDN()], nil
+	return c, nil
 }
 
 func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode) error {
