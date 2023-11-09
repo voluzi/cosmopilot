@@ -708,7 +708,7 @@ func (r *Reconciler) setPhaseRunningOrSyncing(ctx context.Context, chainNode *ap
 }
 
 func podInFailedState(pod *corev1.Pod) bool {
-	if pod.Status.Phase == corev1.PodFailed {
+	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		return true
 	}
 
