@@ -140,7 +140,8 @@ func (r *Reconciler) updateJailedStatus(ctx context.Context, chainNode *appsv1.C
 
 	validatorStatus := getValidatorStatus(validator.Status)
 
-	if chainNode.Status.ValidatorAddress == "" ||
+	if !chainNode.Status.Validator ||
+		chainNode.Status.ValidatorAddress == "" ||
 		chainNode.Status.ValidatorStatus != validatorStatus ||
 		chainNode.Status.AccountAddress != accountAddr ||
 		chainNode.Status.ValidatorAddress != validator.OperatorAddress ||
@@ -168,6 +169,7 @@ func (r *Reconciler) updateJailedStatus(ctx context.Context, chainNode *appsv1.C
 		chainNode.Status.Jailed = validator.Jailed
 		chainNode.Status.ValidatorStatus = validatorStatus
 		chainNode.Status.PubKey = pkStr
+		chainNode.Status.Validator = true
 		return r.Status().Update(ctx, chainNode)
 	}
 
