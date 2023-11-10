@@ -115,7 +115,7 @@ func (r *Reconciler) getIngressSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 			IngressClassName: pointer.String(ingressClassNameNginx),
 			TLS: []v1.IngressTLS{
 				{
-					Hosts:      []string{group.Ingress.Host},
+					Hosts:      []string{},
 					SecretName: group.GetIngressSecretName(nodeSet),
 				},
 			},
