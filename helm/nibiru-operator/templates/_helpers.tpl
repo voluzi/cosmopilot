@@ -15,7 +15,7 @@
 
 {{- define "operator.labels" }}
 app.kubernetes.io/name: {{ .Chart.Name }}
-helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+helm.sh/chart: {{ .Chart.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.labels }}{{ toYaml .Values.labels}}{{- end }}

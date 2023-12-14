@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"os"
+	"path/filepath"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	monitoring "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -53,7 +54,7 @@ func main() {
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "cae47b13.k8s.nibiru.org",
+		LeaderElectionID:       filepath.Join("nibiru-operator.k8s.nibiru.org", runOpts.WorkerName),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

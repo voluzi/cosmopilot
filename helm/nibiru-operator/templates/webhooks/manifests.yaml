@@ -19,6 +19,15 @@ webhooks:
     sideEffects: None
     admissionReviewVersions: ["v1"]
     name: vchainnode.kb.io
+    objectSelector:
+    {{- if .Values.workerName }}
+      matchLabels:
+        worker-name: {{ .Values.workerName }}
+    {{- else }}
+      matchExpressions:
+        - key: worker-name
+          operator: DoesNotExist
+    {{- end }}
     rules:
       - apiGroups:
           - apps.k8s.nibiru.org
@@ -39,6 +48,15 @@ webhooks:
     sideEffects: None
     admissionReviewVersions: ["v1"]
     name: vchainnodeset.kb.io
+    objectSelector:
+    {{- if .Values.workerName }}
+      matchLabels:
+        worker-name: {{ .Values.workerName }}
+    {{- else }}
+      matchExpressions:
+        - key: worker-name
+          operator: DoesNotExist
+    {{- end }}
     rules:
       - apiGroups:
           - apps.k8s.nibiru.org
