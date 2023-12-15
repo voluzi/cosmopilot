@@ -18,7 +18,6 @@ import (
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
 	"github.com/NibiruChain/nibiru-operator/internal/chainutils"
 	"github.com/NibiruChain/nibiru-operator/internal/k8s"
-	"github.com/NibiruChain/nibiru-operator/internal/utils"
 )
 
 func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -205,12 +204,10 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 					TargetPort: intstr.FromInt(nodeUtilsPort),
 				},
 			},
-			Selector: utils.MergeMaps(
-				map[string]string{
-					LabelNodeID:  chainNode.Status.NodeID,
-					LabelChainID: chainNode.Status.ChainID,
-				},
-				chainNode.Labels),
+			Selector: WithChainNodeLabels(chainNode, map[string]string{
+				LabelNodeID:  chainNode.Status.NodeID,
+				LabelChainID: chainNode.Status.ChainID,
+			}),
 		},
 	}
 
@@ -274,12 +271,10 @@ func (r *Reconciler) getInternalServiceSpec(ctx context.Context, chainNode *apps
 					TargetPort: intstr.FromInt(nodeUtilsPort),
 				},
 			},
-			Selector: utils.MergeMaps(
-				map[string]string{
-					LabelNodeID:  chainNode.Status.NodeID,
-					LabelChainID: chainNode.Status.ChainID,
-				},
-				chainNode.Labels),
+			Selector: WithChainNodeLabels(chainNode, map[string]string{
+				LabelNodeID:  chainNode.Status.NodeID,
+				LabelChainID: chainNode.Status.ChainID,
+			}),
 		},
 	}
 
@@ -312,13 +307,10 @@ func (r *Reconciler) getP2pServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Ser
 					TargetPort: intstr.FromInt(chainutils.P2pPort),
 				},
 			},
-			Selector: utils.MergeMaps(
-				map[string]string{
-					LabelNodeID:  chainNode.Status.NodeID,
-					LabelChainID: chainNode.Status.ChainID,
-				},
-				chainNode.Labels,
-			),
+			Selector: WithChainNodeLabels(chainNode, map[string]string{
+				LabelNodeID:  chainNode.Status.NodeID,
+				LabelChainID: chainNode.Status.ChainID,
+			}),
 		},
 	}
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
