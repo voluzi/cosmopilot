@@ -413,6 +413,10 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 							Name:  "BLOCK_THRESHOLD",
 							Value: chainNode.Spec.Config.GetBlockThreshold(),
 						},
+						{
+							Name:  "LOG_LEVEL",
+							Value: chainNode.Spec.Config.GetNodeUtilsLogLevel(),
+						},
 					},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
