@@ -2,6 +2,7 @@ package chainnodeset
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
@@ -23,7 +24,15 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err := r.ensureService(ctx, svc); err != nil {
+		if err = r.ensureService(ctx, svc); err != nil {
+			return err
+		}
+
+		svc, err = r.getInternalServiceSpec(nodeSet, group)
+		if err != nil {
+			return err
+		}
+		if err = r.ensureService(ctx, svc); err != nil {
 			return err
 		}
 	}
@@ -100,6 +109,45 @@ func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 		svc.Spec.Ports[0].TargetPort = intstr.FromInt(controllers.FirewallRpcPort)
 		svc.Spec.Ports[1].TargetPort = intstr.FromInt(controllers.FirewallLcdPort)
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt(controllers.FirewallGrpcPort)
+	}
+
+	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
+}
+
+func (r *Reconciler) getInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) (*corev1.Service, error) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-internal", group.GetServiceName(nodeSet)),
+			Namespace: nodeSet.GetNamespace(),
+			Labels:    WithChainNodeSetLabels(nodeSet),
+		},
+		Spec: corev1.ServiceSpec{
+			PublishNotReadyAddresses: true,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       chainutils.RpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.RpcPort,
+					TargetPort: intstr.FromInt(chainutils.RpcPort),
+				},
+				{
+					Name:       chainutils.LcdPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.LcdPort,
+					TargetPort: intstr.FromInt(chainutils.LcdPort),
+				},
+				{
+					Name:       chainutils.GrpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.GrpcPort,
+					TargetPort: intstr.FromInt(chainutils.GrpcPort),
+				},
+			},
+			Selector: map[string]string{
+				LabelChainNodeSet:      nodeSet.GetName(),
+				LabelChainNodeSetGroup: group.Name,
+			},
+		},
 	}
 
 	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
