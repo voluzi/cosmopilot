@@ -40,6 +40,8 @@ const (
 	startupTimeout                 = 1 * time.Hour
 	timeoutWaitServiceIP           = 5 * time.Minute
 	minimumTimeBeforeFirstSnapshot = 10 * time.Minute
+	livenessProbeTimeoutSeconds    = 5
+	readinessProbeTimeoutSeconds   = 5
 
 	prometheusScrapeInterval = "15s"
 

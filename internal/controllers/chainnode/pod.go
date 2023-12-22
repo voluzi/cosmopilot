@@ -351,6 +351,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 						},
 						PeriodSeconds:    5,
 						FailureThreshold: int32(startupTimeout.Seconds() / 5),
+						TimeoutSeconds:   livenessProbeTimeoutSeconds,
 					},
 					LivenessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
@@ -365,6 +366,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 						},
 						FailureThreshold: 2,
 						PeriodSeconds:    30,
+						TimeoutSeconds:   livenessProbeTimeoutSeconds,
 					},
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
@@ -379,6 +381,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 						},
 						FailureThreshold: 1,
 						PeriodSeconds:    10,
+						TimeoutSeconds:   readinessProbeTimeoutSeconds,
 					},
 					Resources: chainNode.Spec.Resources,
 				},
