@@ -426,6 +426,10 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 							corev1.ResourceCPU:    nodeUtilsCpuResources,
 							corev1.ResourceMemory: nodeUtilsMemoryResources,
 						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    nodeUtilsCpuResources,
+							corev1.ResourceMemory: nodeUtilsMemoryResources,
+						},
 					},
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
