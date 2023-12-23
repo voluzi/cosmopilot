@@ -274,6 +274,16 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 							MountPath: "/trace",
 						},
 					},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    initContainerCpuResources,
+							corev1.ResourceMemory: initContainerMemoryResources,
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    initContainerCpuResources,
+							corev1.ResourceMemory: initContainerMemoryResources,
+						},
+					},
 				},
 			},
 			Containers: []corev1.Container{
@@ -485,6 +495,16 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 					{
 						Name:      "config-empty-dir",
 						MountPath: "/home/app/config",
+					},
+				},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    initContainerCpuResources,
+						corev1.ResourceMemory: initContainerMemoryResources,
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    initContainerCpuResources,
+						corev1.ResourceMemory: initContainerMemoryResources,
 					},
 				},
 			},
