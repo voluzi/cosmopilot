@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -15,6 +16,14 @@ import (
 const (
 	vaultProviderName = "hashicorp"
 	vaultMountDir     = "/vault/"
+
+	tokenRenewerCpu    = "100m"
+	tokenRenewerMemory = "64Mi"
+)
+
+var (
+	tokenRenewerCpuResources    = resource.MustParse(tokenRenewerCpu)
+	tokenRenewerMemoryResources = resource.MustParse(tokenRenewerMemory)
 )
 
 type VaultProvider struct {
@@ -121,6 +130,16 @@ func (v *VaultProvider) getContainers() []corev1.Container {
 					ReadOnly:  true,
 					MountPath: vaultMountDir + v.TokenSecret.Key,
 					SubPath:   v.TokenSecret.Key,
+				},
+			},
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    tokenRenewerCpuResources,
+					corev1.ResourceMemory: tokenRenewerMemoryResources,
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    tokenRenewerCpuResources,
+					corev1.ResourceMemory: tokenRenewerMemoryResources,
 				},
 			},
 		}

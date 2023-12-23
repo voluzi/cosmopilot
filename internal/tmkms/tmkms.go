@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -16,6 +17,16 @@ import (
 
 	"github.com/NibiruChain/nibiru-operator/internal/k8s"
 	"github.com/NibiruChain/nibiru-operator/internal/utils"
+)
+
+const (
+	tmkmsCpu    = "100m"
+	tmkmsMemory = "64Mi"
+)
+
+var (
+	tmkmsCpuResources    = resource.MustParse(tmkmsCpu)
+	tmkmsMemoryResources = resource.MustParse(tmkmsMemory)
 )
 
 type KMS struct {
@@ -274,6 +285,16 @@ func (kms *KMS) GetContainersSpec() []corev1.Container {
 				{
 					Name:  "ROLLME",
 					Value: kms.getConfigHash(),
+				},
+			},
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    tmkmsCpuResources,
+					corev1.ResourceMemory: tmkmsMemoryResources,
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    tmkmsCpuResources,
+					corev1.ResourceMemory: tmkmsMemoryResources,
 				},
 			},
 		},
