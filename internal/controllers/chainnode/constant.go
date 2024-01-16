@@ -25,19 +25,20 @@ const (
 	AnnotationStateSyncTrustHeight = "apps.k8s.nibiru.org/state-sync-trust-height"
 	AnnotationStateSyncTrustHash   = "apps.k8s.nibiru.org/state-sync-trust-hash"
 
-	annotationSafeEvict             = "cluster-autoscaler.kubernetes.io/safe-to-evict"
-	annotationConfigHash            = "apps.k8s.nibiru.org/config-hash"
-	annotationDataInitialized       = "apps.k8s.nibiru.org/data-initialized"
-	annotationVaultKeyUploaded      = "apps.k8s.nibiru.org/vault-key-uploaded"
-	annotationPvcSnapshotInProgress = "apps.k8s.nibiru.org/snapshotting-pvc"
-	annotationLastPvcSnapshot       = "apps.k8s.nibiru.org/last-pvc-snapshot"
-	annotationSnapshotRetention     = "apps.k8s.nibiru.org/snapshot-retention"
-	annotationPvcSnapshotReady      = "apps.k8s.nibiru.org/snapshot-ready"
-	annotationExportingTarball      = "apps.k8s.nibiru.org/exporting-tarball"
+	annotationSafeEvict               = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+	annotationConfigHash              = "apps.k8s.nibiru.org/config-hash"
+	annotationDataInitialized         = "apps.k8s.nibiru.org/data-initialized"
+	annotationVaultKeyUploaded        = "apps.k8s.nibiru.org/vault-key-uploaded"
+	annotationPvcSnapshotInProgress   = "apps.k8s.nibiru.org/snapshotting-pvc"
+	annotationLastPvcSnapshot         = "apps.k8s.nibiru.org/last-pvc-snapshot"
+	annotationSnapshotRetention       = "apps.k8s.nibiru.org/snapshot-retention"
+	annotationPvcSnapshotReady        = "apps.k8s.nibiru.org/snapshot-ready"
+	annotationExportingTarball        = "apps.k8s.nibiru.org/exporting-tarball"
+	annotationSnapshotIntegrityStatus = "apps.k8s.nibiru.org/snapshot-integrity-status"
 
 	timeoutPodRunning              = 5 * time.Minute
 	timeoutPodDeleted              = 2 * time.Minute
-	startupTimeout                 = 1 * time.Hour
+	startupTimeout                 = 90 * time.Minute
 	timeoutWaitServiceIP           = 5 * time.Minute
 	minimumTimeBeforeFirstSnapshot = 10 * time.Minute
 	livenessProbeTimeoutSeconds    = 5
@@ -46,7 +47,7 @@ const (
 	prometheusScrapeInterval = "15s"
 
 	nodeUtilsContainerName = "node-utils"
-	nodeUtilsCPU           = "150m"
+	nodeUtilsCPU           = "300m"
 	nodeUtilsMemory        = "100Mi"
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
@@ -67,6 +68,8 @@ const (
 
 	initContainerCPU    = "100m"
 	initContainerMemory = "250Mi"
+
+	volumeSnapshot = "volume-snapshot"
 )
 
 var (
