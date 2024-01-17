@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/kube-openapi/pkg/validation/strfmt"
 	"k8s.io/utils/pointer"
 
 	"github.com/NibiruChain/nibiru-operator/internal/tmkms"
@@ -15,6 +16,7 @@ const (
 	DefaultReconcilePeriod         = 15 * time.Second
 	DefaultImageVersion            = "latest"
 	DefaultBlockThreshold          = "15s"
+	DefaultStartupTime             = time.Hour
 	DefaultNodeUtilsLogLevel       = "info"
 	DefaultP2pExpose               = false
 	DefaultP2pServiceType          = corev1.ServiceTypeNodePort
@@ -166,6 +168,15 @@ func (cfg *Config) GetBlockThreshold() string {
 		return *cfg.BlockThreshold
 	}
 	return DefaultBlockThreshold
+}
+
+func (cfg *Config) GetStartupTime() time.Duration {
+	if cfg != nil && cfg.StartupTime != nil {
+		if d, err := strfmt.ParseDuration(*cfg.StartupTime); err == nil {
+			return d
+		}
+	}
+	return DefaultStartupTime
 }
 
 func (cfg *Config) GetNodeUtilsLogLevel() string {

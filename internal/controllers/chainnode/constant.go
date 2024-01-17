@@ -38,7 +38,6 @@ const (
 
 	timeoutPodRunning              = 5 * time.Minute
 	timeoutPodDeleted              = 2 * time.Minute
-	startupTimeout                 = 90 * time.Minute
 	timeoutWaitServiceIP           = 5 * time.Minute
 	minimumTimeBeforeFirstSnapshot = 10 * time.Minute
 	livenessProbeTimeoutSeconds    = 5

@@ -1548,6 +1548,11 @@ spec:
                       - name
                       type: object
                     type: array
+                  startupTime:
+                    description: The time after which a node will be restarted if
+                      it does not start properly. Defaults to `1h`.
+                    format: duration
+                    type: string
                   stateSync:
                     description: Allows configuring this node to perform state-sync
                       snapshots.

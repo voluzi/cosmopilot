@@ -186,6 +186,13 @@ type Config struct {
 	// Log level for node-utils container. Defaults to `info`.
 	// +optional
 	NodeUtilsLogLevel *string `json:"nodeUtilsLogLevel,omitempty"`
+
+	// The time after which a node will be restarted if it does not start properly.
+	// Defaults to `1h`.
+	// +optional
+	// +default=1h
+	// +kubebuilder:validation:Format=duration
+	StartupTime *string `json:"startupTime,omitempty"`
 }
 
 // FirewallConfig allows configuring cosmos-firewall rules.

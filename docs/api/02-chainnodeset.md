@@ -212,6 +212,7 @@ Config allows setting specific configurations for a node, including overriding c
 | serviceMonitor | ServiceMonitor allows deploying prometheus service monitor for this node. | *[ServiceMonitorSpec](#servicemonitorspec) | false |
 | firewall | Deploys cosmos-firewall to protect API endpoints to the node. | *[FirewallConfig](#firewallconfig) | false |
 | nodeUtilsLogLevel | Log level for node-utils container. Defaults to `info`. | *string | false |
+| startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 

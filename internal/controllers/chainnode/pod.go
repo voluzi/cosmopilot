@@ -360,7 +360,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 							},
 						},
 						PeriodSeconds:    5,
-						FailureThreshold: int32(startupTimeout.Seconds() / 5),
+						FailureThreshold: int32(chainNode.Spec.Config.GetStartupTime().Seconds() / 5),
 						TimeoutSeconds:   livenessProbeTimeoutSeconds,
 					},
 					LivenessProbe: &corev1.Probe{
