@@ -138,7 +138,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				}
 
 				// Let's start the tarball export right now if it is enabled
-				if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
+				if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && snapshot.Annotations[annotationExportingTarball] == "" {
 					logger.Info("starting tarball export", "snapshot", snapshot.GetName())
 					if err := r.exportTarball(ctx, chainNode, &snapshot); err != nil {
 						return err
