@@ -214,7 +214,6 @@ func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
 }
 
 func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
-	// Create job to compress and upload tarball
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -294,8 +293,10 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 		return err
 	}
 
-	_, err = gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{})
-	return err
+	if _, err = gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+		return err
+	}
+	return gcs.cleanUp(ctx, name)
 }
 
 func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
