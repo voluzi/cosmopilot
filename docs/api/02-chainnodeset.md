@@ -213,6 +213,7 @@ Config allows setting specific configurations for a node, including overriding c
 | firewall | Deploys cosmos-firewall to protect API endpoints to the node. | *[FirewallConfig](#firewallconfig) | false |
 | nodeUtilsLogLevel | Log level for node-utils container. Defaults to `info`. | *string | false |
 | startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
+| ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
 

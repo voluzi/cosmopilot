@@ -193,6 +193,12 @@ type Config struct {
 	// +default=1h
 	// +kubebuilder:validation:Format=duration
 	StartupTime *string `json:"startupTime,omitempty"`
+
+	// Marks the node as ready even when it is catching up. This is useful when a chain
+	// is halted, but you still need the node to be ready for querying existing data.
+	// Defaults to `false`.
+	// +optional
+	IgnoreSyncing *bool `json:"ignoreSyncing,omitempty"`
 }
 
 // FirewallConfig allows configuring cosmos-firewall rules.

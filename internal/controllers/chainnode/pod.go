@@ -190,6 +190,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		i++
 	}
 
+	readinessPath := "/ready"
+	if chainNode.Spec.Config.ShouldIgnoreSyncing() {
+		readinessPath = "/health"
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      chainNode.GetName(),
@@ -381,7 +386,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
-								Path: "/ready",
+								Path: readinessPath,
 								Port: intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: nodeUtilsPort,

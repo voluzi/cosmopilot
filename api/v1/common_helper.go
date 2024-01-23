@@ -119,6 +119,13 @@ func (cfg *Config) SeedModeEnabled() bool {
 	return false
 }
 
+func (cfg *Config) ShouldIgnoreSyncing() bool {
+	if cfg != nil && cfg.IgnoreSyncing != nil {
+		return *cfg.IgnoreSyncing
+	}
+	return false
+}
+
 func (cfg *Config) GetEnv() []corev1.EnvVar {
 	if cfg != nil && cfg.Env != nil {
 		return cfg.Env
