@@ -118,7 +118,15 @@ run.mirrord: RELEASE_NAME?=nibiru-operator
 run.mirrord: NAMESPACE?=nibiru-system
 run.mirrord: WORKER_NAME?=
 run.mirrord: WORKER_COUNT?=1
+run.mirrord: CERTS_DIR?=/tmp
 run.mirrord: manifests generate mirrord
+	@# Create dummy operator service just to have all resources. mirrod will steal its traffic then.
+	@$(HELM) get metadata $(RELEASE_NAME) -n $(NAMESPACE) || \
+		$(MAKE) RELEASE_NAME=$(RELEASE_NAME) NAMESPACE=$(NAMESPACE) NAME=nginxinc/nginx-unprivileged VERSION=latest PROBES_ENABLED=false deploy
+	@mkdir -p $(CERTS_DIR)
+	@for f in tls.key ca.crt tls.crt; do \
+		$(KUBECTL) -n $(NAMESPACE) get secret $(RELEASE_NAME)-cert -o=go-template='{{index .data "'$$f'"|base64decode}}' > $(CERTS_DIR)/$$f; \
+	done
 	$(MIRRORD) exec -t deployment/$(RELEASE_NAME) \
 		-n $(NAMESPACE) \
 		-a $(NAMESPACE) \

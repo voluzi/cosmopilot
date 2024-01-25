@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
 	"k8s.io/utils/pointer"
 
@@ -34,6 +35,8 @@ const (
 	DefaultCommissionMaxRate       = "0.1"
 	DefaultCommissionRate          = "0.1"
 	DefaultMinimumSelfDelegation   = "1"
+	DefaultNodeUtilsCPU            = "300m"
+	DefaultNodeUtilsMemory         = "100Mi"
 )
 
 var (
@@ -145,6 +148,22 @@ func (cfg *Config) ServiceMonitorSelector() map[string]string {
 		return cfg.ServiceMonitor.Selector
 	}
 	return defaultServiceMonitorSelector
+}
+
+func (cfg *Config) GetNodeUtilsResources() corev1.ResourceRequirements {
+	if cfg != nil && cfg.NodeUtilsResources != nil {
+		return *cfg.NodeUtilsResources
+	}
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(DefaultNodeUtilsCPU),
+			corev1.ResourceMemory: resource.MustParse(DefaultNodeUtilsMemory),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(DefaultNodeUtilsCPU),
+			corev1.ResourceMemory: resource.MustParse(DefaultNodeUtilsMemory),
+		},
+	}
 }
 
 // Peer helper methods

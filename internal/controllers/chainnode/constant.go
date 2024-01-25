@@ -46,8 +46,6 @@ const (
 	prometheusScrapeInterval = "15s"
 
 	nodeUtilsContainerName = "node-utils"
-	nodeUtilsCPU           = "300m"
-	nodeUtilsMemory        = "100Mi"
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
 
@@ -72,9 +70,6 @@ const (
 )
 
 var (
-	nodeUtilsCpuResources    = resource.MustParse(nodeUtilsCPU)
-	nodeUtilsMemoryResources = resource.MustParse(nodeUtilsMemory)
-
 	firewallCpuResources    = resource.MustParse(firewallCpu)
 	firewallMemoryResources = resource.MustParse(firewallMemory)
 

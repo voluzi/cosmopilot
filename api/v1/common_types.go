@@ -199,6 +199,10 @@ type Config struct {
 	// Defaults to `false`.
 	// +optional
 	IgnoreSyncing *bool `json:"ignoreSyncing,omitempty"`
+
+	// Compute Resources for node-utils container.
+	// +optional
+	NodeUtilsResources *corev1.ResourceRequirements `json:"nodeUtilsResources,omitempty"`
 }
 
 // FirewallConfig allows configuring cosmos-firewall rules.

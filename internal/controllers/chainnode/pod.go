@@ -436,16 +436,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 							Value: chainNode.Spec.Config.GetNodeUtilsLogLevel(),
 						},
 					},
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    nodeUtilsCpuResources,
-							corev1.ResourceMemory: nodeUtilsMemoryResources,
-						},
-						Limits: corev1.ResourceList{
-							corev1.ResourceCPU:    nodeUtilsCpuResources,
-							corev1.ResourceMemory: nodeUtilsMemoryResources,
-						},
-					},
+					Resources: chainNode.Spec.Config.GetNodeUtilsResources(),
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
