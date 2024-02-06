@@ -309,9 +309,10 @@ func (kms *KMS) GetContainersSpec() []corev1.Container {
 						Scheme: "HTTP",
 					},
 				},
-				FailureThreshold: 10,
-				PeriodSeconds:    2,
-				TimeoutSeconds:   2,
+				// Startup failure after 1h (not likely to happen)
+				FailureThreshold: 720,
+				PeriodSeconds:    5,
+				TimeoutSeconds:   5,
 			},
 			LivenessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
@@ -324,9 +325,9 @@ func (kms *KMS) GetContainersSpec() []corev1.Container {
 						Scheme: "HTTP",
 					},
 				},
-				FailureThreshold: 1,
-				PeriodSeconds:    5,
-				TimeoutSeconds:   2,
+				FailureThreshold: 2,
+				PeriodSeconds:    2,
+				TimeoutSeconds:   5,
 			},
 		},
 	}
