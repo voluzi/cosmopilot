@@ -216,6 +216,13 @@ func (cfg *Config) ShouldPersistAddressBook() bool {
 	return false
 }
 
+func (cfg *Config) GetTerminationGracePeriodSeconds() *int64 {
+	if cfg != nil {
+		return cfg.TerminationGracePeriodSeconds
+	}
+	return nil
+}
+
 func (exp *ExposeConfig) Enabled() bool {
 	if exp != nil && exp.P2P != nil {
 		return *exp.P2P

@@ -207,6 +207,10 @@ type Config struct {
 	// Whether to persist address book file in data directory. Defaults to `false`.
 	// +optional
 	PersistAddressBook *bool `json:"persistAddressBook,omitempty"`
+
+	// Optional duration in seconds the pod needs to terminate gracefully.
+	// +optional
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // FirewallConfig allows configuring cosmos-firewall rules.

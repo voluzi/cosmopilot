@@ -1742,6 +1742,11 @@ spec:
                           required:
                           - snapshotInterval
                           type: object
+                        terminationGracePeriodSeconds:
+                          description: Optional duration in seconds the pod needs
+                            to terminate gracefully.
+                          format: int64
+                          type: integer
                       type: object
                     expose:
                       description: Allows exposing P2P traffic to public.
@@ -3620,6 +3625,11 @@ spec:
                         required:
                         - snapshotInterval
                         type: object
+                      terminationGracePeriodSeconds:
+                        description: Optional duration in seconds the pod needs to
+                          terminate gracefully.
+                        format: int64
+                        type: integer
                     type: object
                   createValidator:
                     description: Indicates that operator should run create-validator
