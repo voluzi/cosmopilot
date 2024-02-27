@@ -216,6 +216,8 @@ Config allows setting specific configurations for a node, including overriding c
 | startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
 | ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
 | nodeUtilsResources | Compute Resources for node-utils container. | *corev1.ResourceRequirements | false |
+| persistAddressBook | Whether to persist address book file in data directory. Defaults to `false`. | *bool | false |
+| terminationGracePeriodSeconds | Optional duration in seconds the pod needs to terminate gracefully. | *int64 | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -436,6 +438,7 @@ TmKMS allows configuring tmkms for signing for this validator node instead of us
 | provider | Signing provider to be used by tmkms. Currently only `vault` is supported. | [TmKmsProvider](#tmkmsprovider) | true |
 | keyFormat | Format and type of key for chain. Defaults to `{\"type\": \"bech32\", \"account_key_prefix\": \"nibipub\", \"consensus_key_prefix\": \"nibivalconspub\"}`. | *[TmKmsKeyFormat](#tmkmskeyformat) | false |
 | validatorProtocol | Tendermint's protocol version to be used. Valid options are: - `v0.34` (default) - `v0.33` - `legacy` | *tmkms.ProtocolVersion | false |
+| persistState | Whether to persist \"priv_validator_state.json\" file on a PVC. Defaults to `true`. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
 
