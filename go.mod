@@ -2,7 +2,7 @@ module github.com/NibiruChain/nibiru-operator
 
 go 1.21
 
-toolchain go1.22.0
+toolchain go1.21.0
 
 require (
 	emperror.dev/errors v0.8.0
