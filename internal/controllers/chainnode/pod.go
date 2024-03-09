@@ -828,6 +828,12 @@ func podInFailedState(pod *corev1.Pod) bool {
 		}
 	}
 
+	for _, c := range pod.Status.InitContainerStatuses {
+		if !c.Ready && c.State.Terminated != nil {
+			return c.State.Terminated.ExitCode != 0
+		}
+	}
+
 	return false
 }
 
@@ -836,7 +842,7 @@ func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
 		return true
 	}
 
-	for _, c := range pod.Status.ContainerStatuses {
+	for _, c := range pod.Status.InitContainerStatuses {
 		if c.Name == nodeUtilsContainerName && !c.Ready && c.State.Terminated != nil {
 			return true
 		}
