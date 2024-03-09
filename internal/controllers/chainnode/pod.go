@@ -589,10 +589,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 				},
 			},
 		})
-		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            firewallContainerName,
 			Image:           r.opts.CosmosFirewallImage,
 			ImagePullPolicy: corev1.PullAlways,
+			RestartPolicy:   &sidecarRestartAlways,
 			Args:            []string{"-config", filepath.Join("/config/", chainNode.Spec.Config.Firewall.Config.Key)},
 			Ports: []corev1.ContainerPort{
 				{
