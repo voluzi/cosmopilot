@@ -529,7 +529,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 				return nil, err
 			}
 			pod.Spec.Volumes = append(pod.Spec.Volumes, kms.GetVolumes()...)
-			pod.Spec.InitContainers = append(pod.Spec.InitContainers, kms.GetContainersSpec()...)
+			pod.Spec.Containers = append(pod.Spec.Containers, kms.GetContainersSpec()...)
 
 		} else {
 			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
@@ -825,12 +825,6 @@ func podInFailedState(pod *corev1.Pod) bool {
 	for _, c := range pod.Status.ContainerStatuses {
 		if !c.Ready && c.State.Terminated != nil {
 			return true
-		}
-	}
-
-	for _, c := range pod.Status.InitContainerStatuses {
-		if !c.Ready && c.State.Terminated != nil {
-			return c.State.Terminated.ExitCode != 0
 		}
 	}
 

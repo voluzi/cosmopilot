@@ -110,13 +110,11 @@ func (v *VaultProvider) getVolumeMounts() []corev1.VolumeMount {
 
 func (v *VaultProvider) getContainers() []corev1.Container {
 	var containers []corev1.Container
-	var sidecarRestartAlways = corev1.ContainerRestartPolicyAlways
 
 	if v.AutoRenewToken {
 		spec := corev1.Container{
-			Name:          "vault-token-renewer",
-			Image:         "ghcr.io/nibiruchain/vault-token-renewer",
-			RestartPolicy: &sidecarRestartAlways,
+			Name:  "vault-token-renewer",
+			Image: "ghcr.io/nibiruchain/vault-token-renewer",
 			Env: []corev1.EnvVar{
 				{
 					Name:  "VAULT_ADDR",
