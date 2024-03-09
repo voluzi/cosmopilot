@@ -60,7 +60,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 		return err
 	}
 
-	if nodeUtilsIsInFailedState(pod) {
+	if nodeUtilsIsInFailedState(currentPod) {
 		logger.Info("node-utils is in failed state", "pod", pod.GetName())
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
 		logs, err := ph.GetLogs(ctx, nodeUtilsContainerName)
