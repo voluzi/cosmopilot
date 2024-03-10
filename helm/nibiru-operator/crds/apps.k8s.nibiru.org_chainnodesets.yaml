@@ -1361,6 +1361,10 @@ spec:
                               description: Whether to enable cosmos-firewall on this
                                 node.
                               type: boolean
+                            restartPodOnFailure:
+                              description: Whether the node's pod should be restarted
+                                when firewall fails.
+                              type: boolean
                           required:
                           - config
                           - enable
@@ -1694,6 +1698,10 @@ spec:
                                       exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                     type: object
                                 type: object
+                              restartPodOnFailure:
+                                description: Whether the pod of this node should be
+                                  restarted when this sidecar container fails
+                                type: boolean
                               securityContext:
                                 description: Security options the container should
                                   be run with.
@@ -3422,6 +3430,10 @@ spec:
                             description: Whether to enable cosmos-firewall on this
                               node.
                             type: boolean
+                          restartPodOnFailure:
+                            description: Whether the node's pod should be restarted
+                              when firewall fails.
+                            type: boolean
                         required:
                         - config
                         - enable
@@ -3751,6 +3763,10 @@ spec:
                                     exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                   type: object
                               type: object
+                            restartPodOnFailure:
+                              description: Whether the pod of this node should be
+                                restarted when this sidecar container fails
+                              type: boolean
                             securityContext:
                               description: Security options the container should be
                                 run with.

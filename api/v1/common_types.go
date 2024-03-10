@@ -220,6 +220,10 @@ type FirewallConfig struct {
 
 	// ConfigMap which cosmos-firewall configuration for this node.
 	Config *corev1.ConfigMapKeySelector `json:"config"`
+
+	// Whether the node's pod should be restarted when firewall fails.
+	// +optional
+	RestartPodOnFailure *bool `json:"restartPodOnFailure,omitempty"`
 }
 
 // ServiceMonitorSpec allows enabling/disabling deployment of ServiceMonitor for this node.
@@ -270,6 +274,10 @@ type SidecarSpec struct {
 	// Compute Resources for the sidecar container.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Whether the pod of this node should be restarted when this sidecar container fails
+	// +optional
+	RestartPodOnFailure *bool `json:"restartPodOnFailure,omitempty"`
 }
 
 // ValidatorInfo contains information about this validator.

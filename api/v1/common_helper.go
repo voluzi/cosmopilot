@@ -374,3 +374,19 @@ func (u *Upgrade) GetVersion() string {
 func (f *FirewallConfig) Enabled() bool {
 	return f != nil && f.Enable
 }
+
+func (f *FirewallConfig) ShouldRestartPodOnFailure() bool {
+	if f != nil && f.RestartPodOnFailure != nil {
+		return *f.RestartPodOnFailure
+	}
+	return false
+}
+
+// Sidecar helper methods
+
+func (s *SidecarSpec) ShouldRestartPodOnFailure() bool {
+	if s.RestartPodOnFailure != nil {
+		return *s.RestartPodOnFailure
+	}
+	return false
+}

@@ -148,7 +148,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 	}
 
 	// Recreate pod if it is in failed state
-	if podInFailedState(currentPod) {
+	if podInFailedState(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
 		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
@@ -818,7 +818,7 @@ func (r *Reconciler) setPhaseRunningOrSyncing(ctx context.Context, chainNode *ap
 	return nil
 }
 
-func podInFailedState(pod *corev1.Pod) bool {
+func podInFailedState(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
 	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		return true
 	}
@@ -829,6 +829,22 @@ func podInFailedState(pod *corev1.Pod) bool {
 		}
 	}
 
+	for _, c := range pod.Status.InitContainerStatuses {
+		if !c.Ready && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
+			if c.Name == firewallContainerName {
+				if chainNode.Spec.Config.Firewall.ShouldRestartPodOnFailure() {
+					return true
+				}
+			}
+			if chainNode.Spec.Config != nil {
+				for _, s := range chainNode.Spec.Config.Sidecars {
+					if s.Name == c.Name && s.ShouldRestartPodOnFailure() {
+						return true
+					}
+				}
+			}
+		}
+	}
 	return false
 }
 
