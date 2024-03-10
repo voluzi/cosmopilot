@@ -260,6 +260,7 @@ ExposeConfig allows configuring how P2P endpoint is exposed to public.
 | ----- | ----------- | ------ | -------- |
 | p2p | Whether to expose p2p endpoint for this node. Defaults to `false`. | *bool | false |
 | p2pServiceType | P2pServiceType indicates how P2P port will be exposed. Valid values are: - `LoadBalancer` - `NodePort` (default) | *corev1.ServiceType | false |
+| annotations | Annotations to be appended to the p2p service. | map[string]string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -271,6 +272,7 @@ FirewallConfig allows configuring cosmos-firewall rules.
 | ----- | ----------- | ------ | -------- |
 | enable | Whether to enable cosmos-firewall on this node. | bool | true |
 | config | ConfigMap which cosmos-firewall configuration for this node. | *corev1.ConfigMapKeySelector | true |
+| restartPodOnFailure | Whether the node's pod should be restarted when firewall fails. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -306,7 +308,7 @@ GenesisConfig specifies how genesis will be retrieved.
 | url | URL to download the genesis from. | *string | false |
 | fromNodeRPC | Get the genesis from an existing node using its RPC endpoint. | *[FromNodeRPCConfig](#fromnoderpcconfig) | false |
 | genesisSHA | SHA256 to validate the genesis. | *string | false |
-| configMap | ConfigMap specifies a configmap to load the genesis from. | *string | false |
+| configMap | ConfigMap specifies a configmap to load the genesis from. It can also be used to specify the name of the configmap to store the genesis when retrieving genesis using other methods. | *string | false |
 | useDataVolume | UseDataVolume indicates that the operator should save the genesis in the same volume as node data instead of a ConfigMap. This is useful for genesis whose size is bigger than ConfigMap limit of 1MiB. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -337,7 +339,7 @@ GenesisInitConfig specifies configs and initialization commands for creating a n
 
 #### InitCommand
 
-InitCommand represents an initialization command. It may be used for running addtional operators on genesis or volume initialization.
+InitCommand represents an initialization command. It may be used for running additional commands on genesis or volume initialization.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
@@ -415,6 +417,7 @@ SidecarSpec allows configuring additional containers to run alongside the node.
 | env | Environment variables to be passed to this container. | []corev1.EnvVar | false |
 | securityContext | Security options the container should be run with. | *corev1.SecurityContext | false |
 | resources | Compute Resources for the sidecar container. | corev1.ResourceRequirements | false |
+| restartPodOnFailure | Whether the pod of this node should be restarted when this sidecar container fails | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
 
