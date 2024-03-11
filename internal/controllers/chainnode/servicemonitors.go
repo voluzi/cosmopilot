@@ -13,6 +13,7 @@ import (
 
 	appsv1 "github.com/NibiruChain/nibiru-operator/api/v1"
 	"github.com/NibiruChain/nibiru-operator/internal/chainutils"
+	"github.com/NibiruChain/nibiru-operator/internal/controllers"
 )
 
 func (r *Reconciler) ensureServiceMonitors(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -70,6 +71,10 @@ func (r *Reconciler) getServiceMonitorSpec(chainNode *appsv1.ChainNode) (*monito
 							Action: "labeldrop",
 						},
 					},
+				},
+				{
+					Port:     controllers.FirewallMetricsPortName,
+					Interval: prometheusScrapeInterval,
 				},
 			},
 			Selector: metav1.LabelSelector{
