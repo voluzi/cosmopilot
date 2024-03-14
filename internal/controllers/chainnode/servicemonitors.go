@@ -75,6 +75,7 @@ func (r *Reconciler) getServiceMonitorSpec(chainNode *appsv1.ChainNode) (*monito
 				{
 					Port:     controllers.FirewallMetricsPortName,
 					Interval: prometheusScrapeInterval,
+					Path:     "/metrics",
 				},
 			},
 			Selector: metav1.LabelSelector{

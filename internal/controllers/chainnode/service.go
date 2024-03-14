@@ -172,37 +172,37 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 					Name:       chainutils.P2pPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.P2pPort,
-					TargetPort: intstr.FromInt(chainutils.P2pPort),
+					TargetPort: intstr.FromInt32(chainutils.P2pPort),
 				},
 				{
 					Name:       chainutils.RpcPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.RpcPort,
-					TargetPort: intstr.FromInt(chainutils.RpcPort),
+					TargetPort: intstr.FromInt32(chainutils.RpcPort),
 				},
 				{
 					Name:       chainutils.LcdPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.LcdPort,
-					TargetPort: intstr.FromInt(chainutils.LcdPort),
+					TargetPort: intstr.FromInt32(chainutils.LcdPort),
 				},
 				{
 					Name:       chainutils.GrpcPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.GrpcPort,
-					TargetPort: intstr.FromInt(chainutils.GrpcPort),
+					TargetPort: intstr.FromInt32(chainutils.GrpcPort),
 				},
 				{
 					Name:       chainutils.PrometheusPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.PrometheusPort,
-					TargetPort: intstr.FromInt(chainutils.PrometheusPort),
+					TargetPort: intstr.FromInt32(chainutils.PrometheusPort),
 				},
 				{
 					Name:       nodeUtilsPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       nodeUtilsPort,
-					TargetPort: intstr.FromInt(nodeUtilsPort),
+					TargetPort: intstr.FromInt32(nodeUtilsPort),
 				},
 			},
 			Selector: WithChainNodeLabels(chainNode, map[string]string{
@@ -213,9 +213,9 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 	}
 
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Firewall.Enabled() {
-		svc.Spec.Ports[1].TargetPort = intstr.FromInt(controllers.FirewallRpcPort)
-		svc.Spec.Ports[2].TargetPort = intstr.FromInt(controllers.FirewallLcdPort)
-		svc.Spec.Ports[3].TargetPort = intstr.FromInt(controllers.FirewallGrpcPort)
+		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.FirewallRpcPort)
+		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.FirewallLcdPort)
+		svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.FirewallGrpcPort)
 	}
 
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
@@ -239,37 +239,37 @@ func (r *Reconciler) getInternalServiceSpec(ctx context.Context, chainNode *apps
 					Name:       chainutils.P2pPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.P2pPort,
-					TargetPort: intstr.FromInt(chainutils.P2pPort),
+					TargetPort: intstr.FromInt32(chainutils.P2pPort),
 				},
 				{
 					Name:       chainutils.RpcPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.RpcPort,
-					TargetPort: intstr.FromInt(chainutils.RpcPort),
+					TargetPort: intstr.FromInt32(chainutils.RpcPort),
 				},
 				{
 					Name:       chainutils.LcdPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.LcdPort,
-					TargetPort: intstr.FromInt(chainutils.LcdPort),
+					TargetPort: intstr.FromInt32(chainutils.LcdPort),
 				},
 				{
 					Name:       chainutils.GrpcPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.GrpcPort,
-					TargetPort: intstr.FromInt(chainutils.GrpcPort),
+					TargetPort: intstr.FromInt32(chainutils.GrpcPort),
 				},
 				{
 					Name:       chainutils.PrometheusPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.PrometheusPort,
-					TargetPort: intstr.FromInt(chainutils.PrometheusPort),
+					TargetPort: intstr.FromInt32(chainutils.PrometheusPort),
 				},
 				{
 					Name:       nodeUtilsPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       nodeUtilsPort,
-					TargetPort: intstr.FromInt(nodeUtilsPort),
+					TargetPort: intstr.FromInt32(nodeUtilsPort),
 				},
 			},
 			Selector: WithChainNodeLabels(chainNode, map[string]string{
@@ -306,7 +306,7 @@ func (r *Reconciler) getP2pServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Ser
 					Name:       chainutils.P2pPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       chainutils.P2pPort,
-					TargetPort: intstr.FromInt(chainutils.P2pPort),
+					TargetPort: intstr.FromInt32(chainutils.P2pPort),
 				},
 			},
 			Selector: WithChainNodeLabels(chainNode, map[string]string{
