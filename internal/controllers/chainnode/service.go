@@ -193,12 +193,6 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 					TargetPort: intstr.FromInt32(chainutils.GrpcPort),
 				},
 				{
-					Name:       chainutils.PrometheusPortName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       chainutils.PrometheusPort,
-					TargetPort: intstr.FromInt32(chainutils.PrometheusPort),
-				},
-				{
 					Name:       nodeUtilsPortName,
 					Protocol:   corev1.ProtocolTCP,
 					Port:       nodeUtilsPort,
@@ -277,6 +271,15 @@ func (r *Reconciler) getInternalServiceSpec(ctx context.Context, chainNode *apps
 				LabelChainID: chainNode.Status.ChainID,
 			}),
 		},
+	}
+
+	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Firewall.Enabled() {
+		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
+			Name:       controllers.FirewallMetricsPortName,
+			Protocol:   corev1.ProtocolTCP,
+			Port:       controllers.FirewallMetricsPort,
+			TargetPort: intstr.FromInt32(controllers.FirewallMetricsPort),
+		})
 	}
 
 	if err := r.maybeAddStateSyncAnnotations(ctx, chainNode, svc); err != nil {
