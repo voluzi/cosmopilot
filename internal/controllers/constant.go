@@ -4,6 +4,6 @@ const (
 	FirewallRpcPort         = 16657
 	FirewallLcdPort         = 11317
 	FirewallGrpcPort        = 19090
-	FirewallMetricsPortName = "firewall-metrics"
+	FirewallMetricsPortName = "fw-metrics"
 	FirewallMetricsPort     = 9001
 )
