@@ -312,6 +312,8 @@ func (r *Reconciler) startNewSnapshot(ctx context.Context, chainNode *appsv1.Cha
 }
 
 func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.ChainNode) (*snapshotv1.VolumeSnapshot, error) {
+	logger := log.FromContext(ctx)
+
 	if chainNode.Spec.Persistence.Snapshots.ShouldStopNode() {
 		pod, err := r.getPodSpec(ctx, chainNode, "")
 		if err != nil {
@@ -330,7 +332,10 @@ func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.Chain
 		}
 	}
 	if err := r.updateLatestHeight(ctx, chainNode); err != nil {
-		return nil, err
+		// When this error happens, the most likely scenario is that pod is not running. So lets not throw the error and
+		// let the rest of the reconcile loop handle the missing pod.
+		logger.Error(err, "error getting latest height (pod is probably missing)")
+		return nil, nil
 	}
 	snapshot := getVolumeSnapshotSpec(chainNode)
 	return snapshot, r.Create(ctx, snapshot)
