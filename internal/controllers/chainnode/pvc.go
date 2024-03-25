@@ -173,7 +173,7 @@ func (r *Reconciler) ensurePvc(ctx context.Context, chainNode *appsv1.ChainNode)
 			// When this error happens, the most likely scenario is that pod is not running. So lets not throw the error and
 			// let the rest of the reconcile loop handle the missing pod.
 			logger.Error(err, "error getting latest height (pod is probably missing)")
-			return nil, nil
+			return pvc, nil
 		}
 		dataHeight := strconv.FormatInt(chainNode.Status.LatestHeight, 10)
 		if pvc.Annotations[annotationDataHeight] != dataHeight {

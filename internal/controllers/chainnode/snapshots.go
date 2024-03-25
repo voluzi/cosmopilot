@@ -298,6 +298,11 @@ func (r *Reconciler) startNewSnapshot(ctx context.Context, chainNode *appsv1.Cha
 		return err
 	}
 
+	// If snapshot is nil then it was not started
+	if snapshot == nil {
+		return nil
+	}
+
 	r.recorder.Eventf(chainNode,
 		corev1.EventTypeNormal,
 		appsv1.ReasonStartedSnapshot,
