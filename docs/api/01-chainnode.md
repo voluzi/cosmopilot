@@ -330,7 +330,7 @@ Persistence configuration for a node.
 | additionalInitCommands | Additional commands to run on data initialization. Useful for downloading and extracting snapshots. App home is at `/home/app` and data dir is at `/home/app/data`. There is also `/temp`, a temporary volume shared by all init containers. | [][InitCommand](#initcommand) | false |
 | snapshots | Whether the operator should create volume snapshots according to this config. | *[VolumeSnapshotsConfig](#volumesnapshotsconfig) | false |
 | restoreFromSnapshot | Restore from the specified snapshot when creating the PVC for this node. | *[PvcSnapshot](#pvcsnapshot) | false |
-| initTimeout | Time to wait for data initialization pod to be successful. Defaults to `5m`. | *time.Duration | false |
+| initTimeout | Time to wait for data initialization pod to be successful. Defaults to `5m`. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 

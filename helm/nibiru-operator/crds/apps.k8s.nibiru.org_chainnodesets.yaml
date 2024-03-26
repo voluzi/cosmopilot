@@ -2116,8 +2116,7 @@ spec:
                         initTimeout:
                           description: Time to wait for data initialization pod to
                             be successful. Defaults to `5m`.
-                          format: int64
-                          type: integer
+                          type: string
                         restoreFromSnapshot:
                           description: Restore from the specified snapshot when creating
                             the PVC for this node.
@@ -4271,8 +4270,7 @@ spec:
                       initTimeout:
                         description: Time to wait for data initialization pod to be
                           successful. Defaults to `5m`.
-                        format: int64
-                        type: integer
+                        type: string
                       restoreFromSnapshot:
                         description: Restore from the specified snapshot when creating
                           the PVC for this node.

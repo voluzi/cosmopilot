@@ -100,7 +100,9 @@ func (chainNode *ChainNode) GetPersistenceInitCommands() []InitCommand {
 
 func (chainNode *ChainNode) GetPersistenceInitTimeout() time.Duration {
 	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.InitTimeout != nil {
-		return *chainNode.Spec.Persistence.InitTimeout
+		if d, err := strfmt.ParseDuration(*chainNode.Spec.Persistence.InitTimeout); err == nil {
+			return d
+		}
 	}
 	return 5 * time.Minute
 }
