@@ -1,6 +1,8 @@
 package v1
 
 import (
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -614,6 +616,10 @@ type Persistence struct {
 	// Restore from the specified snapshot when creating the PVC for this node.
 	// +optional
 	RestoreFromSnapshot *PvcSnapshot `json:"restoreFromSnapshot,omitempty"`
+
+	// Time to wait for data initialization pod to be successful. Defaults to `5m`.
+	// +optional
+	InitTimeout *time.Duration `json:"initTimeout,omitempty"`
 }
 
 // VolumeSnapshotsConfig holds the configuration of snapshotting feature.

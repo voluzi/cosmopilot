@@ -98,6 +98,13 @@ func (chainNode *ChainNode) GetPersistenceInitCommands() []InitCommand {
 	return []InitCommand{}
 }
 
+func (chainNode *ChainNode) GetPersistenceInitTimeout() time.Duration {
+	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.InitTimeout != nil {
+		return *chainNode.Spec.Persistence.InitTimeout
+	}
+	return 5 * time.Minute
+}
+
 func (chainNode *ChainNode) SnapshotsEnabled() bool {
 	return chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil
 }

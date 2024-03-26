@@ -51,7 +51,7 @@ func (r *Reconciler) initializeData(ctx context.Context, app *chainutils.App, ch
 		}
 	}
 
-	if err := app.InitPvcData(ctx, pvc, initCommands...); err != nil {
+	if err := app.InitPvcData(ctx, pvc, chainNode.GetPersistenceInitTimeout(), initCommands...); err != nil {
 		return err
 	}
 	// Get the updated PVC for updating annotation

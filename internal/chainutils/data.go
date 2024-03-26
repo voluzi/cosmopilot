@@ -14,7 +14,7 @@ import (
 	"github.com/NibiruChain/nibiru-operator/internal/k8s"
 )
 
-func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim, initCommands ...*InitCommand) error {
+func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim, timeout time.Duration, initCommands ...*InitCommand) error {
 
 	var (
 		homeVolumeMount = corev1.VolumeMount{
@@ -114,5 +114,5 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 	if err := ph.Create(ctx); err != nil {
 		return err
 	}
-	return ph.WaitForPodSucceeded(ctx, 5*time.Minute)
+	return ph.WaitForPodSucceeded(ctx, timeout)
 }
