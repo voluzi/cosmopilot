@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/NibiruChain/nibiru-operator/internal/utils"
@@ -46,6 +47,10 @@ func (nodeSet *ChainNodeSet) GetAppSpecWithUpgrades() AppSpec {
 			Height: u.Height,
 			Image:  u.Image,
 		}
+		if u.Source == OnChainUpgrade {
+			upgradeSpec.ForceOnChain = pointer.Bool(true)
+		}
+
 		if !utils.SliceContainsObj(spec.Upgrades, upgradeSpec, func(a UpgradeSpec, b UpgradeSpec) bool {
 			return a.Height == b.Height
 		}) {
