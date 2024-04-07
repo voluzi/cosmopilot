@@ -636,12 +636,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 					MountPath: "/config",
 				},
 			},
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:    firewallCpuResources,
-					corev1.ResourceMemory: firewallMemoryResources,
-				},
-			},
+			Resources: chainNode.Spec.Config.Firewall.GetResources(),
 			ReadinessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{

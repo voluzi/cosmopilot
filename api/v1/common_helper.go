@@ -34,6 +34,8 @@ const (
 	DefaultMinimumSelfDelegation   = "1"
 	DefaultNodeUtilsCPU            = "300m"
 	DefaultNodeUtilsMemory         = "100Mi"
+	DefaultFirewallCPU             = "200m"
+	DefaultFirewallMemory          = "250Mi"
 )
 
 var (
@@ -394,6 +396,22 @@ func (f *FirewallConfig) ShouldRestartPodOnFailure() bool {
 		return *f.RestartPodOnFailure
 	}
 	return false
+}
+
+func (f *FirewallConfig) GetResources() corev1.ResourceRequirements {
+	if f != nil && f.Resources != nil {
+		return *f.Resources
+	}
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(DefaultFirewallCPU),
+			corev1.ResourceMemory: resource.MustParse(DefaultFirewallMemory),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(DefaultFirewallCPU),
+			corev1.ResourceMemory: resource.MustParse(DefaultFirewallMemory),
+		},
+	}
 }
 
 // Sidecar helper methods

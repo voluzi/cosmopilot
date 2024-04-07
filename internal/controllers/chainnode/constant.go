@@ -61,8 +61,6 @@ const (
 
 	firewallContainerName = "firewall"
 	firewallVolumeName    = "firewall-config"
-	firewallCpu           = "200m"
-	firewallMemory        = "250Mi"
 
 	initContainerCPU    = "100m"
 	initContainerMemory = "250Mi"
@@ -74,9 +72,6 @@ const (
 )
 
 var (
-	firewallCpuResources    = resource.MustParse(firewallCpu)
-	firewallMemoryResources = resource.MustParse(firewallMemory)
-
 	initContainerCpuResources    = resource.MustParse(initContainerCPU)
 	initContainerMemoryResources = resource.MustParse(initContainerMemory)
 )

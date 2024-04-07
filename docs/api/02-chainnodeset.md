@@ -294,6 +294,7 @@ FirewallConfig allows configuring cosmos-firewall rules.
 | enable | Whether to enable cosmos-firewall on this node. | bool | true |
 | config | ConfigMap which cosmos-firewall configuration for this node. | *corev1.ConfigMapKeySelector | true |
 | restartPodOnFailure | Whether the node's pod should be restarted when firewall fails. | *bool | false |
+| resources | Compute Resources for firewall container. | *corev1.ResourceRequirements | false |
 
 [Back to Custom Resources](#custom-resources)
 

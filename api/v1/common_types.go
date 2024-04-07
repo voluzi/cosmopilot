@@ -224,6 +224,10 @@ type FirewallConfig struct {
 	// Whether the node's pod should be restarted when firewall fails.
 	// +optional
 	RestartPodOnFailure *bool `json:"restartPodOnFailure,omitempty"`
+
+	// Compute Resources for firewall container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ServiceMonitorSpec allows enabling/disabling deployment of ServiceMonitor for this node.
