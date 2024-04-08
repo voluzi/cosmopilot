@@ -235,6 +235,9 @@ func (r *Reconciler) ensureConfig(ctx context.Context, app *chainutils.App, chai
 				if err != nil {
 					return "", err
 				}
+
+				// Set latest height to trust height so that old upgrades are marked as skipped
+				chainNode.Status.LatestHeight = trustHeight
 			}
 		}
 	}
