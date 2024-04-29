@@ -161,6 +161,7 @@ func (r *Reconciler) ensurePvc(ctx context.Context, chainNode *appsv1.ChainNode)
 			}
 			if chainNode.Status.LatestHeight != height {
 				chainNode.Status.LatestHeight = height
+				chainNode.Status.PvcSize = pvc.Spec.Resources.Requests.Storage().String()
 				if err := r.Status().Update(ctx, chainNode); err != nil {
 					return nil, err
 				}
