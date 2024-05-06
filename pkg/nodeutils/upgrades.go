@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 
-	upgradeTypes "github.com/cosmos/cosmos-sdk/x/upgrade/types"
 	"github.com/fsnotify/fsnotify"
 	log "github.com/sirupsen/logrus"
 )
@@ -104,34 +103,4 @@ func (u *UpgradeChecker) GetUpgrade(height int64) (*Upgrade, error) {
 		}
 	}
 	return nil, fmt.Errorf("upgrade not found")
-}
-
-func (u *UpgradeChecker) LoadPlan(upgradeInfoPath string) (*upgradeTypes.Plan, error) {
-	file, err := os.Open(upgradeInfoPath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	bytes, err := io.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
-
-	var plan upgradeTypes.Plan
-	if err = json.Unmarshal(bytes, &plan); err != nil {
-		return nil, err
-	}
-	return &plan, nil
-}
-
-func (u *UpgradeChecker) HasUpgradeInfo(height int64, path string) (bool, error) {
-	if _, err := os.Stat(filepath.Join(path, UpgradeInfoFile)); err == nil {
-		plan, err := u.LoadPlan(filepath.Join(path, UpgradeInfoFile))
-		if err != nil {
-			return false, err
-		}
-		return plan.Height == height, nil
-	}
-	return false, nil
 }

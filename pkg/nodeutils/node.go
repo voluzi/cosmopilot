@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
-	"time"
 
 	"github.com/gorilla/mux"
 	log "github.com/sirupsen/logrus"
@@ -102,27 +101,13 @@ func (s *NodeUtils) Start() error {
 					upgrade, _ := s.upgradeChecker.GetUpgrade(height)
 
 					// If it's an on-chain upgrade, the application is supposed to panic and require the upgrade.
-					// Just in case, we still validate that the upgrade-info.json file contains the expected upgrade info
-					// for this height, before marking node-utils with upgrade required.
 					// In manual upgrades case, we don't assume the application will panic but still want to stop the node at the
 					// right height. However, application can send several traces with the same height, so if we want
 					// stop the node after the whole block is processed, let's do it on the first trace of the next height
 					if upgrade.Source == OnChainUpgrade {
-						// wait for upgrade-info.json to be written to disk
-						log.WithField("height", height).Info("waiting for upgrade-info.json to be written to disk")
-						for {
-							hasUpgradeInfo, err := s.upgradeChecker.HasUpgradeInfo(height, s.cfg.DataPath)
-							if err != nil {
-								log.Errorf("failed to check if upgrade-info has expected upgrade: %v", err)
-								continue
-							}
+						log.WithField("height", height).Info("on-chain upgrade: application should panic now")
+						s.requiresUpgrade = true
 
-							if hasUpgradeInfo {
-								s.requiresUpgrade = true
-								break
-							}
-							time.Sleep(time.Second)
-						}
 					} else if heightUpdated {
 						log.WithField("height", height).Warn("stopping tracer to force application stop for upgrade")
 						s.requiresUpgrade = true
