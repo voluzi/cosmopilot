@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/mux"
 	log "github.com/sirupsen/logrus"
@@ -120,6 +121,7 @@ func (s *NodeUtils) Start() error {
 								s.requiresUpgrade = true
 								break
 							}
+							time.Sleep(time.Second)
 						}
 					} else if heightUpdated {
 						log.WithField("height", height).Warn("stopping tracer to force application stop for upgrade")
