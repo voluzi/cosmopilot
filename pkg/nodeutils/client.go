@@ -71,3 +71,11 @@ func (c *Client) RequiresUpgrade() (bool, error) {
 
 	return strconv.ParseBool(string(body))
 }
+
+func (c *Client) ShutdownNodeUtilsServer() error {
+	response, err := http.Post(c.url+"/shutdown", "text/plain", nil)
+	if err != nil {
+		return err
+	}
+	return response.Body.Close()
+}

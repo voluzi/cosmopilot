@@ -26,6 +26,7 @@ import (
 	"github.com/NibiruChain/nibiru-operator/internal/chainutils"
 	"github.com/NibiruChain/nibiru-operator/internal/controllers"
 	"github.com/NibiruChain/nibiru-operator/internal/k8s"
+	"github.com/NibiruChain/nibiru-operator/pkg/nodeutils"
 )
 
 func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode, configHash string) error {
@@ -666,6 +667,12 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 		return err
 	}
 
+	// Attempt to terminate node-utils container without waiting for grace-period. If there is an error
+	// we will just wait for the grace-period
+	if err := r.stopNodeUtilsContainer(chainNode); err != nil {
+		logger.Info("failed to stop node utils container", "pod", pod.GetName(), "error", err.Error())
+	}
+
 	deletePod := pod.DeepCopy()
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, deletePod)
 	if err := ph.Delete(ctx); err != nil {
@@ -705,6 +712,12 @@ func (r *Reconciler) upgradePod(ctx context.Context, chainNode *appsv1.ChainNode
 	phase := appsv1.PhaseChainNodeUpgrading
 	if err := r.updatePhase(ctx, chainNode, phase); err != nil {
 		return false, err
+	}
+
+	// Attempt to terminate node-utils container without waiting for grace-period. If there is an error
+	// we will just wait for the grace-period
+	if err := r.stopNodeUtilsContainer(chainNode); err != nil {
+		logger.Info("failed to stop node utils container", "pod", pod.GetName(), "error", err.Error())
 	}
 
 	deletePod := pod.DeepCopy()
@@ -893,4 +906,8 @@ func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
 	}
 
 	return false
+}
+
+func (r *Reconciler) stopNodeUtilsContainer(chainNode *appsv1.ChainNode) error {
+	return nodeutils.NewClient(chainNode.GetNodeFQDN()).ShutdownNodeUtilsServer()
 }
