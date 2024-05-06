@@ -1,10 +1,13 @@
 package nodeutils
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 
+	"emperror.dev/errors"
 	"github.com/gorilla/mux"
 	log "github.com/sirupsen/logrus"
 
@@ -14,6 +17,7 @@ import (
 )
 
 type NodeUtils struct {
+	server            *http.Server
 	router            *mux.Router
 	cfg               *Options
 	client            *chainutils.Client
@@ -122,8 +126,22 @@ func (s *NodeUtils) Start() error {
 		}
 	}()
 
+	s.server = &http.Server{Addr: fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port), Handler: s.router}
 	log.Infof("server started listening on %s:%d ...\n\n", s.cfg.Host, s.cfg.Port)
-	return http.ListenAndServe(fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port), s.router)
+	err := s.server.ListenAndServe()
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (s *NodeUtils) Stop() error {
+	if s.server == nil {
+		return fmt.Errorf("server was not started")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.server.Shutdown(ctx)
 }
 
 func (s *NodeUtils) StopNode() error {

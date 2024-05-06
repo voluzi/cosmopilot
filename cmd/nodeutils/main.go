@@ -2,6 +2,9 @@ package main
 
 import (
 	"flag"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -29,6 +32,9 @@ func main() {
 		log.SetLevel(level)
 	}
 
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	nodeUtilsServer, err := nodeutils.New(
 		nodeutils.WithHost(host),
 		nodeutils.WithPort(port),
@@ -42,5 +48,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Fatal(nodeUtilsServer.Start())
+
+	if err := nodeUtilsServer.Start(); err != nil {
+		log.Fatal(err)
+	}
 }

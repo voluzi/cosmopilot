@@ -18,6 +18,8 @@ func (s *NodeUtils) registerRoutes() {
 	s.router.HandleFunc("/latest_height", s.latestHeight).Methods(http.MethodGet)
 	s.router.HandleFunc("/must_upgrade", s.mustUpgrade).Methods(http.MethodGet)
 	s.router.HandleFunc("/tmkms_active", s.tmkmsConnectionActive).Methods(http.MethodGet)
+
+	s.router.HandleFunc("/shutdown", s.shutdownServer).Methods(http.MethodPost)
 }
 
 func (s *NodeUtils) ready(w http.ResponseWriter, r *http.Request) {
@@ -120,4 +122,14 @@ func (s *NodeUtils) tmkmsConnectionActive(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNotAcceptable)
 	}
 	w.Write([]byte(strconv.FormatBool(s.tmkmsActive)))
+}
+
+func (s *NodeUtils) shutdownServer(w http.ResponseWriter, r *http.Request) {
+	log.Info("shutting down server")
+	if err := s.Stop(); err != nil {
+		log.Errorf("error stopping server: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
