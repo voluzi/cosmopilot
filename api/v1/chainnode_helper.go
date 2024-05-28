@@ -132,11 +132,6 @@ func (chainNode *ChainNode) ShouldUploadVaultKey() bool {
 		return true
 	}
 
-	// TODO: remove this on next version
-	if chainNode.Spec.Validator.TmKMS != nil && chainNode.Spec.Validator.TmKMS.Provider.Vault != nil {
-		return chainNode.Spec.Validator.TmKMS.Provider.Vault.UploadGenerated
-	}
-
 	if chainNode.Spec.Validator.TmKMS != nil && chainNode.Spec.Validator.TmKMS.Provider.Hashicorp != nil {
 		return chainNode.Spec.Validator.TmKMS.Provider.Hashicorp.UploadGenerated
 	}
@@ -155,11 +150,6 @@ func (chainNode *ChainNode) RequiresPrivKey() bool {
 
 	if chainNode.Status.PubKey == "" && chainNode.ShouldInitGenesis() {
 		// For key upload when we are initializing a chain
-
-		// TODO: remove this on next version
-		if chainNode.Spec.Validator.TmKMS != nil && chainNode.Spec.Validator.TmKMS.Provider.Vault != nil {
-			chainNode.Spec.Validator.TmKMS.Provider.Vault.UploadGenerated = true
-		}
 
 		if chainNode.Spec.Validator.TmKMS != nil && chainNode.Spec.Validator.TmKMS.Provider.Hashicorp != nil {
 			chainNode.Spec.Validator.TmKMS.Provider.Hashicorp.UploadGenerated = true

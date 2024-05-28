@@ -35,7 +35,6 @@
 * [TmKmsHashicorpProvider](#tmkmshashicorpprovider)
 * [TmKmsKeyFormat](#tmkmskeyformat)
 * [TmKmsProvider](#tmkmsprovider)
-* [TmKmsVaultProvider](#tmkmsvaultprovider)
 * [Upgrade](#upgrade)
 * [UpgradeSpec](#upgradespec)
 * [ValidatorInfo](#validatorinfo)
@@ -505,22 +504,6 @@ TmKmsProvider allows configuring providers for tmKMS. Note that only one should 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | hashicorp | Hashicorp provider. | *[TmKmsHashicorpProvider](#tmkmshashicorpprovider) | false |
-| vault | Vault provider. Deprecated: use hashicorp instead. Will be removed in a future version. | *[TmKmsVaultProvider](#tmkmsvaultprovider) | false |
-
-[Back to Custom Resources](#custom-resources)
-
-#### TmKmsVaultProvider
-
-TmKmsVaultProvider holds `vault` provider specific configurations. Deprecated: please use hashicorp.
-
-| Field | Description | Scheme | Required |
-| ----- | ----------- | ------ | -------- |
-| address | Full address of the Vault cluster. | string | true |
-| key | Key to be used by this validator. | string | true |
-| certificateSecret | Secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
-| tokenSecret | Secret containing the token to be used. | *corev1.SecretKeySelector | true |
-| uploadGenerated | UploadGenerated indicates if the controller should upload the generated private key to vault. Defaults to `false`. Will be set to `true` if this validator is initializing a new genesis. This should not be used in production. | bool | false |
-| autoRenewToken | Whether to automatically renew vault token. Defaults to `false`. | bool | false |
 
 [Back to Custom Resources](#custom-resources)
 

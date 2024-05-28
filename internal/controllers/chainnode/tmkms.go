@@ -36,36 +36,6 @@ func (r *Reconciler) ensureTmKMSConfig(ctx context.Context, chainNode *appsv1.Ch
 
 	// Provider specific operations
 	switch p := provider.(type) {
-	// NOTE: Vault is deprecated and will be removed in a future version
-	case *tmkms.VaultProvider:
-		if chainNode.ShouldUploadVaultKey() {
-			key, err := r.loadPrivKey(ctx, chainNode)
-			if err != nil {
-				return err
-			}
-
-			// If the key is empty, then it was uploaded already
-			if key == "" {
-				return nil
-			}
-
-			if err = p.UploadKey(ctx, kms, key); err != nil {
-				r.recorder.Eventf(chainNode,
-					corev1.EventTypeWarning,
-					appsv1.ReasonUploadFailure,
-					"failed to upload key: %v", err,
-				)
-				return err
-			}
-
-			if chainNode.Annotations == nil {
-				chainNode.Annotations = make(map[string]string)
-			}
-
-			chainNode.Annotations[annotationVaultKeyUploaded] = strconv.FormatBool(true)
-			return r.Update(ctx, chainNode)
-		}
-
 	case *tmkms.HashicorpProvider:
 		if chainNode.ShouldUploadVaultKey() {
 			key, err := r.loadPrivKey(ctx, chainNode)
@@ -108,21 +78,6 @@ func (r *Reconciler) getTmkms(chainNode *appsv1.ChainNode) (tmkms.Provider, *tmk
 
 	var provider tmkms.Provider
 	switch providerCfg := chainNode.Spec.Validator.TmKMS.Provider; {
-
-	// Deprecated: Vault is deprecated and will be removed in a future version
-	case providerCfg.Vault != nil:
-		provider = tmkms.NewVaultProvider(
-			chainNode.Status.ChainID,
-			providerCfg.Vault.Address,
-			providerCfg.Vault.Key,
-			providerCfg.Vault.TokenSecret,
-			providerCfg.Vault.CertificateSecret,
-			providerCfg.Vault.AutoRenewToken,
-		)
-		tmkmsOptions = append(tmkmsOptions, tmkms.WithProvider(provider))
-
-		// TODO: remove this when we have official release of tmkms (see https://github.com/iqlusioninc/tmkms/pull/843)
-		tmkmsOptions = append(tmkmsOptions, tmkms.WithImage("ghcr.io/nibiruchain/tmkms:vault"))
 
 	case providerCfg.Hashicorp != nil:
 		provider = tmkms.NewHashicorpProvider(
