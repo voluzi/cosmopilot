@@ -171,6 +171,9 @@ spec:
                     enableEvmRPC:
                       description: Enable EVM RPC endpoint.
                       type: boolean
+                    enableEvmRpcWS:
+                      description: Enable EVM RPC Websocket endpoint.
+                      type: boolean
                     enableGRPC:
                       description: Enable gRPC endpoint.
                       type: boolean
@@ -2068,6 +2071,9 @@ spec:
                           type: boolean
                         enableEvmRPC:
                           description: Enable EVM RPC endpoint.
+                          type: boolean
+                        enableEvmRpcWS:
+                          description: Enable EVM RPC Websocket endpoint.
                           type: boolean
                         enableGRPC:
                           description: Enable gRPC endpoint.

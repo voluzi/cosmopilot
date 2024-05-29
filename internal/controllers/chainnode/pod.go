@@ -482,6 +482,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			ContainerPort: controllers.EvmRpcPort,
 			Protocol:      corev1.ProtocolTCP,
 		})
+		pod.Spec.Containers[0].Ports = append(pod.Spec.Containers[0].Ports, corev1.ContainerPort{
+			Name:          controllers.EvmRpcWsPortName,
+			ContainerPort: controllers.EvmRpcWsPort,
+			Protocol:      corev1.ProtocolTCP,
+		})
 	}
 
 	// Always use latest version we know if we are doing state-sync restore
@@ -665,6 +670,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			firewallContainer.Ports = append(firewallContainer.Ports, corev1.ContainerPort{
 				Name:          controllers.EvmRpcPortName,
 				ContainerPort: controllers.FirewallEvmRpcPort,
+				Protocol:      corev1.ProtocolTCP,
+			})
+			firewallContainer.Ports = append(firewallContainer.Ports, corev1.ContainerPort{
+				Name:          controllers.EvmRpcWsPortName,
+				ContainerPort: controllers.FirewallEvmRpcWsPort,
 				Protocol:      corev1.ProtocolTCP,
 			})
 		}

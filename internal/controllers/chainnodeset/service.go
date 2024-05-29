@@ -170,6 +170,12 @@ func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 			Port:       controllers.EvmRpcPort,
 			TargetPort: intstr.FromInt32(controllers.EvmRpcPort),
 		})
+		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
+			Name:       controllers.EvmRpcWsPortName,
+			Protocol:   corev1.ProtocolTCP,
+			Port:       controllers.EvmRpcWsPort,
+			TargetPort: intstr.FromInt32(controllers.EvmRpcWsPort),
+		})
 	}
 
 	if group.Config != nil && group.Config.Firewall.Enabled() {
@@ -178,6 +184,7 @@ func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.FirewallGrpcPort)
 		if group.Config.IsEvmEnabled() {
 			svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.FirewallEvmRpcPort)
+			svc.Spec.Ports[4].TargetPort = intstr.FromInt32(controllers.FirewallEvmRpcWsPort)
 		}
 	}
 
@@ -230,6 +237,12 @@ func (r *Reconciler) getInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, group 
 			Port:       controllers.EvmRpcPort,
 			TargetPort: intstr.FromInt32(controllers.EvmRpcPort),
 		})
+		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
+			Name:       controllers.EvmRpcWsPortName,
+			Protocol:   corev1.ProtocolTCP,
+			Port:       controllers.EvmRpcWsPort,
+			TargetPort: intstr.FromInt32(controllers.EvmRpcWsPort),
+		})
 	}
 
 	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
@@ -272,6 +285,12 @@ func (r *Reconciler) getGlobalServiceSpec(nodeSet *appsv1.ChainNodeSet, globalIn
 					Port:       controllers.EvmRpcPort,
 					TargetPort: intstr.FromInt32(controllers.EvmRpcPort),
 				},
+				{
+					Name:       controllers.EvmRpcWsPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       controllers.EvmRpcWsPort,
+					TargetPort: intstr.FromInt32(controllers.EvmRpcWsPort),
+				},
 			},
 			Selector: map[string]string{
 				LabelChainNodeSet:              nodeSet.GetName(),
@@ -285,6 +304,7 @@ func (r *Reconciler) getGlobalServiceSpec(nodeSet *appsv1.ChainNodeSet, globalIn
 		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.FirewallLcdPort)
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.FirewallGrpcPort)
 		svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.FirewallEvmRpcPort)
+		svc.Spec.Ports[4].TargetPort = intstr.FromInt32(controllers.FirewallEvmRpcWsPort)
 	}
 
 	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
@@ -326,6 +346,12 @@ func (r *Reconciler) getGlobalInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, 
 					Protocol:   corev1.ProtocolTCP,
 					Port:       controllers.EvmRpcPort,
 					TargetPort: intstr.FromInt32(controllers.EvmRpcPort),
+				},
+				{
+					Name:       controllers.EvmRpcWsPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       controllers.EvmRpcWsPort,
+					TargetPort: intstr.FromInt32(controllers.EvmRpcWsPort),
 				},
 			},
 			Selector: map[string]string{

@@ -128,6 +128,7 @@ GlobalIngressConfig specifies configurations for ingress to expose API endpoints
 | enableGRPC | Enable gRPC endpoint. | bool | false |
 | enableLCD | Enable LCD endpoint. | bool | false |
 | enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
 | host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
 | annotations | Annotations to be appended to the ingress. | map[string]string | false |
 | disableTLS | Whether to disable TLS on ingress resource. | bool | false |
@@ -145,6 +146,7 @@ IngressConfig specifies configurations for ingress to expose API endpoints.
 | enableGRPC | Enable gRPC endpoint. | bool | false |
 | enableLCD | Enable LCD endpoint. | bool | false |
 | enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
 | host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
 | annotations | Annotations to be appended to the ingress. | map[string]string | false |
 | disableTLS | Whether to disable TLS on ingress resource. | bool | false |

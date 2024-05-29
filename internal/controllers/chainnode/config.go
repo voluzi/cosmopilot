@@ -54,6 +54,11 @@ var (
 			"enable":  true,
 			"address": "0.0.0.0:9090",
 		},
+		"json-rpc": map[string]interface{}{
+			"enable":     true,
+			"address":    "0.0.0.0:8545",
+			"ws-address": "0.0.0.0:8546",
+		},
 	}
 )
 

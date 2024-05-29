@@ -6,8 +6,11 @@ const (
 	FirewallGrpcPort        = 19090
 	FirewallMetricsPortName = "fw-metrics"
 	FirewallMetricsPort     = 9001
-	FirewallEvmRpcPort      = 8546 //TODO: add correct port when implemented on firewall
+	FirewallEvmRpcPort      = 8545 //TODO: add correct port when implemented on firewall
+	FirewallEvmRpcWsPort    = 8546 //TODO: add correct port when implemented on firewall
 
-	EvmRpcPortName = "evm-rpc"
-	EvmRpcPort     = 8546
+	EvmRpcPortName   = "evm-rpc"
+	EvmRpcPort       = 8545
+	EvmRpcWsPortName = "evm-rpc-ws"
+	EvmRpcWsPort     = 8546
 )
