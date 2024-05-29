@@ -476,6 +476,14 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		},
 	}
 
+	if chainNode.Spec.Config.IsEvmEnabled() {
+		pod.Spec.Containers[0].Ports = append(pod.Spec.Containers[0].Ports, corev1.ContainerPort{
+			Name:          controllers.EvmRpcPortName,
+			ContainerPort: controllers.EvmRpcPort,
+			Protocol:      corev1.ProtocolTCP,
+		})
+	}
+
 	// Always use latest version we know if we are doing state-sync restore
 	if chainNode.StateSyncRestoreEnabled() && chainNode.Status.LatestHeight == 0 {
 		pod.Spec.Containers[0].Image = chainNode.GetLatestAppImage()
@@ -603,7 +611,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 				},
 			},
 		})
-		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+		firewallContainer := corev1.Container{
 			Name:            firewallContainerName,
 			Image:           r.opts.CosmosFirewallImage,
 			ImagePullPolicy: corev1.PullAlways,
@@ -652,7 +660,15 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 				FailureThreshold: 1,
 				PeriodSeconds:    2,
 			},
-		})
+		}
+		if chainNode.Spec.Config.IsEvmEnabled() {
+			firewallContainer.Ports = append(firewallContainer.Ports, corev1.ContainerPort{
+				Name:          controllers.EvmRpcPortName,
+				ContainerPort: controllers.FirewallEvmRpcPort,
+				Protocol:      corev1.ProtocolTCP,
+			})
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, firewallContainer)
 	}
 
 	return pod, controllerutil.SetControllerReference(chainNode, pod, r.Scheme)
