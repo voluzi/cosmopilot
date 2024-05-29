@@ -219,6 +219,9 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.FirewallRpcPort)
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.FirewallLcdPort)
 		svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.FirewallGrpcPort)
+		if chainNode.Spec.Config.IsEvmEnabled() {
+			svc.Spec.Ports[5].TargetPort = intstr.FromInt32(controllers.FirewallEvmRpcPort)
+		}
 	}
 
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
