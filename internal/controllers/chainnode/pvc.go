@@ -247,11 +247,10 @@ func (r *Reconciler) getStorageSize(ctx context.Context, chainNode *appsv1.Chain
 		if chainNode.Status.DataUsage != dataUsageStr {
 			logger.Info("updating .status.dataUsage", "usage", dataUsageStr)
 			chainNode.Status.DataUsage = dataUsageStr
-			if err := r.Status().Update(ctx, chainNode); err != nil {
+			if err = r.Status().Update(ctx, chainNode); err != nil {
 				return resource.Quantity{}, err
 			}
 		}
-
 		return specSize, nil
 	}
 
@@ -270,7 +269,7 @@ func (r *Reconciler) getStorageSize(ctx context.Context, chainNode *appsv1.Chain
 	if chainNode.Status.DataUsage != dataUsageStr {
 		logger.Info("updating .status.dataUsage", "usage", dataUsageStr)
 		chainNode.Status.DataUsage = dataUsageStr
-		if err := r.Status().Update(ctx, chainNode); err != nil {
+		if err = r.Status().Update(ctx, chainNode); err != nil {
 			return resource.Quantity{}, err
 		}
 	}

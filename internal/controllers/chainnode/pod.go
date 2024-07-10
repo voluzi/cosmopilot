@@ -60,7 +60,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 				appsv1.ReasonNodeStarted,
 				"Node successfully started",
 			)
-			return r.setPhaseRunningOrSyncing(ctx, chainNode)
+			return r.setNodePhase(ctx, chainNode)
 		}
 		return err
 	}
@@ -82,7 +82,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 		return r.recreatePod(ctx, chainNode, pod)
 	}
 
-	if err := r.updateLatestHeight(ctx, chainNode); err != nil {
+	if err = r.updateLatestHeight(ctx, chainNode); err != nil {
 		return err
 	}
 
@@ -191,10 +191,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 		return err
 	}
 
-	if volumeSnapshotInProgress(chainNode) {
-		return nil
-	}
-	return r.setPhaseRunningOrSyncing(ctx, chainNode)
+	return r.setNodePhase(ctx, chainNode)
 }
 
 func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode, configHash string) (*corev1.Pod, error) {
@@ -728,7 +725,7 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 		appsv1.ReasonNodeRestarted,
 		"Node restarted",
 	)
-	return r.setPhaseRunningOrSyncing(ctx, chainNode)
+	return r.setNodePhase(ctx, chainNode)
 }
 
 func (r *Reconciler) upgradePod(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod, image string) (bool, error) {
@@ -776,7 +773,7 @@ func (r *Reconciler) upgradePod(ctx context.Context, chainNode *appsv1.ChainNode
 		appsv1.ReasonNodeRestarted,
 		"Node upgraded",
 	)
-	return true, r.setPhaseRunningOrSyncing(ctx, chainNode)
+	return true, r.setNodePhase(ctx, chainNode)
 }
 
 func (r *Reconciler) PatchPod(ctx context.Context, cur, mod *corev1.Pod) (*corev1.Pod, error) {
@@ -853,7 +850,13 @@ func removeFieldsForComparison(pod *corev1.Pod) {
 	}
 }
 
-func (r *Reconciler) setPhaseRunningOrSyncing(ctx context.Context, chainNode *appsv1.ChainNode) error {
+func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if volumeSnapshotInProgress(chainNode) {
+		if chainNode.Status.Phase != appsv1.PhaseChainNodeSnapshotting {
+			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSnapshotting)
+		}
+	}
+
 	c, err := r.getClient(chainNode)
 	if err != nil {
 		return err

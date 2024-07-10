@@ -208,7 +208,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Update jailed status
 	if chainNode.Status.Phase == appsv1.PhaseChainNodeRunning && chainNode.IsValidator() {
-		if err := r.updateJailedStatus(ctx, chainNode); err != nil {
+		if err = r.updateJailedStatus(ctx, chainNode); err != nil {
 			return ctrl.Result{}, err
 		}
 	}

@@ -44,16 +44,23 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	}
 
 	// Get list of snapshots
-	listOption := client.MatchingLabels{LabelChainNode: chainNode.GetName()}
-	list := &snapshotv1.VolumeSnapshotList{}
-	if err := r.List(ctx, list, listOption); err != nil {
+	snapshots, err := r.listNodeSnapshots(ctx, chainNode)
+	if err != nil {
 		return err
+	}
+
+	// Fix snapshotting status in case there are no snapshots for this node
+	if len(snapshots) == 0 && volumeSnapshotInProgress(chainNode) {
+		setSnapshotInProgress(chainNode, false)
+		if err = r.Update(ctx, chainNode); err != nil {
+			return err
+		}
 	}
 
 	// Grab list of possible tarball names to make sure we delete any possible dangling jobs
 	tarballNames := make([]string, 0)
 
-	for _, snapshot := range list.Items {
+	for _, snapshot := range snapshots {
 		if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
 			tarballNames = append(tarballNames, getTarballName(chainNode, &snapshot))
 		}
@@ -74,25 +81,25 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 
 			// Update snapshot ready annotation
 			snapshot.ObjectMeta.Annotations[annotationPvcSnapshotReady] = strconv.FormatBool(true)
-			if err := r.Update(ctx, &snapshot); err != nil {
+			if err = r.Update(ctx, &snapshot); err != nil {
 				return err
 			}
 
 			// Update ChainNode status
 			setSnapshotInProgress(chainNode, false)
 			setSnapshotTime(chainNode, snapshot.CreationTimestamp.Time)
-			if err := r.Update(ctx, chainNode); err != nil {
+			if err = r.Update(ctx, chainNode); err != nil {
 				return err
 			}
 
 			// If verify is enabled, lets start it now. If not, let's start tarball export if its enabled
 			if chainNode.Spec.Persistence.Snapshots.ShouldVerify() {
 				logger.Info("starting data integrity check", "snapshot", snapshot.GetName())
-				if err := r.startSnapshotIntegrityCheck(ctx, chainNode, &snapshot); err != nil {
+				if err = r.startSnapshotIntegrityCheck(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
 				snapshot.ObjectMeta.Annotations[annotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
-				if err := r.Update(ctx, &snapshot); err != nil {
+				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
 				r.recorder.Eventf(chainNode,
@@ -102,11 +109,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				)
 			} else if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
 				logger.Info("starting tarball export", "snapshot", snapshot.GetName())
-				if err := r.exportTarball(ctx, chainNode, &snapshot); err != nil {
+				if err = r.exportTarball(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
 				snapshot.ObjectMeta.Annotations[annotationExportingTarball] = strconv.FormatBool(true)
-				if err := r.Update(ctx, &snapshot); err != nil {
+				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
 				r.recorder.Eventf(chainNode,
@@ -133,18 +140,18 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			case snapshotIntegrityOk:
 				logger.Info("data integrity check finished successfully. Data is ok.", "snapshot", snapshot.GetName())
 				snapshot.ObjectMeta.Annotations[annotationSnapshotIntegrityStatus] = string(snapshotIntegrityOk)
-				if err := r.Update(ctx, &snapshot); err != nil {
+				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
 
 				// Let's start the tarball export right now if it is enabled
 				if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && snapshot.Annotations[annotationExportingTarball] == "" {
 					logger.Info("starting tarball export", "snapshot", snapshot.GetName())
-					if err := r.exportTarball(ctx, chainNode, &snapshot); err != nil {
+					if err = r.exportTarball(ctx, chainNode, &snapshot); err != nil {
 						return err
 					}
 					snapshot.ObjectMeta.Annotations[annotationExportingTarball] = strconv.FormatBool(true)
-					if err := r.Update(ctx, &snapshot); err != nil {
+					if err = r.Update(ctx, &snapshot); err != nil {
 						return err
 					}
 					r.recorder.Eventf(chainNode,
@@ -157,11 +164,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			case snapshotIntegrityCorrupted:
 				logger.Info("data integrity check finished. Data is corrupted.", "snapshot", snapshot.GetName())
 				snapshot.ObjectMeta.Annotations[annotationSnapshotIntegrityStatus] = string(snapshotIntegrityCorrupted)
-				if err := r.Update(ctx, &snapshot); err != nil {
+				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
 				logger.Info("re-creating snapshot")
-				if err := r.Delete(ctx, &snapshot); err != nil {
+				if err = r.Delete(ctx, &snapshot); err != nil {
 					return err
 				}
 				return r.startNewSnapshot(ctx, chainNode)
@@ -170,11 +177,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				// Integrity check job was not started yet. Let's start it.
 				logger.Info("starting data integrity check", "snapshot", snapshot.GetName())
 
-				if err := r.startSnapshotIntegrityCheck(ctx, chainNode, &snapshot); err != nil {
+				if err = r.startSnapshotIntegrityCheck(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
 				snapshot.ObjectMeta.Annotations[annotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
-				if err := r.Update(ctx, &snapshot); err != nil {
+				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
 				r.recorder.Eventf(chainNode,
@@ -190,11 +197,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshot.Annotations[annotationPvcSnapshotReady] == strconv.FormatBool(true) &&
 			snapshot.Annotations[annotationExportingTarball] == "":
 			logger.Info("starting tarball export", "snapshot", snapshot.GetName())
-			if err := r.exportTarball(ctx, chainNode, &snapshot); err != nil {
+			if err = r.exportTarball(ctx, chainNode, &snapshot); err != nil {
 				return err
 			}
 			snapshot.ObjectMeta.Annotations[annotationExportingTarball] = strconv.FormatBool(true)
-			if err := r.Update(ctx, &snapshot); err != nil {
+			if err = r.Update(ctx, &snapshot); err != nil {
 				return err
 			}
 			r.recorder.Eventf(chainNode,
@@ -221,7 +228,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			if ready {
 				logger.Info("finished tarball export", "snapshot", snapshot.GetName())
 				snapshot.Annotations[annotationExportingTarball] = tarballFinished
-				if err := r.Update(ctx, &snapshot); err != nil {
+				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
 			}
@@ -235,7 +242,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			}
 			if expired {
 				logger.Info("deleting expired pvc snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[annotationSnapshotRetention])
-				if err := r.Delete(ctx, &snapshot); err != nil {
+				if err = r.Delete(ctx, &snapshot); err != nil {
 					return err
 				}
 				r.recorder.Eventf(chainNode,
@@ -245,7 +252,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				)
 				if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired() {
 					logger.Info("deleting expired snapshot tarball", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[annotationSnapshotRetention])
-					if err := r.deleteTarball(ctx, chainNode, &snapshot); err != nil {
+					if err = r.deleteTarball(ctx, chainNode, &snapshot); err != nil {
 						return err
 					}
 					r.recorder.Eventf(chainNode,
@@ -271,7 +278,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		for _, snapshot := range tarballSnapshots {
 			if !utils.SliceContains[string](tarballNames, snapshot) {
 				logger.Info("deleting orphaned tarball upload job as volumesnapshot does not exist anymore", "snapshot", snapshot)
-				if err := exporter.DeleteSnapshot(ctx, snapshot); err != nil {
+				if err = exporter.DeleteSnapshot(ctx, snapshot); err != nil {
 					return err
 				}
 			}
@@ -290,6 +297,15 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	}
 
 	return nil
+}
+
+func (r *Reconciler) listNodeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode) ([]snapshotv1.VolumeSnapshot, error) {
+	listOption := client.MatchingLabels{LabelChainNode: chainNode.GetName()}
+	list := &snapshotv1.VolumeSnapshotList{}
+	if err := r.List(ctx, list, listOption); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 func (r *Reconciler) startNewSnapshot(ctx context.Context, chainNode *appsv1.ChainNode) error {

@@ -309,7 +309,9 @@ func (r *Reconciler) waitChainNodeRunningOrSyncing(node *appsv1.ChainNode) error
 	}
 
 	validateFunc := func(chainNode *appsv1.ChainNode) bool {
-		return chainNode.Status.Phase == appsv1.PhaseChainNodeRunning || chainNode.Status.Phase == appsv1.PhaseChainNodeSyncing
+		return chainNode.Status.Phase == appsv1.PhaseChainNodeRunning ||
+			chainNode.Status.Phase == appsv1.PhaseChainNodeSyncing ||
+			chainNode.Status.Phase == appsv1.PhaseChainNodeSnapshotting
 	}
 
 	nodesInformer, err := informer.GetChainNodesInformer(r.RestConfig)
@@ -323,7 +325,7 @@ func (r *Reconciler) waitChainNodeRunningOrSyncing(node *appsv1.ChainNode) error
 
 	go func() {
 		time.Sleep(ChainNodeWaitTimeout)
-		exitErr = fmt.Errorf("timeout waiting for chainnode running or syncing status")
+		exitErr = fmt.Errorf("timeout waiting for chainnode %s running or syncing status", node.GetName())
 		once.Do(func() { close(stopCh) })
 	}()
 
