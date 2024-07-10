@@ -96,7 +96,16 @@ func (r *Reconciler) ensurePvc(ctx context.Context, app *chainutils.App, chainNo
 					return nil, err
 				}
 				chainNode.Status.LatestHeight = height
-				if err := r.Status().Update(ctx, chainNode); err != nil {
+				if err = r.Status().Update(ctx, chainNode); err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			// In case the PVC was deleted on an existing node, lets set latest height to 0 to make sure state-sync
+			// configuration can be applied if necessary.
+			if chainNode.Status.LatestHeight != 0 {
+				chainNode.Status.LatestHeight = 0
+				if err = r.Status().Update(ctx, chainNode); err != nil {
 					return nil, err
 				}
 			}
