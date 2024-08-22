@@ -113,6 +113,15 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 		}
 
 		// Force update config files, to prevent restarting again because of config changes
+		app, err = chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, chainNode,
+			chainNode.Spec.App.GetSdkVersion(),
+			chainutils.WithImage(chainNode.GetAppImage()),
+			chainutils.WithImagePullPolicy(chainNode.Spec.App.ImagePullPolicy),
+			chainutils.WithBinary(chainNode.Spec.App.App),
+		)
+		if err != nil {
+			return err
+		}
 		configHash, err = r.ensureConfigMap(ctx, app, chainNode)
 		if err != nil {
 			return err
