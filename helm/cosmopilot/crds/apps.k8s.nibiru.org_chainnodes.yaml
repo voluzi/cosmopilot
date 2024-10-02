@@ -1593,6 +1593,11 @@ spec:
                             nodes. Defaults to `Always` if `version` is `latest` and
                             `IfNotPresent` otherwise.
                           type: string
+                        mountConfig:
+                          description: Directory where config files from ConfigMap
+                            will be mounted on this container. They are not mounted
+                            if not specified.
+                          type: string
                         mountDataVolume:
                           description: Where data volume will be mounted on this container.
                             It is not mounted if not specified.
@@ -1654,6 +1659,11 @@ spec:
                         restartPodOnFailure:
                           description: Whether the pod of this node should be restarted
                             when this sidecar container fails
+                          type: boolean
+                        runBeforeNode:
+                          description: When enabled, this container turns into an
+                            init container instead of a sidecar as it will have to
+                            finish before the node container starts.
                           type: boolean
                         securityContext:
                           description: Security options the container should be run

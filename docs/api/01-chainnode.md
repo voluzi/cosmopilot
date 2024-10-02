@@ -386,12 +386,14 @@ SidecarSpec allows configuring additional containers to run alongside the node.
 | image | Container image to be used. | string | true |
 | imagePullPolicy | Indicates the desired pull policy when creating nodes. Defaults to `Always` if `version` is `latest` and `IfNotPresent` otherwise. | corev1.PullPolicy | false |
 | mountDataVolume | Where data volume will be mounted on this container. It is not mounted if not specified. | *string | false |
+| mountConfig | Directory where config files from ConfigMap will be mounted on this container. They are not mounted if not specified. | *string | false |
 | command | Command to be run by this container. Defaults to entrypoint defined in image. | []string | false |
 | args | Args to be passed to this container. Defaults to cmd defined in image. | []string | false |
 | env | Environment variables to be passed to this container. | []corev1.EnvVar | false |
 | securityContext | Security options the container should be run with. | *corev1.SecurityContext | false |
 | resources | Compute Resources for the sidecar container. | corev1.ResourceRequirements | false |
 | restartPodOnFailure | Whether the pod of this node should be restarted when this sidecar container fails | *bool | false |
+| runBeforeNode | When enabled, this container turns into an init container instead of a sidecar as it will have to finish before the node container starts. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
 
