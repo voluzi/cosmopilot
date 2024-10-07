@@ -881,6 +881,10 @@ func podSpecChanged(existing, new *corev1.Pod) bool {
 		return true
 	}
 
+	if len(existingCopy.Spec.InitContainers) != len(new.Spec.InitContainers) {
+		return true
+	}
+
 	patchResult, err := patch.DefaultPatchMaker.Calculate(existingCopy, newCopy,
 		patch.IgnoreStatusFields(),
 		patch.IgnoreVolumeClaimTemplateTypeMetaAndStatus(),
