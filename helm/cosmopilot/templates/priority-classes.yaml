@@ -1,8 +1,9 @@
+{{- $existingDefaultClass := lookup "scheduling.k8s.io/v1" "PriorityClass" "" (printf "%s-default" .Release.Name) }}
+{{- if $existingDefaultClass }}
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-default
-  namespace: {{ .Release.Namespace }}
   annotations:
     "helm.sh/hook": "pre-install,pre-upgrade"
     "helm.sh/hook-delete-policy": "before-hook-creation"
@@ -11,23 +12,25 @@ metadata:
 value: {{ .Values.defaultPriority }}
 globalDefault: false
 description: "Delete default priority class before upgrading"
+{{- end }}
 ---
+# Always create the PriorityClass after checking/deleting existing ones
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-default
-  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "cosmopilot.labels" . | indent 4 }}
 value: {{ .Values.defaultPriority }}
 globalDefault: false
 description: "CosmoPilot default priority class for background jobs and normal workloads"
 ---
+{{- $existingNodesClass := lookup "scheduling.k8s.io/v1" "PriorityClass" "" (printf "%s-nodes" .Release.Name) }}
+{{- if $existingNodesClass }}
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-nodes
-  namespace: {{ .Release.Namespace }}
   annotations:
     "helm.sh/hook": "pre-install,pre-upgrade"
     "helm.sh/hook-delete-policy": "before-hook-creation"
@@ -36,23 +39,25 @@ metadata:
 value: {{ .Values.nodesPodPriority }}
 globalDefault: false
 description: "Delete nodes priority class before upgrading"
+{{- end }}
 ---
+# Always create the PriorityClass after checking/deleting existing ones
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-nodes
-  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "cosmopilot.labels" . | indent 4 }}
 value: {{ .Values.nodesPodPriority }}
 globalDefault: false
 description: "CosmoPilot priority class for nodes"
 ---
+{{- $existingValidatorsClass := lookup "scheduling.k8s.io/v1" "PriorityClass" "" (printf "%s-validators" .Release.Name) }}
+{{- if $existingValidatorsClass }}
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-validators
-  namespace: {{ .Release.Namespace }}
   annotations:
     "helm.sh/hook": "pre-install,pre-upgrade"
     "helm.sh/hook-delete-policy": "before-hook-creation"
@@ -61,12 +66,13 @@ metadata:
 value: {{ .Values.validatorPodPriority }}
 globalDefault: false
 description: "Delete validator priority class before upgrading"
+{{- end }}
 ---
+# Always create the PriorityClass after checking/deleting existing ones
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-validators
-  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "cosmopilot.labels" . | indent 4 }}
 value: {{ .Values.validatorPodPriority }}
