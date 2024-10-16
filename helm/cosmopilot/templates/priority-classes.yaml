@@ -3,6 +3,9 @@ kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-default
   namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
   labels:
     {{- include "cosmopilot.labels" . | indent 4 }}
 value: {{ .Values.defaultPriority }}
@@ -14,6 +17,9 @@ kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-nodes
   namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
   labels:
     {{- include "cosmopilot.labels" . | indent 4 }}
 value: {{ .Values.nodesPodPriority }}
@@ -25,6 +31,9 @@ kind: PriorityClass
 metadata:
   name: {{ .Release.Name }}-validators
   namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
   labels:
     {{- include "cosmopilot.labels" . | indent 4 }}
 value: {{ .Values.validatorPodPriority }}

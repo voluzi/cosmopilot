@@ -11,6 +11,6 @@ nodeSelector: {}
 debugMode: false
 probesEnabled: true
 
-nodesPodPriority: 1000
-validatorPodPriority: 1001
+nodesPodPriority: 950
+validatorPodPriority: 1050
 defaultPriority: 0
