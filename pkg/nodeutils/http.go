@@ -19,7 +19,7 @@ func (s *NodeUtils) registerRoutes() {
 	s.router.HandleFunc("/must_upgrade", s.mustUpgrade).Methods(http.MethodGet)
 	s.router.HandleFunc("/tmkms_active", s.tmkmsConnectionActive).Methods(http.MethodGet)
 
-	s.router.HandleFunc("/shutdown", s.shutdownServer).Methods(http.MethodPost)
+	s.router.HandleFunc("/shutdown", s.shutdownServer).Methods(http.MethodGet, http.MethodPost)
 }
 
 func (s *NodeUtils) ready(w http.ResponseWriter, r *http.Request) {
