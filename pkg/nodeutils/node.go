@@ -24,7 +24,7 @@ type NodeUtils struct {
 	tracer            *tracer.StoreTracer
 	latestBlockHeight atomic.Int64
 	upgradeChecker    *UpgradeChecker
-	requiresUpgrade   bool
+	requiresUpgrade   atomic.Bool
 	tmkmsActive       atomic.Bool
 	tmkmsProxy        *proxy.TCP
 }
@@ -84,6 +84,12 @@ func (s *NodeUtils) Start() error {
 				err := s.tmkmsProxy.Start()
 				log.Errorf("tmkms connection finished with error: %v", err)
 				s.tmkmsActive.Store(false)
+
+				// If an upgrade is required lets not restart proxy
+				if s.requiresUpgrade.Load() {
+					return
+				}
+
 				// Wait one second before restarting
 				time.Sleep(time.Second)
 			}
@@ -114,11 +120,11 @@ func (s *NodeUtils) Start() error {
 					// stop the node after the whole block is processed, let's do it on the first trace of the next height
 					if upgrade.Source == OnChainUpgrade {
 						log.WithField("height", height).Info("on-chain upgrade: application should panic now")
-						s.requiresUpgrade = true
+						s.requiresUpgrade.Store(true)
 
 					} else if heightUpdated {
 						log.WithField("height", height).Warn("stopping tracer to force application stop for upgrade")
-						s.requiresUpgrade = true
+						s.requiresUpgrade.Store(true)
 						err := s.StopNode()
 						if err == nil {
 							return
@@ -139,10 +145,34 @@ func (s *NodeUtils) Start() error {
 	return err
 }
 
-func (s *NodeUtils) Stop() error {
+func (s *NodeUtils) Stop(force bool) error {
+	log.WithField("force", force).Info("stopping server")
+
+	// When Stop is not forced, in the case of an upgrade being required we ignore
+	// the Stop call. This is most likely coming from SIGINT or SIGTERM signals and
+	// we need to wait for cosmopilot to read /requires_upgrade before shutting down.
+	// When stop is forced (coming from /shutdown endpoint mostly) we ignore the upgrade
+	// requirement.
+	if !force && s.requiresUpgrade.Load() {
+		log.Warn("node requires upgrade. ignoring stop call")
+		return nil
+	}
+
 	if s.server == nil {
 		return fmt.Errorf("server was not started")
 	}
+
+	// Stop tmkms proxy if it is still alive
+	if s.tmkmsProxy != nil {
+		if err := s.tmkmsProxy.Stop(); err != nil {
+			log.Errorf("failed to stop tmkms proxy: %v", err)
+		}
+	}
+
+	// Ensure tracer will be stopped too (at this point it should be stopped already, but just in case)
+	defer s.tracer.Stop()
+
+	// Shutdown main server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return s.server.Shutdown(ctx)

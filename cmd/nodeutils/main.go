@@ -49,6 +49,14 @@ func main() {
 		log.Fatal(err)
 	}
 
+	go func() {
+		sig := <-sigChan
+		log.Infof("received signal: %v", sig)
+		if err := nodeUtilsServer.Stop(false); err != nil {
+			log.Errorf("failed to stop nodeutils server: %v", err)
+		}
+	}()
+
 	if err := nodeUtilsServer.Start(); err != nil {
 		log.Fatal(err)
 	}

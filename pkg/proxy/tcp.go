@@ -11,6 +11,7 @@ import (
 
 type TCP struct {
 	laddr, raddr *net.TCPAddr
+	listener     *net.TCPListener
 	runOnce      bool
 }
 
@@ -32,15 +33,16 @@ func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool) (*TCP, error) {
 }
 
 func (p *TCP) Start() error {
+	var err error
 	log.Infof("starting tcp proxy at %v", p.laddr)
-	listener, err := net.ListenTCP("tcp", p.laddr)
+	p.listener, err = net.ListenTCP("tcp", p.laddr)
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
+	defer p.listener.Close()
 
 	for {
-		lconn, err := listener.AcceptTCP()
+		lconn, err := p.listener.AcceptTCP()
 		if err != nil {
 			log.Errorf("failed to accept connection: %v", err)
 			continue
@@ -59,6 +61,10 @@ func (p *TCP) Start() error {
 			return err
 		}
 	}
+}
+
+func (p *TCP) Stop() error {
+	return p.listener.Close()
 }
 
 func (p *TCP) handle(lconn *net.TCPConn) error {

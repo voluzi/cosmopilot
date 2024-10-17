@@ -33,3 +33,5 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ghcr.io/nibiruchain/node-utils:latest, ghcr.io/nibiruchain/node-utils:${{ steps.get_version.outputs.full_without_prefix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

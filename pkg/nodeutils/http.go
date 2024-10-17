@@ -105,13 +105,13 @@ func (s *NodeUtils) latestHeight(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *NodeUtils) mustUpgrade(w http.ResponseWriter, r *http.Request) {
-	log.WithField("must-upgrade", s.requiresUpgrade).Info("checked if should upgrade")
-	if s.requiresUpgrade {
+	log.WithField("must-upgrade", s.requiresUpgrade.Load()).Info("checked if should upgrade")
+	if s.requiresUpgrade.Load() {
 		w.WriteHeader(http.StatusUpgradeRequired)
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
-	w.Write([]byte(strconv.FormatBool(s.requiresUpgrade)))
+	w.Write([]byte(strconv.FormatBool(s.requiresUpgrade.Load())))
 }
 
 func (s *NodeUtils) tmkmsConnectionActive(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +126,7 @@ func (s *NodeUtils) tmkmsConnectionActive(w http.ResponseWriter, r *http.Request
 
 func (s *NodeUtils) shutdownServer(w http.ResponseWriter, r *http.Request) {
 	log.Info("shutting down server")
-	if err := s.Stop(); err != nil {
+	if err := s.Stop(true); err != nil {
 		log.Errorf("error stopping server: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
