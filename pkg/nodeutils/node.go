@@ -169,8 +169,10 @@ func (s *NodeUtils) Stop(force bool) error {
 		}
 	}
 
-	// Ensure tracer will be stopped too (at this point it should be stopped already, but just in case)
-	defer s.tracer.Stop()
+	// Ensure tracer is stopped too (at this point it should be stopped already, but just in case)
+	if err := s.tracer.Stop(); err != nil {
+		log.Errorf("failed to stop tracer: %v", err)
+	}
 
 	// Shutdown main server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
