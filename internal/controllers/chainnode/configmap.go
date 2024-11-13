@@ -30,15 +30,15 @@ var (
 )
 
 func getConfigsLockForAppVersion(version string) *sync.Mutex {
-	locksMutex.Lock()
-	defer locksMutex.Unlock()
+	configGenerationLocksMutex.Lock()
+	defer configGenerationLocksMutex.Unlock()
 
-	if lock, exists := locks[version]; exists {
+	if lock, exists := configGenerationLocks[version]; exists {
 		return lock
 	}
 
 	newLock := &sync.Mutex{}
-	locks[version] = newLock
+	configGenerationLocks[version] = newLock
 	return newLock
 }
 
