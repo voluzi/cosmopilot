@@ -76,7 +76,13 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 					chainNode.Spec.NodeSelector); err != nil {
 				return err
 			}
-
+			if pvc.Annotations == nil {
+				pvc.Annotations = map[string]string{}
+			}
+			pvc.Annotations[annotationGenesisDownloaded] = StringValueTrue
+			if err = r.Update(ctx, pvc); err != nil {
+				return err
+			}
 			chainNode.Status.ChainID = *chainNode.Spec.Genesis.ChainID
 			return r.Status().Update(ctx, chainNode)
 		}
