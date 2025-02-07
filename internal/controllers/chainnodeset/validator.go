@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -59,6 +60,15 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 }
 
 func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet) (*appsv1.ChainNode, error) {
+	var genesisConfig *appsv1.GenesisConfig
+	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() || nodeSet.Spec.Genesis.ConfigMap != nil {
+		genesisConfig = nodeSet.Spec.Genesis
+	} else {
+		genesisConfig = &appsv1.GenesisConfig{
+			ConfigMap: pointer.String(fmt.Sprintf("%s-genesis", nodeSet.Status.ChainID)),
+		}
+	}
+
 	validator := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-validator", nodeSet.GetName()),
@@ -70,7 +80,7 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet) (*appsv1.Cha
 			}),
 		},
 		Spec: appsv1.ChainNodeSpec{
-			Genesis:     nodeSet.Spec.Genesis,
+			Genesis:     genesisConfig,
 			App:         nodeSet.GetAppSpecWithUpgrades(),
 			Config:      nodeSet.Spec.Validator.Config,
 			Persistence: nodeSet.Spec.Validator.Persistence,

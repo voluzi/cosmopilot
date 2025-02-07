@@ -226,7 +226,7 @@ func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 
 func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec, index int) (*appsv1.ChainNode, error) {
 	var genesisConfig *appsv1.GenesisConfig
-	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() {
+	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() || nodeSet.Spec.Genesis.ConfigMap != nil {
 		genesisConfig = nodeSet.Spec.Genesis
 	} else {
 		genesisConfig = &appsv1.GenesisConfig{
