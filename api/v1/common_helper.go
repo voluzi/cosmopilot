@@ -98,6 +98,13 @@ func (g *GenesisConfig) ShouldDownloadUsingContainer() bool {
 	return false
 }
 
+func (g *GenesisConfig) HasConfigMapSource() bool {
+	if g != nil && g.ConfigMap != nil {
+		return true
+	}
+	return false
+}
+
 func (g *GenesisConfig) GetConfigMapName(chainID string) string {
 	if g != nil && g.ConfigMap != nil {
 		return *g.ConfigMap

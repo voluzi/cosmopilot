@@ -61,7 +61,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 
 func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet) (*appsv1.ChainNode, error) {
 	var genesisConfig *appsv1.GenesisConfig
-	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() || nodeSet.Spec.Genesis.ConfigMap != nil {
+	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() || nodeSet.Spec.Genesis.HasConfigMapSource() {
 		genesisConfig = nodeSet.Spec.Genesis
 	} else {
 		genesisConfig = &appsv1.GenesisConfig{
