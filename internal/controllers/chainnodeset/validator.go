@@ -61,11 +61,16 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 
 func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet) (*appsv1.ChainNode, error) {
 	var genesisConfig *appsv1.GenesisConfig
-	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() || nodeSet.Spec.Genesis.HasConfigMapSource() {
+	switch {
+	case nodeSet.ShouldInitGenesis():
+		genesisConfig = nil
+
+	case nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() || nodeSet.Spec.Genesis.HasConfigMapSource():
 		genesisConfig = nodeSet.Spec.Genesis
-	} else {
+
+	default:
 		genesisConfig = &appsv1.GenesisConfig{
-			ConfigMap: pointer.String(fmt.Sprintf("%s-genesis", nodeSet.Status.ChainID)),
+			ConfigMap: pointer.String(nodeSet.Spec.Genesis.GetConfigMapName(nodeSet.Status.ChainID)),
 		}
 	}
 

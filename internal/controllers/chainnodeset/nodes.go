@@ -230,7 +230,7 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 		genesisConfig = nodeSet.Spec.Genesis
 	} else {
 		genesisConfig = &appsv1.GenesisConfig{
-			ConfigMap: pointer.String(fmt.Sprintf("%s-genesis", nodeSet.Status.ChainID)),
+			ConfigMap: pointer.String(nodeSet.Spec.Genesis.GetConfigMapName(nodeSet.Status.ChainID)),
 		}
 	}
 
