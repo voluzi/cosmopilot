@@ -31,8 +31,8 @@ if [ "$SIZE" -gt "$LIMIT" ]; then
   echo "Splitting into chunks of $CHUNK_SIZE each..."
 
   tar cf - "$DATA_DIR" \
-      | pv -s "$SIZE" \
       | pigz -1 \
+      | pv --eta --timer --progress --rate --force -s "$SIZE" \
       | split \
           --bytes="$CHUNK_SIZE" \
           --numeric-suffixes=0 \
@@ -41,7 +41,7 @@ if [ "$SIZE" -gt "$LIMIT" ]; then
           --additional-suffix=.tar.gz \
           --filter='
             echo "Uploading $FILE..."
-            pv | gsutil -o "GSUtil:parallel_composite_upload_threshold=150M" cp - "gs://'"$BUCKET"'/$FILE"
+            pv | gsutil -q -o "GSUtil:parallel_composite_upload_threshold=150M" cp - "gs://'"$BUCKET"'/$FILE"
           ' \
           - "${NAME}-part-"
 
@@ -50,9 +50,9 @@ else
   echo "Performing single archive upload to gs://$BUCKET/$NAME.tar.gz..."
 
   tar cf - "$DATA_DIR" \
-    | pv -s "$SIZE" \
     | pigz -1 \
-    | gsutil -o "GSUtil:parallel_composite_upload_threshold=150M" cp - "gs://$BUCKET/$NAME.tar.gz"
+    | pv --eta --timer --progress --rate --force -s "$SIZE" \
+    | gsutil -q -o "GSUtil:parallel_composite_upload_threshold=150M" cp - "gs://$BUCKET/$NAME.tar.gz"
 fi
 
 echo "Upload completed successfully!"
