@@ -93,7 +93,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 							Name:            "dataexporter",
 							Image:           "ghcr.io/nibiruchain/dataexporter:latest",
 							ImagePullPolicy: corev1.PullAlways,
-							Args:            []string{fmt.Sprintf("gcs upload data %s %s", gcs.Config.Bucket, name)},
+							Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
 							WorkingDir:      "/home/app",
 							Env: []corev1.EnvVar{
 								{
@@ -248,7 +248,7 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 							Name:            "dataexporter",
 							Image:           "ghcr.io/nibiruchain/dataexporter:latest",
 							ImagePullPolicy: corev1.PullAlways,
-							Args:            []string{fmt.Sprintf("gcs delete %s %s", gcs.Config.Bucket, name)},
+							Args:            []string{"gcs", "delete", gcs.Config.Bucket, name},
 							WorkingDir:      "/home/app",
 							Env: []corev1.EnvVar{
 								{
