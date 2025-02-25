@@ -110,10 +110,7 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 						"compressed": datasize.ByteSize(bytesCompressed).HumanReadable(),
 						"uploaded":   datasize.ByteSize(bytesUploaded.Load()).HumanReadable(),
 						"dir-size":   totalSize.HumanReadable(),
-					}).Info("compressing and uploading",
-						int(float64(bytesCompressed)/float64(totalSize)*100),
-						int(float64(bytesUploaded.Load())/float64(totalSize)*100),
-					)
+					}).Info("compressing and uploading")
 				}
 				lastCompressed, lastUploaded = bytesCompressed, bytesUploaded.Load()
 			}
