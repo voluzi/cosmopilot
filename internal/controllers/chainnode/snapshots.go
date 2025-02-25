@@ -558,7 +558,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 	// Create job to verify data integrity
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-integrity-check", snapshot.GetName()),
+			Name:      fmt.Sprintf("%s-ichk", snapshot.GetName()),
 			Namespace: chainNode.GetNamespace(),
 			Labels: map[string]string{
 				volumeSnapshot: snapshot.GetName(),
@@ -576,7 +576,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 							Name: "data",
 							VolumeSource: corev1.VolumeSource{
 								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: fmt.Sprintf("%s-integrity-check", snapshot.GetName()),
+									ClaimName: fmt.Sprintf("%s-ichk", snapshot.GetName()),
 								},
 							},
 						},
@@ -667,7 +667,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 	// Create PVC from Snapshot
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-integrity-check", snapshot.GetName()),
+			Name:      fmt.Sprintf("%s-ichk", snapshot.GetName()),
 			Namespace: snapshot.GetNamespace(),
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
