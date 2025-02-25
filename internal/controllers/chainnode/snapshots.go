@@ -567,6 +567,18 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: pointer.Int32(60),
 			BackoffLimit:            pointer.Int32(0),
+			PodFailurePolicy: &batchv1.PodFailurePolicy{
+				Rules: []batchv1.PodFailurePolicyRule{
+					{
+						Action: batchv1.PodFailurePolicyActionFailJob,
+						OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+							ContainerName: pointer.String(chainNode.Spec.App.App),
+							Operator:      batchv1.PodFailurePolicyOnExitCodesOpNotIn,
+							Values:        []int32{0},
+						},
+					},
+				},
+			},
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:     corev1.RestartPolicyNever,
