@@ -33,6 +33,12 @@ config:
 
 ## Restoring from a Volume Snapshot
 
+You can obtain the list of available volume snapshots by running
+
+```bash
+$ kubectl get volumesnapshots
+```
+
 To restore a node from a previously created volume snapshot, use the following configuration:
 
 ```yaml
@@ -56,6 +62,11 @@ persistence:
     command: ["sh"] # Optional. Defaults to image entrypoint.
     args: ["-c", "wget -qO- https://remote.tarball.here | tar xvf - -C /home/app/data"]
 ```
+
+::: tip Important
+Make sure to set the [initial PVC size](05-persistence-and-backup#default-pvc-size) large enough to store the extracted data.
+Make sure to set the [initTimeout](/03-reference/crds/crds.html#persistence) long enough to allow init container have enough time to extract the tarball data.
+:::
 
 ### Notes
 - The application’s home directory is located at `/home/app`.

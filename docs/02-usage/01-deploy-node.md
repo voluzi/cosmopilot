@@ -87,6 +87,10 @@ When you create a [ChainNode](/03-reference/crds/crds#chainnode), `Cosmopilot` a
     - **Account Mnemonic**: Used with validators for starting a new network or submiting `create-validator` transaction.
 - **Service Monitors**: A `ServiceMonitor` is created to enable Prometheus to scrape metrics from the node.
 
+::: warning Important
+Storing mnemonics and private keys in Kubernetes secrets may not be secure and is recommended only for testnets. For production networks, consider using [TmKMS](11-tmkms) for enhanced security.
+:::
+
 ## Accessing Node Endpoints
 
 Once the node is running, you can access its endpoints by using `kubectl` to port-forward traffic to either the node's containers or services. For example, to access the `RPC`, `LCD`, and `gRPC` endpoints of the node deployed earlier, you can run:
@@ -100,7 +104,7 @@ After setting up port-forwarding:
 - **LCD**: will be available at [localhost:1317](http://localhost:1317).
 - **gRPC**: will be available at `localhost:9090`.
 
-You can test the `gRPC` endpoint using grpcurl:
+You can test the `gRPC` endpoint using [grpcurl](https://github.com/fullstorydev/grpcurl):
 
 ```bash
 $ grpcurl --plaintext localhost:9090 list
