@@ -56,7 +56,7 @@ func (p *PodHelper) WaitForPodDeleted(ctx context.Context, timeout time.Duration
 	if err != nil && errors.IsNotFound(err) {
 		return nil
 	}
-	
+
 	fs := fields.SelectorFromSet(map[string]string{
 		"metadata.namespace": p.pod.Namespace,
 		"metadata.name":      p.pod.Name,

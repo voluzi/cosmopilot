@@ -872,7 +872,7 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 	// There is no need to wait for pod to be deleted if we are keeping it stopped
 	if mustStop, stopReason := chainNode.MustStop(); mustStop {
 		logger.Info("node must be stopped. not recreating pod", "pod", pod.GetName(), "reason", stopReason)
-		
+
 		// Attempt to terminate node-utils container without waiting for grace-period. If there is an error
 		// we will just wait for the grace-period
 		if err := r.stopNodeUtilsContainer(chainNode); err != nil {
