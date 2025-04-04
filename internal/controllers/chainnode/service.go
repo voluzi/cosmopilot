@@ -233,6 +233,12 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 					Port:       nodeUtilsPort,
 					TargetPort: intstr.FromInt32(nodeUtilsPort),
 				},
+				{
+					Name:       chainutils.PrometheusPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.PrometheusPort,
+					TargetPort: intstr.FromInt32(chainutils.PrometheusPort),
+				},
 			},
 			Selector: WithChainNodeLabels(chainNode, map[string]string{
 				LabelNodeID:  chainNode.Status.NodeID,
@@ -264,6 +270,12 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 			svc.Spec.Ports[5].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
 			svc.Spec.Ports[6].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
 		}
+		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
+			Name:       controllers.CosmoGuardMetricsPortName,
+			Protocol:   corev1.ProtocolTCP,
+			Port:       controllers.CosmoGuardMetricsPort,
+			TargetPort: intstr.FromInt32(controllers.CosmoGuardMetricsPort),
+		})
 	}
 
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
