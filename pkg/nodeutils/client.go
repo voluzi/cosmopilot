@@ -29,7 +29,7 @@ func (c *Client) GetDataSize() (int64, error) {
 	}
 
 	if response.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf(string(body))
+		return 0, fmt.Errorf("%s", string(body))
 	}
 
 	return strconv.ParseInt(string(body), 10, 64)
@@ -48,7 +48,7 @@ func (c *Client) GetLatestHeight() (int64, error) {
 	}
 
 	if response.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf(string(body))
+		return 0, fmt.Errorf("%s", string(body))
 	}
 
 	return strconv.ParseInt(string(body), 10, 64)
@@ -67,7 +67,7 @@ func (c *Client) RequiresUpgrade() (bool, error) {
 	}
 
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusUpgradeRequired {
-		return false, fmt.Errorf(string(body))
+		return false, fmt.Errorf("%s", string(body))
 	}
 
 	return strconv.ParseBool(string(body))
