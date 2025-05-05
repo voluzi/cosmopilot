@@ -520,7 +520,7 @@ func (s *SidecarSpec) GetImage(chainNode *ChainNode) string {
 	if s.Image != nil {
 		return *s.Image
 	}
-	return chainNode.GetAppVersion()
+	return chainNode.GetAppImage()
 }
 
 // VolumeSpec methods
