@@ -15,7 +15,7 @@ import (
 	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
 )
 
-func (r *Reconciler) EnsurePodDisruptionBudgets(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Spec.Validator.HasPdbEnabled() {
 		pdb := getPdbSpec(
 			nodeSet,

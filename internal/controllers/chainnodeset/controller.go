@@ -137,6 +137,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	if err := r.ensurePodDisruptionBudgets(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if nodeSet.Status.Phase != appsv1.PhaseChainNodeSetRunning || nodeSet.GetLastUpgradeVersion() != nodeSet.Status.AppVersion {
 		log.FromContext(ctx).Info("updating .status.appVersion", "version", nodeSet.GetLastUpgradeVersion())
 		nodeSet.Status.AppVersion = nodeSet.GetLastUpgradeVersion()
