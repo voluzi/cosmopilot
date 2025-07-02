@@ -65,6 +65,8 @@ type ChainNodeSetSpec struct {
 	// Ensures that changes to ChainNodeSet are propagated to ChainNode resources one at a time. Cosmopilot will wait
 	// for each ChainNode to be in either Running or Syncing state before proceeding to the next one. Note that this
 	// does not apply to upgrades, as those are handled directly by the ChainNode controller. Defaults to `false`.
+	// Deprecated: recent versions of `cosmopilot` includes disruption checks when handling pods of the same group.
+	// If you need more control over it, please use `.spec.nodes[].pdb` instead.
 	// +optional
 	RollingUpdates *bool `json:"rollingUpdates,omitempty"`
 
