@@ -3,8 +3,8 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"reflect"
 
-	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,12 +88,10 @@ func (r *Reconciler) ensurePodDisruptionBudget(ctx context.Context, pdb *policyv
 		return err
 	}
 
-	patchResult, err := patch.DefaultPatchMaker.Calculate(currentPdb, pdb)
-	if err != nil {
-		return err
-	}
+	mustUpdate := currentPdb.Spec.MinAvailable.IntValue() != pdb.Spec.MinAvailable.IntValue() ||
+		!reflect.DeepEqual(currentPdb.Spec.Selector.MatchLabels, pdb.Spec.Selector.MatchLabels)
 
-	if !patchResult.IsEmpty() {
+	if mustUpdate {
 		logger.Info("updating pod disruption budget", "pdb", pdb.GetName())
 
 		pdb.ObjectMeta.ResourceVersion = currentPdb.ObjectMeta.ResourceVersion

@@ -84,14 +84,14 @@ test.e2e: WORKER_COUNT?=1
 test.e2e: TEST_TIMEOUT?=20m
 test.e2e: manifests generate fmt vet mirrord setup-test-env install ## Run integration tests.
 	@# Create dummy cosmopilot service just to have all resources. mirrod will steal its traffic then.
-	@$(HELM) get metadata cosmopilot -n nibiru-system || $(MAKE) NAME=nginxinc/nginx-unprivileged APP_VERSION=latest PROBES_ENABLED=false deploy
+	@$(HELM) get metadata cosmopilot -n cosmopilot-system || $(MAKE) NAME=nginxinc/nginx-unprivileged APP_VERSION=latest PROBES_ENABLED=false deploy
 	@mkdir -p $(CERTS_DIR)
 	@for f in tls.key ca.crt tls.crt; do \
-		$(KUBECTL) -n nibiru-system get secret cosmopilot-cert -o=go-template='{{index .data "'$$f'"|base64decode}}' > $(CERTS_DIR)/$$f; \
+		$(KUBECTL) -n cosmopilot-system get secret cosmopilot-cert -o=go-template='{{index .data "'$$f'"|base64decode}}' > $(CERTS_DIR)/$$f; \
 	done
 	@$(MIRRORD) exec -t deployment/cosmopilot \
-		-n nibiru-system \
-		-a nibiru-system \
+		-n cosmopilot-system \
+		-a cosmopilot-system \
 		-p --steal \
 		--fs-mode local \
 		--no-telemetry \
@@ -120,7 +120,7 @@ run: manifests generate ## Run a controller from your host.
 
 .PHONY: run.mirrord
 run.mirrord: RELEASE_NAME?=cosmopilot
-run.mirrord: NAMESPACE?=nibiru-system
+run.mirrord: NAMESPACE?=cosmopilot-system
 run.mirrord: WORKER_NAME?=
 run.mirrord: WORKER_COUNT?=1
 run.mirrord: CERTS_DIR?=/tmp
@@ -146,7 +146,7 @@ run.mirrord: manifests generate mirrord
 
 .PHONY: attach.mirrord
 attach.mirrord: RELEASE_NAME?=cosmopilot
-attach.mirrord: NAMESPACE?=nibiru-system
+attach.mirrord: NAMESPACE?=cosmopilot-system
 attach.mirrord: WORKER_NAME?=
 attach.mirrord: WORKER_COUNT?=1
 attach.mirrord: CERTS_DIR?=/tmp
@@ -199,7 +199,7 @@ uninstall: manifests kubectl ## Uninstall CRDs from the K8s cluster
 
 .PHONY: deploy
 deploy: RELEASE_NAME?=cosmopilot
-deploy: NAMESPACE?=nibiru-system
+deploy: NAMESPACE?=cosmopilot-system
 deploy: SERVICE_MONITOR_ENABLED?=false
 deploy: IMAGE_PULL_SECRETS?=
 deploy: WORKER_NAME?=
@@ -227,7 +227,7 @@ deploy: manifests helm ## Deploy controller to the K8s cluster
 
 .PHONY: undeploy
 undeploy: RELEASE_NAME?=cosmopilot
-undeploy: NAMESPACE?=nibiru-system
+undeploy: NAMESPACE?=cosmopilot-system
 undeploy: helm ## Undeploy controller from the K8s cluster
 	@$(HELM) uninstall --namespace=$(NAMESPACE) $(RELEASE_NAME)
 
