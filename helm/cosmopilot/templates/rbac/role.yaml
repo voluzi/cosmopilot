@@ -115,7 +115,7 @@ rules:
 - apiGroups:
   - policy
   resources:
-  - poddisruptionbudget
+  - poddisruptionbudgets
   verbs:
   - create
   - delete
