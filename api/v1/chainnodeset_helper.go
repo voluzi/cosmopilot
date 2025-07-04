@@ -134,21 +134,21 @@ func (group *NodeGroupSpec) GetPdbMinAvailable() int {
 // Validator methods
 
 func (val *NodeSetValidatorConfig) GetPrivKeySecretName(obj client.Object) string {
-	if val.PrivateKeySecret != nil {
+	if val != nil && val.PrivateKeySecret != nil {
 		return *val.PrivateKeySecret
 	}
 	return fmt.Sprintf("%s-priv-key", obj.GetName())
 }
 
 func (val *NodeSetValidatorConfig) GetAccountHDPath() string {
-	if val.Init != nil && val.Init.AccountHDPath != nil {
+	if val != nil && val.Init != nil && val.Init.AccountHDPath != nil {
 		return *val.Init.AccountHDPath
 	}
 	return DefaultHDPath
 }
 
 func (val *NodeSetValidatorConfig) GetAccountSecretName(obj client.Object) string {
-	if val.Init != nil && val.Init.AccountMnemonicSecret != nil {
+	if val != nil && val.Init != nil && val.Init.AccountMnemonicSecret != nil {
 		return *val.Init.AccountMnemonicSecret
 	}
 
@@ -156,42 +156,42 @@ func (val *NodeSetValidatorConfig) GetAccountSecretName(obj client.Object) strin
 }
 
 func (val *NodeSetValidatorConfig) GetAccountPrefix() string {
-	if val.Init != nil && val.Init.AccountPrefix != nil {
+	if val != nil && val.Init != nil && val.Init.AccountPrefix != nil {
 		return *val.Init.AccountPrefix
 	}
 	return DefaultAccountPrefix
 }
 
 func (val *NodeSetValidatorConfig) GetValPrefix() string {
-	if val.Init != nil && val.Init.ValPrefix != nil {
+	if val != nil && val.Init != nil && val.Init.ValPrefix != nil {
 		return *val.Init.ValPrefix
 	}
 	return DefaultValPrefix
 }
 
 func (val *NodeSetValidatorConfig) GetInitUnbondingTime() string {
-	if val.Init != nil && val.Init.UnbondingTime != nil {
+	if val != nil && val.Init != nil && val.Init.UnbondingTime != nil {
 		return *val.Init.UnbondingTime
 	}
 	return DefaultUnbondingTime
 }
 
 func (val *NodeSetValidatorConfig) GetInitVotingPeriod() string {
-	if val.Init != nil && val.Init.VotingPeriod != nil {
+	if val != nil && val.Init != nil && val.Init.VotingPeriod != nil {
 		return *val.Init.VotingPeriod
 	}
 	return DefaultVotingPeriod
 }
 
 func (val *NodeSetValidatorConfig) HasPdbEnabled() bool {
-	if val.PDB != nil {
+	if val != nil && val.PDB != nil {
 		return val.PDB.Enabled
 	}
 	return false
 }
 
 func (val *NodeSetValidatorConfig) GetPdbMinAvailable() int {
-	if val.PDB != nil && val.PDB.MinAvailable != nil {
+	if val != nil && val.PDB != nil && val.PDB.MinAvailable != nil {
 		return *val.PDB.MinAvailable
 	}
 	return 0
