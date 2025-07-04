@@ -31,7 +31,7 @@ func (r *Reconciler) maybeGetVpaResources(ctx context.Context, chainNode *appsv1
 
 	if chainNode.Spec.VPA.CPU != nil && !withinCooldown(getLastCpuScaleTime(chainNode), chainNode.Spec.VPA.CPU.GetCooldownDuration()) {
 		for _, rule := range chainNode.Spec.VPA.CPU.Rules {
-			shouldScale, newCpuRequest, err := r.evaluateCpuRule(chainNode, client, updated, chainNode.Spec.VPA.CPU, rule)
+			shouldScale, newCpuRequest, err := r.evaluateCpuRule(ctx, chainNode, client, updated, chainNode.Spec.VPA.CPU, rule)
 			if err != nil {
 				return getVpaLastAppliedResourcesOrFallback(chainNode), err
 			}
@@ -71,7 +71,7 @@ func (r *Reconciler) maybeGetVpaResources(ctx context.Context, chainNode *appsv1
 
 	if chainNode.Spec.VPA.Memory != nil && !withinCooldown(getLastMemoryScaleTime(chainNode), chainNode.Spec.VPA.Memory.GetCooldownDuration()) {
 		for _, rule := range chainNode.Spec.VPA.Memory.Rules {
-			shouldScale, newMemRequest, err := r.evaluateMemoryRule(chainNode, client, updated, chainNode.Spec.VPA.Memory, rule)
+			shouldScale, newMemRequest, err := r.evaluateMemoryRule(ctx, chainNode, client, updated, chainNode.Spec.VPA.Memory, rule)
 			if err != nil {
 				return getVpaLastAppliedResourcesOrFallback(chainNode), err
 			}
@@ -119,7 +119,9 @@ func getScaleReason(direction appsv1.ScalingDirection) string {
 	return appsv1.ReasonVPAScaleDown
 }
 
-func (r *Reconciler) evaluateCpuRule(chainNode *appsv1.ChainNode, client *nodeutils.Client, current corev1.ResourceRequirements, cfg *appsv1.VerticalAutoscalingMetricConfig, rule *appsv1.VerticalAutoscalingRule) (bool, resource.Quantity, error) {
+func (r *Reconciler) evaluateCpuRule(ctx context.Context, chainNode *appsv1.ChainNode, client *nodeutils.Client, current corev1.ResourceRequirements, cfg *appsv1.VerticalAutoscalingMetricConfig, rule *appsv1.VerticalAutoscalingRule) (bool, resource.Quantity, error) {
+	logger := log.FromContext(ctx).WithValues("module", "vpa")
+
 	avg, err := client.GetCPUStats(rule.GetDuration())
 	if err != nil {
 		return false, resource.Quantity{}, err
@@ -136,6 +138,7 @@ func (r *Reconciler) evaluateCpuRule(chainNode *appsv1.ChainNode, client *nodeut
 
 	limitMillicores := limit.MilliValue()
 	usedPercent := int((avg * 1000 / float64(limitMillicores)) * 100)
+	logger.V(1).Info("got cpu usage", "percentage", usedPercent, "duration", rule.GetDuration())
 
 	if (rule.Direction == appsv1.ScaleUp && usedPercent >= rule.UsagePercent) || (rule.Direction == appsv1.ScaleDown && usedPercent <= rule.UsagePercent) {
 		step := limitMillicores * int64(rule.StepPercent) / 100
@@ -160,7 +163,9 @@ func (r *Reconciler) evaluateCpuRule(chainNode *appsv1.ChainNode, client *nodeut
 	return false, resource.Quantity{}, nil
 }
 
-func (r *Reconciler) evaluateMemoryRule(chainNode *appsv1.ChainNode, client *nodeutils.Client, current corev1.ResourceRequirements, cfg *appsv1.VerticalAutoscalingMetricConfig, rule *appsv1.VerticalAutoscalingRule) (bool, resource.Quantity, error) {
+func (r *Reconciler) evaluateMemoryRule(ctx context.Context, chainNode *appsv1.ChainNode, client *nodeutils.Client, current corev1.ResourceRequirements, cfg *appsv1.VerticalAutoscalingMetricConfig, rule *appsv1.VerticalAutoscalingRule) (bool, resource.Quantity, error) {
+	logger := log.FromContext(ctx).WithValues("module", "vpa")
+
 	avg, err := client.GetMemoryStats(rule.GetDuration())
 	if err != nil {
 		return false, resource.Quantity{}, err
@@ -181,6 +186,7 @@ func (r *Reconciler) evaluateMemoryRule(chainNode *appsv1.ChainNode, client *nod
 	}
 
 	usedPercent := int((float64(avg) / float64(limitBytes)) * 100)
+	logger.V(1).Info("got memory usage", "percentage", usedPercent, "duration", rule.GetDuration())
 
 	if (rule.Direction == appsv1.ScaleUp && usedPercent >= rule.UsagePercent) ||
 		(rule.Direction == appsv1.ScaleDown && usedPercent <= rule.UsagePercent) {
