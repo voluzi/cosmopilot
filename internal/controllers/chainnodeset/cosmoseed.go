@@ -316,8 +316,9 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  controllers.CosmoseedName,
-							Image: r.opts.CosmoseedImage,
+							Name:            controllers.CosmoseedName,
+							Image:           r.opts.CosmoseedImage,
+							ImagePullPolicy: corev1.PullAlways,
 							Args: []string{
 								"--home", cosmoseedMountPoint,
 								"--log-level", nodeSet.Spec.Cosmoseed.GetLogLevel(),
@@ -348,10 +349,6 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 							Resources: nodeSet.Spec.Cosmoseed.Resources,
 							VolumeMounts: append([]corev1.VolumeMount{
 								{
-									Name:      "cosmoseed",
-									MountPath: cosmoseedMountPoint,
-								},
-								{
 									Name:      "data",
 									MountPath: path.Join(cosmoseedMountPoint, cosmoseedAddrBookDir),
 								},
@@ -364,12 +361,6 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 						},
 					},
 					Volumes: []corev1.Volume{
-						{
-							Name: "cosmoseed",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
-						},
 						{
 							Name: "config",
 							VolumeSource: corev1.VolumeSource{

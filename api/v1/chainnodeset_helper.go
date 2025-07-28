@@ -307,11 +307,11 @@ func (cs *CosmoseedConfig) GetLogLevel() string {
 	return DefaultCosmoseedLogLevel
 }
 
-func (cs *CosmoseedConfig) GetAddressbookStrict() bool {
-	if cs != nil && cs.AddrBookStrict != nil {
-		return *cs.AddrBookStrict
+func (cs *CosmoseedConfig) GetAllowNonRoutable() bool {
+	if cs != nil && cs.AllowNonRoutable != nil {
+		return *cs.AllowNonRoutable
 	}
-	return true
+	return false
 }
 
 func (cs *CosmoseedConfig) GetCosmoseedConfig(chainID, seeds string) (*cosmoseed.Config, error) {
@@ -323,7 +323,7 @@ func (cs *CosmoseedConfig) GetCosmoseedConfig(chainID, seeds string) (*cosmoseed
 	cfg.ChainID = chainID
 	cfg.Seeds = seeds
 
-	cfg.AddrBookStrict = cs.GetAddressbookStrict()
+	cfg.AllowNonRoutable = cs.GetAllowNonRoutable()
 	cfg.MaxOutboundPeers = cs.GetMaxOutboundPeers()
 	cfg.MaxInboundPeers = cs.GetMaxInboundPeers()
 	cfg.MaxPacketMsgPayloadSize = cs.GetMaxPacketMsgPayloadSize()

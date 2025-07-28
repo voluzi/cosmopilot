@@ -420,14 +420,13 @@ type CosmoseedConfig struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Whether to enforce strict routability rules for peer addresses.
-	// Set to true to only accept publicly routable IPs (recommended for public networks).
-	// Set to false to allow local/private IPs (e.g., in testnets or dev environments).
-	// Mirrors CometBFT's `addr_book_strict` setting.
-	// Defaults to `true`.
-	// +default=true
+	// Used to enforce strict routability rules for peer addresses.
+	// Set to false to only accept publicly routable IPs (recommended for public networks).
+	// Set to true to allow local/private IPs (e.g., in testnets or dev environments).
+	// Defaults to `false`.
+	// +default=false
 	// +optional
-	AddrBookStrict *bool `json:"addrBookStrict,omitempty"`
+	AllowNonRoutable *bool `json:"allowNonRoutable,omitempty"`
 
 	// Maximum number of inbound P2P connections.
 	// Defaults to `2000`.

@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/storage v1.38.0
 	emperror.dev/errors v0.8.0
 	github.com/BurntSushi/toml v1.4.0
-	github.com/NibiruChain/cosmoseed v0.4.0
+	github.com/NibiruChain/cosmoseed v0.7.0
 	github.com/RaveNoX/go-jsonmerge v1.0.0
 	github.com/banzaicloud/k8s-objectmatcher v1.8.0
 	github.com/c2h5oh/datasize v0.0.0-20231215233829-aa82cc1e6500

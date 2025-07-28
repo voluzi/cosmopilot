@@ -229,7 +229,7 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | instances | Number of seed node instances to deploy. Defaults to 1. | *int | false |
 | expose | Configuration for exposing the P2P endpoint (e.g., via LoadBalancer or NodePort). | *[ExposeConfig](#exposeconfig) | false |
 | resources | Compute Resources to be applied on the cosmoseed container. | corev1.ResourceRequirements | false |
-| addrBookStrict | Whether to enforce strict routability rules for peer addresses. Set to true to only accept publicly routable IPs (recommended for public networks). Set to false to allow local/private IPs (e.g., in testnets or dev environments). Mirrors CometBFT's `addr_book_strict` setting. Defaults to `true`. | *bool | false |
+| allowNonRoutable | Used to enforce strict routability rules for peer addresses. Set to false to only accept publicly routable IPs (recommended for public networks). Set to true to allow local/private IPs (e.g., in testnets or dev environments). Defaults to `false`. | *bool | false |
 | maxInboundPeers | Maximum number of inbound P2P connections. Defaults to `2000`. | *int | false |
 | maxOutboundPeers | Maximum number of outbound P2P connections. Defaults to `20`. | *int | false |
 | peerQueueSize | Size of the internal peer queue used by dial workers in the PEX reactor. This queue holds peers to be dialed; dial workers consume from it. If the queue is full, new discovered peers may be discarded. Use together with `DialWorkers` to control peer discovery throughput. Defaults to `1000`. | *int | false |

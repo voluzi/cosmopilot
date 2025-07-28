@@ -39,8 +39,8 @@ github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3
 github.com/DataDog/zstd v1.5.6 h1:LbEglqepa/ipmmQJUDnSsfvA8e8IStVcGaFWDuxvGOY=
 github.com/DataDog/zstd v1.5.6/go.mod h1:g4AWEaM3yOg3HYfnJ3YIawPnVdXJh9QME85blwSAmyw=
 github.com/NYTimes/gziphandler v0.0.0-20170623195520-56545f4a5d46/go.mod h1:3wb06e3pkSAbeQ52E9H9iFoQsEEwGN64994WTCIhntQ=
-github.com/NibiruChain/cosmoseed v0.4.0 h1:r79a/zliOET5SNozac2svBOc6VFNCDmuDxc0Yt31/w4=
-github.com/NibiruChain/cosmoseed v0.4.0/go.mod h1:IpwUtZlngnlDm9A4w8wiOtASPJ0XyEk/TyzPzxLlKVA=
+github.com/NibiruChain/cosmoseed v0.7.0 h1:6q3OowTaW5WJDAgQupLkeaacScdYakUFP2dBXewHbk0=
+github.com/NibiruChain/cosmoseed v0.7.0/go.mod h1:IpwUtZlngnlDm9A4w8wiOtASPJ0XyEk/TyzPzxLlKVA=
 github.com/PuerkitoBio/purell v1.0.0/go.mod h1:c11w/QuzBsJSee3cPx9rAFu61PvFxuPbtSwDGJws/X0=
 github.com/PuerkitoBio/urlesc v0.0.0-20160726150825-5bd2802263f2/go.mod h1:uGdkoq3SwY9Y+13GIhn11/XLaGBb4BfwItxLd5jeuXE=
 github.com/RaveNoX/go-jsoncommentstrip v1.0.0/go.mod h1:78ihd09MekBnJnxpICcwzCMzGrKSKYe4AqU6PDYYpjk=

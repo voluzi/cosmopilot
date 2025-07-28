@@ -590,8 +590,8 @@ func (in *CosmoseedConfig) DeepCopyInto(out *CosmoseedConfig) {
 		(*in).DeepCopyInto(*out)
 	}
 	in.Resources.DeepCopyInto(&out.Resources)
-	if in.AddrBookStrict != nil {
-		in, out := &in.AddrBookStrict, &out.AddrBookStrict
+	if in.AllowNonRoutable != nil {
+		in, out := &in.AllowNonRoutable, &out.AllowNonRoutable
 		*out = new(bool)
 		**out = **in
 	}
