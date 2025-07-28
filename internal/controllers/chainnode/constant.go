@@ -27,8 +27,6 @@ const (
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
 
-	nonRootId = 1000
-
 	defaultAddrBookFile         = "/home/app/data/addrbook.json"
 	defaultStateSyncTrustPeriod = "168h0m0s"
 	defaultLogsLineCount        = 50

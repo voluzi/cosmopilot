@@ -9,6 +9,8 @@ const (
 	CosmoGuardEvmRpcPort      = 18545
 	CosmoGuardEvmRpcWsPort    = 18546
 
+	NonRootId = 1000
+
 	CosmoseedName = "cosmoseed"
 
 	AnnotationStateSyncTrustHeight    = "apps.k8s.nibiru.org/state-sync-trust-height"

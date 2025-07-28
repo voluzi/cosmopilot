@@ -314,6 +314,12 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 					},
 				},
 				Spec: corev1.PodSpec{
+					PriorityClassName: r.opts.GetNodesPriorityClassName(),
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsUser:  pointer.Int64(controllers.NonRootId),
+						RunAsGroup: pointer.Int64(controllers.NonRootId),
+						FSGroup:    pointer.Int64(controllers.NonRootId),
+					},
 					Containers: []corev1.Container{
 						{
 							Name:            controllers.CosmoseedName,

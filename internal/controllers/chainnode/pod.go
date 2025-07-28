@@ -323,9 +323,9 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			Affinity:              chainNode.Spec.Affinity,
 			NodeSelector:          chainNode.Spec.NodeSelector,
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:  pointer.Int64(nonRootId),
-				RunAsGroup: pointer.Int64(nonRootId),
-				FSGroup:    pointer.Int64(nonRootId),
+				RunAsUser:  pointer.Int64(controllers.NonRootId),
+				RunAsGroup: pointer.Int64(controllers.NonRootId),
+				FSGroup:    pointer.Int64(controllers.NonRootId),
 			},
 			TerminationGracePeriodSeconds: chainNode.Spec.Config.GetTerminationGracePeriodSeconds(),
 			Volumes: []corev1.Volume{
