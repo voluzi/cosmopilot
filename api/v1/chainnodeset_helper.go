@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	DefaultGroupInstances    = 1
-	DefaultCosmoseedLogLevel = "info"
+	DefaultGroupInstances        = 1
+	DefaultCosmoseedLogLevel     = "info"
+	DefaultCosmoseedAddrBookFile = "data/addrbook.json"
 )
 
 func (nodeSet *ChainNodeSet) GetNamespacedName() string {
@@ -328,6 +329,7 @@ func (cs *CosmoseedConfig) GetCosmoseedConfig(chainID, seeds string) (*cosmoseed
 	cfg.MaxPacketMsgPayloadSize = cs.GetMaxPacketMsgPayloadSize()
 	cfg.PeerQueueSize = cs.GetPeerQueueSize()
 	cfg.DialWorkers = cs.GetDialWorkers()
-
+	cfg.LogLevel = cs.GetLogLevel()
+	cfg.AddrBookFile = DefaultCosmoseedAddrBookFile
 	return cfg, nil
 }

@@ -13,12 +13,12 @@ const (
 
 	validatorGroupName = "validator"
 
-	cosmoseedMountPoint      = "/data/cosmoseed"
-	cosmoseedConfigFileName  = "config.yaml"
-	cosmoseedNodeKeyFileName = "nodekey.json"
-	cosmoseedHttpPortName    = "http"
-	cosmoseedHttpPort        = 8080
-	cosmoseedP2pPort         = 26656
+	cosmoseedMountPoint     = "/cosmoseed"
+	cosmoseedConfigFileName = "config.yaml"
+	cosmoseedAddrBookDir    = "data"
+	cosmoseedHttpPortName   = "http"
+	cosmoseedHttpPort       = 8080
+	cosmoseedP2pPort        = 26656
 
 	timeoutWaitServiceIP = 5 * time.Minute
 )

@@ -284,6 +284,17 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 		controllers.LabelChainID:      nodeSet.Status.ChainID,
 	}
 
+	keysVolumeMounts := make([]corev1.VolumeMount, replicas)
+	for i := range keysVolumeMounts {
+		podName := fmt.Sprintf("%s-seed-%d", nodeSet.GetName(), i)
+		keysVolumeMounts[i] = corev1.VolumeMount{
+			Name:      "nodekey",
+			ReadOnly:  true,
+			MountPath: path.Join(cosmoseedMountPoint, podName),
+			SubPath:   podName,
+		}
+	}
+
 	ss := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-seed", nodeSet.GetName()),
@@ -307,7 +318,11 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 						{
 							Name:  controllers.CosmoseedName,
 							Image: r.opts.CosmoseedImage,
-							Args:  []string{"--home", cosmoseedMountPoint, "--config-read-only"},
+							Args: []string{
+								"--home", cosmoseedMountPoint,
+								"--log-level", nodeSet.Spec.Cosmoseed.GetLogLevel(),
+								"--config-read-only",
+							},
 							Ports: []corev1.ContainerPort{
 								{
 									Name:          "p2p",
@@ -322,7 +337,7 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 							},
 							Env: []corev1.EnvVar{
 								{
-									Name: "NODE_KEY_NAME",
+									Name: "NODE_KEY_FILE",
 									ValueFrom: &corev1.EnvVarSource{
 										FieldRef: &corev1.ObjectFieldSelector{
 											FieldPath: "metadata.name",
@@ -331,25 +346,30 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string)
 								},
 							},
 							Resources: nodeSet.Spec.Cosmoseed.Resources,
-							VolumeMounts: []corev1.VolumeMount{
+							VolumeMounts: append([]corev1.VolumeMount{
+								{
+									Name:      "cosmoseed",
+									MountPath: cosmoseedMountPoint,
+								},
 								{
 									Name:      "data",
-									MountPath: cosmoseedMountPoint,
+									MountPath: path.Join(cosmoseedMountPoint, cosmoseedAddrBookDir),
 								},
 								{
 									Name:      "config",
 									MountPath: path.Join(cosmoseedMountPoint, cosmoseedConfigFileName),
 									SubPath:   cosmoseedConfigFileName,
 								},
-								{
-									Name:      "nodekey",
-									MountPath: path.Join(cosmoseedMountPoint, cosmoseedNodeKeyFileName),
-									SubPath:   cosmoseedNodeKeyFileName,
-								},
-							},
+							}, keysVolumeMounts...),
 						},
 					},
 					Volumes: []corev1.Volume{
+						{
+							Name: "cosmoseed",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
 						{
 							Name: "config",
 							VolumeSource: corev1.VolumeSource{
