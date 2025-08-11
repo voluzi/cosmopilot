@@ -228,6 +228,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 	}
 
 	// Patch pod without restart when labels change
+	logger.V(1).Info("checking for labels changes", "current", currentPod.Labels, "new", pod.Labels)
 	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) {
 		logger.Info("updating pod labels", "pod", pod.GetName())
 		modifiedPod := currentPod.DeepCopy()
@@ -823,7 +824,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, cosmoGuardContainer)
 	}
 
-	specHash, err := podSpecHash(ctx, pod)
+	specHash, err := podSpecHash(pod)
 	if err != nil {
 		return nil, err
 	}
@@ -972,6 +973,8 @@ func (r *Reconciler) waitForPodTermination(ctx context.Context, pod *corev1.Pod)
 }
 
 func (r *Reconciler) PatchPod(ctx context.Context, cur, mod *corev1.Pod) (*corev1.Pod, error) {
+	logger := log.FromContext(ctx)
+
 	curJson, err := json.Marshal(cur)
 	if err != nil {
 		return nil, err
@@ -986,15 +989,18 @@ func (r *Reconciler) PatchPod(ctx context.Context, cur, mod *corev1.Pod) (*corev
 	if err != nil {
 		return nil, err
 	}
+
+	logger.V(1).Info("created patch for pod", "patch", string(pa), "pod", cur.GetName())
+
 	if len(pa) == 0 || string(pa) == "{}" {
 		return cur, nil
 	}
+
 	return r.ClientSet.CoreV1().Pods(cur.GetNamespace()).
 		Patch(ctx, cur.GetName(), types.StrategicMergePatchType, pa, metav1.PatchOptions{})
 }
 
-func podSpecHash(ctx context.Context, pod *corev1.Pod) (string, error) {
-	logger := log.FromContext(ctx)
+func podSpecHash(pod *corev1.Pod) (string, error) {
 	specCopy := pod.Spec.DeepCopy()
 
 	// Order volume mounts and volumes
@@ -1004,15 +1010,8 @@ func podSpecHash(ctx context.Context, pod *corev1.Pod) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	logger.V(1).Info("pod hasher", "spec", string(specBytes))
 
-	labelsBytes, err := json.Marshal(pod.GetLabels())
-	if err != nil {
-		return "", err
-	}
-	logger.V(1).Info("pod hasher", "labels", string(labelsBytes))
-
-	return fmt.Sprintf("%x", sha256.Sum256(append(specBytes, labelsBytes...))), nil
+	return fmt.Sprintf("%x", sha256.Sum256(specBytes)), nil
 }
 
 func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
@@ -1028,8 +1027,6 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 	logger.V(1).Info("checked pod spec hash",
 		"old-spec", oldSpecHash,
 		"new-spec", newSpecHash,
-		"new-labels", new.GetLabels(),
-		"old-labels", existing.GetLabels(),
 	)
 	return newSpecHash != oldSpecHash
 }
