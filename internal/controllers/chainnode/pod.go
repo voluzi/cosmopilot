@@ -94,6 +94,18 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 		return r.createPod(ctx, chainNode, pod)
 	}
 
+	// Patch pod without restart when labels change
+	logger.V(1).Info("checking for labels changes", "current", currentPod.Labels, "new", pod.Labels)
+	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) {
+		logger.Info("updating pod labels", "pod", pod.GetName())
+		modifiedPod := currentPod.DeepCopy()
+		modifiedPod.Labels = pod.Labels
+		currentPod, err = r.PatchPod(ctx, currentPod, modifiedPod)
+		if err != nil {
+			return err
+		}
+	}
+
 	if nodeUtilsIsInFailedState(currentPod) {
 		logger.Info("node-utils is in failed state", "pod", pod.GetName())
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
@@ -225,16 +237,6 @@ func (r *Reconciler) ensurePod(ctx context.Context, app *chainutils.App, chainNo
 	if currentPod.Annotations[controllers.AnnotationConfigHash] != configHash {
 		logger.Info("config changed", "pod", pod.GetName())
 		return r.recreatePod(ctx, chainNode, pod, r.opts.DisruptionCheckEnabled)
-	}
-
-	// Patch pod without restart when labels change
-	logger.V(1).Info("checking for labels changes", "current", currentPod.Labels, "new", pod.Labels)
-	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) {
-		logger.Info("updating pod labels", "pod", pod.GetName())
-		modifiedPod := currentPod.DeepCopy()
-		modifiedPod.Labels = pod.Labels
-		_, err = r.PatchPod(ctx, currentPod, modifiedPod)
-		return err
 	}
 
 	return r.setNodePhase(ctx, chainNode)
