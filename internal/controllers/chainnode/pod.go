@@ -823,7 +823,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, cosmoGuardContainer)
 	}
 
-	specHash, err := podSpecHash(pod)
+	specHash, err := podSpecHash(ctx, pod)
 	if err != nil {
 		return nil, err
 	}
@@ -993,7 +993,8 @@ func (r *Reconciler) PatchPod(ctx context.Context, cur, mod *corev1.Pod) (*corev
 		Patch(ctx, cur.GetName(), types.StrategicMergePatchType, pa, metav1.PatchOptions{})
 }
 
-func podSpecHash(pod *corev1.Pod) (string, error) {
+func podSpecHash(ctx context.Context, pod *corev1.Pod) (string, error) {
+	logger := log.FromContext(ctx)
 	specCopy := pod.Spec.DeepCopy()
 
 	// Order volume mounts and volumes
@@ -1003,10 +1004,14 @@ func podSpecHash(pod *corev1.Pod) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	logger.V(1).Info("pod hasher", "spec", string(specBytes))
+
 	labelsBytes, err := json.Marshal(pod.GetLabels())
 	if err != nil {
 		return "", err
 	}
+	logger.V(1).Info("pod hasher", "labels", string(labelsBytes))
+
 	return fmt.Sprintf("%x", sha256.Sum256(append(specBytes, labelsBytes...))), nil
 }
 
@@ -1020,7 +1025,12 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 	}
 	newSpecHash := new.Annotations[controllers.AnnotationPodSpecHash]
 
-	logger.V(1).Info("checked pod spec hash", "old-spec", oldSpecHash, "new-spec", newSpecHash)
+	logger.V(1).Info("checked pod spec hash",
+		"old-spec", oldSpecHash,
+		"new-spec", newSpecHash,
+		"new-labels", new.GetLabels(),
+		"old-labels", existing.GetLabels(),
+	)
 	return newSpecHash != oldSpecHash
 }
 
