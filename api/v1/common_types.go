@@ -732,6 +732,10 @@ type VolumeSnapshotsConfig struct {
 	// +optional
 	// +default=true
 	DisableWhileSyncing *bool `json:"disableWhileSyncing,omitempty"`
+
+	// Compute resources for the integrity-check job pod (applied only when `verify` is true).
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // PvcSnapshot represents a snapshot to be used to restore a PVC.
