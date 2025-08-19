@@ -573,9 +573,19 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: pointer.Int32(60),
-			BackoffLimit:            pointer.Int32(3),
+			BackoffLimit:            pointer.Int32(1),
 			PodFailurePolicy: &batchv1.PodFailurePolicy{
 				Rules: []batchv1.PodFailurePolicyRule{
+					// 1) Count real checker failures (anything except 137/143)
+					{
+						Action: batchv1.PodFailurePolicyActionCount,
+						OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+							ContainerName: pointer.String("start-checker"),
+							Operator:      batchv1.PodFailurePolicyOnExitCodesOpNotIn,
+							Values:        []int32{137, 143},
+						},
+					},
+					// 2) Ignore kube-initiated disruptions (eviction/drain/preemption)
 					{
 						Action: batchv1.PodFailurePolicyActionIgnore,
 						OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{
@@ -585,6 +595,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 							},
 						},
 					},
+					// 3) Ignore external kill paths (OOM/SIGTERM)
 					{
 						Action: batchv1.PodFailurePolicyActionIgnore,
 						OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
