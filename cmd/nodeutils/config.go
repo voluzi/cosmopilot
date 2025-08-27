@@ -44,7 +44,7 @@ func init() {
 
 	flag.BoolVar(&createFifo, "create-fifo",
 		environ.GetBool("CREATE_FIFO", false),
-		"log level",
+		"create FIFO for trace store",
 	)
 
 	flag.BoolVar(&enableTmkmsProxy, "tmkms-proxy",
