@@ -84,7 +84,7 @@ When you create a [ChainNode](/03-reference/crds/crds#chainnode), `Cosmopilot` a
 - **Secrets**:
   - Secrets are created only when necessary and may include:
     - **Private Consensus Key**: Generated for validators (not created if [TmKMS is being used](11-tmkms)). If TmKMS is in use, an additional secret with the KMS identity is created.
-    - **Account Mnemonic**: Used with validators for starting a new network or submiting `create-validator` transaction.
+    - **Account Mnemonic**: Used with validators for starting a new network or submitting `create-validator` transaction.
 - **Service Monitors**: A `ServiceMonitor` is created to enable Prometheus to scrape metrics from the node.
 
 ::: warning Important
