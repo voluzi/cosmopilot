@@ -36,6 +36,10 @@ $ helm show values oci://ghcr.io/nibiruchain/helm/cosmopilot
 - **Description**: The container image of [CosmoGuard](https://github.com/NibiruChain/cosmoguard) (with version tag included).
 - **Default**: `ghcr.io/nibiruchain/cosmoguard`
 
+### `cosmoseedImage`
+- **Description**: The container image of [Cosmoseed](https://github.com/NibiruChain/cosmoseed) (with version tag included). Used when deploying seed nodes.
+- **Default**: `ghcr.io/nibiruchain/cosmoseed`
+
 ### `imagePullSecrets`
 - **Description**: Secrets for pulling images from private repositories.
 - **Default**: `[]`
