@@ -31,7 +31,7 @@ $ helm install \
 
 ---
 
-If you opted for not installing cert-manager (one of the recommended controllers in [Prerequisites](01-prerequisites) page), you need to disable both webhooks:
+If you opted for not installing cert-manager (one of the recommended controllers in [Prerequisites](01-prerequisites) page), you need to disable webhooks:
 
 ```bash
 $ helm install \
