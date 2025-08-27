@@ -273,7 +273,7 @@ func (gcs *GcsExporter) renameObject(ctx context.Context, bucket, oldName, newNa
 	log.Debugf("renaming %s to %s", oldName, newName)
 	src := gcs.client.Bucket(bucket).Object(oldName)
 	if _, err := gcs.client.Bucket(bucket).Object(newName).CopierFrom(src).Run(ctx); err != nil {
-		return fmt.Errorf("failed to rename object %s -> %s: %v", oldName, oldName, err)
+		return fmt.Errorf("failed to rename object %s -> %s: %v", oldName, newName, err)
 	}
 	return src.Delete(ctx)
 }
