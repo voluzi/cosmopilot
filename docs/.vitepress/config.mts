@@ -48,6 +48,9 @@ export default defineConfig({
           { text: 'Initializing new Network', link: '10-initializing-new-network' },
           { text: 'Using TmKMS', link: '11-tmkms' },
           { text: 'Using CosmoGuard', link: '12-cosmoguard' },
+          { text: 'Using Cosmoseed', link: '13-cosmoseed' },
+          { text: 'Pod Disruption Budgets', link: '14-pod-disruption-budgets' },
+          { text: 'Vertical Pod Autoscaling', link: '15-vertical-pod-autoscaling' },
         ]
       },
       {
@@ -100,8 +103,7 @@ export default defineConfig({
       { icon: 'github', link: 'https://github.com/NibiruChain/cosmopilot' }
     ],
     footer: {
-      message: 'Released under the MIT License.',
-      copyright: 'Copyright © 2024-present NIBIRU'
+      message: 'Released under the MIT License.'
     }
   }
 })
