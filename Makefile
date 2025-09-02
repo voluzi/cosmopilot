@@ -9,6 +9,8 @@ NODE_UTILS_IMG 	   ?= $(NODE_UTILS_NAME):$(NODE_UTILS_VERSION:node-utils/v%=%)
 HELM_CHART_LATEST_TAG ?= $(shell git describe --tags --match 'chart/*' --abbrev=0)
 HELM_CHART_VERSION = $(HELM_CHART_LATEST_TAG:chart/v%=%)
 
+BUILDDIR ?= $(CURDIR)/build
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -126,13 +128,16 @@ teardown-test-env: kind ## Tear down test environment (kind cluster).
 
 ##@ Build
 
+$(BUILDDIR)/:
+	mkdir -p $(BUILDDIR)/
+
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o build/cosmopilot ./cmd/manager
+build: manifests generate fmt vet $(BUILDDIR)/ ## Build manager binary.
+	go build -o $(BUILDDIR)/cosmopilot ./cmd/manager
 
 .PHONY: helm.package
-helm.package: manifests helm ## Package helm chart. Final package name is cosmopilot-<<VERSION>>.tgz
-	@$(HELM) package helm/cosmopilot --version $(HELM_CHART_VERSION:v%=%) --app-version $(VERSION:v%=%) -d build
+helm.package: manifests helm $(BUILDDIR)/ ## Package helm chart. Final package name is cosmopilot-<<VERSION>>.tgz
+	@$(HELM) package helm/cosmopilot --version $(HELM_CHART_VERSION:v%=%) --app-version $(VERSION:v%=%) -d $(BUILDDIR)
 
 ##@ Run
 
