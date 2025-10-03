@@ -21,7 +21,7 @@ func (r *Reconciler) maybeGetVpaResources(ctx context.Context, chainNode *appsv1
 	logger := log.FromContext(ctx).WithValues("module", "vpa")
 
 	if !chainNode.Spec.VPA.IsEnabled() {
-		return chainNode.Spec.Resources, nil
+		return chainNode.Spec.Resources, r.clearVpaLastAppliedResources(ctx, chainNode)
 	}
 
 	// Clone the last applied or fallback
@@ -342,6 +342,18 @@ func getVpaLastAppliedResourcesOrFallback(chainNode *appsv1.ChainNode) corev1.Re
 	}
 
 	return resources
+}
+
+func (r *Reconciler) clearVpaLastAppliedResources(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	logger := log.FromContext(ctx).WithValues("module", "vpa")
+
+	if _, ok := chainNode.ObjectMeta.Annotations[controllers.AnnotationVPAResources]; !ok {
+		return nil
+	}
+
+	logger.Info("clearing vpa annotations")
+	delete(chainNode.ObjectMeta.Annotations, controllers.AnnotationVPAResources)
+	return r.Update(ctx, chainNode)
 }
 
 func clamp(val, min, max int64) int64 {
