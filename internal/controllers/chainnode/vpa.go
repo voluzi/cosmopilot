@@ -268,7 +268,7 @@ func getLastCpuScaleTime(chainNode *appsv1.ChainNode) time.Time {
 			return ts.UTC()
 		}
 	}
-	return time.Time{}
+	return chainNode.ObjectMeta.CreationTimestamp.Time
 }
 
 func getLastMemoryScaleTime(chainNode *appsv1.ChainNode) time.Time {
@@ -277,7 +277,7 @@ func getLastMemoryScaleTime(chainNode *appsv1.ChainNode) time.Time {
 			return ts.UTC()
 		}
 	}
-	return time.Time{}
+	return chainNode.ObjectMeta.CreationTimestamp.Time
 }
 
 func (r *Reconciler) storeVpaLastAppliedResources(
