@@ -1070,20 +1070,15 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 		return err
 	}
 
-	logger.V(1).Info("check if node is syncing")
-	syncing, err := c.IsNodeSyncing(ctx)
+	// Check if its state-sync first
+	stateSyncing, err := nodeutils.NewClient(chainNode.GetNodeFQDN()).IsStateSyncing()
 	if err != nil {
 		return err
 	}
-	logger.V(1).Info("node syncing status", "syncing", syncing)
 
-	if syncing {
-		// Check if its state-sync first
-		stateSyncing, err := nodeutils.NewClient(chainNode.GetNodeFQDN()).IsStateSyncing()
-		if err != nil {
-			return err
-		}
-		if stateSyncing && chainNode.Status.Phase != appsv1.PhaseChainNodeStateSyncing {
+	logger.V(1).Info("node state-syncing status", "state-syncing", stateSyncing)
+	if stateSyncing {
+		if chainNode.Status.Phase != appsv1.PhaseChainNodeStateSyncing {
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeNormal,
 				appsv1.ReasonNodeStateSyncing,
@@ -1092,7 +1087,17 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 			chainNode.Status.AppVersion = chainNode.GetAppVersion()
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeStateSyncing)
 		}
+		return nil
+	}
 
+	logger.V(1).Info("check if node is syncing")
+	syncing, err := c.IsNodeSyncing(ctx)
+	if err != nil {
+		return err
+	}
+	logger.V(1).Info("node syncing status", "syncing", syncing)
+
+	if syncing {
 		if chainNode.Status.Phase != appsv1.PhaseChainNodeSyncing {
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeNormal,
