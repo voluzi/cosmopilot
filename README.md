@@ -1,7 +1,7 @@
 # Cosmopilot
 
 [![Test](https://github.com/NibiruChain/cosmopilot/actions/workflows/test.yaml/badge.svg)](https://github.com/NibiruChain/cosmopilot/actions/workflows/test.yaml)
-[![Docker Builds](https://github.com/NibiruChain/cosmopilot/actions/workflows/cosmopilot-docker.yaml/badge.svg)](https://github.com/NibiruChain/cosmopilot/actions/workflows/cosmopilot-docker.yaml)
+[![Builds](https://github.com/NibiruChain/cosmopilot/actions/workflows/release.yaml/badge.svg)](https://github.com/NibiruChain/cosmopilot/actions/workflows/release.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/NibiruChain/cosmopilot/blob/main/LICENSE.md)
 
 **Cosmopilot** is a Kubernetes operator designed to simplify the deployment and management of Cosmos-based blockchain nodes.
