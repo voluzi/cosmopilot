@@ -150,9 +150,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          MANIFEST_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}" --format '{{.Digest}}')"
-          AMD64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-amd64" --format '{{.Digest}}')"
-          ARM64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-arm64" --format '{{.Digest}}')"
+          MANIFEST_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}" --format '{{.Descriptor.Digest}}')"
+          AMD64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-amd64" --format '{{.Descriptor.Digest}}')"
+          ARM64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-arm64" --format '{{.Descriptor.Digest}}')"
+
+          : "${MANIFEST_DIGEST:?no digest for ${IMG}:${VER}}"
+          : "${AMD64_DIGEST:?no digest for ${IMG}:${VER}-amd64}"
+          : "${ARM64_DIGEST:?no digest for ${IMG}:${VER}-arm64}"
 
           echo "manifest=${MANIFEST_DIGEST}" >> "$GITHUB_OUTPUT"
           echo "amd64=${AMD64_DIGEST}" >> "$GITHUB_OUTPUT"
