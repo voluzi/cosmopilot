@@ -150,9 +150,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          MANIFEST_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}" --format '{{.Descriptor.Digest}}')"
-          AMD64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-amd64" --format '{{.Descriptor.Digest}}')"
-          ARM64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-arm64" --format '{{.Descriptor.Digest}}')"
+          MANIFEST_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}" --format '{{json .}}' | jq -r '.manifest.digest')"
+          AMD64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-amd64" --format '{{json .}}' | jq -r '.manifest.digest')"
+          ARM64_DIGEST="$(docker buildx imagetools inspect "${IMG}:${VER}-arm64" --format '{{json .}}' | jq -r '.manifest.digest')"
 
           : "${MANIFEST_DIGEST:?no digest for ${IMG}:${VER}}"
           : "${AMD64_DIGEST:?no digest for ${IMG}:${VER}-amd64}"
