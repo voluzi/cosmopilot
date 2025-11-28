@@ -74,29 +74,44 @@ func (p *TCP) handle(lconn *net.TCPConn) error {
 		return fmt.Errorf("failed to dial upstream: %v", err)
 	}
 
+	// Use sync.Once to ensure connections are closed exactly once
+	var lconnClose, rconnClose sync.Once
+	closeLconn := func() { lconnClose.Do(func() { lconn.Close() }) }
+	closeRconn := func() { rconnClose.Do(func() { rconn.Close() }) }
+
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
 	go func() {
-		defer lconn.Close()
-		defer rconn.Close()
-		io.Copy(rconn, lconn)
+		defer wg.Done()
+		defer closeLconn()
+		defer closeRconn()
+		if _, err := io.Copy(rconn, lconn); err != nil {
+			log.WithFields(log.Fields{
+				"laddr": p.laddr,
+				"raddr": p.raddr,
+			}).Tracef("error copying from %v: %v", lconn.RemoteAddr(), err)
+		}
 		log.WithFields(log.Fields{
 			"laddr": p.laddr,
 			"raddr": p.raddr,
 		}).Tracef("finished copying from %v", lconn.RemoteAddr())
-		wg.Done()
 	}()
 
 	go func() {
-		defer lconn.Close()
-		defer rconn.Close()
-		io.Copy(lconn, rconn)
+		defer wg.Done()
+		defer closeLconn()
+		defer closeRconn()
+		if _, err := io.Copy(lconn, rconn); err != nil {
+			log.WithFields(log.Fields{
+				"laddr": p.laddr,
+				"raddr": p.raddr,
+			}).Tracef("error copying to %v: %v", lconn.RemoteAddr(), err)
+		}
 		log.WithFields(log.Fields{
 			"laddr": p.laddr,
 			"raddr": p.raddr,
 		}).Tracef("finished copying to %v", lconn.RemoteAddr())
-		wg.Done()
 	}()
 
 	wg.Wait()

@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -235,7 +235,7 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 		genesisConfig = nodeSet.Spec.Genesis
 	} else {
 		genesisConfig = &appsv1.GenesisConfig{
-			ConfigMap: pointer.String(nodeSet.Spec.Genesis.GetConfigMapName(nodeSet.Status.ChainID)),
+			ConfigMap: ptr.To(nodeSet.Spec.Genesis.GetConfigMapName(nodeSet.Status.ChainID)),
 		}
 	}
 
@@ -277,7 +277,10 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 			data := map[string]string{
 				controllers.MinimumGasPricesKey: price,
 			}
-			dataBytes, _ := json.Marshal(data)
+			dataBytes, err := json.Marshal(data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal minimum gas prices: %w", err)
+			}
 
 			if node.Spec.Config == nil {
 				node.Spec.Config = &appsv1.Config{
@@ -293,11 +296,14 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 				cfg := *node.Spec.Config.Override
 				var cfgData map[string]interface{}
 				if err := json.Unmarshal(cfg[controllers.AppTomlFile].Raw, &cfgData); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("unmarshaling app config: %w", err)
 				}
 
 				cfgData[controllers.MinimumGasPricesKey] = price
-				newDataBytes, _ := json.Marshal(cfgData)
+				newDataBytes, err := json.Marshal(cfgData)
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal config data: %w", err)
+				}
 				cfg[controllers.AppTomlFile] = runtime.RawExtension{Raw: newDataBytes}
 			}
 		}

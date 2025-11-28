@@ -114,12 +114,9 @@ func (s *NodeUtils) Start() error {
 	go func() {
 		ticker := time.NewTicker(fineStatsCollectorInterval)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := s.collectProcessStats(s.fineStats); err != nil {
-					log.Errorf("error collecting process fine-grained stats: %v", err)
-				}
+		for range ticker.C {
+			if err := s.collectProcessStats(s.fineStats); err != nil {
+				log.Errorf("error collecting process fine-grained stats: %v", err)
 			}
 		}
 	}()
@@ -128,12 +125,9 @@ func (s *NodeUtils) Start() error {
 	go func() {
 		ticker := time.NewTicker(coarseStatsCollectorInterval)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := s.collectProcessStats(s.coarseStats); err != nil {
-					log.Errorf("error collecting process coarse-grained stats: %v", err)
-				}
+		for range ticker.C {
+			if err := s.collectProcessStats(s.coarseStats); err != nil {
+				log.Errorf("error collecting process coarse-grained stats: %v", err)
 			}
 		}
 	}()
@@ -154,7 +148,11 @@ func (s *NodeUtils) Start() error {
 				height := s.latestBlockHeight.Load()
 
 				if s.upgradeChecker.ShouldUpgrade(height) {
-					upgrade, _ := s.upgradeChecker.GetUpgrade(height)
+					upgrade, err := s.upgradeChecker.GetUpgrade(height)
+					if err != nil {
+						log.Errorf("failed to get upgrade info for height %d: %v", height, err)
+						continue
+					}
 
 					// If it's an on-chain upgrade, the application is supposed to panic and require the upgrade.
 					// In manual upgrades case, we don't assume the application will panic but still want to stop the node at the
@@ -167,11 +165,11 @@ func (s *NodeUtils) Start() error {
 					} else if heightUpdated {
 						log.WithField("height", height).Warn("stopping node for upgrade")
 						s.requiresUpgrade.Store(true)
-						err := s.StopNode()
-						if err == nil {
+						if err := s.StopNode(); err != nil {
+							log.Errorf("failed to stop node: %v", err)
+						} else {
 							return
 						}
-						log.Errorf("failed to stop node: %v", err)
 					}
 				}
 			}
@@ -180,11 +178,10 @@ func (s *NodeUtils) Start() error {
 
 	s.server = &http.Server{Addr: fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port), Handler: s.router}
 	log.Infof("server started listening on %s:%d ...\n\n", s.cfg.Host, s.cfg.Port)
-	err := s.server.ListenAndServe()
-	if err == nil || errors.Is(err, http.ErrServerClosed) {
-		return nil
+	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
-	return err
+	return nil
 }
 
 func (s *NodeUtils) Stop(force bool) error {
