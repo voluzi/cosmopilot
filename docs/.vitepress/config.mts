@@ -31,8 +31,8 @@ export default defineConfig({
         items: [
           { text: 'Prerequisites', link: '01-prerequisites' },
           { text: 'Chain Compatibility', link: '02-chain-compatibility' },
-          { text: 'Installation', link: '02-installation' },
-          { text: 'Configuration', link: '03-configuration' }
+          { text: 'Installation', link: '03-installation' },
+          { text: 'Configuration', link: '04-configuration' }
         ]
       },
       {
