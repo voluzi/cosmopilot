@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitepress'
+import { examplesSidebar } from './examples-sidebar'
 
 export default defineConfig({
   ignoreDeadLinks: true,
@@ -20,7 +21,8 @@ export default defineConfig({
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Getting Started', link: '/01-getting-started/01-prerequisites' },
-      { text: 'Usage', link: '/02-usage/01-deploy-node' }
+      { text: 'Chain Compatibility', link: '/01-getting-started/02-chain-compatibility' },
+      { text: 'Usage', link: '/02-usage/01-deploy-node' },
     ],
     sidebar: [
       {
@@ -28,6 +30,7 @@ export default defineConfig({
         base: '/01-getting-started/',
         items: [
           { text: 'Prerequisites', link: '01-prerequisites' },
+          { text: 'Chain Compatibility', link: '02-chain-compatibility' },
           { text: 'Installation', link: '02-installation' },
           { text: 'Configuration', link: '03-configuration' }
         ]
@@ -62,41 +65,7 @@ export default defineConfig({
       },
       {
         text: 'Examples',
-        items: [
-          {
-            text: 'Nibiru',
-            base: '/04-examples/nibiru/',
-            items: [
-              { text: 'Validator + Fullnode', link: 'devnet-one-fullnode' },
-              { text: 'Validator with TmKMS', link: 'validator-tmkms' },
-              { text: 'Multi-Validator Devnet', link: 'multi-validator-devnet' },
-            ]
-          },
-          {
-            text: 'Osmosis',
-            base: '/04-examples/osmosis/',
-            items: [
-              { text: 'Validator + Fullnode', link: 'devnet-one-fullnode' },
-              { text: 'Multi-Validator Devnet', link: 'multi-validator-devnet' },
-            ]
-          },
-          {
-            text: 'Cosmos',
-            base: '/04-examples/cosmos/',
-            items: [
-              { text: 'Validator + Fullnode', link: 'devnet-one-fullnode' },
-              { text: 'Multi-Validator Devnet', link: 'multi-validator-devnet' },
-            ]
-          },
-          {
-            text: 'Sei',
-            base: '/04-examples/sei/',
-            items: [
-              { text: 'Validator + Fullnode', link: 'devnet-one-fullnode' },
-              { text: 'Multi-Validator Devnet', link: 'multi-validator-devnet' },
-            ]
-          },
-        ]
+        items: examplesSidebar
       }
     ],
     socialLinks: [
