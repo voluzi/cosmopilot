@@ -155,6 +155,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 func (r *Reconciler) updatePhase(ctx context.Context, nodeSet *appsv1.ChainNodeSet, phase appsv1.ChainNodeSetPhase) error {
+	if nodeSet.Status.Phase == phase {
+		return nil
+	}
 	log.FromContext(ctx).Info("updating .status.phase", "phase", phase)
 	nodeSet.Status.Phase = phase
 	return r.Status().Update(ctx, nodeSet)

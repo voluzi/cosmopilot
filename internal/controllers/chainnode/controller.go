@@ -277,6 +277,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 func (r *Reconciler) updatePhase(ctx context.Context, chainNode *appsv1.ChainNode, phase appsv1.ChainNodePhase) error {
+	if chainNode.Status.Phase == phase {
+		return nil
+	}
 	log.FromContext(ctx).Info("updating .status.phase", "phase", phase)
 	chainNode.Status.Phase = phase
 	return r.Status().Update(ctx, chainNode)
