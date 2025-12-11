@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
 )
 
 var crdsPath = filepath.Join("..", "helm", "cosmopilot", "crds")

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NibiruChain/cosmopilot/pkg/environ"
+	"github.com/voluzi/cosmopilot/pkg/environ"
 )
 
 func init() {
@@ -35,7 +35,7 @@ func init() {
 
 	flag.StringVar(&nodeUtilsImage,
 		"nodeutils-image",
-		environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/nibiruchain/node-utils"),
+		environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils"),
 		"nodeutils image to be deployed with nodes.",
 	)
 }

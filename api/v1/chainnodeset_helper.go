@@ -5,13 +5,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/NibiruChain/cosmoseed/pkg/cosmoseed"
 	"github.com/goccy/go-json"
+	"github.com/voluzi/cosmoseed/pkg/cosmoseed"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/NibiruChain/cosmopilot/pkg/utils"
+	"github.com/voluzi/cosmopilot/pkg/utils"
 )
 
 const (

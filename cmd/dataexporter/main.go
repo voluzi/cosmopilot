@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/NibiruChain/cosmopilot/cmd/dataexporter/cmd"
+	"github.com/voluzi/cosmopilot/cmd/dataexporter/cmd"
 )
 
 func main() {

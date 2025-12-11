@@ -5,7 +5,7 @@ func defaultConfig() *Configs {
 		CertsDir:     "/tmp/k8s-webhook-server/serving-certs",
 		IssuerName:   "no-e2e",
 		WorkerCount:  1,
-		NodeUtilsImg: "ghcr.io/nibiruchain/node-utils",
+		NodeUtilsImg: "ghcr.io/voluzi/node-utils",
 	}
 }
 

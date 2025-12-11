@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.3
-  name: chainnodes.apps.k8s.nibiru.org
+  name: chainnodes.cosmopilot.voluzi.com
 spec:
-  group: apps.k8s.nibiru.org
+  group: cosmopilot.voluzi.com
   names:
     kind: ChainNode
     listKind: ChainNodeList

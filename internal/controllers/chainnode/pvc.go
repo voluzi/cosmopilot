@@ -16,10 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
-	"github.com/NibiruChain/cosmopilot/internal/chainutils"
-	"github.com/NibiruChain/cosmopilot/internal/controllers"
-	"github.com/NibiruChain/cosmopilot/pkg/nodeutils"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/internal/chainutils"
+	"github.com/voluzi/cosmopilot/internal/controllers"
+	"github.com/voluzi/cosmopilot/pkg/nodeutils"
 )
 
 func (r *Reconciler) initializeData(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {

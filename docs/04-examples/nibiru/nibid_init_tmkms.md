@@ -1,7 +1,7 @@
 # Nibiru Nibid Init Tmkms
 
 ```yaml
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNode
 metadata:
   name: nibiru-validator
@@ -13,8 +13,7 @@ spec:
 
   validator:
     info:
-      moniker: nibiru
-      website: https://nibiru.fi
+      moniker: cosmopilot
     tmKMS:
       provider:
         vault:

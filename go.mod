@@ -1,4 +1,4 @@
-module github.com/NibiruChain/cosmopilot
+module github.com/voluzi/cosmopilot
 
 go 1.24.0
 
@@ -6,7 +6,6 @@ require (
 	cloud.google.com/go/storage v1.38.0
 	emperror.dev/errors v0.8.0
 	github.com/BurntSushi/toml v1.4.0
-	github.com/NibiruChain/cosmoseed v0.7.0
 	github.com/RaveNoX/go-jsonmerge v1.0.0
 	github.com/banzaicloud/k8s-objectmatcher v1.8.0
 	github.com/c2h5oh/datasize v0.0.0-20231215233829-aa82cc1e6500
@@ -32,6 +31,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
+	github.com/voluzi/cosmoseed v0.11.0
 	go.uber.org/automaxprocs v1.5.3
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
 	google.golang.org/api v0.171.0
@@ -65,6 +65,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.1.1-0.20220910012023-760eaf8b6816 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.2 // indirect
+	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
 	github.com/cenkalti/backoff/v3 v3.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cockroachdb/errors v1.11.3 // indirect

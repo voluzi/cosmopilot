@@ -1,8 +1,8 @@
-NAME 	?= ghcr.io/nibiruchain/cosmopilot
+NAME 	?= ghcr.io/voluzi/cosmopilot
 VERSION ?= $(shell git describe --tags --exclude 'node-*/*' --exclude 'vault-*/*' --exclude 'chart/*' --exclude 'dataexporter/*' --abbrev=0)
 IMG 	?= $(NAME):$(VERSION:v%=%)
 
-NODE_UTILS_NAME    ?= ghcr.io/nibiruchain/node-utils
+NODE_UTILS_NAME    ?= ghcr.io/voluzi/node-utils
 NODE_UTILS_VERSION ?= $(shell git describe --tags --match 'node-utils/*' --abbrev=0)
 NODE_UTILS_IMG 	   ?= $(NODE_UTILS_NAME):$(NODE_UTILS_VERSION:node-utils/v%=%)
 

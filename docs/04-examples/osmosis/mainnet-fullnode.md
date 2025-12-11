@@ -1,7 +1,7 @@
 # Osmosis Mainnet Fullnode
 
 ```yaml
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
   name: osmosis
@@ -24,7 +24,7 @@ spec:
         size: 100Gi
         initTimeout: 10m
         additionalInitCommands:
-          - image: ghcr.io/nibiruchain/node-tools
+          - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
             args:
               - "-c"

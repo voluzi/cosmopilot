@@ -1,7 +1,7 @@
 # Nibiru Multi Validator Devnet
 
 ```yaml
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
   name: nibiru-devnet
@@ -13,8 +13,7 @@ spec:
 
   validator:
     info:
-      moniker: nibiru-0
-      website: https://nibiru.fi
+      moniker: cosmopilot
 
     config:
       override:
@@ -76,7 +75,7 @@ spec:
             pruning-keep-recent: "100"
             pruning-interval: "10"
 ---
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNode
 metadata:
   name: nibiru-devnet-validator-1
@@ -92,8 +91,7 @@ spec:
 
   validator:
     info:
-      moniker: nibiru-1
-      website: https://nibiru.fi
+      moniker: cosmopilot
 
     createValidator:
       stakeAmount: 100000000unibi
@@ -126,7 +124,7 @@ spec:
           size: 100000
           cache_size: 200000
 ---
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNode
 metadata:
   name: nibiru-devnet-validator-2
@@ -142,8 +140,7 @@ spec:
 
   validator:
     info:
-      moniker: nibiru-2
-      website: https://nibiru.fi
+      moniker: cosmopilot
 
     createValidator:
       stakeAmount: 100000000unibi
@@ -176,7 +173,7 @@ spec:
           size: 100000
           cache_size: 200000
 ---
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNode
 metadata:
   name: nibiru-devnet-validator-3
@@ -192,8 +189,7 @@ spec:
 
   validator:
     info:
-      moniker: nibiru-3
-      website: https://nibiru.fi
+      moniker: cosmopilot
 
     createValidator:
       stakeAmount: 100000000unibi

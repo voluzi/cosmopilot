@@ -1,7 +1,7 @@
 # Cosmoshub Testnet With Fullnode
 
 ```yaml
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
   name: cosmos-testnet

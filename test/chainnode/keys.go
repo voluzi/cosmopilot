@@ -8,9 +8,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
-	"github.com/NibiruChain/cosmopilot/internal/controllers/chainnode"
-	"github.com/NibiruChain/cosmopilot/test/framework"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/internal/controllers/chainnode"
+	"github.com/voluzi/cosmopilot/test/framework"
 )
 
 const (
@@ -25,7 +25,7 @@ const (
 func testCreatePrivateKey(tf *framework.TestFramework, ns *corev1.Namespace, app appsv1.AppSpec) {
 	chainNode := NewChainNodeBasic(ns, app)
 	chainNode.Spec.Validator = &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
-		ChainID:     "nibiru-localnet",
+		ChainID:     "test-localnet",
 		Assets:      []string{"10000000unibi"},
 		StakeAmount: "10000000unibi",
 	}}
@@ -65,7 +65,7 @@ func testImportPrivateKey(tf *framework.TestFramework, ns *corev1.Namespace, app
 	chainNode.GenerateName = ""
 	chainNode.Name = chainNodeName
 	chainNode.Spec.Validator = &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
-		ChainID:     "nibiru-localnet",
+		ChainID:     "test-localnet",
 		Assets:      []string{"10000000unibi"},
 		StakeAmount: "10000000unibi",
 	}}
@@ -86,7 +86,7 @@ func testImportPrivateKey(tf *framework.TestFramework, ns *corev1.Namespace, app
 func testCreateAccount(tf *framework.TestFramework, ns *corev1.Namespace, app appsv1.AppSpec) {
 	chainNode := NewChainNodeBasic(ns, app)
 	chainNode.Spec.Validator = &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
-		ChainID:     "nibiru-localnet",
+		ChainID:     "test-localnet",
 		Assets:      []string{"10000000unibi"},
 		StakeAmount: "10000000unibi",
 	}}
@@ -126,7 +126,7 @@ func testImportAccount(tf *framework.TestFramework, ns *corev1.Namespace, app ap
 	chainNode.GenerateName = ""
 	chainNode.Name = chainNodeName
 	chainNode.Spec.Validator = &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
-		ChainID:     "nibiru-localnet",
+		ChainID:     "test-localnet",
 		Assets:      []string{"10000000unibi"},
 		StakeAmount: "10000000unibi",
 	}}

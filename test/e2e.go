@@ -14,9 +14,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/NibiruChain/cosmopilot/test/chainnode"
-	"github.com/NibiruChain/cosmopilot/test/chainnodeset"
-	"github.com/NibiruChain/cosmopilot/test/framework"
+	"github.com/voluzi/cosmopilot/test/chainnode"
+	"github.com/voluzi/cosmopilot/test/chainnodeset"
+	"github.com/voluzi/cosmopilot/test/framework"
 )
 
 var (

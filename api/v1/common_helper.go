@@ -9,8 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
 
-	"github.com/NibiruChain/cosmopilot/internal/tmkms"
-	"github.com/NibiruChain/cosmopilot/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/internal/tmkms"
+	"github.com/voluzi/cosmopilot/pkg/dataexporter"
 )
 
 const (
@@ -45,10 +45,10 @@ const (
 	DefaultHDPath = "m/44'/118'/0'/0/0"
 
 	// DefaultAccountPrefix is the default bech32 prefix for accounts.
-	DefaultAccountPrefix = "nibi"
+	DefaultAccountPrefix = "cosmos"
 
 	// DefaultValPrefix is the default bech32 prefix for validator operator accounts.
-	DefaultValPrefix = "nibivaloper"
+	DefaultValPrefix = "cosmosvaloper"
 
 	// DefaultP2pPort is the default port used for P2P connections.
 	DefaultP2pPort = 26656

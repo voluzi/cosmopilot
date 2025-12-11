@@ -16,10 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
-	"github.com/NibiruChain/cosmopilot/internal/chainutils"
-	"github.com/NibiruChain/cosmopilot/internal/controllers"
-	"github.com/NibiruChain/cosmopilot/pkg/nodeutils"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/internal/chainutils"
+	"github.com/voluzi/cosmopilot/internal/controllers"
+	"github.com/voluzi/cosmopilot/pkg/nodeutils"
 )
 
 // Reconciler reconciles a ChainNode object
@@ -82,9 +82,9 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 	return r, nil
 }
 
-//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodes,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodes/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=apps.k8s.nibiru.org,resources=chainnodes/finalizers,verbs=update
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/finalizers,verbs=update
 //+kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims;configmaps;secrets;services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods/exec;pods/attach,verbs=create

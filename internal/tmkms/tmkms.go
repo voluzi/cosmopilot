@@ -16,8 +16,8 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/NibiruChain/cosmopilot/internal/k8s"
-	utils2 "github.com/NibiruChain/cosmopilot/pkg/utils"
+	"github.com/voluzi/cosmopilot/internal/k8s"
+	utils2 "github.com/voluzi/cosmopilot/pkg/utils"
 )
 
 type KMS struct {

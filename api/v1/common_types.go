@@ -5,7 +5,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/NibiruChain/cosmopilot/internal/tmkms"
+	"github.com/voluzi/cosmopilot/internal/tmkms"
 )
 
 // Reasons for events.

@@ -20,11 +20,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
-	"github.com/NibiruChain/cosmopilot/internal/controllers"
-	"github.com/NibiruChain/cosmopilot/internal/datasnapshot"
-	"github.com/NibiruChain/cosmopilot/internal/k8s"
-	"github.com/NibiruChain/cosmopilot/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/internal/controllers"
+	"github.com/voluzi/cosmopilot/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/internal/k8s"
+	"github.com/voluzi/cosmopilot/pkg/utils"
 )
 
 type SnapshotIntegrityStatus string

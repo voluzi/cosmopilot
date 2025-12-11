@@ -5,7 +5,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/NibiruChain/cosmopilot/test/framework"
+	"github.com/voluzi/cosmopilot/test/framework"
 )
 
 var tf *framework.TestFramework
@@ -37,7 +37,7 @@ var _ = Describe("ChainNode", func() {
 		})
 	})
 
-	Context("on nibiru v1.0.0", func() {
+	Context("on default test app", func() {
 		BeforeEach(func() {
 			ns, err = tf.CreateRandomNamespace()
 			Expect(err).NotTo(HaveOccurred())
@@ -47,7 +47,7 @@ var _ = Describe("ChainNode", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		appConfig := Nibiru_v1_0_0
+		appConfig := DefaultTestApp
 
 		It("creates private key", func() {
 			testCreatePrivateKey(tf, ns, appConfig)

@@ -21,12 +21,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/NibiruChain/cosmopilot/api/v1"
-	"github.com/NibiruChain/cosmopilot/internal/chainutils"
-	"github.com/NibiruChain/cosmopilot/internal/cometbft"
-	"github.com/NibiruChain/cosmopilot/internal/controllers"
-	"github.com/NibiruChain/cosmopilot/internal/k8s"
-	"github.com/NibiruChain/cosmopilot/pkg/utils"
+	"github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/internal/chainutils"
+	"github.com/voluzi/cosmopilot/internal/cometbft"
+	"github.com/voluzi/cosmopilot/internal/controllers"
+	"github.com/voluzi/cosmopilot/internal/k8s"
+	"github.com/voluzi/cosmopilot/pkg/utils"
 )
 
 func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {

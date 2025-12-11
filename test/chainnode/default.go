@@ -7,7 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
 )
 
 const (
@@ -16,7 +16,8 @@ const (
 )
 
 var (
-	Nibiru_v1_0_0 = appsv1.AppSpec{
+	// DefaultTestApp is the default application used for e2e testing
+	DefaultTestApp = appsv1.AppSpec{
 		Image:   "ghcr.io/nibiruchain/nibiru",
 		Version: ptr.To("1.0.0"),
 		App:     "nibid",

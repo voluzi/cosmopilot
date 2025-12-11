@@ -123,7 +123,7 @@ config:
     another-key: another-value
 ```
 
-These annotations will be merged with system-managed annotations. Note that system annotations (like `apps.k8s.nibiru.org/config-hash`) take precedence and cannot be overridden.
+These annotations will be merged with system-managed annotations. Note that system annotations (like `cosmopilot.voluzi.com/config-hash`) take precedence and cannot be overridden.
 
 ## Configuring Node Startup Time
 

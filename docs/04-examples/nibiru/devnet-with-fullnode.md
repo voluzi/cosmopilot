@@ -1,7 +1,7 @@
 # Nibiru Devnet With Fullnode
 
 ```yaml
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
   name: nibiru-devnet
@@ -13,8 +13,7 @@ spec:
 
   validator:
     info:
-      moniker: nibiru-0
-      website: https://nibiru.fi
+      moniker: cosmopilot
 
     config:
       override:

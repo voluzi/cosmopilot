@@ -4,10 +4,10 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
-	"github.com/NibiruChain/cosmopilot/internal/controllers"
-	"github.com/NibiruChain/cosmopilot/internal/controllers/chainnode"
-	"github.com/NibiruChain/cosmopilot/internal/controllers/chainnodeset"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/internal/controllers"
+	"github.com/voluzi/cosmopilot/internal/controllers/chainnode"
+	"github.com/voluzi/cosmopilot/internal/controllers/chainnodeset"
 )
 
 const (

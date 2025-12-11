@@ -1,4 +1,4 @@
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
   name: cosmos
@@ -12,8 +12,6 @@ spec:
     url: https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz
     chainID: cosmoshub-4
     useDataVolume: true
-
-
 
   nodes:
     - name: fullnodes
@@ -33,7 +31,7 @@ spec:
         size: 100Gi
         initTimeout: 30m
         additionalInitCommands:
-          - image: ghcr.io/nibiruchain/node-tools
+          - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
             args:
               - "-c"

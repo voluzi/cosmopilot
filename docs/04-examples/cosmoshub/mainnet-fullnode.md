@@ -1,7 +1,7 @@
 # Cosmoshub Mainnet Fullnode
 
 ```yaml
-apiVersion: apps.k8s.nibiru.org/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
   name: cosmos
@@ -12,7 +12,7 @@ spec:
     app: gaiad
 
   genesis:
-    url: https://github.com/osmosis-labs/networks/raw/main/osmosis-1/genesis.json
+    url: https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz
     chainID: cosmoshub-4
     useDataVolume: true
 
@@ -20,11 +20,21 @@ spec:
     - name: fullnodes
       instances: 1
 
+      peers:
+        # Lavender.Five Nodes 🐝
+        - id: ade4d8bc8cbe014af6ebdf3cb7b1e9ad36f412c0
+          address: seeds.polkachu.com
+          port: 14956
+        # Lavender.Five Nodes 🐝
+        - id: 20e1000e88125698264454a884812746c2eb4807
+          address: seeds.lavenderfive.com
+          port: 14956
+
       persistence:
         size: 100Gi
         initTimeout: 30m
         additionalInitCommands:
-          - image: ghcr.io/nibiruchain/node-tools
+          - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
             args:
               - "-c"

@@ -6,15 +6,15 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/NibiruChain/cosmopilot/api/v1"
-	"github.com/NibiruChain/cosmopilot/test/framework"
+	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/test/framework"
 )
 
 func testCreateChainNodes(tf *framework.TestFramework, ns *corev1.Namespace, app appsv1.AppSpec) {
 	chainNodeSet := NewChainNodeSetBasic(ns, app)
 	chainNodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}}
 	chainNodeSet.Spec.Validator = &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
-		ChainID:     "nibiru-localnet",
+		ChainID:     "test-localnet",
 		Assets:      []string{"10000000unibi"},
 		StakeAmount: "10000000unibi",
 	}}
@@ -38,7 +38,7 @@ func testScaleDownChainNodes(tf *framework.TestFramework, ns *corev1.Namespace, 
 	chainNodeSet := NewChainNodeSetBasic(ns, app)
 	chainNodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(2)}}
 	chainNodeSet.Spec.Validator = &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
-		ChainID:     "nibiru-localnet",
+		ChainID:     "test-localnet",
 		Assets:      []string{"10000000unibi"},
 		StakeAmount: "10000000unibi",
 	}}

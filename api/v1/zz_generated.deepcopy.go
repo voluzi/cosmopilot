@@ -5,7 +5,7 @@
 package v1
 
 import (
-	"github.com/NibiruChain/cosmopilot/internal/tmkms"
+	"github.com/voluzi/cosmopilot/internal/tmkms"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"

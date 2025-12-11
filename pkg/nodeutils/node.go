@@ -12,10 +12,10 @@ import (
 	"github.com/shirou/gopsutil/process"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/NibiruChain/cosmopilot/internal/chainutils"
-	"github.com/NibiruChain/cosmopilot/pkg/proxy"
-	"github.com/NibiruChain/cosmopilot/pkg/statscollector"
-	"github.com/NibiruChain/cosmopilot/pkg/tracer"
+	"github.com/voluzi/cosmopilot/internal/chainutils"
+	"github.com/voluzi/cosmopilot/pkg/proxy"
+	"github.com/voluzi/cosmopilot/pkg/statscollector"
+	"github.com/voluzi/cosmopilot/pkg/tracer"
 )
 
 const (

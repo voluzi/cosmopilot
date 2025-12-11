@@ -12,7 +12,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/NibiruChain/cosmopilot/internal/k8s"
+	"github.com/voluzi/cosmopilot/internal/k8s"
 )
 
 func (a *App) GenerateConfigFiles(ctx context.Context) (map[string]string, error) {
