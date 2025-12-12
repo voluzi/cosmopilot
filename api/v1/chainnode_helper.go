@@ -118,6 +118,13 @@ func (chainNode *ChainNode) GetPersistenceInitTimeout() time.Duration {
 	return 5 * time.Minute
 }
 
+func (chainNode *ChainNode) GetPersistenceAdditionalVolumes() []VolumeSpec {
+	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.AdditionalVolumes != nil {
+		return chainNode.Spec.Persistence.AdditionalVolumes
+	}
+	return []VolumeSpec{}
+}
+
 func (chainNode *ChainNode) SnapshotsEnabled() bool {
 	return chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil
 }

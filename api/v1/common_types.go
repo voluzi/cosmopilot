@@ -222,10 +222,6 @@ type Config struct {
 	// +optional
 	RunFlags []string `json:"runFlags,omitempty"`
 
-	// Additional volumes to be created and mounted on this node.
-	// +optional
-	Volumes []VolumeSpec `json:"volumes,omitempty"`
-
 	// Whether field naming in config.toml should use dashes instead of underscores. Defaults to `false`.
 	// +optional
 	DashedConfigToml *bool `json:"dashedConfigToml,omitempty"`
@@ -713,6 +709,12 @@ type Persistence struct {
 	// Time to wait for data initialization pod to be successful. Defaults to `5m`.
 	// +optional
 	InitTimeout *string `json:"initTimeout,omitempty"`
+
+	// Additional volumes to be created and mounted on this node.
+	// These volumes are also mounted during data initialization, so they can be used
+	// with `additionalInitCommands` to extract snapshots or initialize data.
+	// +optional
+	AdditionalVolumes []VolumeSpec `json:"additionalVolumes,omitempty"`
 }
 
 // VolumeSnapshotsConfig holds the configuration of snapshotting feature.

@@ -452,7 +452,6 @@ Config allows setting specific configurations for a node, including overriding c
 | terminationGracePeriodSeconds | Optional duration in seconds the pod needs to terminate gracefully. | *int64 | false |
 | evmEnabled | Whether EVM is enabled on this node. Will add evm-rpc port to services. Defaults to `false`. | *bool | false |
 | runFlags | List of flags to be appended to app container when starting the node. | []string | false |
-| volumes | Additional volumes to be created and mounted on this node. | [][VolumeSpec](#volumespec) | false |
 | dashedConfigToml | Whether field naming in config.toml should use dashes instead of underscores. Defaults to `false`. | *bool | false |
 | haltHeight | The block height at which the node should stop. Cosmopilot will not attempt to restart the node beyond this height. | *int64 | false |
 
@@ -625,6 +624,7 @@ Persistence configuration for a node.
 | snapshots | Whether cosmopilot should create volume snapshots according to this config. | *[VolumeSnapshotsConfig](#volumesnapshotsconfig) | false |
 | restoreFromSnapshot | Restore from the specified snapshot when creating the PVC for this node. | *[PvcSnapshot](#pvcsnapshot) | false |
 | initTimeout | Time to wait for data initialization pod to be successful. Defaults to `5m`. | *string | false |
+| additionalVolumes | Additional volumes to be created and mounted on this node. These volumes are also mounted during data initialization, so they can be used with `additionalInitCommands` to extract snapshots or initialize data. | [][VolumeSpec](#volumespec) | false |
 
 [Back to Custom Resources](#custom-resources)
 

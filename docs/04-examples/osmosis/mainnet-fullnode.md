@@ -23,6 +23,15 @@ spec:
       persistence:
         size: 100Gi
         initTimeout: 10m
+        additionalVolumes:
+          - name: wasm
+            size: 1Gi
+            path: /home/app/wasm
+            deleteWithNode: true
+          - name: ibc-08-wasm
+            size: 1Gi
+            path: /home/app/ibc_08-wasm
+            deleteWithNode: true
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
@@ -35,15 +44,6 @@ spec:
 
       config:
         runFlags: [ "--reject-config-defaults=true" ]
-        volumes:
-          - name: wasm
-            size: 1Gi
-            path: /home/app/wasm
-            deleteWithNode: true
-          - name: ibc-08-wasm
-            size: 1Gi
-            path: /home/app/ibc_08-wasm
-            deleteWithNode: true
         override:
           app.toml:
             minimum-gas-prices: 0.025uosmo

@@ -59,6 +59,12 @@ type InitCommand struct {
 	Args    []string
 }
 
+type AdditionalVolume struct {
+	Name    string // Volume name
+	PVCName string // Full PVC name (nodeName-volumeName)
+	Path    string // Mount path
+}
+
 func NewApp(client *kubernetes.Clientset, scheme *runtime.Scheme, cfg *rest.Config,
 	owner metav1.Object, sdkVersion appsv1.SdkVersion, options ...Option) (*App, error) {
 	cmd, err := sdkcmd.GetSDK(sdkVersion, sdkcmd.WithGlobalArg(sdkcmd.Home, defaultHome))

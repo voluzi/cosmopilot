@@ -40,7 +40,17 @@ func (r *Reconciler) initializeData(ctx context.Context, app *chainutils.App, ch
 		}
 	}
 
-	if err := app.InitPvcData(ctx, pvc, chainNode.GetPersistenceInitTimeout(), initCommands...); err != nil {
+	// Build additional volumes for init
+	additionalVolumes := make([]chainutils.AdditionalVolume, len(chainNode.GetPersistenceAdditionalVolumes()))
+	for i, vol := range chainNode.GetPersistenceAdditionalVolumes() {
+		additionalVolumes[i] = chainutils.AdditionalVolume{
+			Name:    vol.Name,
+			PVCName: fmt.Sprintf("%s-%s", chainNode.GetName(), vol.Name),
+			Path:    vol.Path,
+		}
+	}
+
+	if err := app.InitPvcData(ctx, pvc, chainNode.GetPersistenceInitTimeout(), additionalVolumes, initCommands...); err != nil {
 		return fmt.Errorf("failed to initialize PVC data for %s: %w", pvc.GetName(), err)
 	}
 	// Get the updated PVC for updating annotation
@@ -334,11 +344,12 @@ func (r *Reconciler) getPVC(ctx context.Context, chainNode *appsv1.ChainNode) (*
 func (r *Reconciler) ensureAdditionalVolumes(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
-	if chainNode.Spec.Config == nil || chainNode.Spec.Config.Volumes == nil {
+	additionalVolumes := chainNode.GetPersistenceAdditionalVolumes()
+	if len(additionalVolumes) == 0 {
 		return nil
 	}
 
-	for _, volume := range chainNode.Spec.Config.Volumes {
+	for _, volume := range additionalVolumes {
 		volumeName := fmt.Sprintf("%s-%s", chainNode.GetName(), volume.Name)
 		specSize, err := resource.ParseQuantity(volume.Size)
 		if err != nil {

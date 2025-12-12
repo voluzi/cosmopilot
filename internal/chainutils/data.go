@@ -14,7 +14,7 @@ import (
 	"github.com/voluzi/cosmopilot/internal/k8s"
 )
 
-func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim, timeout time.Duration, initCommands ...*InitCommand) error {
+func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim, timeout time.Duration, additionalVolumes []AdditionalVolume, initCommands ...*InitCommand) error {
 
 	var (
 		homeVolumeMount = corev1.VolumeMount{
@@ -30,6 +30,15 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 			MountPath: "/temp",
 		}
 	)
+
+	// Build additional volume mounts
+	additionalVolumeMounts := make([]corev1.VolumeMount, len(additionalVolumes))
+	for i, vol := range additionalVolumes {
+		additionalVolumeMounts[i] = corev1.VolumeMount{
+			Name:      vol.Name,
+			MountPath: vol.Path,
+		}
+	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -90,6 +99,21 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 		},
 	}
 
+	// Add additional volumes
+	for _, vol := range additionalVolumes {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: vol.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: vol.PVCName,
+				},
+			},
+		})
+	}
+
+	// Build volume mounts for init commands (includes additional volumes)
+	initCommandVolumeMounts := append([]corev1.VolumeMount{homeVolumeMount, dataVolumeMount, tempVolumeMount}, additionalVolumeMounts...)
+
 	// Add additional commands
 	for i, cmd := range initCommands {
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
@@ -97,7 +121,7 @@ func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim
 			Image:        cmd.Image,
 			Command:      cmd.Command,
 			Args:         cmd.Args,
-			VolumeMounts: []corev1.VolumeMount{homeVolumeMount, dataVolumeMount, tempVolumeMount},
+			VolumeMounts: initCommandVolumeMounts,
 		})
 	}
 

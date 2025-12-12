@@ -13,12 +13,14 @@ spec:
     info:
       moniker: cosmopilot
 
-    config:
-      volumes:
+    persistence:
+      additionalVolumes:
         - name: wasm
           size: 1Gi
           path: /home/app/wasm
           deleteWithNode: true
+
+    config:
       override:
         app.toml:
           minimum-gas-prices: 0.025uatom

@@ -33,6 +33,11 @@ spec:
       persistence:
         size: 100Gi
         initTimeout: 30m
+        additionalVolumes:
+          - name: wasm
+            size: 1Gi
+            path: /home/app/wasm
+            deleteWithNode: true
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
@@ -44,11 +49,6 @@ spec:
                 wget -qO- "$SNAPSHOT_URL" | zstd -d | tar -C /home/app -xvf -
 
       config:
-        volumes:
-          - name: wasm
-            size: 1Gi
-            path: /home/app/wasm
-            deleteWithNode: true
         override:
           app.toml:
             minimum-gas-prices: 0.025uatom

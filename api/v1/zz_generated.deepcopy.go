@@ -525,13 +525,6 @@ func (in *Config) DeepCopyInto(out *Config) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
-	if in.Volumes != nil {
-		in, out := &in.Volumes, &out.Volumes
-		*out = make([]VolumeSpec, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
-	}
 	if in.DashedConfigToml != nil {
 		in, out := &in.DashedConfigToml, &out.DashedConfigToml
 		*out = new(bool)
@@ -1473,6 +1466,13 @@ func (in *Persistence) DeepCopyInto(out *Persistence) {
 		in, out := &in.InitTimeout, &out.InitTimeout
 		*out = new(string)
 		**out = **in
+	}
+	if in.AdditionalVolumes != nil {
+		in, out := &in.AdditionalVolumes, &out.AdditionalVolumes
+		*out = make([]VolumeSpec, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 }
 

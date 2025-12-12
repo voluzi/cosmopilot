@@ -641,21 +641,19 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		},
 	}
 
-	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Volumes != nil {
-		for _, volume := range chainNode.Spec.Config.Volumes {
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-				Name: volume.Name,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: fmt.Sprintf("%s-%s", chainNode.GetName(), volume.Name),
-					},
+	for _, volume := range chainNode.GetPersistenceAdditionalVolumes() {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: volume.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: fmt.Sprintf("%s-%s", chainNode.GetName(), volume.Name),
 				},
-			})
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      volume.Name,
-				MountPath: volume.Path,
-			})
-		}
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      volume.Name,
+			MountPath: volume.Path,
+		})
 	}
 
 	if chainNode.Spec.Config.IsEvmEnabled() {

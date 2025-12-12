@@ -16,9 +16,8 @@ spec:
     info:
       moniker: cosmopilot
 
-    config:
-      runFlags: ["--reject-config-defaults=true"]
-      volumes:
+    persistence:
+      additionalVolumes:
         - name: wasm
           size: 1Gi
           path: /home/app/wasm
@@ -27,6 +26,9 @@ spec:
           size: 1Gi
           path: /home/app/ibc_08-wasm
           deleteWithNode: true
+
+    config:
+      runFlags: ["--reject-config-defaults=true"]
       override:
         app.toml:
           minimum-gas-prices: 0.025uosmo
@@ -53,9 +55,8 @@ spec:
     - name: fullnodes
       instances: 1
 
-      config:
-        runFlags: ["--reject-config-defaults=true"]
-        volumes:
+      persistence:
+        additionalVolumes:
           - name: wasm
             size: 1Gi
             path: /home/app/wasm
@@ -64,6 +65,9 @@ spec:
             size: 1Gi
             path: /home/app/ibc_08-wasm
             deleteWithNode: true
+
+      config:
+        runFlags: ["--reject-config-defaults=true"]
         override:
           app.toml:
             minimum-gas-prices: 0.025uosmo
