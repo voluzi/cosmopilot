@@ -57,7 +57,7 @@ const (
 	DefaultStateSyncKeepRecent = 2
 
 	// DefaultSdkVersion is the default Cosmos SDK version.
-	DefaultSdkVersion = V0_47
+	DefaultSdkVersion = V0_53
 
 	// DefaultCommissionMaxChangeRate is the default maximum commission change rate.
 	DefaultCommissionMaxChangeRate = "0.1"

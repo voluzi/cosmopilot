@@ -83,15 +83,19 @@ spec:
                       is `latest` and `IfNotPresent` otherwise.
                     type: string
                   sdkVersion:
-                    default: v0.47
+                    default: v0.53
                     description: |-
                       SdkVersion specifies the version of cosmos-sdk used by this app.
                       Valid options are:
-                      - "v0.47" (default)
+                      - "v0.53" (default)
+                      - "v0.50"
+                      - "v0.47"
                       - "v0.45"
                     enum:
                     - v0.45
                     - v0.47
+                    - v0.50
+                    - v0.53
                     type: string
                   upgrades:
                     description: List of upgrades to schedule for this node.

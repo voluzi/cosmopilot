@@ -8,14 +8,17 @@ import (
 )
 
 func init() {
-	sdkCreator := func(globalOptions ...Option) SDK {
-		options := newDefaultOptions()
-		for _, option := range globalOptions {
-			option(options)
-		}
-		return &v0_45{options: options}
+	RegisterSDK(appsv1.V0_45, func(globalOptions ...Option) SDK {
+		return newV0_45(globalOptions...)
+	})
+}
+
+func newV0_45(globalOptions ...Option) *v0_45 {
+	options := newDefaultOptions()
+	for _, option := range globalOptions {
+		option(options)
 	}
-	RegisterSDK(appsv1.V0_45, sdkCreator)
+	return &v0_45{options: options}
 }
 
 type v0_45 struct {

@@ -58,10 +58,16 @@ const (
 )
 
 // SdkVersion specifies the cosmos-sdk version used by this application.
-// +kubebuilder:validation:Enum=v0.45;v0.47
+// +kubebuilder:validation:Enum=v0.45;v0.47;v0.50;v0.53
 type SdkVersion string
 
 const (
+	// Cosmos-sdk version v0.53.x.
+	V0_53 SdkVersion = "v0.53"
+
+	// Cosmos-sdk version v0.50.x.
+	V0_50 SdkVersion = "v0.50"
+
 	// Cosmos-sdk version v0.47.x.
 	V0_47 SdkVersion = "v0.47"
 
@@ -112,10 +118,12 @@ type AppSpec struct {
 
 	// SdkVersion specifies the version of cosmos-sdk used by this app.
 	// Valid options are:
-	// - "v0.47" (default)
+	// - "v0.53" (default)
+	// - "v0.50"
+	// - "v0.47"
 	// - "v0.45"
 	// +optional
-	// +default="v0.47"
+	// +default="v0.53"
 	SdkVersion *SdkVersion `json:"sdkVersion,omitempty"`
 
 	// Whether cosmopilot should query gov proposals to find and schedule upgrades.

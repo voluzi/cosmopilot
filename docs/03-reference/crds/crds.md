@@ -410,7 +410,7 @@ AppSpec specifies the source image, version and binary name of the app to run. A
 | version | Image tag to be used. Once there are completed or skipped upgrades this will be ignored. For a new node that will be state-synced, this will be the version used during state-sync. Only after that, the cosmopilot will switch to the version of last upgrade. Defaults to `latest`. | *string | false |
 | imagePullPolicy | Indicates the desired pull policy when creating nodes. Defaults to `Always` if `version` is `latest` and `IfNotPresent` otherwise. | corev1.PullPolicy | false |
 | app | Binary name of the application to be run. | string | true |
-| sdkVersion | SdkVersion specifies the version of cosmos-sdk used by this app. Valid options are: - \"v0.47\" (default) - \"v0.45\" | *SdkVersion | false |
+| sdkVersion | SdkVersion specifies the version of cosmos-sdk used by this app. Valid options are: - \"v0.53\" (default) - \"v0.50\" - \"v0.47\" - \"v0.45\" | *SdkVersion | false |
 | checkGovUpgrades | Whether cosmopilot should query gov proposals to find and schedule upgrades. Defaults to `true`. | *bool | false |
 | upgrades | List of upgrades to schedule for this node. | [][UpgradeSpec](#upgradespec) | false |
 

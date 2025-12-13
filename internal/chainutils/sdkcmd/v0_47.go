@@ -8,21 +8,17 @@ import (
 )
 
 func init() {
-	sdkCreator := func(globalOptions ...Option) SDK {
-		options := newDefaultOptions()
-		for _, option := range globalOptions {
-			option(options)
-		}
-		v := v0_47{options: options}
-		v.v0_45.options = options
-		return &v
-	}
-	RegisterSDK(appsv1.V0_47, sdkCreator)
+	RegisterSDK(appsv1.V0_47, func(globalOptions ...Option) SDK {
+		return newV0_47(globalOptions...)
+	})
+}
+
+func newV0_47(globalOptions ...Option) *v0_47 {
+	return &v0_47{v0_45: *newV0_45(globalOptions...)}
 }
 
 type v0_47 struct {
-	v0_45   // Use this version for non specified methods
-	options *Options
+	v0_45
 }
 
 func (sdk *v0_47) AddGenesisAccountArgs(account string, assets []string) []string {
