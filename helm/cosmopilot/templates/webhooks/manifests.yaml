@@ -13,7 +13,7 @@ webhooks:
       service:
         name: {{ .Release.Name }}-webhook
         namespace: {{ .Release.Namespace }}
-        path: /validate-cosmopilot.voluzi.com-v1-chainnode
+        path: /validate-cosmopilot-voluzi-com-v1-chainnode
     failurePolicy: Fail
     matchPolicy: Exact
     sideEffects: None
@@ -42,7 +42,7 @@ webhooks:
       service:
         name: {{ .Release.Name }}-webhook
         namespace: {{ .Release.Namespace }}
-        path: /validate-cosmopilot.voluzi.com-v1-chainnodeset
+        path: /validate-cosmopilot-voluzi-com-v1-chainnodeset
     failurePolicy: Fail
     matchPolicy: Exact
     sideEffects: None
