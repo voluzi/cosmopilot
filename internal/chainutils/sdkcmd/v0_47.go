@@ -22,6 +22,9 @@ type v0_47 struct {
 }
 
 func (sdk *v0_47) AddGenesisAccountArgs(account string, assets []string) []string {
+	if !sdk.options.GenesisSubcommand {
+		return sdk.v0_45.AddGenesisAccountArgs(account, assets)
+	}
 	return append(
 		[]string{"genesis", "add-genesis-account", account, strings.Join(assets, ",")},
 		sdk.options.GlobalArgs...,
@@ -29,6 +32,9 @@ func (sdk *v0_47) AddGenesisAccountArgs(account string, assets []string) []strin
 }
 
 func (sdk *v0_47) GenTxArgs(account, moniker, stakeAmount, chainID string, options ...*ArgOption) []string {
+	if !sdk.options.GenesisSubcommand {
+		return sdk.v0_45.GenTxArgs(account, moniker, stakeAmount, chainID, options...)
+	}
 	args := []string{
 		"genesis", "gentx", account, stakeAmount,
 		"--moniker", moniker,
@@ -41,6 +47,9 @@ func (sdk *v0_47) GenTxArgs(account, moniker, stakeAmount, chainID string, optio
 }
 
 func (sdk *v0_47) CollectGenTxsArgs() []string {
+	if !sdk.options.GenesisSubcommand {
+		return sdk.v0_45.CollectGenTxsArgs()
+	}
 	return append(
 		[]string{"genesis", "collect-gentxs"},
 		sdk.options.GlobalArgs...,

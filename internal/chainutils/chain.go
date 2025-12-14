@@ -66,8 +66,9 @@ type AdditionalVolume struct {
 }
 
 func NewApp(client *kubernetes.Clientset, scheme *runtime.Scheme, cfg *rest.Config,
-	owner metav1.Object, sdkVersion appsv1.SdkVersion, options ...Option) (*App, error) {
-	cmd, err := sdkcmd.GetSDK(sdkVersion, sdkcmd.WithGlobalArg(sdkcmd.Home, defaultHome))
+	owner metav1.Object, sdkVersion appsv1.SdkVersion, sdkOpts []sdkcmd.Option, options ...Option) (*App, error) {
+	allSdkOpts := append([]sdkcmd.Option{sdkcmd.WithGlobalArg(sdkcmd.Home, defaultHome)}, sdkOpts...)
+	cmd, err := sdkcmd.GetSDK(sdkVersion, allSdkOpts...)
 	if err != nil {
 		return nil, err
 	}

@@ -7,7 +7,7 @@ spec:
     image: ghcr.io/cosmos/gaia
     version: v25.2.0
     app: gaiad
-    sdkVersion: v0.47
+    sdkVersion: v0.53
 
   validator:
     info:

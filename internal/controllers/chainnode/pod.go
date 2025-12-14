@@ -27,6 +27,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/api/v1"
 	"github.com/voluzi/cosmopilot/internal/chainutils"
+	"github.com/voluzi/cosmopilot/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/internal/controllers"
 	"github.com/voluzi/cosmopilot/internal/k8s"
 	"github.com/voluzi/cosmopilot/pkg/nodeutils"
@@ -177,6 +178,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		// Force update config files, to prevent restarting again because of config changes
 		app, err := chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, chainNode,
 			chainNode.Spec.App.GetSdkVersion(),
+			[]sdkcmd.Option{sdkcmd.WithGenesisSubcommand(chainNode.Spec.App.UseGenesisSubcommand())},
 			chainutils.WithImage(chainNode.GetAppImage()),
 			chainutils.WithImagePullPolicy(chainNode.Spec.App.ImagePullPolicy),
 			chainutils.WithBinary(chainNode.Spec.App.App),

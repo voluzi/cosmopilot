@@ -10,6 +10,7 @@ spec:
     image: ghcr.io/nibiruchain/nibiru
     version: 0.21.9
     app: nibid
+    sdkVersion: v0.47
 
   validator:
     info:

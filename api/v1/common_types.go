@@ -135,6 +135,19 @@ type AppSpec struct {
 	// List of upgrades to schedule for this node.
 	// +optional
 	Upgrades []UpgradeSpec `json:"upgrades,omitempty"`
+
+	// SdkOptions allows customizing SDK command behavior for chains that diverge from standard SDK CLI.
+	// +optional
+	SdkOptions *SdkOptions `json:"sdkOptions,omitempty"`
+}
+
+// SdkOptions allows customizing SDK command behavior for chains that diverge from standard SDK CLI structure.
+type SdkOptions struct {
+	// GenesisSubcommand controls whether genesis commands use the "genesis" subcommand
+	// (e.g., "genesis gentx" vs "gentx"). Some chains like Osmosis don't use this subcommand.
+	// Defaults to true for sdkVersion >= v0.47, false otherwise.
+	// +optional
+	GenesisSubcommand *bool `json:"genesisSubcommand,omitempty"`
 }
 
 // Config allows setting specific configurations for a node, including overriding configs in app.toml and config.toml.

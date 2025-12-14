@@ -10,6 +10,9 @@ spec:
     image: osmolabs/osmosis
     version: 31.0.0
     app: osmosisd
+    sdkVersion: v0.53
+    sdkOptions:
+      genesisSubcommand: false
 
   genesis:
     url: https://github.com/osmosis-labs/networks/raw/main/osmosis-1/genesis.json

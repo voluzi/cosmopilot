@@ -41,6 +41,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [Peer](#peer)
 * [Persistence](#persistence)
 * [PvcSnapshot](#pvcsnapshot)
+* [SdkOptions](#sdkoptions)
 * [SidecarSpec](#sidecarspec)
 * [StateSyncConfig](#statesyncconfig)
 * [TmKMS](#tmkms)
@@ -413,6 +414,7 @@ AppSpec specifies the source image, version and binary name of the app to run. A
 | sdkVersion | SdkVersion specifies the version of cosmos-sdk used by this app. Valid options are: - \"v0.53\" (default) - \"v0.50\" - \"v0.47\" - \"v0.45\" | *SdkVersion | false |
 | checkGovUpgrades | Whether cosmopilot should query gov proposals to find and schedule upgrades. Defaults to `true`. | *bool | false |
 | upgrades | List of upgrades to schedule for this node. | [][UpgradeSpec](#upgradespec) | false |
+| sdkOptions | SdkOptions allows customizing SDK command behavior for chains that diverge from standard SDK CLI. | *[SdkOptions](#sdkoptions) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -635,6 +637,16 @@ PvcSnapshot represents a snapshot to be used to restore a PVC.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | name | Name of the volume snapshot being referenced. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SdkOptions
+
+SdkOptions allows customizing SDK command behavior for chains that diverge from standard SDK CLI structure.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| genesisSubcommand | GenesisSubcommand controls whether genesis commands use the \"genesis\" subcommand (e.g., \"genesis gentx\" vs \"gentx\"). Some chains like Osmosis don't use this subcommand. Defaults to true for sdkVersion >= v0.47, false otherwise. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)
 

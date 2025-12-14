@@ -128,6 +128,21 @@ func (app *AppSpec) ShouldQueryGovUpgrades() bool {
 	return true
 }
 
+// UseGenesisSubcommand returns whether genesis commands should use the "genesis" subcommand
+// (e.g., "genesis gentx" vs "gentx"). Defaults to true for sdkVersion >= v0.47.
+func (app *AppSpec) UseGenesisSubcommand() bool {
+	if app.SdkOptions != nil && app.SdkOptions.GenesisSubcommand != nil {
+		return *app.SdkOptions.GenesisSubcommand
+	}
+	// Default based on SDK version: v0.47+ uses genesis subcommand
+	switch app.GetSdkVersion() {
+	case V0_45:
+		return false
+	default:
+		return true
+	}
+}
+
 // GenesisConfig helper methods
 
 func (g *GenesisConfig) ShouldUseDataVolume() bool {

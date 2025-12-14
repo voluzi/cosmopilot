@@ -10,6 +10,7 @@ spec:
     image: ghcr.io/cosmos/gaia
     version: v25.2.0
     app: gaiad
+    sdkVersion: v0.53
 
   genesis:
     url: https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz

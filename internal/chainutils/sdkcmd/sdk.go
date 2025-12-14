@@ -37,20 +37,28 @@ type SDK interface {
 }
 
 type Options struct {
-	GlobalArgs []string
+	GlobalArgs        []string
+	GenesisSubcommand bool
 }
 
 type Option func(*Options)
 
 func newDefaultOptions() *Options {
 	return &Options{
-		GlobalArgs: make([]string, 0),
+		GlobalArgs:        make([]string, 0),
+		GenesisSubcommand: true, // Default for v0.47+
 	}
 }
 
 func WithGlobalArg(key, value string) Option {
 	return func(opts *Options) {
 		opts.GlobalArgs = append(opts.GlobalArgs, fmt.Sprintf("--%s", key), value)
+	}
+}
+
+func WithGenesisSubcommand(use bool) Option {
+	return func(opts *Options) {
+		opts.GenesisSubcommand = use
 	}
 }
 

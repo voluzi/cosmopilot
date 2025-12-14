@@ -10,6 +10,7 @@ spec:
     image: ghcr.io/nibiruchain/nibiru
     version: 1.5.0
     app: nibid
+    sdkVersion: v0.47
 
   validator:
     info:
@@ -84,6 +85,7 @@ spec:
     image: ghcr.io/nibiruchain/nibiru
     version: 1.5.0
     app: nibid
+    sdkVersion: v0.47
 
   genesis:
     fromNodeRPC:
@@ -133,6 +135,7 @@ spec:
     image: ghcr.io/nibiruchain/nibiru
     version: 1.5.0
     app: nibid
+    sdkVersion: v0.47
 
   genesis:
     fromNodeRPC:
@@ -182,6 +185,7 @@ spec:
     image: ghcr.io/nibiruchain/nibiru
     version: 1.5.0
     app: nibid
+    sdkVersion: v0.47
 
   genesis:
     fromNodeRPC:

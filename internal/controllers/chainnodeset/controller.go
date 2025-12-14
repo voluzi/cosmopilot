@@ -16,6 +16,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/api/v1"
 	"github.com/voluzi/cosmopilot/internal/chainutils"
+	"github.com/voluzi/cosmopilot/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/internal/controllers"
 )
 
@@ -96,6 +97,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	app, err := chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, nodeSet,
 		nodeSet.Spec.App.GetSdkVersion(),
+		[]sdkcmd.Option{sdkcmd.WithGenesisSubcommand(nodeSet.Spec.App.UseGenesisSubcommand())},
 		chainutils.WithImage(nodeSet.Spec.App.GetImage()),
 		chainutils.WithImagePullPolicy(nodeSet.Spec.App.ImagePullPolicy),
 		chainutils.WithBinary(nodeSet.Spec.App.App),

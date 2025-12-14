@@ -980,6 +980,17 @@ spec:
                       Indicates the desired pull policy when creating nodes. Defaults to `Always` if `version`
                       is `latest` and `IfNotPresent` otherwise.
                     type: string
+                  sdkOptions:
+                    description: SdkOptions allows customizing SDK command behavior
+                      for chains that diverge from standard SDK CLI.
+                    properties:
+                      genesisSubcommand:
+                        description: |-
+                          GenesisSubcommand controls whether genesis commands use the "genesis" subcommand
+                          (e.g., "genesis gentx" vs "gentx"). Some chains like Osmosis don't use this subcommand.
+                          Defaults to true for sdkVersion >= v0.47, false otherwise.
+                        type: boolean
+                    type: object
                   sdkVersion:
                     default: v0.53
                     description: |-
