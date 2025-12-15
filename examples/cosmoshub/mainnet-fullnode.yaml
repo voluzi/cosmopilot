@@ -35,7 +35,6 @@ spec:
           - name: wasm
             size: 1Gi
             path: /home/app/wasm
-            deleteWithNode: true
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]

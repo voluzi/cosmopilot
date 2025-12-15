@@ -39,8 +39,11 @@ const (
 	defaultStateSyncTrustPeriod = "168h0m0s"
 	defaultLogsLineCount        = 50
 
-	snapshotCheckPeriod   = 15 * time.Second
-	pvcDeletionWaitPeriod = 15 * time.Second
+	snapshotCheckPeriod        = 15 * time.Second
+	pvcDeletionWaitPeriod      = 15 * time.Second
+	initDataCheckPeriod        = 30 * time.Second
+	initDataRetryPeriod        = 10 * time.Second
+	initDataUnknownPhasePeriod = 10 * time.Second
 
 	cosmoGuardContainerName = "cosmoguard"
 	cosmoGuardVolumeName    = "cosmoguard-config"

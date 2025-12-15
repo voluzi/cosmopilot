@@ -27,11 +27,9 @@ spec:
           - name: wasm
             size: 1Gi
             path: /home/app/wasm
-            deleteWithNode: true
           - name: ibc-08-wasm
             size: 1Gi
             path: /home/app/ibc_08-wasm
-            deleteWithNode: true
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]

@@ -185,9 +185,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	logger.V(1).Info("ensure data volume")
-	pvc, err := r.ensureDataVolume(ctx, app, chainNode)
+	pvc, result, err := r.ensureDataVolume(ctx, app, chainNode)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	// If data initialization is in progress, return early with the requeue result
+	if result.RequeueAfter > 0 || result.Requeue {
+		return result, nil
 	}
 
 	// If PVC is being deleted lets wait before trying again.

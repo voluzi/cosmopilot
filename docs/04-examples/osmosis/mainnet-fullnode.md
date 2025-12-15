@@ -25,16 +25,14 @@ spec:
 
       persistence:
         size: 100Gi
-        initTimeout: 10m
+        initTimeout: 30m
         additionalVolumes:
           - name: wasm
             size: 1Gi
             path: /home/app/wasm
-            deleteWithNode: true
           - name: ibc-08-wasm
             size: 1Gi
             path: /home/app/ibc_08-wasm
-            deleteWithNode: true
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
@@ -43,7 +41,7 @@ spec:
               - |
                 SNAPSHOT_URL=$(wget -qO- https://snapshots.osmosis.zone/index.html | sed -n 's/.*href="\(https:\/\/hel1\.your-objectstorage\.com\/osmosis\/osmosis-1\/snapshots\/v31\/[^"]*\.tar\.lz4\)".*/\1/p' | tail -1) && \
                 echo "Downloading snapshot: $SNAPSHOT_URL" && \
-                wget -qO- "$SNAPSHOT_URL" | lz4 -d | tar -C /home/app -xvf -
+                wget -T 0 -qO- "$SNAPSHOT_URL" | lz4 -d | tar -C /home/app -xvf -
 
       config:
         runFlags: [ "--reject-config-defaults=true" ]

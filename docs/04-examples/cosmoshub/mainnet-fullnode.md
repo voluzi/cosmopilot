@@ -33,12 +33,11 @@ spec:
 
       persistence:
         size: 100Gi
-        initTimeout: 30m
+        initTimeout: 1h
         additionalVolumes:
           - name: wasm
             size: 1Gi
             path: /home/app/wasm
-            deleteWithNode: true
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
@@ -47,7 +46,7 @@ spec:
               - |
                 SNAPSHOT_URL="https://storage1.quicksync.io/cosmos/mainnet/daily/latest.tar.zst" && \
                 echo "Downloading snapshot: $SNAPSHOT_URL" && \
-                wget -qO- "$SNAPSHOT_URL" | zstd -d | tar -C /home/app -xvf -
+                wget -T 0 -qO- "$SNAPSHOT_URL" | zstd -d | tar -C /home/app -xvf -
 
       config:
         override:

@@ -13,6 +13,8 @@ const (
 	ReasonPvcResized             = "PvcResized"
 	ReasonPvcMaxReached          = "PvcMaxSizeReached"
 	ReasonDataInitialized        = "DataInitialized"
+	ReasonDataInitStarted        = "DataInitStarted"
+	ReasonDataInitFailed         = "DataInitFailed"
 	ReasonNodeKeyCreated         = "NodeKeyCreated"
 	ReasonNodeKeyImported        = "NodeKeyImported"
 	ReasonPrivateKeyCreated      = "PrivateKeyCreated"
