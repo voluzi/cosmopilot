@@ -486,6 +486,14 @@ type InitCommand struct {
 
 	// Args to be passed to this command.
 	Args []string `json:"args"`
+
+	// Resources specifies the resource requirements for this init command container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Env specifies additional environment variables for this init command container.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // GenesisConfig specifies how genesis will be retrieved.

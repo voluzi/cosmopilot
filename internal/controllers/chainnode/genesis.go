@@ -240,7 +240,12 @@ func (r *Reconciler) initGenesis(ctx context.Context, app *chainutils.App, chain
 
 	initCommands := make([]*chainutils.InitCommand, len(chainNode.Spec.Validator.Init.AdditionalInitCommands))
 	for i, c := range chainNode.Spec.Validator.Init.AdditionalInitCommands {
-		initCommands[i] = &chainutils.InitCommand{Args: c.Args, Command: c.Command}
+		initCommands[i] = &chainutils.InitCommand{
+			Args:      c.Args,
+			Command:   c.Command,
+			Resources: c.Resources,
+			Env:       c.Env,
+		}
 		if c.Image != nil {
 			initCommands[i].Image = *c.Image
 		} else {

@@ -182,6 +182,8 @@ func (a *App) NewGenesis(ctx context.Context,
 			Command:      cmd.Command,
 			Args:         cmd.Args,
 			VolumeMounts: []corev1.VolumeMount{dataVolumeMount, tempVolumeMount},
+			Resources:    cmd.Resources,
+			Env:          cmd.Env,
 		})
 	}
 

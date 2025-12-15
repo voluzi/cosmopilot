@@ -140,7 +140,12 @@ func (r *Reconciler) markDataInitialized(ctx context.Context, chainNode *appsv1.
 func (r *Reconciler) buildInitCommands(chainNode *appsv1.ChainNode) []*chainutils.InitCommand {
 	initCommands := make([]*chainutils.InitCommand, len(chainNode.GetPersistenceInitCommands()))
 	for i, c := range chainNode.GetPersistenceInitCommands() {
-		initCommands[i] = &chainutils.InitCommand{Args: c.Args, Command: c.Command}
+		initCommands[i] = &chainutils.InitCommand{
+			Args:      c.Args,
+			Command:   c.Command,
+			Resources: c.Resources,
+			Env:       c.Env,
+		}
 		if c.Image != nil {
 			initCommands[i].Image = *c.Image
 		} else {

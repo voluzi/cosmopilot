@@ -123,6 +123,8 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 			Command:      cmd.Command,
 			Args:         cmd.Args,
 			VolumeMounts: initCommandVolumeMounts,
+			Resources:    cmd.Resources,
+			Env:          cmd.Env,
 		})
 	}
 

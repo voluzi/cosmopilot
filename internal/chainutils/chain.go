@@ -54,9 +54,11 @@ type AccountAssets struct {
 }
 
 type InitCommand struct {
-	Image   string
-	Command []string
-	Args    []string
+	Image     string
+	Command   []string
+	Args      []string
+	Resources corev1.ResourceRequirements
+	Env       []corev1.EnvVar
 }
 
 type AdditionalVolume struct {

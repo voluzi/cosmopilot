@@ -592,6 +592,8 @@ InitCommand represents an initialization command. It may be used for running add
 | image | Image to be used to run this command. Defaults to app image. | *string | false |
 | command | Command to be used. Defaults to image entrypoint. | []string | false |
 | args | Args to be passed to this command. | []string | true |
+| resources | Resources specifies the resource requirements for this init command container. | corev1.ResourceRequirements | false |
+| env | Env specifies additional environment variables for this init command container. | []corev1.EnvVar | false |
 
 [Back to Custom Resources](#custom-resources)
 
