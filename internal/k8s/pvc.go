@@ -41,6 +41,7 @@ func (h *PvcHelper) WriteToFile(ctx context.Context, content, path, pc string, a
 			PriorityClassName:             pc,
 			Affinity:                      af,
 			NodeSelector:                  ns,
+			SecurityContext:               RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
 					Name: "pvc",
@@ -53,9 +54,10 @@ func (h *PvcHelper) WriteToFile(ctx context.Context, content, path, pc string, a
 			},
 			Containers: []corev1.Container{
 				{
-					Name:    "busybox",
-					Image:   "busybox",
-					Command: []string{"/bin/sh"},
+					Name:            "busybox",
+					Image:           "busybox",
+					Command:         []string{"/bin/sh"},
+					SecurityContext: RestrictedSecurityContext(),
 					Args: []string{
 						"-c",
 						fmt.Sprintf("cp /dev/stdin %s", filepath.Join("/pvc", path)),
@@ -124,6 +126,7 @@ func (h *PvcHelper) DownloadGenesis(ctx context.Context, url, path, pc string, a
 			PriorityClassName:             pc,
 			Affinity:                      af,
 			NodeSelector:                  ns,
+			SecurityContext:               RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
 					Name: "pvc",
@@ -136,10 +139,11 @@ func (h *PvcHelper) DownloadGenesis(ctx context.Context, url, path, pc string, a
 			},
 			Containers: []corev1.Container{
 				{
-					Name:    "downloader",
-					Image:   image,
-					Command: []string{"/bin/sh"},
-					Args:    []string{"-c", cmd},
+					Name:            "downloader",
+					Image:           image,
+					Command:         []string{"/bin/sh"},
+					SecurityContext: RestrictedSecurityContext(),
+					Args:            []string{"-c", cmd},
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "pvc",

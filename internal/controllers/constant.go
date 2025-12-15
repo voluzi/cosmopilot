@@ -14,8 +14,6 @@ const (
 	CosmoGuardEvmRpcWsPortName = "fw-evm-rpc-ws"
 	CosmoGuardEvmRpcWsPort     = 18546
 
-	NonRootId = 1000
-
 	CosmoseedName = "cosmoseed"
 
 	AnnotationStateSyncTrustHeight    = "cosmopilot.voluzi.com/state-sync-trust-height"

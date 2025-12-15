@@ -51,11 +51,7 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 			PriorityClassName: a.priorityClassName,
 			Affinity:          a.Affinity,
 			NodeSelector:      a.NodeSelector,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:  ptr.To[int64](nonRootId),
-				RunAsGroup: ptr.To[int64](nonRootId),
-				FSGroup:    ptr.To[int64](nonRootId),
-			},
+			SecurityContext:   k8s.RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
 					Name: dataVolumeMount.Name,
@@ -86,14 +82,16 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 					Command:         []string{a.binary},
 					Args:            a.cmd.InitArgs(none, none),
 					VolumeMounts:    []corev1.VolumeMount{homeVolumeMount, dataVolumeMount},
+					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
 			},
 			Containers: []corev1.Container{
 				// no-op container
 				{
-					Name:    "busybox",
-					Image:   "busybox",
-					Command: []string{"echo"},
+					Name:            "busybox",
+					Image:           "busybox",
+					Command:         []string{"echo"},
+					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
 			},
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
@@ -118,13 +116,14 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 	// Add additional commands
 	for i, cmd := range initCommands {
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
-			Name:         fmt.Sprintf("init-command-%d", i),
-			Image:        cmd.Image,
-			Command:      cmd.Command,
-			Args:         cmd.Args,
-			VolumeMounts: initCommandVolumeMounts,
-			Resources:    cmd.Resources,
-			Env:          cmd.Env,
+			Name:            fmt.Sprintf("init-command-%d", i),
+			Image:           cmd.Image,
+			Command:         cmd.Command,
+			Args:            cmd.Args,
+			VolumeMounts:    initCommandVolumeMounts,
+			Resources:       cmd.Resources,
+			Env:             cmd.Env,
+			SecurityContext: k8s.RestrictedSecurityContext(),
 		})
 	}
 

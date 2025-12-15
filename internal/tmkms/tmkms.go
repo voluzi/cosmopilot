@@ -123,6 +123,7 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 					Name:            tmkmsAppName,
 					Image:           kms.Config.Image,
 					ImagePullPolicy: corev1.PullAlways,
+					SecurityContext: k8s.RestrictedSecurityContext(),
 					Command:         []string{"/bin/sh", "-c", "tmkms init /root/tmkms"},
 					VolumeMounts: []corev1.VolumeMount{
 						{
@@ -137,6 +138,7 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 					Name:            "busybox",
 					Image:           kms.Config.Image,
 					ImagePullPolicy: corev1.PullAlways,
+					SecurityContext: k8s.RestrictedSecurityContext(),
 					Command:         []string{"cat", "/root/tmkms/secrets/" + identityKeyName},
 					VolumeMounts: []corev1.VolumeMount{
 						{
@@ -319,6 +321,7 @@ func (kms *KMS) GetContainersSpec() []corev1.Container {
 			Name:            tmkmsAppName,
 			Image:           kms.Config.Image,
 			ImagePullPolicy: corev1.PullAlways,
+			SecurityContext: k8s.RestrictedSecurityContext(),
 			Args:            []string{"start", "-c", "/data/" + configFileName},
 			VolumeMounts:    volumeMounts,
 			Env: []corev1.EnvVar{
