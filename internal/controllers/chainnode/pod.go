@@ -926,11 +926,16 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 		defer lock.Unlock()
 		logger.Info("acquired lock for recreating pod", "pod", pod.GetName(), "labels", disruptionLabels)
 
-		logger.Info("checking pod disruption", "pod", pod.GetName(), "labels", disruptionLabels)
-		err := r.checkDisruptionAllowance(ctx, disruptionLabels)
-		if err != nil {
-			logger.Info("delaying pod recreation due to disruption limits", "pod", pod.GetName(), "reason", err.Error())
-			return nil
+		// If the pod is already unavailable, recreating it won't increase disruption
+		if isPodRunningAndReady(pod) {
+			logger.Info("checking pod disruption", "pod", pod.GetName(), "labels", disruptionLabels)
+			err := r.checkDisruptionAllowance(ctx, disruptionLabels)
+			if err != nil {
+				logger.Info("delaying pod recreation due to disruption limits", "pod", pod.GetName(), "reason", err.Error())
+				return nil
+			}
+		} else {
+			logger.Info("pod is already unavailable, skipping disruption check", "pod", pod.GetName())
 		}
 	}
 

@@ -27,7 +27,7 @@ spec:
 
       persistence:
         size: 100Gi
-        initTimeout: 30m
+        initTimeout: 1h
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]

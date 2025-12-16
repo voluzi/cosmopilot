@@ -31,7 +31,7 @@ spec:
 
       persistence:
         size: 100Gi
-        initTimeout: 30m
+        initTimeout: 1h
         additionalVolumes:
           - name: wasm
             size: 1Gi
