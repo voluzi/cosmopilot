@@ -1348,10 +1348,10 @@ spec:
                       description: Specific configurations for these nodes.
                       properties:
                         blockThreshold:
-                          default: 15s
+                          default: 0s
                           description: |-
                             The time to wait for a block before considering node unhealthy.
-                            Defaults to `15s`.
+                            Defaults to `0s`.
                           format: duration
                           type: string
                         cosmoGuard:
@@ -1657,7 +1657,7 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                         persistAddressBook:
                           description: Whether to persist address book file in data
-                            directory. Defaults to `false`.
+                            directory. Defaults to `true`.
                           type: boolean
                         podAnnotations:
                           additionalProperties:
@@ -5004,10 +5004,10 @@ spec:
                     description: Allows setting specific configurations for the validator.
                     properties:
                       blockThreshold:
-                        default: 15s
+                        default: 0s
                         description: |-
                           The time to wait for a block before considering node unhealthy.
-                          Defaults to `15s`.
+                          Defaults to `0s`.
                         format: duration
                         type: string
                       cosmoGuard:
@@ -5312,7 +5312,7 @@ spec:
                         x-kubernetes-preserve-unknown-fields: true
                       persistAddressBook:
                         description: Whether to persist address book file in data
-                          directory. Defaults to `false`.
+                          directory. Defaults to `true`.
                         type: boolean
                       podAnnotations:
                         additionalProperties:

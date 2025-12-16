@@ -169,9 +169,9 @@ type Config struct {
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
 	// The time to wait for a block before considering node unhealthy.
-	// Defaults to `15s`.
+	// Defaults to `0s`.
 	// +optional
-	// +default="15s"
+	// +default="0s"
 	// +kubebuilder:validation:Format=duration
 	BlockThreshold *string `json:"blockThreshold,omitempty"`
 
@@ -229,7 +229,7 @@ type Config struct {
 	// +optional
 	NodeUtilsResources *corev1.ResourceRequirements `json:"nodeUtilsResources,omitempty"`
 
-	// Whether to persist address book file in data directory. Defaults to `false`.
+	// Whether to persist address book file in data directory. Defaults to `true`.
 	// +optional
 	PersistAddressBook *bool `json:"persistAddressBook,omitempty"`
 

@@ -438,7 +438,7 @@ Config allows setting specific configurations for a node, including overriding c
 | override | Allows overriding configs on `.toml` configuration files. | *map[string]runtime.RawExtension | false |
 | sidecars | Allows configuring additional containers to run alongside the node. | [][SidecarSpec](#sidecarspec) | false |
 | imagePullSecrets | Optional list of references to secrets in the same namespace to use for pulling any of the images used by this node. | []corev1.LocalObjectReference | false |
-| blockThreshold | The time to wait for a block before considering node unhealthy. Defaults to `15s`. | *string | false |
+| blockThreshold | The time to wait for a block before considering node unhealthy. Defaults to `0s`. | *string | false |
 | reconcilePeriod | Period at which a reconcile loop will happen for this ChainNode. Defaults to `15s`. | *string | false |
 | stateSync | Allows configuring this node to perform state-sync snapshots. | *[StateSyncConfig](#statesyncconfig) | false |
 | seedMode | Configures this node to run on seed mode. Defaults to `false`. | *bool | false |
@@ -450,7 +450,7 @@ Config allows setting specific configurations for a node, including overriding c
 | startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
 | ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
 | nodeUtilsResources | Compute Resources for node-utils container. | *corev1.ResourceRequirements | false |
-| persistAddressBook | Whether to persist address book file in data directory. Defaults to `false`. | *bool | false |
+| persistAddressBook | Whether to persist address book file in data directory. Defaults to `true`. | *bool | false |
 | terminationGracePeriodSeconds | Optional duration in seconds the pod needs to terminate gracefully. | *int64 | false |
 | evmEnabled | Whether EVM is enabled on this node. Will add evm-rpc port to services. Defaults to `false`. | *bool | false |
 | runFlags | List of flags to be appended to app container when starting the node. | []string | false |

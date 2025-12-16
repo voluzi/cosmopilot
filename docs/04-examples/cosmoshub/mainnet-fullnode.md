@@ -22,11 +22,11 @@ spec:
       instances: 1
 
       peers:
-        # Lavender.Five Nodes 🐝
+        # Polkachu Nodes
         - id: ade4d8bc8cbe014af6ebdf3cb7b1e9ad36f412c0
           address: seeds.polkachu.com
           port: 14956
-        # Lavender.Five Nodes 🐝
+        # Lavender.Five Nodes
         - id: 20e1000e88125698264454a884812746c2eb4807
           address: seeds.lavenderfive.com
           port: 14956

@@ -21,7 +21,7 @@ const (
 	DefaultImageVersion = "latest"
 
 	// DefaultBlockThreshold is the duration to wait for a block before marking the node unhealthy.
-	DefaultBlockThreshold = "15s"
+	DefaultBlockThreshold = "0s"
 
 	// DefaultStartupTime is the time after which a node is restarted if it fails to start.
 	DefaultStartupTime = time.Hour
@@ -274,7 +274,7 @@ func (cfg *Config) ShouldPersistAddressBook() bool {
 	if cfg != nil && cfg.PersistAddressBook != nil {
 		return *cfg.PersistAddressBook
 	}
-	return false
+	return true
 }
 
 func (cfg *Config) GetTerminationGracePeriodSeconds() *int64 {
