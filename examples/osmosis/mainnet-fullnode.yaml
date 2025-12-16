@@ -20,6 +20,12 @@ spec:
     - name: fullnodes
       instances: 1
 
+      peers:
+        # Polkachu Nodes
+        - id: ade4d8bc8cbe014af6ebdf3cb7b1e9ad36f412c0
+          address: seeds.polkachu.com
+          port: 12556
+
       persistence:
         size: 100Gi
         initTimeout: 30m
