@@ -29,7 +29,7 @@ spec:
           minimum-gas-prices: 0.025uatom
 
     init:
-      chainID: cosmos-hub-0
+      chainID: cosmoshub-testnet-0
       assets: ["1000000000000000000uatom"]
       stakeAmount: 100000000uatom
       minSelfDelegation: ""

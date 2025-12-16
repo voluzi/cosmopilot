@@ -1,14 +1,14 @@
-# Nibiru Devnet With Fullnode
+# Nibiru Testnet With Fullnode
 
 ```yaml
 apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
-  name: nibiru-devnet
+  name: nibiru-testnet
 spec:
   app:
     image: ghcr.io/nibiruchain/nibiru
-    version: 1.5.0
+    version: 2.9.0
     app: nibid
     sdkVersion: v0.47
 
@@ -20,31 +20,27 @@ spec:
       override:
         app.toml:
           minimum-gas-prices: 0.025unibi
-          mempool:
-            max-txs: 100000
-        config.toml:
-          mempool:
-            size: 100000
-            cache_size: 200000
 
       sidecars:
         - name: pricefeeder
-          image: ghcr.io/nibiruchain/pricefeeder:1.0.3
+          image: ghcr.io/nibiruchain/pricefeeder:1.1.1
           env:
             - name: FEEDER_MNEMONIC
               valueFrom:
                 secretKeyRef:
-                  name: nibiru-devnet-validator-account
+                  name: nibiru-testnet-validator-account
                   key: mnemonic
             - name: CHAIN_ID
-              value: nibiru-devnet-0
+              value: nibiru-testnet-0
             - name: GRPC_ENDPOINT
               value: localhost:9090
             - name: WEBSOCKET_ENDPOINT
               value: ws://localhost:26657/websocket
 
     init:
-      chainID: nibiru-devnet-0
+      chainID: nibiru-testnet-0
+      accountPrefix: nibi
+      valPrefix: nibivaloper
       assets: ["100000000000000unibi", "1000000000000000000unusd", "10000000000000000uusdt"]
       stakeAmount: 100000000unibi
       unbondingTime: 60s
