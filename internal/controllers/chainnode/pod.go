@@ -388,6 +388,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 		Image:           r.opts.NodeUtilsImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &sidecarRestartAlways,
+		SecurityContext: k8s.RestrictedSecurityContext(),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          nodeUtilsPortName,
@@ -464,6 +465,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 		Name:            chainNode.Spec.App.App,
 		Image:           chainNode.GetAppImage(),
 		ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
+		SecurityContext: k8s.RestrictedSecurityContext(),
 		Command:         []string{chainNode.Spec.App.App},
 		Args: append([]string{"start",
 			"--home", "/home/app",
@@ -626,16 +628,12 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			}),
 		},
 		Spec: corev1.PodSpec{
-			ShareProcessNamespace: ptr.To(true),
-			RestartPolicy:         corev1.RestartPolicyNever,
-			PriorityClassName:     r.opts.GetNodesPriorityClassName(),
-			Affinity:              chainNode.Spec.Affinity,
-			NodeSelector:          chainNode.Spec.NodeSelector,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:  ptr.To[int64](controllers.NonRootId),
-				RunAsGroup: ptr.To[int64](controllers.NonRootId),
-				FSGroup:    ptr.To[int64](controllers.NonRootId),
-			},
+			ShareProcessNamespace:         ptr.To(true),
+			RestartPolicy:                 corev1.RestartPolicyNever,
+			PriorityClassName:             r.opts.GetNodesPriorityClassName(),
+			Affinity:                      chainNode.Spec.Affinity,
+			NodeSelector:                  chainNode.Spec.NodeSelector,
+			SecurityContext:               k8s.RestrictedPodSecurityContext(),
 			TerminationGracePeriodSeconds: chainNode.Spec.Config.GetTerminationGracePeriodSeconds(),
 			Volumes:                       r.buildBaseVolumes(chainNode),
 			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode)},
@@ -696,9 +694,10 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		//TODO: This is a workaround. Remove this when issue with genesis_file field not being used is fixed
 		pod.Spec.InitContainers = append([]corev1.Container{
 			{
-				Name:    "link-genesis",
-				Image:   "busybox",
-				Command: []string{"/bin/sh"},
+				Name:            "link-genesis",
+				Image:           "busybox",
+				Command:         []string{"/bin/sh"},
+				SecurityContext: k8s.RestrictedSecurityContext(),
 				Args: []string{
 					"-c",
 					"ln -s /home/app/data/genesis.json /home/app/config/genesis.json",
@@ -831,6 +830,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			Image:           r.opts.CosmoGuardImage,
 			ImagePullPolicy: corev1.PullAlways,
 			RestartPolicy:   &sidecarRestartAlways,
+			SecurityContext: k8s.RestrictedSecurityContext(),
 			Args:            []string{"-config", filepath.Join("/config/", chainNode.Spec.Config.GetCosmoGuardConfig().Key)},
 			Ports: []corev1.ContainerPort{
 				{

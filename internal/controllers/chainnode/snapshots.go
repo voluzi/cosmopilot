@@ -699,9 +699,10 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 					},
 					InitContainers: []corev1.Container{
 						{
-							Name:    "init-config",
-							Image:   "busybox",
-							Command: []string{"sh"},
+							Name:            "init-config",
+							Image:           "busybox",
+							Command:         []string{"sh"},
+							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args: []string{
 								"-c",
 								fmt.Sprintf(
@@ -737,6 +738,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 							Image:           chainNode.GetAppImage(),
 							ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
 							RestartPolicy:   &sidecarRestartAlways,
+							SecurityContext: k8s.RestrictedSecurityContext(),
 							Command:         []string{chainNode.Spec.App.App},
 							Args:            []string{"start", "--grpc-only", "--home", "/home/app"},
 							VolumeMounts: []corev1.VolumeMount{
@@ -757,6 +759,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 							Name:            "start-checker",
 							Image:           "busybox",
 							ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
+							SecurityContext: k8s.RestrictedSecurityContext(),
 							Command:         []string{"sh"},
 							Args: []string{
 								"-c",

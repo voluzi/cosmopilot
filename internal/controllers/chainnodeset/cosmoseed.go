@@ -327,16 +327,13 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string,
 				},
 				Spec: corev1.PodSpec{
 					PriorityClassName: r.opts.GetNodesPriorityClassName(),
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser:  ptr.To[int64](controllers.NonRootId),
-						RunAsGroup: ptr.To[int64](controllers.NonRootId),
-						FSGroup:    ptr.To[int64](controllers.NonRootId),
-					},
+					SecurityContext:   k8s.RestrictedPodSecurityContext(),
 					Containers: []corev1.Container{
 						{
 							Name:            controllers.CosmoseedName,
 							Image:           r.opts.CosmoseedImage,
 							ImagePullPolicy: corev1.PullAlways,
+							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args: []string{
 								"--home", cosmoseedMountPoint,
 								"--log-level", nodeSet.Spec.Cosmoseed.GetLogLevel(),

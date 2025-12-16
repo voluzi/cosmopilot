@@ -59,6 +59,7 @@ func (a *App) CreateValidator(
 					Stdin:           true,
 					StdinOnce:       true,
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
 			},
 			Containers: []corev1.Container{
@@ -83,7 +84,8 @@ func (a *App) CreateValidator(
 						sdkcmd.WithOptionalArg(sdkcmd.Identity, nodeInfo.Identity),
 						sdkcmd.WithArg(sdkcmd.Node, node),
 					),
-					VolumeMounts: []corev1.VolumeMount{dataVolumeMount},
+					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
 			},
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
