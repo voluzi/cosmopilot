@@ -492,7 +492,7 @@ func (r *Reconciler) ensureAdditionalVolumes(ctx context.Context, chainNode *app
 								corev1.ResourceStorage: specSize,
 							},
 						},
-						StorageClassName: volume.StorageClassName,
+						StorageClassName: volume.GetStorageClass(chainNode.GetPersistenceStorageClass()),
 					},
 				}
 

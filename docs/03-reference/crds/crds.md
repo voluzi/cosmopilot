@@ -849,7 +849,7 @@ VolumeSpec describes an additional volume to mount on a node.
 | name | The name of the volume. | string | true |
 | size | Size of the volume. | string | true |
 | path | Path specifies where this volume should be mounted. | string | true |
-| storageClass | Name of the storage class to use for this volume. Uses the default class if not specified. | *string | false |
+| storageClass | Name of the storage class to use for this volume. If not specified, defaults to .persistence.storageClass. If that is also not specified, the cluster default storage class will be used. | *string | false |
 | deleteWithNode | Whether this volume should be deleted when node is deleted. Defaults to `false`. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)

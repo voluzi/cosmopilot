@@ -597,6 +597,16 @@ func (v *VolumeSpec) ShouldDeleteWithNode() bool {
 	return false
 }
 
+// GetStorageClass returns the storage class for this volume.
+// If not explicitly set, it falls back to the provided fallback value (typically the main persistence storage class).
+// If the fallback is also nil, the cluster default storage class will be used.
+func (v *VolumeSpec) GetStorageClass(fallback *string) *string {
+	if v.StorageClassName != nil {
+		return v.StorageClassName
+	}
+	return fallback
+}
+
 // Vertical Pod Autoscaling
 
 func (vpa *VerticalAutoscalingConfig) IsEnabled() bool {

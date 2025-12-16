@@ -2584,8 +2584,10 @@ spec:
                                 description: Size of the volume.
                                 type: string
                               storageClass:
-                                description: Name of the storage class to use for
-                                  this volume. Uses the default class if not specified.
+                                description: |-
+                                  Name of the storage class to use for this volume.
+                                  If not specified, defaults to .persistence.storageClass. If that is also not specified,
+                                  the cluster default storage class will be used.
                                 type: string
                             required:
                             - name
@@ -6477,8 +6479,10 @@ spec:
                               description: Size of the volume.
                               type: string
                             storageClass:
-                              description: Name of the storage class to use for this
-                                volume. Uses the default class if not specified.
+                              description: |-
+                                Name of the storage class to use for this volume.
+                                If not specified, defaults to .persistence.storageClass. If that is also not specified,
+                                the cluster default storage class will be used.
                               type: string
                           required:
                           - name

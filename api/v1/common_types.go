@@ -266,7 +266,9 @@ type VolumeSpec struct {
 	// Path specifies where this volume should be mounted.
 	Path string `json:"path"`
 
-	// Name of the storage class to use for this volume. Uses the default class if not specified.
+	// Name of the storage class to use for this volume.
+	// If not specified, defaults to .persistence.storageClass. If that is also not specified,
+	// the cluster default storage class will be used.
 	// +optional
 	StorageClassName *string `json:"storageClass,omitempty"`
 
