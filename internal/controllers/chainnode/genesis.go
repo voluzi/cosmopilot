@@ -215,6 +215,7 @@ func (r *Reconciler) initGenesis(ctx context.Context, app *chainutils.App, chain
 		MinSelfDelegation:       chainNode.Spec.Validator.GetMinSelfDelegation(),
 		UnbondingTime:           chainNode.Spec.Validator.GetInitUnbondingTime(),
 		VotingPeriod:            chainNode.Spec.Validator.GetInitVotingPeriod(),
+		ExpeditedVotingPeriod:   chainNode.Spec.Validator.GetInitExpeditedVotingPeriod(),
 	}
 
 	for _, a := range chainNode.Spec.Validator.Init.ChainNodeAccounts {

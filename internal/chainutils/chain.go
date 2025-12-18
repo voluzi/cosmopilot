@@ -34,6 +34,7 @@ type Params struct {
 	Accounts                []AccountAssets
 	UnbondingTime           string
 	VotingPeriod            string
+	ExpeditedVotingPeriod   string
 	CommissionMaxChangeRate string
 	CommissionMaxRate       string
 	CommissionRate          string

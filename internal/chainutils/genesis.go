@@ -138,22 +138,6 @@ func (a *App) NewGenesis(ctx context.Context,
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
 					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
-				{
-					Name:            "set-unbonding-time",
-					Image:           "apteno/alpine-jq",
-					Command:         []string{"sh", "-c"},
-					Args:            []string{a.cmd.GenesisSetUnbondingTimeCmd(params.UnbondingTime, filepath.Join(defaultHome, defaultGenesisFile))},
-					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
-					SecurityContext: k8s.RestrictedSecurityContext(),
-				},
-				{
-					Name:            "set-voting-period",
-					Image:           "apteno/alpine-jq",
-					Command:         []string{"sh", "-c"},
-					Args:            []string{a.cmd.GenesisSetVotingPeriodCmd(params.VotingPeriod, filepath.Join(defaultHome, defaultGenesisFile))},
-					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
-					SecurityContext: k8s.RestrictedSecurityContext(),
-				},
 			},
 			Containers: []corev1.Container{
 				{
@@ -167,6 +151,38 @@ func (a *App) NewGenesis(ctx context.Context,
 			},
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
 		},
+	}
+
+	// Add genesis parameter modifications (only when explicitly set)
+	if params.UnbondingTime != "" {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:            "set-unbonding-time",
+			Image:           "apteno/alpine-jq",
+			Command:         []string{"sh", "-c"},
+			Args:            []string{a.cmd.GenesisSetUnbondingTimeCmd(params.UnbondingTime, filepath.Join(defaultHome, defaultGenesisFile))},
+			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+			SecurityContext: k8s.RestrictedSecurityContext(),
+		})
+	}
+	if params.VotingPeriod != "" {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:            "set-voting-period",
+			Image:           "apteno/alpine-jq",
+			Command:         []string{"sh", "-c"},
+			Args:            []string{a.cmd.GenesisSetVotingPeriodCmd(params.VotingPeriod, filepath.Join(defaultHome, defaultGenesisFile))},
+			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+			SecurityContext: k8s.RestrictedSecurityContext(),
+		})
+	}
+	if cmd := a.cmd.GenesisSetExpeditedVotingPeriodCmd(params.ExpeditedVotingPeriod, filepath.Join(defaultHome, defaultGenesisFile)); params.ExpeditedVotingPeriod != "" && cmd != "" {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:            "set-expedited-voting-period",
+			Image:           "apteno/alpine-jq",
+			Command:         []string{"sh", "-c"},
+			Args:            []string{cmd},
+			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+			SecurityContext: k8s.RestrictedSecurityContext(),
+		})
 	}
 
 	// Add additional accounts

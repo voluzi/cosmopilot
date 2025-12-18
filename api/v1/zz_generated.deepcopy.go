@@ -989,6 +989,11 @@ func (in *GenesisInitConfig) DeepCopyInto(out *GenesisInitConfig) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.ExpeditedVotingPeriod != nil {
+		in, out := &in.ExpeditedVotingPeriod, &out.ExpeditedVotingPeriod
+		*out = new(string)
+		**out = **in
+	}
 	if in.AdditionalInitCommands != nil {
 		in, out := &in.AdditionalInitCommands, &out.AdditionalInitCommands
 		*out = make([]InitCommand, len(*in))

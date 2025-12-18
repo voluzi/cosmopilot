@@ -1,6 +1,8 @@
 package sdkcmd
 
 import (
+	"fmt"
+
 	appsv1 "github.com/voluzi/cosmopilot/api/v1"
 )
 
@@ -16,4 +18,10 @@ func newV0_50(globalOptions ...Option) *v0_50 {
 
 type v0_50 struct {
 	v0_47
+}
+
+func (sdk *v0_50) GenesisSetExpeditedVotingPeriodCmd(votingPeriod, genesisFile string) string {
+	return fmt.Sprintf("jq '.app_state.gov.params.expedited_voting_period = %q' %s > /tmp/genesis.tmp && mv /tmp/genesis.tmp %s",
+		votingPeriod, genesisFile, genesisFile,
+	)
 }

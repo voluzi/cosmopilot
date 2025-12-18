@@ -94,3 +94,8 @@ func (sdk *v0_45) GenesisSetVotingPeriodCmd(votingPeriod, genesisFile string) st
 		votingPeriod, genesisFile, genesisFile,
 	)
 }
+
+// GenesisSetExpeditedVotingPeriodCmd is not supported in v0.45, returns empty string.
+func (sdk *v0_45) GenesisSetExpeditedVotingPeriodCmd(votingPeriod, genesisFile string) string {
+	return ""
+}

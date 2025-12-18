@@ -361,14 +361,21 @@ func (val *ValidatorConfig) GetInitUnbondingTime() string {
 	if val.Init != nil && val.Init.UnbondingTime != nil {
 		return *val.Init.UnbondingTime
 	}
-	return DefaultUnbondingTime
+	return ""
 }
 
 func (val *ValidatorConfig) GetInitVotingPeriod() string {
 	if val.Init != nil && val.Init.VotingPeriod != nil {
 		return *val.Init.VotingPeriod
 	}
-	return DefaultVotingPeriod
+	return ""
+}
+
+func (val *ValidatorConfig) GetInitExpeditedVotingPeriod() string {
+	if val.Init != nil && val.Init.ExpeditedVotingPeriod != nil {
+		return *val.Init.ExpeditedVotingPeriod
+	}
+	return ""
 }
 
 func (val *ValidatorConfig) GetCommissionMaxChangeRate() string {

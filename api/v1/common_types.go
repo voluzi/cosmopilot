@@ -439,17 +439,21 @@ type GenesisInitConfig struct {
 	// NOTE: Cosmopilot will wait for the ChainNodes to exist and have accounts before proceeding.
 	ChainNodeAccounts []ChainNodeAssets `json:"chainNodeAccounts,omitempty"`
 
-	// Time required to totally unbond delegations. Defaults to `1814400s` (21 days).
+	// Time required to totally unbond delegations. If not set, the chain's default is used.
 	// +optional
-	// +default="1814400s"
 	// +kubebuilder:validation:Format=duration
 	UnbondingTime *string `json:"unbondingTime,omitempty"`
 
-	// Voting period for this chain. Defaults to `120h`.
+	// Voting period for governance proposals. If not set, the chain's default is used.
 	// +optional
-	// +default="120h"
 	// +kubebuilder:validation:Format=duration
 	VotingPeriod *string `json:"votingPeriod,omitempty"`
+
+	// Expedited voting period for governance proposals. If not set, the chain's default is used.
+	// Only supported in SDK >= v0.50.
+	// +optional
+	// +kubebuilder:validation:Format=duration
+	ExpeditedVotingPeriod *string `json:"expeditedVotingPeriod,omitempty"`
 
 	// Additional commands to run on genesis initialization.
 	// Note: App home is at `/home/app` and `/temp` is a temporary volume shared by all init containers.

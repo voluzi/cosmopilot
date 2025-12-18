@@ -6185,6 +6185,12 @@ spec:
                         description: Initial commission rate percentage. Defaults
                           to `0.1`.
                         type: string
+                      expeditedVotingPeriod:
+                        description: |-
+                          Expedited voting period for governance proposals. If not set, the chain's default is used.
+                          Only supported in SDK >= v0.50.
+                        format: duration
+                        type: string
                       minSelfDelegation:
                         default: "1"
                         description: |-
@@ -6196,9 +6202,8 @@ spec:
                         description: Amount to be staked by this validator.
                         type: string
                       unbondingTime:
-                        default: 1814400s
                         description: Time required to totally unbond delegations.
-                          Defaults to `1814400s` (21 days).
+                          If not set, the chain's default is used.
                         format: duration
                         type: string
                       valPrefix:
@@ -6207,8 +6212,8 @@ spec:
                           to `nibivaloper`.
                         type: string
                       votingPeriod:
-                        default: 120h
-                        description: Voting period for this chain. Defaults to `120h`.
+                        description: Voting period for governance proposals. If not
+                          set, the chain's default is used.
                         format: duration
                         type: string
                     required:

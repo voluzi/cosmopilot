@@ -577,8 +577,9 @@ GenesisInitConfig specifies configs and initialization commands for creating a n
 | stakeAmount | Amount to be staked by this validator. | string | true |
 | accounts | Accounts specify additional accounts and respective assets to be added to this chain. | [][AccountAssets](#accountassets) | false |
 | chainNodeAccounts | List of ChainNodes whose accounts should be included in genesis. NOTE: Cosmopilot will wait for the ChainNodes to exist and have accounts before proceeding. | [][ChainNodeAssets](#chainnodeassets) | false |
-| unbondingTime | Time required to totally unbond delegations. Defaults to `1814400s` (21 days). | *string | false |
-| votingPeriod | Voting period for this chain. Defaults to `120h`. | *string | false |
+| unbondingTime | Time required to totally unbond delegations. If not set, the chain's default is used. | *string | false |
+| votingPeriod | Voting period for governance proposals. If not set, the chain's default is used. | *string | false |
+| expeditedVotingPeriod | Expedited voting period for governance proposals. If not set, the chain's default is used. Only supported in SDK >= v0.50. | *string | false |
 | additionalInitCommands | Additional commands to run on genesis initialization. Note: App home is at `/home/app` and `/temp` is a temporary volume shared by all init containers. | [][InitCommand](#initcommand) | false |
 
 [Back to Custom Resources](#custom-resources)

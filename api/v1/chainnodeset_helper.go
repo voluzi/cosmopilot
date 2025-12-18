@@ -221,14 +221,21 @@ func (val *NodeSetValidatorConfig) GetInitUnbondingTime() string {
 	if val != nil && val.Init != nil && val.Init.UnbondingTime != nil {
 		return *val.Init.UnbondingTime
 	}
-	return DefaultUnbondingTime
+	return ""
 }
 
 func (val *NodeSetValidatorConfig) GetInitVotingPeriod() string {
 	if val != nil && val.Init != nil && val.Init.VotingPeriod != nil {
 		return *val.Init.VotingPeriod
 	}
-	return DefaultVotingPeriod
+	return ""
+}
+
+func (val *NodeSetValidatorConfig) GetInitExpeditedVotingPeriod() string {
+	if val != nil && val.Init != nil && val.Init.ExpeditedVotingPeriod != nil {
+		return *val.Init.ExpeditedVotingPeriod
+	}
+	return ""
 }
 
 func (val *NodeSetValidatorConfig) HasPdbEnabled() bool {
