@@ -40,6 +40,7 @@ spec:
       stakeAmount: 100000000uosmo
       unbondingTime: 60s
       votingPeriod: 60s
+      expeditedVotingPeriod: 30s
       additionalInitCommands:
         # Use uOSMO as default denom
         - image: busybox

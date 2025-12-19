@@ -4,7 +4,7 @@
 apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
-  name: cosmos
+  name: cosmoshub
 spec:
   app:
     image: ghcr.io/cosmos/gaia
