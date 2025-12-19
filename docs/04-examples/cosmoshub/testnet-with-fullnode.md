@@ -4,7 +4,7 @@
 apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
-  name: cosmos-testnet
+  name: cosmoshub-testnet
 spec:
   app:
     image: ghcr.io/cosmos/gaia
@@ -35,6 +35,9 @@ spec:
       minSelfDelegation: ""
       accountPrefix: cosmos
       valPrefix: cosmosvaloper
+      unbondingTime: 60s
+      votingPeriod: 60s
+      expeditedVotingPeriod: 30s
       additionalInitCommands:
         # Use uATOM as default denom
         - image: busybox
