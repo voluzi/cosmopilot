@@ -50,6 +50,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	}
 
 	reuseCluster := os.Getenv("REUSE_CLUSTER") != "false"
+	installVault := os.Getenv("INSTALL_VAULT") != "false"
 
 	setupFramework := framework.NewKindFramework(
 		framework.WithClusterName(clusterName),
@@ -60,6 +61,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		framework.WithCertManager(true),
 		framework.WithCSIDriver(true),
 		framework.WithIngressNginx(true),
+		framework.WithVault(installVault),
 	)
 
 	err := setupFramework.Setup(ctx)
@@ -103,6 +105,8 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		nodeUtilsImage = "ghcr.io/voluzi/node-utils"
 	}
 
+	installVault := os.Getenv("INSTALL_VAULT") != "false"
+
 	// Always reuse the cluster that Process 1 set up
 	tf = framework.NewKindFramework(
 		framework.WithClusterName(clusterName),
@@ -113,6 +117,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		framework.WithCertManager(true),
 		framework.WithCSIDriver(true),
 		framework.WithIngressNginx(true),
+		framework.WithVault(installVault),
 	)
 
 	err := tf.Setup(ctx)

@@ -211,6 +211,13 @@ func (f *KindFramework) Setup(ctx context.Context) error {
 		}
 	}
 
+	if f.cfg.InstallVault {
+		log.Info("Installing HashiCorp Vault")
+		if err := f.installVault(); err != nil {
+			return fmt.Errorf("failed to install Vault: %w", err)
+		}
+	}
+
 	return nil
 }
 

@@ -95,6 +95,9 @@ type Config struct {
 
 	// InstallIngressNginx indicates whether to install ingress-nginx (for e2e only)
 	InstallIngressNginx bool
+
+	// InstallVault indicates whether to install HashiCorp Vault (for e2e only)
+	InstallVault bool
 }
 
 // DefaultConfig returns a Config with default values
@@ -109,6 +112,7 @@ func DefaultConfig() *Config {
 		InstallCertManager:  true,
 		InstallCSIDriver:    true,
 		InstallIngressNginx: true,
+		InstallVault:        true,
 	}
 }
 
@@ -189,5 +193,12 @@ func WithCSIDriver(install bool) Option {
 func WithIngressNginx(install bool) Option {
 	return func(c *Config) {
 		c.InstallIngressNginx = install
+	}
+}
+
+// WithVault sets whether to install HashiCorp Vault (for e2e)
+func WithVault(install bool) Option {
+	return func(c *Config) {
+		c.InstallVault = install
 	}
 }

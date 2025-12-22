@@ -1,14 +1,17 @@
 package e2e
 
 import (
+	"context"
 	"math/rand"
 	"time"
 
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	"github.com/voluzi/cosmopilot/test/framework"
 )
 
 // RandString generates a random string of the specified length
@@ -141,4 +144,74 @@ func WaitForChainNodesHeight(chainNodeSet *appsv1.ChainNodeSet, minHeight int64)
 			return current.Status.LatestHeight
 		}).Should(BeNumerically(">", minHeight))
 	}
+}
+
+// GetVaultAddress returns the in-cluster Vault address
+func GetVaultAddress() string {
+	return framework.VaultAddress
+}
+
+// CopyVaultSecretsToNamespace copies Vault token and CA certificate secrets to the test namespace.
+// Returns the names of the token secret and CA secret in the target namespace.
+func CopyVaultSecretsToNamespace(namespace string) (tokenSecretName, caSecretName string) {
+	ctx := context.Background()
+
+	// Copy token secret
+	tokenSecret, err := Framework().KubeClient().CoreV1().Secrets(framework.VaultNamespace).Get(
+		ctx, framework.VaultTokenSecretName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred())
+
+	tokenSecretName = "vault-token"
+	newTokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      tokenSecretName,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"token": tokenSecret.Data["token"],
+		},
+	}
+	_, err = Framework().KubeClient().CoreV1().Secrets(namespace).Create(ctx, newTokenSecret, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred())
+
+	// Copy CA certificate secret
+	caSecret, err := Framework().KubeClient().CoreV1().Secrets(framework.VaultNamespace).Get(
+		ctx, framework.VaultCASecretName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred())
+
+	caSecretName = "vault-ca"
+	newCASecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      caSecretName,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"ca.crt": caSecret.Data["ca.crt"],
+		},
+	}
+	_, err = Framework().KubeClient().CoreV1().Secrets(namespace).Create(ctx, newCASecret, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred())
+
+	return tokenSecretName, caSecretName
+}
+
+// WaitForTmkmsContainerRunning waits for the TMKMS container to be ready in the ChainNode pod
+func WaitForTmkmsContainerRunning(chainNode *appsv1.ChainNode) {
+	Eventually(func() bool {
+		pod := &corev1.Pod{}
+		if err := Framework().Client().Get(Framework().Context(), client.ObjectKey{
+			Namespace: chainNode.Namespace,
+			Name:      chainNode.Name,
+		}, pod); err != nil {
+			return false
+		}
+
+		// Check if tmkms container exists and is ready
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.Name == "tmkms" {
+				return cs.Ready
+			}
+		}
+		return false
+	}).Should(BeTrue())
 }

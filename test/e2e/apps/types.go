@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -314,4 +315,54 @@ func (t TestApp) WithVersion(version string) TestApp {
 	copy := t
 	copy.AppSpec.Version = ptr.To(version)
 	return copy
+}
+
+// TmKMSConfig holds configuration for building a ChainNode with TMKMS
+type TmKMSConfig struct {
+	// VaultAddress is the full address of the Vault cluster
+	VaultAddress string
+
+	// KeyName is the key path in Vault (e.g., "transit/keys/chain-validator")
+	KeyName string
+
+	// TokenSecretName is the name of the secret containing the Vault token
+	TokenSecretName string
+
+	// CASecretName is the name of the secret containing the Vault CA certificate
+	CASecretName string
+}
+
+// BuildChainNodeWithTmKMS creates a ChainNode resource with TMKMS Vault configuration
+func (t TestApp) BuildChainNodeWithTmKMS(namespace string, tmkmsConfig TmKMSConfig) *appsv1.ChainNode {
+	chainNode := t.BuildChainNode(namespace)
+
+	// Configure TMKMS with Vault provider
+	chainNode.Spec.Validator.TmKMS = &appsv1.TmKMS{
+		Provider: appsv1.TmKmsProvider{
+			Hashicorp: &appsv1.TmKmsHashicorpProvider{
+				Address: tmkmsConfig.VaultAddress,
+				Key:     tmkmsConfig.KeyName,
+				TokenSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: tmkmsConfig.TokenSecretName,
+					},
+					Key: "token",
+				},
+				CertificateSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: tmkmsConfig.CASecretName,
+					},
+					Key: "ca.crt",
+				},
+				UploadGenerated: true,
+			},
+		},
+		KeyFormat: &appsv1.TmKmsKeyFormat{
+			Type:               "bech32",
+			AccountKeyPrefix:   t.ValidatorConfig.AccountPrefix + "pub",
+			ConsensusKeyPrefix: t.ValidatorConfig.ValPrefix + "conspub",
+		},
+	}
+
+	return chainNode
 }
