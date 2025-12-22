@@ -15,10 +15,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
-	"github.com/voluzi/cosmopilot/internal/controllers"
-	"github.com/voluzi/cosmopilot/internal/controllers/chainnode"
-	"github.com/voluzi/cosmopilot/internal/controllers/chainnodeset"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnodeset"
 )
 
 var (

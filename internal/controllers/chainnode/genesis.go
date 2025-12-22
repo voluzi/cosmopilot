@@ -12,10 +12,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
-	"github.com/voluzi/cosmopilot/internal/chainutils"
-	"github.com/voluzi/cosmopilot/internal/controllers"
-	"github.com/voluzi/cosmopilot/internal/k8s"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
 
 func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode) error {

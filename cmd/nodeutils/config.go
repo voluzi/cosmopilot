@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 
-	"github.com/voluzi/cosmopilot/pkg/environ"
+	"github.com/voluzi/cosmopilot/v2/pkg/environ"
 )
 
 func init() {

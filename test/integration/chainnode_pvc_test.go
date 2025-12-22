@@ -10,7 +10,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
 var _ = Describe("ChainNode PVC", func() {

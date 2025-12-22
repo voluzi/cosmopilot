@@ -22,11 +22,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
-	"github.com/voluzi/cosmopilot/internal/chainutils"
-	"github.com/voluzi/cosmopilot/internal/controllers"
-	"github.com/voluzi/cosmopilot/pkg/informer"
-	"github.com/voluzi/cosmopilot/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/pkg/informer"
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {

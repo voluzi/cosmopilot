@@ -9,8 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
 
-	"github.com/voluzi/cosmopilot/internal/tmkms"
-	"github.com/voluzi/cosmopilot/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v2/internal/tmkms"
+	"github.com/voluzi/cosmopilot/v2/pkg/dataexporter"
 )
 
 const (

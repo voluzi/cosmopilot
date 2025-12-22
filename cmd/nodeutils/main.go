@@ -10,7 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	_ "go.uber.org/automaxprocs"
 
-	"github.com/voluzi/cosmopilot/pkg/nodeutils"
+	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
 var (

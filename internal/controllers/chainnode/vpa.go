@@ -10,9 +10,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
-	"github.com/voluzi/cosmopilot/internal/controllers"
-	"github.com/voluzi/cosmopilot/pkg/nodeutils"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
 const OneMiB = int64(1024 * 1024)

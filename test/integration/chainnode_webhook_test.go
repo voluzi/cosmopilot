@@ -7,7 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
 var _ = Describe("ChainNode Webhook Validation", func() {

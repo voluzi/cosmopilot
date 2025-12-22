@@ -11,7 +11,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/voluzi/cosmopilot/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
 
 // BuildInitPod constructs the init pod spec without creating it.

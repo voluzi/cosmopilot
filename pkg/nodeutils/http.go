@@ -14,8 +14,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/voluzi/cosmopilot/pkg/statscollector"
-	"github.com/voluzi/cosmopilot/pkg/utils"
+	"github.com/voluzi/cosmopilot/v2/pkg/statscollector"
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 func (s *NodeUtils) registerRoutes() {

@@ -1,7 +1,7 @@
 package sdkcmd
 
 import (
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
 func init() {

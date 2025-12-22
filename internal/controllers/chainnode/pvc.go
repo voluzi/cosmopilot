@@ -17,10 +17,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
-	"github.com/voluzi/cosmopilot/internal/chainutils"
-	"github.com/voluzi/cosmopilot/internal/controllers"
-	"github.com/voluzi/cosmopilot/pkg/nodeutils"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
 // initializeData manages the data initialization process in a non-blocking way.

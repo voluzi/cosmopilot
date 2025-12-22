@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
 // defaultConfigOverride contains hardcoded config overrides applied to all test chains.

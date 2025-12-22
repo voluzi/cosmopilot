@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/voluzi/cosmopilot/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/internal/k8s"
-	"github.com/voluzi/cosmopilot/pkg/utils"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v2/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 var (

@@ -22,7 +22,7 @@ import (
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
 const (

@@ -1,4 +1,4 @@
-module github.com/voluzi/cosmopilot
+module github.com/voluzi/cosmopilot/v2
 
 go 1.24.0
 

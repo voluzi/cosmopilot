@@ -13,7 +13,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/voluzi/cosmopilot/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
 
 const (

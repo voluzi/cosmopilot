@@ -18,10 +18,10 @@ import (
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/api/v1"
-	"github.com/voluzi/cosmopilot/internal/controllers"
-	"github.com/voluzi/cosmopilot/internal/controllers/chainnode"
-	"github.com/voluzi/cosmopilot/internal/controllers/chainnodeset"
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnodeset"
 )
 
 const (
