@@ -109,7 +109,8 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 			Namespace: kms.Owner.GetNamespace(),
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:   corev1.RestartPolicyNever,
+			SecurityContext: k8s.RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
 					Name: "data",
@@ -124,11 +125,11 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 					Image:           kms.Config.Image,
 					ImagePullPolicy: corev1.PullAlways,
 					SecurityContext: k8s.RestrictedSecurityContext(),
-					Command:         []string{"/bin/sh", "-c", "tmkms init /root/tmkms"},
+					Command:         []string{"/bin/sh", "-c", "tmkms init /data/tmkms"},
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "data",
-							MountPath: "/root/tmkms",
+							MountPath: "/data/tmkms",
 						},
 					},
 				},
@@ -139,11 +140,11 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 					Image:           kms.Config.Image,
 					ImagePullPolicy: corev1.PullAlways,
 					SecurityContext: k8s.RestrictedSecurityContext(),
-					Command:         []string{"cat", "/root/tmkms/secrets/" + identityKeyName},
+					Command:         []string{"cat", "/data/tmkms/secrets/" + identityKeyName},
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "data",
-							MountPath: "/root/tmkms",
+							MountPath: "/data/tmkms",
 						},
 					},
 				},
