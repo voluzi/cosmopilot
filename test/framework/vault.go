@@ -378,16 +378,9 @@ func (f *KindFramework) configureVaultTransit(rootToken string) error {
 		return err
 	}
 
-	// Login with root token (-no-store to avoid needing /root directory)
-	_, err = f.PodExec(VaultNamespace, podName, "vault",
-		"vault", "login", "-tls-skip-verify", "-no-store", rootToken)
-	if err != nil {
-		return fmt.Errorf("failed to login to vault: %w", err)
-	}
-
-	// Enable Transit engine (ignore error if already enabled)
+	// Enable Transit engine using VAULT_TOKEN env var (ignore error if already enabled)
 	_, _ = f.PodExec(VaultNamespace, podName, "vault",
-		"vault", "secrets", "enable", "-tls-skip-verify", "transit")
+		"sh", "-c", fmt.Sprintf("VAULT_TOKEN=%s vault secrets enable -tls-skip-verify transit", rootToken))
 
 	return nil
 }
@@ -399,19 +392,13 @@ func (f *KindFramework) createTmkmsToken(rootToken string) error {
 		return err
 	}
 
-	// Login with root token (-no-store to avoid needing /root directory)
-	_, err = f.PodExec(VaultNamespace, podName, "vault",
-		"vault", "login", "-tls-skip-verify", "-no-store", rootToken)
-	if err != nil {
-		return fmt.Errorf("failed to login to vault: %w", err)
-	}
-
 	// Always update the policy (in case it changed)
-	// Write policy to a temp file in the container, then apply it
-	policyCmd := fmt.Sprintf(`cat > /tmp/tmkms-policy.hcl << 'EOF'
+	// Write policy to a temp file in the container, then apply it using VAULT_TOKEN env var
+	policyCmd := fmt.Sprintf(`export VAULT_TOKEN=%s
+cat > /tmp/tmkms-policy.hcl << 'EOF'
 %s
 EOF
-vault policy write -tls-skip-verify tmkms /tmp/tmkms-policy.hcl`, strings.TrimSpace(tmkmsPolicy))
+vault policy write -tls-skip-verify tmkms /tmp/tmkms-policy.hcl`, rootToken, strings.TrimSpace(tmkmsPolicy))
 
 	_, err = f.PodExec(VaultNamespace, podName, "vault",
 		"sh", "-c", policyCmd)
@@ -427,10 +414,9 @@ vault policy write -tls-skip-verify tmkms /tmp/tmkms-policy.hcl`, strings.TrimSp
 		return nil
 	}
 
-	// Create token with policy
+	// Create token with policy using VAULT_TOKEN env var
 	tokenOut, err := f.PodExec(VaultNamespace, podName, "vault",
-		"vault", "token", "create", "-tls-skip-verify",
-		"-policy=tmkms", "-format=json")
+		"sh", "-c", fmt.Sprintf("VAULT_TOKEN=%s vault token create -tls-skip-verify -policy=tmkms -format=json", rootToken))
 	if err != nil {
 		return fmt.Errorf("failed to create tmkms token: %w", err)
 	}
