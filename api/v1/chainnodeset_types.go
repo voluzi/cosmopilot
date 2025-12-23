@@ -233,6 +233,11 @@ type NodeSetValidatorConfig struct {
 	// +optional
 	Ingress *IngressConfig `json:"ingress,omitempty"`
 
+	// HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+	// +optional
+	// +default="m/44'/118'/0'/0/0"
+	AccountHDPath *string `json:"accountHDPath,omitempty"`
+
 	// Prefix for accounts. Defaults to `cosmos`.
 	// +optional
 	// +default="cosmos"

@@ -189,8 +189,15 @@ func (val *NodeSetValidatorConfig) GetPrivKeySecretName(obj client.Object) strin
 }
 
 func (val *NodeSetValidatorConfig) GetAccountHDPath() string {
-	if val != nil && val.Init != nil && val.Init.AccountHDPath != nil {
-		return *val.Init.AccountHDPath
+	if val != nil {
+		switch {
+		case val.AccountHDPath != nil:
+			return *val.AccountHDPath
+		case val.Init != nil && val.Init.AccountHDPath != nil:
+			return *val.Init.AccountHDPath
+		case val.CreateValidator != nil && val.CreateValidator.AccountHDPath != nil:
+			return *val.CreateValidator.AccountHDPath
+		}
 	}
 	return DefaultHDPath
 }

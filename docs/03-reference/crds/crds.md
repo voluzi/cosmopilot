@@ -144,6 +144,7 @@ ValidatorConfig contains the configuration for running a node as validator.
 | init | Specifies configs and initialization commands for creating a new genesis. | *[GenesisInitConfig](#genesisinitconfig) | false |
 | tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node. | *[TmKMS](#tmkms) | false |
 | createValidator | Indicates that cosmopilot should run create-validator tx to make this node a validator. | *[CreateValidatorConfig](#createvalidatorconfig) | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
 | accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
 | valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. | *string | false |
 
@@ -366,6 +367,7 @@ NodeSetValidatorConfig contains validator configurations.
 | pdb | Pod Disruption Budget configuration for the validator pod. This is mainly useful in testnets where multiple validators might run in the same namespace. In production mainnet environments, where typically only one validator runs per namespace, this is rarely needed. | *[PdbConfig](#pdbconfig) | false |
 | overrideVersion | OverrideVersion will force validator to use the specified version. NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version based on upgrade history. For unsetting this, you will have to do it here and on the ChainNode itself. | *string | false |
 | ingress | Indicates if an ingress should be created to access API endpoints of validator node and configures it. | *[IngressConfig](#ingressconfig) | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
 | accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
 | valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. | *string | false |
 
@@ -485,7 +487,7 @@ CreateValidatorConfig holds configuration for cosmopilot to submit a create-vali
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | accountMnemonicSecret | Name of the secret containing the mnemonic of the account to be used by this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist. | *string | false |
-| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. Deprecated: Use `.validator.accountHDPath` instead. | *string | false |
 | accountPrefix | Prefix for accounts. Defaults to `cosmos`. Deprecated: Use `.validator.accountPrefix` instead. | *string | false |
 | valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. Deprecated: Use `.validator.valPrefix` instead. | *string | false |
 | commissionMaxChangeRate | Maximum commission change rate percentage (per day). Defaults to `0.1`. | *string | false |
@@ -572,7 +574,7 @@ GenesisInitConfig specifies configs and initialization commands for creating a n
 | ----- | ----------- | ------ | -------- |
 | chainID | ChainID of the chain to initialize. | string | true |
 | accountMnemonicSecret | Name of the secret containing the mnemonic of the account to be used by this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist. | *string | false |
-| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. Deprecated: Use `.validator.accountHDPath` instead. | *string | false |
 | accountPrefix | Prefix for accounts. Defaults to `cosmos`. Deprecated: Use `.validator.accountPrefix` instead. | *string | false |
 | valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. Deprecated: Use `.validator.valPrefix` instead. | *string | false |
 | commissionMaxChangeRate | Maximum commission change rate percentage (per day). Defaults to `0.1`. | *string | false |

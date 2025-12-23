@@ -1352,6 +1352,11 @@ func (in *NodeSetValidatorConfig) DeepCopyInto(out *NodeSetValidatorConfig) {
 		*out = new(IngressConfig)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.AccountHDPath != nil {
+		in, out := &in.AccountHDPath, &out.AccountHDPath
+		*out = new(string)
+		**out = **in
+	}
 	if in.AccountPrefix != nil {
 		in, out := &in.AccountPrefix, &out.AccountPrefix
 		*out = new(string)
@@ -1820,6 +1825,11 @@ func (in *ValidatorConfig) DeepCopyInto(out *ValidatorConfig) {
 		in, out := &in.CreateValidator, &out.CreateValidator
 		*out = new(CreateValidatorConfig)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.AccountHDPath != nil {
+		in, out := &in.AccountHDPath, &out.AccountHDPath
+		*out = new(string)
+		**out = **in
 	}
 	if in.AccountPrefix != nil {
 		in, out := &in.AccountPrefix, &out.AccountPrefix

@@ -3817,6 +3817,10 @@ spec:
                 description: Indicates this node is going to be a validator and allows
                   configuring it.
                 properties:
+                  accountHDPath:
+                    default: m/44'/118'/0'/0/0
+                    description: HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+                    type: string
                   accountPrefix:
                     default: cosmos
                     description: Prefix for accounts. Defaults to `cosmos`.
@@ -3827,7 +3831,9 @@ spec:
                     properties:
                       accountHDPath:
                         default: m/44'/118'/0'/0/0
-                        description: HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+                        description: |-
+                          HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+                          Deprecated: Use `.validator.accountHDPath` instead.
                         type: string
                       accountMnemonicSecret:
                         description: |-
@@ -3900,7 +3906,9 @@ spec:
                     properties:
                       accountHDPath:
                         default: m/44'/118'/0'/0/0
-                        description: HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+                        description: |-
+                          HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+                          Deprecated: Use `.validator.accountHDPath` instead.
                         type: string
                       accountMnemonicSecret:
                         description: |-

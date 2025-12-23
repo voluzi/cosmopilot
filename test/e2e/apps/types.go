@@ -247,12 +247,12 @@ func (t TestApp) BuildChainNode(namespace string) *appsv1.ChainNode {
 			Config:      t.buildConfig(t.ValidatorConfig.RunFlags),
 			Persistence: buildPersistence(t.ValidatorConfig.AdditionalVolumes),
 			Validator: &appsv1.ValidatorConfig{
+				AccountPrefix: ptr.To(t.ValidatorConfig.AccountPrefix),
+				ValPrefix:     ptr.To(t.ValidatorConfig.ValPrefix),
 				Init: &appsv1.GenesisInitConfig{
 					ChainID:                t.ValidatorConfig.ChainID,
 					Assets:                 t.ValidatorConfig.Assets,
 					StakeAmount:            t.ValidatorConfig.StakeAmount,
-					AccountPrefix:          ptr.To(t.ValidatorConfig.AccountPrefix),
-					ValPrefix:              ptr.To(t.ValidatorConfig.ValPrefix),
 					VotingPeriod:           ptr.To[string]("15s"),
 					ExpeditedVotingPeriod:  ptr.To[string]("10s"),
 					AdditionalInitCommands: t.ValidatorConfig.AdditionalInitCommands,
@@ -285,14 +285,14 @@ func (t TestApp) BuildChainNodeSet(namespace string, fullnodes int) *appsv1.Chai
 		Spec: appsv1.ChainNodeSetSpec{
 			App: t.AppSpec,
 			Validator: &appsv1.NodeSetValidatorConfig{
-				Config:      t.buildConfig(t.ValidatorConfig.RunFlags),
-				Persistence: buildPersistence(t.ValidatorConfig.AdditionalVolumes),
+				Config:        t.buildConfig(t.ValidatorConfig.RunFlags),
+				Persistence:   buildPersistence(t.ValidatorConfig.AdditionalVolumes),
+				AccountPrefix: ptr.To(t.ValidatorConfig.AccountPrefix),
+				ValPrefix:     ptr.To(t.ValidatorConfig.ValPrefix),
 				Init: &appsv1.GenesisInitConfig{
 					ChainID:                t.ValidatorConfig.ChainID,
 					Assets:                 t.ValidatorConfig.Assets,
 					StakeAmount:            t.ValidatorConfig.StakeAmount,
-					AccountPrefix:          ptr.To(t.ValidatorConfig.AccountPrefix),
-					ValPrefix:              ptr.To(t.ValidatorConfig.ValPrefix),
 					VotingPeriod:           ptr.To[string]("15s"),
 					ExpeditedVotingPeriod:  ptr.To[string]("10s"),
 					AdditionalInitCommands: t.ValidatorConfig.AdditionalInitCommands,

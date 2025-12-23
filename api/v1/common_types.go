@@ -401,6 +401,7 @@ type GenesisInitConfig struct {
 	AccountMnemonicSecret *string `json:"accountMnemonicSecret,omitempty"`
 
 	// HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+	// Deprecated: Use `.validator.accountHDPath` instead.
 	// +optional
 	// +default="m/44'/118'/0'/0/0"
 	AccountHDPath *string `json:"accountHDPath,omitempty"`
@@ -953,6 +954,7 @@ type CreateValidatorConfig struct {
 	AccountMnemonicSecret *string `json:"accountMnemonicSecret,omitempty"`
 
 	// HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
+	// Deprecated: Use `.validator.accountHDPath` instead.
 	// +optional
 	// +default="m/44'/118'/0'/0/0"
 	AccountHDPath *string `json:"accountHDPath,omitempty"`
