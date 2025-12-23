@@ -204,15 +204,29 @@ func (val *NodeSetValidatorConfig) GetAccountSecretName(obj client.Object) strin
 }
 
 func (val *NodeSetValidatorConfig) GetAccountPrefix() string {
-	if val != nil && val.Init != nil && val.Init.AccountPrefix != nil {
-		return *val.Init.AccountPrefix
+	if val != nil {
+		switch {
+		case val.AccountPrefix != nil:
+			return *val.AccountPrefix
+		case val.Init != nil && val.Init.AccountPrefix != nil:
+			return *val.Init.AccountPrefix
+		case val.CreateValidator != nil && val.CreateValidator.AccountPrefix != nil:
+			return *val.CreateValidator.AccountPrefix
+		}
 	}
 	return DefaultAccountPrefix
 }
 
 func (val *NodeSetValidatorConfig) GetValPrefix() string {
-	if val != nil && val.Init != nil && val.Init.ValPrefix != nil {
-		return *val.Init.ValPrefix
+	if val != nil {
+		switch {
+		case val.ValPrefix != nil:
+			return *val.ValPrefix
+		case val.Init != nil && val.Init.ValPrefix != nil:
+			return *val.Init.ValPrefix
+		case val.CreateValidator != nil && val.CreateValidator.ValPrefix != nil:
+			return *val.CreateValidator.ValPrefix
+		}
 	}
 	return DefaultValPrefix
 }

@@ -10,6 +10,9 @@ spec:
     sdkVersion: v0.47
 
   validator:
+    accountPrefix: nibi
+    valPrefix: nibivaloper
+
     info:
       moniker: cosmopilot
 
@@ -36,8 +39,6 @@ spec:
 
     init:
       chainID: nibiru-testnet-0
-      accountPrefix: nibi
-      valPrefix: nibivaloper
       assets: ["100000000000000unibi", "1000000000000000000unusd", "10000000000000000uusdt"]
       stakeAmount: 100000000unibi
       unbondingTime: 60s

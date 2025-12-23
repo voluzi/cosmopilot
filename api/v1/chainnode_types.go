@@ -262,4 +262,14 @@ type ValidatorConfig struct {
 	// Indicates that cosmopilot should run create-validator tx to make this node a validator.
 	// +optional
 	CreateValidator *CreateValidatorConfig `json:"createValidator,omitempty"`
+
+	// Prefix for accounts. Defaults to `cosmos`.
+	// +optional
+	// +default="cosmos"
+	AccountPrefix *string `json:"accountPrefix,omitempty"`
+
+	// Prefix for validator operator accounts. Defaults to `cosmosvaloper`.
+	// +optional
+	// +default="cosmosvaloper"
+	ValPrefix *string `json:"valPrefix,omitempty"`
 }

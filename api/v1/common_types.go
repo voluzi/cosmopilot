@@ -394,11 +394,13 @@ type GenesisInitConfig struct {
 	AccountHDPath *string `json:"accountHDPath,omitempty"`
 
 	// Prefix for accounts. Defaults to `cosmos`.
+	// Deprecated: Use `.validator.accountPrefix` instead.
 	// +optional
 	// +default="cosmos"
 	AccountPrefix *string `json:"accountPrefix,omitempty"`
 
 	// Prefix for validator operator accounts. Defaults to `cosmosvaloper`.
+	// Deprecated: Use `.validator.valPrefix` instead.
 	// +optional
 	// +default="cosmosvaloper"
 	ValPrefix *string `json:"valPrefix,omitempty"`
@@ -944,11 +946,13 @@ type CreateValidatorConfig struct {
 	AccountHDPath *string `json:"accountHDPath,omitempty"`
 
 	// Prefix for accounts. Defaults to `cosmos`.
+	// Deprecated: Use `.validator.accountPrefix` instead.
 	// +optional
 	// +default="cosmos"
 	AccountPrefix *string `json:"accountPrefix,omitempty"`
 
 	// Prefix for validator operator accounts. Defaults to `cosmosvaloper`.
+	// Deprecated: Use `.validator.valPrefix` instead.
 	// +optional
 	// +default="cosmosvaloper"
 	ValPrefix *string `json:"valPrefix,omitempty"`

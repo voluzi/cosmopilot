@@ -96,6 +96,8 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet) (*appsv1.Cha
 				Init:             nodeSet.Spec.Validator.Init,
 				TmKMS:            nodeSet.Spec.Validator.TmKMS,
 				CreateValidator:  nodeSet.Spec.Validator.CreateValidator,
+				AccountPrefix:    nodeSet.Spec.Validator.AccountPrefix,
+				ValPrefix:        nodeSet.Spec.Validator.ValPrefix,
 			},
 			Resources:          nodeSet.Spec.Validator.Resources,
 			Affinity:           nodeSet.Spec.Validator.Affinity,

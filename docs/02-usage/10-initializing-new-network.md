@@ -46,15 +46,15 @@ validator:
 
 ## Account Prefixes
 
-By default, `Cosmopilot` uses the `nibi` prefix for accounts. If the network requires different prefixes, you can customize them:
+By default, `Cosmopilot` uses the `cosmos` prefix for accounts. If the network requires different prefixes, you can customize them:
 
-```yaml{5-6}
+```yaml{2-3}
 validator:
+  accountPrefix: cosmos
+  valPrefix: cosmosvaloper
   init:
     chainID: my-testnet-1
     stakeAmount: "1000000uatom"
-    accountPrefix: cosmos
-    valPrefix: cosmosvaloper
     assets: ["100000000uatom"]
 ```
 

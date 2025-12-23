@@ -12,6 +12,9 @@ spec:
       genesisSubcommand: false
 
   validator:
+    accountPrefix: osmo
+    valPrefix: osmovaloper
+
     info:
       moniker: cosmopilot
 
@@ -27,15 +30,13 @@ spec:
           deleteWithNode: true
 
     config:
-      runFlags: ["--reject-config-defaults=true"]
+      runFlags: [ "--reject-config-defaults=true" ]
       override:
         app.toml:
           minimum-gas-prices: 0.025uosmo
 
     init:
       chainID: osmosis-testnet-0
-      accountPrefix: osmo
-      valPrefix: osmovaloper
       assets: [ "100000000000000000000uosmo" ]
       stakeAmount: 100000000uosmo
       unbondingTime: 60s
@@ -67,7 +68,7 @@ spec:
             deleteWithNode: true
 
       config:
-        runFlags: ["--reject-config-defaults=true"]
+        runFlags: [ "--reject-config-defaults=true" ]
         override:
           app.toml:
             minimum-gas-prices: 0.025uosmo

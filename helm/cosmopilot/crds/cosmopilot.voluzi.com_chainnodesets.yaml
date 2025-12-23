@@ -4107,6 +4107,10 @@ spec:
                 description: Indicates this node set will run a validator and allows
                   configuring it.
                 properties:
+                  accountPrefix:
+                    default: cosmos
+                    description: Prefix for accounts. Defaults to `cosmos`.
+                    type: string
                   affinity:
                     description: If specified, the pod's scheduling constraints.
                     properties:
@@ -5789,7 +5793,9 @@ spec:
                         type: string
                       accountPrefix:
                         default: cosmos
-                        description: Prefix for accounts. Defaults to `cosmos`.
+                        description: |-
+                          Prefix for accounts. Defaults to `cosmos`.
+                          Deprecated: Use `.validator.accountPrefix` instead.
                         type: string
                       commissionMaxChangeRate:
                         default: "0.1"
@@ -5820,8 +5826,9 @@ spec:
                         type: string
                       valPrefix:
                         default: cosmosvaloper
-                        description: Prefix for validator operator accounts. Defaults
-                          to `cosmosvaloper`.
+                        description: |-
+                          Prefix for validator operator accounts. Defaults to `cosmosvaloper`.
+                          Deprecated: Use `.validator.valPrefix` instead.
                         type: string
                     required:
                     - gasPrices
@@ -5919,7 +5926,9 @@ spec:
                         type: string
                       accountPrefix:
                         default: cosmos
-                        description: Prefix for accounts. Defaults to `cosmos`.
+                        description: |-
+                          Prefix for accounts. Defaults to `cosmos`.
+                          Deprecated: Use `.validator.accountPrefix` instead.
                         type: string
                       accounts:
                         description: Accounts specify additional accounts and respective
@@ -6208,8 +6217,9 @@ spec:
                         type: string
                       valPrefix:
                         default: cosmosvaloper
-                        description: Prefix for validator operator accounts. Defaults
-                          to `cosmosvaloper`.
+                        description: |-
+                          Prefix for validator operator accounts. Defaults to `cosmosvaloper`.
+                          Deprecated: Use `.validator.valPrefix` instead.
                         type: string
                       votingPeriod:
                         description: Voting period for governance proposals. If not
@@ -7920,6 +7930,11 @@ spec:
                     required:
                     - provider
                     type: object
+                  valPrefix:
+                    default: cosmosvaloper
+                    description: Prefix for validator operator accounts. Defaults
+                      to `cosmosvaloper`.
+                    type: string
                   vpa:
                     description: Vertical Pod Autoscaling configuration for this node.
                     properties:
