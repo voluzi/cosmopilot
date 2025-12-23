@@ -5788,8 +5788,8 @@ spec:
                           this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist.
                         type: string
                       accountPrefix:
-                        default: nibi
-                        description: Prefix for accounts. Defaults to `nibi`.
+                        default: cosmos
+                        description: Prefix for accounts. Defaults to `cosmos`.
                         type: string
                       commissionMaxChangeRate:
                         default: "0.1"
@@ -5819,9 +5819,9 @@ spec:
                         description: Amount to be staked by this validator.
                         type: string
                       valPrefix:
-                        default: nibivaloper
+                        default: cosmosvaloper
                         description: Prefix for validator operator accounts. Defaults
-                          to `nibivaloper`.
+                          to `cosmosvaloper`.
                         type: string
                     required:
                     - gasPrices
@@ -5918,8 +5918,8 @@ spec:
                           this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist.
                         type: string
                       accountPrefix:
-                        default: nibi
-                        description: Prefix for accounts. Defaults to `nibi`.
+                        default: cosmos
+                        description: Prefix for accounts. Defaults to `cosmos`.
                         type: string
                       accounts:
                         description: Accounts specify additional accounts and respective
@@ -6207,9 +6207,9 @@ spec:
                         format: duration
                         type: string
                       valPrefix:
-                        default: nibivaloper
+                        default: cosmosvaloper
                         description: Prefix for validator operator accounts. Defaults
-                          to `nibivaloper`.
+                          to `cosmosvaloper`.
                         type: string
                       votingPeriod:
                         description: Voting period for governance proposals. If not
@@ -7754,12 +7754,12 @@ spec:
                     properties:
                       keyFormat:
                         default:
-                          account_key_prefix: nibipub
-                          consensus_key_prefix: nibivalconspub
+                          account_key_prefix: cosmospub
+                          consensus_key_prefix: cosmosvalconspub
                           type: bech32
                         description: |-
                           Format and type of key for chain.
-                          Defaults to `{"type": "bech32", "account_key_prefix": "nibipub", "consensus_key_prefix": "nibivalconspub"}`.
+                          Defaults to `{"type": "bech32", "account_key_prefix": "cosmospub", "consensus_key_prefix": "cosmosvalconspub"}`.
                         properties:
                           account_key_prefix:
                             description: AccountKeyPrefix is the prefix used for account

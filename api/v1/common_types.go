@@ -393,14 +393,14 @@ type GenesisInitConfig struct {
 	// +default="m/44'/118'/0'/0/0"
 	AccountHDPath *string `json:"accountHDPath,omitempty"`
 
-	// Prefix for accounts. Defaults to `nibi`.
+	// Prefix for accounts. Defaults to `cosmos`.
 	// +optional
-	// +default="nibi"
+	// +default="cosmos"
 	AccountPrefix *string `json:"accountPrefix,omitempty"`
 
-	// Prefix for validator operator accounts. Defaults to `nibivaloper`.
+	// Prefix for validator operator accounts. Defaults to `cosmosvaloper`.
 	// +optional
-	// +default="nibivaloper"
+	// +default="cosmosvaloper"
 	ValPrefix *string `json:"valPrefix,omitempty"`
 
 	// Maximum commission change rate percentage (per day). Defaults to `0.1`.
@@ -591,9 +591,9 @@ type TmKMS struct {
 	Provider TmKmsProvider `json:"provider"`
 
 	// Format and type of key for chain.
-	// Defaults to `{"type": "bech32", "account_key_prefix": "nibipub", "consensus_key_prefix": "nibivalconspub"}`.
+	// Defaults to `{"type": "bech32", "account_key_prefix": "cosmospub", "consensus_key_prefix": "cosmosvalconspub"}`.
 	// +optional
-	// +default={"type": "bech32", "account_key_prefix": "nibipub", "consensus_key_prefix": "nibivalconspub"}
+	// +default={"type": "bech32", "account_key_prefix": "cosmospub", "consensus_key_prefix": "cosmosvalconspub"}
 	KeyFormat *TmKmsKeyFormat `json:"keyFormat,omitempty"`
 
 	// Tendermint's protocol version to be used.
@@ -943,14 +943,14 @@ type CreateValidatorConfig struct {
 	// +default="m/44'/118'/0'/0/0"
 	AccountHDPath *string `json:"accountHDPath,omitempty"`
 
-	// Prefix for accounts. Defaults to `nibi`.
+	// Prefix for accounts. Defaults to `cosmos`.
 	// +optional
-	// +default="nibi"
+	// +default="cosmos"
 	AccountPrefix *string `json:"accountPrefix,omitempty"`
 
-	// Prefix for validator operator accounts. Defaults to `nibivaloper`.
+	// Prefix for validator operator accounts. Defaults to `cosmosvaloper`.
 	// +optional
-	// +default="nibivaloper"
+	// +default="cosmosvaloper"
 	ValPrefix *string `json:"valPrefix,omitempty"`
 
 	// Maximum commission change rate percentage (per day). Defaults to `0.1`.

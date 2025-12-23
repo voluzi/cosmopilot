@@ -480,8 +480,8 @@ CreateValidatorConfig holds configuration for cosmopilot to submit a create-vali
 | ----- | ----------- | ------ | -------- |
 | accountMnemonicSecret | Name of the secret containing the mnemonic of the account to be used by this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist. | *string | false |
 | accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
-| accountPrefix | Prefix for accounts. Defaults to `nibi`. | *string | false |
-| valPrefix | Prefix for validator operator accounts. Defaults to `nibivaloper`. | *string | false |
+| accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
+| valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. | *string | false |
 | commissionMaxChangeRate | Maximum commission change rate percentage (per day). Defaults to `0.1`. | *string | false |
 | commissionMaxRate | Maximum commission rate percentage. Defaults to `0.1`. | *string | false |
 | commissionRate | Initial commission rate percentage. Defaults to `0.1`. | *string | false |
@@ -567,8 +567,8 @@ GenesisInitConfig specifies configs and initialization commands for creating a n
 | chainID | ChainID of the chain to initialize. | string | true |
 | accountMnemonicSecret | Name of the secret containing the mnemonic of the account to be used by this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist. | *string | false |
 | accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
-| accountPrefix | Prefix for accounts. Defaults to `nibi`. | *string | false |
-| valPrefix | Prefix for validator operator accounts. Defaults to `nibivaloper`. | *string | false |
+| accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
+| valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. | *string | false |
 | commissionMaxChangeRate | Maximum commission change rate percentage (per day). Defaults to `0.1`. | *string | false |
 | commissionMaxRate | Maximum commission rate percentage. Defaults to `0.1`. | *string | false |
 | commissionRate | Initial commission rate percentage. Defaults to `0.1`. | *string | false |
@@ -693,7 +693,7 @@ TmKMS allows configuring tmkms for signing for this validator node instead of us
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | provider | Signing provider to be used by tmkms. Currently only `vault` is supported. | [TmKmsProvider](#tmkmsprovider) | true |
-| keyFormat | Format and type of key for chain. Defaults to `{\"type\": \"bech32\", \"account_key_prefix\": \"nibipub\", \"consensus_key_prefix\": \"nibivalconspub\"}`. | *[TmKmsKeyFormat](#tmkmskeyformat) | false |
+| keyFormat | Format and type of key for chain. Defaults to `{\"type\": \"bech32\", \"account_key_prefix\": \"cosmospub\", \"consensus_key_prefix\": \"cosmosvalconspub\"}`. | *[TmKmsKeyFormat](#tmkmskeyformat) | false |
 | validatorProtocol | Tendermint's protocol version to be used. Valid options are: - `v0.34` (default) - `v0.33` - `legacy` | *tmkms.ProtocolVersion | false |
 | persistState | Whether to persist \"priv_validator_state.json\" file on a PVC. Defaults to `true`. | *bool | false |
 | resources | Compute Resources for tmkms container. | *corev1.ResourceRequirements | false |
