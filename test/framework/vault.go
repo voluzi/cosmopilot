@@ -378,9 +378,9 @@ func (f *KindFramework) configureVaultTransit(rootToken string) error {
 		return err
 	}
 
-	// Login with root token
+	// Login with root token (-no-store to avoid needing /root directory)
 	_, err = f.PodExec(VaultNamespace, podName, "vault",
-		"vault", "login", "-tls-skip-verify", rootToken)
+		"vault", "login", "-tls-skip-verify", "-no-store", rootToken)
 	if err != nil {
 		return fmt.Errorf("failed to login to vault: %w", err)
 	}
@@ -399,9 +399,9 @@ func (f *KindFramework) createTmkmsToken(rootToken string) error {
 		return err
 	}
 
-	// Login with root token
+	// Login with root token (-no-store to avoid needing /root directory)
 	_, err = f.PodExec(VaultNamespace, podName, "vault",
-		"vault", "login", "-tls-skip-verify", rootToken)
+		"vault", "login", "-tls-skip-verify", "-no-store", rootToken)
 	if err != nil {
 		return fmt.Errorf("failed to login to vault: %w", err)
 	}
