@@ -12,16 +12,17 @@ Cosmopilot adapts its behavior based on the SDK version, as different versions h
 
 | SDK Version | Status |
 |-------------|--------|
-| `v0.47` | Default |
+| `v0.53` | Default |
+| `v0.50` | Supported |
+| `v0.47` | Supported |
 | `v0.45` | Supported |
-| `v0.50` | Coming soon |
 
 You can specify the SDK version in your `ChainNode` or `ChainNodeSet` manifest:
 
 ```yaml
 spec:
   app:
-    sdkVersion: v0.47  # or v0.45
+    sdkVersion: v0.53  # or v0.50, v0.47, v0.45
 ```
 
 ## Required CLI Commands
@@ -65,7 +66,7 @@ Recovers an account from a mnemonic. The `--keyring-backend test` flag must be s
 These commands are only required when [initializing a new network](/02-usage/10-initializing-new-network).
 
 <details>
-<summary><b>SDK v0.47+ (Default)</b></summary>
+<summary><b>SDK v0.47 and Later (Default)</b></summary>
 
 ```bash
 # Add account to genesis
