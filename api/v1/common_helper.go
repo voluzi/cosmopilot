@@ -331,6 +331,22 @@ func (cfg *Config) GetHaltHeight() int64 {
 	return 0
 }
 
+// GetSecurityContext returns the custom security context for the main app container if specified, or nil otherwise.
+func (cfg *Config) GetSecurityContext() *corev1.SecurityContext {
+	if cfg != nil {
+		return cfg.SecurityContext
+	}
+	return nil
+}
+
+// GetPodSecurityContext returns the custom pod security context if specified, or nil otherwise.
+func (cfg *Config) GetPodSecurityContext() *corev1.PodSecurityContext {
+	if cfg != nil {
+		return cfg.PodSecurityContext
+	}
+	return nil
+}
+
 func (exp *ExposeConfig) Enabled() bool {
 	if exp != nil && exp.P2P != nil {
 		return *exp.P2P

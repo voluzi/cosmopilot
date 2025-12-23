@@ -460,6 +460,8 @@ Config allows setting specific configurations for a node, including overriding c
 | runFlags | List of flags to be appended to app container when starting the node. | []string | false |
 | dashedConfigToml | Whether field naming in config.toml should use dashes instead of underscores. Defaults to `false`. | *bool | false |
 | haltHeight | The block height at which the node should stop. Cosmopilot will not attempt to restart the node beyond this height. | *int64 | false |
+| securityContext | SecurityContext allows overriding the default restricted security context for the main app container. When not specified, a restricted security context is applied (runAsNonRoot, runAsUser=1000, drop all capabilities). Use this only if your app image requires running as root or with different security settings. | *corev1.SecurityContext | false |
+| podSecurityContext | PodSecurityContext allows overriding the default restricted pod security context. When not specified, a restricted pod security context is applied (runAsNonRoot, runAsUser=1000, fsGroup=1000). Use this only if your app or sidecars require running as root or with different security settings. | *corev1.PodSecurityContext | false |
 
 [Back to Custom Resources](#custom-resources)
 

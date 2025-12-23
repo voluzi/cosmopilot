@@ -460,12 +460,12 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 }
 
 // buildAppContainer creates the main application container with its configuration.
-func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesMounts []corev1.VolumeMount, readinessPath string, appResources corev1.ResourceRequirements) corev1.Container {
+func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesMounts []corev1.VolumeMount, readinessPath string, appResources corev1.ResourceRequirements, securityContext *corev1.SecurityContext) corev1.Container {
 	return corev1.Container{
 		Name:            chainNode.Spec.App.App,
 		Image:           chainNode.GetAppImage(),
 		ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
-		SecurityContext: k8s.RestrictedSecurityContext(),
+		SecurityContext: securityContext,
 		Command:         []string{chainNode.Spec.App.App},
 		Args: append([]string{"start",
 			"--home", "/home/app",
@@ -615,6 +615,18 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	// System annotations override user annotations
 	annotations[controllers.AnnotationConfigHash] = configHash
 
+	// Use custom pod security context if provided, otherwise use restricted
+	podSecurityContext := chainNode.Spec.Config.GetPodSecurityContext()
+	if podSecurityContext == nil {
+		podSecurityContext = k8s.RestrictedPodSecurityContext()
+	}
+
+	// Use custom container security context if provided, otherwise use restricted
+	appSecurityContext := chainNode.Spec.Config.GetSecurityContext()
+	if appSecurityContext == nil {
+		appSecurityContext = k8s.RestrictedSecurityContext()
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        chainNode.GetName(),
@@ -633,11 +645,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			PriorityClassName:             r.opts.GetNodesPriorityClassName(),
 			Affinity:                      chainNode.Spec.Affinity,
 			NodeSelector:                  chainNode.Spec.NodeSelector,
-			SecurityContext:               k8s.RestrictedPodSecurityContext(),
+			SecurityContext:               podSecurityContext,
 			TerminationGracePeriodSeconds: chainNode.Spec.Config.GetTerminationGracePeriodSeconds(),
 			Volumes:                       r.buildBaseVolumes(chainNode),
 			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode)},
-			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources)},
+			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
 	}
 
@@ -762,6 +774,12 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			if r.shouldSkipSidecar(ctx, chainNode, c, pod.Labels) {
 				continue
 			}
+			// Use custom security context if provided, otherwise use restricted
+			sidecarSecurityContext := c.SecurityContext
+			if sidecarSecurityContext == nil {
+				sidecarSecurityContext = k8s.RestrictedSecurityContext()
+			}
+
 			sidecar := corev1.Container{
 				Name:            c.Name,
 				Image:           c.GetImage(chainNode),
@@ -769,7 +787,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 				Command:         c.Command,
 				Args:            c.Args,
 				Env:             c.Env,
-				SecurityContext: c.SecurityContext,
+				SecurityContext: sidecarSecurityContext,
 				Resources:       c.Resources,
 			}
 

@@ -253,6 +253,18 @@ type Config struct {
 	// Cosmopilot will not attempt to restart the node beyond this height.
 	// +optional
 	HaltHeight *int64 `json:"haltHeight,omitempty"`
+
+	// SecurityContext allows overriding the default restricted security context for the main app container.
+	// When not specified, a restricted security context is applied (runAsNonRoot, runAsUser=1000, drop all capabilities).
+	// Use this only if your app image requires running as root or with different security settings.
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// PodSecurityContext allows overriding the default restricted pod security context.
+	// When not specified, a restricted pod security context is applied (runAsNonRoot, runAsUser=1000, fsGroup=1000).
+	// Use this only if your app or sidecars require running as root or with different security settings.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
 // VolumeSpec describes an additional volume to mount on a node.
