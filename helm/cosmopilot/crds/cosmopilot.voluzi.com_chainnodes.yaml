@@ -1728,6 +1728,12 @@ spec:
                     description: Configures this node to run on seed mode. Defaults
                       to `false`.
                     type: boolean
+                  serviceAccountName:
+                    description: |-
+                      ServiceAccountName is the name of the ServiceAccount to use for the node's pod.
+                      If not specified, the default service account in the namespace is used.
+                      This is useful when sidecars need specific permissions (e.g., for leader election using leases).
+                    type: string
                   sidecars:
                     description: Allows configuring additional containers to run alongside
                       the node.

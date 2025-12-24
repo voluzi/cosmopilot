@@ -265,6 +265,12 @@ type Config struct {
 	// Use this only if your app or sidecars require running as root or with different security settings.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ServiceAccountName is the name of the ServiceAccount to use for the node's pod.
+	// If not specified, the default service account in the namespace is used.
+	// This is useful when sidecars need specific permissions (e.g., for leader election using leases).
+	// +optional
+	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
 }
 
 // VolumeSpec describes an additional volume to mount on a node.

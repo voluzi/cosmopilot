@@ -642,6 +642,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		Spec: corev1.PodSpec{
 			ShareProcessNamespace:         ptr.To(true),
 			RestartPolicy:                 corev1.RestartPolicyNever,
+			ServiceAccountName:            chainNode.Spec.Config.GetServiceAccountName(),
 			PriorityClassName:             r.opts.GetNodesPriorityClassName(),
 			Affinity:                      chainNode.Spec.Affinity,
 			NodeSelector:                  chainNode.Spec.NodeSelector,

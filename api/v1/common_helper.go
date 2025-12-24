@@ -347,6 +347,14 @@ func (cfg *Config) GetPodSecurityContext() *corev1.PodSecurityContext {
 	return nil
 }
 
+// GetServiceAccountName returns the service account name if specified, or empty string otherwise.
+func (cfg *Config) GetServiceAccountName() string {
+	if cfg != nil && cfg.ServiceAccountName != nil {
+		return *cfg.ServiceAccountName
+	}
+	return ""
+}
+
 func (exp *ExposeConfig) Enabled() bool {
 	if exp != nil && exp.P2P != nil {
 		return *exp.P2P
