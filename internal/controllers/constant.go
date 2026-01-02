@@ -34,6 +34,7 @@ const (
 	AnnotationVPAResources            = "cosmopilot.voluzi.com/vpa-resources"
 	AnnotationVPALastCPUScale         = "cosmopilot.voluzi.com/last-cpu-scale"
 	AnnotationVPALastMemoryScale      = "cosmopilot.voluzi.com/last-memory-scale"
+	AnnotationVPAOOMRecoveryHistory   = "cosmopilot.voluzi.com/oom-recovery-history"
 	AnnotationStatefulSetPodName      = "statefulset.kubernetes.io/pod-name"
 
 	LabelNodeID                = "node-id"

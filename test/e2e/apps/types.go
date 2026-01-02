@@ -317,6 +317,31 @@ func (t TestApp) WithVersion(version string) TestApp {
 	return copy
 }
 
+// BuildChainNodeWithMockMode creates a ChainNode with node-utils mock mode enabled.
+// This is useful for E2E testing VPA functionality with controllable resource usage.
+func (t TestApp) BuildChainNodeWithMockMode(namespace string) *appsv1.ChainNode {
+	chainNode := t.BuildChainNode(namespace)
+	chainNode.Spec.Config.NodeUtilsEnv = append(chainNode.Spec.Config.NodeUtilsEnv,
+		corev1.EnvVar{
+			Name:  "MOCK_MODE",
+			Value: "true",
+		},
+		corev1.EnvVar{
+			Name:  "LOG_LEVEL",
+			Value: "debug",
+		},
+	)
+	return chainNode
+}
+
+// BuildChainNodeWithVPA creates a ChainNode with VPA and mock mode enabled.
+// This is the recommended setup for E2E testing VPA functionality.
+func (t TestApp) BuildChainNodeWithVPA(namespace string, vpa *appsv1.VerticalAutoscalingConfig) *appsv1.ChainNode {
+	chainNode := t.BuildChainNodeWithMockMode(namespace)
+	chainNode.Spec.VPA = vpa
+	return chainNode
+}
+
 // TmKMSConfig holds configuration for building a ChainNode with TMKMS
 type TmKMSConfig struct {
 	// VaultAddress is the full address of the Vault cluster

@@ -411,7 +411,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 				MountPath: "/config",
 			},
 		},
-		Env: []corev1.EnvVar{
+		Env: append([]corev1.EnvVar{
 			{
 				Name:  "BLOCK_THRESHOLD",
 				Value: chainNode.Spec.Config.GetBlockThreshold(),
@@ -440,7 +440,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 				Name:  "HALT_HEIGHT",
 				Value: strconv.FormatInt(chainNode.Spec.Config.GetHaltHeight(), 10),
 			},
-		},
+		}, chainNode.Spec.Config.GetNodeUtilsEnv()...),
 		Resources: chainNode.Spec.Config.GetNodeUtilsResources(),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{

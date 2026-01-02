@@ -10,53 +10,55 @@ import (
 
 // Reasons for events.
 const (
-	ReasonPvcResized             = "PvcResized"
-	ReasonPvcMaxReached          = "PvcMaxSizeReached"
-	ReasonDataInitialized        = "DataInitialized"
-	ReasonDataInitStarted        = "DataInitStarted"
-	ReasonDataInitFailed         = "DataInitFailed"
-	ReasonNodeKeyCreated         = "NodeKeyCreated"
-	ReasonNodeKeyImported        = "NodeKeyImported"
-	ReasonPrivateKeyCreated      = "PrivateKeyCreated"
-	ReasonPrivateKeyImported     = "PrivateKeyImported"
-	ReasonAccountCreated         = "AccountCreated"
-	ReasonAccountImported        = "AccountImported"
-	ReasonGenesisInitialized     = "GenesisCreated"
-	ReasonGenesisImported        = "GenesisImported"
-	ReasonConfigsCreated         = "ConfigsCreated"
-	ReasonConfigsUpdated         = "ConfigsUpdated"
-	ReasonNodeStarted            = "NodeStarted"
-	ReasonNodeRestarted          = "NodeRestarted"
-	ReasonNodeError              = "NodeError"
-	ReasonNodeSyncing            = "NodeSyncing"
-	ReasonNodeStateSyncing       = "NodeStateSyncing"
-	ReasonNodeRunning            = "NodeRunning"
-	ReasonValidatorJailed        = "ValidatorJailed"
-	ReasonValidatorUnjailed      = "ValidatorUnjailed"
-	ReasonNodeCreated            = "NodeCreated"
-	ReasonNodeUpdated            = "NodeUpdated"
-	ReasonNodeDeleted            = "NodeDeleted"
-	ReasonInitGenesisFailure     = "InitGenesisFail"
-	ReasonUploadFailure          = "UploadFailed"
-	ReasonGenesisError           = "GenesisError"
-	ReasonNoTrustHeight          = "NoTrustHeight"
-	ReasonNoPeers                = "NoPeers"
-	ReasonStartedSnapshot        = "SnapshotStarted"
-	ReasonFinishedSnapshot       = "SnapshotFinished"
-	ReasonDeletedSnapshot        = "SnapshotDeleted"
-	ReasonTarballExportStart     = "ExportingTarball"
-	ReasonTarballExportFinish    = "TarballFinished"
-	ReasonTarballDeleted         = "TarballDeleted"
-	ReasonTarballExportError     = "TarballExportError"
-	ReasonSnapshotIntegrityStart = "IntegrityCheckStart"
-	ReasonUpgradeCompleted       = "UpgradeCompleted"
-	ReasonUpgradeFailed          = "UpgradeFailed"
-	ReasonUpgradeMissingData     = "UpgradeMissingData"
-	ReasonCreateValidatorFailure = "FailedCreateValidator"
-	ReasonCreateValidatorSuccess = "CreateValidatorSuccess"
-	ReasonInvalid                = "Invalid"
-	ReasonVPAScaleUp             = "VPAScaleUp"
-	ReasonVPAScaleDown           = "VPAScaleDown"
+	ReasonPvcResized                 = "PvcResized"
+	ReasonPvcMaxReached              = "PvcMaxSizeReached"
+	ReasonDataInitialized            = "DataInitialized"
+	ReasonDataInitStarted            = "DataInitStarted"
+	ReasonDataInitFailed             = "DataInitFailed"
+	ReasonNodeKeyCreated             = "NodeKeyCreated"
+	ReasonNodeKeyImported            = "NodeKeyImported"
+	ReasonPrivateKeyCreated          = "PrivateKeyCreated"
+	ReasonPrivateKeyImported         = "PrivateKeyImported"
+	ReasonAccountCreated             = "AccountCreated"
+	ReasonAccountImported            = "AccountImported"
+	ReasonGenesisInitialized         = "GenesisCreated"
+	ReasonGenesisImported            = "GenesisImported"
+	ReasonConfigsCreated             = "ConfigsCreated"
+	ReasonConfigsUpdated             = "ConfigsUpdated"
+	ReasonNodeStarted                = "NodeStarted"
+	ReasonNodeRestarted              = "NodeRestarted"
+	ReasonNodeError                  = "NodeError"
+	ReasonNodeSyncing                = "NodeSyncing"
+	ReasonNodeStateSyncing           = "NodeStateSyncing"
+	ReasonNodeRunning                = "NodeRunning"
+	ReasonValidatorJailed            = "ValidatorJailed"
+	ReasonValidatorUnjailed          = "ValidatorUnjailed"
+	ReasonNodeCreated                = "NodeCreated"
+	ReasonNodeUpdated                = "NodeUpdated"
+	ReasonNodeDeleted                = "NodeDeleted"
+	ReasonInitGenesisFailure         = "InitGenesisFail"
+	ReasonUploadFailure              = "UploadFailed"
+	ReasonGenesisError               = "GenesisError"
+	ReasonNoTrustHeight              = "NoTrustHeight"
+	ReasonNoPeers                    = "NoPeers"
+	ReasonStartedSnapshot            = "SnapshotStarted"
+	ReasonFinishedSnapshot           = "SnapshotFinished"
+	ReasonDeletedSnapshot            = "SnapshotDeleted"
+	ReasonTarballExportStart         = "ExportingTarball"
+	ReasonTarballExportFinish        = "TarballFinished"
+	ReasonTarballDeleted             = "TarballDeleted"
+	ReasonTarballExportError         = "TarballExportError"
+	ReasonSnapshotIntegrityStart     = "IntegrityCheckStart"
+	ReasonUpgradeCompleted           = "UpgradeCompleted"
+	ReasonUpgradeFailed              = "UpgradeFailed"
+	ReasonUpgradeMissingData         = "UpgradeMissingData"
+	ReasonCreateValidatorFailure     = "FailedCreateValidator"
+	ReasonCreateValidatorSuccess     = "CreateValidatorSuccess"
+	ReasonInvalid                    = "Invalid"
+	ReasonVPAScaleUp                 = "VPAScaleUp"
+	ReasonVPAScaleDown               = "VPAScaleDown"
+	ReasonVPAEmergencyScaleUp        = "VPAEmergencyScaleUp"
+	ReasonVPAOOMRecoveryLimitReached = "VPAOOMRecoveryLimitReached"
 )
 
 // SdkVersion specifies the cosmos-sdk version used by this application.
@@ -228,6 +230,10 @@ type Config struct {
 	// Compute Resources for node-utils container.
 	// +optional
 	NodeUtilsResources *corev1.ResourceRequirements `json:"nodeUtilsResources,omitempty"`
+
+	// Additional environment variables for the node-utils container.
+	// +optional
+	NodeUtilsEnv []corev1.EnvVar `json:"nodeUtilsEnv,omitempty"`
 
 	// Whether to persist address book file in data directory. Defaults to `true`.
 	// +optional
@@ -1024,21 +1030,6 @@ type VerticalAutoscalingConfig struct {
 	Memory *VerticalAutoscalingMetricConfig `json:"memory,omitempty"`
 }
 
-// LimitSource specifies which resource value should be used as the scaling reference.
-// +kubebuilder:validation:Enum=effective-limit;requests;limits
-type LimitSource string
-
-const (
-	// EffectiveLimit means use limits if set; otherwise fallback to requests.
-	EffectiveLimit LimitSource = "effective-limit"
-
-	// Requests means always use the pod's requested resource value.
-	Requests LimitSource = "requests"
-
-	// Limits means always use the pod's resource limit value.
-	Limits LimitSource = "limits"
-)
-
 // LimitUpdateStrategy defines how resource limits should be managed when autoscaling.
 // +kubebuilder:validation:Enum=equal;max;percentage;retain;unset
 type LimitUpdateStrategy string
@@ -1062,15 +1053,6 @@ const (
 
 // VerticalAutoscalingMetricConfig defines autoscaling behavior for a specific resource type (CPU or memory).
 type VerticalAutoscalingMetricConfig struct {
-	// Source determines whether to base autoscaling decisions on requests, limits, or effective limit.
-	// Valid values are:
-	// `effective-limit` (default) (use limits if set; otherwise fallback to requests)
-	// `requests` (use the pod’s requested resource value)
-	// `limits` (use the pod’s resource limit value)
-	// +optional
-	// +default="effective-limit"
-	Source *LimitSource `json:"source,omitempty"`
-
 	// Minimum resource value allowed during scaling (e.g. "100m" or "128Mi").
 	Min resource.Quantity `json:"min"`
 
@@ -1103,6 +1085,40 @@ type VerticalAutoscalingMetricConfig struct {
 	// Only used when LimitStrategy = "percentage". Defaults to `150` when not set.
 	// +optional
 	LimitPercentage *int `json:"limitPercentage,omitempty"`
+
+	// SafetyMarginPercent prevents scaling down below (current_usage * (1 + margin/100)).
+	// Provides headroom to prevent OOM from usage spikes. Defaults to 15.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	SafetyMarginPercent *int `json:"safetyMarginPercent,omitempty"`
+
+	// HysteresisPercent creates a deadband between scale-up and scale-down zones.
+	// For scale-down rules, effective threshold = configured threshold - hysteresis.
+	// This prevents oscillation when usage hovers near a threshold. Defaults to 5.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=50
+	HysteresisPercent *int `json:"hysteresisPercent,omitempty"`
+
+	// EmergencyScaleUpPercent defines how much to scale up on OOM detection.
+	// Only applicable to memory. Defaults to 25.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	EmergencyScaleUpPercent *int `json:"emergencyScaleUpPercent,omitempty"`
+
+	// MaxOOMRecoveries limits how many OOM emergency scale-ups can happen within
+	// OOMRecoveryWindow. Prevents runaway scaling on apps with memory leaks. Defaults to 3.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxOOMRecoveries *int `json:"maxOOMRecoveries,omitempty"`
+
+	// OOMRecoveryWindow is the time window for counting OOM recoveries.
+	// Defaults to "1h".
+	// +optional
+	// +kubebuilder:validation:Format=duration
+	OOMRecoveryWindow *string `json:"oomRecoveryWindow,omitempty"`
 }
 
 // ScalingDirection determines whether the scaling action is an increase or decrease in resource.

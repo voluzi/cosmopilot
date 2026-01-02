@@ -35,6 +35,9 @@ var _ = BeforeSuite(func() {
 	err := tf.Setup(ctx)
 	Expect(err).NotTo(HaveOccurred())
 
+	By("Enabling mock stats for VPA testing")
+	tf.EnableMockStats()
+
 	By("Starting controller manager")
 	err = tf.StartManager()
 	Expect(err).NotTo(HaveOccurred())

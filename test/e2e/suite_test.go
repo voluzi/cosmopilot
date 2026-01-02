@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/voluzi/cosmopilot/v2/pkg/environ"
 	"github.com/voluzi/cosmopilot/v2/test/e2e/apps"
 	"github.com/voluzi/cosmopilot/v2/test/framework"
 )
@@ -19,7 +19,7 @@ var (
 )
 
 func TestE2E(t *testing.T) {
-	if os.Getenv("E2E_TEST") != "true" {
+	if !environ.GetBool("E2E_TEST", false) {
 		t.Skip("Skipping e2e tests. Set E2E_TEST=true to run.")
 	}
 
@@ -37,20 +37,12 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 
 	ctx := context.Background()
 
-	clusterName := os.Getenv("CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "cosmopilot-e2e"
-	}
-
-	controllerImage := os.Getenv("CONTROLLER_IMAGE")
-	chartVersion := os.Getenv("CHART_VERSION")
-	nodeUtilsImage := os.Getenv("NODE_UTILS_IMAGE")
-	if nodeUtilsImage == "" {
-		nodeUtilsImage = "ghcr.io/voluzi/node-utils"
-	}
-
-	reuseCluster := os.Getenv("REUSE_CLUSTER") != "false"
-	installVault := os.Getenv("INSTALL_VAULT") != "false"
+	clusterName := environ.GetString("CLUSTER_NAME", "cosmopilot-e2e")
+	controllerImage := environ.GetString("CONTROLLER_IMAGE", "")
+	chartVersion := environ.GetString("CHART_VERSION", "")
+	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
+	reuseCluster := environ.GetBool("REUSE_CLUSTER", true)
+	installVault := environ.GetBool("INSTALL_VAULT", true)
 
 	setupFramework := framework.NewKindFramework(
 		framework.WithClusterName(clusterName),
@@ -76,6 +68,13 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// Load locally built node-utils image if requested
+	if environ.GetBool("BUILD_NODE_UTILS", false) && nodeUtilsImage != "" {
+		By("Loading node-utils image into Kind cluster")
+		err = setupFramework.LoadImage(nodeUtilsImage)
+		Expect(err).NotTo(HaveOccurred())
+	}
+
 	By("Deploying controller to cluster")
 	err = setupFramework.DeployController()
 	Expect(err).NotTo(HaveOccurred())
@@ -93,19 +92,11 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 
 	ctx := context.Background()
 
-	clusterName := os.Getenv("CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "cosmopilot-e2e"
-	}
-
-	controllerImage := os.Getenv("CONTROLLER_IMAGE")
-	chartVersion := os.Getenv("CHART_VERSION")
-	nodeUtilsImage := os.Getenv("NODE_UTILS_IMAGE")
-	if nodeUtilsImage == "" {
-		nodeUtilsImage = "ghcr.io/voluzi/node-utils"
-	}
-
-	installVault := os.Getenv("INSTALL_VAULT") != "false"
+	clusterName := environ.GetString("CLUSTER_NAME", "cosmopilot-e2e")
+	controllerImage := environ.GetString("CONTROLLER_IMAGE", "")
+	chartVersion := environ.GetString("CHART_VERSION", "")
+	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
+	installVault := environ.GetBool("INSTALL_VAULT", true)
 
 	// Always reuse the cluster that Process 1 set up
 	tf = framework.NewKindFramework(
@@ -136,7 +127,7 @@ var _ = SynchronizedAfterSuite(func() {
 	// This runs only on Process 1
 	By("Tearing down e2e test framework (Process 1)")
 
-	reuseCluster := os.Getenv("REUSE_CLUSTER") != "false"
+	reuseCluster := environ.GetBool("REUSE_CLUSTER", true)
 
 	// Don't undeploy if we want to keep the cluster for debugging
 	if !reuseCluster && tf != nil {
