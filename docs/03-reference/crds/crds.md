@@ -456,6 +456,7 @@ Config allows setting specific configurations for a node, including overriding c
 | startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
 | ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
 | nodeUtilsResources | Compute Resources for node-utils container. | *corev1.ResourceRequirements | false |
+| nodeUtilsEnv | Additional environment variables for the node-utils container. | []corev1.EnvVar | false |
 | persistAddressBook | Whether to persist address book file in data directory. Defaults to `true`. | *bool | false |
 | terminationGracePeriodSeconds | Optional duration in seconds the pod needs to terminate gracefully. | *int64 | false |
 | evmEnabled | Whether EVM is enabled on this node. Will add evm-rpc port to services. Defaults to `false`. | *bool | false |
@@ -804,13 +805,17 @@ VerticalAutoscalingMetricConfig defines autoscaling behavior for a specific reso
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| source | Source determines whether to base autoscaling decisions on requests, limits, or effective limit. Valid values are: `effective-limit` (default) (use limits if set; otherwise fallback to requests) `requests` (use the pod’s requested resource value) `limits` (use the pod’s resource limit value) | *LimitSource | false |
 | min | Minimum resource value allowed during scaling (e.g. \"100m\" or \"128Mi\"). | resource.Quantity | true |
 | max | Maximum resource value allowed during scaling (e.g. \"8000m\" or \"2Gi\"). | resource.Quantity | true |
 | rules | Rules define when and how scaling should occur based on sustained usage levels. | []*[VerticalAutoscalingRule](#verticalautoscalingrule) | true |
 | cooldown | Cooldown is the minimum duration to wait between consecutive scaling actions. Defaults to \"5m\". | *string | false |
 | limitStrategy | LimitStrategy controls how resource limits should be updated after autoscaling. Valid values are: `retain` (default) (keep original limits) `equal` (match request value) `max` (use configured VPA Max) `percentage` (request × percentage) `unset` (remove the limits field entirely) | *LimitUpdateStrategy | false |
 | limitPercentage | LimitPercentage defines the percentage multiplier to apply when using \"percentage\" LimitStrategy. For example, 150 means limit = request * 1.5. Only used when LimitStrategy = \"percentage\". Defaults to `150` when not set. | *int | false |
+| safetyMarginPercent | SafetyMarginPercent prevents scaling down below (current_usage * (1 + margin/100)). Provides headroom to prevent OOM from usage spikes. Defaults to 15. | *int | false |
+| hysteresisPercent | HysteresisPercent creates a deadband between scale-up and scale-down zones. For scale-down rules, effective threshold = configured threshold - hysteresis. This prevents oscillation when usage hovers near a threshold. Defaults to 5. | *int | false |
+| emergencyScaleUpPercent | EmergencyScaleUpPercent defines how much to scale up on OOM detection. Only applicable to memory. Defaults to 25. | *int | false |
+| maxOOMRecoveries | MaxOOMRecoveries limits how many OOM emergency scale-ups can happen within OOMRecoveryWindow. Prevents runaway scaling on apps with memory leaks. Defaults to 3. | *int | false |
+| oomRecoveryWindow | OOMRecoveryWindow is the time window for counting OOM recoveries. Defaults to \"1h\". | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 

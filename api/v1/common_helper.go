@@ -88,6 +88,21 @@ const (
 
 	// DefaultLimitPercentage is the default percentage used when applying limit-based scaling strategies.
 	DefaultLimitPercentage = 150
+
+	// DefaultSafetyMarginPercent is the default safety margin for VPA scale-down operations.
+	DefaultSafetyMarginPercent = 15
+
+	// DefaultHysteresisPercent is the default hysteresis for VPA scale-down thresholds.
+	DefaultHysteresisPercent = 5
+
+	// DefaultEmergencyScaleUpPercent is the default percentage to scale up on OOM detection.
+	DefaultEmergencyScaleUpPercent = 25
+
+	// DefaultMaxOOMRecoveries is the default maximum OOM recoveries allowed within the recovery window.
+	DefaultMaxOOMRecoveries = 3
+
+	// DefaultOOMRecoveryWindow is the default time window for counting OOM recoveries.
+	DefaultOOMRecoveryWindow = 1 * time.Hour
 )
 
 // GetImage returns the versioned image to be used
@@ -268,6 +283,13 @@ func (cfg *Config) GetNodeUtilsLogLevel() string {
 		return *cfg.NodeUtilsLogLevel
 	}
 	return DefaultNodeUtilsLogLevel
+}
+
+func (cfg *Config) GetNodeUtilsEnv() []corev1.EnvVar {
+	if cfg != nil {
+		return cfg.NodeUtilsEnv
+	}
+	return nil
 }
 
 func (cfg *Config) ShouldPersistAddressBook() bool {
@@ -646,13 +668,6 @@ func (vpam *VerticalAutoscalingMetricConfig) GetCooldownDuration() time.Duration
 	return DefaultVpaCooldown
 }
 
-func (vpam *VerticalAutoscalingMetricConfig) GetSource() LimitSource {
-	if vpam != nil && vpam.Source != nil {
-		return *vpam.Source
-	}
-	return EffectiveLimit
-}
-
 func (vpam *VerticalAutoscalingMetricConfig) GetLimitUpdateStrategy() LimitUpdateStrategy {
 	if vpam != nil && vpam.LimitStrategy != nil {
 		return *vpam.LimitStrategy
@@ -665,6 +680,43 @@ func (vpam *VerticalAutoscalingMetricConfig) GetLimitPercentage() int {
 		return *vpam.LimitPercentage
 	}
 	return DefaultLimitPercentage
+}
+
+func (vpam *VerticalAutoscalingMetricConfig) GetSafetyMarginPercent() int {
+	if vpam != nil && vpam.SafetyMarginPercent != nil {
+		return *vpam.SafetyMarginPercent
+	}
+	return DefaultSafetyMarginPercent
+}
+
+func (vpam *VerticalAutoscalingMetricConfig) GetHysteresisPercent() int {
+	if vpam != nil && vpam.HysteresisPercent != nil {
+		return *vpam.HysteresisPercent
+	}
+	return DefaultHysteresisPercent
+}
+
+func (vpam *VerticalAutoscalingMetricConfig) GetEmergencyScaleUpPercent() int {
+	if vpam != nil && vpam.EmergencyScaleUpPercent != nil {
+		return *vpam.EmergencyScaleUpPercent
+	}
+	return DefaultEmergencyScaleUpPercent
+}
+
+func (vpam *VerticalAutoscalingMetricConfig) GetMaxOOMRecoveries() int {
+	if vpam != nil && vpam.MaxOOMRecoveries != nil {
+		return *vpam.MaxOOMRecoveries
+	}
+	return DefaultMaxOOMRecoveries
+}
+
+func (vpam *VerticalAutoscalingMetricConfig) GetOOMRecoveryWindow() time.Duration {
+	if vpam != nil && vpam.OOMRecoveryWindow != nil {
+		if d, err := strfmt.ParseDuration(*vpam.OOMRecoveryWindow); err == nil {
+			return d
+		}
+	}
+	return DefaultOOMRecoveryWindow
 }
 
 func (vpar *VerticalAutoscalingRule) GetDuration() time.Duration {

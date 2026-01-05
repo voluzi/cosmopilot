@@ -22,6 +22,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnodeset"
+	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
 const (
@@ -42,9 +43,11 @@ var (
 // EnvTestFramework implements Framework using controller-runtime's envtest
 type EnvTestFramework struct {
 	BaseFramework
-	env        *envtest.Environment
-	mgrCancel  context.CancelFunc
-	mgrStarted bool
+	env                 *envtest.Environment
+	mgrCancel           context.CancelFunc
+	mgrStarted          bool
+	chainNodeReconciler *chainnode.Reconciler
+	mockStatsRegistry   *MockStatsClientRegistry
 }
 
 // NewEnvTestFramework creates a new envtest-based framework
@@ -139,8 +142,17 @@ func (f *EnvTestFramework) StartManager() error {
 		DisableWebhooks: false,
 	}
 
-	if _, err = chainnode.New(mgr, f.kubeClient, &runOpts); err != nil {
+	reconciler, err := chainnode.New(mgr, f.kubeClient, &runOpts)
+	if err != nil {
 		return fmt.Errorf("failed to create chainnode controller: %w", err)
+	}
+	f.chainNodeReconciler = reconciler
+
+	// Inject mock stats client factory if configured
+	if f.mockStatsRegistry != nil {
+		f.chainNodeReconciler.SetStatsClientFactory(func(host string) nodeutils.StatsClient {
+			return f.mockStatsRegistry.Get(host)
+		})
 	}
 
 	if _, err = chainnodeset.New(mgr, f.kubeClient, &runOpts); err != nil {
@@ -217,4 +229,36 @@ func (f *EnvTestFramework) Type() FrameworkType {
 // Env returns the underlying envtest environment
 func (f *EnvTestFramework) Env() *envtest.Environment {
 	return f.env
+}
+
+// SetMockStatsRegistry sets the mock stats client registry.
+// This must be called before StartManager() to have effect.
+func (f *EnvTestFramework) SetMockStatsRegistry(registry *MockStatsClientRegistry) {
+	f.mockStatsRegistry = registry
+}
+
+// MockStatsRegistry returns the mock stats client registry, creating one if needed.
+// This provides access to configure mock CPU/memory stats for testing VPA.
+func (f *EnvTestFramework) MockStatsRegistry() *MockStatsClientRegistry {
+	if f.mockStatsRegistry == nil {
+		f.mockStatsRegistry = NewMockStatsClientRegistry()
+	}
+	return f.mockStatsRegistry
+}
+
+// EnableMockStats enables mock stats for the framework.
+// This is a convenience method that creates a registry and ensures
+// it will be injected when StartManager() is called.
+// Returns the registry for configuration.
+func (f *EnvTestFramework) EnableMockStats() *MockStatsClientRegistry {
+	if f.mockStatsRegistry == nil {
+		f.mockStatsRegistry = NewMockStatsClientRegistry()
+	}
+	return f.mockStatsRegistry
+}
+
+// ChainNodeReconciler returns the ChainNode reconciler.
+// This can be used to directly access or configure the reconciler in tests.
+func (f *EnvTestFramework) ChainNodeReconciler() *chainnode.Reconciler {
+	return f.chainNodeReconciler
 }

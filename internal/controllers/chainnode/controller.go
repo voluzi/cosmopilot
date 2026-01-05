@@ -23,18 +23,34 @@ import (
 	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
+// StatsClientFactory is a function that creates a StatsClient for a given host.
+// This can be overridden in tests to inject mock clients.
+type StatsClientFactory func(host string) nodeutils.StatsClient
+
+// DefaultStatsClientFactory creates a real nodeutils client.
+func DefaultStatsClientFactory(host string) nodeutils.StatsClient {
+	return nodeutils.NewClient(host)
+}
+
+// SetStatsClientFactory sets the factory function for creating StatsClient instances.
+// This is primarily used in tests to inject mock clients.
+func (r *Reconciler) SetStatsClientFactory(factory StatsClientFactory) {
+	r.statsClientFactory = factory
+}
+
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
 	client.Client
-	ClientSet       *kubernetes.Clientset
-	RestConfig      *rest.Config
-	Scheme          *runtime.Scheme
-	configCache     *ttlcache.Cache[string, map[string]interface{}]
-	nodeClients     *ttlcache.Cache[string, *chainutils.Client]
-	recorder        record.EventRecorder
-	opts            *controllers.ControllerRunOptions
-	disruptionLocks *lockManager
-	configLocks     *configLockManager
+	ClientSet          *kubernetes.Clientset
+	RestConfig         *rest.Config
+	Scheme             *runtime.Scheme
+	configCache        *ttlcache.Cache[string, map[string]interface{}]
+	nodeClients        *ttlcache.Cache[string, *chainutils.Client]
+	recorder           record.EventRecorder
+	opts               *controllers.ControllerRunOptions
+	disruptionLocks    *lockManager
+	configLocks        *configLockManager
+	statsClientFactory StatsClientFactory
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {
@@ -64,16 +80,17 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 	})
 
 	r := &Reconciler{
-		Client:          mgr.GetClient(),
-		ClientSet:       clientSet,
-		RestConfig:      mgr.GetConfig(),
-		Scheme:          mgr.GetScheme(),
-		configCache:     cfgCache,
-		nodeClients:     clientsCache,
-		recorder:        mgr.GetEventRecorderFor("chainnode-controller"),
-		opts:            opts,
-		disruptionLocks: newLockManager(),
-		configLocks:     newConfigLockManager(),
+		Client:             mgr.GetClient(),
+		ClientSet:          clientSet,
+		RestConfig:         mgr.GetConfig(),
+		Scheme:             mgr.GetScheme(),
+		configCache:        cfgCache,
+		nodeClients:        clientsCache,
+		recorder:           mgr.GetEventRecorderFor("chainnode-controller"),
+		opts:               opts,
+		disruptionLocks:    newLockManager(),
+		configLocks:        newConfigLockManager(),
+		statsClientFactory: DefaultStatsClientFactory,
 	}
 	if err := r.setupWithManager(mgr); err != nil {
 		return nil, err

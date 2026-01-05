@@ -99,15 +99,20 @@ test.integration: manifests generate fmt vet envtest ## Run integration tests (e
 .PHONY: test.e2e
 test.e2e: CLUSTER_NAME?=cosmopilot-e2e
 test.e2e: REUSE_CLUSTER?=true
+test.e2e: BUILD_NODE_UTILS?=true
 test.e2e: FOCUS?=
 test.e2e: SKIP?=
 test.e2e: TEST_TIMEOUT?=30m
 test.e2e: PROCS?=10
 test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Run e2e tests with locally built image.
+	@if [ "$(BUILD_NODE_UTILS)" = "true" ]; then \
+		$(MAKE) docker-build-nodeutils; \
+	fi
 	E2E_TEST=true \
 	CLUSTER_NAME=$(CLUSTER_NAME) \
 	CONTROLLER_IMAGE=$(IMG) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
+	BUILD_NODE_UTILS=$(BUILD_NODE_UTILS) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \
 	$(GINKGO) -v -procs=$(PROCS) --timeout=$(TEST_TIMEOUT) \
 		--focus="$(FOCUS)" \
@@ -146,6 +151,10 @@ build: manifests generate fmt vet $(BUILDDIR)/ ## Build manager binary.
 .PHONY: docker-build
 docker-build: ## Build docker image.
 	docker build -t $(IMG) .
+
+.PHONY: docker-build-nodeutils
+docker-build-nodeutils: ## Build node-utils docker image.
+	docker build -t $(NODE_UTILS_IMG) -f Dockerfile.utils .
 
 .PHONY: helm.package
 helm.package: manifests helm $(BUILDDIR)/ ## Package helm chart. Final package name is cosmopilot-<<VERSION>>.tgz

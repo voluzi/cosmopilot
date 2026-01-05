@@ -1,11 +1,12 @@
 package apps
 
 import (
-	"os"
 	"runtime"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
+
+	"github.com/voluzi/cosmopilot/v2/pkg/environ"
 )
 
 // currentArch returns the current CPU architecture in Docker/OCI format
@@ -59,7 +60,7 @@ func All() []TestApp {
 	}
 
 	// If TEST_APPS is not set, return arch-filtered apps
-	filter := os.Getenv("TEST_APPS")
+	filter := environ.GetString("TEST_APPS", "")
 	if filter == "" {
 		return archFiltered
 	}

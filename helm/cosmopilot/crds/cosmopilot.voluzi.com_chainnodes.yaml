@@ -1292,6 +1292,119 @@ spec:
                       type: object
                       x-kubernetes-map-type: atomic
                     type: array
+                  nodeUtilsEnv:
+                    description: Additional environment variables for the node-utils
+                      container.
+                    items:
+                      description: EnvVar represents an environment variable present
+                        in a Container.
+                      properties:
+                        name:
+                          description: Name of the environment variable. Must be a
+                            C_IDENTIFIER.
+                          type: string
+                        value:
+                          description: |-
+                            Variable references $(VAR_NAME) are expanded
+                            using the previously defined environment variables in the container and
+                            any service environment variables. If a variable cannot be resolved,
+                            the reference in the input string will be unchanged. Double $$ are reduced
+                            to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                            "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                            Escaped references will never be expanded, regardless of whether the variable
+                            exists or not.
+                            Defaults to "".
+                          type: string
+                        valueFrom:
+                          description: Source for the environment variable's value.
+                            Cannot be used if value is not empty.
+                          properties:
+                            configMapKeyRef:
+                              description: Selects a key of a ConfigMap.
+                              properties:
+                                key:
+                                  description: The key to select.
+                                  type: string
+                                name:
+                                  description: |-
+                                    Name of the referent.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the ConfigMap or its
+                                    key must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            fieldRef:
+                              description: |-
+                                Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                              properties:
+                                apiVersion:
+                                  description: Version of the schema the FieldPath
+                                    is written in terms of, defaults to "v1".
+                                  type: string
+                                fieldPath:
+                                  description: Path of the field to select in the
+                                    specified API version.
+                                  type: string
+                              required:
+                              - fieldPath
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            resourceFieldRef:
+                              description: |-
+                                Selects a resource of the container: only resources limits and requests
+                                (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                              properties:
+                                containerName:
+                                  description: 'Container name: required for volumes,
+                                    optional for env vars'
+                                  type: string
+                                divisor:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Specifies the output format of the
+                                    exposed resources, defaults to "1"
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                resource:
+                                  description: 'Required: resource to select'
+                                  type: string
+                              required:
+                              - resource
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            secretKeyRef:
+                              description: Selects a key of a secret in the pod's
+                                namespace
+                              properties:
+                                key:
+                                  description: The key of the secret to select from.  Must
+                                    be a valid secret key.
+                                  type: string
+                                name:
+                                  description: |-
+                                    Name of the referent.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the Secret or its key
+                                    must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                          type: object
+                      required:
+                      - name
+                      type: object
+                    type: array
                   nodeUtilsLogLevel:
                     description: Log level for node-utils container. Defaults to `info`.
                     type: string
@@ -4425,6 +4538,21 @@ spec:
                           Defaults to "5m".
                         format: duration
                         type: string
+                      emergencyScaleUpPercent:
+                        description: |-
+                          EmergencyScaleUpPercent defines how much to scale up on OOM detection.
+                          Only applicable to memory. Defaults to 25.
+                        maximum: 100
+                        minimum: 1
+                        type: integer
+                      hysteresisPercent:
+                        description: |-
+                          HysteresisPercent creates a deadband between scale-up and scale-down zones.
+                          For scale-down rules, effective threshold = configured threshold - hysteresis.
+                          This prevents oscillation when usage hovers near a threshold. Defaults to 5.
+                        maximum: 50
+                        minimum: 0
+                        type: integer
                       limitPercentage:
                         description: |-
                           LimitPercentage defines the percentage multiplier to apply when using "percentage" LimitStrategy.
@@ -4456,6 +4584,12 @@ spec:
                           (e.g. "8000m" or "2Gi").
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                      maxOOMRecoveries:
+                        description: |-
+                          MaxOOMRecoveries limits how many OOM emergency scale-ups can happen within
+                          OOMRecoveryWindow. Prevents runaway scaling on apps with memory leaks. Defaults to 3.
+                        minimum: 1
+                        type: integer
                       min:
                         anyOf:
                         - type: integer
@@ -4464,6 +4598,12 @@ spec:
                           (e.g. "100m" or "128Mi").
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                      oomRecoveryWindow:
+                        description: |-
+                          OOMRecoveryWindow is the time window for counting OOM recoveries.
+                          Defaults to "1h".
+                        format: duration
+                        type: string
                       rules:
                         description: Rules define when and how scaling should occur
                           based on sustained usage levels.
@@ -4510,19 +4650,13 @@ spec:
                           - usagePercent
                           type: object
                         type: array
-                      source:
-                        default: effective-limit
+                      safetyMarginPercent:
                         description: |-
-                          Source determines whether to base autoscaling decisions on requests, limits, or effective limit.
-                          Valid values are:
-                          `effective-limit` (default) (use limits if set; otherwise fallback to requests)
-                          `requests` (use the pod’s requested resource value)
-                          `limits` (use the pod’s resource limit value)
-                        enum:
-                        - effective-limit
-                        - requests
-                        - limits
-                        type: string
+                          SafetyMarginPercent prevents scaling down below (current_usage * (1 + margin/100)).
+                          Provides headroom to prevent OOM from usage spikes. Defaults to 15.
+                        maximum: 100
+                        minimum: 0
+                        type: integer
                     required:
                     - max
                     - min
@@ -4541,6 +4675,21 @@ spec:
                           Defaults to "5m".
                         format: duration
                         type: string
+                      emergencyScaleUpPercent:
+                        description: |-
+                          EmergencyScaleUpPercent defines how much to scale up on OOM detection.
+                          Only applicable to memory. Defaults to 25.
+                        maximum: 100
+                        minimum: 1
+                        type: integer
+                      hysteresisPercent:
+                        description: |-
+                          HysteresisPercent creates a deadband between scale-up and scale-down zones.
+                          For scale-down rules, effective threshold = configured threshold - hysteresis.
+                          This prevents oscillation when usage hovers near a threshold. Defaults to 5.
+                        maximum: 50
+                        minimum: 0
+                        type: integer
                       limitPercentage:
                         description: |-
                           LimitPercentage defines the percentage multiplier to apply when using "percentage" LimitStrategy.
@@ -4572,6 +4721,12 @@ spec:
                           (e.g. "8000m" or "2Gi").
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                      maxOOMRecoveries:
+                        description: |-
+                          MaxOOMRecoveries limits how many OOM emergency scale-ups can happen within
+                          OOMRecoveryWindow. Prevents runaway scaling on apps with memory leaks. Defaults to 3.
+                        minimum: 1
+                        type: integer
                       min:
                         anyOf:
                         - type: integer
@@ -4580,6 +4735,12 @@ spec:
                           (e.g. "100m" or "128Mi").
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                      oomRecoveryWindow:
+                        description: |-
+                          OOMRecoveryWindow is the time window for counting OOM recoveries.
+                          Defaults to "1h".
+                        format: duration
+                        type: string
                       rules:
                         description: Rules define when and how scaling should occur
                           based on sustained usage levels.
@@ -4626,19 +4787,13 @@ spec:
                           - usagePercent
                           type: object
                         type: array
-                      source:
-                        default: effective-limit
+                      safetyMarginPercent:
                         description: |-
-                          Source determines whether to base autoscaling decisions on requests, limits, or effective limit.
-                          Valid values are:
-                          `effective-limit` (default) (use limits if set; otherwise fallback to requests)
-                          `requests` (use the pod’s requested resource value)
-                          `limits` (use the pod’s resource limit value)
-                        enum:
-                        - effective-limit
-                        - requests
-                        - limits
-                        type: string
+                          SafetyMarginPercent prevents scaling down below (current_usage * (1 + margin/100)).
+                          Provides headroom to prevent OOM from usage spikes. Defaults to 15.
+                        maximum: 100
+                        minimum: 0
+                        type: integer
                     required:
                     - max
                     - min

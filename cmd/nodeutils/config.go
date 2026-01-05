@@ -6,6 +6,8 @@ import (
 	"github.com/voluzi/cosmopilot/v2/pkg/environ"
 )
 
+var mockMode bool
+
 func init() {
 	flag.StringVar(&host, "host",
 		environ.GetString("HOST", "0.0.0.0"),
@@ -60,5 +62,10 @@ func init() {
 	flag.Int64Var(&haltHeight, "halt-height",
 		environ.GetInt64("HALT_HEIGHT", 0),
 		"the height at which this server will be halted",
+	)
+
+	flag.BoolVar(&mockMode, "mock-mode",
+		environ.GetBool("MOCK_MODE", false),
+		"enable mock mode for testing (returns configurable stats instead of real process stats)",
 	)
 }
