@@ -50,10 +50,7 @@ spec:
         - image: busybox
           command: [ "sh", "-c" ]
           args:
-            - >
-              sed -i 's/stake/uosmo/g' /home/app/config/genesis.json;
-              sed -i 's/uosmors/stakers/g' /home/app/config/genesis.json;
-              sed -i 's/uosmod/staked/g' /home/app/config/genesis.json;
+            - sed -i 's/"stake"/"uosmo"/g' /home/app/config/genesis.json
 
   nodes:
     - name: fullnodes

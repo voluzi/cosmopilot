@@ -29,7 +29,7 @@ func Osmosis() TestApp {
 		Image:   ptr.To("busybox"),
 		Command: []string{"sh", "-c"},
 		Args: []string{
-			`sed -i 's/stake/uosmo/g' /home/app/config/genesis.json; sed -i 's/uosmors/stakers/g' /home/app/config/genesis.json; sed -i 's/uosmod/staked/g' /home/app/config/genesis.json;`,
+			`sed -i 's/"stake"/"uosmo"/g' /home/app/config/genesis.json`,
 		},
 	}
 

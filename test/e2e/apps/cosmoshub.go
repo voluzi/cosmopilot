@@ -24,7 +24,7 @@ func CosmosHub() TestApp {
 		Image:   ptr.To("busybox"),
 		Command: []string{"sh", "-c"},
 		Args: []string{
-			`sed -i 's/stake/uatom/g' /home/app/config/genesis.json; sed -i 's/uatomrs/stakers/g' /home/app/config/genesis.json; sed -i 's/uatomd/staked/g' /home/app/config/genesis.json;`,
+			`sed -i 's/"stake"/"uatom"/g' /home/app/config/genesis.json;`,
 		},
 	}
 

@@ -41,6 +41,7 @@ func allApps() []TestApp {
 		Nibiru(),
 		Osmosis(),
 		CosmosHub(),
+		Allora(),
 	}
 }
 
