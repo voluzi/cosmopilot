@@ -55,7 +55,7 @@ var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 					// Refresh to get current height
 					RefreshChainNodeSet(chainNodeSet)
 					currentHeight := chainNodeSet.Status.LatestHeight
-					upgradeHeight := currentHeight + 50
+					upgradeHeight := currentHeight + 100
 
 					// Build upgrade info JSON with docker image
 					upgradeInfo := map[string]interface{}{
@@ -95,7 +95,7 @@ var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 					Expect(err).NotTo(HaveOccurred())
 
 					// Wait a few blocks for proposal to be created
-					time.Sleep(5 * time.Second)
+					time.Sleep(10 * time.Second)
 
 					// Vote yes on proposal (proposal ID is 1 for the first proposal)
 					By("Voting yes on the upgrade proposal")
