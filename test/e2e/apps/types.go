@@ -112,6 +112,10 @@ type ValidatorTestConfig struct {
 	// ExpectedPubKey is the expected public key JSON after importing PrivKey.
 	// Must be set if PrivKey is set.
 	ExpectedPubKey string
+
+	// SkipChainIDForQueries skips --chain-id flag for query commands.
+	// Some chains (like Allora) get chain-id from the node and fail if it's specified.
+	SkipChainIDForQueries bool
 }
 
 // FullnodeTestConfig contains configuration specific to fullnodes

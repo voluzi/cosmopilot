@@ -95,7 +95,7 @@ var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 
 					// Wait for proposal to be in voting period
 					By("Waiting for proposal to be in voting period")
-					waitForProposalVotingPeriod(ns.Name, appImage, app.AppSpec.App, accountSecretName, "1", app.ValidatorConfig.ChainID, nodeEndpoint)
+					waitForProposalVotingPeriod(ns.Name, appImage, app.AppSpec.App, accountSecretName, "1", app.ValidatorConfig.ChainID, nodeEndpoint, app.ValidatorConfig.SkipChainIDForQueries)
 
 					// Vote yes on proposal (proposal ID is 1 for the first proposal)
 					By("Voting yes on the upgrade proposal")
@@ -237,12 +237,14 @@ func buildVoteArgs(proposalID, denom, chainID, nodeEndpoint string) []string {
 }
 
 // waitForProposalVotingPeriod polls the chain until the proposal is in voting period
-func waitForProposalVotingPeriod(namespace, appImage, appName, accountSecretName, proposalID, chainID, nodeEndpoint string) {
+func waitForProposalVotingPeriod(namespace, appImage, appName, accountSecretName, proposalID, chainID, nodeEndpoint string, skipChainID bool) {
 	queryArgs := []string{
 		"query", "gov", "proposal", proposalID,
-		"--chain-id", chainID,
 		"--node", nodeEndpoint,
 		"--output", "json",
+	}
+	if !skipChainID {
+		queryArgs = append(queryArgs, "--chain-id", chainID)
 	}
 	Eventually(func() bool {
 		output, err := Framework().RunAppCommand(namespace, appImage, appName, accountSecretName, queryArgs)

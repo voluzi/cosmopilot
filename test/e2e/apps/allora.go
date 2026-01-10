@@ -50,6 +50,7 @@ func Allora() TestApp {
 			AdditionalInitCommands: []appsv1.InitCommand{denomReplacementCmd},
 			PrivKey:                `{"address":"B9FC7DCF7902D8F4C9CF3516D8AD89AF82097921","pub_key":{"type":"tendermint/PubKeyEd25519","value":"lkQs7mneRKD46mJW+OQV9v4J9YbbbW/Y4xemUZN7FXE="},"priv_key":{"type":"tendermint/PrivKeyEd25519","value":"DkCbnUW+xib4TrZFQbI4eXxGoGIWy/NDY26ypgrVyqWWRCzuad5EoPjqYlb45BX2/gn1htttb9jjF6ZRk3sVcQ=="}}`,
 			ExpectedPubKey:         `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"lkQs7mneRKD46mJW+OQV9v4J9YbbbW/Y4xemUZN7FXE="}`,
+			SkipChainIDForQueries:  true,
 		},
 	}
 }
