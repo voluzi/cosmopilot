@@ -103,7 +103,7 @@ test.e2e: BUILD_NODE_UTILS?=true
 test.e2e: FOCUS?=
 test.e2e: SKIP?=
 test.e2e: TEST_TIMEOUT?=30m
-test.e2e: PROCS?=10
+test.e2e: PROCS?=4
 test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Run e2e tests with locally built image.
 	@if [ "$(BUILD_NODE_UTILS)" = "true" ]; then \
 		$(MAKE) docker-build-nodeutils; \
@@ -126,7 +126,7 @@ test.e2e.release: REUSE_CLUSTER?=true
 test.e2e.release: FOCUS?=
 test.e2e.release: SKIP?=
 test.e2e.release: TEST_TIMEOUT?=30m
-test.e2e.release: PROCS?=10
+test.e2e.release: PROCS?=4
 test.e2e.release: kind kubectl helm ginkgo ## Run e2e tests with released chart version.
 	E2E_TEST=true \
 	CLUSTER_NAME=$(CLUSTER_NAME) \
