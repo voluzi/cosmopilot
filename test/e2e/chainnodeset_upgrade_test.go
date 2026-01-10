@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -55,7 +54,7 @@ var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 					// Refresh to get current height
 					RefreshChainNodeSet(chainNodeSet)
 					currentHeight := chainNodeSet.Status.LatestHeight
-					upgradeHeight := currentHeight + 100
+					upgradeHeight := currentHeight + 50
 
 					// Build upgrade info JSON with docker image
 					upgradeInfo := map[string]interface{}{
@@ -94,8 +93,9 @@ var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 					_, err = Framework().RunAppCommand(ns.Name, appImage, app.AppSpec.App, accountSecretName, submitArgs)
 					Expect(err).NotTo(HaveOccurred())
 
-					// Wait a few blocks for proposal to be created
-					time.Sleep(10 * time.Second)
+					// Wait for proposal to be in voting period
+					By("Waiting for proposal to be in voting period")
+					waitForProposalVotingPeriod(ns.Name, appImage, app.AppSpec.App, accountSecretName, "1", app.ValidatorConfig.ChainID, nodeEndpoint)
 
 					// Vote yes on proposal (proposal ID is 1 for the first proposal)
 					By("Voting yes on the upgrade proposal")
@@ -234,4 +234,23 @@ func buildVoteArgs(proposalID, denom, chainID, nodeEndpoint string) []string {
 		"--yes",
 		"--fees", fmt.Sprintf("1000000%s", denom),
 	}
+}
+
+// waitForProposalVotingPeriod polls the chain until the proposal is in voting period
+func waitForProposalVotingPeriod(namespace, appImage, appName, accountSecretName, proposalID, chainID, nodeEndpoint string) {
+	queryArgs := []string{
+		"query", "gov", "proposal", proposalID,
+		"--chain-id", chainID,
+		"--node", nodeEndpoint,
+		"--output", "json",
+	}
+	Eventually(func() bool {
+		output, err := Framework().RunAppCommand(namespace, appImage, appName, accountSecretName, queryArgs)
+		if err != nil {
+			return false
+		}
+		// Check if proposal is in voting period by looking for status field
+		// PROPOSAL_STATUS_VOTING_PERIOD is status 2 in cosmos-sdk
+		return strings.Contains(output, "PROPOSAL_STATUS_VOTING_PERIOD") || strings.Contains(output, `"status":"2"`) || strings.Contains(output, `"status": "2"`)
+	}).Should(BeTrue())
 }
