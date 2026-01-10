@@ -49,5 +49,5 @@ spec:
       config:
         override:
           app.toml:
-            minimum-gas-prices: 0.025unibi
+            minimum-gas-prices: 10uallo
 ```

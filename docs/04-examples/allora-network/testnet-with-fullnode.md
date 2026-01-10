@@ -22,12 +22,12 @@ spec:
     config:
       override:
         app.toml:
-          minimum-gas-prices: 0.025allo
+          minimum-gas-prices: 10uallo
 
     init:
       chainID: allora-testnet-0
-      assets: ["100000000000000allo"]
-      stakeAmount: 100000000allo
+      assets: ["1000000000allo"]
+      stakeAmount: 10allo
       unbondingTime: 60s
       votingPeriod: 60s
       expeditedVotingPeriod: 30s
@@ -45,7 +45,7 @@ spec:
       config:
         override:
           app.toml:
-            minimum-gas-prices: 0.025allo
+            minimum-gas-prices: 10uallo
             pruning: custom
             pruning-keep-recent: "100"
             pruning-interval: "10"
