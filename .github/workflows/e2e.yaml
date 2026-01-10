@@ -30,10 +30,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Increase inotify limits
+      - name: Configure kernel parameters
         run: |
-          sudo sysctl -w fs.inotify.max_user_watches=524288
-          sudo sysctl -w fs.inotify.max_user_instances=512
+          sudo tee /etc/sysctl.d/99-kubernetes.conf <<EOF
+          fs.inotify.max_user_watches=1048576
+          fs.inotify.max_user_instances=8192
+          net.ipv4.ip_unprivileged_port_start=0
+          EOF
+          sudo sysctl -p /etc/sysctl.d/99-kubernetes.conf
 
       - name: Setup Go
         uses: actions/setup-go@v5
