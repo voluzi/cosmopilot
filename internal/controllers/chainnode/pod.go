@@ -615,6 +615,14 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	// System annotations override user annotations
 	annotations[controllers.AnnotationConfigHash] = configHash
 
+	// Propagate peer pods hash from ConfigMap to pod annotations.
+	// When a peer pod is rescheduled, its UID changes, the hash changes in the ConfigMap,
+	// which flows here and causes the pod spec hash to change, triggering pod recreation
+	// to clear stale CometBFT P2P state.
+	if peerPodsHash, ok := config.Annotations[controllers.AnnotationPeerPodsHash]; ok && peerPodsHash != "" {
+		annotations[controllers.AnnotationPeerPodsHash] = peerPodsHash
+	}
+
 	// Use custom pod security context if provided, otherwise use restricted
 	podSecurityContext := chainNode.Spec.Config.GetPodSecurityContext()
 	if podSecurityContext == nil {

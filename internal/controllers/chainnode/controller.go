@@ -8,13 +8,19 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
@@ -326,9 +332,94 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
+		// Watch for peer pod reschedules. When a pod with a chain-id label is created or deleted,
+		// reconcile all OTHER ChainNodes with the same chain-id so they can detect the new peer
+		// pod UID and restart to clear stale CometBFT P2P state.
+		Watches(&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPeerPodToChainNodes),
+			builder.WithPredicates(peerPodPredicate{}),
+		).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)
+}
+
+// mapPeerPodToChainNodes maps a pod event to reconcile requests for all ChainNodes
+// with the same chain-id in the same namespace, excluding the ChainNode that owns the pod.
+func (r *Reconciler) mapPeerPodToChainNodes(ctx context.Context, obj client.Object) []reconcile.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+
+	chainID := pod.Labels[controllers.LabelChainID]
+	if chainID == "" {
+		return nil
+	}
+
+	// List all ChainNodes with the same chain-id in the same namespace
+	chainNodeList := &appsv1.ChainNodeList{}
+	if err := r.List(ctx, chainNodeList,
+		client.InNamespace(pod.Namespace),
+		client.MatchingFields{"status.chainID": chainID},
+	); err != nil {
+		// Fall back to listing all and filtering
+		if err := r.List(ctx, chainNodeList, client.InNamespace(pod.Namespace)); err != nil {
+			return nil
+		}
+	}
+
+	var requests []reconcile.Request
+	for _, cn := range chainNodeList.Items {
+		// Skip the ChainNode that owns this pod (we only want to reconcile peers)
+		if cn.Name == pod.Name {
+			continue
+		}
+		// Only reconcile ChainNodes with matching chain-id
+		if cn.Status.ChainID != chainID {
+			continue
+		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      cn.Name,
+				Namespace: cn.Namespace,
+			},
+		})
+	}
+
+	return requests
+}
+
+// peerPodPredicate filters pod events to only those relevant for peer pod tracking.
+// It triggers only on Create and Delete events for pods that have a chain-id label,
+// which indicates they are managed by cosmopilot and belong to a chain.
+type peerPodPredicate struct {
+	predicate.Funcs
+}
+
+func (p peerPodPredicate) Create(e event.CreateEvent) bool {
+	if e.Object == nil {
+		return false
+	}
+	_, hasChainID := e.Object.GetLabels()[controllers.LabelChainID]
+	return hasChainID
+}
+
+func (p peerPodPredicate) Update(e event.UpdateEvent) bool {
+	// We don't need to react to updates — only creation (new UID) and deletion matter
+	return false
+}
+
+func (p peerPodPredicate) Delete(e event.DeleteEvent) bool {
+	if e.Object == nil {
+		return false
+	}
+	_, hasChainID := e.Object.GetLabels()[controllers.LabelChainID]
+	return hasChainID
+}
+
+func (p peerPodPredicate) Generic(e event.GenericEvent) bool {
+	return false
 }
 
 func (r *Reconciler) getChainNodeClient(chainNode *appsv1.ChainNode) (*chainutils.Client, error) {

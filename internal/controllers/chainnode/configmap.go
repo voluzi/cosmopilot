@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -277,15 +278,28 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 		}
 	}
 
+	// Calculate peer pod UIDs hash for detecting peer pod reschedules.
+	// When a peer pod is rescheduled (new UID), this hash changes, which triggers
+	// a ConfigMap update and subsequently a pod recreation to clear stale CometBFT P2P state.
+	peerPodsHash, err := r.getPeerPodsHash(ctx, chainNode)
+	if err != nil {
+		logger.Info("could not compute peer pods hash", "error", err)
+	}
+
+	cmAnnotations := map[string]string{
+		controllers.AnnotationConfigHash: hash,
+	}
+	if peerPodsHash != "" {
+		cmAnnotations[controllers.AnnotationPeerPodsHash] = peerPodsHash
+	}
+
 	cm := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      chainNode.GetName(),
-			Namespace: chainNode.GetNamespace(),
-			Labels:    WithChainNodeLabels(chainNode),
-			Annotations: map[string]string{
-				controllers.AnnotationConfigHash: hash,
-			},
+			Name:        chainNode.GetName(),
+			Namespace:   chainNode.GetNamespace(),
+			Labels:      WithChainNodeLabels(chainNode),
+			Annotations: cmAnnotations,
 		},
 		Data: cmData,
 	}
@@ -508,6 +522,52 @@ func getMostRecentHeightFromServicesAnnotations(annotationsList []map[string]str
 	}
 
 	return trustHeight, trustHash
+}
+
+// getPeerPodsHash computes a deterministic hash from the UIDs of all peer pods.
+// This is used to detect when a peer pod has been rescheduled (getting a new UID),
+// which signals that the current node should be restarted to clear stale CometBFT P2P state.
+func (r *Reconciler) getPeerPodsHash(ctx context.Context, chainNode *appsv1.ChainNode) (string, error) {
+	if !chainNode.AutoDiscoverPeersEnabled() {
+		return "", nil
+	}
+
+	if chainNode.Status.ChainID == "" {
+		return "", nil
+	}
+
+	peers, _, err := r.getChainPeers(ctx, chainNode)
+	if err != nil {
+		return "", err
+	}
+
+	if len(peers) == 0 {
+		return "", nil
+	}
+
+	// For each peer, look up its pod UID. The peer address is the internal service name
+	// (e.g. "chainnode-name-internal"), and the pod name is the service name without "-internal".
+	peerUIDs := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		peerName := strings.TrimSuffix(peer.Address, "-internal")
+		pod := &corev1.Pod{}
+		err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.Namespace, Name: peerName}, pod)
+		if err != nil {
+			// Peer pod may not exist yet; skip it
+			continue
+		}
+		peerUIDs = append(peerUIDs, string(pod.UID))
+	}
+
+	if len(peerUIDs) == 0 {
+		return "", nil
+	}
+
+	// Sort for determinism
+	sort.Strings(peerUIDs)
+
+	h := sha256.Sum256([]byte(strings.Join(peerUIDs, ",")))
+	return fmt.Sprintf("%x", h[:8]), nil
 }
 
 func getExternalAddress(chainNode *appsv1.ChainNode) (string, bool) {

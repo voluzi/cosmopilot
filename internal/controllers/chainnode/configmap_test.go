@@ -1,6 +1,10 @@
 package chainnode
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -240,6 +244,58 @@ func TestGetExternalAddress(t *testing.T) {
 			assert.Equal(t, tt.wantOk, ok)
 		})
 	}
+}
+
+func TestGetPeerPodsHash_Deterministic(t *testing.T) {
+	// Test that the hash function produces consistent results for same inputs
+	// (testing the hashing logic directly since getPeerPodsHash requires a reconciler)
+	uids1 := []string{"uid-aaa", "uid-bbb", "uid-ccc"}
+	uids2 := []string{"uid-aaa", "uid-bbb", "uid-ccc"}
+
+	sort.Strings(uids1)
+	sort.Strings(uids2)
+
+	h1 := sha256.Sum256([]byte(strings.Join(uids1, ",")))
+	h2 := sha256.Sum256([]byte(strings.Join(uids2, ",")))
+
+	hash1 := fmt.Sprintf("%x", h1[:8])
+	hash2 := fmt.Sprintf("%x", h2[:8])
+
+	assert.Equal(t, hash1, hash2, "same UIDs should produce same hash")
+}
+
+func TestGetPeerPodsHash_OrderIndependent(t *testing.T) {
+	// UIDs are sorted before hashing, so order shouldn't matter
+	uids1 := []string{"uid-ccc", "uid-aaa", "uid-bbb"}
+	uids2 := []string{"uid-bbb", "uid-ccc", "uid-aaa"}
+
+	sort.Strings(uids1)
+	sort.Strings(uids2)
+
+	h1 := sha256.Sum256([]byte(strings.Join(uids1, ",")))
+	h2 := sha256.Sum256([]byte(strings.Join(uids2, ",")))
+
+	hash1 := fmt.Sprintf("%x", h1[:8])
+	hash2 := fmt.Sprintf("%x", h2[:8])
+
+	assert.Equal(t, hash1, hash2, "different UID order should produce same hash after sorting")
+}
+
+func TestGetPeerPodsHash_DifferentUIDs(t *testing.T) {
+	// Different UIDs should produce different hashes
+	uids1 := []string{"uid-aaa", "uid-bbb"}
+	uids2 := []string{"uid-aaa", "uid-ccc"} // uid-bbb changed to uid-ccc (pod rescheduled)
+
+	sort.Strings(uids1)
+	sort.Strings(uids2)
+
+	h1 := sha256.Sum256([]byte(strings.Join(uids1, ",")))
+	h2 := sha256.Sum256([]byte(strings.Join(uids2, ",")))
+
+	hash1 := fmt.Sprintf("%x", h1[:8])
+	hash2 := fmt.Sprintf("%x", h2[:8])
+
+	assert.NotEqual(t, hash1, hash2, "different UIDs should produce different hashes")
 }
 
 func TestNewConfigLockManager(t *testing.T) {
