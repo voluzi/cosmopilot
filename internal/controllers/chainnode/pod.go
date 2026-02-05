@@ -75,11 +75,11 @@ func (r *Reconciler) getChainNodePod(ctx context.Context, chainNode *appsv1.Chai
 	return pod, nil
 }
 
-func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode *appsv1.ChainNode, configHash string) error {
+func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode *appsv1.ChainNode, hashes configHashes) error {
 	logger := log.FromContext(ctx)
 
 	// Prepare pod spec
-	pod, err := r.getPodSpec(ctx, chainNode, configHash)
+	pod, err := r.getPodSpec(ctx, chainNode, hashes)
 	if err != nil {
 		return fmt.Errorf("failed to get pod spec for %s: %w", chainNode.GetName(), err)
 	}
@@ -189,13 +189,13 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		if err != nil {
 			return fmt.Errorf("failed to create new app for upgrade %s: %w", chainNode.GetName(), err)
 		}
-		configHash, err = r.ensureConfigs(ctx, app, chainNode, true)
+		hashes, err = r.ensureConfigs(ctx, app, chainNode, true)
 		if err != nil {
 			return fmt.Errorf("failed to ensure configs for upgrade %s: %w", chainNode.GetName(), err)
 		}
 
 		// Get new pod spec with updated configs
-		pod, err = r.getPodSpec(ctx, chainNode, configHash)
+		pod, err = r.getPodSpec(ctx, chainNode, hashes)
 		if err != nil {
 			return fmt.Errorf("failed to get pod spec after config update for %s: %w", chainNode.GetName(), err)
 		}
@@ -259,8 +259,14 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	}
 
 	// Re-create pod if config changed
-	if currentPod.Annotations[controllers.AnnotationConfigHash] != configHash {
+	if currentPod.Annotations[controllers.AnnotationConfigHash] != hashes.configHash {
 		logger.Info("config changed", "pod", pod.GetName())
+		return r.recreatePod(ctx, chainNode, pod, r.opts.DisruptionCheckEnabled)
+	}
+
+	// Re-create pod if peer endpoints changed (stale IP fix for issue #12)
+	if hashes.peerEndpointsHash != "" && currentPod.Annotations[controllers.AnnotationPeerEndpointsHash] != hashes.peerEndpointsHash {
+		logger.Info("peer endpoints changed", "pod", pod.GetName(), "oldHash", currentPod.Annotations[controllers.AnnotationPeerEndpointsHash], "newHash", hashes.peerEndpointsHash)
 		return r.recreatePod(ctx, chainNode, pod, r.opts.DisruptionCheckEnabled)
 	}
 
@@ -576,7 +582,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 	}
 }
 
-func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode, configHash string) (*corev1.Pod, error) {
+func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode, hashes configHashes) (*corev1.Pod, error) {
 	logger := log.FromContext(ctx)
 
 	configFilesMounts, err := r.getConfigFilesMounts(ctx, chainNode)
@@ -613,7 +619,10 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		}
 	}
 	// System annotations override user annotations
-	annotations[controllers.AnnotationConfigHash] = configHash
+	annotations[controllers.AnnotationConfigHash] = hashes.configHash
+	if hashes.peerEndpointsHash != "" {
+		annotations[controllers.AnnotationPeerEndpointsHash] = hashes.peerEndpointsHash
+	}
 
 	// Use custom pod security context if provided, otherwise use restricted
 	podSecurityContext := chainNode.Spec.Config.GetPodSecurityContext()

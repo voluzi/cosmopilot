@@ -6,6 +6,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -104,6 +105,7 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/finalizers,verbs=update
 //+kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims;configmaps;secrets;services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods/exec;pods/attach,verbs=create
 //+kubebuilder:rbac:groups="",resources=pods/log,verbs=get
@@ -253,7 +255,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Create/update configmap with config files
 	logger.V(1).Info("ensure config")
-	configHash, err := r.ensureConfigs(ctx, app, chainNode, nodePodRunning)
+	hashes, err := r.ensureConfigs(ctx, app, chainNode, nodePodRunning)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -272,7 +274,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Ensure pod is running
 	logger.V(1).Info("ensure pod")
-	if err = r.ensurePod(ctx, app, chainNode, configHash); err != nil {
+	if err = r.ensurePod(ctx, app, chainNode, hashes); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -326,6 +328,10 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
+		// Watch EndpointSlices for peer services to detect endpoint changes.
+		// When peer endpoints change (e.g., pod reschedule), ChainNodes using those peers
+		// will be reconciled to update the peer-endpoints-hash annotation, triggering pod restart.
+		Watches(&discoveryv1.EndpointSlice{}, newEndpointSliceHandler(mgr.GetClient())).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

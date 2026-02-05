@@ -73,12 +73,18 @@ func (clm *configLockManager) getLockForVersion(version string) *sync.Mutex {
 	return newLock
 }
 
-func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode, nodePodRunning bool) (string, error) {
+// configHashes contains hash values returned from ensureConfigs for pod annotation comparison.
+type configHashes struct {
+	configHash        string
+	peerEndpointsHash string
+}
+
+func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode, nodePodRunning bool) (configHashes, error) {
 	logger := log.FromContext(ctx)
 
 	configs, err := r.getGeneratedConfigs(ctx, app, chainNode)
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
 	kf := GetKeyFormatter(chainNode)
@@ -86,12 +92,12 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 	// Apply app.toml and config.toml defaults
 	configs[appTomlFilename], err = utils.Merge(configs[appTomlFilename], kf.GetBaseAppToml())
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
 	configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], kf.GetBaseConfigToml())
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
 	// Apply moniker
@@ -99,7 +105,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 		kf.Moniker(): chainNode.GetMoniker(),
 	})
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
 	// Set halt-height
@@ -107,7 +113,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 		kf.HaltHeight(): chainNode.Spec.Config.GetHaltHeight(),
 	})
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
 	// Persist address book file
@@ -118,7 +124,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 			},
 		})
 		if err != nil {
-			return "", err
+			return configHashes{}, err
 		}
 	}
 
@@ -130,7 +136,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 			},
 		})
 		if err != nil {
-			return "", err
+			return configHashes{}, err
 		}
 	}
 
@@ -143,7 +149,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 			},
 		})
 		if err != nil {
-			return "", err
+			return configHashes{}, err
 		}
 	}
 
@@ -155,7 +161,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 			},
 		})
 		if err != nil {
-			return "", err
+			return configHashes{}, err
 		}
 	}
 
@@ -165,7 +171,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 			kf.GenesisFile(): genesisLocation,
 		})
 		if err != nil {
-			return "", err
+			return configHashes{}, err
 		}
 	}
 
@@ -174,12 +180,12 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 		for filename, b := range *chainNode.Spec.Config.Override {
 			var data map[string]interface{}
 			if err := json.Unmarshal(b.Raw, &data); err != nil {
-				return "", err
+				return configHashes{}, err
 			}
 			if _, ok := configs[filename]; ok {
 				configs[filename], err = utils.Merge(configs[filename], data)
 				if err != nil {
-					return "", err
+					return configHashes{}, err
 				}
 			} else {
 				configs[filename] = data
@@ -190,7 +196,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 	// Get hash before adding peer configuration
 	hash, err := getConfigHash(configs)
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
 	// Apply state-sync restore config if enabled and node is not running. Also ignore this if this node is restoring
@@ -198,7 +204,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 	if chainNode.StateSyncRestoreEnabled() && !nodePodRunning && !chainNode.ShouldRestoreFromSnapshot() {
 		peers, stateSyncAnnotations, err := r.getChainPeers(ctx, chainNode, controllers.AnnotationStateSyncTrustHeight, controllers.AnnotationStateSyncTrustHash)
 		if err != nil {
-			return "", err
+			return configHashes{}, err
 		}
 
 		peers = r.filterNonWorkingPeers(ctx, chainNode, peers.ExcludeSeeds())
@@ -249,7 +255,7 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 					},
 				})
 				if err != nil {
-					return "", err
+					return configHashes{}, err
 				}
 
 				// Set latest height to trust height so that old upgrades are marked as skipped
@@ -261,11 +267,11 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 	// Apply peer configuration
 	peerConfig, err := r.getPeerConfiguration(ctx, chainNode, kf)
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 	configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], peerConfig)
 	if err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
 	// Encode back to toml
@@ -273,8 +279,23 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 	for filename, data := range configs {
 		cmData[filename], err = utils.TomlEncode(data)
 		if err != nil {
-			return "", err
+			return configHashes{}, err
 		}
+	}
+
+	// Calculate peer endpoints hash to detect when peer IPs change.
+	// This hash is used to trigger pod recreation when peer endpoints change,
+	// ensuring the Cosmos node refreshes its P2P connections.
+	peerEndpointsHash, err := r.getPeerEndpointsHash(ctx, chainNode)
+	if err != nil {
+		return configHashes{}, fmt.Errorf("failed to get peer endpoints hash: %w", err)
+	}
+
+	cmAnnotations := map[string]string{
+		controllers.AnnotationConfigHash: hash,
+	}
+	if peerEndpointsHash != "" {
+		cmAnnotations[controllers.AnnotationPeerEndpointsHash] = peerEndpointsHash
 	}
 
 	cm := &corev1.ConfigMap{
@@ -283,18 +304,16 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 			Name:      chainNode.GetName(),
 			Namespace: chainNode.GetNamespace(),
 			Labels:    WithChainNodeLabels(chainNode),
-			Annotations: map[string]string{
-				controllers.AnnotationConfigHash: hash,
-			},
+			Annotations: cmAnnotations,
 		},
 		Data: cmData,
 	}
 
 	if err = controllerutil.SetControllerReference(chainNode, cm, r.Scheme); err != nil {
-		return "", err
+		return configHashes{}, err
 	}
 
-	return hash, r.ensureConfigMap(ctx, cm)
+	return configHashes{configHash: hash, peerEndpointsHash: peerEndpointsHash}, r.ensureConfigMap(ctx, cm)
 }
 
 func (r *Reconciler) ensureConfigMap(ctx context.Context, cm *corev1.ConfigMap) error {

@@ -390,7 +390,7 @@ func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.Chain
 	logger := log.FromContext(ctx)
 
 	if chainNode.Spec.Persistence.Snapshots.ShouldStopNode() {
-		pod, err := r.getPodSpec(ctx, chainNode, "")
+		pod, err := r.getPodSpec(ctx, chainNode, configHashes{})
 		if err != nil {
 			return nil, err
 		}
