@@ -11,6 +11,7 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const (
@@ -468,6 +469,9 @@ func (chainNode *ChainNode) UseInternal() bool {
 	if chainNode.Spec.Ingress != nil && chainNode.Spec.Ingress.UseInternalServices != nil {
 		return *chainNode.Spec.Ingress.UseInternalServices
 	}
+	if chainNode.Spec.Gateway != nil && chainNode.Spec.Gateway.UseInternalServices != nil {
+		return *chainNode.Spec.Gateway.UseInternalServices
+	}
 	return false
 }
 
@@ -476,4 +480,15 @@ func (chainNode *ChainNode) GetServiceName() string {
 		return fmt.Sprintf("%s-internal", chainNode.GetName())
 	}
 	return chainNode.GetName()
+}
+
+func (chainNode *ChainNode) GetGatewayParentRef() gwapiv1.ParentReference {
+	ref := gwapiv1.ParentReference{
+		Name: gwapiv1.ObjectName(chainNode.Spec.Gateway.Gateway.Name),
+	}
+	if chainNode.Spec.Gateway.Gateway.Namespace != nil {
+		ns := gwapiv1.Namespace(*chainNode.Spec.Gateway.Gateway.Namespace)
+		ref.Namespace = &ns
+	}
+	return ref
 }

@@ -70,6 +70,11 @@ type ChainNodeSetSpec struct {
 	// +optional
 	Ingresses []GlobalIngressConfig `json:"ingresses,omitempty"`
 
+	// List of Gateway API route configs for this ChainNodeSet. This allows to create
+	// HTTPRoute/GRPCRoute resources targeting multiple groups of nodes.
+	// +optional
+	Gateways []GlobalGatewayConfig `json:"gateways,omitempty"`
+
 	// Allows deploying seed nodes using Cosmoseed.
 	// +optional
 	Cosmoseed *CosmoseedConfig `json:"cosmoseed,omitempty"`
@@ -228,11 +233,6 @@ type NodeSetValidatorConfig struct {
 	// +optional
 	OverrideVersion *string `json:"overrideVersion,omitempty"`
 
-	// Indicates if an ingress should be created to access API endpoints of validator node
-	// and configures it.
-	// +optional
-	Ingress *IngressConfig `json:"ingress,omitempty"`
-
 	// HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
 	// +optional
 	// +default="m/44'/118'/0'/0/0"
@@ -250,6 +250,7 @@ type NodeSetValidatorConfig struct {
 }
 
 // NodeGroupSpec sets chainnode configurations for a group.
+// +kubebuilder:validation:XValidation:rule="!(has(self.individualIngresses) && has(self.individualGateways))",message="individualIngresses and individualGateways are mutually exclusive"
 type NodeGroupSpec struct {
 	// Name of this group.
 	Name string `json:"name"`
@@ -277,13 +278,6 @@ type NodeGroupSpec struct {
 	// +optional
 	Expose *ExposeConfig `json:"expose,omitempty"`
 
-	// Ingress defines configuration for exposing API endpoints through a single shared Ingress,
-	// which routes traffic to the group Service backing all nodes in this set. This results in
-	// load-balanced access across all nodes (e.g., round-robin).
-	// See IngressConfig for detailed endpoint and TLS settings.
-	// +optional
-	Ingress *IngressConfig `json:"ingress,omitempty"`
-
 	// IndividualIngresses defines configuration for exposing API endpoints through separate
 	// Ingress resources per node in the set. Each Ingress routes traffic directly to its
 	// corresponding node's Service (i.e., no load balancing across nodes).
@@ -295,9 +289,15 @@ type NodeGroupSpec struct {
 	//   - 1.fullnodes.cosmopilot.local
 	//   - etc.
 	//
-	// This mode allows targeting specific nodes individually.
+	// Mutually exclusive with individualGateways.
 	// +optional
 	IndividualIngresses *IngressConfig `json:"individualIngresses,omitempty"`
+
+	// IndividualGateways configures per-node Gateway API routes. Each node gets its own
+	// HTTPRoute/GRPCRoute with hostname prefixed by node index (e.g., 0.host, 1.host).
+	// Mutually exclusive with individualIngresses.
+	// +optional
+	IndividualGateways *GatewayConfig `json:"individualGateways,omitempty"`
 
 	// Compute Resources required by the app container.
 	// +optional
@@ -497,6 +497,7 @@ type PdbConfig struct {
 }
 
 // CosmoseedConfig defines settings for deploying seed nodes via Cosmoseed.
+// +kubebuilder:validation:XValidation:rule="!(has(self.ingress) && has(self.gateway))",message="ingress and gateway are mutually exclusive"
 type CosmoseedConfig struct {
 	// Whether to enable deployment of Cosmoseed.
 	// If false or unset, no seed node instances will be created.
@@ -574,6 +575,10 @@ type CosmoseedConfig struct {
 	// Ingress configuration for cosmoseed nodes.
 	// +optional
 	Ingress *CosmoseedIngressConfig `json:"ingress,omitempty"`
+
+	// Gateway API configuration for cosmoseed nodes. Mutually exclusive with ingress.
+	// +optional
+	Gateway *CosmoseedGatewayConfig `json:"gateway,omitempty"`
 }
 
 // SeedStatus contains status information about a cosmoseed node.
@@ -608,5 +613,80 @@ type CosmoseedIngressConfig struct {
 
 // IndividualIngressConfig provides host configuration for individual node ingresses.
 type IndividualIngressConfig struct {
+	Host string `json:"host"`
+}
+
+// GatewayRef identifies the Gateway resource routes should attach to.
+type GatewayRef struct {
+	// Name of the Gateway resource.
+	Name string `json:"name"`
+
+	// Namespace of the Gateway. Defaults to the resource's namespace.
+	// +optional
+	Namespace *string `json:"namespace,omitempty"`
+}
+
+// GatewayConfig configures Gateway API HTTPRoute/GRPCRoute resources
+// for exposing blockchain node APIs. TLS is handled at the Gateway level,
+// not per-route.
+type GatewayConfig struct {
+	// Gateway to attach routes to.
+	Gateway GatewayRef `json:"gateway"`
+
+	// Host in which endpoints will be exposed. Endpoints are exposed on corresponding
+	// subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
+	// `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
+	Host string `json:"host"`
+
+	// Enable RPC endpoint.
+	// +optional
+	EnableRPC bool `json:"enableRPC,omitempty"`
+
+	// Enable gRPC endpoint.
+	// +optional
+	EnableGRPC bool `json:"enableGRPC,omitempty"`
+
+	// Enable LCD endpoint.
+	// +optional
+	EnableLCD bool `json:"enableLCD,omitempty"`
+
+	// Enable EVM RPC endpoint.
+	// +optional
+	EnableEvmRPC bool `json:"enableEvmRPC,omitempty"`
+
+	// Enable EVM RPC Websocket endpoint.
+	// +optional
+	EnableEvmRpcWs bool `json:"enableEvmRpcWS,omitempty"`
+
+	// UseInternalServices configures routes to point directly to the node services,
+	// bypassing Cosmoguard and any readiness checks.
+	// +optional
+	// +default=false
+	UseInternalServices *bool `json:"useInternalServices,omitempty"`
+}
+
+// GlobalGatewayConfig configures Gateway API routes for cross-group routing in ChainNodeSet.
+type GlobalGatewayConfig struct {
+	GatewayConfig `json:",inline"`
+
+	// The name of this gateway route config.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Groups of nodes to which this gateway route will point to.
+	// +kubebuilder:validation:MinItems=1
+	Groups []string `json:"groups"`
+
+	// ServicesOnly indicates that only global services should be created. No route resources will be created.
+	// +optional
+	ServicesOnly *bool `json:"servicesOnly,omitempty"`
+}
+
+// CosmoseedGatewayConfig is a simplified gateway config for seed nodes.
+type CosmoseedGatewayConfig struct {
+	// Gateway to attach routes to.
+	Gateway GatewayRef `json:"gateway"`
+
+	// Host in which cosmoseed nodes will be exposed.
 	Host string `json:"host"`
 }

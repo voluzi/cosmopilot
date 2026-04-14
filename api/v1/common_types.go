@@ -592,6 +592,7 @@ type Peer struct {
 }
 
 // ExposeConfig allows configuring how P2P endpoint is exposed to public.
+// +kubebuilder:validation:XValidation:rule="!(has(self.gateway) && has(self.p2pServiceType))",message="gateway and p2pServiceType are mutually exclusive"
 type ExposeConfig struct {
 	// Whether to expose p2p endpoint for this node. Defaults to `false`.
 	// +optional
@@ -609,6 +610,24 @@ type ExposeConfig struct {
 	// Annotations to be appended to the p2p service.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Gateway configures P2P exposure via a Gateway API TCPRoute instead of a dedicated Service.
+	// When set, a TCPRoute is created that routes P2P TCP traffic through the referenced Gateway.
+	// This is mutually exclusive with p2pServiceType.
+	// +optional
+	Gateway *ExposeGatewayConfig `json:"gateway,omitempty"`
+}
+
+// ExposeGatewayConfig configures P2P exposure through a Gateway API TCPRoute.
+type ExposeGatewayConfig struct {
+	// Reference to the Gateway resource to attach the TCPRoute to.
+	GatewayRef `json:",inline"`
+
+	// Port is the external port on the Gateway listener for P2P traffic.
+	// This is the port that peers will use to connect. Defaults to 26656.
+	// +optional
+	// +default=26656
+	Port *int32 `json:"port,omitempty"`
 }
 
 // TmKMS allows configuring tmkms for signing for this validator node instead of

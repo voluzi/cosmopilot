@@ -15,8 +15,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -98,6 +102,12 @@ func (f *EnvTestFramework) Setup(ctx context.Context) error {
 	if err := snapshotv1.AddToScheme(scheme.Scheme); err != nil {
 		return fmt.Errorf("failed to add snapshot/v1 to scheme: %w", err)
 	}
+	if err := gwapiv1.AddToScheme(scheme.Scheme); err != nil {
+		return fmt.Errorf("failed to add gateway-api/v1 to scheme: %w", err)
+	}
+	if err := gwapiv1a2.AddToScheme(scheme.Scheme); err != nil {
+		return fmt.Errorf("failed to add gateway-api/v1alpha2 to scheme: %w", err)
+	}
 
 	// Create clients
 	k8sClient, err := client.New(restCfg, client.Options{Scheme: scheme.Scheme})
@@ -125,12 +135,16 @@ func (f *EnvTestFramework) StartManager() error {
 	webhookOpts := f.env.WebhookInstallOptions
 
 	mgr, err := ctrl.NewManager(f.restCfg, ctrl.Options{
-		Scheme:             scheme.Scheme,
-		MetricsBindAddress: webhookServerMetricsBindAddress,
-		LeaderElection:     false,
-		Host:               webhookOpts.LocalServingHost,
-		Port:               webhookOpts.LocalServingPort,
-		CertDir:            webhookOpts.LocalServingCertDir,
+		Scheme: scheme.Scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: webhookServerMetricsBindAddress,
+		},
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Host:    webhookOpts.LocalServingHost,
+			Port:    webhookOpts.LocalServingPort,
+			CertDir: webhookOpts.LocalServingCertDir,
+		}),
+		LeaderElection: false,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create manager: %w", err)

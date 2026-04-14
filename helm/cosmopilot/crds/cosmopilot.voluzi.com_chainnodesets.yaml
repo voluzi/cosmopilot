@@ -181,6 +181,29 @@ spec:
                           type: string
                         description: Annotations to be appended to the p2p service.
                         type: object
+                      gateway:
+                        description: |-
+                          Gateway configures P2P exposure via a Gateway API TCPRoute instead of a dedicated Service.
+                          When set, a TCPRoute is created that routes P2P TCP traffic through the referenced Gateway.
+                          This is mutually exclusive with p2pServiceType.
+                        properties:
+                          name:
+                            description: Name of the Gateway resource.
+                            type: string
+                          namespace:
+                            description: Namespace of the Gateway. Defaults to the
+                              resource's namespace.
+                            type: string
+                          port:
+                            default: 26656
+                            description: |-
+                              Port is the external port on the Gateway listener for P2P traffic.
+                              This is the port that peers will use to connect. Defaults to 26656.
+                            format: int32
+                            type: integer
+                        required:
+                        - name
+                        type: object
                       p2p:
                         default: false
                         description: Whether to expose p2p endpoint for this node.
@@ -194,6 +217,33 @@ spec:
                           - `LoadBalancer`
                           - `NodePort` (default)
                         type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: gateway and p2pServiceType are mutually exclusive
+                      rule: '!(has(self.gateway) && has(self.p2pServiceType))'
+                  gateway:
+                    description: Gateway API configuration for cosmoseed nodes. Mutually
+                      exclusive with ingress.
+                    properties:
+                      gateway:
+                        description: Gateway to attach routes to.
+                        properties:
+                          name:
+                            description: Name of the Gateway resource.
+                            type: string
+                          namespace:
+                            description: Namespace of the Gateway. Defaults to the
+                              resource's namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      host:
+                        description: Host in which cosmoseed nodes will be exposed.
+                        type: string
+                    required:
+                    - gateway
+                    - host
                     type: object
                   ingress:
                     description: Ingress configuration for cosmoseed nodes.
@@ -314,6 +364,79 @@ spec:
                         type: object
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: ingress and gateway are mutually exclusive
+                  rule: '!(has(self.ingress) && has(self.gateway))'
+              gateways:
+                description: |-
+                  List of Gateway API route configs for this ChainNodeSet. This allows to create
+                  HTTPRoute/GRPCRoute resources targeting multiple groups of nodes.
+                items:
+                  description: GlobalGatewayConfig configures Gateway API routes for
+                    cross-group routing in ChainNodeSet.
+                  properties:
+                    enableEvmRPC:
+                      description: Enable EVM RPC endpoint.
+                      type: boolean
+                    enableEvmRpcWS:
+                      description: Enable EVM RPC Websocket endpoint.
+                      type: boolean
+                    enableGRPC:
+                      description: Enable gRPC endpoint.
+                      type: boolean
+                    enableLCD:
+                      description: Enable LCD endpoint.
+                      type: boolean
+                    enableRPC:
+                      description: Enable RPC endpoint.
+                      type: boolean
+                    gateway:
+                      description: Gateway to attach routes to.
+                      properties:
+                        name:
+                          description: Name of the Gateway resource.
+                          type: string
+                        namespace:
+                          description: Namespace of the Gateway. Defaults to the resource's
+                            namespace.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    groups:
+                      description: Groups of nodes to which this gateway route will
+                        point to.
+                      items:
+                        type: string
+                      minItems: 1
+                      type: array
+                    host:
+                      description: |-
+                        Host in which endpoints will be exposed. Endpoints are exposed on corresponding
+                        subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
+                        `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
+                      type: string
+                    name:
+                      description: The name of this gateway route config.
+                      minLength: 1
+                      type: string
+                    servicesOnly:
+                      description: ServicesOnly indicates that only global services
+                        should be created. No route resources will be created.
+                      type: boolean
+                    useInternalServices:
+                      default: false
+                      description: |-
+                        UseInternalServices configures routes to point directly to the node services,
+                        bypassing Cosmoguard and any readiness checks.
+                      type: boolean
+                  required:
+                  - gateway
+                  - groups
+                  - host
+                  - name
+                  type: object
+                type: array
               genesis:
                 description: Indicates where this node will get the genesis from.
                   Can be omitted when .spec.validator.init is specified.
@@ -2591,6 +2714,29 @@ spec:
                             type: string
                           description: Annotations to be appended to the p2p service.
                           type: object
+                        gateway:
+                          description: |-
+                            Gateway configures P2P exposure via a Gateway API TCPRoute instead of a dedicated Service.
+                            When set, a TCPRoute is created that routes P2P TCP traffic through the referenced Gateway.
+                            This is mutually exclusive with p2pServiceType.
+                          properties:
+                            name:
+                              description: Name of the Gateway resource.
+                              type: string
+                            namespace:
+                              description: Namespace of the Gateway. Defaults to the
+                                resource's namespace.
+                              type: string
+                            port:
+                              default: 26656
+                              description: |-
+                                Port is the external port on the Gateway listener for P2P traffic.
+                                This is the port that peers will use to connect. Defaults to 26656.
+                              format: int32
+                              type: integer
+                          required:
+                          - name
+                          type: object
                         p2p:
                           default: false
                           description: Whether to expose p2p endpoint for this node.
@@ -2605,35 +2751,21 @@ spec:
                             - `NodePort` (default)
                           type: string
                       type: object
+                      x-kubernetes-validations:
+                      - message: gateway and p2pServiceType are mutually exclusive
+                        rule: '!(has(self.gateway) && has(self.p2pServiceType))'
                     ignoreGroupOnDisruptionChecks:
                       description: |-
                         Whether ChainNodeSet group label should be ignored on pod disruption checks.
                         This is useful to ensure no downtime globally or per global ingress, instead of just per group.
                         Defaults to `false`.
                       type: boolean
-                    individualIngresses:
+                    individualGateways:
                       description: |-
-                        IndividualIngresses defines configuration for exposing API endpoints through separate
-                        Ingress resources per node in the set. Each Ingress routes traffic directly to its
-                        corresponding node's Service (i.e., no load balancing across nodes).
-
-                        The same IngressConfig is reused for all nodes, but the `host` field will be prefixed
-                        with the node index to generate unique subdomains. For example, if
-                        `host = "fullnodes.cosmopilot.local"`, then node ingress domains will be:
-                          - 0.fullnodes.cosmopilot.local
-                          - 1.fullnodes.cosmopilot.local
-                          - etc.
-
-                        This mode allows targeting specific nodes individually.
+                        IndividualGateways configures per-node Gateway API routes. Each node gets its own
+                        HTTPRoute/GRPCRoute with hostname prefixed by node index (e.g., 0.host, 1.host).
+                        Mutually exclusive with individualIngresses.
                       properties:
-                        annotations:
-                          additionalProperties:
-                            type: string
-                          description: Annotations to be appended to the ingress.
-                          type: object
-                        disableTLS:
-                          description: Whether to disable TLS on ingress resource.
-                          type: boolean
                         enableEvmRPC:
                           description: Enable EVM RPC endpoint.
                           type: boolean
@@ -2649,13 +2781,18 @@ spec:
                         enableRPC:
                           description: Enable RPC endpoint.
                           type: boolean
-                        grpcAnnotations:
-                          additionalProperties:
-                            type: string
-                          description: |-
-                            GrpcAnnotations to be set on grpc ingress resource.
-                            Defaults to nginx annotation `nginx.ingress.kubernetes.io/backend-protocol: GRPC`
-                            if nginx ingress class is used.
+                        gateway:
+                          description: Gateway to attach routes to.
+                          properties:
+                            name:
+                              description: Name of the Gateway resource.
+                              type: string
+                            namespace:
+                              description: Namespace of the Gateway. Defaults to the
+                                resource's namespace.
+                              type: string
+                          required:
+                          - name
                           type: object
                         host:
                           description: |-
@@ -2663,30 +2800,30 @@ spec:
                             subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
                             `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
                           type: string
-                        ingressClass:
-                          default: nginx
-                          description: IngressClass specifies the ingress class to
-                            be used on ingresses
-                          type: string
-                        tlsSecretName:
-                          description: Name of the secret containing TLS certificate.
-                          type: string
                         useInternalServices:
                           default: false
                           description: |-
-                            UseInternalServices configures Ingress to route traffic directly to the node services,
-                            bypassing Cosmoguard and any readiness checks. This is only recommended for debugging
-                            or for private/internal traffic (e.g., when accessing the cluster over a VPN).
+                            UseInternalServices configures routes to point directly to the node services,
+                            bypassing Cosmoguard and any readiness checks.
                           type: boolean
                       required:
+                      - gateway
                       - host
                       type: object
-                    ingress:
+                    individualIngresses:
                       description: |-
-                        Ingress defines configuration for exposing API endpoints through a single shared Ingress,
-                        which routes traffic to the group Service backing all nodes in this set. This results in
-                        load-balanced access across all nodes (e.g., round-robin).
-                        See IngressConfig for detailed endpoint and TLS settings.
+                        IndividualIngresses defines configuration for exposing API endpoints through separate
+                        Ingress resources per node in the set. Each Ingress routes traffic directly to its
+                        corresponding node's Service (i.e., no load balancing across nodes).
+
+                        The same IngressConfig is reused for all nodes, but the `host` field will be prefixed
+                        with the node index to generate unique subdomains. For example, if
+                        `host = "fullnodes.cosmopilot.local"`, then node ingress domains will be:
+                          - 0.fullnodes.cosmopilot.local
+                          - 1.fullnodes.cosmopilot.local
+                          - etc.
+
+                        Mutually exclusive with individualGateways.
                       properties:
                         annotations:
                           additionalProperties:
@@ -4607,6 +4744,10 @@ spec:
                   required:
                   - name
                   type: object
+                  x-kubernetes-validations:
+                  - message: individualIngresses and individualGateways are mutually
+                      exclusive
+                    rule: '!(has(self.individualIngresses) && has(self.individualGateways))'
                 type: array
               validator:
                 description: Indicates this node set will run a validator and allows
@@ -6824,66 +6965,6 @@ spec:
                       website:
                         description: Website of the validator.
                         type: string
-                    type: object
-                  ingress:
-                    description: |-
-                      Indicates if an ingress should be created to access API endpoints of validator node
-                      and configures it.
-                    properties:
-                      annotations:
-                        additionalProperties:
-                          type: string
-                        description: Annotations to be appended to the ingress.
-                        type: object
-                      disableTLS:
-                        description: Whether to disable TLS on ingress resource.
-                        type: boolean
-                      enableEvmRPC:
-                        description: Enable EVM RPC endpoint.
-                        type: boolean
-                      enableEvmRpcWS:
-                        description: Enable EVM RPC Websocket endpoint.
-                        type: boolean
-                      enableGRPC:
-                        description: Enable gRPC endpoint.
-                        type: boolean
-                      enableLCD:
-                        description: Enable LCD endpoint.
-                        type: boolean
-                      enableRPC:
-                        description: Enable RPC endpoint.
-                        type: boolean
-                      grpcAnnotations:
-                        additionalProperties:
-                          type: string
-                        description: |-
-                          GrpcAnnotations to be set on grpc ingress resource.
-                          Defaults to nginx annotation `nginx.ingress.kubernetes.io/backend-protocol: GRPC`
-                          if nginx ingress class is used.
-                        type: object
-                      host:
-                        description: |-
-                          Host in which endpoints will be exposed. Endpoints are exposed on corresponding
-                          subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
-                          `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
-                        type: string
-                      ingressClass:
-                        default: nginx
-                        description: IngressClass specifies the ingress class to be
-                          used on ingresses
-                        type: string
-                      tlsSecretName:
-                        description: Name of the secret containing TLS certificate.
-                        type: string
-                      useInternalServices:
-                        default: false
-                        description: |-
-                          UseInternalServices configures Ingress to route traffic directly to the node services,
-                          bypassing Cosmoguard and any readiness checks. This is only recommended for debugging
-                          or for private/internal traffic (e.g., when accessing the cluster over a VPN).
-                        type: boolean
-                    required:
-                    - host
                     type: object
                   init:
                     description: Specifies configs and initialization commands for

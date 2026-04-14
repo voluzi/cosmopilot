@@ -83,6 +83,15 @@ func ContainsGlobalIngress(ingresses []v1.GlobalIngressConfig, ingressName strin
 	return false
 }
 
+func ContainsGlobalGateway(gateways []v1.GlobalGatewayConfig, gatewayName string) bool {
+	for _, gw := range gateways {
+		if gw.Name == gatewayName {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Reconciler) ensureConfigMap(ctx context.Context, cm *corev1.ConfigMap) error {
 	logger := log.FromContext(ctx).WithValues("cm", cm.GetName())
 

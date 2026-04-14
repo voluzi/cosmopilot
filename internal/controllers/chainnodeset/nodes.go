@@ -271,6 +271,11 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 		node.Spec.Ingress.Host = fmt.Sprintf("%d.%s", index, group.IndividualIngresses.Host)
 	}
 
+	if group.IndividualGateways != nil {
+		node.Spec.Gateway = group.IndividualGateways.DeepCopy()
+		node.Spec.Gateway.Host = fmt.Sprintf("%d.%s", index, group.IndividualGateways.Host)
+	}
+
 	if nodeSet.HasValidator() && group.ShouldInheritValidatorGasPrice() {
 		price := nodeSet.GetValidatorMinimumGasPrices()
 		if price != "" {
@@ -318,6 +323,17 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 
 	if len(globalIngressLabels) > 0 {
 		node.Labels = utils.MergeMaps(node.Labels, globalIngressLabels)
+	}
+
+	globalGatewayLabels := map[string]string{}
+	for _, gw := range nodeSet.Spec.Gateways {
+		if gw.HasGroup(group.Name) {
+			globalGatewayLabels[gw.GetName(nodeSet)] = strconv.FormatBool(true)
+		}
+	}
+
+	if len(globalGatewayLabels) > 0 {
+		node.Labels = utils.MergeMaps(node.Labels, globalGatewayLabels)
 	}
 
 	// When enabling snapshots on a group, we only do it on one node, the onde with the index indicated
