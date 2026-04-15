@@ -435,6 +435,9 @@ func (gg *GlobalGatewayConfig) GetServiceName(owner client.Object) string {
 	return fmt.Sprintf("%s-global-%s", owner.GetName(), gg.Name)
 }
 
+// ShouldUseCosmoGuardPorts returns true if any group in this gateway config has CosmoGuard enabled.
+// When a gateway spans multiple groups, CosmoGuard ports are used for the shared service if at least
+// one group enables it — this matches the ingress behavior where all traffic goes through the guard.
 func (gg *GlobalGatewayConfig) ShouldUseCosmoGuardPorts(nodeSet *ChainNodeSet) bool {
 	for _, groupName := range gg.Groups {
 		for _, group := range nodeSet.Spec.Nodes {

@@ -73,7 +73,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 			if err != nil {
 				return fmt.Errorf("failed to get TCPRoute spec for %s: %w", chainNode.GetName(), err)
 			}
-			if err := r.ensureTCPRoute(ctx, tcpRoute); err != nil {
+			if err := controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute); err != nil {
 				return fmt.Errorf("failed to ensure TCPRoute for %s: %w", chainNode.GetName(), err)
 			}
 

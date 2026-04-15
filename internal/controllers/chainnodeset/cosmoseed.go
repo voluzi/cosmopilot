@@ -88,7 +88,7 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 				Name:      seedRouteName,
 				Namespace: nodeSet.GetNamespace(),
 			},
-		}); err != nil && !errors.IsNotFound(err) && !isCRDNotInstalled(err) {
+		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 			return err
 		}
 	} else if nodeSet.Spec.Cosmoseed.Gateway != nil {
@@ -96,7 +96,7 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 		if err != nil {
 			return err
 		}
-		if err = r.ensureHTTPRoute(ctx, route); err != nil {
+		if err = controllers.EnsureHTTPRoute(ctx, r.Client, route); err != nil {
 			return err
 		}
 		// Clean up any lingering Ingress from a previous Ingress config
@@ -123,7 +123,7 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 				Name:      seedRouteName,
 				Namespace: nodeSet.GetNamespace(),
 			},
-		}); err != nil && !errors.IsNotFound(err) && !isCRDNotInstalled(err) {
+		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 			return err
 		}
 	}
@@ -167,7 +167,7 @@ func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.Chai
 			Name:      fmt.Sprintf("%s-seed", nodeSet.GetName()),
 			Namespace: nodeSet.GetNamespace(),
 		},
-	}); err != nil && !errors.IsNotFound(err) && !isCRDNotInstalled(err) {
+	}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 		return err
 	}
 
@@ -177,7 +177,7 @@ func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.Chai
 		controllers.LabelApp:          controllers.CosmoseedName,
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
 	}); err != nil {
-		if !isCRDNotInstalled(err) {
+		if !controllers.IsCRDNotInstalled(err) {
 			return err
 		}
 	} else {
@@ -554,7 +554,7 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 				if err != nil {
 					return nil, err
 				}
-				if err = r.ensureTCPRoute(ctx, tcpRoute); err != nil {
+				if err = controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute); err != nil {
 					return nil, err
 				}
 				expectedTCPRoutes[tcpRoute.Name] = true
@@ -579,7 +579,7 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 						Name:      fmt.Sprintf("%s-seed-%d-p2p", nodeSet.GetName(), i),
 						Namespace: nodeSet.GetNamespace(),
 					},
-				}); err != nil && !errors.IsNotFound(err) && !isCRDNotInstalled(err) {
+				}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 					return nil, err
 				}
 
@@ -624,7 +624,7 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 		controllers.LabelApp:          controllers.CosmoseedName,
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
 	}); err != nil {
-		if !isCRDNotInstalled(err) {
+		if !controllers.IsCRDNotInstalled(err) {
 			return nil, err
 		}
 	} else {

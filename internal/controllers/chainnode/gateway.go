@@ -4,15 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	v1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
@@ -40,7 +37,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 	desiredNames := map[string]bool{}
 	for _, route := range desiredRoutes {
 		desiredNames[route.Name] = true
-		if err = r.ensureHTTPRoute(ctx, route); err != nil {
+		if err = controllers.EnsureHTTPRoute(ctx, r.Client, route); err != nil {
 			return err
 		}
 	}
@@ -52,7 +49,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 		if err != nil {
 			return err
 		}
-		if err = r.ensureGRPCRoute(ctx, grpcRoute); err != nil {
+		if err = controllers.EnsureGRPCRoute(ctx, r.Client, grpcRoute); err != nil {
 			return err
 		}
 	} else {
@@ -61,7 +58,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 				Name:      grpcRouteName,
 				Namespace: chainNode.GetNamespace(),
 			},
-		}); err != nil && !errors.IsNotFound(err) && !isCRDNotInstalled(err) {
+		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 			return err
 		}
 	}
@@ -97,66 +94,6 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 		return err
 	}
 
-	return nil
-}
-
-func (r *Reconciler) ensureHTTPRoute(ctx context.Context, route *gwapiv1.HTTPRoute) error {
-	logger := log.FromContext(ctx)
-
-	current := &gwapiv1.HTTPRoute{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(route), current)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("creating httproute", "httproute", route.GetName())
-			return r.Create(ctx, route)
-		}
-		return err
-	}
-
-	patchResult, err := patch.DefaultPatchMaker.Calculate(current, route)
-	if err != nil {
-		return err
-	}
-
-	if !patchResult.IsEmpty() {
-		logger.Info("updating httproute", "httproute", route.GetName())
-		route.ObjectMeta.ResourceVersion = current.ObjectMeta.ResourceVersion
-		if err = r.Update(ctx, route); err != nil {
-			return err
-		}
-	}
-
-	*route = *current
-	return nil
-}
-
-func (r *Reconciler) ensureGRPCRoute(ctx context.Context, route *gwapiv1a2.GRPCRoute) error {
-	logger := log.FromContext(ctx)
-
-	current := &gwapiv1a2.GRPCRoute{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(route), current)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("creating grpcroute", "grpcroute", route.GetName())
-			return r.Create(ctx, route)
-		}
-		return err
-	}
-
-	patchResult, err := patch.DefaultPatchMaker.Calculate(current, route)
-	if err != nil {
-		return err
-	}
-
-	if !patchResult.IsEmpty() {
-		logger.Info("updating grpcroute", "grpcroute", route.GetName())
-		route.ObjectMeta.ResourceVersion = current.ObjectMeta.ResourceVersion
-		if err = r.Update(ctx, route); err != nil {
-			return err
-		}
-	}
-
-	*route = *current
 	return nil
 }
 
@@ -278,42 +215,12 @@ func (r *Reconciler) listChainNodeHTTPRoutes(ctx context.Context, chainNode *app
 		}),
 	})
 	if err != nil {
-		if isCRDNotInstalled(err) {
+		if controllers.IsCRDNotInstalled(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	return list.Items, nil
-}
-
-func (r *Reconciler) ensureTCPRoute(ctx context.Context, route *gwapiv1a2.TCPRoute) error {
-	logger := log.FromContext(ctx)
-
-	current := &gwapiv1a2.TCPRoute{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(route), current)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("creating tcproute", "tcproute", route.GetName())
-			return r.Create(ctx, route)
-		}
-		return err
-	}
-
-	patchResult, err := patch.DefaultPatchMaker.Calculate(current, route)
-	if err != nil {
-		return err
-	}
-
-	if !patchResult.IsEmpty() {
-		logger.Info("updating tcproute", "tcproute", route.GetName())
-		route.ObjectMeta.ResourceVersion = current.ObjectMeta.ResourceVersion
-		if err = r.Update(ctx, route); err != nil {
-			return err
-		}
-	}
-
-	*route = *current
-	return nil
 }
 
 func (r *Reconciler) cleanupTCPRoute(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -323,7 +230,7 @@ func (r *Reconciler) cleanupTCPRoute(ctx context.Context, chainNode *appsv1.Chai
 			Namespace: chainNode.GetNamespace(),
 		},
 	})
-	if err != nil && !errors.IsNotFound(err) && !isCRDNotInstalled(err) {
+	if err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 		return err
 	}
 	return nil
@@ -345,14 +252,9 @@ func (r *Reconciler) cleanupGatewayRoutes(ctx context.Context, chainNode *appsv1
 			Name:      fmt.Sprintf("%s-grpc", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),
 		},
-	}); err != nil && !errors.IsNotFound(err) && !isCRDNotInstalled(err) {
+	}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 		return err
 	}
 
 	return nil
-}
-
-// isCRDNotInstalled returns true when the Gateway API CRDs are not installed.
-func isCRDNotInstalled(err error) bool {
-	return meta.IsNoMatchError(err)
 }
