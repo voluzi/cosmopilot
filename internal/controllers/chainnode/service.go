@@ -348,8 +348,8 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
 		svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)
 		if chainNode.Spec.Config.IsEvmEnabled() {
-			svc.Spec.Ports[5].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
-			svc.Spec.Ports[6].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
+			svc.Spec.Ports[6].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
+			svc.Spec.Ports[7].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
 		}
 		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
 			Name:       controllers.CosmoGuardMetricsPortName,
