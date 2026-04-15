@@ -235,7 +235,7 @@ func (r *Reconciler) getP2pTCPRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2
 					BackendRefs: []gwapiv1a2.BackendRef{
 						{
 							BackendObjectReference: gwapiv1.BackendObjectReference{
-								Name: gwapiv1.ObjectName(chainNode.GetServiceName()),
+								Name: gwapiv1.ObjectName(fmt.Sprintf("%s-internal", chainNode.GetName())),
 								Port: ptr.To(port),
 							},
 						},
