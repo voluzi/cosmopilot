@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
+	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/voluzi/cosmopilot/v2/internal/tmkms"
@@ -406,6 +407,7 @@ func (exp *ExposeConfig) UsesGateway() bool {
 func (exp *ExposeConfig) GetGatewayParentRef() gwapiv1.ParentReference {
 	ref := gwapiv1.ParentReference{
 		Name: gwapiv1.ObjectName(exp.Gateway.Name),
+		Port: ptr.To(gwapiv1.PortNumber(exp.GetGatewayPort())),
 	}
 	if exp.Gateway.Namespace != nil {
 		ns := gwapiv1.Namespace(*exp.Gateway.Namespace)

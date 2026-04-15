@@ -212,6 +212,7 @@ func (r *Reconciler) listChainNodeHTTPRoutes(ctx context.Context, chainNode *app
 		Namespace: chainNode.GetNamespace(),
 		LabelSelector: labels.SelectorFromSet(map[string]string{
 			controllers.LabelChainNode: chainNode.GetName(),
+			labelGatewayRoute:          "true",
 		}),
 	})
 	if err != nil {

@@ -907,6 +907,7 @@ func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcNam
 	parentRef := gwapiv1.ParentReference{
 		Name:      gwapiv1.ObjectName(gwRef.Name),
 		Namespace: namespace,
+		Port:      ptr.To(gwapiv1.PortNumber(nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort())),
 	}
 
 	route := &gwapiv1a2.TCPRoute{

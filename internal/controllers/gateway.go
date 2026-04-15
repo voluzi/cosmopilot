@@ -23,9 +23,15 @@ func EnsureHTTPRoute(ctx context.Context, c client.Client, route *gwapiv1.HTTPRo
 	current := &gwapiv1.HTTPRoute{}
 	err := c.Get(ctx, client.ObjectKeyFromObject(route), current)
 	if err != nil {
+		if IsCRDNotInstalled(err) {
+			return nil
+		}
 		if errors.IsNotFound(err) {
 			logger.Info("creating httproute", "httproute", route.GetName())
-			return c.Create(ctx, route)
+			if err = c.Create(ctx, route); err != nil && !IsCRDNotInstalled(err) {
+				return err
+			}
+			return nil
 		}
 		return err
 	}
@@ -38,7 +44,7 @@ func EnsureHTTPRoute(ctx context.Context, c client.Client, route *gwapiv1.HTTPRo
 	if !patchResult.IsEmpty() {
 		logger.Info("updating httproute", "httproute", route.GetName())
 		route.ObjectMeta.ResourceVersion = current.ObjectMeta.ResourceVersion
-		if err = c.Update(ctx, route); err != nil {
+		if err = c.Update(ctx, route); err != nil && !IsCRDNotInstalled(err) {
 			return err
 		}
 	}
@@ -53,9 +59,15 @@ func EnsureGRPCRoute(ctx context.Context, c client.Client, route *gwapiv1a2.GRPC
 	current := &gwapiv1a2.GRPCRoute{}
 	err := c.Get(ctx, client.ObjectKeyFromObject(route), current)
 	if err != nil {
+		if IsCRDNotInstalled(err) {
+			return nil
+		}
 		if errors.IsNotFound(err) {
 			logger.Info("creating grpcroute", "grpcroute", route.GetName())
-			return c.Create(ctx, route)
+			if err = c.Create(ctx, route); err != nil && !IsCRDNotInstalled(err) {
+				return err
+			}
+			return nil
 		}
 		return err
 	}
@@ -68,7 +80,7 @@ func EnsureGRPCRoute(ctx context.Context, c client.Client, route *gwapiv1a2.GRPC
 	if !patchResult.IsEmpty() {
 		logger.Info("updating grpcroute", "grpcroute", route.GetName())
 		route.ObjectMeta.ResourceVersion = current.ObjectMeta.ResourceVersion
-		if err = c.Update(ctx, route); err != nil {
+		if err = c.Update(ctx, route); err != nil && !IsCRDNotInstalled(err) {
 			return err
 		}
 	}
@@ -83,9 +95,15 @@ func EnsureTCPRoute(ctx context.Context, c client.Client, route *gwapiv1a2.TCPRo
 	current := &gwapiv1a2.TCPRoute{}
 	err := c.Get(ctx, client.ObjectKeyFromObject(route), current)
 	if err != nil {
+		if IsCRDNotInstalled(err) {
+			return nil
+		}
 		if errors.IsNotFound(err) {
 			logger.Info("creating tcproute", "tcproute", route.GetName())
-			return c.Create(ctx, route)
+			if err = c.Create(ctx, route); err != nil && !IsCRDNotInstalled(err) {
+				return err
+			}
+			return nil
 		}
 		return err
 	}
@@ -98,7 +116,7 @@ func EnsureTCPRoute(ctx context.Context, c client.Client, route *gwapiv1a2.TCPRo
 	if !patchResult.IsEmpty() {
 		logger.Info("updating tcproute", "tcproute", route.GetName())
 		route.ObjectMeta.ResourceVersion = current.ObjectMeta.ResourceVersion
-		if err = c.Update(ctx, route); err != nil {
+		if err = c.Update(ctx, route); err != nil && !IsCRDNotInstalled(err) {
 			return err
 		}
 	}
