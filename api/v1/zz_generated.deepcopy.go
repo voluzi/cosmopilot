@@ -254,8 +254,8 @@ func (in *ChainNodeSetSpec) DeepCopyInto(out *ChainNodeSetSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.Gateways != nil {
-		in, out := &in.Gateways, &out.Gateways
+	if in.GatewayRoutes != nil {
+		in, out := &in.GatewayRoutes, &out.GatewayRoutes
 		*out = make([]GlobalGatewayConfig, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
@@ -1347,8 +1347,8 @@ func (in *NodeGroupSpec) DeepCopyInto(out *NodeGroupSpec) {
 		*out = new(IngressConfig)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.IndividualGateways != nil {
-		in, out := &in.IndividualGateways, &out.IndividualGateways
+	if in.IndividualGatewayRoutes != nil {
+		in, out := &in.IndividualGatewayRoutes, &out.IndividualGatewayRoutes
 		*out = new(GatewayConfig)
 		(*in).DeepCopyInto(*out)
 	}

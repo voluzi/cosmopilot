@@ -28,7 +28,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 	desiredHTTPRouteNames := map[string]bool{}
 	desiredGRPCRouteNames := map[string]bool{}
 
-	for _, gw := range nodeSet.Spec.Gateways {
+	for _, gw := range nodeSet.Spec.GatewayRoutes {
 		if gw.CreateServicesOnly() {
 			continue
 		}

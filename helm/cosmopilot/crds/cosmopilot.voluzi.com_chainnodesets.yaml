@@ -367,7 +367,7 @@ spec:
                 x-kubernetes-validations:
                 - message: ingress and gateway are mutually exclusive
                   rule: '!(has(self.ingress) && has(self.gateway))'
-              gateways:
+              gatewayRoutes:
                 description: |-
                   List of Gateway API route configs for this ChainNodeSet. This allows to create
                   HTTPRoute/GRPCRoute resources targeting multiple groups of nodes.
@@ -2760,9 +2760,9 @@ spec:
                         This is useful to ensure no downtime globally or per global ingress, instead of just per group.
                         Defaults to `false`.
                       type: boolean
-                    individualGateways:
+                    individualGatewayRoutes:
                       description: |-
-                        IndividualGateways configures per-node Gateway API routes. Each node gets its own
+                        IndividualGatewayRoutes configures per-node Gateway API routes. Each node gets its own
                         HTTPRoute/GRPCRoute with hostname prefixed by node index (e.g., 0.host, 1.host).
                         Mutually exclusive with individualIngresses.
                       properties:
@@ -2823,7 +2823,7 @@ spec:
                           - 1.fullnodes.cosmopilot.local
                           - etc.
 
-                        Mutually exclusive with individualGateways.
+                        Mutually exclusive with individualGatewayRoutes.
                       properties:
                         annotations:
                           additionalProperties:
@@ -4745,9 +4745,9 @@ spec:
                   - name
                   type: object
                   x-kubernetes-validations:
-                  - message: individualIngresses and individualGateways are mutually
+                  - message: individualIngresses and individualGatewayRoutes are mutually
                       exclusive
-                    rule: '!(has(self.individualIngresses) && has(self.individualGateways))'
+                    rule: '!(has(self.individualIngresses) && has(self.individualGatewayRoutes))'
                 type: array
               validator:
                 description: Indicates this node set will run a validator and allows

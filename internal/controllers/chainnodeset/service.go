@@ -59,7 +59,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		}
 	}
 
-	for _, gw := range nodeSet.Spec.Gateways {
+	for _, gw := range nodeSet.Spec.GatewayRoutes {
 		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw)
 		if err != nil {
 			return err
@@ -102,7 +102,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		ingressName := svc.Labels[controllers.LabelGlobalIngress]
 		gatewayName := svc.Labels[labelGlobalGateway]
 		if !ContainsGlobalIngress(nodeSet.Spec.Ingresses, ingressName, false) &&
-			!ContainsGlobalGateway(nodeSet.Spec.Gateways, gatewayName) {
+			!ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, gatewayName) {
 			logger.Info("deleting service", "svc", svc.GetName())
 			if err = r.Delete(ctx, &svc); err != nil {
 				return err

@@ -73,7 +73,7 @@ type ChainNodeSetSpec struct {
 	// List of Gateway API route configs for this ChainNodeSet. This allows to create
 	// HTTPRoute/GRPCRoute resources targeting multiple groups of nodes.
 	// +optional
-	Gateways []GlobalGatewayConfig `json:"gateways,omitempty"`
+	GatewayRoutes []GlobalGatewayConfig `json:"gatewayRoutes,omitempty"`
 
 	// Allows deploying seed nodes using Cosmoseed.
 	// +optional
@@ -250,7 +250,7 @@ type NodeSetValidatorConfig struct {
 }
 
 // NodeGroupSpec sets chainnode configurations for a group.
-// +kubebuilder:validation:XValidation:rule="!(has(self.individualIngresses) && has(self.individualGateways))",message="individualIngresses and individualGateways are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="!(has(self.individualIngresses) && has(self.individualGatewayRoutes))",message="individualIngresses and individualGatewayRoutes are mutually exclusive"
 type NodeGroupSpec struct {
 	// Name of this group.
 	Name string `json:"name"`
@@ -289,15 +289,15 @@ type NodeGroupSpec struct {
 	//   - 1.fullnodes.cosmopilot.local
 	//   - etc.
 	//
-	// Mutually exclusive with individualGateways.
+	// Mutually exclusive with individualGatewayRoutes.
 	// +optional
 	IndividualIngresses *IngressConfig `json:"individualIngresses,omitempty"`
 
-	// IndividualGateways configures per-node Gateway API routes. Each node gets its own
+	// IndividualGatewayRoutes configures per-node Gateway API routes. Each node gets its own
 	// HTTPRoute/GRPCRoute with hostname prefixed by node index (e.g., 0.host, 1.host).
 	// Mutually exclusive with individualIngresses.
 	// +optional
-	IndividualGateways *GatewayConfig `json:"individualGateways,omitempty"`
+	IndividualGatewayRoutes *GatewayConfig `json:"individualGatewayRoutes,omitempty"`
 
 	// Compute Resources required by the app container.
 	// +optional

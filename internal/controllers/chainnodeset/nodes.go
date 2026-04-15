@@ -271,9 +271,9 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 		node.Spec.Ingress.Host = fmt.Sprintf("%d.%s", index, group.IndividualIngresses.Host)
 	}
 
-	if group.IndividualGateways != nil {
-		node.Spec.Gateway = group.IndividualGateways.DeepCopy()
-		node.Spec.Gateway.Host = fmt.Sprintf("%d.%s", index, group.IndividualGateways.Host)
+	if group.IndividualGatewayRoutes != nil {
+		node.Spec.Gateway = group.IndividualGatewayRoutes.DeepCopy()
+		node.Spec.Gateway.Host = fmt.Sprintf("%d.%s", index, group.IndividualGatewayRoutes.Host)
 	}
 
 	if nodeSet.HasValidator() && group.ShouldInheritValidatorGasPrice() {
@@ -326,7 +326,7 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 	}
 
 	globalGatewayLabels := map[string]string{}
-	for _, gw := range nodeSet.Spec.Gateways {
+	for _, gw := range nodeSet.Spec.GatewayRoutes {
 		if gw.HasGroup(group.Name) {
 			globalGatewayLabels[gw.GetName(nodeSet)] = strconv.FormatBool(true)
 		}
