@@ -64,7 +64,18 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 		}
 	}
 
-	ss, err := r.getStatefulSet(nodeSet, configHash, RemoveIdFromFullAddresses(publicAddresses))
+	// Filter out empty entries — when the Gateway has not yet been assigned an address,
+	// publicAddresses[i] is empty and would otherwise produce a malformed EXTERNAL_ADDRESS
+	// like ",," in the StatefulSet env var, forcing a redundant rollout once the Gateway
+	// is ready.
+	knownPublicAddresses := make([]string, 0, len(publicAddresses))
+	for _, addr := range publicAddresses {
+		if addr != "" {
+			knownPublicAddresses = append(knownPublicAddresses, addr)
+		}
+	}
+
+	ss, err := r.getStatefulSet(nodeSet, configHash, RemoveIdFromFullAddresses(knownPublicAddresses))
 	if err != nil {
 		return err
 	}
