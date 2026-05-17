@@ -30,6 +30,15 @@ func NewServiceHelper(client *kubernetes.Clientset, cfg *rest.Config, svc *corev
 	}
 }
 
+// LoadBalancerAddress returns a usable network address from a LoadBalancer Ingress entry,
+// preferring IP and falling back to Hostname (used by AWS NLB and similar hostname-only LBs).
+func LoadBalancerAddress(ing corev1.LoadBalancerIngress) string {
+	if ing.IP != "" {
+		return ing.IP
+	}
+	return ing.Hostname
+}
+
 func (s *ServiceHelper) WaitForCondition(ctx context.Context, fn func(service *corev1.Service) (bool, error), timeout time.Duration) error {
 	fs := fields.SelectorFromSet(map[string]string{
 		"metadata.namespace": s.svc.Namespace,

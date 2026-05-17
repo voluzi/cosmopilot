@@ -603,8 +603,9 @@ type ExposeConfig struct {
 	// Valid values are:
 	// - `LoadBalancer`
 	// - `NodePort` (default)
+	// The default is applied at runtime so that the mutual-exclusion CEL rule with
+	// `gateway` does not match merely because the schema default was applied.
 	// +optional
-	// +default="NodePort"
 	P2pServiceType *corev1.ServiceType `json:"p2pServiceType,omitempty"`
 
 	// Annotations to be appended to the p2p service.

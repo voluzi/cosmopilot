@@ -552,15 +552,9 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 
 		if nodeSet.Spec.Cosmoseed.Expose.Enabled() {
 			if nodeSet.Spec.Cosmoseed.Expose.UsesGateway() {
-				// Gateway mode: create TCPRoute, delete stale expose service
-				staleSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
-				if err != nil {
-					return nil, err
-				}
-				if err = r.Delete(ctx, staleSvc); err != nil && !errors.IsNotFound(err) {
-					return nil, err
-				}
-
+				// Gateway mode: ensure TCPRoute first, then delete the stale expose service.
+				// This ordering avoids a window with no P2P exposure if the Gateway API
+				// call fails transiently.
 				tcpRoute, err := r.getSeedTCPRouteSpec(nodeSet, internalSvc.Name, i)
 				if err != nil {
 					return nil, err
@@ -570,6 +564,14 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 				}
 				expectedTCPRoutes[tcpRoute.Name] = true
 
+				staleSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
+				if err != nil {
+					return nil, err
+				}
+				if err = r.Delete(ctx, staleSvc); err != nil && !errors.IsNotFound(err) {
+					return nil, err
+				}
+
 				// Discover public address from Gateway status
 				gwRef := nodeSet.Spec.Cosmoseed.Expose.Gateway
 				gwNamespace := nodeSet.GetNamespace()
@@ -578,9 +580,12 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 				}
 				gw := &gwapiv1.Gateway{}
 				if err = r.Get(ctx, client.ObjectKey{Name: gwRef.Name, Namespace: gwNamespace}, gw); err != nil {
-					return nil, fmt.Errorf("failed to get Gateway %s: %w", gwRef.Name, err)
-				}
-				if len(gw.Status.Addresses) > 0 {
+					if controllers.IsCRDNotInstalled(err) {
+						log.FromContext(ctx).Info("gateway api crds not installed, skipping public address update")
+					} else {
+						return nil, fmt.Errorf("failed to get Gateway %s: %w", gwRef.Name, err)
+					}
+				} else if len(gw.Status.Addresses) > 0 {
 					publicAddresses[i] = fmt.Sprintf("%s@%s:%d", id, gw.Status.Addresses[0].Value, nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort())
 				}
 			} else {
@@ -839,11 +844,12 @@ func (r *Reconciler) getSeedPublicAddress(ctx context.Context, nodeSet *v1.Chain
 		// Wait for LoadBalancer to be available
 		logger.V(1).Info("waiting for load balancer address to be available", "svc", svc.GetName())
 		if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
-			return len(svc.Status.LoadBalancer.Ingress) > 0, nil
+			return len(svc.Status.LoadBalancer.Ingress) > 0 &&
+				k8s.LoadBalancerAddress(svc.Status.LoadBalancer.Ingress[0]) != "", nil
 		}, timeoutWaitServiceIP); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("%s@%s:%d", id, svc.Status.LoadBalancer.Ingress[0].IP, chainutils.P2pPort), nil
+		return fmt.Sprintf("%s@%s:%d", id, k8s.LoadBalancerAddress(svc.Status.LoadBalancer.Ingress[0]), chainutils.P2pPort), nil
 	}
 
 	return "", fmt.Errorf("unsupported service type")

@@ -64,17 +64,18 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 	}
 	if chainNode.Spec.Expose.Enabled() {
 		if chainNode.Spec.Expose.UsesGateway() {
-			// Gateway mode: create TCPRoute, clean up any stale P2P service
-			if err := r.Delete(ctx, p2p); err != nil && !errors.IsNotFound(err) {
-				return fmt.Errorf("failed to delete stale P2P service %s: %w", p2p.GetName(), err)
-			}
-
+			// Gateway mode: ensure TCPRoute first, then clean up any stale P2P service.
+			// Doing it in this order avoids a window with no P2P exposure if a transient
+			// Gateway API failure delays the TCPRoute creation.
 			tcpRoute, err := r.getP2pTCPRouteSpec(chainNode)
 			if err != nil {
 				return fmt.Errorf("failed to get TCPRoute spec for %s: %w", chainNode.GetName(), err)
 			}
 			if err := controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute); err != nil {
 				return fmt.Errorf("failed to ensure TCPRoute for %s: %w", chainNode.GetName(), err)
+			}
+			if err := r.Delete(ctx, p2p); err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete stale P2P service %s: %w", p2p.GetName(), err)
 			}
 
 			// Discover public address from Gateway status
@@ -85,6 +86,10 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 			}
 			gw := &gwapiv1.Gateway{}
 			if err := r.Get(ctx, client.ObjectKey{Name: gwRef.Name, Namespace: gwNamespace}, gw); err != nil {
+				if controllers.IsCRDNotInstalled(err) {
+					logger.Info("gateway api crds not installed, skipping public address update")
+					return nil
+				}
 				return fmt.Errorf("failed to get Gateway %s: %w", gwRef.Name, err)
 			}
 
@@ -184,11 +189,12 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 				// Wait for LoadBalancer to be available
 				logger.V(1).Info("waiting for load balancer address to be available", "svc", p2p.GetName())
 				if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
-					return len(svc.Status.LoadBalancer.Ingress) > 0, nil
+					return len(svc.Status.LoadBalancer.Ingress) > 0 &&
+						k8s.LoadBalancerAddress(svc.Status.LoadBalancer.Ingress[0]) != "", nil
 				}, timeoutWaitServiceIP); err != nil {
 					return fmt.Errorf("timeout waiting for LoadBalancer address for service %s: %w", p2p.GetName(), err)
 				}
-				externalAddress = fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, p2p.Status.LoadBalancer.Ingress[0].IP, chainutils.P2pPort)
+				externalAddress = fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, k8s.LoadBalancerAddress(p2p.Status.LoadBalancer.Ingress[0]), chainutils.P2pPort)
 			}
 
 			if chainNode.Status.PublicAddress != externalAddress {
