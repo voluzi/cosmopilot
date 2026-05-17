@@ -82,14 +82,6 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		}
 	}
 
-	// Cosmoseed gateway-exposed P2P does not support multiple instances: every TCPRoute would
-	// attach to the same Gateway listener (no SNI for L4) and every seed would advertise the
-	// same public host:port. Peers cannot distinguish replicas.
-	if nodeSet.Spec.Cosmoseed != nil && nodeSet.Spec.Cosmoseed.IsEnabled() &&
-		nodeSet.Spec.Cosmoseed.Expose.UsesGateway() && nodeSet.Spec.Cosmoseed.GetInstances() > 1 {
-		return nil, fmt.Errorf(".spec.cosmoseed.instances must be 1 when .spec.cosmoseed.expose.gateway is set")
-	}
-
 	// Names in .spec.ingresses and .spec.gatewayRoutes must be unique across both lists,
 	// because both produce identically-named global Services (<name>-global-<name>).
 	seenRouteNames := make(map[string]string, len(nodeSet.Spec.Ingresses)+len(nodeSet.Spec.GatewayRoutes))

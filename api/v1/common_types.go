@@ -626,6 +626,12 @@ type ExposeGatewayConfig struct {
 
 	// Port is the external port on the Gateway listener for P2P traffic.
 	// This is the port that peers will use to connect. Defaults to 26656.
+	//
+	// When this config is applied to a group of nodes with more than one instance
+	// (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is
+	// treated as the BASE port and each instance attaches to a distinct listener:
+	// instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i.
+	// The Gateway must be configured with a matching TCP listener for each port.
 	// +optional
 	// +default=26656
 	Port *int32 `json:"port,omitempty"`

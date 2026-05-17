@@ -23,12 +23,24 @@ import (
 func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	logger := log.FromContext(ctx)
 
+	expectedGroup := map[string]bool{}
+	expectedGlobal := map[string]bool{}
+
+	ensure := func(svc *corev1.Service, scope string) error {
+		if scope == scopeGroup {
+			expectedGroup[svc.GetName()] = true
+		} else {
+			expectedGlobal[svc.GetName()] = true
+		}
+		return r.ensureService(ctx, svc)
+	}
+
 	for _, group := range nodeSet.Spec.Nodes {
 		svc, err := r.getServiceSpec(nodeSet, group)
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGroup); err != nil {
 			return err
 		}
 
@@ -36,7 +48,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGroup); err != nil {
 			return err
 		}
 	}
@@ -46,7 +58,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGlobal); err != nil {
 			return err
 		}
 
@@ -54,7 +66,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGlobal); err != nil {
 			return err
 		}
 	}
@@ -64,7 +76,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGlobal); err != nil {
 			return err
 		}
 
@@ -72,20 +84,23 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGlobal); err != nil {
 			return err
 		}
 	}
 
-	// Clean up if necessary
+	// Clean up group-scoped services that are no longer expected. This also catches
+	// legacy "-internal-internal" services created by older releases that used the
+	// deprecated group-level UseInternalServices option.
 	groupServices, err := r.listChainNodeSetServices(ctx, nodeSet, controllers.LabelScope, scopeGroup)
 	if err != nil {
 		return err
 	}
 
 	for _, svc := range groupServices.Items {
-		if _, ok := svc.Labels[controllers.LabelChainNodeSetGroup]; !ok ||
-			!ContainsGroup(nodeSet.Spec.Nodes, svc.Labels[controllers.LabelChainNodeSetGroup]) {
+		groupName, hasGroup := svc.Labels[controllers.LabelChainNodeSetGroup]
+		groupGone := !hasGroup || !ContainsGroup(nodeSet.Spec.Nodes, groupName)
+		if groupGone || !expectedGroup[svc.GetName()] {
 			logger.Info("deleting service", "svc", svc.GetName())
 			if err = r.Delete(ctx, &svc); err != nil {
 				return err
@@ -101,8 +116,9 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	for _, svc := range globalServices.Items {
 		ingressName := svc.Labels[controllers.LabelGlobalIngress]
 		gatewayName := svc.Labels[labelGlobalGateway]
-		if !ContainsGlobalIngress(nodeSet.Spec.Ingresses, ingressName, false) &&
-			!ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, gatewayName) {
+		ownerGone := !ContainsGlobalIngress(nodeSet.Spec.Ingresses, ingressName, false) &&
+			!ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, gatewayName)
+		if ownerGone || !expectedGlobal[svc.GetName()] {
 			logger.Info("deleting service", "svc", svc.GetName())
 			if err = r.Delete(ctx, &svc); err != nil {
 				return err

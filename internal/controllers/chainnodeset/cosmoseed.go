@@ -586,7 +586,8 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 						return nil, fmt.Errorf("failed to get Gateway %s: %w", gwRef.Name, err)
 					}
 				} else if len(gw.Status.Addresses) > 0 {
-					publicAddresses[i] = fmt.Sprintf("%s@%s:%d", id, gw.Status.Addresses[0].Value, nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort())
+					listenerPort := nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort() + int32(i)
+					publicAddresses[i] = fmt.Sprintf("%s@%s:%d", id, gw.Status.Addresses[0].Value, listenerPort)
 				}
 			} else {
 				// LoadBalancer/NodePort mode: delete any stale TCPRoute
@@ -921,10 +922,13 @@ func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcNam
 		ns := gwapiv1.Namespace(*gwRef.Namespace)
 		namespace = &ns
 	}
+	// Each seed instance attaches to a distinct Gateway listener at base+index so multiple
+	// seeds can coexist on a single Gateway (L4 routes have no SNI to disambiguate).
+	listenerPort := nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort() + int32(index)
 	parentRef := gwapiv1.ParentReference{
 		Name:      gwapiv1.ObjectName(gwRef.Name),
 		Namespace: namespace,
-		Port:      ptr.To(gwapiv1.PortNumber(nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort())),
+		Port:      ptr.To(gwapiv1.PortNumber(listenerPort)),
 	}
 
 	route := &gwapiv1a2.TCPRoute{

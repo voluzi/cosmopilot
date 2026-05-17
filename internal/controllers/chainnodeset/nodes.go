@@ -254,7 +254,7 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 			Config:                        group.Config,
 			Persistence:                   group.Persistence.DeepCopy(),
 			Peers:                         group.Peers,
-			Expose:                        group.Expose,
+			Expose:                        exposeForInstance(group.Expose, index),
 			Resources:                     group.Resources,
 			Affinity:                      group.Affinity,
 			NodeSelector:                  group.NodeSelector,
@@ -451,4 +451,19 @@ func (r *Reconciler) maybeDeleteNode(ctx context.Context, nodeSet *appsv1.ChainN
 	}
 	DeleteNodeStatus(nodeSet, name)
 	return nil
+}
+
+// exposeForInstance returns the ExposeConfig that should be applied to the i-th
+// instance of a group. When Gateway-based P2P exposure is used, the gateway
+// listener port is offset by the instance index so each instance attaches to a
+// distinct TCP listener (Port + i). All other Expose fields are shared.
+func exposeForInstance(src *appsv1.ExposeConfig, index int) *appsv1.ExposeConfig {
+	if src == nil || src.Gateway == nil {
+		return src
+	}
+	out := src.DeepCopy()
+	base := out.GetGatewayPort()
+	port := base + int32(index)
+	out.Gateway.Port = &port
+	return out
 }
