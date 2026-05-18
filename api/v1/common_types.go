@@ -592,6 +592,7 @@ type Peer struct {
 }
 
 // ExposeConfig allows configuring how P2P endpoint is exposed to public.
+// +kubebuilder:validation:XValidation:rule="!(has(self.gateway) && has(self.p2pServiceType))",message="gateway and p2pServiceType are mutually exclusive"
 type ExposeConfig struct {
 	// Whether to expose p2p endpoint for this node. Defaults to `false`.
 	// +optional
@@ -602,13 +603,38 @@ type ExposeConfig struct {
 	// Valid values are:
 	// - `LoadBalancer`
 	// - `NodePort` (default)
+	// The default is applied at runtime so that the mutual-exclusion CEL rule with
+	// `gateway` does not match merely because the schema default was applied.
 	// +optional
-	// +default="NodePort"
 	P2pServiceType *corev1.ServiceType `json:"p2pServiceType,omitempty"`
 
 	// Annotations to be appended to the p2p service.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Gateway configures P2P exposure via a Gateway API TCPRoute instead of a dedicated Service.
+	// When set, a TCPRoute is created that routes P2P TCP traffic through the referenced Gateway.
+	// This is mutually exclusive with p2pServiceType.
+	// +optional
+	Gateway *ExposeGatewayConfig `json:"gateway,omitempty"`
+}
+
+// ExposeGatewayConfig configures P2P exposure through a Gateway API TCPRoute.
+type ExposeGatewayConfig struct {
+	// Reference to the Gateway resource to attach the TCPRoute to.
+	GatewayRef `json:",inline"`
+
+	// Port is the external port on the Gateway listener for P2P traffic.
+	// This is the port that peers will use to connect. Defaults to 26656.
+	//
+	// When this config is applied to a group of nodes with more than one instance
+	// (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is
+	// treated as the BASE port and each instance attaches to a distinct listener:
+	// instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i.
+	// The Gateway must be configured with a matching TCP listener for each port.
+	// +optional
+	// +default=26656
+	Port *int32 `json:"port,omitempty"`
 }
 
 // TmKMS allows configuring tmkms for signing for this validator node instead of

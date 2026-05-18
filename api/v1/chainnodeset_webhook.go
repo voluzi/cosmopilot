@@ -82,5 +82,21 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		}
 	}
 
+	// Names in .spec.ingresses and .spec.gatewayRoutes must be unique across both lists,
+	// because both produce identically-named global Services (<name>-global-<name>).
+	seenRouteNames := make(map[string]string, len(nodeSet.Spec.Ingresses)+len(nodeSet.Spec.GatewayRoutes))
+	for i, ing := range nodeSet.Spec.Ingresses {
+		if existing, ok := seenRouteNames[ing.Name]; ok {
+			return nil, fmt.Errorf(".spec.ingresses[%d].name %q duplicates %s", i, ing.Name, existing)
+		}
+		seenRouteNames[ing.Name] = fmt.Sprintf(".spec.ingresses[%d]", i)
+	}
+	for i, gw := range nodeSet.Spec.GatewayRoutes {
+		if existing, ok := seenRouteNames[gw.Name]; ok {
+			return nil, fmt.Errorf(".spec.gatewayRoutes[%d].name %q duplicates %s", i, gw.Name, existing)
+		}
+		seenRouteNames[gw.Name] = fmt.Sprintf(".spec.gatewayRoutes[%d]", i)
+	}
+
 	return nil, nil
 }

@@ -20,6 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	"github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
@@ -62,7 +64,18 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 		}
 	}
 
-	ss, err := r.getStatefulSet(nodeSet, configHash, RemoveIdFromFullAddresses(publicAddresses))
+	// Filter out empty entries — when the Gateway has not yet been assigned an address,
+	// publicAddresses[i] is empty and would otherwise produce a malformed EXTERNAL_ADDRESS
+	// like ",," in the StatefulSet env var, forcing a redundant rollout once the Gateway
+	// is ready.
+	knownPublicAddresses := make([]string, 0, len(publicAddresses))
+	for _, addr := range publicAddresses {
+		if addr != "" {
+			knownPublicAddresses = append(knownPublicAddresses, addr)
+		}
+	}
+
+	ss, err := r.getStatefulSet(nodeSet, configHash, RemoveIdFromFullAddresses(knownPublicAddresses))
 	if err != nil {
 		return err
 	}
@@ -71,12 +84,61 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 		return err
 	}
 
+	seedRouteName := fmt.Sprintf("%s-seed", nodeSet.GetName())
 	if nodeSet.Spec.Cosmoseed.Ingress != nil {
 		ing, err := r.getCosmoseedIngress(nodeSet)
 		if err != nil {
 			return err
 		}
 		if err = r.ensureIngress(ctx, ing); err != nil {
+			return err
+		}
+		// Clean up any lingering HTTPRoute from a previous Gateway config
+		if err = r.Delete(ctx, &gwapiv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      seedRouteName,
+				Namespace: nodeSet.GetNamespace(),
+			},
+		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+			return err
+		}
+	} else if nodeSet.Spec.Cosmoseed.Gateway != nil {
+		route, err := r.getCosmoseedHTTPRoute(nodeSet)
+		if err != nil {
+			return err
+		}
+		applied, err := controllers.EnsureHTTPRoute(ctx, r.Client, route)
+		if err != nil {
+			return err
+		}
+		// Only clean up the legacy Ingress if the HTTPRoute was actually applied,
+		// otherwise (Gateway API CRDs missing) we would lose seed HTTP exposure.
+		if applied {
+			if err = r.Delete(ctx, &netv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      seedRouteName,
+					Namespace: nodeSet.GetNamespace(),
+				},
+			}); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
+		}
+	} else {
+		// Neither ingress nor gateway configured — clean up both
+		if err := r.Delete(ctx, &netv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      seedRouteName,
+				Namespace: nodeSet.GetNamespace(),
+			},
+		}); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+		if err := r.Delete(ctx, &gwapiv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      seedRouteName,
+				Namespace: nodeSet.GetNamespace(),
+			},
+		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
 			return err
 		}
 	}
@@ -112,6 +174,33 @@ func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.Chai
 		},
 	}); err != nil && !errors.IsNotFound(err) {
 		return err
+	}
+
+	// Cleanup httproute
+	if err := r.Delete(ctx, &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-seed", nodeSet.GetName()),
+			Namespace: nodeSet.GetNamespace(),
+		},
+	}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+		return err
+	}
+
+	// Cleanup TCPRoutes by label (can't use GetInstances() since it returns 0 when disabled)
+	tcpRouteList := &gwapiv1a2.TCPRouteList{}
+	if err := r.List(ctx, tcpRouteList, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
+		controllers.LabelApp:          controllers.CosmoseedName,
+		controllers.LabelChainNodeSet: nodeSet.GetName(),
+	}); err != nil {
+		if !controllers.IsCRDNotInstalled(err) {
+			return err
+		}
+	} else {
+		for _, route := range tcpRouteList.Items {
+			if err := r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
+		}
 	}
 
 	// Cleanup services
@@ -430,8 +519,9 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string,
 }
 
 func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNodeSet, ids []string) ([]string, error) {
-	// Track expected services for cleanup
+	// Track expected resources for cleanup
 	expected := map[string]bool{}
+	expectedTCPRoutes := map[string]bool{}
 
 	// List of public addresses (empty if not exposed)
 	publicAddresses := make([]string, len(ids))
@@ -465,18 +555,90 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 		expected[internalSvc.Name] = true
 
 		if nodeSet.Spec.Cosmoseed.Expose.Enabled() {
-			exposeSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
-			if err != nil {
-				return nil, err
-			}
-			if err = r.ensureService(ctx, exposeSvc); err != nil {
-				return nil, err
-			}
-			expected[exposeSvc.Name] = true
+			if nodeSet.Spec.Cosmoseed.Expose.UsesGateway() {
+				// Gateway mode: ensure TCPRoute first, then delete the stale expose service.
+				// This ordering avoids a window with no P2P exposure if the Gateway API
+				// call fails transiently. When Gateway CRDs are missing the route call is
+				// a no-op (applied=false); we must keep the expose Service in place so the
+				// seed retains an external endpoint, and we keep it in `expected` so the
+				// downstream cleanup pass does not delete it.
+				tcpRoute, err := r.getSeedTCPRouteSpec(nodeSet, internalSvc.Name, i)
+				if err != nil {
+					return nil, err
+				}
+				applied, err := controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute)
+				if err != nil {
+					return nil, err
+				}
+				if !applied {
+					// Gateway API CRDs missing: fall back to the LB/NodePort expose
+					// service so the seed still has an external endpoint and a
+					// public address for peer discovery.
+					exposeSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
+					if err != nil {
+						return nil, err
+					}
+					if err = r.ensureService(ctx, exposeSvc); err != nil {
+						return nil, err
+					}
+					expected[exposeSvc.Name] = true
+					publicAddresses[i], err = r.getSeedPublicAddress(ctx, nodeSet, exposeSvc, id)
+					if err != nil {
+						return nil, err
+					}
+					continue
+				}
+				expectedTCPRoutes[tcpRoute.Name] = true
 
-			publicAddresses[i], err = r.getSeedPublicAddress(ctx, nodeSet, exposeSvc, id)
-			if err != nil {
-				return nil, err
+				staleSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
+				if err != nil {
+					return nil, err
+				}
+				if err = r.Delete(ctx, staleSvc); err != nil && !errors.IsNotFound(err) {
+					return nil, err
+				}
+
+				// Discover public address from Gateway status
+				gwRef := nodeSet.Spec.Cosmoseed.Expose.Gateway
+				gwNamespace := nodeSet.GetNamespace()
+				if gwRef.Namespace != nil {
+					gwNamespace = *gwRef.Namespace
+				}
+				gw := &gwapiv1.Gateway{}
+				if err = r.Get(ctx, client.ObjectKey{Name: gwRef.Name, Namespace: gwNamespace}, gw); err != nil {
+					if controllers.IsCRDNotInstalled(err) {
+						log.FromContext(ctx).Info("gateway api crds not installed, skipping public address update")
+					} else {
+						return nil, fmt.Errorf("failed to get Gateway %s: %w", gwRef.Name, err)
+					}
+				} else if len(gw.Status.Addresses) > 0 {
+					listenerPort := nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort() + int32(i)
+					publicAddresses[i] = fmt.Sprintf("%s@%s:%d", id, gw.Status.Addresses[0].Value, listenerPort)
+				}
+			} else {
+				// LoadBalancer/NodePort mode: delete any stale TCPRoute
+				if err = r.Delete(ctx, &gwapiv1a2.TCPRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      fmt.Sprintf("%s-seed-%d-p2p", nodeSet.GetName(), i),
+						Namespace: nodeSet.GetNamespace(),
+					},
+				}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+					return nil, err
+				}
+
+				exposeSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
+				if err != nil {
+					return nil, err
+				}
+				if err = r.ensureService(ctx, exposeSvc); err != nil {
+					return nil, err
+				}
+				expected[exposeSvc.Name] = true
+
+				publicAddresses[i], err = r.getSeedPublicAddress(ctx, nodeSet, exposeSvc, id)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -495,6 +657,26 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 			log.FromContext(ctx).Info("deleting stale service", "name", svc.Name)
 			if err := r.Delete(ctx, &svc); err != nil {
 				return nil, err
+			}
+		}
+	}
+
+	// Cleanup stale TCPRoutes (e.g., after scale-down or switching from gateway to service mode)
+	tcpRouteList := &gwapiv1a2.TCPRouteList{}
+	if err = r.List(ctx, tcpRouteList, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
+		controllers.LabelApp:          controllers.CosmoseedName,
+		controllers.LabelChainNodeSet: nodeSet.GetName(),
+	}); err != nil {
+		if !controllers.IsCRDNotInstalled(err) {
+			return nil, err
+		}
+	} else {
+		for _, route := range tcpRouteList.Items {
+			if !expectedTCPRoutes[route.Name] {
+				log.FromContext(ctx).Info("deleting stale tcproute", "name", route.Name)
+				if err := r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -689,11 +871,12 @@ func (r *Reconciler) getSeedPublicAddress(ctx context.Context, nodeSet *v1.Chain
 		// Wait for LoadBalancer to be available
 		logger.V(1).Info("waiting for load balancer address to be available", "svc", svc.GetName())
 		if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
-			return len(svc.Status.LoadBalancer.Ingress) > 0, nil
+			return len(svc.Status.LoadBalancer.Ingress) > 0 &&
+				k8s.LoadBalancerAddress(svc.Status.LoadBalancer.Ingress[0]) != "", nil
 		}, timeoutWaitServiceIP); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("%s@%s:%d", id, svc.Status.LoadBalancer.Ingress[0].IP, chainutils.P2pPort), nil
+		return fmt.Sprintf("%s@%s:%d", id, k8s.LoadBalancerAddress(svc.Status.LoadBalancer.Ingress[0]), chainutils.P2pPort), nil
 	}
 
 	return "", fmt.Errorf("unsupported service type")
@@ -755,4 +938,51 @@ func (r *Reconciler) getCosmoseedIngress(nodeSet *v1.ChainNodeSet) (*netv1.Ingre
 	}
 
 	return ingress, controllerutil.SetControllerReference(nodeSet, ingress, r.Scheme)
+}
+
+func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcName string, index int) (*gwapiv1a2.TCPRoute, error) {
+	port := gwapiv1.PortNumber(cosmoseedP2pPort)
+	gwRef := nodeSet.Spec.Cosmoseed.Expose.Gateway
+	var namespace *gwapiv1.Namespace
+	if gwRef.Namespace != nil {
+		ns := gwapiv1.Namespace(*gwRef.Namespace)
+		namespace = &ns
+	}
+	// Each seed instance attaches to a distinct Gateway listener at base+index so multiple
+	// seeds can coexist on a single Gateway (L4 routes have no SNI to disambiguate).
+	listenerPort := nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort() + int32(index)
+	parentRef := gwapiv1.ParentReference{
+		Name:      gwapiv1.ObjectName(gwRef.Name),
+		Namespace: namespace,
+		Port:      ptr.To(gwapiv1.PortNumber(listenerPort)),
+	}
+
+	route := &gwapiv1a2.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-seed-%d-p2p", nodeSet.GetName(), index),
+			Namespace: nodeSet.GetNamespace(),
+			Labels: map[string]string{
+				controllers.LabelApp:          controllers.CosmoseedName,
+				controllers.LabelChainNodeSet: nodeSet.GetName(),
+			},
+		},
+		Spec: gwapiv1a2.TCPRouteSpec{
+			CommonRouteSpec: gwapiv1.CommonRouteSpec{
+				ParentRefs: []gwapiv1.ParentReference{parentRef},
+			},
+			Rules: []gwapiv1a2.TCPRouteRule{
+				{
+					BackendRefs: []gwapiv1a2.BackendRef{
+						{
+							BackendObjectReference: gwapiv1.BackendObjectReference{
+								Name: gwapiv1.ObjectName(backendSvcName),
+								Port: ptr.To(port),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return route, controllerutil.SetControllerReference(nodeSet, route, r.Scheme)
 }

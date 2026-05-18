@@ -8,6 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
+	"k8s.io/utils/ptr"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/voluzi/cosmopilot/v2/internal/tmkms"
 	"github.com/voluzi/cosmopilot/v2/pkg/dataexporter"
@@ -396,6 +398,29 @@ func (exp *ExposeConfig) GetAnnotations() map[string]string {
 		return exp.Annotations
 	}
 	return nil
+}
+
+func (exp *ExposeConfig) UsesGateway() bool {
+	return exp != nil && exp.Gateway != nil
+}
+
+func (exp *ExposeConfig) GetGatewayParentRef() gwapiv1.ParentReference {
+	ref := gwapiv1.ParentReference{
+		Name: gwapiv1.ObjectName(exp.Gateway.Name),
+		Port: ptr.To(gwapiv1.PortNumber(exp.GetGatewayPort())),
+	}
+	if exp.Gateway.Namespace != nil {
+		ns := gwapiv1.Namespace(*exp.Gateway.Namespace)
+		ref.Namespace = &ns
+	}
+	return ref
+}
+
+func (exp *ExposeConfig) GetGatewayPort() int32 {
+	if exp.Gateway != nil && exp.Gateway.Port != nil {
+		return *exp.Gateway.Port
+	}
+	return 26656
 }
 
 // TmKMS helper methods

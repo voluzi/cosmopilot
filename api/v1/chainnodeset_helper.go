@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
@@ -104,43 +105,7 @@ func (group *NodeGroupSpec) GetInstances() int {
 	return DefaultGroupInstances
 }
 
-func (group *NodeGroupSpec) GetIngressSecretName(owner client.Object) string {
-	if group.Ingress != nil && group.Ingress.TlsSecretName != nil {
-		return *group.Ingress.TlsSecretName
-	}
-	return fmt.Sprintf("%s-%s-tls", owner.GetName(), group.Name)
-}
-
-func (group *NodeGroupSpec) GetIngressClass() string {
-	if group.Ingress != nil && group.Ingress.IngressClass != nil {
-		return *group.Ingress.IngressClass
-	}
-	return DefaultIngressClass
-}
-
-func (group *NodeGroupSpec) GetGrpcAnnotations() map[string]string {
-	if group.Ingress != nil && group.Ingress.GrpcAnnotations != nil {
-		return group.Ingress.GrpcAnnotations
-	}
-	if strings.Contains(group.GetIngressClass(), DefaultIngressClass) {
-		return map[string]string{
-			"nginx.ingress.kubernetes.io/backend-protocol": "GRPC",
-		}
-	}
-	return nil
-}
-
-func (group *NodeGroupSpec) UseInternal() bool {
-	if group.Ingress != nil && group.Ingress.UseInternalServices != nil {
-		return *group.Ingress.UseInternalServices
-	}
-	return false
-}
-
 func (group *NodeGroupSpec) GetServiceName(owner client.Object) string {
-	if group.UseInternal() {
-		return fmt.Sprintf("%s-%s-internal", owner.GetName(), group.Name)
-	}
 	return fmt.Sprintf("%s-%s", owner.GetName(), group.Name)
 }
 
@@ -447,4 +412,65 @@ func (csi *CosmoseedIngressConfig) GetIngressClass() string {
 		return *csi.IngressClass
 	}
 	return DefaultIngressClass
+}
+
+// Gateway helper methods
+
+func (gc *GatewayConfig) UseInternal() bool {
+	return gc != nil && gc.UseInternalServices != nil && *gc.UseInternalServices
+}
+
+func (gg *GlobalGatewayConfig) GetName(owner client.Object) string {
+	return fmt.Sprintf("%s-%s-gw", owner.GetName(), gg.Name)
+}
+
+func (gg *GlobalGatewayConfig) GetGrpcName(owner client.Object) string {
+	return fmt.Sprintf("%s-%s-gw-grpc", owner.GetName(), gg.Name)
+}
+
+func (gg *GlobalGatewayConfig) GetServiceName(owner client.Object) string {
+	if gg.UseInternal() {
+		return fmt.Sprintf("%s-global-%s-internal", owner.GetName(), gg.Name)
+	}
+	return fmt.Sprintf("%s-global-%s", owner.GetName(), gg.Name)
+}
+
+// ShouldUseCosmoGuardPorts returns true if any group in this gateway config has CosmoGuard enabled.
+// When a gateway spans multiple groups, CosmoGuard ports are used for the shared service if at least
+// one group enables it — this matches the ingress behavior where all traffic goes through the guard.
+func (gg *GlobalGatewayConfig) ShouldUseCosmoGuardPorts(nodeSet *ChainNodeSet) bool {
+	for _, groupName := range gg.Groups {
+		for _, group := range nodeSet.Spec.Nodes {
+			if group.Name == groupName {
+				if group.Config != nil && group.Config.CosmoGuardEnabled() {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (gg *GlobalGatewayConfig) HasGroup(name string) bool {
+	for _, g := range gg.Groups {
+		if g == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (gg *GlobalGatewayConfig) CreateServicesOnly() bool {
+	return gg.ServicesOnly != nil && *gg.ServicesOnly
+}
+
+func (gg *GlobalGatewayConfig) GetGatewayParentRef() gwapiv1.ParentReference {
+	ref := gwapiv1.ParentReference{
+		Name: gwapiv1.ObjectName(gg.Gateway.Name),
+	}
+	if gg.Gateway.Namespace != nil {
+		ns := gwapiv1.Namespace(*gg.Gateway.Namespace)
+		ref.Namespace = &ns
+	}
+	return ref
 }

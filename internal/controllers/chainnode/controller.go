@@ -112,6 +112,10 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;patch;create;update;delete
 //+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;patch;create;update;delete
+//+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=grpcroutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -281,9 +285,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
 	}
 
-	logger.V(1).Info("ensure ingresses")
-	if err = r.ensureIngresses(ctx, chainNode); err != nil {
-		return ctrl.Result{}, err
+	logger.V(1).Info("ensure routing")
+	if chainNode.Spec.Gateway != nil {
+		if err = r.ensureGatewayRoutes(ctx, chainNode); err != nil {
+			return ctrl.Result{}, err
+		}
+	} else {
+		if err = r.ensureIngresses(ctx, chainNode); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err = r.cleanupGatewayRoutes(ctx, chainNode); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	logger.V(1).Info("ensure pvc updates")

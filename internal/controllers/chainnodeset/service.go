@@ -23,12 +23,24 @@ import (
 func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	logger := log.FromContext(ctx)
 
+	expectedGroup := map[string]bool{}
+	expectedGlobal := map[string]bool{}
+
+	ensure := func(svc *corev1.Service, scope string) error {
+		if scope == scopeGroup {
+			expectedGroup[svc.GetName()] = true
+		} else {
+			expectedGlobal[svc.GetName()] = true
+		}
+		return r.ensureService(ctx, svc)
+	}
+
 	for _, group := range nodeSet.Spec.Nodes {
 		svc, err := r.getServiceSpec(nodeSet, group)
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGroup); err != nil {
 			return err
 		}
 
@@ -36,7 +48,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGroup); err != nil {
 			return err
 		}
 	}
@@ -46,7 +58,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGlobal); err != nil {
 			return err
 		}
 
@@ -54,20 +66,41 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if err != nil {
 			return err
 		}
-		if err = r.ensureService(ctx, svc); err != nil {
+		if err = ensure(svc, scopeGlobal); err != nil {
 			return err
 		}
 	}
 
-	// Clean up if necessary
+	for _, gw := range nodeSet.Spec.GatewayRoutes {
+		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw)
+		if err != nil {
+			return err
+		}
+		if err = ensure(svc, scopeGlobal); err != nil {
+			return err
+		}
+
+		svc, err = r.getGlobalGatewayInternalServiceSpec(nodeSet, gw)
+		if err != nil {
+			return err
+		}
+		if err = ensure(svc, scopeGlobal); err != nil {
+			return err
+		}
+	}
+
+	// Clean up group-scoped services that are no longer expected. This also catches
+	// legacy "-internal-internal" services created by older releases that used the
+	// deprecated group-level UseInternalServices option.
 	groupServices, err := r.listChainNodeSetServices(ctx, nodeSet, controllers.LabelScope, scopeGroup)
 	if err != nil {
 		return err
 	}
 
 	for _, svc := range groupServices.Items {
-		if _, ok := svc.Labels[controllers.LabelChainNodeSetGroup]; !ok ||
-			!ContainsGroup(nodeSet.Spec.Nodes, svc.Labels[controllers.LabelChainNodeSetGroup]) {
+		groupName, hasGroup := svc.Labels[controllers.LabelChainNodeSetGroup]
+		groupGone := !hasGroup || !ContainsGroup(nodeSet.Spec.Nodes, groupName)
+		if groupGone || !expectedGroup[svc.GetName()] {
 			logger.Info("deleting service", "svc", svc.GetName())
 			if err = r.Delete(ctx, &svc); err != nil {
 				return err
@@ -81,8 +114,11 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, svc := range globalServices.Items {
-		if _, ok := svc.Labels[controllers.LabelGlobalIngress]; !ok ||
-			!ContainsGlobalIngress(nodeSet.Spec.Ingresses, svc.Labels[controllers.LabelGlobalIngress], false) {
+		ingressName := svc.Labels[controllers.LabelGlobalIngress]
+		gatewayName := svc.Labels[labelGlobalGateway]
+		ownerGone := !ContainsGlobalIngress(nodeSet.Spec.Ingresses, ingressName, false) &&
+			!ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, gatewayName)
+		if ownerGone || !expectedGlobal[svc.GetName()] {
 			logger.Info("deleting service", "svc", svc.GetName())
 			if err = r.Delete(ctx, &svc); err != nil {
 				return err
@@ -357,6 +393,122 @@ func (r *Reconciler) getGlobalInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, 
 			Selector: map[string]string{
 				controllers.LabelChainNodeSet:  nodeSet.GetName(),
 				globalIngress.GetName(nodeSet): strconv.FormatBool(true),
+			},
+		},
+	}
+
+	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
+}
+
+func (r *Reconciler) getGlobalGatewayServiceSpec(nodeSet *appsv1.ChainNodeSet, gw appsv1.GlobalGatewayConfig) (*corev1.Service, error) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name),
+			Namespace: nodeSet.GetNamespace(),
+			Labels: WithChainNodeSetLabels(nodeSet, map[string]string{
+				controllers.LabelChainNodeSet: nodeSet.GetName(),
+				labelGlobalGateway:            gw.Name,
+				controllers.LabelScope:        scopeGlobal,
+			}),
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:       chainutils.RpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.RpcPort,
+					TargetPort: intstr.FromInt32(chainutils.RpcPort),
+				},
+				{
+					Name:       chainutils.LcdPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.LcdPort,
+					TargetPort: intstr.FromInt32(chainutils.LcdPort),
+				},
+				{
+					Name:       chainutils.GrpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.GrpcPort,
+					TargetPort: intstr.FromInt32(chainutils.GrpcPort),
+				},
+				{
+					Name:       controllers.EvmRpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       controllers.EvmRpcPort,
+					TargetPort: intstr.FromInt32(controllers.EvmRpcPort),
+				},
+				{
+					Name:       controllers.EvmRpcWsPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       controllers.EvmRpcWsPort,
+					TargetPort: intstr.FromInt32(controllers.EvmRpcWsPort),
+				},
+			},
+			Selector: map[string]string{
+				controllers.LabelChainNodeSet: nodeSet.GetName(),
+				gw.GetName(nodeSet):           strconv.FormatBool(true),
+			},
+		},
+	}
+
+	if gw.ShouldUseCosmoGuardPorts(nodeSet) {
+		svc.Spec.Ports[0].TargetPort = intstr.FromInt32(controllers.CosmoGuardRpcPort)
+		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
+		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)
+		svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
+		svc.Spec.Ports[4].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
+	}
+
+	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
+}
+
+func (r *Reconciler) getGlobalGatewayInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, gw appsv1.GlobalGatewayConfig) (*corev1.Service, error) {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-global-%s-internal", nodeSet.GetName(), gw.Name),
+			Namespace: nodeSet.GetNamespace(),
+			Labels: WithChainNodeSetLabels(nodeSet, map[string]string{
+				controllers.LabelChainNodeSet: nodeSet.GetName(),
+				labelGlobalGateway:            gw.Name,
+				controllers.LabelScope:        scopeGlobal,
+			}),
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:       chainutils.RpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.RpcPort,
+					TargetPort: intstr.FromInt32(chainutils.RpcPort),
+				},
+				{
+					Name:       chainutils.LcdPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.LcdPort,
+					TargetPort: intstr.FromInt32(chainutils.LcdPort),
+				},
+				{
+					Name:       chainutils.GrpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       chainutils.GrpcPort,
+					TargetPort: intstr.FromInt32(chainutils.GrpcPort),
+				},
+				{
+					Name:       controllers.EvmRpcPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       controllers.EvmRpcPort,
+					TargetPort: intstr.FromInt32(controllers.EvmRpcPort),
+				},
+				{
+					Name:       controllers.EvmRpcWsPortName,
+					Protocol:   corev1.ProtocolTCP,
+					Port:       controllers.EvmRpcWsPort,
+					TargetPort: intstr.FromInt32(controllers.EvmRpcWsPort),
+				},
+			},
+			Selector: map[string]string{
+				controllers.LabelChainNodeSet: nodeSet.GetName(),
+				gw.GetName(nodeSet):           strconv.FormatBool(true),
 			},
 		},
 	}

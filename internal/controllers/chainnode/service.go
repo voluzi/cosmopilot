@@ -11,9 +11,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
@@ -54,106 +57,161 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 		return fmt.Errorf("failed to ensure internal service for %s: %w", chainNode.GetName(), err)
 	}
 
-	// Ensure P2P service if enabled
+	// Ensure P2P service/TCPRoute if enabled
 	p2p, err := r.getP2pServiceSpec(chainNode)
 	if err != nil {
 		return fmt.Errorf("failed to get P2P service spec for %s: %w", chainNode.GetName(), err)
 	}
 	if chainNode.Spec.Expose.Enabled() {
-		if err := r.ensureService(ctx, p2p); err != nil {
-			return fmt.Errorf("failed to ensure P2P service for %s: %w", chainNode.GetName(), err)
-		}
-
-		// Get External IP address
-		var externalAddress string
-		sh := k8s.NewServiceHelper(r.ClientSet, r.RestConfig, p2p)
-
-		switch chainNode.Spec.Expose.GetServiceType() {
-		case corev1.ServiceTypeNodePort:
-			// Wait for NodePort to be available
-			logger.V(1).Info("waiting for nodePort to be available", "svc", p2p.GetName())
-			if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
-				return svc.Spec.Ports[0].NodePort > 0, nil
-			}, timeoutWaitServiceIP); err != nil {
-				return fmt.Errorf("timeout waiting for NodePort to be available for service %s: %w", p2p.GetName(), err)
-			}
-			port := p2p.Spec.Ports[0].NodePort
-
-			var node *corev1.Node
-			pod, err := r.getChainNodePod(ctx, chainNode)
+		if chainNode.Spec.Expose.UsesGateway() {
+			// Gateway mode: ensure TCPRoute first, then clean up any stale P2P service.
+			// Doing it in this order avoids a window with no P2P exposure if a transient
+			// Gateway API failure delays the TCPRoute creation. Skip the stale-service
+			// delete entirely when Gateway API CRDs are missing, otherwise we would tear
+			// down the working endpoint without a replacement.
+			tcpRoute, err := r.getP2pTCPRouteSpec(chainNode)
 			if err != nil {
-				return fmt.Errorf("failed to get ChainNode pod %s for NodePort external address: %w", chainNode.GetName(), err)
+				return fmt.Errorf("failed to get TCPRoute spec for %s: %w", chainNode.GetName(), err)
 			}
-			if pod != nil {
-				if pod.Spec.NodeName != "" {
-					node, err = r.ClientSet.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
-					if err != nil {
-						return fmt.Errorf("failed to get node %s for NodePort external address: %w", pod.Spec.NodeName, err)
+			applied, err := controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute)
+			if err != nil {
+				return fmt.Errorf("failed to ensure TCPRoute for %s: %w", chainNode.GetName(), err)
+			}
+			if !applied {
+				logger.Info("gateway api crds not installed, preserving existing P2P service")
+				return r.clearPublicAddressIfSet(ctx, chainNode)
+			}
+			if err := r.Delete(ctx, p2p); err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete stale P2P service %s: %w", p2p.GetName(), err)
+			}
+
+			// Discover public address from Gateway status
+			gwRef := chainNode.Spec.Expose.Gateway
+			gwNamespace := chainNode.GetNamespace()
+			if gwRef.Namespace != nil {
+				gwNamespace = *gwRef.Namespace
+			}
+			gw := &gwapiv1.Gateway{}
+			if err := r.Get(ctx, client.ObjectKey{Name: gwRef.Name, Namespace: gwNamespace}, gw); err != nil {
+				if controllers.IsCRDNotInstalled(err) {
+					logger.Info("gateway api crds not installed, skipping public address update")
+					return r.clearPublicAddressIfSet(ctx, chainNode)
+				}
+				return fmt.Errorf("failed to get Gateway %s: %w", gwRef.Name, err)
+			}
+
+			if len(gw.Status.Addresses) == 0 {
+				logger.Info("gateway has no addresses yet, skipping public address update")
+				return r.clearPublicAddressIfSet(ctx, chainNode)
+			}
+
+			externalAddress := fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, gw.Status.Addresses[0].Value, chainNode.Spec.Expose.GetGatewayPort())
+			if chainNode.Status.PublicAddress != externalAddress {
+				logger.Info("updating .status.publicAddress", "address", externalAddress)
+				chainNode.Status.PublicAddress = externalAddress
+				return r.Status().Update(ctx, chainNode)
+			}
+		} else {
+			// LoadBalancer/NodePort mode: clean up any stale TCPRoute
+			if err := r.cleanupTCPRoute(ctx, chainNode); err != nil {
+				return fmt.Errorf("failed to cleanup TCPRoute for %s: %w", chainNode.GetName(), err)
+			}
+
+			if err := r.ensureService(ctx, p2p); err != nil {
+				return fmt.Errorf("failed to ensure P2P service for %s: %w", chainNode.GetName(), err)
+			}
+
+			// Get External IP address
+			var externalAddress string
+			sh := k8s.NewServiceHelper(r.ClientSet, r.RestConfig, p2p)
+
+			switch chainNode.Spec.Expose.GetServiceType() {
+			case corev1.ServiceTypeNodePort:
+				// Wait for NodePort to be available
+				logger.V(1).Info("waiting for nodePort to be available", "svc", p2p.GetName())
+				if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
+					return svc.Spec.Ports[0].NodePort > 0, nil
+				}, timeoutWaitServiceIP); err != nil {
+					return fmt.Errorf("timeout waiting for NodePort to be available for service %s: %w", p2p.GetName(), err)
+				}
+				port := p2p.Spec.Ports[0].NodePort
+
+				var node *corev1.Node
+				pod, err := r.getChainNodePod(ctx, chainNode)
+				if err != nil {
+					return fmt.Errorf("failed to get ChainNode pod %s for NodePort external address: %w", chainNode.GetName(), err)
+				}
+				if pod != nil {
+					if pod.Spec.NodeName != "" {
+						node, err = r.ClientSet.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+						if err != nil {
+							return fmt.Errorf("failed to get node %s for NodePort external address: %w", pod.Spec.NodeName, err)
+						}
 					}
 				}
-			}
 
-			// pick any node if we could not retrieve pod's node
-			if node == nil {
-				nodes, err := r.ClientSet.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-				if err != nil {
-					return fmt.Errorf("failed to list nodes for NodePort external address: %w", err)
+				// pick any node if we could not retrieve pod's node
+				if node == nil {
+					nodes, err := r.ClientSet.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+					if err != nil {
+						return fmt.Errorf("failed to list nodes for NodePort external address: %w", err)
+					}
+					if len(nodes.Items) > 0 {
+						node = &nodes.Items[0]
+					}
 				}
-				if len(nodes.Items) > 0 {
-					node = &nodes.Items[0]
+
+				if node == nil {
+					return fmt.Errorf("no node found")
 				}
-			}
 
-			if node == nil {
-				return fmt.Errorf("no node found")
-			}
+				var address string
+				addressPriority := []corev1.NodeAddressType{
+					corev1.NodeExternalIP,
+					corev1.NodeExternalDNS,
+					corev1.NodeInternalIP,
+					corev1.NodeInternalDNS,
+					corev1.NodeHostName,
+				}
 
-			var address string
-			addressPriority := []corev1.NodeAddressType{
-				corev1.NodeExternalIP,
-				corev1.NodeExternalDNS,
-				corev1.NodeInternalIP,
-				corev1.NodeInternalDNS,
-				corev1.NodeHostName,
-			}
-
-			for _, addrType := range addressPriority {
-				for _, addr := range node.Status.Addresses {
-					if addr.Type == addrType {
-						address = addr.Address
+				for _, addrType := range addressPriority {
+					for _, addr := range node.Status.Addresses {
+						if addr.Type == addrType {
+							address = addr.Address
+							break
+						}
+					}
+					if address != "" {
 						break
 					}
 				}
-				if address != "" {
-					break
+
+				if address == "" {
+					return fmt.Errorf("no address found for nodeport")
 				}
+
+				externalAddress = fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, address, port)
+
+			case corev1.ServiceTypeLoadBalancer:
+				// Wait for LoadBalancer to be available
+				logger.V(1).Info("waiting for load balancer address to be available", "svc", p2p.GetName())
+				if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
+					return len(svc.Status.LoadBalancer.Ingress) > 0 &&
+						k8s.LoadBalancerAddress(svc.Status.LoadBalancer.Ingress[0]) != "", nil
+				}, timeoutWaitServiceIP); err != nil {
+					return fmt.Errorf("timeout waiting for LoadBalancer address for service %s: %w", p2p.GetName(), err)
+				}
+				externalAddress = fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, k8s.LoadBalancerAddress(p2p.Status.LoadBalancer.Ingress[0]), chainutils.P2pPort)
 			}
 
-			if address == "" {
-				return fmt.Errorf("no address found for nodeport")
+			if chainNode.Status.PublicAddress != externalAddress {
+				logger.Info("updating .status.publicAddress", "address", externalAddress)
+				chainNode.Status.PublicAddress = externalAddress
+				return r.Status().Update(ctx, chainNode)
 			}
-
-			externalAddress = fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, address, port)
-
-		case corev1.ServiceTypeLoadBalancer:
-			// Wait for LoadBalancer to be available
-			logger.V(1).Info("waiting for load balancer address to be available", "svc", p2p.GetName())
-			if err := sh.WaitForCondition(ctx, func(svc *corev1.Service) (bool, error) {
-				return len(svc.Status.LoadBalancer.Ingress) > 0, nil
-			}, timeoutWaitServiceIP); err != nil {
-				return fmt.Errorf("timeout waiting for LoadBalancer address for service %s: %w", p2p.GetName(), err)
-			}
-			externalAddress = fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, p2p.Status.LoadBalancer.Ingress[0].IP, chainutils.P2pPort)
 		}
-
-		if chainNode.Status.PublicAddress != externalAddress {
-			logger.Info("updating .status.publicAddress", "address", externalAddress)
-			chainNode.Status.PublicAddress = externalAddress
-			return r.Status().Update(ctx, chainNode)
-		}
-
 	} else {
-		// Delete the service if it exists
+		// Delete the P2P service and TCPRoute if they exist
 		if err := r.Delete(ctx, p2p); err != nil {
 			if !errors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete P2P service %s: %w", p2p.GetName(), err)
@@ -161,9 +219,58 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 		} else {
 			logger.Info("deleted service", "svc", p2p.GetName())
 		}
+		if err := r.cleanupTCPRoute(ctx, chainNode); err != nil {
+			return fmt.Errorf("failed to cleanup TCPRoute for %s: %w", chainNode.GetName(), err)
+		}
 	}
 
 	return nil
+}
+
+// clearPublicAddressIfSet wipes .status.publicAddress when we cannot derive a
+// fresh one (e.g. switching modes, Gateway not yet provisioned, Gateway CRDs
+// missing). Without this, peers reading status would continue to see the
+// previous mode's address long after the corresponding Service/route is gone.
+func (r *Reconciler) clearPublicAddressIfSet(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if chainNode.Status.PublicAddress == "" {
+		return nil
+	}
+	log.FromContext(ctx).Info("clearing stale .status.publicAddress")
+	chainNode.Status.PublicAddress = ""
+	return r.Status().Update(ctx, chainNode)
+}
+
+func (r *Reconciler) getP2pTCPRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2.TCPRoute, error) {
+	port := gwapiv1.PortNumber(chainutils.P2pPort)
+	route := &gwapiv1a2.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-p2p", chainNode.GetName()),
+			Namespace: chainNode.GetNamespace(),
+			Labels: WithChainNodeLabels(chainNode, map[string]string{
+				controllers.LabelChainNode: chainNode.GetName(),
+			}),
+		},
+		Spec: gwapiv1a2.TCPRouteSpec{
+			CommonRouteSpec: gwapiv1.CommonRouteSpec{
+				ParentRefs: []gwapiv1.ParentReference{
+					chainNode.Spec.Expose.GetGatewayParentRef(),
+				},
+			},
+			Rules: []gwapiv1a2.TCPRouteRule{
+				{
+					BackendRefs: []gwapiv1a2.BackendRef{
+						{
+							BackendObjectReference: gwapiv1.BackendObjectReference{
+								Name: gwapiv1.ObjectName(fmt.Sprintf("%s-internal", chainNode.GetName())),
+								Port: ptr.To(port),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return route, controllerutil.SetControllerReference(chainNode, route, r.Scheme)
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {
@@ -267,8 +374,8 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
 		svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)
 		if chainNode.Spec.Config.IsEvmEnabled() {
-			svc.Spec.Ports[5].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
-			svc.Spec.Ports[6].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
+			svc.Spec.Ports[6].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
+			svc.Spec.Ports[7].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
 		}
 		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
 			Name:       controllers.CosmoGuardMetricsPortName,

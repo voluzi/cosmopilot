@@ -14,6 +14,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -49,19 +53,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := gwapiv1.AddToScheme(scheme); err != nil {
+		setupLog.Error(err, "unable to add gateway api v1 types to scheme")
+		os.Exit(1)
+	}
+
+	if err := gwapiv1a2.AddToScheme(scheme); err != nil {
+		setupLog.Error(err, "unable to add gateway api v1alpha2 types to scheme")
+		os.Exit(1)
+	}
+
 	leaderElectionID := fmt.Sprintf("%s.cosmopilot.voluzi.com", runOpts.ReleaseName)
 	if runOpts.WorkerName != "" {
 		leaderElectionID = fmt.Sprintf("%s.%s.cosmopilot.voluzi.com", runOpts.WorkerName, runOpts.ReleaseName)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+		},
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Port:    9443,
+			CertDir: certsDir,
+		}),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       leaderElectionID,
-		CertDir:                certsDir,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

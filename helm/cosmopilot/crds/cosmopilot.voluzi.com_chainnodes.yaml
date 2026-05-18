@@ -2282,19 +2282,101 @@ spec:
                       type: string
                     description: Annotations to be appended to the p2p service.
                     type: object
+                  gateway:
+                    description: |-
+                      Gateway configures P2P exposure via a Gateway API TCPRoute instead of a dedicated Service.
+                      When set, a TCPRoute is created that routes P2P TCP traffic through the referenced Gateway.
+                      This is mutually exclusive with p2pServiceType.
+                    properties:
+                      name:
+                        description: Name of the Gateway resource.
+                        type: string
+                      namespace:
+                        description: Namespace of the Gateway. Defaults to the resource's
+                          namespace.
+                        type: string
+                      port:
+                        default: 26656
+                        description: |-
+                          Port is the external port on the Gateway listener for P2P traffic.
+                          This is the port that peers will use to connect. Defaults to 26656.
+
+                          When this config is applied to a group of nodes with more than one instance
+                          (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is
+                          treated as the BASE port and each instance attaches to a distinct listener:
+                          instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i.
+                          The Gateway must be configured with a matching TCP listener for each port.
+                        format: int32
+                        type: integer
+                    required:
+                    - name
+                    type: object
                   p2p:
                     default: false
                     description: Whether to expose p2p endpoint for this node. Defaults
                       to `false`.
                     type: boolean
                   p2pServiceType:
-                    default: NodePort
                     description: |-
                       P2pServiceType indicates how P2P port will be exposed.
                       Valid values are:
                       - `LoadBalancer`
                       - `NodePort` (default)
+                      The default is applied at runtime so that the mutual-exclusion CEL rule with
+                      `gateway` does not match merely because the schema default was applied.
                     type: string
+                type: object
+                x-kubernetes-validations:
+                - message: gateway and p2pServiceType are mutually exclusive
+                  rule: '!(has(self.gateway) && has(self.p2pServiceType))'
+              gateway:
+                description: |-
+                  Configures Gateway API routes for exposing API endpoints of this node.
+                  Mutually exclusive with ingress.
+                properties:
+                  enableEvmRPC:
+                    description: Enable EVM RPC endpoint.
+                    type: boolean
+                  enableEvmRpcWS:
+                    description: Enable EVM RPC Websocket endpoint.
+                    type: boolean
+                  enableGRPC:
+                    description: Enable gRPC endpoint.
+                    type: boolean
+                  enableLCD:
+                    description: Enable LCD endpoint.
+                    type: boolean
+                  enableRPC:
+                    description: Enable RPC endpoint.
+                    type: boolean
+                  gateway:
+                    description: Gateway to attach routes to.
+                    properties:
+                      name:
+                        description: Name of the Gateway resource.
+                        type: string
+                      namespace:
+                        description: Namespace of the Gateway. Defaults to the resource's
+                          namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  host:
+                    description: |-
+                      Host in which endpoints will be exposed. Endpoints are exposed on corresponding
+                      subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
+                      `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
+                    type: string
+                  useInternalServices:
+                    default: false
+                    description: |-
+                      UseInternalServices configures routes to point directly to the node services,
+                      bypassing Cosmoguard and any readiness checks.
+                    type: boolean
+                required:
+                - gateway
+                - host
                 type: object
               genesis:
                 description: Indicates where this node will get the genesis from.
@@ -4811,6 +4893,9 @@ spec:
             required:
             - app
             type: object
+            x-kubernetes-validations:
+            - message: ingress and gateway are mutually exclusive
+              rule: '!(has(self.ingress) && has(self.gateway))'
           status:
             description: ChainNodeStatus defines the observed state of ChainNode
             properties:

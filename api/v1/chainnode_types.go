@@ -88,6 +88,7 @@ type ChainNode struct {
 }
 
 // ChainNodeSpec defines the desired state of ChainNode.
+// +kubebuilder:validation:XValidation:rule="!(has(self.ingress) && has(self.gateway))",message="ingress and gateway are mutually exclusive"
 type ChainNodeSpec struct {
 	// Indicates where this node will get the genesis from. Can be omitted when .spec.validator.init is specified.
 	// +optional
@@ -163,6 +164,11 @@ type ChainNodeSpec struct {
 	// Indicates if an ingress should be created to access API endpoints of this node and configures it.
 	// +optional
 	Ingress *IngressConfig `json:"ingress,omitempty"`
+
+	// Configures Gateway API routes for exposing API endpoints of this node.
+	// Mutually exclusive with ingress.
+	// +optional
+	Gateway *GatewayConfig `json:"gateway,omitempty"`
 }
 
 // ChainNodeStatus defines the observed state of ChainNode
