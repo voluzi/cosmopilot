@@ -571,11 +571,21 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 					return nil, err
 				}
 				if !applied {
+					// Gateway API CRDs missing: fall back to the LB/NodePort expose
+					// service so the seed still has an external endpoint and a
+					// public address for peer discovery.
 					exposeSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
 					if err != nil {
 						return nil, err
 					}
+					if err = r.ensureService(ctx, exposeSvc); err != nil {
+						return nil, err
+					}
 					expected[exposeSvc.Name] = true
+					publicAddresses[i], err = r.getSeedPublicAddress(ctx, nodeSet, exposeSvc, id)
+					if err != nil {
+						return nil, err
+					}
 					continue
 				}
 				expectedTCPRoutes[tcpRoute.Name] = true
