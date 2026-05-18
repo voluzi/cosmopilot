@@ -107,17 +107,21 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 		if err != nil {
 			return err
 		}
-		if err = controllers.EnsureHTTPRoute(ctx, r.Client, route); err != nil {
+		applied, err := controllers.EnsureHTTPRoute(ctx, r.Client, route)
+		if err != nil {
 			return err
 		}
-		// Clean up any lingering Ingress from a previous Ingress config
-		if err = r.Delete(ctx, &netv1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      seedRouteName,
-				Namespace: nodeSet.GetNamespace(),
-			},
-		}); err != nil && !errors.IsNotFound(err) {
-			return err
+		// Only clean up the legacy Ingress if the HTTPRoute was actually applied,
+		// otherwise (Gateway API CRDs missing) we would lose seed HTTP exposure.
+		if applied {
+			if err = r.Delete(ctx, &netv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      seedRouteName,
+					Namespace: nodeSet.GetNamespace(),
+				},
+			}); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
 		}
 	} else {
 		// Neither ingress nor gateway configured — clean up both
@@ -554,13 +558,25 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 			if nodeSet.Spec.Cosmoseed.Expose.UsesGateway() {
 				// Gateway mode: ensure TCPRoute first, then delete the stale expose service.
 				// This ordering avoids a window with no P2P exposure if the Gateway API
-				// call fails transiently.
+				// call fails transiently. When Gateway CRDs are missing the route call is
+				// a no-op (applied=false); we must keep the expose Service in place so the
+				// seed retains an external endpoint, and we keep it in `expected` so the
+				// downstream cleanup pass does not delete it.
 				tcpRoute, err := r.getSeedTCPRouteSpec(nodeSet, internalSvc.Name, i)
 				if err != nil {
 					return nil, err
 				}
-				if err = controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute); err != nil {
+				applied, err := controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute)
+				if err != nil {
 					return nil, err
+				}
+				if !applied {
+					exposeSvc, err := r.getSeedExposeServiceSpec(nodeSet, i)
+					if err != nil {
+						return nil, err
+					}
+					expected[exposeSvc.Name] = true
+					continue
 				}
 				expectedTCPRoutes[tcpRoute.Name] = true
 

@@ -66,13 +66,20 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 		if chainNode.Spec.Expose.UsesGateway() {
 			// Gateway mode: ensure TCPRoute first, then clean up any stale P2P service.
 			// Doing it in this order avoids a window with no P2P exposure if a transient
-			// Gateway API failure delays the TCPRoute creation.
+			// Gateway API failure delays the TCPRoute creation. Skip the stale-service
+			// delete entirely when Gateway API CRDs are missing, otherwise we would tear
+			// down the working endpoint without a replacement.
 			tcpRoute, err := r.getP2pTCPRouteSpec(chainNode)
 			if err != nil {
 				return fmt.Errorf("failed to get TCPRoute spec for %s: %w", chainNode.GetName(), err)
 			}
-			if err := controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute); err != nil {
+			applied, err := controllers.EnsureTCPRoute(ctx, r.Client, tcpRoute)
+			if err != nil {
 				return fmt.Errorf("failed to ensure TCPRoute for %s: %w", chainNode.GetName(), err)
+			}
+			if !applied {
+				logger.Info("gateway api crds not installed, preserving existing P2P service")
+				return r.clearPublicAddressIfSet(ctx, chainNode)
 			}
 			if err := r.Delete(ctx, p2p); err != nil && !errors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete stale P2P service %s: %w", p2p.GetName(), err)

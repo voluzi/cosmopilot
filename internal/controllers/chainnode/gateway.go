@@ -35,10 +35,15 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 	}
 
 	desiredNames := map[string]bool{}
+	routesApplied := true
 	for _, route := range desiredRoutes {
 		desiredNames[route.Name] = true
-		if err = controllers.EnsureHTTPRoute(ctx, r.Client, route); err != nil {
+		applied, err := controllers.EnsureHTTPRoute(ctx, r.Client, route)
+		if err != nil {
 			return err
+		}
+		if !applied {
+			routesApplied = false
 		}
 	}
 
@@ -49,8 +54,12 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 		if err != nil {
 			return err
 		}
-		if err = controllers.EnsureGRPCRoute(ctx, r.Client, grpcRoute); err != nil {
+		applied, err := controllers.EnsureGRPCRoute(ctx, r.Client, grpcRoute)
+		if err != nil {
 			return err
+		}
+		if !applied {
+			routesApplied = false
 		}
 	} else {
 		if err = r.Delete(ctx, &gwapiv1a2.GRPCRoute{
@@ -76,7 +85,12 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 		}
 	}
 
-	// Cross-cleanup: delete stale Ingress resources if switching to Gateway API
+	// Cross-cleanup: delete stale Ingress resources if switching to Gateway API.
+	// Skip this when no routes were actually applied (e.g. Gateway API CRDs missing)
+	// so we don't tear down working Ingress without a replacement.
+	if !routesApplied {
+		return nil
+	}
 	if err = r.Delete(ctx, &v1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      chainNode.GetName(),

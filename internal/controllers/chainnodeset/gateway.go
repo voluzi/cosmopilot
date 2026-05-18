@@ -38,7 +38,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 			return err
 		}
 		for _, route := range httpRoutes {
-			if err = controllers.EnsureHTTPRoute(ctx, r.Client, route); err != nil {
+			if _, err = controllers.EnsureHTTPRoute(ctx, r.Client, route); err != nil {
 				return err
 			}
 			desiredHTTPRouteNames[route.Name] = true
@@ -50,7 +50,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 			if err != nil {
 				return err
 			}
-			if err = controllers.EnsureGRPCRoute(ctx, r.Client, grpcRoute); err != nil {
+			if _, err = controllers.EnsureGRPCRoute(ctx, r.Client, grpcRoute); err != nil {
 				return err
 			}
 			desiredGRPCRouteNames[grpcRoute.Name] = true
