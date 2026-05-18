@@ -145,12 +145,15 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 
 			case snapshotIntegrityOk:
 				logger.Info("data integrity check finished successfully. Data is ok.", "snapshot", snapshot.GetName())
-				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
-					return fmt.Errorf("failed to clean up integrity check resources: %w", err)
-				}
 				snapshot.ObjectMeta.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityOk)
 				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
+				}
+				// Persist the result first; clean up is best-effort so that a
+				// transient delete failure does not lose the integrity status
+				// and force the next reconcile to restart the check.
+				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
+					logger.Error(err, "failed to clean up integrity check resources", "snapshot", snapshot.GetName())
 				}
 
 				// Let's start the tarball export right now if it is enabled
@@ -172,12 +175,15 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 
 			case snapshotIntegrityCorrupted:
 				logger.Info("data integrity check finished. Data is corrupted.", "snapshot", snapshot.GetName())
-				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
-					return fmt.Errorf("failed to clean up integrity check resources: %w", err)
-				}
 				snapshot.ObjectMeta.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityCorrupted)
 				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
+				}
+				// Persist the result first; clean up is best-effort so that a
+				// transient delete failure does not lose the integrity status
+				// and force the next reconcile to restart the check.
+				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
+					logger.Error(err, "failed to clean up integrity check resources", "snapshot", snapshot.GetName())
 				}
 				logger.Info("re-creating snapshot")
 				if err = r.Delete(ctx, &snapshot); err != nil {
