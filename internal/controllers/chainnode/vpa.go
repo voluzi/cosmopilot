@@ -406,34 +406,40 @@ func getVpaLastAppliedResourcesOrFallback(chainNode *appsv1.ChainNode) corev1.Re
 		return chainNode.GetResources()
 	}
 
-	// Merge VPA resources with fallback, preserving non-CPU/Memory resources
-	fallback := chainNode.GetResources()
+	// Merge VPA resources with fallback, preserving non-CPU/Memory resources.
+	// Note: we deliberately do NOT pre-allocate empty Requests/Limits maps. If
+	// the user spec has no Limits and VPA has no Limits override either, we want
+	// to return a ResourceRequirements with Limits=nil — identical to what the
+	// no-annotation code path returns and to what chainNode.Spec.Resources looks
+	// like. Pre-allocating an empty map flips the field from nil to {} which
+	// produces a different pod spec serialization on some reconciles, causing
+	// spurious pod restarts (issue #26).
+	merged := chainNode.GetResources()
 
-	// Start with fallback as base
-	merged := fallback
-
-	// Override CPU and Memory from VPA
-	if merged.Requests == nil {
-		merged.Requests = corev1.ResourceList{}
+	setRequest := func(name corev1.ResourceName, q resource.Quantity) {
+		if merged.Requests == nil {
+			merged.Requests = corev1.ResourceList{}
+		}
+		merged.Requests[name] = q
 	}
-	if merged.Limits == nil {
-		merged.Limits = corev1.ResourceList{}
+	setLimit := func(name corev1.ResourceName, q resource.Quantity) {
+		if merged.Limits == nil {
+			merged.Limits = corev1.ResourceList{}
+		}
+		merged.Limits[name] = q
 	}
 
-	// Copy VPA CPU/Memory to requests
 	if q, ok := vpaResources.Requests[corev1.ResourceCPU]; ok {
-		merged.Requests[corev1.ResourceCPU] = q
+		setRequest(corev1.ResourceCPU, q)
 	}
 	if q, ok := vpaResources.Requests[corev1.ResourceMemory]; ok {
-		merged.Requests[corev1.ResourceMemory] = q
+		setRequest(corev1.ResourceMemory, q)
 	}
-
-	// Copy VPA CPU/Memory to limits
 	if q, ok := vpaResources.Limits[corev1.ResourceCPU]; ok {
-		merged.Limits[corev1.ResourceCPU] = q
+		setLimit(corev1.ResourceCPU, q)
 	}
 	if q, ok := vpaResources.Limits[corev1.ResourceMemory]; ok {
-		merged.Limits[corev1.ResourceMemory] = q
+		setLimit(corev1.ResourceMemory, q)
 	}
 
 	return merged
