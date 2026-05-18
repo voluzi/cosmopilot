@@ -19,7 +19,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
-func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainNodeSet, gatewayApplied bool) error {
 	logger := log.FromContext(ctx)
 
 	for _, globalIngress := range nodeSet.Spec.Ingresses {
@@ -62,12 +62,21 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 	}
 
 	for _, ing := range globalIngresses.Items {
-		if _, ok := ing.Labels[controllers.LabelGlobalIngress]; !ok ||
-			!ContainsGlobalIngress(nodeSet.Spec.Ingresses, ing.Labels[controllers.LabelGlobalIngress], true) {
-			logger.Info("deleting ingress", "ingress", ing.GetName())
-			if err = r.Delete(ctx, &ing); err != nil {
-				return err
-			}
+		name, hasLabel := ing.Labels[controllers.LabelGlobalIngress]
+		if hasLabel && ContainsGlobalIngress(nodeSet.Spec.Ingresses, name, true) {
+			continue
+		}
+		// Preserve the Ingress when a gatewayRoutes entry with the same name
+		// exists in spec but the Gateway API routes could not be applied (e.g.
+		// CRDs missing). Otherwise the user would lose external exposure during
+		// the ingress -> gatewayRoutes migration.
+		if hasLabel && !gatewayApplied && ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, name) {
+			logger.Info("preserving ingress; replacement gateway route not applied", "ingress", ing.GetName())
+			continue
+		}
+		logger.Info("deleting ingress", "ingress", ing.GetName())
+		if err = r.Delete(ctx, &ing); err != nil {
+			return err
 		}
 	}
 

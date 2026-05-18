@@ -154,11 +154,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureIngresses(ctx, nodeSet); err != nil {
+	// Reconcile gateway routes BEFORE legacy ingresses so we know whether the
+	// replacement routes were actually applied. If Gateway API CRDs are missing,
+	// ensureIngresses must preserve any Ingress whose name is now covered by a
+	// gatewayRoutes entry, to avoid an exposure gap during migration.
+	gatewayApplied, err := r.ensureGatewayRoutes(ctx, nodeSet)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureGatewayRoutes(ctx, nodeSet); err != nil {
+	if err := r.ensureIngresses(ctx, nodeSet, gatewayApplied); err != nil {
 		return ctrl.Result{}, err
 	}
 

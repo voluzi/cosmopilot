@@ -22,11 +22,17 @@ const (
 	labelGlobalGateway = "global-gateway"
 )
 
-func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+// ensureGatewayRoutes reconciles every global gateway route defined on the
+// ChainNodeSet. The returned bool is true when every desired route was applied;
+// it is false when at least one route call was a no-op because Gateway API CRDs
+// are not installed. Callers use this signal to decide whether stale legacy
+// resources (e.g. Ingresses being replaced) can be safely cleaned up.
+func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	desiredHTTPRouteNames := map[string]bool{}
 	desiredGRPCRouteNames := map[string]bool{}
+	allApplied := true
 
 	for _, gw := range nodeSet.Spec.GatewayRoutes {
 		if gw.CreateServicesOnly() {
@@ -35,11 +41,15 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 
 		httpRoutes, err := r.getGlobalHTTPRouteSpecs(nodeSet, gw)
 		if err != nil {
-			return err
+			return false, err
 		}
 		for _, route := range httpRoutes {
-			if _, err = controllers.EnsureHTTPRoute(ctx, r.Client, route); err != nil {
-				return err
+			applied, err := controllers.EnsureHTTPRoute(ctx, r.Client, route)
+			if err != nil {
+				return false, err
+			}
+			if !applied {
+				allApplied = false
 			}
 			desiredHTTPRouteNames[route.Name] = true
 		}
@@ -48,10 +58,14 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 		if gw.EnableGRPC {
 			grpcRoute, err := r.getGlobalGRPCRouteSpec(nodeSet, gw)
 			if err != nil {
-				return err
+				return false, err
 			}
-			if _, err = controllers.EnsureGRPCRoute(ctx, r.Client, grpcRoute); err != nil {
-				return err
+			applied, err := controllers.EnsureGRPCRoute(ctx, r.Client, grpcRoute)
+			if err != nil {
+				return false, err
+			}
+			if !applied {
+				allApplied = false
 			}
 			desiredGRPCRouteNames[grpcRoute.Name] = true
 		} else {
@@ -61,7 +75,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 					Namespace: nodeSet.GetNamespace(),
 				},
 			}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
-				return err
+				return false, err
 			}
 		}
 	}
@@ -69,7 +83,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 	// Cleanup stale routes
 	existingHTTP, existingGRPC, err := r.listChainNodeSetGatewayRoutes(ctx, nodeSet)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	for _, route := range existingHTTP {
@@ -80,7 +94,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 		if !desiredHTTPRouteNames[route.Name] {
 			logger.Info("deleting stale httproute", "httproute", route.GetName())
 			if err = r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
-				return err
+				return false, err
 			}
 		}
 	}
@@ -92,12 +106,12 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 		if !desiredGRPCRouteNames[route.Name] {
 			logger.Info("deleting stale grpcroute", "grpcroute", route.GetName())
 			if err = r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
-				return err
+				return false, err
 			}
 		}
 	}
 
-	return nil
+	return allApplied, nil
 }
 
 // getGlobalHTTPRouteSpecs returns one HTTPRoute per enabled HTTP endpoint for a global gateway config.
