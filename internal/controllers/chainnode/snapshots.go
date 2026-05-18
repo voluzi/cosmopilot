@@ -149,6 +149,12 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
 				}
+				// Persist the result first; clean up is best-effort so that a
+				// transient delete failure does not lose the integrity status
+				// and force the next reconcile to restart the check.
+				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
+					logger.Error(err, "failed to clean up integrity check resources", "snapshot", snapshot.GetName())
+				}
 
 				// Let's start the tarball export right now if it is enabled
 				if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && snapshot.Annotations[controllers.AnnotationExportingTarball] == "" {
@@ -172,6 +178,12 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				snapshot.ObjectMeta.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityCorrupted)
 				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
+				}
+				// Persist the result first; clean up is best-effort so that a
+				// transient delete failure does not lose the integrity status
+				// and force the next reconcile to restart the check.
+				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
+					logger.Error(err, "failed to clean up integrity check resources", "snapshot", snapshot.GetName())
 				}
 				logger.Info("re-creating snapshot")
 				if err = r.Delete(ctx, &snapshot); err != nil {
@@ -839,6 +851,28 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 
 	snapshot.ObjectMeta.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
 	return r.Update(ctx, snapshot)
+}
+
+// cleanUpSnapshotIntegrityCheck deletes the integrity-check Job and PVC eagerly
+// (Foreground propagation + explicit PVC delete) so the underlying disk is
+// released as soon as the check finishes. Relying solely on
+// TTLSecondsAfterFinished + Kubernetes garbage collection has been observed to
+// leave orphaned PVCs/PVs intermittently (issue #27).
+func (r *Reconciler) cleanUpSnapshotIntegrityCheck(ctx context.Context, snapshot *snapshotv1.VolumeSnapshot) error {
+	jobName := fmt.Sprintf("%s-ichk", snapshot.GetName())
+	pvcName := fmt.Sprintf("%s-ichk", snapshot.GetName())
+
+	propagation := metav1.DeletePropagationForeground
+	if err := r.ClientSet.BatchV1().Jobs(snapshot.GetNamespace()).Delete(ctx, jobName, metav1.DeleteOptions{
+		PropagationPolicy: &propagation,
+	}); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+
+	if err := r.ClientSet.CoreV1().PersistentVolumeClaims(snapshot.GetNamespace()).Delete(ctx, pvcName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 func (r *Reconciler) getSnapshotIntegrityCheckStatus(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (SnapshotIntegrityStatus, error) {
