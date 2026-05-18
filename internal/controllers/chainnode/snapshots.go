@@ -145,6 +145,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 
 			case snapshotIntegrityOk:
 				logger.Info("data integrity check finished successfully. Data is ok.", "snapshot", snapshot.GetName())
+				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
+					return fmt.Errorf("failed to clean up integrity check resources: %w", err)
+				}
 				snapshot.ObjectMeta.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityOk)
 				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
@@ -169,6 +172,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 
 			case snapshotIntegrityCorrupted:
 				logger.Info("data integrity check finished. Data is corrupted.", "snapshot", snapshot.GetName())
+				if err = r.cleanUpSnapshotIntegrityCheck(ctx, &snapshot); err != nil {
+					return fmt.Errorf("failed to clean up integrity check resources: %w", err)
+				}
 				snapshot.ObjectMeta.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityCorrupted)
 				if err = r.Update(ctx, &snapshot); err != nil {
 					return err
@@ -839,6 +845,28 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 
 	snapshot.ObjectMeta.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
 	return r.Update(ctx, snapshot)
+}
+
+// cleanUpSnapshotIntegrityCheck deletes the integrity-check Job and PVC eagerly
+// (Foreground propagation + explicit PVC delete) so the underlying disk is
+// released as soon as the check finishes. Relying solely on
+// TTLSecondsAfterFinished + Kubernetes garbage collection has been observed to
+// leave orphaned PVCs/PVs intermittently (issue #27).
+func (r *Reconciler) cleanUpSnapshotIntegrityCheck(ctx context.Context, snapshot *snapshotv1.VolumeSnapshot) error {
+	jobName := fmt.Sprintf("%s-ichk", snapshot.GetName())
+	pvcName := fmt.Sprintf("%s-ichk", snapshot.GetName())
+
+	propagation := metav1.DeletePropagationForeground
+	if err := r.ClientSet.BatchV1().Jobs(snapshot.GetNamespace()).Delete(ctx, jobName, metav1.DeleteOptions{
+		PropagationPolicy: &propagation,
+	}); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+
+	if err := r.ClientSet.CoreV1().PersistentVolumeClaims(snapshot.GetNamespace()).Delete(ctx, pvcName, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 func (r *Reconciler) getSnapshotIntegrityCheckStatus(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (SnapshotIntegrityStatus, error) {

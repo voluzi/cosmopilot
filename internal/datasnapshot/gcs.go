@@ -207,10 +207,27 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 }
 
 func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
-	propagation := metav1.DeletePropagationBackground
-	return gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-upload", name), metav1.DeleteOptions{
+	// Use Foreground propagation so the api-server waits for the owned PVC to be
+	// removed before the Job goes away. With Background propagation the cascade
+	// is handed off to the garbage collector and the PVC (and its underlying PV
+	// and disk) can be left behind intermittently. See issue #27.
+	propagation := metav1.DeletePropagationForeground
+	err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-upload", name), metav1.DeleteOptions{
 		PropagationPolicy: &propagation,
 	})
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+
+	// Belt-and-braces: explicitly delete the PVC in case the Job was already
+	// gone (e.g. reaped by TTLSecondsAfterFinished) which leaves the PVC with a
+	// dangling owner reference that the garbage collector won't always clean up
+	// before the underlying disk is released.
+	err = gcs.Client.CoreV1().PersistentVolumeClaims(gcs.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-upload", name), metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
