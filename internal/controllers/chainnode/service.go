@@ -88,14 +88,14 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 			if err := r.Get(ctx, client.ObjectKey{Name: gwRef.Name, Namespace: gwNamespace}, gw); err != nil {
 				if controllers.IsCRDNotInstalled(err) {
 					logger.Info("gateway api crds not installed, skipping public address update")
-					return nil
+					return r.clearPublicAddressIfSet(ctx, chainNode)
 				}
 				return fmt.Errorf("failed to get Gateway %s: %w", gwRef.Name, err)
 			}
 
 			if len(gw.Status.Addresses) == 0 {
 				logger.Info("gateway has no addresses yet, skipping public address update")
-				return nil
+				return r.clearPublicAddressIfSet(ctx, chainNode)
 			}
 
 			externalAddress := fmt.Sprintf("%s@%s:%d", chainNode.Status.NodeID, gw.Status.Addresses[0].Value, chainNode.Spec.Expose.GetGatewayPort())
@@ -218,6 +218,19 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 	}
 
 	return nil
+}
+
+// clearPublicAddressIfSet wipes .status.publicAddress when we cannot derive a
+// fresh one (e.g. switching modes, Gateway not yet provisioned, Gateway CRDs
+// missing). Without this, peers reading status would continue to see the
+// previous mode's address long after the corresponding Service/route is gone.
+func (r *Reconciler) clearPublicAddressIfSet(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if chainNode.Status.PublicAddress == "" {
+		return nil
+	}
+	log.FromContext(ctx).Info("clearing stale .status.publicAddress")
+	chainNode.Status.PublicAddress = ""
+	return r.Status().Update(ctx, chainNode)
 }
 
 func (r *Reconciler) getP2pTCPRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2.TCPRoute, error) {
