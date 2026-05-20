@@ -1157,8 +1157,14 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 		return fmt.Errorf("failed to get chain node client for %s: %w", chainNode.GetName(), err)
 	}
 
-	// Check if its state-sync first
-	stateSyncing, err := nodeutils.NewClient(chainNode.GetNodeFQDN()).IsStateSyncing(ctx)
+	// Probe the node's HTTP and gRPC endpoints with a bounded context. The gRPC
+	// client has no dial timeout and runs straight after createPod when the
+	// endpoint may not be reachable yet; without a deadline an unreachable pod
+	// hangs the reconcile worker indefinitely (controller-runtime serializes
+	// reconciles per key, so the whole ChainNode silently stops progressing).
+	stateSyncCtx, cancelStateSync := context.WithTimeout(ctx, rpcProbeTimeout)
+	stateSyncing, err := nodeutils.NewClient(chainNode.GetNodeFQDN()).IsStateSyncing(stateSyncCtx)
+	cancelStateSync()
 	if err != nil {
 		return fmt.Errorf("failed to check state-sync status for %s: %w", chainNode.GetName(), err)
 	}
@@ -1178,7 +1184,9 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 	}
 
 	logger.V(1).Info("check if node is syncing")
-	syncing, err := c.IsNodeSyncing(ctx)
+	syncCtx, cancelSync := context.WithTimeout(ctx, rpcProbeTimeout)
+	syncing, err := c.IsNodeSyncing(syncCtx)
+	cancelSync()
 	if err != nil {
 		return fmt.Errorf("failed to check if node %s is syncing: %w", chainNode.GetName(), err)
 	}
