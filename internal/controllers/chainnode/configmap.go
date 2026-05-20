@@ -122,14 +122,18 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 		}
 	}
 
-	// Set external address to internal service FQDN for reliable P2P reconnection.
-	configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
-		kf.P2P(): map[string]interface{}{
-			kf.ExternalAddress(): getExternalAddress(chainNode),
-		},
-	})
-	if err != nil {
-		return "", err
+	// Set external_address only when we know a publicly reachable address.
+	// Defaulting to the internal cluster.local FQDN causes public peers to drop
+	// the handshake (NodeInfo address fails their dial-back validation).
+	if extAddr, ok := getExternalAddress(chainNode); ok {
+		configs[configTomlFilename], err = utils.Merge(configs[configTomlFilename], map[string]interface{}{
+			kf.P2P(): map[string]interface{}{
+				kf.ExternalAddress(): extAddr,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// Apply state-sync config
@@ -508,17 +512,25 @@ func getMostRecentHeightFromServicesAnnotations(annotationsList []map[string]str
 	return trustHeight, trustHash
 }
 
-// getExternalAddress returns the address this node advertises to peers.
-// For public nodes (with PublicAddress set), it returns the public address so
-// the node is correctly advertised on the network for PEX discovery.
-// For non-public nodes, it returns the internal service FQDN which resolves to
-// a stable ClusterIP, ensuring reliable P2P reconnection after pod reschedules.
-func getExternalAddress(chainNode *appsv1.ChainNode) string {
-	if chainNode.Status.PublicAddress != "" {
-		parts := strings.Split(chainNode.Status.PublicAddress, "@")
-		if len(parts) == 2 {
-			return parts[1]
-		}
+// getExternalAddress returns the address this node should advertise to peers
+// via config.toml's [p2p].external_address.
+//
+// It returns (addr, true) only when the node has a publicly reachable address
+// (populated in Status.PublicAddress by the service/gateway reconciler once an
+// expose.p2p Gateway/Service materialises a routable endpoint).
+//
+// When no public address is known it returns ("", false) and the caller must
+// skip writing the field. Advertising the internal service FQDN (or any
+// cluster-local address) breaks the CometBFT handshake with public peers,
+// which validate that the advertised address is reachable from their side
+// before staying connected.
+func getExternalAddress(chainNode *appsv1.ChainNode) (string, bool) {
+	if chainNode.Status.PublicAddress == "" {
+		return "", false
 	}
-	return fmt.Sprintf("%s:%d", chainNode.GetNodeFQDN(), chainutils.P2pPort)
+	parts := strings.Split(chainNode.Status.PublicAddress, "@")
+	if len(parts) != 2 || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
 }
