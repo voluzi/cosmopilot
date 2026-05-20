@@ -62,7 +62,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 			routesApplied = false
 		}
 	} else {
-		if err = r.Delete(ctx, &gwapiv1a2.GRPCRoute{
+		if err = r.Delete(ctx, &gwapiv1.GRPCRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      grpcRouteName,
 				Namespace: chainNode.GetNamespace(),
@@ -180,14 +180,14 @@ func (r *Reconciler) getHTTPRouteSpecs(chainNode *appsv1.ChainNode) ([]*gwapiv1.
 	return routes, nil
 }
 
-func (r *Reconciler) getGRPCRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2.GRPCRoute, error) {
+func (r *Reconciler) getGRPCRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1.GRPCRoute, error) {
 	cfg := chainNode.Spec.Gateway
 	parentRef := chainNode.GetGatewayParentRef()
 	svcName := chainNode.GetServiceName()
 	hostname := gwapiv1.Hostname(fmt.Sprintf("grpc.%s", cfg.Host))
 	port := gwapiv1.PortNumber(chainutils.GrpcPort)
 
-	route := &gwapiv1a2.GRPCRoute{
+	route := &gwapiv1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-grpc", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),
@@ -196,14 +196,14 @@ func (r *Reconciler) getGRPCRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2.G
 				labelGatewayRoute:          "true",
 			}),
 		},
-		Spec: gwapiv1a2.GRPCRouteSpec{
+		Spec: gwapiv1.GRPCRouteSpec{
 			CommonRouteSpec: gwapiv1.CommonRouteSpec{
 				ParentRefs: []gwapiv1.ParentReference{parentRef},
 			},
 			Hostnames: []gwapiv1.Hostname{hostname},
-			Rules: []gwapiv1a2.GRPCRouteRule{
+			Rules: []gwapiv1.GRPCRouteRule{
 				{
-					BackendRefs: []gwapiv1a2.GRPCBackendRef{
+					BackendRefs: []gwapiv1.GRPCBackendRef{
 						{
 							BackendRef: gwapiv1.BackendRef{
 								BackendObjectReference: gwapiv1.BackendObjectReference{
@@ -262,7 +262,7 @@ func (r *Reconciler) cleanupGatewayRoutes(ctx context.Context, chainNode *appsv1
 		}
 	}
 
-	if err = r.Delete(ctx, &gwapiv1a2.GRPCRoute{
+	if err = r.Delete(ctx, &gwapiv1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-grpc", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),
