@@ -65,10 +65,10 @@ func EnsureHTTPRoute(ctx context.Context, c client.Client, route *gwapiv1.HTTPRo
 
 // EnsureGRPCRoute creates or updates the given GRPCRoute. See EnsureHTTPRoute
 // for the meaning of the bool return value.
-func EnsureGRPCRoute(ctx context.Context, c client.Client, route *gwapiv1a2.GRPCRoute) (bool, error) {
+func EnsureGRPCRoute(ctx context.Context, c client.Client, route *gwapiv1.GRPCRoute) (bool, error) {
 	logger := log.FromContext(ctx)
 
-	current := &gwapiv1a2.GRPCRoute{}
+	current := &gwapiv1.GRPCRoute{}
 	err := c.Get(ctx, client.ObjectKeyFromObject(route), current)
 	if err != nil {
 		if IsCRDNotInstalled(err) {

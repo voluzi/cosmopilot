@@ -11,7 +11,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
@@ -69,7 +68,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 			}
 			desiredGRPCRouteNames[grpcRoute.Name] = true
 		} else {
-			if err = r.Delete(ctx, &gwapiv1a2.GRPCRoute{
+			if err = r.Delete(ctx, &gwapiv1.GRPCRoute{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      grpcRouteName,
 					Namespace: nodeSet.GetNamespace(),
@@ -182,13 +181,13 @@ func (r *Reconciler) getGlobalHTTPRouteSpecs(nodeSet *appsv1.ChainNodeSet, gw ap
 	return routes, nil
 }
 
-func (r *Reconciler) getGlobalGRPCRouteSpec(nodeSet *appsv1.ChainNodeSet, gw appsv1.GlobalGatewayConfig) (*gwapiv1a2.GRPCRoute, error) {
+func (r *Reconciler) getGlobalGRPCRouteSpec(nodeSet *appsv1.ChainNodeSet, gw appsv1.GlobalGatewayConfig) (*gwapiv1.GRPCRoute, error) {
 	parentRef := gw.GetGatewayParentRef()
 	svcName := gw.GetServiceName(nodeSet)
 	hostname := gwapiv1.Hostname(fmt.Sprintf("grpc.%s", gw.Host))
 	port := gwapiv1.PortNumber(chainutils.GrpcPort)
 
-	route := &gwapiv1a2.GRPCRoute{
+	route := &gwapiv1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      gw.GetGrpcName(nodeSet),
 			Namespace: nodeSet.GetNamespace(),
@@ -197,14 +196,14 @@ func (r *Reconciler) getGlobalGRPCRouteSpec(nodeSet *appsv1.ChainNodeSet, gw app
 				labelGlobalGateway:            gw.Name,
 			}),
 		},
-		Spec: gwapiv1a2.GRPCRouteSpec{
+		Spec: gwapiv1.GRPCRouteSpec{
 			CommonRouteSpec: gwapiv1.CommonRouteSpec{
 				ParentRefs: []gwapiv1.ParentReference{parentRef},
 			},
 			Hostnames: []gwapiv1.Hostname{hostname},
-			Rules: []gwapiv1a2.GRPCRouteRule{
+			Rules: []gwapiv1.GRPCRouteRule{
 				{
-					BackendRefs: []gwapiv1a2.GRPCBackendRef{
+					BackendRefs: []gwapiv1.GRPCBackendRef{
 						{
 							BackendRef: gwapiv1.BackendRef{
 								BackendObjectReference: gwapiv1.BackendObjectReference{
@@ -222,7 +221,7 @@ func (r *Reconciler) getGlobalGRPCRouteSpec(nodeSet *appsv1.ChainNodeSet, gw app
 	return route, controllerutil.SetControllerReference(nodeSet, route, r.Scheme)
 }
 
-func (r *Reconciler) listChainNodeSetGatewayRoutes(ctx context.Context, nodeSet *appsv1.ChainNodeSet, l ...string) ([]gwapiv1.HTTPRoute, []gwapiv1a2.GRPCRoute, error) {
+func (r *Reconciler) listChainNodeSetGatewayRoutes(ctx context.Context, nodeSet *appsv1.ChainNodeSet, l ...string) ([]gwapiv1.HTTPRoute, []gwapiv1.GRPCRoute, error) {
 	if len(l)%2 != 0 {
 		return nil, nil, fmt.Errorf("list of labels must contain pairs of key-value")
 	}
@@ -244,7 +243,7 @@ func (r *Reconciler) listChainNodeSetGatewayRoutes(ctx context.Context, nodeSet 
 		return nil, nil, err
 	}
 
-	grpcList := &gwapiv1a2.GRPCRouteList{}
+	grpcList := &gwapiv1.GRPCRouteList{}
 	if err := r.List(ctx, grpcList, &client.ListOptions{
 		Namespace:     nodeSet.GetNamespace(),
 		LabelSelector: sel,
