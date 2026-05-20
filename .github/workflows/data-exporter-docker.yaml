@@ -68,7 +68,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-dataexporter-docker-${{ hashFiles('go.sum') }}
 
       - name: Inject cache
-        uses: reproducible-containers/buildkit-cache-dance@v3.3.2
+        uses: reproducible-containers/buildkit-cache-dance@v3.4.0
         with:
           cache-map: |
             {
