@@ -7,6 +7,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -822,4 +823,92 @@ func (p PeerList) ExcludeSeeds() PeerList {
 
 func (p PeerList) Append(l PeerList) PeerList {
 	return append(p, l...)
+}
+
+const (
+	defaultSubdomainRPC      = "rpc"
+	defaultSubdomainGRPC     = "grpc"
+	defaultSubdomainLCD      = "lcd"
+	defaultSubdomainEvmRPC   = "evm-rpc"
+	defaultSubdomainEvmRpcWs = "evm-rpc-ws"
+)
+
+// GetRPC returns the RPC subdomain prefix or the default ("rpc") when unset.
+// Safe to call on a nil receiver.
+func (s *SubdomainsConfig) GetRPC() string {
+	if s != nil && s.RPC != nil && *s.RPC != "" {
+		return *s.RPC
+	}
+	return defaultSubdomainRPC
+}
+
+// GetGRPC returns the gRPC subdomain prefix or the default ("grpc") when unset.
+// Safe to call on a nil receiver.
+func (s *SubdomainsConfig) GetGRPC() string {
+	if s != nil && s.GRPC != nil && *s.GRPC != "" {
+		return *s.GRPC
+	}
+	return defaultSubdomainGRPC
+}
+
+// GetLCD returns the LCD subdomain prefix or the default ("lcd") when unset.
+// Safe to call on a nil receiver.
+func (s *SubdomainsConfig) GetLCD() string {
+	if s != nil && s.LCD != nil && *s.LCD != "" {
+		return *s.LCD
+	}
+	return defaultSubdomainLCD
+}
+
+// GetEvmRPC returns the EVM RPC subdomain prefix or the default ("evm-rpc") when unset.
+// Safe to call on a nil receiver.
+func (s *SubdomainsConfig) GetEvmRPC() string {
+	if s != nil && s.EvmRPC != nil && *s.EvmRPC != "" {
+		return *s.EvmRPC
+	}
+	return defaultSubdomainEvmRPC
+}
+
+// GetEvmRpcWs returns the EVM RPC WS subdomain prefix or the default ("evm-rpc-ws") when unset.
+// Safe to call on a nil receiver.
+func (s *SubdomainsConfig) GetEvmRpcWs() string {
+	if s != nil && s.EvmRpcWs != nil && *s.EvmRpcWs != "" {
+		return *s.EvmRpcWs
+	}
+	return defaultSubdomainEvmRpcWs
+}
+
+// ValidateSubdomainPrefixes returns an error if any enabled endpoint resolves
+// to an invalid DNS label (RFC 1123) or if two enabled endpoints share the
+// same prefix, which would produce two routes or ingresses for the same
+// hostname but different backend ports — ambiguous at runtime.
+func ValidateSubdomainPrefixes(path string, sub *SubdomainsConfig, enableRPC, enableGRPC, enableLCD, enableEvmRPC, enableEvmRpcWs bool) error {
+	type ep struct{ name, prefix string }
+	endpoints := make([]ep, 0, 5)
+	if enableRPC {
+		endpoints = append(endpoints, ep{"rpc", sub.GetRPC()})
+	}
+	if enableGRPC {
+		endpoints = append(endpoints, ep{"grpc", sub.GetGRPC()})
+	}
+	if enableLCD {
+		endpoints = append(endpoints, ep{"lcd", sub.GetLCD()})
+	}
+	if enableEvmRPC {
+		endpoints = append(endpoints, ep{"evmRPC", sub.GetEvmRPC()})
+	}
+	if enableEvmRpcWs {
+		endpoints = append(endpoints, ep{"evmRpcWS", sub.GetEvmRpcWs()})
+	}
+	seen := make(map[string]string, len(endpoints))
+	for _, e := range endpoints {
+		if errs := validation.IsDNS1123Label(e.prefix); len(errs) > 0 {
+			return fmt.Errorf("%s.subdomains.%s: %q is not a valid DNS label: %s", path, e.name, e.prefix, strings.Join(errs, "; "))
+		}
+		if prev, ok := seen[e.prefix]; ok {
+			return fmt.Errorf("%s.subdomains: prefix %q is used by both %q and %q endpoints", path, e.prefix, prev, e.name)
+		}
+		seen[e.prefix] = e.name
+	}
+	return nil
 }

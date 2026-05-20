@@ -125,16 +125,16 @@ func (r *Reconciler) getHTTPRouteSpecs(chainNode *appsv1.ChainNode) ([]*gwapiv1.
 
 	var endpoints []endpointDef
 	if cfg.EnableRPC {
-		endpoints = append(endpoints, endpointDef{"rpc", "rpc", chainutils.RpcPort})
+		endpoints = append(endpoints, endpointDef{"rpc", cfg.Subdomains.GetRPC(), chainutils.RpcPort})
 	}
 	if cfg.EnableLCD {
-		endpoints = append(endpoints, endpointDef{"lcd", "lcd", chainutils.LcdPort})
+		endpoints = append(endpoints, endpointDef{"lcd", cfg.Subdomains.GetLCD(), chainutils.LcdPort})
 	}
 	if cfg.EnableEvmRPC {
-		endpoints = append(endpoints, endpointDef{"evm-rpc", "evm-rpc", controllers.EvmRpcPort})
+		endpoints = append(endpoints, endpointDef{"evm-rpc", cfg.Subdomains.GetEvmRPC(), controllers.EvmRpcPort})
 	}
 	if cfg.EnableEvmRpcWs {
-		endpoints = append(endpoints, endpointDef{"evm-rpc-ws", "evm-rpc-ws", controllers.EvmRpcWsPort})
+		endpoints = append(endpoints, endpointDef{"evm-rpc-ws", cfg.Subdomains.GetEvmRpcWs(), controllers.EvmRpcWsPort})
 	}
 
 	routes := make([]*gwapiv1.HTTPRoute, 0, len(endpoints))
@@ -184,7 +184,7 @@ func (r *Reconciler) getGRPCRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1.GRP
 	cfg := chainNode.Spec.Gateway
 	parentRef := chainNode.GetGatewayParentRef()
 	svcName := chainNode.GetServiceName()
-	hostname := gwapiv1.Hostname(fmt.Sprintf("grpc.%s", cfg.Host))
+	hostname := gwapiv1.Hostname(fmt.Sprintf("%s.%s", cfg.Subdomains.GetGRPC(), cfg.Host))
 	port := gwapiv1.PortNumber(chainutils.GrpcPort)
 
 	route := &gwapiv1.GRPCRoute{

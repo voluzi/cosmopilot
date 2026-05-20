@@ -126,16 +126,16 @@ func (r *Reconciler) getGlobalHTTPRouteSpecs(nodeSet *appsv1.ChainNodeSet, gw ap
 
 	var endpoints []endpointDef
 	if gw.EnableRPC {
-		endpoints = append(endpoints, endpointDef{"rpc", "rpc", chainutils.RpcPort})
+		endpoints = append(endpoints, endpointDef{"rpc", gw.Subdomains.GetRPC(), chainutils.RpcPort})
 	}
 	if gw.EnableLCD {
-		endpoints = append(endpoints, endpointDef{"lcd", "lcd", chainutils.LcdPort})
+		endpoints = append(endpoints, endpointDef{"lcd", gw.Subdomains.GetLCD(), chainutils.LcdPort})
 	}
 	if gw.EnableEvmRPC {
-		endpoints = append(endpoints, endpointDef{"evm-rpc", "evm-rpc", controllers.EvmRpcPort})
+		endpoints = append(endpoints, endpointDef{"evm-rpc", gw.Subdomains.GetEvmRPC(), controllers.EvmRpcPort})
 	}
 	if gw.EnableEvmRpcWs {
-		endpoints = append(endpoints, endpointDef{"evm-rpc-ws", "evm-rpc-ws", controllers.EvmRpcWsPort})
+		endpoints = append(endpoints, endpointDef{"evm-rpc-ws", gw.Subdomains.GetEvmRpcWs(), controllers.EvmRpcWsPort})
 	}
 
 	routes := make([]*gwapiv1.HTTPRoute, 0, len(endpoints))
@@ -184,7 +184,7 @@ func (r *Reconciler) getGlobalHTTPRouteSpecs(nodeSet *appsv1.ChainNodeSet, gw ap
 func (r *Reconciler) getGlobalGRPCRouteSpec(nodeSet *appsv1.ChainNodeSet, gw appsv1.GlobalGatewayConfig) (*gwapiv1.GRPCRoute, error) {
 	parentRef := gw.GetGatewayParentRef()
 	svcName := gw.GetServiceName(nodeSet)
-	hostname := gwapiv1.Hostname(fmt.Sprintf("grpc.%s", gw.Host))
+	hostname := gwapiv1.Hostname(fmt.Sprintf("%s.%s", gw.Subdomains.GetGRPC(), gw.Host))
 	port := gwapiv1.PortNumber(chainutils.GrpcPort)
 
 	route := &gwapiv1.GRPCRoute{

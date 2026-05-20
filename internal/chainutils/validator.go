@@ -89,6 +89,9 @@ func (a *App) CreateValidator(
 				},
 			},
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
+			// Kubelet reaps the pod after 5 min even if cosmopilot dies mid-call
+			// (SIGKILL prevents `defer ph.Delete` from running).
+			ActiveDeadlineSeconds: ptr.To[int64](300),
 		},
 	}
 
