@@ -382,6 +382,11 @@ type IngressConfig struct {
 	// `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
 	Host string `json:"host"`
 
+	// Subdomains overrides the default DNS subdomain prefix for each endpoint
+	// (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default.
+	// +optional
+	Subdomains *SubdomainsConfig `json:"subdomains,omitempty"`
+
 	// Annotations to be appended to the ingress.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -447,6 +452,11 @@ type GlobalIngressConfig struct {
 	// subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
 	// `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
 	Host string `json:"host"`
+
+	// Subdomains overrides the default DNS subdomain prefix for each endpoint
+	// (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default.
+	// +optional
+	Subdomains *SubdomainsConfig `json:"subdomains,omitempty"`
 
 	// Annotations to be set on ingress resource.
 	// +optional
@@ -637,6 +647,11 @@ type GatewayConfig struct {
 	// subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
 	// `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
 	Host string `json:"host"`
+
+	// Subdomains overrides the default DNS subdomain prefix for each endpoint
+	// (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default.
+	// +optional
+	Subdomains *SubdomainsConfig `json:"subdomains,omitempty"`
 
 	// Enable RPC endpoint.
 	// +optional

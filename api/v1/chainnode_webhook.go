@@ -66,6 +66,20 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		}
 	}
 
+	// Reject duplicate subdomain prefixes across enabled endpoints
+	if ing := chainNode.Spec.Ingress; ing != nil {
+		if err := ValidateSubdomainPrefixes(".spec.ingress", ing.Subdomains,
+			ing.EnableRPC, ing.EnableGRPC, ing.EnableLCD, ing.EnableEvmRPC, ing.EnableEvmRpcWs); err != nil {
+			return nil, err
+		}
+	}
+	if gw := chainNode.Spec.Gateway; gw != nil {
+		if err := ValidateSubdomainPrefixes(".spec.gateway", gw.Subdomains,
+			gw.EnableRPC, gw.EnableGRPC, gw.EnableLCD, gw.EnableEvmRPC, gw.EnableEvmRpcWs); err != nil {
+			return nil, err
+		}
+	}
+
 	return nil, nil
 }
 

@@ -123,7 +123,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 	pathType := v1.PathTypeImplementationSpecific
 
 	if chainNode.Spec.Ingress.EnableRPC {
-		host := fmt.Sprintf("rpc.%s", chainNode.Spec.Ingress.Host)
+		host := fmt.Sprintf("%s.%s", chainNode.Spec.Ingress.Subdomains.GetRPC(), chainNode.Spec.Ingress.Host)
 		if ingress.Spec.TLS != nil {
 			ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, host)
 		}
@@ -151,7 +151,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 	}
 
 	if chainNode.Spec.Ingress.EnableLCD {
-		host := fmt.Sprintf("lcd.%s", chainNode.Spec.Ingress.Host)
+		host := fmt.Sprintf("%s.%s", chainNode.Spec.Ingress.Subdomains.GetLCD(), chainNode.Spec.Ingress.Host)
 		if ingress.Spec.TLS != nil {
 			ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, host)
 		}
@@ -179,7 +179,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 	}
 
 	if chainNode.Spec.Ingress.EnableEvmRPC {
-		host := fmt.Sprintf("evm-rpc.%s", chainNode.Spec.Ingress.Host)
+		host := fmt.Sprintf("%s.%s", chainNode.Spec.Ingress.Subdomains.GetEvmRPC(), chainNode.Spec.Ingress.Host)
 		if ingress.Spec.TLS != nil {
 			ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, host)
 		}
@@ -207,7 +207,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 	}
 
 	if chainNode.Spec.Ingress.EnableEvmRpcWs {
-		host := fmt.Sprintf("evm-rpc-ws.%s", chainNode.Spec.Ingress.Host)
+		host := fmt.Sprintf("%s.%s", chainNode.Spec.Ingress.Subdomains.GetEvmRpcWs(), chainNode.Spec.Ingress.Host)
 		if ingress.Spec.TLS != nil {
 			ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, host)
 		}
@@ -237,7 +237,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 	if chainNode.Spec.Ingress.EnableGRPC && !chainNode.Spec.Ingress.DisableTLS {
 		// We just append the hostname to TLS config and add no rule as it will be handled by a separate ingress
 		// but will use the same certificate
-		ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, fmt.Sprintf("grpc.%s", chainNode.Spec.Ingress.Host))
+		ingress.Spec.TLS[0].Hosts = append(ingress.Spec.TLS[0].Hosts, fmt.Sprintf("%s.%s", chainNode.Spec.Ingress.Subdomains.GetGRPC(), chainNode.Spec.Ingress.Host))
 	}
 
 	return ingress, controllerutil.SetControllerReference(chainNode, ingress, r.Scheme)
@@ -256,7 +256,7 @@ func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingres
 			IngressClassName: ptr.To(chainNode.GetIngressClass()),
 			Rules: []v1.IngressRule{
 				{
-					Host: fmt.Sprintf("grpc.%s", chainNode.Spec.Ingress.Host),
+					Host: fmt.Sprintf("%s.%s", chainNode.Spec.Ingress.Subdomains.GetGRPC(), chainNode.Spec.Ingress.Host),
 					IngressRuleValue: v1.IngressRuleValue{
 						HTTP: &v1.HTTPIngressRuleValue{Paths: []v1.HTTPIngressPath{
 							{
@@ -279,7 +279,7 @@ func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingres
 	if !chainNode.Spec.Ingress.DisableTLS {
 		ingress.Spec.TLS = []v1.IngressTLS{
 			{
-				Hosts:      []string{fmt.Sprintf("grpc.%s", chainNode.Spec.Ingress.Host)},
+				Hosts:      []string{fmt.Sprintf("%s.%s", chainNode.Spec.Ingress.Subdomains.GetGRPC(), chainNode.Spec.Ingress.Host)},
 				SecretName: chainNode.GetIngressSecretName(),
 			},
 		}

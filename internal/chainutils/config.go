@@ -74,6 +74,9 @@ func (a *App) GenerateConfigFiles(ctx context.Context) (map[string]string, error
 				},
 			},
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
+			// Kubelet reaps the pod after 5 min even if cosmopilot dies mid-call
+			// (SIGKILL prevents `defer ph.Delete` from running).
+			ActiveDeadlineSeconds: ptr.To[int64](300),
 		},
 	}
 	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {

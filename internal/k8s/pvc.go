@@ -38,10 +38,13 @@ func (h *PvcHelper) WriteToFile(ctx context.Context, content, path, pc string, a
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
-			PriorityClassName:             pc,
-			Affinity:                      af,
-			NodeSelector:                  ns,
-			SecurityContext:               RestrictedPodSecurityContext(),
+			// Kubelet reaps the pod after 5 min even if cosmopilot dies mid-call
+			// (SIGKILL prevents `defer ph.Delete` from running).
+			ActiveDeadlineSeconds: ptr.To[int64](300),
+			PriorityClassName:     pc,
+			Affinity:              af,
+			NodeSelector:          ns,
+			SecurityContext:       RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
 					Name: "pvc",
@@ -123,10 +126,13 @@ func (h *PvcHelper) DownloadGenesis(ctx context.Context, url, path, pc string, a
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
 			TerminationGracePeriodSeconds: ptr.To[int64](0),
-			PriorityClassName:             pc,
-			Affinity:                      af,
-			NodeSelector:                  ns,
-			SecurityContext:               RestrictedPodSecurityContext(),
+			// Kubelet reaps the pod after 75 min (download wait is 1h) even if
+			// cosmopilot dies mid-call (SIGKILL prevents `defer ph.Delete`).
+			ActiveDeadlineSeconds: ptr.To[int64](4500),
+			PriorityClassName:     pc,
+			Affinity:              af,
+			NodeSelector:          ns,
+			SecurityContext:       RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
 					Name: "pvc",

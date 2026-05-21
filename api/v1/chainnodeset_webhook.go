@@ -80,6 +80,21 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if group.GetSnapshotNodeIndex() < 0 || group.GetSnapshotNodeIndex() >= group.GetInstances() {
 			return nil, fmt.Errorf(".spec.nodes[%d].snapshotNodeIndex is out of range", i)
 		}
+
+		// Catch duplicate subdomain prefixes on individual ingresses/gateways here
+		// instead of letting the ChainNode webhook reject the child during reconcile.
+		if ing := group.IndividualIngresses; ing != nil {
+			if err := ValidateSubdomainPrefixes(fmt.Sprintf(".spec.nodes[%d].individualIngresses", i), ing.Subdomains,
+				ing.EnableRPC, ing.EnableGRPC, ing.EnableLCD, ing.EnableEvmRPC, ing.EnableEvmRpcWs); err != nil {
+				return nil, err
+			}
+		}
+		if gw := group.IndividualGatewayRoutes; gw != nil {
+			if err := ValidateSubdomainPrefixes(fmt.Sprintf(".spec.nodes[%d].individualGatewayRoutes", i), gw.Subdomains,
+				gw.EnableRPC, gw.EnableGRPC, gw.EnableLCD, gw.EnableEvmRPC, gw.EnableEvmRpcWs); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Names in .spec.ingresses and .spec.gatewayRoutes must be unique across both lists,
@@ -96,6 +111,20 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			return nil, fmt.Errorf(".spec.gatewayRoutes[%d].name %q duplicates %s", i, gw.Name, existing)
 		}
 		seenRouteNames[gw.Name] = fmt.Sprintf(".spec.gatewayRoutes[%d]", i)
+	}
+
+	// Reject duplicate subdomain prefixes across enabled endpoints in each ingress / gateway entry
+	for i, ing := range nodeSet.Spec.Ingresses {
+		if err := ValidateSubdomainPrefixes(fmt.Sprintf(".spec.ingresses[%d]", i), ing.Subdomains,
+			ing.EnableRPC, ing.EnableGRPC, ing.EnableLCD, ing.EnableEvmRPC, ing.EnableEvmRpcWs); err != nil {
+			return nil, err
+		}
+	}
+	for i, gw := range nodeSet.Spec.GatewayRoutes {
+		if err := ValidateSubdomainPrefixes(fmt.Sprintf(".spec.gatewayRoutes[%d]", i), gw.Subdomains,
+			gw.EnableRPC, gw.EnableGRPC, gw.EnableLCD, gw.EnableEvmRPC, gw.EnableEvmRpcWs); err != nil {
+			return nil, err
+		}
 	}
 
 	return nil, nil

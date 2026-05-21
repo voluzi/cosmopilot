@@ -1189,3 +1189,28 @@ type VerticalAutoscalingRule struct {
 	// +kubebuilder:validation:Format=duration
 	Cooldown *string `json:"cooldown,omitempty"`
 }
+
+// SubdomainsConfig allows overriding the default DNS subdomain prefixes used
+// for each exposed endpoint. Any field left empty falls back to its default
+// (rpc, lcd, grpc, evm-rpc, evm-rpc-ws).
+type SubdomainsConfig struct {
+	// RPC subdomain prefix. Defaults to "rpc".
+	// +optional
+	RPC *string `json:"rpc,omitempty"`
+
+	// GRPC subdomain prefix. Defaults to "grpc".
+	// +optional
+	GRPC *string `json:"grpc,omitempty"`
+
+	// LCD subdomain prefix. Defaults to "lcd".
+	// +optional
+	LCD *string `json:"lcd,omitempty"`
+
+	// EvmRPC subdomain prefix. Defaults to "evm-rpc".
+	// +optional
+	EvmRPC *string `json:"evmRPC,omitempty"`
+
+	// EvmRpcWs subdomain prefix. Defaults to "evm-rpc-ws".
+	// +optional
+	EvmRpcWs *string `json:"evmRpcWS,omitempty"`
+}

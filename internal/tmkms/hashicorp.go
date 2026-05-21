@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
@@ -211,6 +212,9 @@ func (v HashicorpProvider) UploadKey(ctx context.Context, kms *KMS, key string) 
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			// Kubelet reaps the pod after 5 min even if cosmopilot dies mid-call
+			// (SIGKILL prevents `defer ph.Delete` from running).
+			ActiveDeadlineSeconds: ptr.To[int64](300),
 			Volumes: []corev1.Volume{
 				{
 					Name: "vault-token",
