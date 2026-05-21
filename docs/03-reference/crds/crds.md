@@ -319,6 +319,15 @@ GlobalGatewayConfig configures Gateway API routes for cross-group routing in Cha
 | ----- | ----------- | ------ | -------- |
 | name | The name of this gateway route config. | string | true |
 | groups | Groups of nodes to which this gateway route will point to. | []string | true |
+| gateway | Gateway to attach routes to. | [GatewayRef](#gatewayref) | true |
+| host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
+| enableRPC | Enable RPC endpoint. | bool | false |
+| enableGRPC | Enable gRPC endpoint. | bool | false |
+| enableLCD | Enable LCD endpoint. | bool | false |
+| enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
+| useInternalServices | UseInternalServices configures routes to point directly to the node services, bypassing Cosmoguard and any readiness checks. | *bool | false |
 | servicesOnly | ServicesOnly indicates that only global services should be created. No route resources will be created. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)

@@ -682,8 +682,6 @@ type GatewayConfig struct {
 
 // GlobalGatewayConfig configures Gateway API routes for cross-group routing in ChainNodeSet.
 type GlobalGatewayConfig struct {
-	GatewayConfig `json:",inline"`
-
 	// The name of this gateway route config.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
@@ -691,6 +689,45 @@ type GlobalGatewayConfig struct {
 	// Groups of nodes to which this gateway route will point to.
 	// +kubebuilder:validation:MinItems=1
 	Groups []string `json:"groups"`
+
+	// Gateway to attach routes to.
+	Gateway GatewayRef `json:"gateway"`
+
+	// Host in which endpoints will be exposed. Endpoints are exposed on corresponding
+	// subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at
+	// `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`.
+	Host string `json:"host"`
+
+	// Subdomains overrides the default DNS subdomain prefix for each endpoint
+	// (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default.
+	// +optional
+	Subdomains *SubdomainsConfig `json:"subdomains,omitempty"`
+
+	// Enable RPC endpoint.
+	// +optional
+	EnableRPC bool `json:"enableRPC,omitempty"`
+
+	// Enable gRPC endpoint.
+	// +optional
+	EnableGRPC bool `json:"enableGRPC,omitempty"`
+
+	// Enable LCD endpoint.
+	// +optional
+	EnableLCD bool `json:"enableLCD,omitempty"`
+
+	// Enable EVM RPC endpoint.
+	// +optional
+	EnableEvmRPC bool `json:"enableEvmRPC,omitempty"`
+
+	// Enable EVM RPC Websocket endpoint.
+	// +optional
+	EnableEvmRpcWs bool `json:"enableEvmRpcWS,omitempty"`
+
+	// UseInternalServices configures routes to point directly to the node services,
+	// bypassing Cosmoguard and any readiness checks.
+	// +optional
+	// +default=false
+	UseInternalServices *bool `json:"useInternalServices,omitempty"`
 
 	// ServicesOnly indicates that only global services should be created. No route resources will be created.
 	// +optional

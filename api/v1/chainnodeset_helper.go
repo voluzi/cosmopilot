@@ -420,6 +420,10 @@ func (gc *GatewayConfig) UseInternal() bool {
 	return gc != nil && gc.UseInternalServices != nil && *gc.UseInternalServices
 }
 
+func (gg *GlobalGatewayConfig) UseInternal() bool {
+	return gg != nil && gg.UseInternalServices != nil && *gg.UseInternalServices
+}
+
 func (gg *GlobalGatewayConfig) GetName(owner client.Object) string {
 	return fmt.Sprintf("%s-%s-gw", owner.GetName(), gg.Name)
 }
