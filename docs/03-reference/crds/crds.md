@@ -17,7 +17,11 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [ChainNodeSetSpec](#chainnodesetspec)
 * [ChainNodeSetStatus](#chainnodesetstatus)
 * [CosmoseedConfig](#cosmoseedconfig)
+* [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
 * [CosmoseedIngressConfig](#cosmoseedingressconfig)
+* [GatewayConfig](#gatewayconfig)
+* [GatewayRef](#gatewayref)
+* [GlobalGatewayConfig](#globalgatewayconfig)
 * [GlobalIngressConfig](#globalingressconfig)
 * [IndividualIngressConfig](#individualingressconfig)
 * [IngressConfig](#ingressconfig)
@@ -33,6 +37,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CreateValidatorConfig](#createvalidatorconfig)
 * [ExportTarballConfig](#exporttarballconfig)
 * [ExposeConfig](#exposeconfig)
+* [ExposeGatewayConfig](#exposegatewayconfig)
 * [FromNodeRPCConfig](#fromnoderpcconfig)
 * [GcsExportConfig](#gcsexportconfig)
 * [GenesisConfig](#genesisconfig)
@@ -44,6 +49,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [SdkOptions](#sdkoptions)
 * [SidecarSpec](#sidecarspec)
 * [StateSyncConfig](#statesyncconfig)
+* [SubdomainsConfig](#subdomainsconfig)
 * [TmKMS](#tmkms)
 * [TmKmsHashicorpProvider](#tmkmshashicorpprovider)
 * [TmKmsKeyFormat](#tmkmskeyformat)
@@ -103,6 +109,7 @@ ChainNodeSpec defines the desired state of ChainNode.
 | vpa | Vertical Pod Autoscaling configuration for this node. | *[VerticalAutoscalingConfig](#verticalautoscalingconfig) | false |
 | overrideVersion | OverrideVersion will force this node to use the specified version. NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version based on upgrade history. | *string | false |
 | ingress | Indicates if an ingress should be created to access API endpoints of this node and configures it. | *[IngressConfig](#ingressconfig) | false |
+| gateway | Configures Gateway API routes for exposing API endpoints of this node. Mutually exclusive with ingress. | *[GatewayConfig](#gatewayconfig) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -202,6 +209,7 @@ ChainNodeSetSpec defines the desired state of ChainNode.
 | validator | Indicates this node set will run a validator and allows configuring it. | *[NodeSetValidatorConfig](#nodesetvalidatorconfig) | false |
 | nodes | List of groups of ChainNodes to be run. | [][NodeGroupSpec](#nodegroupspec) | true |
 | ingresses | List of ingresses to create for this ChainNodeSet. This allows to create ingresses targeting multiple groups of nodes. | [][GlobalIngressConfig](#globalingressconfig) | false |
+| gatewayRoutes | List of Gateway API route configs for this ChainNodeSet. This allows to create HTTPRoute/GRPCRoute resources targeting multiple groups of nodes. | [][GlobalGatewayConfig](#globalgatewayconfig) | false |
 | cosmoseed | Allows deploying seed nodes using Cosmoseed. | *[CosmoseedConfig](#cosmoseedconfig) | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -245,6 +253,18 @@ CosmoseedConfig defines settings for deploying seed nodes via Cosmoseed.
 | additionalSeeds | Additional seed nodes to append to the node’s default seed list. Comma-separated list in the format `nodeID@ip:port`. | *string | false |
 | logLevel | Log level of cosmoseed. Defaults to `info`. | *string | false |
 | ingress | Ingress configuration for cosmoseed nodes. | *[CosmoseedIngressConfig](#cosmoseedingressconfig) | false |
+| gateway | Gateway API configuration for cosmoseed nodes. Mutually exclusive with ingress. | *[CosmoseedGatewayConfig](#cosmoseedgatewayconfig) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoseedGatewayConfig
+
+CosmoseedGatewayConfig is a simplified gateway config for seed nodes.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| gateway | Gateway to attach routes to. | [GatewayRef](#gatewayref) | true |
+| host | Host in which cosmoseed nodes will be exposed. | string | true |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -262,6 +282,47 @@ CosmoseedIngressConfig configures ingress for cosmoseed nodes.
 
 [Back to Custom Resources](#custom-resources)
 
+#### GatewayConfig
+
+GatewayConfig configures Gateway API HTTPRoute/GRPCRoute resources for exposing blockchain node APIs. TLS is handled at the Gateway level, not per-route.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| gateway | Gateway to attach routes to. | [GatewayRef](#gatewayref) | true |
+| host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
+| enableRPC | Enable RPC endpoint. | bool | false |
+| enableGRPC | Enable gRPC endpoint. | bool | false |
+| enableLCD | Enable LCD endpoint. | bool | false |
+| enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
+| useInternalServices | UseInternalServices configures routes to point directly to the node services, bypassing Cosmoguard and any readiness checks. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GatewayRef
+
+GatewayRef identifies the Gateway resource routes should attach to.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name of the Gateway resource. | string | true |
+| namespace | Namespace of the Gateway. Defaults to the resource's namespace. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GlobalGatewayConfig
+
+GlobalGatewayConfig configures Gateway API routes for cross-group routing in ChainNodeSet.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | The name of this gateway route config. | string | true |
+| groups | Groups of nodes to which this gateway route will point to. | []string | true |
+| servicesOnly | ServicesOnly indicates that only global services should be created. No route resources will be created. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
 #### GlobalIngressConfig
 
 GlobalIngressConfig specifies configurations for ingress to expose API endpoints of several groups of nodes.
@@ -276,6 +337,7 @@ GlobalIngressConfig specifies configurations for ingress to expose API endpoints
 | enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
 | enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
 | host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
 | annotations | Annotations to be set on ingress resource. | map[string]string | false |
 | disableTLS | Whether to disable TLS on ingress resource. | bool | false |
 | tlsSecretName | Name of the secret containing TLS certificate. | *string | false |
@@ -308,6 +370,7 @@ IngressConfig specifies configurations for ingress to expose API endpoints.
 | enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
 | enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
 | host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
 | annotations | Annotations to be appended to the ingress. | map[string]string | false |
 | disableTLS | Whether to disable TLS on ingress resource. | bool | false |
 | tlsSecretName | Name of the secret containing TLS certificate. | *string | false |
@@ -329,8 +392,8 @@ NodeGroupSpec sets chainnode configurations for a group.
 | persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. | *[Persistence](#persistence) | false |
 | peers | Additional persistent peers that should be added to these nodes. | [][Peer](#peer) | false |
 | expose | Allows exposing P2P traffic to public. | *[ExposeConfig](#exposeconfig) | false |
-| ingress | Ingress defines configuration for exposing API endpoints through a single shared Ingress, which routes traffic to the group Service backing all nodes in this set. This results in load-balanced access across all nodes (e.g., round-robin). See IngressConfig for detailed endpoint and TLS settings. | *[IngressConfig](#ingressconfig) | false |
-| individualIngresses | IndividualIngresses defines configuration for exposing API endpoints through separate Ingress resources per node in the set. Each Ingress routes traffic directly to its corresponding node's Service (i.e., no load balancing across nodes).\n\nThe same IngressConfig is reused for all nodes, but the `host` field will be prefixed with the node index to generate unique subdomains. For example, if `host = \"fullnodes.cosmopilot.local\"`, then node ingress domains will be:\n  - 0.fullnodes.cosmopilot.local\n  - 1.fullnodes.cosmopilot.local\n  - etc.\n\nThis mode allows targeting specific nodes individually. | *[IngressConfig](#ingressconfig) | false |
+| individualIngresses | IndividualIngresses defines configuration for exposing API endpoints through separate Ingress resources per node in the set. Each Ingress routes traffic directly to its corresponding node's Service (i.e., no load balancing across nodes).\n\nThe same IngressConfig is reused for all nodes, but the `host` field will be prefixed with the node index to generate unique subdomains. For example, if `host = \"fullnodes.cosmopilot.local\"`, then node ingress domains will be:\n  - 0.fullnodes.cosmopilot.local\n  - 1.fullnodes.cosmopilot.local\n  - etc.\n\nMutually exclusive with individualGatewayRoutes. | *[IngressConfig](#ingressconfig) | false |
+| individualGatewayRoutes | IndividualGatewayRoutes configures per-node Gateway API routes. Each node gets its own HTTPRoute/GRPCRoute with hostname prefixed by node index (e.g., 0.host, 1.host). Mutually exclusive with individualIngresses. | *[GatewayConfig](#gatewayconfig) | false |
 | resources | Compute Resources required by the app container. | corev1.ResourceRequirements | false |
 | nodeSelector | Selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. | map[string]string | false |
 | affinity | If specified, the pod's scheduling constraints. | *corev1.Affinity | false |
@@ -366,7 +429,6 @@ NodeSetValidatorConfig contains validator configurations.
 | vpa | Vertical Pod Autoscaling configuration for this node. | *[VerticalAutoscalingConfig](#verticalautoscalingconfig) | false |
 | pdb | Pod Disruption Budget configuration for the validator pod. This is mainly useful in testnets where multiple validators might run in the same namespace. In production mainnet environments, where typically only one validator runs per namespace, this is rarely needed. | *[PdbConfig](#pdbconfig) | false |
 | overrideVersion | OverrideVersion will force validator to use the specified version. NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version based on upgrade history. For unsetting this, you will have to do it here and on the ChainNode itself. | *string | false |
-| ingress | Indicates if an ingress should be created to access API endpoints of validator node and configures it. | *[IngressConfig](#ingressconfig) | false |
 | accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
 | accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
 | valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. | *string | false |
@@ -520,8 +582,19 @@ ExposeConfig allows configuring how P2P endpoint is exposed to public.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | p2p | Whether to expose p2p endpoint for this node. Defaults to `false`. | *bool | false |
-| p2pServiceType | P2pServiceType indicates how P2P port will be exposed. Valid values are: - `LoadBalancer` - `NodePort` (default) | *corev1.ServiceType | false |
+| p2pServiceType | P2pServiceType indicates how P2P port will be exposed. Valid values are: - `LoadBalancer` - `NodePort` (default) The default is applied at runtime so that the mutual-exclusion CEL rule with `gateway` does not match merely because the schema default was applied. | *corev1.ServiceType | false |
 | annotations | Annotations to be appended to the p2p service. | map[string]string | false |
+| gateway | Gateway configures P2P exposure via a Gateway API TCPRoute instead of a dedicated Service. When set, a TCPRoute is created that routes P2P TCP traffic through the referenced Gateway. This is mutually exclusive with p2pServiceType. | *[ExposeGatewayConfig](#exposegatewayconfig) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ExposeGatewayConfig
+
+ExposeGatewayConfig configures P2P exposure through a Gateway API TCPRoute.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| port | Port is the external port on the Gateway listener for P2P traffic. This is the port that peers will use to connect. Defaults to 26656.\n\nWhen this config is applied to a group of nodes with more than one instance (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is treated as the BASE port and each instance attaches to a distinct listener: instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i. The Gateway must be configured with a matching TCP listener for each port. | *int32 | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -693,6 +766,20 @@ StateSyncConfig holds configurations for enabling state-sync snapshots on a node
 | ----- | ----------- | ------ | -------- |
 | snapshotInterval | Block interval at which local state sync snapshots are taken (0 to disable). | int | true |
 | snapshotKeepRecent | Number of recent snapshots to keep and serve (0 to keep all). Defaults to 2. | *int | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SubdomainsConfig
+
+SubdomainsConfig allows overriding the default DNS subdomain prefixes used for each exposed endpoint. Any field left empty falls back to its default (rpc, lcd, grpc, evm-rpc, evm-rpc-ws).
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| rpc | RPC subdomain prefix. Defaults to \"rpc\". | *string | false |
+| grpc | GRPC subdomain prefix. Defaults to \"grpc\". | *string | false |
+| lcd | LCD subdomain prefix. Defaults to \"lcd\". | *string | false |
+| evmRPC | EvmRPC subdomain prefix. Defaults to \"evm-rpc\". | *string | false |
+| evmRpcWS | EvmRpcWs subdomain prefix. Defaults to \"evm-rpc-ws\". | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 
