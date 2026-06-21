@@ -238,9 +238,9 @@ KUBECTL_VERSION ?= v1.34.3
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 HELM_VERSION ?= v3.17.3
 CRD_TO_MARKDOWN_VERSION ?= 0.0.3
-KIND_VERSION ?= 0.25.0
+KIND_VERSION ?= 0.32.0
 ENVTEST_K8S_VERSION ?= 1.32.0
-GINKGO_VERSION ?= v2.27.3
+GINKGO_VERSION ?= v2.29.0
 
 .PHONY: kubectl
 kubectl: $(KUBECTL) ## Download kubectl locally if necessary. If wrong version is installed, it will be removed before downloading.

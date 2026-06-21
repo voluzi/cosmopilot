@@ -27,6 +27,10 @@ const (
 
 	// DefaultIngressClass is the default ingress class name.
 	DefaultIngressClass = "nginx"
+
+	// ReservedValidatorGroupName is the group name reserved for the legacy
+	// singleton .spec.validator. It cannot be used as a node group name.
+	ReservedValidatorGroupName = "validator"
 )
 
 func (nodeSet *ChainNodeSet) GetNamespacedName() string {
@@ -34,11 +38,27 @@ func (nodeSet *ChainNodeSet) GetNamespacedName() string {
 }
 
 func (nodeSet *ChainNodeSet) HasValidator() bool {
-	return nodeSet.Spec.Validator != nil
+	if nodeSet.Spec.Validator != nil {
+		return true
+	}
+	for _, group := range nodeSet.Spec.Nodes {
+		if group.Validator != nil && group.GetInstances() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (nodeSet *ChainNodeSet) ShouldInitGenesis() bool {
-	return nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil
+	if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
+		return true
+	}
+	for _, group := range nodeSet.Spec.Nodes {
+		if group.Validator != nil && group.Validator.Init != nil && group.GetInstances() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (nodeSet *ChainNodeSet) GetLastUpgradeVersion() string {
@@ -81,8 +101,19 @@ func (nodeSet *ChainNodeSet) GetAppSpecWithUpgrades() AppSpec {
 }
 
 func (nodeSet *ChainNodeSet) GetValidatorMinimumGasPrices() string {
-	if nodeSet.HasValidator() && nodeSet.Spec.Validator.Config != nil && nodeSet.Spec.Validator.Config.Override != nil {
-		cfgOverride := *nodeSet.Spec.Validator.Config.Override
+	validator := nodeSet.Spec.Validator
+	if validator == nil {
+		for _, group := range nodeSet.Spec.Nodes {
+			// Skip zero-instance validator groups: they run no validator, so their gas price
+			// must not shadow that of a later group that actually runs validators.
+			if group.Validator != nil && group.GetInstances() > 0 {
+				validator = group.Validator
+				break
+			}
+		}
+	}
+	if validator != nil && validator.Config != nil && validator.Config.Override != nil {
+		cfgOverride := *validator.Config.Override
 		if cfgRaw, ok := cfgOverride["app.toml"]; ok {
 			var cfg map[string]interface{}
 			if err := json.Unmarshal(cfgRaw.Raw, &cfg); err != nil {
@@ -107,6 +138,16 @@ func (group *NodeGroupSpec) GetInstances() int {
 
 func (group *NodeGroupSpec) GetServiceName(owner client.Object) string {
 	return fmt.Sprintf("%s-%s", owner.GetName(), group.Name)
+}
+
+// GetServiceConfig returns the Config that determines which endpoints (EVM, CosmoGuard) this
+// group's pods expose. For a validator group the pods are configured from the validator config,
+// so the group Services must build their ports from that same config to match the pods.
+func (group *NodeGroupSpec) GetServiceConfig() *Config {
+	if group.Validator != nil {
+		return group.Validator.Config
+	}
+	return group.Config
 }
 
 func (group *NodeGroupSpec) ShouldInheritValidatorGasPrice() bool {
@@ -231,11 +272,17 @@ func (val *NodeSetValidatorConfig) HasPdbEnabled() bool {
 	return false
 }
 
-func (val *NodeSetValidatorConfig) GetPdbMinAvailable() int {
+// GetPdbMinAvailable returns the PDB minAvailable for a validator group with the given number of
+// instances. When not explicitly set it defaults to instances-1, matching PdbConfig's documented
+// default of allowing a single disruption (0 for a single-instance validator).
+func (val *NodeSetValidatorConfig) GetPdbMinAvailable(instances int) int {
 	if val != nil && val.PDB != nil && val.PDB.MinAvailable != nil {
 		return *val.PDB.MinAvailable
 	}
-	return 0
+	if instances < 1 {
+		return 0
+	}
+	return instances - 1
 }
 
 // Global Ingress helper methods
@@ -264,9 +311,18 @@ func (gi *GlobalIngressConfig) GetTlsSecretName(owner client.Object) string {
 
 func (gi *GlobalIngressConfig) ShouldUseCosmoGuardPorts(nodeSet *ChainNodeSet) bool {
 	for _, groupName := range gi.Groups {
+		// The reserved "validator" group name refers to the legacy singleton .spec.validator, which is
+		// not in .spec.nodes. Check its config directly so a CosmoGuard-enabled legacy validator targeted
+		// by this global route still selects the CosmoGuard ports.
+		if groupName == ReservedValidatorGroupName {
+			if v := nodeSet.Spec.Validator; v != nil && v.Config != nil && v.Config.CosmoGuardEnabled() {
+				return true
+			}
+			continue
+		}
 		for _, group := range nodeSet.Spec.Nodes {
 			if group.Name == groupName {
-				if group.Config != nil && group.Config.CosmoGuardEnabled() {
+				if cfg := group.GetServiceConfig(); cfg != nil && cfg.CosmoGuardEnabled() {
 					return true
 				}
 			}
@@ -444,9 +500,18 @@ func (gg *GlobalGatewayConfig) GetServiceName(owner client.Object) string {
 // one group enables it — this matches the ingress behavior where all traffic goes through the guard.
 func (gg *GlobalGatewayConfig) ShouldUseCosmoGuardPorts(nodeSet *ChainNodeSet) bool {
 	for _, groupName := range gg.Groups {
+		// The reserved "validator" group name refers to the legacy singleton .spec.validator, which is
+		// not in .spec.nodes. Check its config directly so a CosmoGuard-enabled legacy validator targeted
+		// by this global route still selects the CosmoGuard ports.
+		if groupName == ReservedValidatorGroupName {
+			if v := nodeSet.Spec.Validator; v != nil && v.Config != nil && v.Config.CosmoGuardEnabled() {
+				return true
+			}
+			continue
+		}
 		for _, group := range nodeSet.Spec.Nodes {
 			if group.Name == groupName {
-				if group.Config != nil && group.Config.CosmoGuardEnabled() {
+				if cfg := group.GetServiceConfig(); cfg != nil && cfg.CosmoGuardEnabled() {
 					return true
 				}
 			}

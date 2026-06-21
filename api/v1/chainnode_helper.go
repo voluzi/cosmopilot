@@ -339,6 +339,13 @@ func (val *ValidatorConfig) GetAccountSecretName(obj client.Object) string {
 		return *val.Init.AccountMnemonicSecret
 	}
 
+	// A create-validator node joining an existing chain signs its create-validator tx from the
+	// configured (already funded) operator account. Honor that secret here so all ChainNode paths
+	// resolve to it instead of falling back to the generated <chainnode>-account default.
+	if val.CreateValidator != nil && val.CreateValidator.AccountMnemonicSecret != nil {
+		return *val.CreateValidator.AccountMnemonicSecret
+	}
+
 	return fmt.Sprintf("%s-account", obj.GetName())
 }
 

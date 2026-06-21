@@ -54,6 +54,24 @@ type AccountAssets struct {
 	Assets  []string
 }
 
+// GenesisValidator describes an additional validator to be included in a genesis built by
+// NewGenesis (besides the validator owning the init pod). Its account is added to genesis and
+// a gentx is generated for it using its own consensus key and account, so it becomes part of
+// the initial validator set. Commission and min-self-delegation are taken from the shared
+// Params passed to NewGenesis.
+type GenesisValidator struct {
+	// PrivKeySecret is the name of the secret holding this validator's priv_validator_key.json.
+	PrivKeySecret string
+	// Account holds the validator's account (mnemonic + addresses) used for gentx.
+	Account *Account
+	// NodeInfo holds the validator's moniker and optional metadata.
+	NodeInfo *NodeInfo
+	// StakeAmount to be self-delegated by this validator in its gentx.
+	StakeAmount string
+	// Assets assigned to this validator's account in genesis.
+	Assets []string
+}
+
 type InitCommand struct {
 	Image     string
 	Command   []string

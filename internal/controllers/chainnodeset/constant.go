@@ -1,6 +1,10 @@
 package chainnodeset
 
-import "time"
+import (
+	"time"
+
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+)
 
 const (
 	ChainNodeWaitTimeout = 3 * time.Minute
@@ -9,7 +13,7 @@ const (
 	scopeGlobal = "global"
 	scopeGroup  = "group"
 
-	validatorGroupName = "validator"
+	validatorGroupName = appsv1.ReservedValidatorGroupName
 
 	cosmoseedMountPoint     = "/cosmoseed"
 	cosmoseedConfigFileName = "config.yaml"
@@ -19,4 +23,10 @@ const (
 	cosmoseedP2pPort        = 26656
 
 	timeoutWaitServiceIP = 5 * time.Minute
+
+	// mnemonicKey and privKeyFilename mirror the keys used by the ChainNode controller for the
+	// account mnemonic and priv_validator_key.json secrets, so the secrets pre-created here for
+	// genesis validators are reused as-is by the ChainNode controllers.
+	mnemonicKey     = "mnemonic"
+	privKeyFilename = "priv_validator_key.json"
 )

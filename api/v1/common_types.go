@@ -486,6 +486,40 @@ type GenesisInitConfig struct {
 	// Note: App home is at `/home/app` and `/temp` is a temporary volume shared by all init containers.
 	// +optional
 	AdditionalInitCommands []InitCommand `json:"additionalInitCommands,omitempty"`
+
+	// GenesisValidators lists additional validators (besides the one performing the
+	// initialization) to be included as genesis validators. For each entry, cosmopilot adds
+	// the account to genesis and generates a gentx using the referenced secrets, so the
+	// validator becomes part of the initial validator set.
+	//
+	// This field is primarily populated by ChainNodeSet when a validator group initializes
+	// genesis with more than one instance: every instance of the group is then included in
+	// the same generated genesis. It is generally not meant to be set by hand.
+	// +optional
+	GenesisValidators []GenesisValidator `json:"genesisValidators,omitempty"`
+}
+
+// GenesisValidator references the material needed to include an additional validator in a
+// genesis being initialized by another ChainNode. The referenced secrets must already exist
+// (they are created deterministically by the ChainNodeSet controller for group validators).
+type GenesisValidator struct {
+	// PrivKeySecret is the name of the secret holding this validator's priv_validator_key.json.
+	// +kubebuilder:validation:MinLength=1
+	PrivKeySecret string `json:"privKeySecret"`
+
+	// AccountMnemonicSecret is the name of the secret holding this validator's account mnemonic.
+	// +kubebuilder:validation:MinLength=1
+	AccountMnemonicSecret string `json:"accountMnemonicSecret"`
+
+	// Moniker for this validator's gentx.
+	// +kubebuilder:validation:MinLength=1
+	Moniker string `json:"moniker"`
+
+	// Assets is the list of tokens and amounts assigned to this validator's account in genesis.
+	Assets []string `json:"assets"`
+
+	// StakeAmount to be self-delegated by this validator in its gentx.
+	StakeAmount string `json:"stakeAmount"`
 }
 
 // AccountAssets represents the assets associated with an account.

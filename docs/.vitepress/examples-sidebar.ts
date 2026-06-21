@@ -23,6 +23,7 @@ export const examplesSidebar = [
     base: '/04-examples/nibiru/',
     items: [
       { text: 'Mainnet Fullnode', link: 'mainnet-fullnode' },
+      { text: 'Testnet Multi Validator', link: 'testnet-multi-validator' },
       { text: 'Testnet With Fullnode', link: 'testnet-with-fullnode' }
     ]
   },

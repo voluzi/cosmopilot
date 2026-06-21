@@ -2,6 +2,8 @@
 
 This page explains how to configure a `ChainNode` or `ChainNodeSet` to run a validator. `Cosmopilot` provides multiple options to suit different use cases.
 
+The options below (existing key, create-validator, genesis init) apply to a single validator configured under `.spec.validator`. A `ChainNodeSet` can also run **multiple validators** by declaring validator groups under `.spec.nodes[]` — see [Multiple Validators](#multiple-validators).
+
 ## Existing Consensus Key
 
 ::: warning Important
@@ -60,6 +62,59 @@ validator:
     gasPrices: "0.025unibi"
     minSelfDelegation: "1"
 ```
+
+## Multiple Validators
+
+The `.spec.validator` field configures a single validator. To run **several validators in one `ChainNodeSet`**, declare validator groups under `.spec.nodes[]`: a group is a validator group when it has a `validator` block, and `instances` controls how many validators it runs. Each instance gets its **own consensus key and operator account**, created automatically by `Cosmopilot` (`<nodeset>-<group>-<index>-priv-key` and `<nodeset>-<group>-<index>-account`).
+
+There are two ways to add validators, depending on whether you are bootstrapping a new network or joining an existing one.
+
+### Genesis validators
+
+Use a group with `validator.init` to bake multiple validators into a brand-new genesis. Instance `0` generates the genesis and the rest are added to it as full validators:
+
+```yaml
+nodes:
+  - name: validators
+    instances: 3
+    validator:
+      accountPrefix: nibi
+      valPrefix: nibivaloper
+      init:
+        chainID: my-testnet-1
+        assets: ["100000000unibi"]
+        stakeAmount: "1000000unibi"
+```
+
+See [Initializing a New Network → Multiple Genesis Validators](10-initializing-new-network#multiple-genesis-validators) and the [Nibiru Testnet Multi Validator](/04-examples/nibiru/testnet-multi-validator) example.
+
+### Validators on a running chain
+
+Use a group with `validator.createValidator` (together with an external `.spec.genesis`) to add validators to a chain that is already running. Each instance submits its own `create-validator` transaction once it is synced:
+
+```yaml
+genesis:
+  url: https://example.com/my-network-genesis.json
+  chainID: my-network-1
+
+nodes:
+  - name: validators
+    instances: 2
+    validator:
+      accountPrefix: nibi
+      valPrefix: nibivaloper
+      createValidator:
+        stakeAmount: "1000000unibi"
+        gasPrices: "0.025unibi"
+        # accountMnemonicSecret: my-funded-account  # optional; otherwise an account is generated per instance and must be funded
+```
+
+### Things to know
+
+- **Per-instance keys are mandatory.** A multi-instance validator group cannot set a shared `privateKeySecret`, `tmKMS`, or account secret — that would make every instance sign with the same key (double-signing). Single-instance validator groups may use them, just like `.spec.validator`.
+- **`validator` is a reserved group name** (it backs the legacy `.spec.validator`). Use any other name for your groups.
+- **Genesis (`init`) validator groups are immutable after the genesis is created** — you cannot add, remove, scale, or change their keys. Use a `createValidator` group to grow a running validator set.
+- **Backward compatible.** The singleton `.spec.validator` continues to work unchanged and is equivalent to a one-instance validator group that keeps the legacy ChainNode name `<nodeset>-validator`.
 
 ## Initializing a New Network
 

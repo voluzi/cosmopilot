@@ -23,17 +23,14 @@ func AddOrUpdateNodeStatus(nodeSet *v1.ChainNodeSet, status v1.ChainNodeSetNodeS
 		return
 	}
 
-	found := false
 	for i, s := range nodeSet.Status.Nodes {
 		if s.Name == status.Name {
-			found = true
 			nodeSet.Status.Nodes[i] = status
+			return
 		}
 	}
 
-	if !found {
-		nodeSet.Status.Nodes = append(nodeSet.Status.Nodes, status)
-	}
+	nodeSet.Status.Nodes = append(nodeSet.Status.Nodes, status)
 }
 
 func DeleteNodeStatus(nodeSet *v1.ChainNodeSet, name string) {
@@ -44,6 +41,35 @@ func DeleteNodeStatus(nodeSet *v1.ChainNodeSet, name string) {
 	for i, s := range nodeSet.Status.Nodes {
 		if s.Name == name {
 			nodeSet.Status.Nodes = append(nodeSet.Status.Nodes[:i], nodeSet.Status.Nodes[i+1:]...)
+			return
+		}
+	}
+}
+
+func AddOrUpdateValidatorStatus(nodeSet *v1.ChainNodeSet, status v1.ChainNodeSetValidatorStatus) {
+	if nodeSet.Status.Validators == nil {
+		nodeSet.Status.Validators = []v1.ChainNodeSetValidatorStatus{status}
+		return
+	}
+
+	for i, s := range nodeSet.Status.Validators {
+		if s.Name == status.Name {
+			nodeSet.Status.Validators[i] = status
+			return
+		}
+	}
+
+	nodeSet.Status.Validators = append(nodeSet.Status.Validators, status)
+}
+
+func DeleteValidatorStatus(nodeSet *v1.ChainNodeSet, name string) {
+	if nodeSet.Status.Validators == nil {
+		return
+	}
+
+	for i, s := range nodeSet.Status.Validators {
+		if s.Name == name {
+			nodeSet.Status.Validators = append(nodeSet.Status.Validators[:i], nodeSet.Status.Validators[i+1:]...)
 			return
 		}
 	}
@@ -155,6 +181,27 @@ func (r *Reconciler) ensureStatefulSet(ctx context.Context, ss *appsv1.StatefulS
 
 	*ss = *currentStatefulset
 	return nil
+}
+
+// parsePublicAddress parses a ChainNode Status.PublicAddress of the form "<nodeID>@<host>:<port>"
+// into its host and port. ok is false when the value is empty or not in that form.
+func parsePublicAddress(publicAddress string) (host string, port int, ok bool) {
+	if publicAddress == "" {
+		return "", 0, false
+	}
+	hostPort := strings.Split(publicAddress, ":")
+	if len(hostPort) != 2 {
+		return "", 0, false
+	}
+	p, err := strconv.Atoi(hostPort[1])
+	if err != nil {
+		return "", 0, false
+	}
+	idHost := strings.Split(hostPort[0], "@")
+	if len(idHost) != 2 {
+		return "", 0, false
+	}
+	return idHost[1], p, true
 }
 
 func AddressWithPortFromFullAddress(fullAddress string) string {
