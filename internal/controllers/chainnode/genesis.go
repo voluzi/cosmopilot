@@ -28,9 +28,22 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 			return fmt.Errorf("pvc not found for chainnode %s/%s", chainNode.Namespace, chainNode.Name)
 		}
 		if v, ok := pvc.Annotations[controllers.AnnotationGenesisDownloaded]; ok && v == controllers.StringValueTrue {
+			// Genesis is on the data volume (always an external source). Record the digest if missing here
+			// too — this branch returns before the chainID branch below, so otherwise a data-volume node
+			// would keep an empty digest and could later be converted to an init validator (see no-webhook
+			// guard in ChainNode.Validate).
+			if updated, err := r.recordGenesisDigestIfMissing(ctx, chainNode); err != nil || updated {
+				return err
+			}
 			return nil
 		}
 	} else if chainNode.Status.ChainID != "" {
+		// Genesis already exists. Record the genesis signing digest if missing so the no-webhook reconcile
+		// path can reject post-genesis init changes (real fingerprint for an initializer, external sentinel
+		// for a consumer). Also backfills nodes upgraded from a version that predates the digest.
+		if updated, err := r.recordGenesisDigestIfMissing(ctx, chainNode); err != nil || updated {
+			return err
+		}
 		return nil
 	}
 
@@ -49,6 +62,24 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 		return nil
 	}
 	return r.getGenesis(ctx, app, chainNode)
+}
+
+// recordGenesisDigestIfMissing records the genesis signing fingerprint (for a node that initialized
+// genesis) or the external sentinel (for one that consumed an external genesis) into status the first
+// time genesis is established, so the no-webhook reconcile path can reject post-genesis changes to
+// .spec.validator.init without a previous spec to diff against. It is recorded once and never
+// overwritten — the genesis is immutable — and also backfills nodes upgraded from a version that
+// predates the digest. Returns whether it performed a status update.
+func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	if chainNode.Status.GenesisSigningDigest != "" {
+		return false, nil
+	}
+	if chainNode.ShouldInitGenesis() {
+		chainNode.Status.GenesisSigningDigest = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
+	} else {
+		chainNode.Status.GenesisSigningDigest = appsv1.GenesisDigestExternal
+	}
+	return true, r.Status().Update(ctx, chainNode)
 }
 
 func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode) error {
@@ -277,12 +308,41 @@ func (r *Reconciler) initGenesis(ctx context.Context, app *chainutils.App, chain
 		nodeInfo.Identity = chainNode.Spec.Validator.Info.Identity
 	}
 
+	// Gather any additional genesis validators. Their accounts are derived directly from their
+	// mnemonic secrets (created up front by the ChainNodeSet controller), so we never depend on
+	// other ChainNode controllers having populated their status first. Account prefixes and HD
+	// path are shared across the validator group, so we reuse this validator's settings.
+	extraValidators := make([]*chainutils.GenesisValidator, 0, len(chainNode.Spec.Validator.Init.GenesisValidators))
+	for _, gv := range chainNode.Spec.Validator.Init.GenesisValidators {
+		mnemonicSecret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: chainNode.GetNamespace(), Name: gv.AccountMnemonicSecret}, mnemonicSecret); err != nil {
+			return fmt.Errorf("failed to get account mnemonic secret %s for genesis validator: %w", gv.AccountMnemonicSecret, err)
+		}
+		gvAccount, err := chainutils.AccountFromMnemonic(
+			string(mnemonicSecret.Data[MnemonicKey]),
+			chainNode.Spec.Validator.GetAccountPrefix(),
+			chainNode.Spec.Validator.GetValPrefix(),
+			chainNode.Spec.Validator.GetAccountHDPath(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create account from mnemonic for genesis validator %s: %w", gv.Moniker, err)
+		}
+		extraValidators = append(extraValidators, &chainutils.GenesisValidator{
+			PrivKeySecret: gv.PrivKeySecret,
+			Account:       gvAccount,
+			NodeInfo:      &chainutils.NodeInfo{Moniker: gv.Moniker},
+			StakeAmount:   gv.StakeAmount,
+			Assets:        gv.Assets,
+		})
+	}
+
 	genesis, err := app.NewGenesis(
 		ctx,
 		chainNode.Spec.Validator.GetPrivKeySecretName(chainNode),
 		account,
 		nodeInfo,
 		genesisParams,
+		extraValidators,
 		initCommands...,
 	)
 	if err != nil {
@@ -310,8 +370,11 @@ func (r *Reconciler) initGenesis(ctx context.Context, app *chainutils.App, chain
 		return fmt.Errorf("failed to create genesis configmap: %w", err)
 	}
 
-	// update chainID in status
+	// Update chainID in status, and record the genesis signing fingerprint so the no-webhook reconcile
+	// path can reject post-genesis changes to .validator.init (it validates with Validate(nil), with no
+	// previous spec to diff against).
 	logger.Info("updating .status.chainID", "chainID", chainNode.Spec.Validator.Init.ChainID)
 	chainNode.Status.ChainID = chainNode.Spec.Validator.Init.ChainID
+	chainNode.Status.GenesisSigningDigest = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
 	return r.Status().Update(ctx, chainNode)
 }

@@ -10,4 +10,5 @@ const (
 	CommissionRate          = "commission-rate"
 	MinSelfDelegation       = "min-self-delegation"
 	Node                    = "node"
+	OutputDocument          = "output-document"
 )

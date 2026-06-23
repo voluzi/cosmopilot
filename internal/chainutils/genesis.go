@@ -29,6 +29,10 @@ var (
 	}
 )
 
+func genesisPodRunningTimeout(extraValidators []*GenesisValidator) time.Duration {
+	return time.Minute + time.Duration(len(extraValidators))*2*time.Minute
+}
+
 func ExtractChainIdFromGenesis(genesis string) (string, error) {
 	var genesisJson map[string]interface{}
 	if err := json.Unmarshal([]byte(genesis), &genesisJson); err != nil {
@@ -50,9 +54,84 @@ func (a *App) NewGenesis(ctx context.Context,
 	account *Account,
 	nodeInfo *NodeInfo,
 	params *Params,
+	extraValidators []*GenesisValidator,
 	initCommands ...*InitCommand,
 ) (string, error) {
+	pod := a.buildGenesisPod(privkeySecret, account, nodeInfo, params, extraValidators, initCommands)
 
+	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {
+		return "", err
+	}
+
+	ph := k8s.NewPodHelper(a.client, a.restConfig, pod)
+
+	// Delete the pod if it already exists
+	logger := log.FromContext(ctx)
+	if err := ph.Delete(ctx); err != nil {
+		logger.V(1).Info("failed to delete existing genesis pod (may not exist)", "error", err)
+	}
+
+	// Delete the pod independently of the result
+	defer func() {
+		if err := ph.Delete(ctx); err != nil {
+			logger.Error(err, "failed to cleanup genesis pod")
+		}
+	}()
+
+	// Create the pod
+	if err := ph.Create(ctx); err != nil {
+		return "", err
+	}
+
+	// Wait for load-account container to be running
+	if err := ph.WaitForInitContainerRunning(ctx, "load-account", time.Minute); err != nil {
+		return "", err
+	}
+
+	// Attach to load-account container to insert mnemonic
+	var input bytes.Buffer
+	input.WriteString(fmt.Sprintf("%s\n", account.Mnemonic))
+	if _, _, err := ph.Attach(ctx, "load-account", &input); err != nil {
+		return "", err
+	}
+
+	// Feed each extra validator's mnemonic into its own load-account container. Init containers
+	// run sequentially, so we wait for each container to be running (blocked on stdin) before
+	// attaching, in the same order they appear in the pod spec.
+	for i, ev := range extraValidators {
+		container := fmt.Sprintf("load-account-%d", i+1)
+		if err := ph.WaitForInitContainerRunning(ctx, container, 5*time.Minute); err != nil {
+			return "", err
+		}
+		var evInput bytes.Buffer
+		evInput.WriteString(fmt.Sprintf("%s\n", ev.Account.Mnemonic))
+		if _, _, err := ph.Attach(ctx, container, &evInput); err != nil {
+			return "", err
+		}
+	}
+
+	// Wait for the pod to be running
+	if err := ph.WaitForPodRunning(ctx, genesisPodRunningTimeout(extraValidators)); err != nil {
+		return "", err
+	}
+
+	genesis, _, err := ph.Exec(ctx, "busybox", []string{"cat", filepath.Join(defaultHome, defaultGenesisFile)})
+	return genesis, err
+}
+
+// buildGenesisPod constructs the ephemeral pod that initializes a new genesis. The pod runs a
+// sequence of init containers: chain init, consensus-key and account loading, genesis account and
+// gentx generation for the owning validator and every extra genesis validator, and finally
+// collect-gentxs. Init-container names are unique across the regular accounts and the extra
+// validators so the resulting pod spec is always valid.
+func (a *App) buildGenesisPod(
+	privkeySecret string,
+	account *Account,
+	nodeInfo *NodeInfo,
+	params *Params,
+	extraValidators []*GenesisValidator,
+	initCommands []*InitCommand,
+) *corev1.Pod {
 	var (
 		dataVolumeMount = corev1.VolumeMount{
 			Name:      "data",
@@ -231,6 +310,82 @@ func (a *App) NewGenesis(ctx context.Context,
 		SecurityContext: k8s.RestrictedSecurityContext(),
 	})
 
+	// Add the extra genesis validators. Each one reuses the same chain home: we swap in its
+	// consensus key, recover its account into the keyring under a distinct name, add its account
+	// to genesis and generate a gentx for it. Each gentx is written to a distinct file inside the
+	// gentx directory (the default filename is derived from the shared node key, so without an
+	// explicit output document later gentxs would overwrite earlier ones). collect-gentxs then
+	// picks up every gentx at once.
+	genTxDir := filepath.Join(defaultHome, defaultConfig, "gentx")
+	for i, ev := range extraValidators {
+		idx := i + 1
+		accountName := fmt.Sprintf("validator-%d", idx)
+		privKeyMount := corev1.VolumeMount{
+			Name:      fmt.Sprintf("priv-key-%d", idx),
+			MountPath: fmt.Sprintf("/secrets-%d", idx),
+		}
+
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: privKeyMount.Name,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: ev.PrivKeySecret,
+				},
+			},
+		})
+
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers,
+			corev1.Container{
+				Name:            fmt.Sprintf("load-priv-key-%d", idx),
+				Image:           "busybox",
+				Command:         []string{"/bin/sh"},
+				Args:            []string{"-c", fmt.Sprintf("cp %s/priv_validator_key.json /home/app/config/priv_validator_key.json", privKeyMount.MountPath)},
+				VolumeMounts:    []corev1.VolumeMount{dataVolumeMount, privKeyMount},
+				SecurityContext: k8s.RestrictedSecurityContext(),
+			},
+			corev1.Container{
+				Name:            fmt.Sprintf("load-account-%d", idx),
+				Image:           a.image,
+				ImagePullPolicy: a.pullPolicy,
+				Command:         []string{a.binary},
+				Args:            a.cmd.RecoverAccountArgs(accountName),
+				Stdin:           true,
+				StdinOnce:       true,
+				VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+				SecurityContext: k8s.RestrictedSecurityContext(),
+			},
+			corev1.Container{
+				// Distinct from the regular "add-account-%d" containers above so the two index
+				// spaces never produce colliding container names in the same pod.
+				Name:            fmt.Sprintf("add-validator-account-%d", idx),
+				Image:           a.image,
+				ImagePullPolicy: a.pullPolicy,
+				Command:         []string{a.binary},
+				Args:            a.cmd.AddGenesisAccountArgs(ev.Account.Address, ev.Assets),
+				VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+				SecurityContext: k8s.RestrictedSecurityContext(),
+			},
+			corev1.Container{
+				Name:            fmt.Sprintf("gentx-%d", idx),
+				Image:           a.image,
+				ImagePullPolicy: a.pullPolicy,
+				Command:         []string{a.binary},
+				Args: a.cmd.GenTxArgs(accountName, ev.NodeInfo.Moniker, ev.StakeAmount, params.ChainID,
+					sdkcmd.WithArg(sdkcmd.CommissionMaxChangeRate, params.CommissionMaxChangeRate),
+					sdkcmd.WithArg(sdkcmd.CommissionMaxRate, params.CommissionMaxRate),
+					sdkcmd.WithArg(sdkcmd.CommissionRate, params.CommissionRate),
+					sdkcmd.WithArg(sdkcmd.OutputDocument, filepath.Join(genTxDir, fmt.Sprintf("gentx-%d.json", idx))),
+					sdkcmd.WithOptionalArg(sdkcmd.MinSelfDelegation, params.MinSelfDelegation),
+					sdkcmd.WithOptionalArg(sdkcmd.Details, ev.NodeInfo.Details),
+					sdkcmd.WithOptionalArg(sdkcmd.Website, ev.NodeInfo.Website),
+					sdkcmd.WithOptionalArg(sdkcmd.Identity, ev.NodeInfo.Identity),
+				),
+				VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+				SecurityContext: k8s.RestrictedSecurityContext(),
+			},
+		)
+	}
+
 	// Add collect-gentxs container
 	pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 		Name:            "collect-gentxs",
@@ -242,49 +397,7 @@ func (a *App) NewGenesis(ctx context.Context,
 		SecurityContext: k8s.RestrictedSecurityContext(),
 	})
 
-	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {
-		return "", err
-	}
-
-	ph := k8s.NewPodHelper(a.client, a.restConfig, pod)
-
-	// Delete the pod if it already exists
-	logger := log.FromContext(ctx)
-	if err := ph.Delete(ctx); err != nil {
-		logger.V(1).Info("failed to delete existing genesis pod (may not exist)", "error", err)
-	}
-
-	// Delete the pod independently of the result
-	defer func() {
-		if err := ph.Delete(ctx); err != nil {
-			logger.Error(err, "failed to cleanup genesis pod")
-		}
-	}()
-
-	// Create the pod
-	if err := ph.Create(ctx); err != nil {
-		return "", err
-	}
-
-	// Wait for load-account container to be running
-	if err := ph.WaitForInitContainerRunning(ctx, "load-account", time.Minute); err != nil {
-		return "", err
-	}
-
-	// Attach to load-account container to insert mnemonic
-	var input bytes.Buffer
-	input.WriteString(fmt.Sprintf("%s\n", account.Mnemonic))
-	if _, _, err := ph.Attach(ctx, "load-account", &input); err != nil {
-		return "", err
-	}
-
-	// Wait for the pod to be running
-	if err := ph.WaitForPodRunning(ctx, time.Minute); err != nil {
-		return "", err
-	}
-
-	genesis, _, err := ph.Exec(ctx, "busybox", []string{"cat", filepath.Join(defaultHome, defaultGenesisFile)})
-	return genesis, err
+	return pod
 }
 
 func (a *App) LoadGenesisFromConfigMap(ctx context.Context, configMapName string) (string, error) {

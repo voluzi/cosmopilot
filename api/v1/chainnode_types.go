@@ -220,6 +220,13 @@ type ChainNodeStatus struct {
 	// +optional
 	Jailed bool `json:"jailed,omitempty"`
 
+	// GenesisSigningDigest is a controller-internal fingerprint of the genesis-initializing validator's
+	// signing material and init config, recorded when this node initializes genesis. It lets the
+	// no-webhook reconcile path reject post-genesis changes to .spec.validator.init without a previous
+	// spec to diff against. Set only for genesis-initializing validators; not meant to be set by hand.
+	// +optional
+	GenesisSigningDigest string `json:"genesisSigningDigest,omitempty"`
+
 	// Application version currently deployed.
 	// +optional
 	AppVersion string `json:"appVersion,omitempty"`

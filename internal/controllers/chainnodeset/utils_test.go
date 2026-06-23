@@ -9,6 +9,51 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
+func TestValidatorNodeName(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset"},
+	}
+
+	tests := []struct {
+		name  string
+		group string
+		index int
+		want  string
+	}{
+		{
+			name:  "legacy singleton uses unindexed validator name",
+			group: validatorGroupName,
+			index: 0,
+			want:  "test-nodeset-validator",
+		},
+		{
+			name:  "group validator uses indexed name",
+			group: "validators",
+			index: 0,
+			want:  "test-nodeset-validators-0",
+		},
+		{
+			name:  "group validator keeps index for higher instances",
+			group: "validators",
+			index: 2,
+			want:  "test-nodeset-validators-2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validatorNodeName(nodeSet, tt.group, tt.index)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	// A group validator must never collide with the legacy singleton name. The webhook
+	// reserves the "validator" group name, so any real group yields a distinct indexed name.
+	singleton := validatorNodeName(nodeSet, validatorGroupName, 0)
+	group := validatorNodeName(nodeSet, "validators", 0)
+	assert.NotEqual(t, singleton, group)
+}
+
 func TestAddOrUpdateNodeStatus(t *testing.T) {
 	tests := []struct {
 		name     string

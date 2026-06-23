@@ -199,7 +199,8 @@ func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 		},
 	}
 
-	if group.Config.IsEvmEnabled() {
+	cfg := group.GetServiceConfig()
+	if cfg.IsEvmEnabled() {
 		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
 			Name:       controllers.EvmRpcPortName,
 			Protocol:   corev1.ProtocolTCP,
@@ -214,11 +215,11 @@ func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 		})
 	}
 
-	if group.Config != nil && group.Config.CosmoGuardEnabled() {
+	if cfg != nil && cfg.CosmoGuardEnabled() {
 		svc.Spec.Ports[0].TargetPort = intstr.FromInt32(controllers.CosmoGuardRpcPort)
 		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)
-		if group.Config.IsEvmEnabled() {
+		if cfg.IsEvmEnabled() {
 			svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
 			svc.Spec.Ports[4].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
 		}
@@ -266,7 +267,7 @@ func (r *Reconciler) getInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, group 
 		},
 	}
 
-	if group.Config.IsEvmEnabled() {
+	if group.GetServiceConfig().IsEvmEnabled() {
 		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
 			Name:       controllers.EvmRpcPortName,
 			Protocol:   corev1.ProtocolTCP,

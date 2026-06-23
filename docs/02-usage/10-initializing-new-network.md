@@ -23,13 +23,38 @@ validator:
 This configuration will create a new network with the ID `my-testnet-1` and a single validator with assets of `100000000unibi` and `500000000uusdt`, staking `1000000unibi`.
 
 
-## Providing Validator Info
+## Multiple Genesis Validators
 
-::: warning Important
-Currently, Cosmopilot supports only one validator in a single `ChainNodeSet`. You can provision additional validators by adding extra `ChainNode` resources like in this [example](/04-examples/cosmos/multi-validator-devnet).
+A `ChainNodeSet` can initialize a new network with **more than one validator** in the genesis. Instead of the singleton `.spec.validator`, define a validator group under `.spec.nodes[]` and set `instances` to the number of validators you want:
+
+```yaml{2-3}
+nodes:
+  - name: validators
+    instances: 3
+    validator:
+      accountPrefix: nibi
+      valPrefix: nibivaloper
+      init:
+        chainID: my-testnet-1
+        assets: ["100000000unibi"]
+        stakeAmount: "1000000unibi"
+```
+
+Instance `0` of the group generates the genesis; the remaining instances are added to that same genesis as full validators. Each instance gets its **own consensus key and operator account** — Cosmopilot creates the per-instance secrets (`<nodeset>-<group>-<index>-priv-key` and `<nodeset>-<group>-<index>-account`) automatically, so every validator is in the initial validator set with a distinct key. All instances share the same `init` parameters (`assets`, `stakeAmount`, commission, …).
+
+See the [Nibiru Testnet Multi Validator](/04-examples/nibiru/testnet-multi-validator) example for a complete manifest.
+
+::: info
+Because each instance must sign with its own key, a multi-instance validator group cannot set a shared `privateKeySecret`, `tmKMS`, or `init.accountMnemonicSecret`. The group name `validator` is reserved for the legacy `.spec.validator`; use any other name.
 :::
 
-When initializing a new network, you can provide additional validator details using the `.spec.validator.info` field:
+::: warning Immutable after creation
+Once the genesis exists, its validator set is fixed. You cannot add, remove, scale, or change the keys of a genesis (`init`) validator group afterwards. To add validators to an already-running chain, use a [create-validator](09-validator#automated-create-validator) group instead.
+:::
+
+## Providing Validator Info
+
+When initializing a new network, you can provide additional validator details using the `.spec.validator.info` field (or `.spec.nodes[].validator.info` for a group):
 
 ```yaml{2-4}
 validator:

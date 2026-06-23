@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +39,9 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 	totalInstances := 0
 	nodeSetCopy := nodeSet.DeepCopy()
 
-	if nodeSet.HasValidator() {
+	// The legacy singleton .spec.validator adds one instance. Group validators are
+	// already counted via group.GetInstances() below.
+	if nodeSet.Spec.Validator != nil {
 		totalInstances += 1
 	}
 
@@ -60,9 +61,18 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 	// Exclude validator group
 	delete(groupList, validatorGroupName)
 
+	// Groups that are now validator-only. Their ChainNodes are reconciled by ensureValidator, so
+	// they are excluded from the index-based deleted-group cleanup below. They still need any
+	// regular ChainNodes left over from a previous regular-group config removed (see further down).
+	validatorGroups := map[string]struct{}{}
+
 	for _, group := range nodeSet.Spec.Nodes {
-		if err := r.ensureNodeGroup(ctx, nodeSet, group); err != nil {
-			return err
+		if group.Validator == nil {
+			if err := r.ensureNodeGroup(ctx, nodeSet, group); err != nil {
+				return err
+			}
+		} else {
+			validatorGroups[group.Name] = struct{}{}
 		}
 		totalInstances += group.GetInstances()
 		delete(groupList, group.Name)
@@ -79,9 +89,33 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 		}
 	}
 
+	// When a group is changed from a regular group to a validator group (e.g. 3 regular instances
+	// to a single validator), ensureValidator reconciles the validator ChainNodes and removes stale
+	// ones labelled validator=true, but it leaves behind the old regular ChainNodes (which carry no
+	// validator label). Remove those here so they do not linger. The validator ChainNodes for these
+	// groups are kept: they are labelled validator=true and are the desired state.
+	for _, node := range chainNodes.Items {
+		group, ok := node.Labels[controllers.LabelChainNodeSetGroup]
+		if !ok {
+			continue
+		}
+		if _, isValidatorGroup := validatorGroups[group]; !isValidatorGroup {
+			continue
+		}
+		if node.Labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue {
+			continue
+		}
+		logger.Info("removing stale regular chainnode from validator group", "group", group, "chainnode", node.Name)
+		if err := r.maybeDeleteNode(ctx, nodeSet, node.Name); err != nil {
+			return err
+		}
+	}
+
+	// Assign the instance count before the comparison so a validator-only change (which does not
+	// touch node status here) is still detected and persisted.
+	nodeSet.Status.Instances = totalInstances
 	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {
 		log.FromContext(ctx).Info("updating .status.instances", "instances", totalInstances)
-		nodeSet.Status.Instances = totalInstances
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
@@ -128,7 +162,7 @@ func (r *Reconciler) ensureNodeGroup(ctx context.Context, nodeSet *appsv1.ChainN
 		if err != nil {
 			return err
 		}
-		if err := r.ensureNode(ctx, nodeSet, node, false); err != nil {
+		if err := r.ensureNode(ctx, nodeSet, node, waitNone); err != nil {
 			return err
 		}
 
@@ -140,25 +174,36 @@ func (r *Reconciler) ensureNodeGroup(ctx context.Context, nodeSet *appsv1.ChainN
 			Seed:    node.Status.SeedMode,
 			Group:   group.Name,
 		}
-		if node.Status.PublicAddress != "" {
-			if parts := strings.Split(node.Status.PublicAddress, ":"); len(parts) == 2 {
-				publicPort, err := strconv.Atoi(parts[1])
-				if err != nil {
-					return err
-				}
-				if parts = strings.Split(parts[0], "@"); len(parts) == 2 {
-					nodeStatus.Public = true
-					nodeStatus.PublicPort = publicPort
-					nodeStatus.PublicAddress = parts[1]
-				}
-			}
+		if host, port, ok := parsePublicAddress(node.Status.PublicAddress); ok {
+			nodeStatus.Public = true
+			nodeStatus.PublicAddress = host
+			nodeStatus.PublicPort = port
 		}
 		AddOrUpdateNodeStatus(nodeSet, nodeStatus)
 	}
 	return nil
 }
 
-func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, node *appsv1.ChainNode, waitRunning bool) error {
+// chainNodeWait selects what condition (if any) ensureNode blocks on after creating or
+// updating a ChainNode.
+type chainNodeWait int
+
+const (
+	// waitNone returns as soon as the ChainNode is reconciled.
+	waitNone chainNodeWait = iota
+
+	// waitRunningOrSyncing blocks until the ChainNode is running, syncing or snapshotting.
+	waitRunningOrSyncing
+
+	// waitGenesisReady blocks only until the ChainNode has produced a genesis (its chainID is
+	// populated). This is used for genesis-initializing validators in a multi-validator group:
+	// such a chain only produces blocks once every group validator is online, so blocking on
+	// "running" would deadlock (the remaining validators are created only after this wait
+	// returns). The genesis (and its ConfigMap) exists as soon as the chainID is set.
+	waitGenesisReady
+)
+
+func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, node *appsv1.ChainNode, wait chainNodeWait) error {
 	logger := log.FromContext(ctx)
 
 	currentNode := &appsv1.ChainNode{}
@@ -174,11 +219,7 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 				"ChainNode %s created",
 				node.GetName(),
 			)
-			if waitRunning {
-				logger.V(1).Info("waiting for chainnode", "chainnode", node.GetName())
-				return r.waitChainNodeRunningOrSyncing(node)
-			}
-			return nil
+			return r.waitForChainNode(node, wait)
 		}
 		return err
 	}
@@ -205,11 +246,26 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 		*node = *currentNode
 	}
 
-	if waitRunning {
-		logger.V(1).Info("waiting for chainnode", "chainnode", node.GetName())
-		return r.waitChainNodeRunningOrSyncing(node)
+	return r.waitForChainNode(node, wait)
+}
+
+// waitForChainNode blocks until the ChainNode satisfies the given wait condition, returning
+// immediately for waitNone.
+func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait) error {
+	switch wait {
+	case waitRunningOrSyncing:
+		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {
+			return cn.Status.Phase == appsv1.PhaseChainNodeRunning ||
+				cn.Status.Phase == appsv1.PhaseChainNodeSyncing ||
+				cn.Status.Phase == appsv1.PhaseChainNodeSnapshotting
+		})
+	case waitGenesisReady:
+		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {
+			return cn.Status.ChainID != ""
+		})
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group string, index int) error {
@@ -243,9 +299,15 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group.Name, index),
 			Namespace: nodeSet.GetNamespace(),
+			// Stamp the internal validator label false explicitly. WithChainNodeSetLabels copies the
+			// ChainNodeSet's user labels onto this ChainNode; if the parent carries a user label
+			// "validator=true", it would otherwise make the validator cleanup selector treat this
+			// regular node as a stale validator and delete it. Setting it here ensures the internal
+			// semantics win over any inherited user label (MergeMaps lets the explicit value override).
 			Labels: WithChainNodeSetLabels(nodeSet, map[string]string{
-				controllers.LabelChainNodeSet:      nodeSet.GetName(),
-				controllers.LabelChainNodeSetGroup: group.Name,
+				controllers.LabelChainNodeSet:          nodeSet.GetName(),
+				controllers.LabelChainNodeSetGroup:     group.Name,
+				controllers.LabelChainNodeSetValidator: strconv.FormatBool(false),
 			}),
 		},
 		Spec: appsv1.ChainNodeSpec{
@@ -299,9 +361,13 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 				}
 			} else {
 				cfg := *node.Spec.Config.Override
-				var cfgData map[string]interface{}
-				if err := json.Unmarshal(cfg[controllers.AppTomlFile].Raw, &cfgData); err != nil {
-					return nil, fmt.Errorf("unmarshaling app config: %w", err)
+				// The override may exist for other files only (no app.toml entry yet). Start from an
+				// empty object in that case instead of unmarshaling a nil Raw, which would error.
+				cfgData := map[string]interface{}{}
+				if raw := cfg[controllers.AppTomlFile].Raw; len(raw) > 0 {
+					if err := json.Unmarshal(raw, &cfgData); err != nil {
+						return nil, fmt.Errorf("unmarshaling app config: %w", err)
+					}
 				}
 
 				cfgData[controllers.MinimumGasPricesKey] = price
@@ -345,15 +411,11 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 	return node, controllerutil.SetControllerReference(nodeSet, node, r.Scheme)
 }
 
-func (r *Reconciler) waitChainNodeRunningOrSyncing(node *appsv1.ChainNode) error {
-	if node.Status.Phase == appsv1.PhaseChainNodeRunning {
+// waitChainNode blocks until the given ChainNode satisfies validateFunc, the wait times out, or
+// the ChainNode is deleted. On success, node is updated in place with the latest observed state.
+func (r *Reconciler) waitChainNode(node *appsv1.ChainNode, validateFunc func(*appsv1.ChainNode) bool) error {
+	if validateFunc(node) {
 		return nil
-	}
-
-	validateFunc := func(chainNode *appsv1.ChainNode) bool {
-		return chainNode.Status.Phase == appsv1.PhaseChainNodeRunning ||
-			chainNode.Status.Phase == appsv1.PhaseChainNodeSyncing ||
-			chainNode.Status.Phase == appsv1.PhaseChainNodeSnapshotting
 	}
 
 	nodesInformer, err := informer.GetChainNodesInformer(r.RestConfig)
