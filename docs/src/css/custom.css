@@ -1,0 +1,54 @@
+/**
+ * Any CSS included here will be global. The classic template
+ * bundles Infima by default. Infima is a CSS framework designed to
+ * work well with content-centric websites.
+ */
+
+/* You can override the default Infima variables here. */
+:root {
+  --ifm-color-primary: #1a4d8f;
+  --ifm-color-primary-dark: #174380;
+  --ifm-color-primary-darker: #163f78;
+  --ifm-color-primary-darkest: #123465;
+  --ifm-color-primary-light: #1d5aa6;
+  --ifm-color-primary-lighter: #1e61b0;
+  --ifm-color-primary-lightest: #2370c4;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+/* For readability concerns, you should choose a lighter palette in dark mode. */
+[data-theme='dark'] {
+  --ifm-color-primary: #4dabf7;
+  --ifm-color-primary-dark: #3a9cef;
+  --ifm-color-primary-darker: #3592e5;
+  --ifm-color-primary-darkest: #2c7bc4;
+  --ifm-color-primary-light: #60b4f8;
+  --ifm-color-primary-lighter: #6abbf9;
+  --ifm-color-primary-lightest: #84c9fb;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* "powered by Voluzi" link in the footer */
+.footer__powered-by {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  opacity: 0.55;
+  text-decoration: none;
+  transition: opacity 0.2s ease;
+}
+.footer__powered-by:hover {
+  opacity: 0.9;
+  text-decoration: none;
+}
+.footer__powered-by span {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: #fff;
+}
+.footer__powered-by img {
+  height: 14px;
+  vertical-align: middle;
+}

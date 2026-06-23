@@ -1,0 +1,96 @@
+name: Version Docs
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  version:
+    name: Snapshot docs version
+    runs-on: ubuntu-latest
+    # Skip any prerelease tag; a semver prerelease component is introduced by a hyphen (e.g. v2.4.0-rc.1, v2.4.0-preview.1).
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$version' derived from tag '$GITHUB_REF_NAME'; expected semver (MAJOR.MINOR.PATCH)" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install docs dependencies
+        run: bun install --frozen-lockfile
+        working-directory: ./docs
+
+      - name: Generate CRD docs
+        run: make docs
+
+      - name: Create docs version snapshot
+        run: bun run docusaurus docs:version ${{ steps.version.outputs.version }}
+        working-directory: ./docs
+
+      - name: Stash versioned docs
+        run: |
+          mkdir -p /tmp/versioned
+          cp -r docs/versioned_docs/version-${{ steps.version.outputs.version }} /tmp/versioned/docs
+          cp docs/versioned_sidebars/version-${{ steps.version.outputs.version }}-sidebars.json /tmp/versioned/sidebar.json
+          cp docs/versions.json /tmp/versioned/versions.json
+
+      - name: Switch to main
+        run: git checkout main
+
+      - name: Restore versioned docs
+        run: |
+          rm -rf "docs/versioned_docs/version-${{ steps.version.outputs.version }}"
+          rm -f "docs/versioned_sidebars/version-${{ steps.version.outputs.version }}-sidebars.json"
+          mkdir -p "docs/versioned_docs/version-${{ steps.version.outputs.version }}"
+          cp -r /tmp/versioned/docs/. "docs/versioned_docs/version-${{ steps.version.outputs.version }}"
+          cp /tmp/versioned/sidebar.json "docs/versioned_sidebars/version-${{ steps.version.outputs.version }}-sidebars.json"
+          cp /tmp/versioned/versions.json docs/versions.json
+
+      - name: Update lastVersion in config
+        run: |
+          sed -i "s/lastVersion: '.*'/lastVersion: '${{ steps.version.outputs.version }}'/" docs/docusaurus.config.ts
+
+      - name: Commit and push to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/versioned_docs docs/versioned_sidebars docs/versions.json docs/docusaurus.config.ts
+          if git diff --cached --quiet; then
+            echo "No documentation changes for version ${{ steps.version.outputs.version }}; skipping commit."
+          else
+            git commit -m "docs: snapshot version ${{ steps.version.outputs.version }}"
+            git push origin main
+          fi
+
+      - name: Deploy docs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run deploy-docs.yaml --ref main
