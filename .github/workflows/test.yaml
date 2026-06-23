@@ -1,13 +1,17 @@
 name: Test
 
-on: [ push ]
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup go
         uses: actions/setup-go@v6

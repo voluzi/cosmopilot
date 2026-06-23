@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup go
         uses: actions/setup-go@v6
@@ -33,28 +33,26 @@ jobs:
       - name: Generate CRD docs
         run: make docs
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: 23
-          cache: yarn
-          cache-dependency-path: docs/yarn.lock
+          bun-version: latest
 
       - name: Setup Pages
         uses: actions/configure-pages@v6
 
       - name: Install dependencies
-        run: yarn install
+        run: bun install --frozen-lockfile
         working-directory: ./docs
 
-      - name: Build with VitePress
-        run: yarn docs:build
+      - name: Build with Docusaurus
+        run: bun run build
         working-directory: ./docs
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: docs/.vitepress/dist
+          path: docs/build
 
   deploy:
     environment:

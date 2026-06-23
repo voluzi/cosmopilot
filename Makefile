@@ -69,14 +69,14 @@ vet: ## Run go vet against code.
 
 .PHONY: docs
 docs: crd-to-markdown ## Generate markdown docs of CRD spec.
-	@mkdir -p ./docs/03-reference/crds
+	@mkdir -p ./docs/docs/reference/crds
 	@$(CRD_TO_MARKDOWN) \
 		-f ./api/v1/chainnode_types.go \
 		-f ./api/v1/chainnodeset_types.go \
 		-f ./api/v1/common_types.go \
-		--header ./docs/03-reference/crds/header.md \
+		--header ./docs/docs/reference/crds/header.md \
 		-n ChainNode \
-		-n ChainNodeSet > ./docs/03-reference/crds/crds.md
+		-n ChainNodeSet > ./docs/docs/reference/crds/crds.md
 	@./contrib/scripts/generate-example-docs.sh
 
 ##@ Tests
