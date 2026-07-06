@@ -26,14 +26,14 @@ const (
 )
 
 type GCS struct {
-	Client        *kubernetes.Clientset
+	Client        kubernetes.Interface
 	Scheme        *runtime.Scheme
 	Owner         metav1.Object
 	priorityClass string
 	Config        *appsv1.GcsExportConfig
 }
 
-func NewGcsSnapshotProvider(client *kubernetes.Clientset, scheme *runtime.Scheme, owner metav1.Object, priorityClass string, cfg *appsv1.GcsExportConfig) SnapshotProvider {
+func NewGcsSnapshotProvider(client kubernetes.Interface, scheme *runtime.Scheme, owner metav1.Object, priorityClass string, cfg *appsv1.GcsExportConfig) SnapshotProvider {
 	return &GCS{
 		Client:        client,
 		Config:        cfg,
@@ -41,6 +41,69 @@ func NewGcsSnapshotProvider(client *kubernetes.Clientset, scheme *runtime.Scheme
 		Scheme:        scheme,
 		priorityClass: priorityClass,
 	}
+}
+
+// usesCredentialsSecret reports whether the snapshot Jobs authenticate to GCS using the mounted
+// credentials secret. When false, the Jobs run as the configured ServiceAccount and rely on Workload
+// Identity / Application Default Credentials instead.
+func (gcs *GCS) usesCredentialsSecret() bool {
+	return gcs.Config.CredentialsSecret != nil
+}
+
+// credentialsVolume returns the secret volume holding the GCS credentials, or nil when authenticating
+// through Workload Identity.
+func (gcs *GCS) credentialsVolume() []corev1.Volume {
+	if !gcs.usesCredentialsSecret() {
+		return nil
+	}
+	return []corev1.Volume{
+		{
+			Name: "credentials",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: gcs.Config.CredentialsSecret.Name,
+				},
+			},
+		},
+	}
+}
+
+// credentialsVolumeMount returns the mount for the credentials secret at /creds, or nil when
+// authenticating through Workload Identity.
+func (gcs *GCS) credentialsVolumeMount() []corev1.VolumeMount {
+	if !gcs.usesCredentialsSecret() {
+		return nil
+	}
+	return []corev1.VolumeMount{
+		{
+			Name:      "credentials",
+			MountPath: "/creds",
+		},
+	}
+}
+
+// credentialsEnv returns the GOOGLE_APPLICATION_CREDENTIALS environment variable pointing at the
+// mounted credentials secret, or nil when authenticating through Workload Identity.
+func (gcs *GCS) credentialsEnv() []corev1.EnvVar {
+	if !gcs.usesCredentialsSecret() {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{
+			Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+			Value: fmt.Sprintf("/creds/%s", gcs.Config.CredentialsSecret.Key),
+		},
+	}
+}
+
+// serviceAccountName returns the ServiceAccount the Job pods should run as. It is only set when
+// authenticating through Workload Identity (no credentials secret); otherwise it is empty and the
+// namespace default ServiceAccount is used, preserving the previous behavior.
+func (gcs *GCS) serviceAccountName() string {
+	if gcs.usesCredentialsSecret() || gcs.Config.ServiceAccountName == nil {
+		return ""
+	}
+	return *gcs.Config.ServiceAccountName
 }
 
 func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.VolumeSnapshot) error {
@@ -69,9 +132,10 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 			BackoffLimit:            ptr.To[int32](0),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					RestartPolicy:     corev1.RestartPolicyNever,
-					PriorityClassName: gcs.priorityClass,
-					Volumes: []corev1.Volume{
+					RestartPolicy:      corev1.RestartPolicyNever,
+					PriorityClassName:  gcs.priorityClass,
+					ServiceAccountName: gcs.serviceAccountName(),
+					Volumes: append([]corev1.Volume{
 						{
 							Name: "data",
 							VolumeSource: corev1.VolumeSource{
@@ -80,15 +144,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 								},
 							},
 						},
-						{
-							Name: "credentials",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: gcs.Config.CredentialsSecret.Name,
-								},
-							},
-						},
-					},
+					}, gcs.credentialsVolume()...),
 					Containers: []corev1.Container{
 						{
 							Name:            "dataexporter",
@@ -97,42 +153,34 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
 							WorkingDir:      "/home/app",
-							Env: []corev1.EnvVar{
-								{
-									Name:  "GOOGLE_APPLICATION_CREDENTIALS",
-									Value: fmt.Sprintf("/creds/%s", gcs.Config.CredentialsSecret.Key),
-								},
-								{
+							Env: append(gcs.credentialsEnv(),
+								corev1.EnvVar{
 									Name:  "SIZE_LIMIT",
 									Value: gcs.Config.GetSizeLimit(),
 								},
-								{
+								corev1.EnvVar{
 									Name:  "PART_SIZE",
 									Value: gcs.Config.GetPartSize(),
 								},
-								{
+								corev1.EnvVar{
 									Name:  "CHUNK_SIZE",
 									Value: gcs.Config.GetChunkSize(),
 								},
-								{
+								corev1.EnvVar{
 									Name:  "BUFFER_SIZE",
 									Value: gcs.Config.GetBufferSize(),
 								},
-								{
+								corev1.EnvVar{
 									Name:  "CONCURRENT_JOBS",
 									Value: strconv.Itoa(gcs.Config.GetConcurrentJobs()),
 								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "credentials",
-									MountPath: "/creds",
-								},
-								{
+							),
+							VolumeMounts: append(gcs.credentialsVolumeMount(),
+								corev1.VolumeMount{
 									Name:      "data",
 									MountPath: "/home/app/data",
 								},
-							},
+							),
 						},
 					},
 				},
@@ -246,18 +294,10 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 			BackoffLimit:            ptr.To[int32](5),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					RestartPolicy:     corev1.RestartPolicyNever,
-					PriorityClassName: gcs.priorityClass,
-					Volumes: []corev1.Volume{
-						{
-							Name: "credentials",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: gcs.Config.CredentialsSecret.Name,
-								},
-							},
-						},
-					},
+					RestartPolicy:      corev1.RestartPolicyNever,
+					PriorityClassName:  gcs.priorityClass,
+					ServiceAccountName: gcs.serviceAccountName(),
+					Volumes:            gcs.credentialsVolume(),
 					Containers: []corev1.Container{
 						{
 							Name:            "dataexporter",
@@ -266,22 +306,13 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args:            []string{"gcs", "delete", gcs.Config.Bucket, name},
 							WorkingDir:      "/home/app",
-							Env: []corev1.EnvVar{
-								{
-									Name:  "GOOGLE_APPLICATION_CREDENTIALS",
-									Value: fmt.Sprintf("/creds/%s", gcs.Config.CredentialsSecret.Key),
-								},
-								{
+							Env: append(gcs.credentialsEnv(),
+								corev1.EnvVar{
 									Name:  "CONCURRENT_JOBS",
 									Value: strconv.Itoa(gcs.Config.GetConcurrentJobs()),
 								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "credentials",
-									MountPath: "/creds",
-								},
-							},
+							),
+							VolumeMounts: gcs.credentialsVolumeMount(),
 						},
 					},
 				},

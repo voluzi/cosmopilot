@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -93,6 +94,65 @@ func TestChainNodeSetValidateGenesis(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+// TestChainNodeSetValidateGcsExportCredentials verifies a ChainNodeSet rejects a GCS tarball export
+// config unless exactly one of credentialsSecret or serviceAccountName (Workload Identity) is set. The
+// config lives on a node group's persistence snapshots, which is validated the same way for every
+// group and validator persistence block.
+func TestChainNodeSetValidateGcsExportCredentials(t *testing.T) {
+	credsSecret := &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "gcs-credentials"},
+		Key:                  "credentials.json",
+	}
+	nodeSet := func(gcs *GcsExportConfig) *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cns"},
+			Spec: ChainNodeSetSpec{
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes: []NodeGroupSpec{
+					{
+						Name:      "fullnodes",
+						Instances: ptr.To(1),
+						Persistence: &Persistence{
+							Snapshots: &VolumeSnapshotsConfig{
+								Frequency:     "24h",
+								ExportTarball: &ExportTarballConfig{GCS: gcs},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("credentialsSecret only is allowed", func(t *testing.T) {
+		_, err := nodeSet(&GcsExportConfig{Bucket: "b", CredentialsSecret: credsSecret}).Validate(nil)
+		assert.NoError(t, err)
+	})
+
+	t.Run("serviceAccountName only is allowed", func(t *testing.T) {
+		_, err := nodeSet(&GcsExportConfig{Bucket: "b", ServiceAccountName: ptr.To("gcs-uploader")}).Validate(nil)
+		assert.NoError(t, err)
+	})
+
+	t.Run("both set is rejected", func(t *testing.T) {
+		_, err := nodeSet(&GcsExportConfig{Bucket: "b", CredentialsSecret: credsSecret, ServiceAccountName: ptr.To("gcs-uploader")}).Validate(nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mutually exclusive")
+	})
+
+	t.Run("neither set is rejected", func(t *testing.T) {
+		_, err := nodeSet(&GcsExportConfig{Bucket: "b"}).Validate(nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be set")
+	})
+
+	t.Run("empty serviceAccountName is rejected", func(t *testing.T) {
+		_, err := nodeSet(&GcsExportConfig{Bucket: "b", ServiceAccountName: ptr.To("")}).Validate(nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serviceAccountName must not be empty")
+	})
 }
 
 func TestChainNodeSetValidateDuplicateGroupNames(t *testing.T) {

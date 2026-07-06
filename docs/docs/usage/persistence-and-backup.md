@@ -110,7 +110,7 @@ When configured on `ChainNodeSet`group, `snapshots` are only taken on one of the
 
 ```yaml
 persistence:
-  snapshot:
+  snapshots:
     frequency: 24h # Take a snapshot every 24 hours
     retention: 72h # Retain snapshots of the last 3 days
 ```
@@ -124,7 +124,7 @@ Delete snapshots after a specified duration:
 
 ```yaml
 persistence:
-  snapshot:
+  snapshots:
     frequency: 24h
     retention: 72h # Delete snapshots older than 3 days
 ```
@@ -134,7 +134,7 @@ Keep only the N most recent snapshots:
 
 ```yaml
 persistence:
-  snapshot:
+  snapshots:
     frequency: 24h
     retain: 5 # Keep only the 5 most recent snapshots
 ```
@@ -149,7 +149,7 @@ By default, `Cosmopilot` uses the default `VolumeSnapshotClass` configured in yo
 
 ```yaml {5}
 persistence:
-  snapshot:
+  snapshots:
     frequency: 24h # Take a snapshot every 24 hours
     retention: 72h # Retain snapshots of the last 3 days
     snapshotClass: my-custom-snapshot-class
@@ -165,7 +165,7 @@ You can enable this behavior with:
 
 ```yaml {3}
 persistence:
-  snapshot:
+  snapshots:
     stopNode: true
 ```
 
@@ -184,11 +184,11 @@ In some cases, it may be beneficial to disable snapshots while the node is synci
 
 #### Configuration
 
-To disable snapshots during sync, set the `.persistence.snapshot.disableWhileSyncing` option to `true`:
+To disable snapshots during sync, set the `.persistence.snapshots.disableWhileSyncing` option to `true`:
 
 ```yaml
 persistence:
-  snapshot:
+  snapshots:
     disableWhileSyncing: true
 ```
 
@@ -198,11 +198,11 @@ persistence:
 
 ### Configuration
 
-To enable integrity checks, set the `.persistence.snapshot.verify` option to `true`:
+To enable integrity checks, set the `.persistence.snapshots.verify` option to `true`:
 
 ```yaml
 persistence:
-  snapshot:
+  snapshots:
     verify: true
 ```
 
@@ -218,7 +218,7 @@ persistence:
 
 `Cosmopilot` provides an option to export data from a volume snapshot as a tarball file and upload it to external storage. Currently, this feature supports uploading to Google Cloud Storage (GCS) buckets. 
 
-To enable this functionality, configure the `.persistence.snapshot.exportTarball` field.
+To enable this functionality, configure the `.persistence.snapshots.exportTarball` field.
 
 ### Configuration
 
@@ -226,7 +226,7 @@ Here’s an example configuration for exporting tarballs:
 
 ```yaml
 persistence:
-  snapshot:
+  snapshots:
     exportTarball:
       suffix: "-archive" # Optional. Default: empty.
       deleteOnExpire: false # Optional. Default: false.
@@ -244,14 +244,66 @@ persistence:
     - Specify database backend (e.g., `-goleveldb` or `-pebbledb`).
 - **`deleteOnExpire`**:
   - Optional. Defaults to `false`.
-  - Indicates whether the tarball should also be deleted when the associated volume snapshot is removed due to expiration (`.persistence.snapshot.retention`).
+  - Indicates whether the tarball should also be deleted when the associated volume snapshot is removed due to expiration (`.persistence.snapshots.retention`).
 
 ### Provider-Specific Fields
-Currently, `Cosmopilot` supports exporting tarballs to **Google Cloud Storage (`GCS`)**. The following fields are required for `GCS` configuration:
+Currently, `Cosmopilot` supports exporting tarballs to **Google Cloud Storage (`GCS`)**. The following fields are available for `GCS` configuration:
 - **`bucket`**:
   - The name of the `GCS` bucket where the tarball will be uploaded.
 - **`credentialsSecret`**:
   - A Kubernetes secret containing the JSON credentials with permissions to upload and delete objects in the specified bucket.
+- **`serviceAccountName`**:
+  - The name of a Kubernetes `ServiceAccount` that the snapshot upload/delete Jobs run as, so they authenticate to `GCS` through [Workload Identity](#authenticating-with-workload-identity) / Application Default Credentials (ADC) instead of a credentials secret.
+
+:::warning[NOTE]
+Exactly one of `credentialsSecret` or `serviceAccountName` must be set. Setting both — or neither — is rejected by the admission webhook.
+:::
+
+### Authenticating with Workload Identity
+
+On `GKE`, you can avoid managing a long-lived JSON key entirely by using [Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity). Instead of a `credentialsSecret`, you reference a Kubernetes `ServiceAccount` that is bound to a Google Service Account (`GSA`) with permissions on the bucket. The snapshot Jobs then obtain credentials automatically via Application Default Credentials.
+
+#### GKE Example
+
+1. Grant the Google Service Account permissions on the bucket (for example `roles/storage.objectAdmin`, which allows both uploading and deleting objects):
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://my-backup-bucket \
+  --member="serviceAccount:gcs-uploader@my-project.iam.gserviceaccount.com" \
+  --role="roles/storage.objectAdmin"
+```
+
+2. Create a Kubernetes `ServiceAccount` in the node's namespace and annotate it with the `GSA` it should impersonate:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gcs-uploader
+  namespace: my-namespace
+  annotations:
+    iam.gke.io/gcp-service-account: gcs-uploader@my-project.iam.gserviceaccount.com
+```
+
+3. Allow the Kubernetes `ServiceAccount` to impersonate the `GSA`:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  gcs-uploader@my-project.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="serviceAccount:my-project.svc.id.goog[my-namespace/gcs-uploader]"
+```
+
+4. Reference the `ServiceAccount` in the export config, without a `credentialsSecret`:
+
+```yaml
+persistence:
+  snapshots:
+    exportTarball:
+      gcs:
+        bucket: my-backup-bucket
+        serviceAccountName: gcs-uploader
+```
 
 
 ## Restoring Data from Snapshot

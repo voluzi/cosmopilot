@@ -648,7 +648,8 @@ GcsExportConfig holds required settings to upload to GCS.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | bucket | Name of the bucket to upload tarballs to. | string | true |
-| credentialsSecret | Secret with the JSON credentials to upload to bucket. | *corev1.SecretKeySelector | true |
+| credentialsSecret | Secret with the JSON credentials to upload to bucket. Exactly one of `credentialsSecret` or `serviceAccountName` must be set. When set, the snapshot Jobs mount this secret and use it as `GOOGLE_APPLICATION_CREDENTIALS`. | *corev1.SecretKeySelector | false |
+| serviceAccountName | ServiceAccountName is the name of the Kubernetes ServiceAccount that the snapshot Jobs run as, so they authenticate to GCS through Workload Identity / Application Default Credentials (ADC) instead of a credentials secret. Exactly one of `credentialsSecret` or `serviceAccountName` must be set. | *string | false |
 | sizeLimit | Size limit at which the file will be split into multiple parts. Defaults to `5TB`. | *string | false |
 | partSize | Size of each part when size-limit is crossed. Defaults to `500GB`. | *string | false |
 | chunkSize | Size of each chunk uploaded in parallel to GCS. Defaults to `250MB`. | *string | false |
