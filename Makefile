@@ -240,7 +240,7 @@ HELM_VERSION ?= v3.17.3
 CRD_TO_MARKDOWN_VERSION ?= 0.0.3
 KIND_VERSION ?= 0.32.0
 ENVTEST_K8S_VERSION ?= 1.32.0
-GINKGO_VERSION ?= v2.29.0
+GINKGO_VERSION ?= v2.32.0
 
 .PHONY: kubectl
 kubectl: $(KUBECTL) ## Download kubectl locally if necessary. If wrong version is installed, it will be removed before downloading.
