@@ -177,5 +177,10 @@ func validateSnapshotsConfig(config *VolumeSnapshotsConfig, path string) error {
 	if config.Retention != nil && config.Retain != nil {
 		return fmt.Errorf("%s.retention and %s.retain are mutually exclusive", path, path)
 	}
+	if config.ExportTarball != nil && config.ExportTarball.GCS != nil {
+		if err := config.ExportTarball.GCS.Validate(fmt.Sprintf("%s.exportTarball.gcs", path)); err != nil {
+			return err
+		}
+	}
 	return nil
 }

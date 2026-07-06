@@ -572,6 +572,27 @@ func (e *ExportTarballConfig) DeleteWhenExpired() bool {
 
 // GcsExporter helper methods
 
+// Validate ensures exactly one authentication method is configured for uploading to GCS: either a
+// credentials secret (`credentialsSecret`) or a Kubernetes ServiceAccount for Workload Identity / ADC
+// (`serviceAccountName`). Having both set or neither set is rejected. path is the field path reported
+// in the returned error.
+func (gcs *GcsExportConfig) Validate(path string) error {
+	if gcs == nil {
+		return nil
+	}
+	hasCredentialsSecret := gcs.CredentialsSecret != nil
+	hasServiceAccount := gcs.ServiceAccountName != nil
+	switch {
+	case hasCredentialsSecret && hasServiceAccount:
+		return fmt.Errorf("%s: credentialsSecret and serviceAccountName are mutually exclusive", path)
+	case !hasCredentialsSecret && !hasServiceAccount:
+		return fmt.Errorf("%s: one of credentialsSecret or serviceAccountName must be set", path)
+	case hasServiceAccount && *gcs.ServiceAccountName == "":
+		return fmt.Errorf("%s.serviceAccountName must not be empty", path)
+	}
+	return nil
+}
+
 func (gcs *GcsExportConfig) GetSizeLimit() string {
 	if gcs != nil && gcs.SizeLimit != nil {
 		return *gcs.SizeLimit

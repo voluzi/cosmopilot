@@ -987,6 +987,11 @@ func (in *GcsExportConfig) DeepCopyInto(out *GcsExportConfig) {
 		*out = new(corev1.SecretKeySelector)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.ServiceAccountName != nil {
+		in, out := &in.ServiceAccountName, &out.ServiceAccountName
+		*out = new(string)
+		**out = **in
+	}
 	if in.SizeLimit != nil {
 		in, out := &in.SizeLimit, &out.SizeLimit
 		*out = new(string)

@@ -934,8 +934,19 @@ type GcsExportConfig struct {
 	// Name of the bucket to upload tarballs to.
 	Bucket string `json:"bucket"`
 
-	// Secret with the JSON credentials to upload to bucket.
-	CredentialsSecret *corev1.SecretKeySelector `json:"credentialsSecret"`
+	// Secret with the JSON credentials to upload to bucket. Exactly one of `credentialsSecret` or
+	// `serviceAccountName` must be set. When set, the snapshot Jobs mount this secret and use it as
+	// `GOOGLE_APPLICATION_CREDENTIALS`.
+	// +optional
+	CredentialsSecret *corev1.SecretKeySelector `json:"credentialsSecret,omitempty"`
+
+	// ServiceAccountName is the name of the Kubernetes ServiceAccount that the snapshot Jobs run as,
+	// so they authenticate to GCS through Workload Identity / Application Default Credentials (ADC)
+	// instead of a credentials secret. Exactly one of `credentialsSecret` or `serviceAccountName`
+	// must be set.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
 
 	// Size limit at which the file will be split into multiple parts. Defaults to `5TB`.
 	SizeLimit *string `json:"sizeLimit,omitempty"`

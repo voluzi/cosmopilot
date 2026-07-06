@@ -4681,8 +4681,10 @@ spec:
                                         delete jobs. Defaults to `10`.
                                       type: integer
                                     credentialsSecret:
-                                      description: Secret with the JSON credentials
-                                        to upload to bucket.
+                                      description: |-
+                                        Secret with the JSON credentials to upload to bucket. Exactly one of `credentialsSecret` or
+                                        `serviceAccountName` must be set. When set, the snapshot Jobs mount this secret and use it as
+                                        `GOOGLE_APPLICATION_CREDENTIALS`.
                                       properties:
                                         key:
                                           description: The key of the secret to select
@@ -4709,6 +4711,14 @@ spec:
                                       description: Size of each part when size-limit
                                         is crossed. Defaults to `500GB`.
                                       type: string
+                                    serviceAccountName:
+                                      description: |-
+                                        ServiceAccountName is the name of the Kubernetes ServiceAccount that the snapshot Jobs run as,
+                                        so they authenticate to GCS through Workload Identity / Application Default Credentials (ADC)
+                                        instead of a credentials secret. Exactly one of `credentialsSecret` or `serviceAccountName`
+                                        must be set.
+                                      minLength: 1
+                                      type: string
                                     sizeLimit:
                                       description: Size limit at which the file will
                                         be split into multiple parts. Defaults to
@@ -4716,7 +4726,6 @@ spec:
                                       type: string
                                   required:
                                   - bucket
-                                  - credentialsSecret
                                   type: object
                                 suffix:
                                   description: Suffix to add to archive name. The
@@ -9306,8 +9315,10 @@ spec:
                                             or delete jobs. Defaults to `10`.
                                           type: integer
                                         credentialsSecret:
-                                          description: Secret with the JSON credentials
-                                            to upload to bucket.
+                                          description: |-
+                                            Secret with the JSON credentials to upload to bucket. Exactly one of `credentialsSecret` or
+                                            `serviceAccountName` must be set. When set, the snapshot Jobs mount this secret and use it as
+                                            `GOOGLE_APPLICATION_CREDENTIALS`.
                                           properties:
                                             key:
                                               description: The key of the secret to
@@ -9335,6 +9346,14 @@ spec:
                                           description: Size of each part when size-limit
                                             is crossed. Defaults to `500GB`.
                                           type: string
+                                        serviceAccountName:
+                                          description: |-
+                                            ServiceAccountName is the name of the Kubernetes ServiceAccount that the snapshot Jobs run as,
+                                            so they authenticate to GCS through Workload Identity / Application Default Credentials (ADC)
+                                            instead of a credentials secret. Exactly one of `credentialsSecret` or `serviceAccountName`
+                                            must be set.
+                                          minLength: 1
+                                          type: string
                                         sizeLimit:
                                           description: Size limit at which the file
                                             will be split into multiple parts. Defaults
@@ -9342,7 +9361,6 @@ spec:
                                           type: string
                                       required:
                                       - bucket
-                                      - credentialsSecret
                                       type: object
                                     suffix:
                                       description: Suffix to add to archive name.
@@ -14653,8 +14671,10 @@ spec:
                                       jobs. Defaults to `10`.
                                     type: integer
                                   credentialsSecret:
-                                    description: Secret with the JSON credentials
-                                      to upload to bucket.
+                                    description: |-
+                                      Secret with the JSON credentials to upload to bucket. Exactly one of `credentialsSecret` or
+                                      `serviceAccountName` must be set. When set, the snapshot Jobs mount this secret and use it as
+                                      `GOOGLE_APPLICATION_CREDENTIALS`.
                                     properties:
                                       key:
                                         description: The key of the secret to select
@@ -14681,13 +14701,20 @@ spec:
                                     description: Size of each part when size-limit
                                       is crossed. Defaults to `500GB`.
                                     type: string
+                                  serviceAccountName:
+                                    description: |-
+                                      ServiceAccountName is the name of the Kubernetes ServiceAccount that the snapshot Jobs run as,
+                                      so they authenticate to GCS through Workload Identity / Application Default Credentials (ADC)
+                                      instead of a credentials secret. Exactly one of `credentialsSecret` or `serviceAccountName`
+                                      must be set.
+                                    minLength: 1
+                                    type: string
                                   sizeLimit:
                                     description: Size limit at which the file will
                                       be split into multiple parts. Defaults to `5TB`.
                                     type: string
                                 required:
                                 - bucket
-                                - credentialsSecret
                                 type: object
                               suffix:
                                 description: Suffix to add to archive name. The name
