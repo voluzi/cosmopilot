@@ -993,7 +993,7 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 	}
 
 	if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, chainNode.Spec.App.App); err != nil {
-		r.recorder.Eventf(chainNode,
+		r.recorder.Event(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonNodeError,
 			controllers.FormatErrorEvent("Pod failed to start", err),
@@ -1040,7 +1040,7 @@ func (r *Reconciler) upgradePod(ctx context.Context, chainNode *appsv1.ChainNode
 	}
 
 	if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, chainNode.Spec.App.App); err != nil {
-		r.recorder.Eventf(chainNode,
+		r.recorder.Event(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonNodeError,
 			controllers.FormatErrorEvent("Pod failed to start after upgrade", err),
