@@ -50,7 +50,7 @@ func (r *Reconciler) ensureTmKMSConfig(ctx context.Context, chainNode *appsv1.Ch
 			}
 
 			if err = p.UploadKey(ctx, kms, key); err != nil {
-				r.recorder.Eventf(chainNode,
+				r.recorder.Event(chainNode,
 					corev1.EventTypeWarning,
 					appsv1.ReasonUploadFailure,
 					controllers.FormatErrorEvent("Failed to upload validator key to Vault", err),

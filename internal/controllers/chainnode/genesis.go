@@ -122,7 +122,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 		logger.Info("retrieving genesis from url", "url", *chainNode.Spec.Genesis.Url)
 		genesis, err = chainutils.RetrieveGenesisFromURL(ctx, *chainNode.Spec.Genesis.Url, chainNode.Spec.Genesis.GenesisSHA)
 		if err != nil {
-			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonGenesisError,
+			r.recorder.Event(chainNode, corev1.EventTypeWarning, appsv1.ReasonGenesisError,
 				controllers.FormatErrorEvent("Failed to download genesis from URL", err))
 			return fmt.Errorf("failed to retrieve genesis from URL %s: %w", *chainNode.Spec.Genesis.Url, err)
 		}
@@ -139,7 +139,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 
 		genesis, err = chainutils.RetrieveGenesisFromNodeRPC(ctx, genesisUrl, chainNode.Spec.Genesis.GenesisSHA)
 		if err != nil {
-			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonGenesisError,
+			r.recorder.Event(chainNode, corev1.EventTypeWarning, appsv1.ReasonGenesisError,
 				controllers.FormatErrorEvent("Failed to retrieve genesis from RPC node", err))
 			return fmt.Errorf("failed to retrieve genesis from RPC endpoint %s: %w", genesisUrl, err)
 		}
@@ -154,7 +154,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 		logger.Info("loading genesis from configmap", "configmap", *chainNode.Spec.Genesis.ConfigMap)
 		genesis, err = app.LoadGenesisFromConfigMap(ctx, *chainNode.Spec.Genesis.ConfigMap)
 		if err != nil {
-			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonGenesisError,
+			r.recorder.Event(chainNode, corev1.EventTypeWarning, appsv1.ReasonGenesisError,
 				controllers.FormatErrorEvent("Failed to load genesis from ConfigMap", err))
 			return fmt.Errorf("failed to load genesis from ConfigMap %s: %w", *chainNode.Spec.Genesis.ConfigMap, err)
 		}
@@ -346,7 +346,7 @@ func (r *Reconciler) initGenesis(ctx context.Context, app *chainutils.App, chain
 		initCommands...,
 	)
 	if err != nil {
-		r.recorder.Eventf(chainNode,
+		r.recorder.Event(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonInitGenesisFailure,
 			controllers.FormatErrorEvent("Failed to initialize new genesis", err))
