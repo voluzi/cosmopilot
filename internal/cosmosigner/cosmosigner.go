@@ -76,9 +76,15 @@ func (p Params) nodeServiceEndpoint() string {
 
 // selectorLabels are the immutable labels that identify signer pods.
 func (p Params) selectorLabels() map[string]string {
+	return InstanceLabels(p.Name)
+}
+
+// InstanceLabels returns the immutable labels identifying a signer instance's pods and PVCs, so the
+// per-pod raft-state PVCs can be selected for cleanup on teardown.
+func InstanceLabels(name string) map[string]string {
 	return map[string]string{
 		labelAppName:  appNameCosmosigner,
-		labelInstance: p.Name,
+		labelInstance: name,
 	}
 }
 
@@ -313,7 +319,9 @@ func (p Params) StatefulSet() (*appsv1.StatefulSet, error) {
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "data"},
+					// Label the per-pod PVCs so they can be selected for cleanup when the signer is
+					// removed (StatefulSet PVCs are not garbage-collected automatically).
+					ObjectMeta: metav1.ObjectMeta{Name: "data", Labels: p.selectorLabels()},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						StorageClassName: p.StorageClassName,

@@ -510,6 +510,17 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}).Should(Succeed())
 	})
 
+	It("rejects an empty raftTLSSecret", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackend(), RaftTLSSecret: ptr.To("")},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("raftTLSSecret must not be empty"))
+	})
+
 	It("rejects nodeGroups on a standalone ChainNode", func() {
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},

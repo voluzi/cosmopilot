@@ -136,6 +136,20 @@ func TestDiscoveryServiceHeadlessPublishNotReady(t *testing.T) {
 	}
 }
 
+func TestVolumeClaimTemplateLabeledForCleanup(t *testing.T) {
+	sts, err := testParams().StatefulSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvc := sts.Spec.VolumeClaimTemplates[0]
+	want := InstanceLabels("mychain-signer")
+	for k, v := range want {
+		if pvc.Labels[k] != v {
+			t.Fatalf("PVC template missing label %s=%s (got %+v)", k, v, pvc.Labels)
+		}
+	}
+}
+
 func TestSoftwareBackendConfig(t *testing.T) {
 	p := testParams()
 	p.Backend = Backend{Software: &SoftwareBackend{SecretName: "mychain-priv-key"}}

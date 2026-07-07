@@ -16,7 +16,10 @@ import (
 )
 
 func WithChainNodeLabels(chainNode *appsv1.ChainNode, additional ...map[string]string) map[string]string {
-	labels := utils.ExcludeMapKeys(chainNode.ObjectMeta.Labels, controllers.LabelWorkerName)
+	// Exclude the cosmosigner-target discovery selector from inherited labels: it must only be set on
+	// genuinely-targeted node pods (added explicitly below), never inherited from a user label, or
+	// the signer would dial pods that are not listening for it (including its own pods).
+	labels := utils.ExcludeMapKeys(chainNode.ObjectMeta.Labels, controllers.LabelWorkerName, controllers.LabelCosmosignerTarget)
 	for _, m := range additional {
 		labels = utils.MergeMaps(labels, m, controllers.LabelWorkerName)
 	}

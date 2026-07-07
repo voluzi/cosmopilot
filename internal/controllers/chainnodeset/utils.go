@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
@@ -78,6 +79,12 @@ func DeleteValidatorStatus(nodeSet *v1.ChainNodeSet, name string) {
 func WithChainNodeSetLabels(nodeSet *v1.ChainNodeSet, additional ...map[string]string) map[string]string {
 	labels := make(map[string]string, len(nodeSet.ObjectMeta.Labels))
 	for k, v := range nodeSet.ObjectMeta.Labels {
+		// The cosmosigner-target label is a controller-managed discovery selector; it must only be
+		// present on genuinely-targeted nodes, never inherited from a user label on the ChainNodeSet
+		// (which would make the signer dial non-target pods).
+		if k == controllers.LabelCosmosignerTarget {
+			continue
+		}
 		labels[k] = v
 	}
 	for _, m := range additional {

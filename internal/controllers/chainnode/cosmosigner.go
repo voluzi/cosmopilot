@@ -210,6 +210,13 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 			return err
 		}
 	}
+
+	// Delete the per-pod raft-state PVCs (not garbage-collected with the StatefulSet) so a later
+	// re-enable starts from clean, consistent raft state.
+	if err := r.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{},
+		client.InNamespace(ns), client.MatchingLabels(cosmosigner.InstanceLabels(name))); err != nil {
+		return err
+	}
 	return nil
 }
 

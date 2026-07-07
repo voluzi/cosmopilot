@@ -231,6 +231,11 @@ func (c *Cosmosigner) Validate(path string, isNodeSet bool) error {
 		return fmt.Errorf("%s.nodeGroups is only valid on a ChainNodeSet", path)
 	}
 
+	// An empty raftTLSSecret would render a Secret volume with an empty name.
+	if c.RaftTLSSecret != nil && *c.RaftTLSSecret == "" {
+		return fmt.Errorf("%s.raftTLSSecret must not be empty when set", path)
+	}
+
 	return nil
 }
 
