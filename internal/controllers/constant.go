@@ -24,6 +24,7 @@ const (
 	AnnotationDataInitialized         = "cosmopilot.voluzi.com/data-initialized"
 	AnnotationGenesisDownloaded       = "cosmopilot.voluzi.com/genesis-downloaded"
 	AnnotationVaultKeyUploaded        = "cosmopilot.voluzi.com/vault-key-uploaded"
+	AnnotationCosmosignerKeyImported  = "cosmopilot.voluzi.com/cosmosigner-key-imported"
 	AnnotationPvcSnapshotInProgress   = "cosmopilot.voluzi.com/snapshotting-pvc"
 	AnnotationLastPvcSnapshot         = "cosmopilot.voluzi.com/last-pvc-snapshot"
 	AnnotationSnapshotRetention       = "cosmopilot.voluzi.com/snapshot-retention"
@@ -50,6 +51,10 @@ const (
 	LabelSeed                  = "seed"
 	LabelPeer                  = "peer"
 	LabelUpgrading             = "upgrading"
+	// LabelCosmosignerTarget marks a node as a signing endpoint for a cosmosigner deployment.
+	// The cosmosigner discovery service selects pods carrying this label so a single service can
+	// target one or more node groups uniformly.
+	LabelCosmosignerTarget = "cosmosigner-target"
 
 	StringValueTrue  = "true"
 	StringValueFalse = "false"

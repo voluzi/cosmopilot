@@ -280,6 +280,11 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, fmt.Errorf("only one ChainNodeSet validator can initialize genesis")
 	}
 
+	// Validate the managed cosmosigner deployment and its target resolution.
+	if err := nodeSet.validateCosmosigner(); err != nil {
+		return nil, err
+	}
+
 	// Two validators that explicitly reference the same signing material would sign with the same
 	// consensus key (double-signing). Reject duplicates across every validator that actually runs.
 	if err := nodeSet.validateUniqueSigningKeys(); err != nil {
@@ -411,6 +416,68 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	}
 
 	return nil, nil
+}
+
+// validateCosmosigner validates the managed cosmosigner deployment and how it targets node groups.
+//
+// A cosmosigner signs for a single consensus identity shared across every node it connects to.
+// Valid targets are therefore:
+//   - a regular (non-validator) node group of any size — "sentry mode", where the group nodes are
+//     the signing endpoints of the one identity;
+//   - the legacy singleton .spec.validator (the default when nodeGroups is empty);
+//   - a single-instance validator group — a drop-in remote signer for that one validator.
+//
+// A multi-instance validator group is rejected: each of its instances is a distinct validator with
+// its own consensus key, which cannot be collapsed onto a single signer identity. A targeted
+// validator must not also use TmKMS.
+func (nodeSet *ChainNodeSet) validateCosmosigner() error {
+	c := nodeSet.Spec.Cosmosigner
+	if c == nil {
+		return nil
+	}
+
+	if err := c.Validate(".spec.cosmosigner", true); err != nil {
+		return err
+	}
+
+	// Index groups by name for target resolution.
+	groups := make(map[string]NodeGroupSpec, len(nodeSet.Spec.Nodes))
+	for _, g := range nodeSet.Spec.Nodes {
+		groups[g.Name] = g
+	}
+
+	if len(c.NodeGroups) == 0 {
+		// Default target is the legacy singleton validator.
+		if nodeSet.Spec.Validator == nil {
+			return fmt.Errorf(".spec.cosmosigner.nodeGroups is required when .spec.validator is not set")
+		}
+		if nodeSet.Spec.Validator.TmKMS != nil {
+			return fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
+		}
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	for i, name := range c.NodeGroups {
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q is listed more than once", i, name)
+		}
+		seen[name] = struct{}{}
+
+		group, ok := groups[name]
+		if !ok {
+			return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q does not match any group in .spec.nodes", i, name)
+		}
+		if group.Validator != nil {
+			if group.GetInstances() > 1 {
+				return fmt.Errorf(".spec.cosmosigner cannot target validator group %q with multiple instances: each instance is a distinct validator with its own key", name)
+			}
+			if group.Validator.TmKMS != nil {
+				return fmt.Errorf(".spec.cosmosigner cannot target group %q which uses tmKMS: cosmosigner and tmKMS are mutually exclusive", name)
+			}
+		}
+	}
+	return nil
 }
 
 // validateUniqueSigningKeys rejects two running validators that would sign with the same

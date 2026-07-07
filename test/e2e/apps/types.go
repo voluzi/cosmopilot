@@ -361,6 +361,63 @@ type TmKMSConfig struct {
 	CASecretName string
 }
 
+// CosmosignerConfig holds configuration for building a ChainNodeSet with a managed cosmosigner
+// deployment. When Vault is nil the software backend is used.
+type CosmosignerConfig struct {
+	// Replicas is the number of signer replicas. Defaults to 1 when zero.
+	Replicas int32
+
+	// Vault, when set, configures the Vault backend (otherwise the software backend is used).
+	Vault *TmKMSConfig
+}
+
+// cosmosignerSharedKeySecret is the fixed priv-key secret name shared by the genesis-init
+// validator and the software signing backend, so the signer holds the exact key baked into
+// genesis (no double-signing: the validator node listens for the signer and never signs locally).
+const cosmosignerSharedKeySecret = "e2e-cosmosigner-priv-key"
+
+// BuildChainNodeSetWithCosmosigner creates a genesis-initializing ChainNodeSet whose validator
+// signs through a Cosmopilot-managed cosmosigner deployment (drop-in mode: nodeGroups empty targets
+// the validator). It reuses BuildChainNodeSet's validator + fullnode topology.
+func (t TestApp) BuildChainNodeSetWithCosmosigner(namespace string, cfg CosmosignerConfig) *appsv1.ChainNodeSet {
+	cns := t.BuildChainNodeSet(namespace, 1)
+
+	// Pin the validator's key to a fixed name so the software backend can reference the same key.
+	cns.Spec.Validator.PrivateKeySecret = ptr.To(cosmosignerSharedKeySecret)
+
+	replicas := cfg.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+
+	backend := appsv1.CosmosignerBackend{
+		Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(cosmosignerSharedKeySecret)},
+	}
+	if cfg.Vault != nil {
+		backend = appsv1.CosmosignerBackend{
+			Vault: &appsv1.CosmosignerVaultBackend{
+				Address: cfg.Vault.VaultAddress,
+				KeyName: cfg.Vault.KeyName,
+				TokenSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Vault.TokenSecretName},
+					Key:                  "token",
+				},
+				CertificateSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Vault.CASecretName},
+					Key:                  "ca.crt",
+				},
+				UploadGenerated: true,
+			},
+		}
+	}
+
+	cns.Spec.Cosmosigner = &appsv1.Cosmosigner{
+		Replicas: ptr.To(replicas),
+		Backend:  backend,
+	}
+	return cns
+}
+
 // BuildChainNodeWithTmKMS creates a ChainNode resource with TMKMS Vault configuration
 func (t TestApp) BuildChainNodeWithTmKMS(namespace string, tmkmsConfig TmKMSConfig) *appsv1.ChainNode {
 	chainNode := t.BuildChainNode(namespace)

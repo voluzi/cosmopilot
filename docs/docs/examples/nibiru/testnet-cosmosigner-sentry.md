@@ -1,0 +1,45 @@
+# Nibiru Testnet Cosmosigner Sentry
+
+```yaml
+# Sentry-mode example: a group of full nodes signs for a single validator identity held by a
+# Cosmopilot-managed Cosmosigner deployment (Vault Transit backend, 3-replica raft HA). There is
+# no separately-signing validator node — the fullnodes group listens for the signer and validates.
+apiVersion: cosmopilot.voluzi.com/v1
+kind: ChainNodeSet
+metadata:
+  name: nibiru-testnet
+spec:
+  app:
+    image: ghcr.io/nibiruchain/nibiru
+    version: 2.9.0
+    app: nibid
+    sdkVersion: v0.47
+
+  genesis:
+    url: https://example.com/nibiru-testnet-0/genesis.json
+
+  cosmosigner:
+    # Sign for the "fullnodes" group. Every node in the group is a signing endpoint of the single
+    # consensus identity held in Vault.
+    nodeGroups: [fullnodes]
+    replicas: 3
+    backend:
+      vault:
+        address: https://vault.vault-system.svc.cluster.local:8200
+        keyName: nibiru-testnet-validator
+        tokenSecret:
+          name: vault-cosmosigner-token
+          key: token
+        certificateSecret:
+          name: vault-ca
+          key: ca.crt
+
+  nodes:
+    - name: fullnodes
+      instances: 3
+      config:
+        override:
+          app.toml:
+            minimum-gas-prices: 0.025unibi
+
+```

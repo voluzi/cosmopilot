@@ -90,6 +90,17 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		return nil, err
 	}
 
+	// Validate cosmosigner configuration when present.
+	if chainNode.Spec.Cosmosigner != nil {
+		if err := chainNode.Spec.Cosmosigner.Validate(".spec.cosmosigner", false); err != nil {
+			return nil, err
+		}
+		// A node cannot both sign through a TmKMS sidecar and a cosmosigner deployment.
+		if chainNode.UsesTmKms() {
+			return nil, fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
+		}
+	}
+
 	// Once genesis has been created (status.chainID set), the genesis-initializing .spec.validator.init
 	// is fixed: its validator is part of the immutable genesis validator set, and the whole init block
 	// (chainID, genesis validators, accounts, gentx parameters, ...) determines what initGenesis builds.

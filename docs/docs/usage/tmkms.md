@@ -156,14 +156,20 @@ validator:
         skipCertificateVerify: false # Optional. Defaults to false.
 ```
 
+:::tip[Consider Cosmosigner]
+For new deployments, consider [Cosmosigner](./cosmosigner.md) — a next-generation remote signer with
+raft-based high availability, double-sign protection, and support for signing across a whole group of
+nodes. It runs as a separate deployment rather than a validator sidecar.
+:::
+
 ## Persist State
 
-By default, `Cosmpilot` does not persist `TmKMS` state. If you need to enable it, use:
+By default, `Cosmopilot` persists `TmKMS` state. To disable it, use:
 
 ```yaml {3}
 validator:
   tmKMS:
-    persistState: true # Default is false.
+    persistState: false # Default is true.
 ```
 
 `Cosmopilot` will create an additional `1Gi` `PVC` to store `priv_validator_state.json`.

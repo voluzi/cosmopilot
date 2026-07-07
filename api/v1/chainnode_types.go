@@ -111,6 +111,18 @@ type ChainNodeSpec struct {
 	// +optional
 	Validator *ValidatorConfig `json:"validator,omitempty"`
 
+	// Cosmosigner deploys a managed cosmosigner remote signer for this node. When configured,
+	// the node listens for the signer on its priv_validator_laddr and no local key is mounted.
+	// +optional
+	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
+
+	// RemoteSignerTarget marks this node as a signing endpoint for a cosmosigner deployment owned
+	// by a parent ChainNodeSet. It is set by the ChainNodeSet controller on nodes of targeted
+	// groups and makes the node listen for the remote signer without mounting a local key. It is
+	// not meant to be set by hand.
+	// +optional
+	RemoteSignerTarget bool `json:"remoteSignerTarget,omitempty"`
+
 	// Ensures peers with same chain ID are connected with each other. Enabled by default.
 	// +optional
 	AutoDiscoverPeers *bool `json:"autoDiscoverPeers,omitempty"`

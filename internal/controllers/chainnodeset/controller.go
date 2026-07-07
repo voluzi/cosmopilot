@@ -168,6 +168,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Deploy (or tear down) the managed cosmosigner remote signer. This runs after ensureNodes so
+	// the chain ID and target group nodes exist.
+	if err := r.ensureCosmosigner(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err := r.ensureSeedNodes(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
 	}

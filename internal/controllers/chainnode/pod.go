@@ -422,7 +422,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 			},
 			{
 				Name:  "TMKMS_PROXY",
-				Value: strconv.FormatBool(chainNode.IsValidator() && chainNode.UsesTmKms()),
+				Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
 			},
 			{
 				Name:  "CREATE_FIFO",
@@ -627,17 +627,24 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		appSecurityContext = k8s.RestrictedSecurityContext()
 	}
 
+	podLabels := map[string]string{
+		controllers.LabelNodeID:    chainNode.Status.NodeID,
+		controllers.LabelChainID:   chainNode.Status.ChainID,
+		controllers.LabelValidator: strconv.FormatBool(chainNode.IsValidator()),
+		controllers.LabelUpgrading: controllers.StringValueFalse,
+	}
+	// A standalone ChainNode with its own cosmosigner deployment must expose the discovery-service
+	// selector label on its pod (ChainNodeSet-managed targets inherit it from the child ChainNode).
+	if chainNode.UsesCosmosigner() {
+		podLabels[controllers.LabelCosmosignerTarget] = cosmosignerName(chainNode)
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        chainNode.GetName(),
 			Namespace:   chainNode.GetNamespace(),
 			Annotations: annotations,
-			Labels: WithChainNodeLabels(chainNode, map[string]string{
-				controllers.LabelNodeID:    chainNode.Status.NodeID,
-				controllers.LabelChainID:   chainNode.Status.ChainID,
-				controllers.LabelValidator: strconv.FormatBool(chainNode.IsValidator()),
-				controllers.LabelUpgrading: controllers.StringValueFalse,
-			}),
+			Labels:      WithChainNodeLabels(chainNode, podLabels),
 		},
 		Spec: corev1.PodSpec{
 			ShareProcessNamespace:         ptr.To(true),
@@ -745,29 +752,35 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 
 	if chainNode.IsValidator() {
 		pod.Spec.PriorityClassName = r.opts.GetValidatorsPriorityClassName()
-		if chainNode.UsesTmKms() {
-			_, kms, err := r.getTmkms(chainNode)
-			if err != nil {
-				return nil, err
-			}
-			pod.Spec.Volumes = append(pod.Spec.Volumes, kms.GetVolumes()...)
-			pod.Spec.Containers = append(pod.Spec.Containers, kms.GetContainersSpec()...)
+	}
 
-		} else {
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-				Name: "priv-key",
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: chainNode.Spec.Validator.GetPrivKeySecretName(chainNode),
-					},
-				},
-			})
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      "priv-key",
-				MountPath: "/home/app/config/" + PrivKeyFilename,
-				SubPath:   PrivKeyFilename,
-			})
+	switch {
+	case chainNode.UsesTmKms():
+		_, kms, err := r.getTmkms(chainNode)
+		if err != nil {
+			return nil, err
 		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, kms.GetVolumes()...)
+		pod.Spec.Containers = append(pod.Spec.Containers, kms.GetContainersSpec()...)
+
+	case chainNode.IsSignerTarget():
+		// Block signing is handled by an external cosmosigner deployment that dials this node's
+		// priv-validator address. No local key is mounted and no signer sidecar is injected.
+
+	case chainNode.IsValidator():
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: "priv-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: chainNode.Spec.Validator.GetPrivKeySecretName(chainNode),
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "priv-key",
+			MountPath: "/home/app/config/" + PrivKeyFilename,
+			SubPath:   PrivKeyFilename,
+		})
 	}
 
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Sidecars != nil {

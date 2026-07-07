@@ -146,6 +146,26 @@ func (chainNode *ChainNode) UsesTmKms() bool {
 	return chainNode.Spec.Validator != nil && chainNode.Spec.Validator.TmKMS != nil
 }
 
+// UsesCosmosigner reports whether this ChainNode declares its own managed cosmosigner deployment
+// (standalone ChainNode usage).
+func (chainNode *ChainNode) UsesCosmosigner() bool {
+	return chainNode.Spec.Cosmosigner != nil
+}
+
+// IsSignerTarget reports whether this ChainNode signs through an external cosmosigner deployment,
+// either because it declares one directly (.spec.cosmosigner) or because a parent ChainNodeSet
+// marked it as a target group node (.spec.remoteSignerTarget).
+func (chainNode *ChainNode) IsSignerTarget() bool {
+	return chainNode.UsesCosmosigner() || chainNode.Spec.RemoteSignerTarget
+}
+
+// UsesRemoteSigner reports whether block signing for this node happens outside the node process,
+// either via a TmKMS sidecar or via an external cosmosigner deployment. In both cases the node
+// listens on priv_validator_laddr and the local priv-key secret is not mounted.
+func (chainNode *ChainNode) UsesRemoteSigner() bool {
+	return chainNode.UsesTmKms() || chainNode.IsSignerTarget()
+}
+
 func (chainNode *ChainNode) ShouldUploadVaultKey() bool {
 	if chainNode.ShouldInitGenesis() {
 		return true

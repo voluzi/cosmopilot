@@ -99,6 +99,8 @@ ChainNodeSpec defines the desired state of ChainNode.
 | config | Allows setting specific configurations for this node. | *[Config](#config) | false |
 | persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. | *[Persistence](#persistence) | false |
 | validator | Indicates this node is going to be a validator and allows configuring it. | *[ValidatorConfig](#validatorconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer for this node. When configured, the node listens for the signer on its priv_validator_laddr and no local key is mounted. | *Cosmosigner | false |
+| remoteSignerTarget | RemoteSignerTarget marks this node as a signing endpoint for a cosmosigner deployment owned by a parent ChainNodeSet. It is set by the ChainNodeSet controller on nodes of targeted groups and makes the node listen for the remote signer without mounting a local key. It is not meant to be set by hand. | bool | false |
 | autoDiscoverPeers | Ensures peers with same chain ID are connected with each other. Enabled by default. | *bool | false |
 | stateSyncRestore | Configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
 | stateSyncResources | Compute Resources to be used while the node is state-syncing. | corev1.ResourceRequirements | false |
@@ -214,6 +216,7 @@ ChainNodeSetSpec defines the desired state of ChainNode.
 | ingresses | List of ingresses to create for this ChainNodeSet. This allows to create ingresses targeting multiple groups of nodes. | [][GlobalIngressConfig](#globalingressconfig) | false |
 | gatewayRoutes | List of Gateway API route configs for this ChainNodeSet. This allows to create HTTPRoute/GRPCRoute resources targeting multiple groups of nodes. | [][GlobalGatewayConfig](#globalgatewayconfig) | false |
 | cosmoseed | Allows deploying seed nodes using Cosmoseed. | *[CosmoseedConfig](#cosmoseedconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer that signs for one or more node groups (or the validator group by default). Targeted nodes listen for the signer instead of mounting a local key or running TmKMS. | *Cosmosigner | false |
 
 [Back to Custom Resources](#custom-resources)
 

@@ -328,6 +328,16 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 		},
 	}
 
+	// Mark nodes of groups targeted by a managed cosmosigner deployment as remote-signer targets,
+	// so they listen for the signer and carry the discovery-service selector label (valued with the
+	// signer name so a single service selects every targeted group's pods).
+	if nodeSet.IsCosmosignerTargetGroup(group.Name) {
+		node.Spec.RemoteSignerTarget = true
+		node.Labels = utils.MergeMaps(node.Labels, map[string]string{
+			controllers.LabelCosmosignerTarget: cosmosignerName(nodeSet),
+		})
+	}
+
 	if group.IndividualIngresses != nil {
 		node.Spec.Ingress = group.IndividualIngresses.DeepCopy()
 		node.Spec.Ingress.Host = fmt.Sprintf("%d.%s", index, group.IndividualIngresses.Host)

@@ -274,6 +274,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Deploy a managed cosmosigner remote signer if configured on this standalone node.
+	logger.V(1).Info("ensure cosmosigner if applicable")
+	if err = r.ensureCosmosigner(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Ensure pod is running
 	logger.V(1).Info("ensure pod")
 	if err = r.ensurePod(ctx, app, chainNode, configHash); err != nil {

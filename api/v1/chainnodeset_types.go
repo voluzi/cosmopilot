@@ -80,6 +80,12 @@ type ChainNodeSetSpec struct {
 	// Allows deploying seed nodes using Cosmoseed.
 	// +optional
 	Cosmoseed *CosmoseedConfig `json:"cosmoseed,omitempty"`
+
+	// Cosmosigner deploys a managed cosmosigner remote signer that signs for one or more node
+	// groups (or the validator group by default). Targeted nodes listen for the signer instead of
+	// mounting a local key or running TmKMS.
+	// +optional
+	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
 }
 
 // ChainNodeSetStatus defines the observed state of ChainNodeSet.
