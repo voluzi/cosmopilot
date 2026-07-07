@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
@@ -35,7 +34,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
-	params, err := r.cosmosignerParams(ctx, nodeSet)
+	params, err := r.cosmosignerParams(nodeSet)
 	if err != nil {
 		return err
 	}
@@ -69,7 +68,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 
 // cosmosignerParams resolves the builder parameters, ensuring the software key secret exists when
 // the software backend is used.
-func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (cosmosigner.Params, error) {
+func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigner.Params, error) {
 	c := nodeSet.Spec.Cosmosigner
 	name := cosmosignerName(nodeSet)
 
@@ -77,7 +76,7 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.Chai
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
 	})
 
-	backend, err := r.cosmosignerBackend(ctx, nodeSet)
+	backend, err := r.cosmosignerBackend(nodeSet)
 	if err != nil {
 		return cosmosigner.Params{}, err
 	}
@@ -102,15 +101,17 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.Chai
 	}, nil
 }
 
-// cosmosignerBackend translates the CRD backend into the builder backend, ensuring the software
-// key secret exists when needed.
-func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (cosmosigner.Backend, error) {
+// cosmosignerBackend translates the CRD backend into the builder backend. Key material is never
+// generated here: the software backend references either an explicit secret or the targeted
+// validator's own key secret (produced by the validator's genesis/create-validator flow), so the
+// signer always signs with the exact consensus key registered on-chain.
+func (r *Reconciler) cosmosignerBackend(nodeSet *appsv1.ChainNodeSet) (cosmosigner.Backend, error) {
 	c := nodeSet.Spec.Cosmosigner
 	switch {
 	case c.UsesSoftwareBackend():
-		secretName := r.cosmosignerSoftwareSecretName(nodeSet)
-		if err := r.ensureCosmosignerSoftwareKey(ctx, nodeSet, secretName); err != nil {
-			return cosmosigner.Backend{}, err
+		secretName, ok := r.cosmosignerSoftwareSecretName(nodeSet)
+		if !ok {
+			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software backend has no resolvable private-key secret")
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 
@@ -136,30 +137,19 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 	return cosmosigner.Backend{}, fmt.Errorf("cosmosigner has no backend configured")
 }
 
-// cosmosignerSoftwareSecretName resolves the secret holding the software backend's key.
-func (r *Reconciler) cosmosignerSoftwareSecretName(nodeSet *appsv1.ChainNodeSet) string {
-	if s := nodeSet.Spec.Cosmosigner.Backend.Software.PrivateKeySecret; s != nil {
-		return *s
+// cosmosignerSoftwareSecretName resolves the secret holding the software backend's key: an explicit
+// privateKeySecret, otherwise the targeted validator's key secret. The webhook guarantees one of
+// these is available.
+func (r *Reconciler) cosmosignerSoftwareSecretName(nodeSet *appsv1.ChainNodeSet) (string, bool) {
+	if s := nodeSet.Spec.Cosmosigner.Backend.Software.PrivateKeySecret; s != nil && *s != "" {
+		return *s, true
 	}
-	return fmt.Sprintf("%s-cosmosigner-priv-key", nodeSet.GetName())
+	return nodeSet.CosmosignerValidatorTargetSecret()
 }
 
-// ensureCosmosignerSoftwareKey creates the software backend key secret with a freshly generated
-// consensus key when it does not yet exist. An existing secret is left untouched so the key stays
-// stable.
-func (r *Reconciler) ensureCosmosignerSoftwareKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
-	return r.ensureSecret(ctx, nodeSet, name, []string{privKeyFilename}, func() (map[string][]byte, error) {
-		key, err := cometbft.GeneratePrivKey()
-		if err != nil {
-			return nil, err
-		}
-		return map[string][]byte{privKeyFilename: key}, nil
-	})
-}
-
-// maybeImportCosmosignerKey imports the locally-generated key into Vault once, when uploadGenerated
-// is set. The source secret is the software key secret (or the target validator's key) — for v1
-// this uses the dedicated cosmosigner software key secret name.
+// maybeImportCosmosignerKey imports the targeted validator's generated consensus key into Vault
+// once, when uploadGenerated is set. The source is the validator's own priv-key secret (created by
+// its genesis/create-validator flow), so Vault holds exactly the key registered on-chain.
 func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, params cosmosigner.Params) error {
 	c := nodeSet.Spec.Cosmosigner
 	if !c.UsesVaultBackend() || !c.Backend.Vault.UploadGenerated {
@@ -169,10 +159,18 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return nil
 	}
 
-	// Generate a local key to import.
-	sourceSecret := fmt.Sprintf("%s-cosmosigner-priv-key", nodeSet.GetName())
-	if err := r.ensureCosmosignerSoftwareKey(ctx, nodeSet, sourceSecret); err != nil {
+	sourceSecret, ok := nodeSet.CosmosignerValidatorTargetSecret()
+	if !ok {
+		// The webhook rejects uploadGenerated without a validator target; guard defensively.
+		return fmt.Errorf("cosmosigner uploadGenerated requires a targeted validator whose key can be imported")
+	}
+
+	// The key is produced by the validator's genesis/create-validator flow; wait for it rather than
+	// generating (and thereby diverging from) a different key.
+	if exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), sourceSecret, privKeyFilename); err != nil {
 		return err
+	} else if !exists {
+		return nil
 	}
 
 	runner := cosmosigner.JobRunner{
@@ -187,14 +185,50 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return err
 	}
 
+	// Mark imported. A transient conflict on this update just re-runs the (idempotent) import; the
+	// import command itself verifies the stored pubkey matches the source key.
+	return r.markCosmosignerKeyImported(ctx, nodeSet)
+}
+
+// markCosmosignerKeyImported records the once-only import annotation, tolerating a concurrent update
+// by re-fetching and retrying.
+func (r *Reconciler) markCosmosignerKeyImported(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Annotations == nil {
 		nodeSet.Annotations = map[string]string{}
 	}
 	nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] = controllers.StringValueTrue
-	return r.Update(ctx, nodeSet)
+	if err := r.Update(ctx, nodeSet); err == nil {
+		return nil
+	} else if !errors.IsConflict(err) {
+		return err
+	}
+
+	fresh := &appsv1.ChainNodeSet{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(nodeSet), fresh); err != nil {
+		return err
+	}
+	if fresh.Annotations == nil {
+		fresh.Annotations = map[string]string{}
+	}
+	fresh.Annotations[controllers.AnnotationCosmosignerKeyImported] = controllers.StringValueTrue
+	return r.Update(ctx, fresh)
 }
 
-// undeployCosmosigner removes managed signer resources when cosmosigner is no longer configured.
+// secretHasKey reports whether the named secret exists and contains a non-empty value for key.
+func (r *Reconciler) secretHasKey(ctx context.Context, namespace, name, key string) (bool, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, secret); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(secret.Data[key]) > 0, nil
+}
+
+// undeployCosmosigner removes managed signer resources when cosmosigner is no longer configured. It
+// only deletes resources this ChainNodeSet actually owns, so an unrelated resource that happens to
+// share the derived name is never touched.
 func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	logger := log.FromContext(ctx)
 	name := cosmosignerName(nodeSet)
@@ -207,6 +241,15 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-privval", Namespace: ns}},
 	}
 	for _, obj := range objects {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if !metav1.IsControlledBy(obj, nodeSet) {
+			continue
+		}
 		if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
 			logger.Error(err, "failed to delete cosmosigner resource", "name", obj.GetName())
 			return err
@@ -215,7 +258,8 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 	return nil
 }
 
-// applyCosmosignerObject sets the owner reference and creates or updates a managed object.
+// applyCosmosignerObject sets the owner reference and creates or updates a managed object,
+// preserving StatefulSet fields that Kubernetes forbids updating.
 func (r *Reconciler) applyCosmosignerObject(ctx context.Context, nodeSet *appsv1.ChainNodeSet, obj client.Object) error {
 	if err := controllerutil.SetControllerReference(nodeSet, obj, r.Scheme); err != nil {
 		return err
@@ -231,8 +275,27 @@ func (r *Reconciler) applyCosmosignerObject(ctx context.Context, nodeSet *appsv1
 	if err != nil {
 		return err
 	}
+	preserveImmutableStatefulSetFields(obj, existing)
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return r.Update(ctx, obj)
+}
+
+// preserveImmutableStatefulSetFields copies the fields Kubernetes rejects updates to (selector,
+// serviceName, podManagementPolicy, volumeClaimTemplates) from the existing StatefulSet onto the
+// desired one, so a changed stateStorageSize/storageClassName does not wedge the reconcile loop.
+func preserveImmutableStatefulSetFields(desired, existing client.Object) {
+	d, ok := desired.(*appsv1k8s.StatefulSet)
+	if !ok {
+		return
+	}
+	e, ok := existing.(*appsv1k8s.StatefulSet)
+	if !ok {
+		return
+	}
+	d.Spec.Selector = e.Spec.Selector
+	d.Spec.ServiceName = e.Spec.ServiceName
+	d.Spec.PodManagementPolicy = e.Spec.PodManagementPolicy
+	d.Spec.VolumeClaimTemplates = e.Spec.VolumeClaimTemplates
 }
 
 // ownedService sets the owner reference on a service built by the cosmosigner package so it can be

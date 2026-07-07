@@ -9,7 +9,6 @@ import (
 func GetKeyFormatter(chainNode *appsv1.ChainNode) *KeyFormatter {
 	return &KeyFormatter{
 		IsValidator:     chainNode.IsValidator(),
-		UseTmkms:        chainNode.UsesTmKms(),
 		UseRemoteSigner: chainNode.UsesRemoteSigner(),
 		UseDashes:       chainNode.Spec.Config.UseDashedConfigToml(),
 	}
@@ -17,7 +16,6 @@ func GetKeyFormatter(chainNode *appsv1.ChainNode) *KeyFormatter {
 
 type KeyFormatter struct {
 	IsValidator bool
-	UseTmkms    bool
 	// UseRemoteSigner is true when block signing happens outside the node process (TmKMS sidecar
 	// or an external cosmosigner deployment). In that case the node must listen for the signer on
 	// its priv_validator_laddr.

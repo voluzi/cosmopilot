@@ -148,6 +148,66 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
 	})
 
+	It("rejects targeting more than one validator group", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"val-a", "val-b"}, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{
+				{Name: "val-a", Validator: &appsv1.NodeSetValidatorConfig{}},
+				{Name: "val-b", Validator: &appsv1.NodeSetValidatorConfig{}},
+			},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cannot target more than one validator"))
+	})
+
+	It("rejects a sentry-mode software backend without an explicit key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: softwareBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("privateKeySecret is required when no validator is targeted"))
+	})
+
+	It("accepts a sentry-mode software backend with an explicit key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("my-key")},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects uploadGenerated without a validator target", func() {
+		vb := vaultBackend()
+		vb.Vault.UploadGenerated = true
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vb},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uploadGenerated requires targeting a validator"))
+	})
+
+	It("accepts uploadGenerated when a validator is targeted", func() {
+		vb := vaultBackend()
+		vb.Vault.UploadGenerated = true
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: vb},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{},
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
 	It("rejects nodeGroups on a standalone ChainNode", func() {
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},

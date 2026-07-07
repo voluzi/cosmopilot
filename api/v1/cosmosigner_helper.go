@@ -125,6 +125,39 @@ func (nodeSet *ChainNodeSet) IsCosmosignerTargetGroup(group string) bool {
 	return ok
 }
 
+// CosmosignerValidatorTargetSecret resolves the private-key secret of the single validator the
+// cosmosigner deployment signs for, so the signer uses the exact consensus key that genesis or
+// create-validator registers. It returns ("", false) for a sentry-mode signer that targets only
+// regular (non-validator) groups. The webhook guarantees at most one validator target.
+func (nodeSet *ChainNodeSet) CosmosignerValidatorTargetSecret() (string, bool) {
+	if nodeSet.Spec.Cosmosigner == nil {
+		return "", false
+	}
+	for name := range nodeSet.CosmosignerTargetGroups() {
+		if name == ReservedValidatorGroupName {
+			if nodeSet.Spec.Validator == nil {
+				continue
+			}
+			if nodeSet.Spec.Validator.PrivateKeySecret != nil {
+				return *nodeSet.Spec.Validator.PrivateKeySecret, true
+			}
+			return fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName()), true
+		}
+		for _, g := range nodeSet.Spec.Nodes {
+			if g.Name != name || g.Validator == nil {
+				continue
+			}
+			if g.Validator.PrivateKeySecret != nil {
+				return *g.Validator.PrivateKeySecret, true
+			}
+			// Validator groups targeted by cosmosigner are single-instance (webhook-enforced), so
+			// instance 0's default key is the validator's key.
+			return fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), name), true
+		}
+	}
+	return "", false
+}
+
 // Validate performs self-contained validation of a Cosmosigner block. isNodeSet indicates whether
 // the block lives on a ChainNodeSet (where nodeGroups is meaningful) or a standalone ChainNode
 // (where nodeGroups must be empty). path is the field path used in error messages.

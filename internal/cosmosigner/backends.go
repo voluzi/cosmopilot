@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
@@ -171,6 +172,10 @@ func (b Backend) sidecars() []corev1.Container {
 	if b.Vault == nil || !b.Vault.AutoRenewToken {
 		return nil
 	}
+	renewerResources := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("64Mi"),
+	}
 	c := corev1.Container{
 		Name:            "vault-token-renewer",
 		Image:           "ghcr.io/voluzi/vault-token-renewer",
@@ -182,6 +187,7 @@ func (b Backend) sidecars() []corev1.Container {
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: vaultTokenVolume, ReadOnly: true, MountPath: vaultTokenFile, SubPath: b.Vault.TokenSecret.Key},
 		},
+		Resources: corev1.ResourceRequirements{Requests: renewerResources, Limits: renewerResources},
 	}
 	if b.Vault.CertificateSecret != nil {
 		c.Env = append(c.Env, corev1.EnvVar{Name: "VAULT_CACERT", Value: vaultCaFile})

@@ -13,7 +13,9 @@ spec:
     sdkVersion: v0.47
 
   genesis:
-    url: https://example.com/nibiru-testnet-0/genesis.json
+    # Placeholder — replace with the real genesis URL of the network you are joining. The signer's
+    # consensus key (Vault transit key below) must already belong to that network's validator set.
+    url: https://replace-me.example/nibiru-testnet-0/genesis.json
 
   cosmosigner:
     # Sign for the "fullnodes" group. Every node in the group is a signing endpoint of the single

@@ -51,7 +51,7 @@ On a standalone **ChainNode**, `.spec.cosmosigner` targets that node; `nodeGroup
 ## Sentry mode: a group of full nodes that validates
 
 ```yaml {8-14}
-apiVersion: apps.k8s.voluzi.com/v1
+apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
   name: mychain
@@ -105,8 +105,19 @@ cosmosigner:
       tokenSecret: { name: vault-cosmosigner-token, key: token }
       certificateSecret: { name: vault-ca, key: ca.crt }   # optional CA
       autoRenewToken: true       # optional token-renewer sidecar
-      uploadGenerated: false     # generate a key locally and import it (testnets only)
+      # uploadGenerated: true    # testnets only: import the validator's generated key into Vault.
+      #                          # Requires targeting a validator (init/create-validator) so the
+      #                          # imported key matches the one registered on-chain. Defaults to false.
 ```
+
+:::note[Key provenance]
+When cosmosigner targets a validator, the signer uses the **validator's own consensus key** — with
+the software backend it references the validator's private-key secret, and with Vault
+`uploadGenerated` it imports that same key. When no validator is targeted (a sentry-mode signer over
+regular groups), you must supply the key yourself: set `backend.software.privateKeySecret`, or
+pre-provision the Vault/GCP key. This guarantees the signer signs with exactly the key registered
+on-chain.
+:::
 
 ### Google Cloud KMS
 

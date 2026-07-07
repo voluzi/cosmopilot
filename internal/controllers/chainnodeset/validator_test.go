@@ -283,15 +283,24 @@ func TestValidatorWaitMode(t *testing.T) {
 	knownChainID := &appsv1.ChainNodeSet{Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"}}
 
 	// Single-instance genesis validator with no chainID: wait until running/syncing.
-	assert.Equal(t, waitRunningOrSyncing, validatorWaitMode(emptyChainID, withInit, 1))
+	assert.Equal(t, waitRunningOrSyncing, validatorWaitMode(emptyChainID, withInit, 1, "validators"))
 	// Multi-instance genesis validator with no chainID: wait only for genesis readiness.
-	assert.Equal(t, waitGenesisReady, validatorWaitMode(emptyChainID, withInit, 3))
+	assert.Equal(t, waitGenesisReady, validatorWaitMode(emptyChainID, withInit, 3, "validators"))
 	// Genesis already known: never wait, regardless of instances.
-	assert.Equal(t, waitNone, validatorWaitMode(knownChainID, withInit, 1))
-	assert.Equal(t, waitNone, validatorWaitMode(knownChainID, withInit, 3))
+	assert.Equal(t, waitNone, validatorWaitMode(knownChainID, withInit, 1, "validators"))
+	assert.Equal(t, waitNone, validatorWaitMode(knownChainID, withInit, 3, "validators"))
 	// Non-init validators never wait.
-	assert.Equal(t, waitNone, validatorWaitMode(emptyChainID, noInit, 1))
-	assert.Equal(t, waitNone, validatorWaitMode(knownChainID, noInit, 3))
+	assert.Equal(t, waitNone, validatorWaitMode(emptyChainID, noInit, 1, "validators"))
+	assert.Equal(t, waitNone, validatorWaitMode(knownChainID, noInit, 3, "validators"))
+
+	// A cosmosigner-targeted single-instance init validator waits only for genesis readiness (it
+	// cannot run before the signer is deployed).
+	cosmosignerTargeted := &appsv1.ChainNodeSet{
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"validators"}},
+		},
+	}
+	assert.Equal(t, waitGenesisReady, validatorWaitMode(cosmosignerTargeted, withInit, 1, "validators"))
 }
 
 // TestGetValidatorSpecNonInitGenesisFromChainID verifies a non-init group validator's

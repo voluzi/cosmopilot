@@ -3,7 +3,6 @@ package cosmosigner
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,8 +23,6 @@ const (
 	importSourceVolume = "import-source"
 	importSourceDir    = "/import"
 	importSourceFile   = importSourceDir + "/priv_validator_key.json"
-
-	pubKeyLogPrefix = "pubkey (base64): "
 )
 
 // JobRunner runs the one-shot cosmosigner key-management pods (pubkey, import). It needs the
@@ -122,22 +119,6 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 		return "", err
 	}
 	return ph.GetLogs(ctx, containerName)
-}
-
-// GetPubKey runs `cosmosigner pubkey` against the configured backend and returns the base64-encoded
-// consensus public key.
-func (j JobRunner) GetPubKey(ctx context.Context) (string, error) {
-	out, err := j.runJob(ctx, "pubkey", []string{"pubkey"}, nil, nil)
-	if err != nil {
-		return "", err
-	}
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, pubKeyLogPrefix) {
-			return strings.TrimSpace(strings.TrimPrefix(line, pubKeyLogPrefix)), nil
-		}
-	}
-	return "", fmt.Errorf("could not find public key in cosmosigner pubkey output")
 }
 
 // ImportKey runs `cosmosigner import` to import an existing priv_validator_key.json (held in

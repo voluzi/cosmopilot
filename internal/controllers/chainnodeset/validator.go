@@ -43,7 +43,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 			return fmt.Errorf("failed to get validator spec for %s: %w", nodeSet.GetName(), err)
 		}
 
-		if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, nodeSet.Spec.Validator, 1)); err != nil {
+		if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, nodeSet.Spec.Validator, 1, validatorGroupName)); err != nil {
 			return fmt.Errorf("failed to ensure validator node for %s: %w", nodeSet.GetName(), err)
 		}
 		updateValidatorStatus(nodeSet, validator, nodeSet.Spec.Validator, validatorGroupName, nodeSet.Spec.Validator.Init != nil, !legacyAliasSet)
@@ -113,7 +113,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 				validator.Spec.Persistence.Snapshots = nil
 			}
 
-			if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, cfg, instances)); err != nil {
+			if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, cfg, instances, group.Name)); err != nil {
 				return fmt.Errorf("failed to ensure validator node for %s group %s index %d: %w", nodeSet.GetName(), group.Name, i, err)
 			}
 			// Update status immediately, in spec order. For a genesis-initializing multi-validator
@@ -494,11 +494,15 @@ func missingSecretKeys(data map[string][]byte, keys []string) []string {
 // returns; blocking on "running" would therefore deadlock. In that case we block only until the
 // genesis is ready (the chainID is populated and its ConfigMap exists), which is enough to derive
 // and create the remaining validators. All other validators reconcile without blocking.
-func validatorWaitMode(nodeSet *appsv1.ChainNodeSet, cfg *appsv1.NodeSetValidatorConfig, instances int) chainNodeWait {
+func validatorWaitMode(nodeSet *appsv1.ChainNodeSet, cfg *appsv1.NodeSetValidatorConfig, instances int, group string) chainNodeWait {
 	if cfg.Init == nil || nodeSet.Status.ChainID != "" {
 		return waitNone
 	}
-	if instances > 1 {
+	// A cosmosigner-targeted init validator starts as a remote-signer target with no local key: it
+	// blocks at startup waiting for the signer to dial in. The signer is deployed only after this
+	// wait returns, so blocking on "running" would deadlock. Wait only until genesis is ready (the
+	// chainID is populated), which is enough for the signer to be configured and dial in.
+	if instances > 1 || nodeSet.IsCosmosignerTargetGroup(group) {
 		return waitGenesisReady
 	}
 	return waitRunningOrSyncing

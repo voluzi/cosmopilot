@@ -446,6 +446,8 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 		groups[g.Name] = g
 	}
 
+	validatorTargets := 0
+
 	if len(c.NodeGroups) == 0 {
 		// Default target is the legacy singleton validator.
 		if nodeSet.Spec.Validator == nil {
@@ -454,29 +456,48 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 		if nodeSet.Spec.Validator.TmKMS != nil {
 			return fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
 		}
-		return nil
+		validatorTargets = 1
+	} else {
+		seen := map[string]struct{}{}
+		for i, name := range c.NodeGroups {
+			if _, dup := seen[name]; dup {
+				return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q is listed more than once", i, name)
+			}
+			seen[name] = struct{}{}
+
+			group, ok := groups[name]
+			if !ok {
+				return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q does not match any group in .spec.nodes", i, name)
+			}
+			if group.Validator != nil {
+				if group.GetInstances() > 1 {
+					return fmt.Errorf(".spec.cosmosigner cannot target validator group %q with multiple instances: each instance is a distinct validator with its own key", name)
+				}
+				if group.Validator.TmKMS != nil {
+					return fmt.Errorf(".spec.cosmosigner cannot target group %q which uses tmKMS: cosmosigner and tmKMS are mutually exclusive", name)
+				}
+				validatorTargets++
+			}
+		}
 	}
 
-	seen := map[string]struct{}{}
-	for i, name := range c.NodeGroups {
-		if _, dup := seen[name]; dup {
-			return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q is listed more than once", i, name)
-		}
-		seen[name] = struct{}{}
+	// A single signer holds one consensus identity. Targeting more than one validator would make
+	// distinct validators share the same signing key.
+	if validatorTargets > 1 {
+		return fmt.Errorf(".spec.cosmosigner cannot target more than one validator: a signer holds a single consensus identity")
+	}
 
-		group, ok := groups[name]
-		if !ok {
-			return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q does not match any group in .spec.nodes", i, name)
+	// Without a validator target there is no controller-registered consensus key to reuse, so the
+	// signer's key material must be supplied explicitly.
+	if validatorTargets == 0 {
+		if c.UsesSoftwareBackend() && (c.Backend.Software.PrivateKeySecret == nil || *c.Backend.Software.PrivateKeySecret == "") {
+			return fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret is required when no validator is targeted")
 		}
-		if group.Validator != nil {
-			if group.GetInstances() > 1 {
-				return fmt.Errorf(".spec.cosmosigner cannot target validator group %q with multiple instances: each instance is a distinct validator with its own key", name)
-			}
-			if group.Validator.TmKMS != nil {
-				return fmt.Errorf(".spec.cosmosigner cannot target group %q which uses tmKMS: cosmosigner and tmKMS are mutually exclusive", name)
-			}
+		if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
+			return fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires targeting a validator whose generated key can be imported")
 		}
 	}
+
 	return nil
 }
 
@@ -594,6 +615,27 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		}
 		if err := registerGenesisValidators(path, group.Validator.Init); err != nil {
 			return err
+		}
+	}
+
+	// The managed cosmosigner deployment signs with a single consensus identity. When it targets a
+	// validator, that validator's own key is already registered above (the signer reuses it), so
+	// only the external backend identity and the sentry-mode software secret need registering here
+	// to catch collisions with other validators.
+	if c := nodeSet.Spec.Cosmosigner; c != nil {
+		if id, ok := c.SigningKeyIdentity(); ok {
+			if prev, ok := tmKMSKeys[id]; ok {
+				return fmt.Errorf(".spec.cosmosigner references the same signing key as %s; each validator must sign with a distinct key", prev)
+			}
+			tmKMSKeys[id] = ".spec.cosmosigner"
+		}
+		if c.UsesSoftwareBackend() {
+			if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget &&
+				c.Backend.Software.PrivateKeySecret != nil {
+				if err := registerSecret(".spec.cosmosigner.backend.software", *c.Backend.Software.PrivateKeySecret); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
