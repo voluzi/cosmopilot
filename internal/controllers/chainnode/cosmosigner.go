@@ -35,7 +35,8 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 
 	params := r.cosmosignerParams(chainNode)
 
-	if err := r.maybeImportCosmosignerKey(ctx, chainNode, params); err != nil {
+	importPending, err := r.maybeImportCosmosignerKey(ctx, chainNode, params)
+	if err != nil {
 		return err
 	}
 
@@ -52,6 +53,11 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	}
 	if err := r.ensureService(ctx, r.ownedCosmosignerService(chainNode, params.DiscoveryService())); err != nil {
 		return err
+	}
+
+	// Do not roll out the signer until the node's generated key has been imported into Vault.
+	if importPending {
+		return nil
 	}
 
 	sts, err := params.StatefulSet()
@@ -140,44 +146,44 @@ func (r *Reconciler) cosmosignerNodeKeySecret(chainNode *appsv1.ChainNode) strin
 
 // maybeImportCosmosignerKey imports the node's generated consensus key into Vault once, when
 // uploadGenerated is set.
-func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) error {
+func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (bool, error) {
 	c := chainNode.Spec.Cosmosigner
 	if !c.UsesVaultBackend() || !c.Backend.Vault.UploadGenerated {
-		return nil
+		return false, nil
 	}
 
 	// Fingerprint the Vault target so changing it (address, namespace, mount or key) re-imports
 	// rather than leaving the annotation set.
 	want := utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s", c.Backend.Vault.Address, derefString(c.Backend.Vault.Namespace), c.Backend.Vault.GetVaultMount(), c.Backend.Vault.KeyName))
 	if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
-		return nil
+		return false, nil
 	}
 
 	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: sourceSecret}, secret); err != nil {
 		if errors.IsNotFound(err) {
-			// The node has not produced its key yet; retry on a later reconcile.
-			return nil
+			// The node has not produced its key yet; import is pending, retry on a later reconcile.
+			return true, nil
 		}
-		return err
+		return false, err
 	}
 	if len(secret.Data[PrivKeyFilename]) == 0 {
-		return nil
+		return true, nil
 	}
 
 	runner := cosmosigner.JobRunner{Client: r.ClientSet, Scheme: r.Scheme, Owner: chainNode, Params: params}
 	if err := runner.ImportKey(ctx, sourceSecret); err != nil {
 		r.recorder.Event(chainNode, corev1.EventTypeWarning, appsv1.ReasonUploadFailure,
 			controllers.FormatErrorEvent("failed to import cosmosigner key to Vault", err))
-		return err
+		return false, err
 	}
 
 	if chainNode.Annotations == nil {
 		chainNode.Annotations = map[string]string{}
 	}
 	chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] = want
-	return r.Update(ctx, chainNode)
+	return false, r.Update(ctx, chainNode)
 }
 
 // undeployCosmosigner removes managed signer resources this ChainNode owns.

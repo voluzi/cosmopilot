@@ -6,6 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
@@ -54,7 +55,8 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{Backend: softwareBackend()},
 			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
-			&appsv1.NodeSetValidatorConfig{},
+			// A plain (external-genesis) validator must supply its key for the software signer.
+			&appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("existing-val-key")},
 		)
 		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
 	})
@@ -379,6 +381,56 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		err := Framework().Client().Create(Framework().Context(), cn)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("managed by the ChainNodeSet controller"))
+	})
+
+	It("rejects a Vault backend with an empty tokenSecret name", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Vault: &appsv1.CosmosignerVaultBackend{
+					Address:     "https://vault:8200",
+					KeyName:     "myval",
+					TokenSecret: &corev1.SecretKeySelector{Key: "token"}, // no name
+				},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("tokenSecret.name is required"))
+	})
+
+	It("rejects a software signer targeting a plain validator without a key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: softwareBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{}, // plain external-genesis validator, no key
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("requires the validator to set privateKeySecret"))
+	})
+
+	It("rejects a replicas change after creation", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+		// Re-fetch and update in a retry loop: the controller reconciles the object concurrently, so a
+		// stale-write conflict is retried until the webhook's immutability rule is what rejects it.
+		Eventually(func() string {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
+				return err.Error()
+			}
+			fresh.Spec.Cosmosigner.Replicas = ptr.To(int32(1))
+			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
+				return err.Error()
+			}
+			return ""
+		}).Should(ContainSubstring("replicas is immutable"))
 	})
 
 	It("rejects nodeGroups on a standalone ChainNode", func() {

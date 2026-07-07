@@ -284,6 +284,11 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	if err := nodeSet.validateCosmosigner(); err != nil {
 		return nil, err
 	}
+	if old != nil {
+		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, nodeSet.Spec.Cosmosigner); err != nil {
+			return nil, err
+		}
+	}
 
 	// Two validators that explicitly reference the same signing material would sign with the same
 	// consensus key (double-signing). Reject duplicates across every validator that actually runs.
@@ -534,15 +539,22 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 		}
 	}
 
+	hasExplicitKey := targetValidator.PrivateKeySecret != nil && *targetValidator.PrivateKeySecret != ""
+
 	// uploadGenerated imports the targeted validator's key into Vault, so that key must exist: the
 	// validator must generate one (init/createValidator) or supply an explicit privateKeySecret. A
 	// plain external-genesis validator with only the default key never creates it, leaving nothing
 	// to import.
 	if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
-		hasExplicitKey := targetValidator.PrivateKeySecret != nil && *targetValidator.PrivateKeySecret != ""
 		if !registers && !hasExplicitKey {
 			return fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires the targeted validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import")
 		}
+	}
+
+	// The software backend mounts the targeted validator's key secret. A plain external-genesis
+	// validator never creates its default key, so an explicit privateKeySecret is required.
+	if c.UsesSoftwareBackend() && !registers && !hasExplicitKey {
+		return fmt.Errorf(".spec.cosmosigner software backend targeting a validator that consumes an external genesis requires the validator to set privateKeySecret: its consensus key is not generated")
 	}
 
 	return nil

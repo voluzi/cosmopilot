@@ -209,8 +209,8 @@ func (c *Cosmosigner) Validate(path string, isNodeSet bool) error {
 		if c.Backend.Vault.KeyName == "" {
 			return fmt.Errorf("%s.backend.vault.keyName is required", path)
 		}
-		if c.Backend.Vault.TokenSecret == nil {
-			return fmt.Errorf("%s.backend.vault.tokenSecret is required", path)
+		if c.Backend.Vault.TokenSecret == nil || c.Backend.Vault.TokenSecret.Name == "" {
+			return fmt.Errorf("%s.backend.vault.tokenSecret.name is required", path)
 		}
 	case c.Backend.GcpKMS != nil:
 		if c.Backend.GcpKMS.KeyVersion == "" {
@@ -223,6 +223,20 @@ func (c *Cosmosigner) Validate(path string, isNodeSet bool) error {
 		return fmt.Errorf("%s.nodeGroups is only valid on a ChainNodeSet", path)
 	}
 
+	return nil
+}
+
+// validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the
+// embedded raft cluster is not a plain Kubernetes scale: the membership recorded in the existing
+// per-pod raft state is not updated by rendering a new bootstrap list, so scaling down can lose
+// quorum and scaling up starts pods outside the existing cluster.
+func validateCosmosignerReplicasImmutable(oldC, newC *Cosmosigner) error {
+	if oldC == nil || newC == nil {
+		return nil
+	}
+	if oldC.GetReplicas() != newC.GetReplicas() {
+		return fmt.Errorf(".spec.cosmosigner.replicas is immutable after creation: changing it does not migrate the raft membership in the signer's state and can break quorum")
+	}
 	return nil
 }
 

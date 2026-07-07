@@ -118,12 +118,16 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// must supply one explicitly.
 		if c.UsesSoftwareBackend() {
 			s := c.Backend.Software.PrivateKeySecret
-			if isValidator {
-				if s != nil && *s != "" {
-					return nil, fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret cannot be set when the node is a validator: the validator's own key is used")
+			switch {
+			case !isValidator:
+				if s == nil || *s == "" {
+					return nil, fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret is required when the node is not a validator")
 				}
-			} else if s == nil || *s == "" {
-				return nil, fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret is required when the node is not a validator")
+			case s != nil && *s != "":
+				return nil, fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret cannot be set when the node is a validator: the validator's own key is used")
+			case !registers && !hasValidatorKey:
+				// A plain external-genesis validator never creates its default key, so it must set one.
+				return nil, fmt.Errorf(".spec.cosmosigner software backend on a validator that consumes an external genesis requires .spec.validator.privateKeySecret: its consensus key is not generated")
 			}
 		}
 
@@ -147,6 +151,12 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			if !matches {
 				return nil, fmt.Errorf(".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
 			}
+		}
+	}
+
+	if old != nil {
+		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, chainNode.Spec.Cosmosigner); err != nil {
+			return nil, err
 		}
 	}
 

@@ -41,8 +41,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return err
 	}
 
-	// Import a locally-generated key into Vault when requested (one-shot, once-only).
-	if err := r.maybeImportCosmosignerKey(ctx, nodeSet, params); err != nil {
+	// Import a locally-generated key into Vault when requested (one-shot, once-only). Returns
+	// pending when the validator has not produced its key yet.
+	importPending, err := r.maybeImportCosmosignerKey(ctx, nodeSet, params)
+	if err != nil {
 		return err
 	}
 
@@ -59,6 +61,13 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 	}
 	if err := r.ensureService(ctx, r.ownedService(nodeSet, params.DiscoveryService())); err != nil {
 		return err
+	}
+
+	// Do not roll out the signer until the validator's generated key has been imported into Vault,
+	// otherwise the signer would come up against an empty/stale transit key while the validator
+	// registers the local pubkey. A later reconcile completes the import and deploys the signer.
+	if importPending {
+		return nil
 	}
 
 	sts, err := params.StatefulSet()
@@ -155,10 +164,10 @@ func (r *Reconciler) cosmosignerSoftwareSecretName(nodeSet *appsv1.ChainNodeSet)
 // maybeImportCosmosignerKey imports the targeted validator's generated consensus key into Vault
 // once, when uploadGenerated is set. The source is the validator's own priv-key secret (created by
 // its genesis/create-validator flow), so Vault holds exactly the key registered on-chain.
-func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, params cosmosigner.Params) error {
+func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, params cosmosigner.Params) (bool, error) {
 	c := nodeSet.Spec.Cosmosigner
 	if !c.UsesVaultBackend() || !c.Backend.Vault.UploadGenerated {
-		return nil
+		return false, nil
 	}
 
 	// The annotation records a fingerprint of the Vault target so that changing the key name, mount
@@ -166,21 +175,22 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	// or stale transit key.
 	want := cosmosignerVaultTargetFingerprint(c.Backend.Vault)
 	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
-		return nil
+		return false, nil
 	}
 
 	sourceSecret, ok := nodeSet.CosmosignerValidatorTargetSecret()
 	if !ok {
 		// The webhook rejects uploadGenerated without a validator target; guard defensively.
-		return fmt.Errorf("cosmosigner uploadGenerated requires a targeted validator whose key can be imported")
+		return false, fmt.Errorf("cosmosigner uploadGenerated requires a targeted validator whose key can be imported")
 	}
 
 	// The key is produced by the validator's genesis/create-validator flow; wait for it rather than
-	// generating (and thereby diverging from) a different key.
+	// generating (and thereby diverging from) a different key. The import is still pending until it
+	// exists, so the caller must not roll out the signer yet.
 	if exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), sourceSecret, privKeyFilename); err != nil {
-		return err
+		return false, err
 	} else if !exists {
-		return nil
+		return true, nil
 	}
 
 	runner := cosmosigner.JobRunner{
@@ -192,12 +202,15 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	if err := runner.ImportKey(ctx, sourceSecret); err != nil {
 		r.recorder.Event(nodeSet, corev1.EventTypeWarning, appsv1.ReasonUploadFailure,
 			controllers.FormatErrorEvent("failed to import cosmosigner key to Vault", err))
-		return err
+		return false, err
 	}
 
 	// Mark imported with the target fingerprint. A transient conflict just re-runs the (idempotent)
 	// import; the import command itself verifies the stored pubkey matches the source key.
-	return r.markCosmosignerKeyImported(ctx, nodeSet, want)
+	if err := r.markCosmosignerKeyImported(ctx, nodeSet, want); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // cosmosignerVaultTargetFingerprint returns a stable fingerprint of the Vault target a generated key
