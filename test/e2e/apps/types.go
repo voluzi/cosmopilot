@@ -390,8 +390,10 @@ func (t TestApp) BuildChainNodeSetWithCosmosigner(namespace string, cfg Cosmosig
 		replicas = 1
 	}
 
+	// Targeting the validator (nodeGroups empty), the signer resolves the validator's own key
+	// automatically, so the software backend must not set an explicit privateKeySecret.
 	backend := appsv1.CosmosignerBackend{
-		Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(cosmosignerSharedKeySecret)},
+		Software: &appsv1.CosmosignerSoftwareBackend{},
 	}
 	if cfg.Vault != nil {
 		backend = appsv1.CosmosignerBackend{

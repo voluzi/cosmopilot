@@ -57,10 +57,11 @@ type Params struct {
 	TargetSelector map[string]string
 }
 
-// raftServiceFQDN is the cluster-internal FQDN of the StatefulSet's governing headless service,
-// used to build stable per-replica raft peer addresses.
-func (p Params) raftServiceFQDN() string {
-	return fmt.Sprintf("%s.%s.svc.cluster.local", p.Name, p.Namespace)
+// raftServiceDNS is the namespaced DNS name of the StatefulSet's governing headless service, used to
+// build stable per-replica raft peer addresses. The `.svc` (no cluster domain) form resolves via the
+// pod's DNS search domain, so it works regardless of the cluster's DNS domain (not just cluster.local).
+func (p Params) raftServiceDNS() string {
+	return fmt.Sprintf("%s.%s.svc", p.Name, p.Namespace)
 }
 
 // DiscoveryServiceName is the name of the headless service the signer points node_service at.
@@ -70,7 +71,7 @@ func (p Params) DiscoveryServiceName() string {
 
 // nodeServiceEndpoint is the host:port the signer dials to discover target nodes.
 func (p Params) nodeServiceEndpoint() string {
-	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", p.DiscoveryServiceName(), p.Namespace, chainutils.PrivValPort)
+	return fmt.Sprintf("%s.%s.svc:%d", p.DiscoveryServiceName(), p.Namespace, chainutils.PrivValPort)
 }
 
 // selectorLabels are the immutable labels that identify signer pods.
@@ -110,7 +111,7 @@ func (p Params) BuildConfig() *Config {
 			id := fmt.Sprintf("%s-%d", p.Name, i)
 			members = append(members, Member{
 				ID:      id,
-				Address: fmt.Sprintf("%s.%s:%d", id, p.raftServiceFQDN(), raftPort),
+				Address: fmt.Sprintf("%s.%s:%d", id, p.raftServiceDNS(), raftPort),
 			})
 		}
 		cfg.Raft.Members = members
@@ -255,7 +256,7 @@ func (p Params) StatefulSet() (*appsv1.StatefulSet, error) {
 			// node_id is the pod name; advertise resolves to this pod's stable raft DNS. Both
 			// override the config file (env has higher precedence in cosmosigner).
 			{Name: "COSMOSIGNER_RAFT_NODE_ID", Value: "$(POD_NAME)"},
-			{Name: "COSMOSIGNER_RAFT_ADVERTISE", Value: fmt.Sprintf("$(POD_NAME).%s:%d", p.raftServiceFQDN(), raftPort)},
+			{Name: "COSMOSIGNER_RAFT_ADVERTISE", Value: fmt.Sprintf("$(POD_NAME).%s:%d", p.raftServiceDNS(), raftPort)},
 			// Force a rollout when the rendered config changes.
 			{Name: "ROLLME", Value: utils.Sha256(configHash)},
 		},

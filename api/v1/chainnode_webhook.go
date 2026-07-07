@@ -90,6 +90,13 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		return nil, err
 	}
 
+	// remoteSignerTarget is a controller-managed marker set by the ChainNodeSet controller on nodes
+	// of targeted groups. Setting it by hand on a ChainNode that has no cosmosigner of its own and no
+	// owning ChainNodeSet would make a validator stop mounting its key and silently fail to sign.
+	if chainNode.Spec.RemoteSignerTarget && chainNode.Spec.Cosmosigner == nil && !isControlledByChainNodeSet(chainNode) {
+		return nil, fmt.Errorf(".spec.remoteSignerTarget is managed by the ChainNodeSet controller and cannot be set manually")
+	}
+
 	// Validate cosmosigner configuration when present.
 	if chainNode.Spec.Cosmosigner != nil {
 		if err := chainNode.Spec.Cosmosigner.Validate(".spec.cosmosigner", false); err != nil {
@@ -98,6 +105,13 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// A node cannot both sign through a TmKMS sidecar and a cosmosigner deployment.
 		if chainNode.UsesTmKms() {
 			return nil, fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
+		}
+		// A software signer on a non-validator node has no controller-created key to reference, so it
+		// must be supplied explicitly (a validator node produces or is given its own key).
+		if chainNode.Spec.Cosmosigner.UsesSoftwareBackend() && chainNode.Spec.Validator == nil {
+			if s := chainNode.Spec.Cosmosigner.Backend.Software.PrivateKeySecret; s == nil || *s == "" {
+				return nil, fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret is required when the node is not a validator")
+			}
 		}
 	}
 
@@ -182,6 +196,17 @@ func (chainNode *ChainNode) validateGenesisValidators() error {
 		accountSecrets[gv.AccountMnemonicSecret] = accPath
 	}
 	return nil
+}
+
+// isControlledByChainNodeSet reports whether the ChainNode carries a controller owner reference to a
+// ChainNodeSet, i.e. it is a generated child rather than a user-created standalone node.
+func isControlledByChainNodeSet(chainNode *ChainNode) bool {
+	for _, ref := range chainNode.GetOwnerReferences() {
+		if ref.Kind == "ChainNodeSet" && ref.Controller != nil && *ref.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 func validateSnapshotsConfig(config *VolumeSnapshotsConfig, path string) error {

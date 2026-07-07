@@ -440,6 +440,14 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 		return err
 	}
 
+	// The signer owns resources named "<nodeset>-signer" and "<nodeset>-signer-privval"; a node
+	// group with either name would produce a colliding Service.
+	for i, g := range nodeSet.Spec.Nodes {
+		if g.Name == "signer" || g.Name == "signer-privval" {
+			return fmt.Errorf(".spec.nodes[%d].name %q is reserved when .spec.cosmosigner is configured", i, g.Name)
+		}
+	}
+
 	// Index groups by name for target resolution.
 	groups := make(map[string]NodeGroupSpec, len(nodeSet.Spec.Nodes))
 	for _, g := range nodeSet.Spec.Nodes {
@@ -447,6 +455,7 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 	}
 
 	validatorTargets := 0
+	var targetValidator *NodeSetValidatorConfig
 
 	if len(c.NodeGroups) == 0 {
 		// Default target is the legacy singleton validator.
@@ -457,6 +466,7 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 			return fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
 		}
 		validatorTargets = 1
+		targetValidator = nodeSet.Spec.Validator
 	} else {
 		seen := map[string]struct{}{}
 		for i, name := range c.NodeGroups {
@@ -469,6 +479,11 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 			if !ok {
 				return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q does not match any group in .spec.nodes", i, name)
 			}
+			// A group scaled to zero has no pods, so it can neither be a signing endpoint nor host a
+			// validator whose key the signer would use.
+			if group.GetInstances() == 0 {
+				return fmt.Errorf(".spec.cosmosigner cannot target group %q with zero instances", name)
+			}
 			if group.Validator != nil {
 				if group.GetInstances() > 1 {
 					return fmt.Errorf(".spec.cosmosigner cannot target validator group %q with multiple instances: each instance is a distinct validator with its own key", name)
@@ -477,6 +492,7 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 					return fmt.Errorf(".spec.cosmosigner cannot target group %q which uses tmKMS: cosmosigner and tmKMS are mutually exclusive", name)
 				}
 				validatorTargets++
+				targetValidator = group.Validator
 			}
 		}
 	}
@@ -487,14 +503,33 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 		return fmt.Errorf(".spec.cosmosigner cannot target more than one validator: a signer holds a single consensus identity")
 	}
 
-	// Without a validator target there is no controller-registered consensus key to reuse, so the
-	// signer's key material must be supplied explicitly.
 	if validatorTargets == 0 {
+		// Without a validator target there is no controller-registered consensus key to reuse, so the
+		// signer's key material must be supplied explicitly.
 		if c.UsesSoftwareBackend() && (c.Backend.Software.PrivateKeySecret == nil || *c.Backend.Software.PrivateKeySecret == "") {
 			return fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret is required when no validator is targeted")
 		}
 		if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
 			return fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires targeting a validator whose generated key can be imported")
+		}
+		return nil
+	}
+
+	// With a validator target the signer must use that validator's own key, so an explicit software
+	// secret (which could point elsewhere) is not allowed.
+	if c.UsesSoftwareBackend() && c.Backend.Software.PrivateKeySecret != nil && *c.Backend.Software.PrivateKeySecret != "" {
+		return fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret cannot be set when targeting a validator: the validator's own key is used")
+	}
+
+	// When the targeted validator registers a freshly-generated consensus key on-chain (genesis
+	// init or create-validator), Cosmopilot registers the validator's local key. The signer must
+	// therefore use that same key: only the software backend (which references it) or Vault with
+	// uploadGenerated (which imports it) match. A pre-provisioned Vault/GCP key would register a
+	// different pubkey than the signer holds, until external pubkey registration is wired.
+	if targetValidator.Init != nil || targetValidator.CreateValidator != nil {
+		matches := c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated)
+		if !matches {
+			return fmt.Errorf(".spec.cosmosigner targeting a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
 		}
 	}
 
@@ -518,6 +553,9 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	privateKeySecrets := map[string]string{}
 	tmKMSKeys := map[string]string{}
+	// vaultKeys tracks Vault Transit keys in a backend-agnostic form so the same key referenced
+	// through tmKMS and through cosmosigner is detected as a collision.
+	vaultKeys := map[string]string{}
 
 	registerSecret := func(path, secret string) error {
 		if prev, ok := privateKeySecrets[secret]; ok {
@@ -527,12 +565,25 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		return nil
 	}
 
+	registerVault := func(path, id string) error {
+		if prev, ok := vaultKeys[id]; ok {
+			return fmt.Errorf("%s references the same Vault signing key as %s; each validator must sign with a distinct key", path, prev)
+		}
+		vaultKeys[id] = path
+		return nil
+	}
+
 	registerTmKMS := func(path string, v *NodeSetValidatorConfig) error {
 		if id, ok := tmKMSSigningKeyIdentity(v.TmKMS); ok {
 			if prev, ok := tmKMSKeys[id]; ok {
 				return fmt.Errorf("%s.tmKMS references the same signing key as %s; each validator must sign with a distinct key", path, prev)
 			}
 			tmKMSKeys[id] = path
+		}
+		if id, ok := tmkmsNormalizedVaultKey(v.TmKMS); ok {
+			if err := registerVault(path+".tmKMS", id); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -623,13 +674,24 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	// only the external backend identity and the sentry-mode software secret need registering here
 	// to catch collisions with other validators.
 	if c := nodeSet.Spec.Cosmosigner; c != nil {
-		if id, ok := c.SigningKeyIdentity(); ok {
-			if prev, ok := tmKMSKeys[id]; ok {
-				return fmt.Errorf(".spec.cosmosigner references the same signing key as %s; each validator must sign with a distinct key", prev)
+		switch {
+		case c.UsesVaultBackend():
+			v := c.Backend.Vault
+			if v.Address != "" && v.KeyName != "" {
+				if err := registerVault(".spec.cosmosigner", normalizedVaultIdentity(v.Address, v.GetVaultMount(), v.KeyName)); err != nil {
+					return err
+				}
 			}
-			tmKMSKeys[id] = ".spec.cosmosigner"
-		}
-		if c.UsesSoftwareBackend() {
+		case c.UsesGcpKmsBackend():
+			if id, ok := c.SigningKeyIdentity(); ok {
+				if prev, ok := tmKMSKeys[id]; ok {
+					return fmt.Errorf(".spec.cosmosigner references the same signing key as %s; each validator must sign with a distinct key", prev)
+				}
+				tmKMSKeys[id] = ".spec.cosmosigner"
+			}
+		case c.UsesSoftwareBackend():
+			// A validator-targeted software signer reuses that validator's already-registered key.
+			// Only a sentry-mode explicit key needs registering so it cannot alias another validator.
 			if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget &&
 				c.Backend.Software.PrivateKeySecret != nil {
 				if err := registerSecret(".spec.cosmosigner.backend.software", *c.Backend.Software.PrivateKeySecret); err != nil {
@@ -887,6 +949,26 @@ func genesisSigningFingerprint(privateKeySecret *string, tmKMS *TmKMS, init *Gen
 	tmKMSID, _ := tmKMSSigningKeyIdentity(tmKMS)
 
 	return strings.Join([]string{secret, tmKMSID, accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
+}
+
+// normalizedVaultIdentity returns a backend-agnostic identifier for a Vault Transit key, so the
+// same key referenced through tmKMS and through cosmosigner compares equal. tmKMS uses the default
+// "transit" mount implicitly. The null-byte separators keep the fields unambiguous.
+func normalizedVaultIdentity(address, mount, key string) string {
+	return fmt.Sprintf("vault\x00%s\x00%s\x00%s", address, mount, key)
+}
+
+// tmkmsNormalizedVaultKey returns the backend-agnostic Vault identity a tmKMS config points at, and
+// whether one is configured.
+func tmkmsNormalizedVaultKey(t *TmKMS) (string, bool) {
+	if t == nil || t.Provider.Hashicorp == nil {
+		return "", false
+	}
+	h := t.Provider.Hashicorp
+	if h.Address == "" || h.Key == "" {
+		return "", false
+	}
+	return normalizedVaultIdentity(h.Address, DefaultCosmosignerVaultMount, h.Key), true
 }
 
 // tmKMSSigningKeyIdentity returns a stable identifier for the concrete signing key a tmKMS config

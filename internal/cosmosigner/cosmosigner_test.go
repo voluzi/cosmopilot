@@ -37,14 +37,14 @@ func TestBuildConfigMultiReplicaMembers(t *testing.T) {
 	if !cfg.Raft.Bootstrap {
 		t.Fatalf("expected bootstrap to be true")
 	}
-	want := "mychain-signer-0.mychain-signer.default.svc.cluster.local:7070"
+	want := "mychain-signer-0.mychain-signer.default.svc:7070"
 	if cfg.Raft.Members[0].Address != want {
 		t.Fatalf("member 0 address = %q, want %q", cfg.Raft.Members[0].Address, want)
 	}
 	if cfg.Raft.Members[0].ID != "mychain-signer-0" {
 		t.Fatalf("member 0 id = %q", cfg.Raft.Members[0].ID)
 	}
-	if cfg.NodeService != "mychain-signer-privval.default.svc.cluster.local:26659" {
+	if cfg.NodeService != "mychain-signer-privval.default.svc:26659" {
 		t.Fatalf("unexpected node_service %q", cfg.NodeService)
 	}
 	if cfg.Backend.Type != "vault" || cfg.Backend.Vault == nil || cfg.Backend.Vault.KeyName != "myval" {
@@ -107,7 +107,7 @@ func TestStatefulSetShape(t *testing.T) {
 		case "COSMOSIGNER_RAFT_NODE_ID":
 			hasNodeID = e.Value == "$(POD_NAME)"
 		case "COSMOSIGNER_RAFT_ADVERTISE":
-			hasAdvertise = strings.Contains(e.Value, "$(POD_NAME).mychain-signer.default.svc.cluster.local:7070")
+			hasAdvertise = strings.Contains(e.Value, "$(POD_NAME).mychain-signer.default.svc:7070")
 		case "ROLLME":
 			hasRollme = e.Value != ""
 		}

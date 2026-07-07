@@ -1,9 +1,30 @@
 package k8s
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// PreserveImmutableStatefulSetFields copies the fields Kubernetes forbids updating (selector,
+// serviceName, podManagementPolicy, volumeClaimTemplates) from an existing StatefulSet onto the
+// desired one, so a changed PVC template (e.g. size/storageClass) does not wedge the reconcile
+// loop with a rejected update. Both arguments must be *appsv1.StatefulSet; otherwise it is a no-op.
+func PreserveImmutableStatefulSetFields(desired, existing client.Object) {
+	d, ok := desired.(*appsv1.StatefulSet)
+	if !ok {
+		return
+	}
+	e, ok := existing.(*appsv1.StatefulSet)
+	if !ok {
+		return
+	}
+	d.Spec.Selector = e.Spec.Selector
+	d.Spec.ServiceName = e.Spec.ServiceName
+	d.Spec.PodManagementPolicy = e.Spec.PodManagementPolicy
+	d.Spec.VolumeClaimTemplates = e.Spec.VolumeClaimTemplates
+}
 
 const (
 	// NonRootUID is the standard non-root user ID used across all pods

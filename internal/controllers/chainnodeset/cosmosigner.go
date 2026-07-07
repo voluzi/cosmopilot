@@ -15,6 +15,8 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 // cosmosignerName is the base name for a ChainNodeSet's managed signer resources.
@@ -137,14 +139,17 @@ func (r *Reconciler) cosmosignerBackend(nodeSet *appsv1.ChainNodeSet) (cosmosign
 	return cosmosigner.Backend{}, fmt.Errorf("cosmosigner has no backend configured")
 }
 
-// cosmosignerSoftwareSecretName resolves the secret holding the software backend's key: an explicit
-// privateKeySecret, otherwise the targeted validator's key secret. The webhook guarantees one of
-// these is available.
+// cosmosignerSoftwareSecretName resolves the secret holding the software backend's key. When a
+// validator is targeted the signer must use that validator's own registered key, so it takes
+// precedence over any explicit privateKeySecret (which the webhook only permits in sentry mode).
 func (r *Reconciler) cosmosignerSoftwareSecretName(nodeSet *appsv1.ChainNodeSet) (string, bool) {
+	if secret, ok := nodeSet.CosmosignerValidatorTargetSecret(); ok {
+		return secret, true
+	}
 	if s := nodeSet.Spec.Cosmosigner.Backend.Software.PrivateKeySecret; s != nil && *s != "" {
 		return *s, true
 	}
-	return nodeSet.CosmosignerValidatorTargetSecret()
+	return "", false
 }
 
 // maybeImportCosmosignerKey imports the targeted validator's generated consensus key into Vault
@@ -155,7 +160,12 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	if !c.UsesVaultBackend() || !c.Backend.Vault.UploadGenerated {
 		return nil
 	}
-	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == controllers.StringValueTrue {
+
+	// The annotation records a fingerprint of the Vault target so that changing the key name, mount
+	// or address re-imports into the new target instead of leaving the signer pointed at an empty
+	// or stale transit key.
+	want := cosmosignerVaultTargetFingerprint(c.Backend.Vault)
+	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
 		return nil
 	}
 
@@ -185,18 +195,24 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return err
 	}
 
-	// Mark imported. A transient conflict on this update just re-runs the (idempotent) import; the
-	// import command itself verifies the stored pubkey matches the source key.
-	return r.markCosmosignerKeyImported(ctx, nodeSet)
+	// Mark imported with the target fingerprint. A transient conflict just re-runs the (idempotent)
+	// import; the import command itself verifies the stored pubkey matches the source key.
+	return r.markCosmosignerKeyImported(ctx, nodeSet, want)
 }
 
-// markCosmosignerKeyImported records the once-only import annotation, tolerating a concurrent update
-// by re-fetching and retrying.
-func (r *Reconciler) markCosmosignerKeyImported(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+// cosmosignerVaultTargetFingerprint returns a stable fingerprint of the Vault target a generated key
+// is imported into, so a change to the target triggers a fresh import.
+func cosmosignerVaultTargetFingerprint(v *appsv1.CosmosignerVaultBackend) string {
+	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s", v.Address, v.GetVaultMount(), v.KeyName))
+}
+
+// markCosmosignerKeyImported records the import annotation, tolerating a concurrent update by
+// re-fetching and retrying.
+func (r *Reconciler) markCosmosignerKeyImported(ctx context.Context, nodeSet *appsv1.ChainNodeSet, value string) error {
 	if nodeSet.Annotations == nil {
 		nodeSet.Annotations = map[string]string{}
 	}
-	nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] = controllers.StringValueTrue
+	nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] = value
 	if err := r.Update(ctx, nodeSet); err == nil {
 		return nil
 	} else if !errors.IsConflict(err) {
@@ -210,7 +226,7 @@ func (r *Reconciler) markCosmosignerKeyImported(ctx context.Context, nodeSet *ap
 	if fresh.Annotations == nil {
 		fresh.Annotations = map[string]string{}
 	}
-	fresh.Annotations[controllers.AnnotationCosmosignerKeyImported] = controllers.StringValueTrue
+	fresh.Annotations[controllers.AnnotationCosmosignerKeyImported] = value
 	return r.Update(ctx, fresh)
 }
 
@@ -275,27 +291,9 @@ func (r *Reconciler) applyCosmosignerObject(ctx context.Context, nodeSet *appsv1
 	if err != nil {
 		return err
 	}
-	preserveImmutableStatefulSetFields(obj, existing)
+	k8s.PreserveImmutableStatefulSetFields(obj, existing)
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return r.Update(ctx, obj)
-}
-
-// preserveImmutableStatefulSetFields copies the fields Kubernetes rejects updates to (selector,
-// serviceName, podManagementPolicy, volumeClaimTemplates) from the existing StatefulSet onto the
-// desired one, so a changed stateStorageSize/storageClassName does not wedge the reconcile loop.
-func preserveImmutableStatefulSetFields(desired, existing client.Object) {
-	d, ok := desired.(*appsv1k8s.StatefulSet)
-	if !ok {
-		return
-	}
-	e, ok := existing.(*appsv1k8s.StatefulSet)
-	if !ok {
-		return
-	}
-	d.Spec.Selector = e.Spec.Selector
-	d.Spec.ServiceName = e.Spec.ServiceName
-	d.Spec.PodManagementPolicy = e.Spec.PodManagementPolicy
-	d.Spec.VolumeClaimTemplates = e.Spec.VolumeClaimTemplates
 }
 
 // ownedService sets the owner reference on a service built by the cosmosigner package so it can be

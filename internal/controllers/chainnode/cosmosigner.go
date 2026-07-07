@@ -14,6 +14,8 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 // cosmosignerName is the base name for a standalone ChainNode's managed signer resources.
@@ -119,7 +121,17 @@ func (r *Reconciler) cosmosignerSoftwareSecretName(chainNode *appsv1.ChainNode) 
 	if s := chainNode.Spec.Cosmosigner.Backend.Software.PrivateKeySecret; s != nil && *s != "" {
 		return *s
 	}
-	// Reuse the node's own priv-key secret so a drop-in signer signs with the node's registered key.
+	// Reuse the node's own priv-key secret so a drop-in signer signs with the node's registered key,
+	// honoring an explicit .spec.validator.privateKeySecret.
+	return r.cosmosignerNodeKeySecret(chainNode)
+}
+
+// cosmosignerNodeKeySecret resolves the node's own consensus key secret: the validator's resolved
+// private-key secret when the node is a validator, otherwise the default name.
+func (r *Reconciler) cosmosignerNodeKeySecret(chainNode *appsv1.ChainNode) string {
+	if chainNode.IsValidator() {
+		return chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)
+	}
 	return fmt.Sprintf("%s-priv-key", chainNode.GetName())
 }
 
@@ -130,11 +142,14 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 	if !c.UsesVaultBackend() || !c.Backend.Vault.UploadGenerated {
 		return nil
 	}
-	if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == controllers.StringValueTrue {
+
+	// Fingerprint the Vault target so changing it re-imports rather than leaving the annotation set.
+	want := utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s", c.Backend.Vault.Address, c.Backend.Vault.GetVaultMount(), c.Backend.Vault.KeyName))
+	if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
 		return nil
 	}
 
-	sourceSecret := fmt.Sprintf("%s-priv-key", chainNode.GetName())
+	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: sourceSecret}, secret); err != nil {
 		if errors.IsNotFound(err) {
@@ -157,7 +172,7 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 	if chainNode.Annotations == nil {
 		chainNode.Annotations = map[string]string{}
 	}
-	chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] = controllers.StringValueTrue
+	chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] = want
 	return r.Update(ctx, chainNode)
 }
 
@@ -203,26 +218,9 @@ func (r *Reconciler) applyCosmosignerObject(ctx context.Context, chainNode *apps
 	if err != nil {
 		return err
 	}
-	preserveImmutableStatefulSetFields(obj, existing)
+	k8s.PreserveImmutableStatefulSetFields(obj, existing)
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return r.Update(ctx, obj)
-}
-
-// preserveImmutableStatefulSetFields copies the StatefulSet fields Kubernetes forbids updating from
-// the existing object onto the desired one.
-func preserveImmutableStatefulSetFields(desired, existing client.Object) {
-	d, ok := desired.(*appsv1k8s.StatefulSet)
-	if !ok {
-		return
-	}
-	e, ok := existing.(*appsv1k8s.StatefulSet)
-	if !ok {
-		return
-	}
-	d.Spec.Selector = e.Spec.Selector
-	d.Spec.ServiceName = e.Spec.ServiceName
-	d.Spec.PodManagementPolicy = e.Spec.PodManagementPolicy
-	d.Spec.VolumeClaimTemplates = e.Spec.VolumeClaimTemplates
 }
 
 func (r *Reconciler) ownedCosmosignerService(chainNode *appsv1.ChainNode, svc *corev1.Service) *corev1.Service {
