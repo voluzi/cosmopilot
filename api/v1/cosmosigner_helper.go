@@ -209,12 +209,20 @@ func (c *Cosmosigner) Validate(path string, isNodeSet bool) error {
 		if c.Backend.Vault.KeyName == "" {
 			return fmt.Errorf("%s.backend.vault.keyName is required", path)
 		}
-		if c.Backend.Vault.TokenSecret == nil || c.Backend.Vault.TokenSecret.Name == "" {
-			return fmt.Errorf("%s.backend.vault.tokenSecret.name is required", path)
+		// Both name and key are required: the controller mounts the token with the selector key as a
+		// SubPath, so an empty key would mount the whole secret directory over the token file path.
+		if c.Backend.Vault.TokenSecret == nil || c.Backend.Vault.TokenSecret.Name == "" || c.Backend.Vault.TokenSecret.Key == "" {
+			return fmt.Errorf("%s.backend.vault.tokenSecret.name and .key are required", path)
+		}
+		if cs := c.Backend.Vault.CertificateSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
+			return fmt.Errorf("%s.backend.vault.certificateSecret.name and .key are required when set", path)
 		}
 	case c.Backend.GcpKMS != nil:
 		if c.Backend.GcpKMS.KeyVersion == "" {
 			return fmt.Errorf("%s.backend.gcpKms.keyVersion is required", path)
+		}
+		if cs := c.Backend.GcpKMS.CredentialsSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
+			return fmt.Errorf("%s.backend.gcpKms.credentialsSecret.name and .key are required when set", path)
 		}
 	}
 
@@ -224,6 +232,67 @@ func (c *Cosmosigner) Validate(path string, isNodeSet bool) error {
 	}
 
 	return nil
+}
+
+// effectiveSigningIdentity returns a fingerprint of the actual consensus key the cosmosigner signs
+// with. softwareKeySecret is the resolved key secret used by the software backend.
+func (c *Cosmosigner) effectiveSigningIdentity(softwareKeySecret string) string {
+	if c == nil {
+		return ""
+	}
+	switch {
+	case c.UsesVaultBackend():
+		v := c.Backend.Vault
+		ns := ""
+		if v.Namespace != nil {
+			ns = *v.Namespace
+		}
+		return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s", v.Address, ns, v.GetVaultMount(), v.KeyName)
+	case c.UsesGcpKmsBackend():
+		return "gcpkms\x00" + c.Backend.GcpKMS.KeyVersion
+	case c.UsesSoftwareBackend():
+		return "software\x00" + softwareKeySecret
+	}
+	return ""
+}
+
+// CosmosignerSigningIdentity returns a fingerprint of the consensus key a standalone ChainNode's
+// cosmosigner signs with, resolving the software backend to the node's own key secret.
+func (chainNode *ChainNode) CosmosignerSigningIdentity() string {
+	c := chainNode.Spec.Cosmosigner
+	if c == nil {
+		return ""
+	}
+	softwareKey := ""
+	if c.UsesSoftwareBackend() {
+		switch {
+		case chainNode.Spec.Validator != nil:
+			softwareKey = chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)
+		case c.Backend.Software.PrivateKeySecret != nil && *c.Backend.Software.PrivateKeySecret != "":
+			softwareKey = *c.Backend.Software.PrivateKeySecret
+		default:
+			softwareKey = fmt.Sprintf("%s-priv-key", chainNode.GetName())
+		}
+	}
+	return c.effectiveSigningIdentity(softwareKey)
+}
+
+// CosmosignerSigningIdentity returns a fingerprint of the consensus key a ChainNodeSet's cosmosigner
+// signs with, resolving the software backend to the targeted validator's key secret.
+func (nodeSet *ChainNodeSet) CosmosignerSigningIdentity() string {
+	c := nodeSet.Spec.Cosmosigner
+	if c == nil {
+		return ""
+	}
+	softwareKey := ""
+	if c.UsesSoftwareBackend() {
+		if secret, ok := nodeSet.CosmosignerValidatorTargetSecret(); ok {
+			softwareKey = secret
+		} else if s := c.Backend.Software.PrivateKeySecret; s != nil {
+			softwareKey = *s
+		}
+	}
+	return c.effectiveSigningIdentity(softwareKey)
 }
 
 // validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the

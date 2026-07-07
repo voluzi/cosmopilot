@@ -288,6 +288,13 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, nodeSet.Spec.Cosmosigner); err != nil {
 			return nil, err
 		}
+		// Once the chain is established, the targeted validator's consensus pubkey is fixed on-chain.
+		// Reject changes to the cosmosigner signing key material that would make it sign with a
+		// different key.
+		if old.Status.ChainID != "" && old.Spec.Cosmosigner != nil && nodeSet.Spec.Cosmosigner != nil &&
+			old.CosmosignerSigningIdentity() != nodeSet.CosmosignerSigningIdentity() {
+			return nil, fmt.Errorf(".spec.cosmosigner signing key material is immutable after the chain is established: changing it would make the validator sign with a key not in the on-chain validator set")
+		}
 	}
 
 	// Two validators that explicitly reference the same signing material would sign with the same

@@ -397,7 +397,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		)
 		err := Framework().Client().Create(Framework().Context(), cs)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("tokenSecret.name is required"))
+		Expect(err.Error()).To(ContainSubstring("tokenSecret.name and .key are required"))
 	})
 
 	It("rejects a software signer targeting a plain validator without a key", func() {
@@ -431,6 +431,52 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 			}
 			return ""
 		}).Should(ContainSubstring("replicas is immutable"))
+	})
+
+	It("rejects a Vault backend with an empty tokenSecret key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Vault: &appsv1.CosmosignerVaultBackend{
+					Address:     "https://vault:8200",
+					KeyName:     "myval",
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}}, // no key
+				},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("tokenSecret.name and .key are required"))
+	})
+
+	It("rejects changing the cosmosigner signing key after the chain is established", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:         DefaultChainNodeTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
+
+		// Mark the chain as established.
+		cn.Status.ChainID = "test-chain-1"
+		Expect(Framework().Client().Status().Update(Framework().Context(), cn)).To(Succeed())
+
+		// Changing the Vault key is now rejected.
+		Eventually(func() string {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err.Error()
+			}
+			fresh.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
+			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
+				return err.Error()
+			}
+			return ""
+		}).Should(ContainSubstring("signing key material is immutable"))
 	})
 
 	It("rejects nodeGroups on a standalone ChainNode", func() {

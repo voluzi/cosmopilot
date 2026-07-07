@@ -158,6 +158,13 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, chainNode.Spec.Cosmosigner); err != nil {
 			return nil, err
 		}
+		// Once the chain is established, the validator's consensus pubkey is fixed in the on-chain
+		// validator set. Changing the cosmosigner signing key material (backend key, or the validator
+		// key the software backend references) would make the node sign with a key not in that set.
+		if old.Status.ChainID != "" && old.Spec.Cosmosigner != nil && chainNode.Spec.Cosmosigner != nil &&
+			old.CosmosignerSigningIdentity() != chainNode.CosmosignerSigningIdentity() {
+			return nil, fmt.Errorf(".spec.cosmosigner signing key material is immutable after the chain is established: changing it would make the validator sign with a key not in the on-chain validator set")
+		}
 	}
 
 	// Once genesis has been created (status.chainID set), the genesis-initializing .spec.validator.init
