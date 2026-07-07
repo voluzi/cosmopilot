@@ -142,6 +142,7 @@ ChainNodeStatus defines the observed state of ChainNode
 | upgrades | All scheduled/completed upgrades performed by cosmopilot on this ChainNode. | [][Upgrade](#upgrade) | false |
 | pubKey | Public key of the validator. | string | false |
 | validatorStatus | Indicates the current status of validator if this node is one. | ValidatorStatus | false |
+| cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity, captured once the chain is established, so the no-webhook reconcile path can reject a later change or removal of the signing configuration. Not meant to be set by hand. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -239,6 +240,7 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | upgrades | All scheduled or completed upgrades performed by cosmopilot on ChainNodes of this ChainNodeSet. | [][Upgrade](#upgrade) | false |
 | latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
 | seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
+| cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity and target set, captured once the chain is established. It lets the no-webhook reconcile path reject a later change or removal of the signing configuration that would make the validator sign with a key not in the on-chain validator set. Not meant to be set by hand. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 

@@ -633,10 +633,13 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		controllers.LabelValidator: strconv.FormatBool(chainNode.IsValidator()),
 		controllers.LabelUpgrading: controllers.StringValueFalse,
 	}
-	// A standalone ChainNode with its own cosmosigner deployment must expose the discovery-service
-	// selector label on its pod (ChainNodeSet-managed targets inherit it from the child ChainNode).
-	if chainNode.UsesCosmosigner() {
-		podLabels[controllers.LabelCosmosignerTarget] = cosmosignerName(chainNode)
+	// Target pods must carry the cosmosigner discovery-service selector label so the signer can find
+	// and dial them. WithChainNodeLabels strips this controller-managed label from inherited metadata
+	// (so a stray user label never leaks it onto non-target pods), so it is re-added explicitly here:
+	// a standalone node uses its own signer name; a ChainNodeSet-managed target copies the value the
+	// nodeset controller stamped on the child ChainNode (`<nodeset>-signer`).
+	if v, ok := cosmosignerTargetLabelValue(chainNode); ok {
+		podLabels[controllers.LabelCosmosignerTarget] = v
 	}
 
 	pod := &corev1.Pod{

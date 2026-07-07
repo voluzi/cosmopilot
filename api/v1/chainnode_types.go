@@ -262,6 +262,13 @@ type ChainNodeStatus struct {
 	// Indicates the current status of validator if this node is one.
 	// +optional
 	ValidatorStatus ValidatorStatus `json:"validatorStatus,omitempty"`
+
+	// CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's
+	// effective signing identity, captured once the chain is established, so the no-webhook reconcile
+	// path can reject a later change or removal of the signing configuration. Not meant to be set by
+	// hand.
+	// +optional
+	CosmosignerSigningDigest string `json:"cosmosignerSigningDigest,omitempty"`
 }
 
 // ValidatorConfig contains the configuration for running a node as validator.

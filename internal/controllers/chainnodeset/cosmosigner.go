@@ -36,6 +36,15 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
+	// Record the signing identity once the chain is established so the no-webhook reconcile path can
+	// reject a later change or removal of the signing configuration.
+	if nodeSet.Status.CosmosignerSigningDigest == "" {
+		nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
+		if err := r.Status().Update(ctx, nodeSet); err != nil {
+			return err
+		}
+	}
+
 	params, err := r.cosmosignerParams(nodeSet)
 	if err != nil {
 		return err
@@ -288,10 +297,21 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 
 	// StatefulSet PVCs are not garbage-collected with the StatefulSet. Delete the per-pod raft-state
 	// PVCs so a later re-enable starts from a clean, consistent raft membership rather than reusing
-	// stale state rendered against a different member list.
-	if err := r.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{},
-		client.InNamespace(ns), client.MatchingLabels(cosmosigner.InstanceLabels(name))); err != nil {
+	// stale state rendered against a different member list. List+Delete (rather than DeleteAllOf) uses
+	// only the list/delete verbs the controller already holds.
+	return r.deleteCosmosignerPVCs(ctx, ns, name)
+}
+
+// deleteCosmosignerPVCs deletes the per-pod raft-state PVCs belonging to a signer instance.
+func (r *Reconciler) deleteCosmosignerPVCs(ctx context.Context, namespace, name string) error {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(cosmosigner.InstanceLabels(name))); err != nil {
 		return err
+	}
+	for i := range pvcs.Items {
+		if err := r.Delete(ctx, &pvcs.Items[i]); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
 	}
 	return nil
 }

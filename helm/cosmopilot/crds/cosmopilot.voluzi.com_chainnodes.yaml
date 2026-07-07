@@ -5792,6 +5792,13 @@ spec:
                   - type
                   type: object
                 type: array
+              cosmosignerSigningDigest:
+                description: |-
+                  CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's
+                  effective signing identity, captured once the chain is established, so the no-webhook reconcile
+                  path can reject a later change or removal of the signing configuration. Not meant to be set by
+                  hand.
+                type: string
               dataUsage:
                 description: Usage percentage of data volume.
                 type: string

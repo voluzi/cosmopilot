@@ -23,6 +23,22 @@ func cosmosignerName(chainNode *appsv1.ChainNode) string {
 	return fmt.Sprintf("%s-signer", chainNode.GetName())
 }
 
+// cosmosignerTargetLabelValue returns the cosmosigner discovery-service selector label value this
+// node's pod must carry, and whether it is a signer target at all. A standalone node with its own
+// .spec.cosmosigner uses its own signer name; a ChainNodeSet-managed target (RemoteSignerTarget)
+// reuses the value the nodeset controller stamped on the child ChainNode's metadata.
+func cosmosignerTargetLabelValue(chainNode *appsv1.ChainNode) (string, bool) {
+	if chainNode.UsesCosmosigner() {
+		return cosmosignerName(chainNode), true
+	}
+	if chainNode.Spec.RemoteSignerTarget {
+		if v := chainNode.Labels[controllers.LabelCosmosignerTarget]; v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // ensureCosmosigner deploys (or tears down) a managed cosmosigner remote signer for a standalone
 // ChainNode. It is a no-op until the chain ID is known.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -31,6 +47,14 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	}
 	if chainNode.Status.ChainID == "" {
 		return nil
+	}
+
+	// Record the signing identity once the chain is established, for the no-webhook path.
+	if chainNode.Status.CosmosignerSigningDigest == "" {
+		chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
+		if err := r.Status().Update(ctx, chainNode); err != nil {
+			return err
+		}
 	}
 
 	params := r.cosmosignerParams(chainNode)
@@ -212,10 +236,15 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 	}
 
 	// Delete the per-pod raft-state PVCs (not garbage-collected with the StatefulSet) so a later
-	// re-enable starts from clean, consistent raft state.
-	if err := r.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{},
-		client.InNamespace(ns), client.MatchingLabels(cosmosigner.InstanceLabels(name))); err != nil {
+	// re-enable starts from clean, consistent raft state. List+Delete uses only verbs already held.
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcs, client.InNamespace(ns), client.MatchingLabels(cosmosigner.InstanceLabels(name))); err != nil {
 		return err
+	}
+	for i := range pvcs.Items {
+		if err := r.Delete(ctx, &pvcs.Items[i]); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
 	}
 	return nil
 }

@@ -1,7 +1,11 @@
 package v1
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -303,6 +307,44 @@ func (nodeSet *ChainNodeSet) CosmosignerSigningIdentity() string {
 // localKeySigningIdentity fingerprints a locally-held consensus key by its secret name.
 func localKeySigningIdentity(secret string) string {
 	return "software\x00" + secret
+}
+
+// CosmosignerSigningDigest fingerprints a ChainNodeSet's managed signer for status persistence: the
+// effective signing identity plus the sorted target-group set. Empty when no cosmosigner is set.
+func (nodeSet *ChainNodeSet) CosmosignerSigningDigest() string {
+	if nodeSet.Spec.Cosmosigner == nil {
+		return ""
+	}
+	targets := make([]string, 0)
+	for t := range nodeSet.CosmosignerTargetGroups() {
+		targets = append(targets, t)
+	}
+	sort.Strings(targets)
+	sum := sha256.Sum256([]byte(nodeSet.CosmosignerSigningIdentity() + "\x00" + strings.Join(targets, ",")))
+	return hex.EncodeToString(sum[:])
+}
+
+// CosmosignerSigningDigest fingerprints a standalone ChainNode's managed signer for status
+// persistence. Empty when no cosmosigner is set.
+func (chainNode *ChainNode) CosmosignerSigningDigest() string {
+	if chainNode.Spec.Cosmosigner == nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(chainNode.CosmosignerSigningIdentity()))
+	return hex.EncodeToString(sum[:])
+}
+
+// equalStringSet reports whether two set-valued maps contain the same keys.
+func equalStringSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // EffectiveSigningIdentity returns a normalized fingerprint of the consensus key this ChainNode

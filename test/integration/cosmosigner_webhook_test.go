@@ -521,6 +521,73 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("raftTLSSecret must not be empty"))
 	})
 
+	It("rejects retargeting the signer to different groups after the chain is established", func() {
+		cs := &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSetSpec{
+				App:         DefaultChainNodeSetTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Nodes:       []appsv1.NodeGroupSpec{{Name: "a"}, {Name: "b"}},
+				Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"a"}, Backend: vaultBackend()},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-chain-1"
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+		Eventually(func() string {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
+				return err.Error()
+			}
+			fresh.Spec.Cosmosigner.NodeGroups = []string{"b"}
+			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
+				return err.Error()
+			}
+			return ""
+		}).Should(ContainSubstring("nodeGroups is immutable"))
+	})
+
+	It("allows an init validator to migrate tmKMS to cosmosigner on the same key", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App: DefaultChainNodeTestApp,
+				Validator: &appsv1.ValidatorConfig{
+					Init: &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi"},
+					TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+						Address:     "https://vault:8200",
+						Key:         "myval",
+						TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+					}}},
+				},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-localnet"
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Spec.Validator.TmKMS = nil
+			fresh.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: vaultBackend()} // same Vault key "myval", uploadGenerated=false
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+	})
+
 	It("rejects nodeGroups on a standalone ChainNode", func() {
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},

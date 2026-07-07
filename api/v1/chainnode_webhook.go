@@ -145,8 +145,12 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 
 		// A validator that registers a freshly-generated key on-chain must sign with that same key,
 		// so the backend must be software (which references it) or Vault uploadGenerated (which
-		// imports it) — not a pre-provisioned Vault/GCP key with a different pubkey.
-		if registers {
+		// imports it) — not a pre-provisioned Vault/GCP key with a different pubkey. This is waived
+		// for a same-key migration on an established chain: the previous signing path already put this
+		// exact key on-chain, so a pre-provisioned key that matches it is correct (e.g. tmKMS→
+		// cosmosigner on the same Vault key, where the key is already in Vault).
+		sameKeyMigration := old != nil && old.Status.ChainID != "" && old.EffectiveSigningIdentity() == chainNode.EffectiveSigningIdentity()
+		if registers && !sameKeyMigration {
 			matches := c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated)
 			if !matches {
 				return nil, fmt.Errorf(".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
@@ -169,6 +173,18 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		}
 	}
 
+	// No-webhook reconcile path (old is nil): the controller records the cosmosigner signing identity
+	// in status once established, so a later removal or change of the signing configuration is rejected
+	// here (the webhook update path above already covers this when webhooks are enabled).
+	if old == nil && chainNode.Status.CosmosignerSigningDigest != "" {
+		if chainNode.Spec.Cosmosigner == nil {
+			return nil, fmt.Errorf(".spec.cosmosigner cannot be removed after the chain is established (webhooks disabled): the validator's key is fixed on-chain")
+		}
+		if chainNode.CosmosignerSigningDigest() != chainNode.Status.CosmosignerSigningDigest {
+			return nil, fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled)")
+		}
+	}
+
 	// Once genesis has been created (status.chainID set), the genesis-initializing .spec.validator.init
 	// is fixed: its validator is part of the immutable genesis validator set, and the whole init block
 	// (chainID, genesis validators, accounts, gentx parameters, ...) determines what initGenesis builds.
@@ -186,8 +202,18 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 				return nil, fmt.Errorf(".spec.validator.init cannot be added after genesis has been created")
 			case oldHasInit && !newHasInit:
 				return nil, fmt.Errorf(".spec.validator.init cannot be removed after genesis has been created: its validator is part of the immutable genesis validator set")
-			case oldHasInit && newHasInit && old.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret) != chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret):
-				return nil, fmt.Errorf(".spec.validator.init is immutable after genesis has been created: changing it would regenerate a different genesis for the same chain ID")
+			case oldHasInit && newHasInit:
+				// When cosmosigner is involved on either side, compare using the effective signing
+				// identity so a same-key signer migration (e.g. tmKMS→cosmosigner on the same Vault key)
+				// is not misread as a genesis change; the init block and account settings are still
+				// compared, so genuine changes are rejected.
+				if old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil {
+					if old.effectiveGenesisFingerprint(defaultPrivKeySecret) != chainNode.effectiveGenesisFingerprint(defaultPrivKeySecret) {
+						return nil, fmt.Errorf(".spec.validator.init is immutable after genesis has been created: changing it would regenerate a different genesis for the same chain ID")
+					}
+				} else if old.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret) != chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret) {
+					return nil, fmt.Errorf(".spec.validator.init is immutable after genesis has been created: changing it would regenerate a different genesis for the same chain ID")
+				}
 			}
 		}
 	} else if chainNode.Status.ChainID != "" && chainNode.Status.GenesisSigningDigest != "" {
@@ -207,6 +233,24 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	}
 
 	return nil, nil
+}
+
+// effectiveGenesisFingerprint is like GenesisSigningFingerprint but uses the node's effective signing
+// identity (which normalizes equivalent keys — the same Vault key via tmKMS or cosmosigner) instead
+// of the raw private-key-secret + tmKMS material, so a same-key signer migration is not treated as a
+// genesis change while genuine init/account changes still are.
+func (chainNode *ChainNode) effectiveGenesisFingerprint(defaultPrivKeySecret string) string {
+	v := chainNode.Spec.Validator
+	if v == nil {
+		return genesisSigningFingerprintWithIdentity("", nil, nil, "", "", "")
+	}
+	identity := chainNode.EffectiveSigningIdentity()
+	if identity == "" {
+		// Not a signer/validator path we can normalize; fall back to the local key secret.
+		identity = localKeySigningIdentity(v.GetPrivKeySecretName(chainNode))
+		_ = defaultPrivKeySecret
+	}
+	return genesisSigningFingerprintWithIdentity(identity, v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath())
 }
 
 // GenesisSigningFingerprint mirrors NodeSetValidatorConfig.GenesisSigningFingerprint for a standalone

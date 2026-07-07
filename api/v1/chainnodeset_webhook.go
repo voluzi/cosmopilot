@@ -292,6 +292,13 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		// Reject changes to its effective signing key — including adding, removing or switching the
 		// cosmosigner backend — while allowing same-key migrations (equivalent keys compare equal).
 		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || nodeSet.Spec.Cosmosigner != nil) {
+			// Retargeting the signer to different groups after establishment would leave the previously
+			// targeted validator signing locally (or concurrently) with a different key, even if the
+			// signer's own key is unchanged. The target set is therefore immutable.
+			if old.Spec.Cosmosigner != nil && nodeSet.Spec.Cosmosigner != nil &&
+				!equalStringSet(old.CosmosignerTargetGroups(), nodeSet.CosmosignerTargetGroups()) {
+				return nil, fmt.Errorf(".spec.cosmosigner.nodeGroups is immutable after the chain is established: retargeting the signer would change which validator signs")
+			}
 			targets := nodeSet.CosmosignerTargetGroups()
 			if len(targets) == 0 {
 				targets = old.CosmosignerTargetGroups()
@@ -729,15 +736,10 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				}
 				tmKMSKeys[id] = ".spec.cosmosigner"
 			}
-		case c.UsesSoftwareBackend():
-			// A validator-targeted software signer reuses that validator's already-registered key.
-			// Only a sentry-mode explicit key needs registering so it cannot alias another validator.
-			if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget &&
-				c.Backend.Software.PrivateKeySecret != nil {
-				if err := registerSecret(".spec.cosmosigner.backend.software", *c.Backend.Software.PrivateKeySecret); err != nil {
-					return err
-				}
-			}
+			// A software backend is intentionally not registered here: a validator-targeted signer
+			// reuses that validator's already-registered key, and a sentry-mode key is legitimately
+			// shared with the genesis validator entry that puts it on-chain (init.genesisValidators),
+			// so registering it again would wrongly reject that documented configuration.
 		}
 	}
 	return nil
@@ -989,6 +991,27 @@ func genesisSigningFingerprint(privateKeySecret *string, tmKMS *TmKMS, init *Gen
 	tmKMSID, _ := tmKMSSigningKeyIdentity(tmKMS)
 
 	return strings.Join([]string{secret, tmKMSID, accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
+}
+
+// genesisSigningFingerprintWithIdentity is like genesisSigningFingerprint but takes a precomputed
+// effective signing identity in place of the raw private-key-secret + tmKMS material, so equivalent
+// keys (e.g. the same Vault key via tmKMS or cosmosigner) yield the same fingerprint. The init,
+// account-derivation and info fields are compared identically, so genuine genesis changes are still
+// detected.
+func genesisSigningFingerprintWithIdentity(signingIdentity string, init *GenesisInitConfig, info *ValidatorInfo, accountPrefix, valPrefix, accountHDPath string) string {
+	var initJSON []byte
+	if init != nil {
+		initCopy := init.DeepCopy()
+		initCopy.AccountPrefix = nil
+		initCopy.ValPrefix = nil
+		initCopy.AccountHDPath = nil
+		initJSON, _ = json.Marshal(initCopy)
+	}
+	var infoJSON []byte
+	if info != nil {
+		infoJSON, _ = json.Marshal(info)
+	}
+	return strings.Join([]string{signingIdentity, accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
 }
 
 // normalizedVaultIdentity returns a backend-agnostic identifier for a Vault Transit key, so the

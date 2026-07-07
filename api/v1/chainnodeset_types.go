@@ -148,6 +148,14 @@ type ChainNodeSetStatus struct {
 
 	// Status of seed nodes (cosmoseed)
 	Seeds []SeedStatus `json:"seeds,omitempty"`
+
+	// CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's
+	// effective signing identity and target set, captured once the chain is established. It lets the
+	// no-webhook reconcile path reject a later change or removal of the signing configuration that
+	// would make the validator sign with a key not in the on-chain validator set. Not meant to be set
+	// by hand.
+	// +optional
+	CosmosignerSigningDigest string `json:"cosmosignerSigningDigest,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.

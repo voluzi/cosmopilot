@@ -234,7 +234,27 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 			return nil, err
 		}
 	}
+	if err := validateNoWebhookCosmosignerState(nodeSet); err != nil {
+		return nil, err
+	}
 	return nodeSet.Validate(nil)
+}
+
+// validateNoWebhookCosmosignerState mirrors the genesis no-webhook protection for the managed
+// cosmosigner: once its signing identity is recorded in status, reject a spec edit that removes or
+// changes it, since the targeted validator's key is fixed on-chain. A same-key migration keeps the
+// digest identical and is allowed.
+func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
+	if nodeSet.Status.CosmosignerSigningDigest == "" {
+		return nil
+	}
+	if nodeSet.Spec.Cosmosigner == nil {
+		return fmt.Errorf(".spec.cosmosigner cannot be removed after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain")
+	}
+	if nodeSet.CosmosignerSigningDigest() != nodeSet.Status.CosmosignerSigningDigest {
+		return fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled)")
+	}
+	return nil
 }
 
 func validateNoWebhookGenesisInitState(nodeSet *appsv1.ChainNodeSet) error {
