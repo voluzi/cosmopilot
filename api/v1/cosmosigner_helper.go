@@ -295,6 +295,77 @@ func (nodeSet *ChainNodeSet) CosmosignerSigningIdentity() string {
 	return c.effectiveSigningIdentity(softwareKey)
 }
 
+// localKeySigningIdentity fingerprints a locally-held consensus key by its secret name.
+func localKeySigningIdentity(secret string) string {
+	return "software\x00" + secret
+}
+
+// EffectiveSigningIdentity returns a normalized fingerprint of the consensus key this ChainNode
+// signs with, across every signing path (local key, tmKMS, cosmosigner). Equivalent keys compare
+// equal — e.g. the same Vault Transit key referenced through tmKMS or cosmosigner — so a same-key
+// migration is not flagged as a change while a real key change is. Empty when the node neither
+// validates nor hosts a signer.
+func (chainNode *ChainNode) EffectiveSigningIdentity() string {
+	switch {
+	case chainNode.Spec.Cosmosigner != nil:
+		return chainNode.CosmosignerSigningIdentity()
+	case chainNode.UsesTmKms():
+		if id, ok := tmkmsNormalizedVaultKey(chainNode.Spec.Validator.TmKMS); ok {
+			return id
+		}
+		return "tmkms\x00unconfigured"
+	case chainNode.IsValidator():
+		return localKeySigningIdentity(chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
+	default:
+		return ""
+	}
+}
+
+// cosmosignerTargetSigningIdentity returns the effective consensus-key fingerprint of the validator
+// the cosmosigner targets (or would target). When cosmosigner is configured it is the signer's
+// identity; otherwise it is the targeted validator's own local/tmKMS identity. targets is the set of
+// targeted group names, resolved from whichever spec revision carries the cosmosigner block.
+func (nodeSet *ChainNodeSet) cosmosignerTargetSigningIdentity(targets map[string]struct{}) string {
+	if nodeSet.Spec.Cosmosigner != nil {
+		return nodeSet.CosmosignerSigningIdentity()
+	}
+	for name := range targets {
+		if name == ReservedValidatorGroupName {
+			if nodeSet.Spec.Validator == nil {
+				continue
+			}
+			return nodeSet.validatorGroupSigningIdentity(ReservedValidatorGroupName, nodeSet.Spec.Validator)
+		}
+		for _, g := range nodeSet.Spec.Nodes {
+			if g.Name == name && g.Validator != nil {
+				return nodeSet.validatorGroupSigningIdentity(name, g.Validator)
+			}
+		}
+	}
+	return ""
+}
+
+// validatorGroupSigningIdentity returns the effective consensus-key fingerprint of a validator group
+// (or the legacy singleton) that signs through its own local key or tmKMS.
+func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *NodeSetValidatorConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if id, ok := tmkmsNormalizedVaultKey(cfg.TmKMS); ok {
+		return id
+	}
+	if cfg.TmKMS != nil {
+		return "tmkms\x00unconfigured"
+	}
+	if cfg.PrivateKeySecret != nil && *cfg.PrivateKeySecret != "" {
+		return localKeySigningIdentity(*cfg.PrivateKeySecret)
+	}
+	if group == ReservedValidatorGroupName {
+		return localKeySigningIdentity(fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName()))
+	}
+	return localKeySigningIdentity(fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group))
+}
+
 // validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the
 // embedded raft cluster is not a plain Kubernetes scale: the membership recorded in the existing
 // per-pod raft state is not updated by rendering a new bootstrap list, so scaling down can lose

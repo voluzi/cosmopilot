@@ -159,11 +159,13 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			return nil, err
 		}
 		// Once the chain is established, the validator's consensus pubkey is fixed in the on-chain
-		// validator set. Changing the cosmosigner signing key material (backend key, or the validator
-		// key the software backend references) would make the node sign with a key not in that set.
-		if old.Status.ChainID != "" && old.Spec.Cosmosigner != nil && chainNode.Spec.Cosmosigner != nil &&
-			old.CosmosignerSigningIdentity() != chainNode.CosmosignerSigningIdentity() {
-			return nil, fmt.Errorf(".spec.cosmosigner signing key material is immutable after the chain is established: changing it would make the validator sign with a key not in the on-chain validator set")
+		// validator set. Changing the effective signing key — including adding, removing or switching
+		// the cosmosigner backend — would make the node sign with a key not in that set. Equivalent
+		// keys (e.g. the same Vault key via tmKMS or cosmosigner) compare equal, so a same-key
+		// migration is still allowed.
+		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil) &&
+			old.EffectiveSigningIdentity() != chainNode.EffectiveSigningIdentity() {
+			return nil, fmt.Errorf("the consensus signing key is immutable after the chain is established: changing the cosmosigner/signing configuration would make the validator sign with a key not in the on-chain validator set")
 		}
 	}
 

@@ -476,7 +476,38 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 				return err.Error()
 			}
 			return ""
-		}).Should(ContainSubstring("signing key material is immutable"))
+		}).Should(ContainSubstring("immutable after the chain is established"))
+	})
+
+	It("allows a same-key migration from tmKMS to cosmosigner after the chain is established", func() {
+		// A validator signing via tmKMS on the same Vault key it later uses through cosmosigner is a
+		// supported migration: the effective key is unchanged, so it must be accepted.
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:     DefaultChainNodeTestApp,
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+					Address:     "https://vault:8200",
+					Key:         "myval",
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+				}}}},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
+		cn.Status.ChainID = "test-chain-1"
+		Expect(Framework().Client().Status().Update(Framework().Context(), cn)).To(Succeed())
+
+		// Switch to cosmosigner pointing at the same Vault transit key (default mount, no namespace).
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Spec.Validator.TmKMS = nil
+			fresh.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: vaultBackend()} // keyName "myval", same address
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
 	})
 
 	It("rejects nodeGroups on a standalone ChainNode", func() {
