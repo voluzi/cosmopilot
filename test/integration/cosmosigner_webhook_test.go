@@ -197,13 +197,13 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("uploadGenerated requires targeting a validator"))
 	})
 
-	It("accepts uploadGenerated when a validator is targeted", func() {
+	It("accepts uploadGenerated when a validator with an importable key is targeted", func() {
 		vb := vaultBackend()
 		vb.Vault.UploadGenerated = true
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{Backend: vb},
 			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
-			&appsv1.NodeSetValidatorConfig{},
+			&appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("existing-val-key")},
 		)
 		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
 	})
@@ -290,6 +290,81 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		err := Framework().Client().Create(Framework().Context(), cn)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("privateKeySecret is required when the node is not a validator"))
+	})
+
+	It("rejects vault uploadGenerated on a non-validator standalone node", func() {
+		vb := vaultBackend()
+		vb.Vault.UploadGenerated = true
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:         DefaultChainNodeTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vb},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uploadGenerated requires the node to be a validator"))
+	})
+
+	It("rejects a non-controller ChainNodeSet ownerRef for remoteSignerTarget", func() {
+		// A well-formed but non-controller owner reference must not pass the guard.
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: ChainNodePrefix,
+				Namespace:    ns.Name,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "cosmopilot.voluzi.com/v1",
+					Kind:       "ChainNodeSet",
+					Name:       "fake",
+					UID:        "12345678-1234-1234-1234-123456789012",
+					Controller: ptr.To(false),
+				}},
+			},
+			Spec: appsv1.ChainNodeSpec{
+				App:                DefaultChainNodeTestApp,
+				Genesis:            &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				RemoteSignerTarget: true,
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("managed by the ChainNodeSet controller"))
+	})
+
+	It("rejects a pre-provisioned Vault key for a standalone genesis-init validator", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App: DefaultChainNodeTestApp,
+				Validator: &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
+					ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
+				}},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()}, // uploadGenerated=false
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("requires the software backend or vault.uploadGenerated"))
+	})
+
+	It("rejects an explicit software key on a standalone validator", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App: DefaultChainNodeTestApp,
+				Validator: &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
+					ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
+				}},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("other-key")},
+				}},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cannot be set when the node is a validator"))
 	})
 
 	It("rejects a manually-set remoteSignerTarget on a standalone node", func() {

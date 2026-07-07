@@ -189,6 +189,10 @@ func (b Backend) sidecars() []corev1.Container {
 		},
 		Resources: corev1.ResourceRequirements{Requests: renewerResources, Limits: renewerResources},
 	}
+	// Vault Enterprise namespaces must renew the token in the same namespace it was issued in.
+	if b.Vault.Namespace != "" {
+		c.Env = append(c.Env, corev1.EnvVar{Name: "VAULT_NAMESPACE", Value: b.Vault.Namespace})
+	}
 	if b.Vault.CertificateSecret != nil {
 		c.Env = append(c.Env, corev1.EnvVar{Name: "VAULT_CACERT", Value: vaultCaFile})
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{

@@ -98,19 +98,54 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	}
 
 	// Validate cosmosigner configuration when present.
-	if chainNode.Spec.Cosmosigner != nil {
-		if err := chainNode.Spec.Cosmosigner.Validate(".spec.cosmosigner", false); err != nil {
+	if c := chainNode.Spec.Cosmosigner; c != nil {
+		if err := c.Validate(".spec.cosmosigner", false); err != nil {
 			return nil, err
 		}
 		// A node cannot both sign through a TmKMS sidecar and a cosmosigner deployment.
 		if chainNode.UsesTmKms() {
 			return nil, fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
 		}
-		// A software signer on a non-validator node has no controller-created key to reference, so it
-		// must be supplied explicitly (a validator node produces or is given its own key).
-		if chainNode.Spec.Cosmosigner.UsesSoftwareBackend() && chainNode.Spec.Validator == nil {
-			if s := chainNode.Spec.Cosmosigner.Backend.Software.PrivateKeySecret; s == nil || *s == "" {
+
+		isValidator := chainNode.Spec.Validator != nil
+		// The node generates and registers its own consensus key when it initializes genesis or runs
+		// create-validator.
+		registers := isValidator && (chainNode.Spec.Validator.Init != nil || chainNode.Spec.Validator.CreateValidator != nil)
+		hasValidatorKey := isValidator && chainNode.Spec.Validator.PrivateKeySecret != nil && *chainNode.Spec.Validator.PrivateKeySecret != ""
+
+		// The signer must use the node's own key. A validator therefore cannot point the software
+		// backend at a different secret, and a non-validator (which has no controller-created key)
+		// must supply one explicitly.
+		if c.UsesSoftwareBackend() {
+			s := c.Backend.Software.PrivateKeySecret
+			if isValidator {
+				if s != nil && *s != "" {
+					return nil, fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret cannot be set when the node is a validator: the validator's own key is used")
+				}
+			} else if s == nil || *s == "" {
 				return nil, fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret is required when the node is not a validator")
+			}
+		}
+
+		// uploadGenerated imports the node's own key into Vault: it needs a key to import — the node
+		// must be a validator that either generates one (init/create-validator) or supplies an
+		// explicit privateKeySecret.
+		if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
+			switch {
+			case !isValidator:
+				return nil, fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires the node to be a validator whose key can be imported")
+			case !registers && !hasValidatorKey:
+				return nil, fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires the validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import")
+			}
+		}
+
+		// A validator that registers a freshly-generated key on-chain must sign with that same key,
+		// so the backend must be software (which references it) or Vault uploadGenerated (which
+		// imports it) — not a pre-provisioned Vault/GCP key with a different pubkey.
+		if registers {
+			matches := c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated)
+			if !matches {
+				return nil, fmt.Errorf(".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
 			}
 		}
 	}
@@ -199,10 +234,17 @@ func (chainNode *ChainNode) validateGenesisValidators() error {
 }
 
 // isControlledByChainNodeSet reports whether the ChainNode carries a controller owner reference to a
-// ChainNodeSet, i.e. it is a generated child rather than a user-created standalone node.
+// ChainNodeSet of this API group, i.e. it is a generated child rather than a user-created standalone
+// node. It checks the APIVersion, controller flag and a non-empty UID so a hand-written reference to
+// a foreign or non-existent object does not pass as easily; this is a footgun guard for a
+// controller-managed field, not a security boundary (a user able to create ChainNodes can already
+// disrupt their own validators).
 func isControlledByChainNodeSet(chainNode *ChainNode) bool {
 	for _, ref := range chainNode.GetOwnerReferences() {
-		if ref.Kind == "ChainNodeSet" && ref.Controller != nil && *ref.Controller {
+		if ref.Kind == "ChainNodeSet" &&
+			ref.APIVersion == GroupVersion.String() &&
+			ref.Controller != nil && *ref.Controller &&
+			ref.UID != "" {
 			return true
 		}
 	}

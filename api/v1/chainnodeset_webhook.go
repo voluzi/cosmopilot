@@ -526,10 +526,22 @@ func (nodeSet *ChainNodeSet) validateCosmosigner() error {
 	// therefore use that same key: only the software backend (which references it) or Vault with
 	// uploadGenerated (which imports it) match. A pre-provisioned Vault/GCP key would register a
 	// different pubkey than the signer holds, until external pubkey registration is wired.
-	if targetValidator.Init != nil || targetValidator.CreateValidator != nil {
+	registers := targetValidator.Init != nil || targetValidator.CreateValidator != nil
+	if registers {
 		matches := c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated)
 		if !matches {
 			return fmt.Errorf(".spec.cosmosigner targeting a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
+		}
+	}
+
+	// uploadGenerated imports the targeted validator's key into Vault, so that key must exist: the
+	// validator must generate one (init/createValidator) or supply an explicit privateKeySecret. A
+	// plain external-genesis validator with only the default key never creates it, leaving nothing
+	// to import.
+	if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
+		hasExplicitKey := targetValidator.PrivateKeySecret != nil && *targetValidator.PrivateKeySecret != ""
+		if !registers && !hasExplicitKey {
+			return fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires the targeted validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import")
 		}
 	}
 
@@ -678,7 +690,11 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		case c.UsesVaultBackend():
 			v := c.Backend.Vault
 			if v.Address != "" && v.KeyName != "" {
-				if err := registerVault(".spec.cosmosigner", normalizedVaultIdentity(v.Address, v.GetVaultMount(), v.KeyName)); err != nil {
+				ns := ""
+				if v.Namespace != nil {
+					ns = *v.Namespace
+				}
+				if err := registerVault(".spec.cosmosigner", normalizedVaultIdentity(v.Address, ns, v.GetVaultMount(), v.KeyName)); err != nil {
 					return err
 				}
 			}
@@ -953,9 +969,11 @@ func genesisSigningFingerprint(privateKeySecret *string, tmKMS *TmKMS, init *Gen
 
 // normalizedVaultIdentity returns a backend-agnostic identifier for a Vault Transit key, so the
 // same key referenced through tmKMS and through cosmosigner compares equal. tmKMS uses the default
-// "transit" mount implicitly. The null-byte separators keep the fields unambiguous.
-func normalizedVaultIdentity(address, mount, key string) string {
-	return fmt.Sprintf("vault\x00%s\x00%s\x00%s", address, mount, key)
+// "transit" mount and the root namespace implicitly. The Vault namespace is included so keys in
+// distinct Vault Enterprise namespaces are not conflated. The null-byte separators keep the fields
+// unambiguous.
+func normalizedVaultIdentity(address, namespace, mount, key string) string {
+	return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s", address, namespace, mount, key)
 }
 
 // tmkmsNormalizedVaultKey returns the backend-agnostic Vault identity a tmKMS config points at, and
@@ -968,7 +986,7 @@ func tmkmsNormalizedVaultKey(t *TmKMS) (string, bool) {
 	if h.Address == "" || h.Key == "" {
 		return "", false
 	}
-	return normalizedVaultIdentity(h.Address, DefaultCosmosignerVaultMount, h.Key), true
+	return normalizedVaultIdentity(h.Address, "", DefaultCosmosignerVaultMount, h.Key), true
 }
 
 // tmKMSSigningKeyIdentity returns a stable identifier for the concrete signing key a tmKMS config

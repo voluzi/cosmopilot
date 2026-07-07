@@ -118,11 +118,14 @@ func (r *Reconciler) cosmosignerBackend(chainNode *appsv1.ChainNode) cosmosigner
 }
 
 func (r *Reconciler) cosmosignerSoftwareSecretName(chainNode *appsv1.ChainNode) string {
+	// A validator always signs with its own registered key (the webhook forbids an explicit
+	// software override in that case). Only a non-validator sentry uses the explicit secret.
+	if chainNode.IsValidator() {
+		return r.cosmosignerNodeKeySecret(chainNode)
+	}
 	if s := chainNode.Spec.Cosmosigner.Backend.Software.PrivateKeySecret; s != nil && *s != "" {
 		return *s
 	}
-	// Reuse the node's own priv-key secret so a drop-in signer signs with the node's registered key,
-	// honoring an explicit .spec.validator.privateKeySecret.
 	return r.cosmosignerNodeKeySecret(chainNode)
 }
 
@@ -143,8 +146,9 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 		return nil
 	}
 
-	// Fingerprint the Vault target so changing it re-imports rather than leaving the annotation set.
-	want := utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s", c.Backend.Vault.Address, c.Backend.Vault.GetVaultMount(), c.Backend.Vault.KeyName))
+	// Fingerprint the Vault target so changing it (address, namespace, mount or key) re-imports
+	// rather than leaving the annotation set.
+	want := utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s", c.Backend.Vault.Address, derefString(c.Backend.Vault.Namespace), c.Backend.Vault.GetVaultMount(), c.Backend.Vault.KeyName))
 	if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
 		return nil
 	}

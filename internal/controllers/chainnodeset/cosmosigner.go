@@ -201,9 +201,10 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 }
 
 // cosmosignerVaultTargetFingerprint returns a stable fingerprint of the Vault target a generated key
-// is imported into, so a change to the target triggers a fresh import.
+// is imported into, so a change to the target (address, namespace, mount or key) triggers a fresh
+// import.
 func cosmosignerVaultTargetFingerprint(v *appsv1.CosmosignerVaultBackend) string {
-	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s", v.Address, v.GetVaultMount(), v.KeyName))
+	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s", v.Address, ptrString(v.Namespace), v.GetVaultMount(), v.KeyName))
 }
 
 // markCosmosignerKeyImported records the import annotation, tolerating a concurrent update by
