@@ -310,7 +310,9 @@ func localKeySigningIdentity(secret string) string {
 }
 
 // CosmosignerSigningDigest fingerprints a ChainNodeSet's managed signer for status persistence: the
-// effective signing identity plus the sorted target-group set. Empty when no cosmosigner is set.
+// effective signing identity, the replica count, and the target-group set. Empty when no cosmosigner
+// is set. The preimage is length-prefixed and NUL-separated so it stays unambiguous regardless of
+// group-name contents.
 func (nodeSet *ChainNodeSet) CosmosignerSigningDigest() string {
 	if nodeSet.Spec.Cosmosigner == nil {
 		return ""
@@ -320,17 +322,20 @@ func (nodeSet *ChainNodeSet) CosmosignerSigningDigest() string {
 		targets = append(targets, t)
 	}
 	sort.Strings(targets)
-	sum := sha256.Sum256([]byte(nodeSet.CosmosignerSigningIdentity() + "\x00" + strings.Join(targets, ",")))
+	preimage := fmt.Sprintf("%s\x00%d\x00%d\x00%s",
+		nodeSet.CosmosignerSigningIdentity(), nodeSet.Spec.Cosmosigner.GetReplicas(), len(targets), strings.Join(targets, "\x00"))
+	sum := sha256.Sum256([]byte(preimage))
 	return hex.EncodeToString(sum[:])
 }
 
 // CosmosignerSigningDigest fingerprints a standalone ChainNode's managed signer for status
-// persistence. Empty when no cosmosigner is set.
+// persistence (effective signing identity plus replica count). Empty when no cosmosigner is set.
 func (chainNode *ChainNode) CosmosignerSigningDigest() string {
 	if chainNode.Spec.Cosmosigner == nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(chainNode.CosmosignerSigningIdentity()))
+	preimage := fmt.Sprintf("%s\x00%d", chainNode.CosmosignerSigningIdentity(), chainNode.Spec.Cosmosigner.GetReplicas())
+	sum := sha256.Sum256([]byte(preimage))
 	return hex.EncodeToString(sum[:])
 }
 

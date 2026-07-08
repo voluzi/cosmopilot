@@ -599,6 +599,10 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	// vaultKeys tracks Vault Transit keys in a backend-agnostic form so the same key referenced
 	// through tmKMS and through cosmosigner is detected as a collision.
 	vaultKeys := map[string]string{}
+	// genesisValidatorSecrets are priv-key secrets registered in genesis via init.genesisValidators. A
+	// sentry-mode software signer may legitimately share such a secret (that entry is how its key gets
+	// on-chain), so this set is used to allow that specific overlap.
+	genesisValidatorSecrets := map[string]struct{}{}
 
 	registerSecret := func(path, secret string) error {
 		if prev, ok := privateKeySecrets[secret]; ok {
@@ -646,6 +650,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				return fmt.Errorf("%s %q is already used by %s; each validator must sign with a distinct key", gvPath, gv.PrivKeySecret, prev)
 			}
 			privateKeySecrets[gv.PrivKeySecret] = gvPath
+			genesisValidatorSecrets[gv.PrivKeySecret] = struct{}{}
 		}
 		return nil
 	}
@@ -736,10 +741,20 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				}
 				tmKMSKeys[id] = ".spec.cosmosigner"
 			}
-			// A software backend is intentionally not registered here: a validator-targeted signer
-			// reuses that validator's already-registered key, and a sentry-mode key is legitimately
-			// shared with the genesis validator entry that puts it on-chain (init.genesisValidators),
-			// so registering it again would wrongly reject that documented configuration.
+		case c.UsesSoftwareBackend():
+			// A validator-targeted software signer reuses that validator's already-registered key, so
+			// nothing extra is registered. A sentry-mode software key must still be unique versus other
+			// live validators — except when it is the priv-key secret of a genesis validator entry, which
+			// is the documented way to register the sentry signer's key on-chain (that overlap is allowed).
+			if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget &&
+				c.Backend.Software.PrivateKeySecret != nil {
+				secret := *c.Backend.Software.PrivateKeySecret
+				if _, sharedWithGenesis := genesisValidatorSecrets[secret]; !sharedWithGenesis {
+					if err := registerSecret(".spec.cosmosigner.backend.software", secret); err != nil {
+						return err
+					}
+				}
+			}
 		}
 	}
 	return nil

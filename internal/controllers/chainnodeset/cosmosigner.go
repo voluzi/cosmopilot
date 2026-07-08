@@ -36,15 +36,6 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
-	// Record the signing identity once the chain is established so the no-webhook reconcile path can
-	// reject a later change or removal of the signing configuration.
-	if nodeSet.Status.CosmosignerSigningDigest == "" {
-		nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
-		if err := r.Status().Update(ctx, nodeSet); err != nil {
-			return err
-		}
-	}
-
 	params, err := r.cosmosignerParams(nodeSet)
 	if err != nil {
 		return err
@@ -65,10 +56,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return err
 	}
 
-	if err := r.ensureService(ctx, r.ownedService(nodeSet, params.RaftService())); err != nil {
+	if err := r.ensureOwnedCosmosignerService(ctx, nodeSet, params.RaftService()); err != nil {
 		return err
 	}
-	if err := r.ensureService(ctx, r.ownedService(nodeSet, params.DiscoveryService())); err != nil {
+	if err := r.ensureOwnedCosmosignerService(ctx, nodeSet, params.DiscoveryService()); err != nil {
 		return err
 	}
 
@@ -83,7 +74,18 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 	if err != nil {
 		return err
 	}
-	return r.applyCosmosignerObject(ctx, nodeSet, sts)
+	if err := r.applyCosmosignerObject(ctx, nodeSet, sts); err != nil {
+		return err
+	}
+
+	// Record the signing identity only after the signer has been successfully rolled out, so a
+	// broken initial config stays correctable (the no-webhook immutability guard then only protects
+	// an identity that is actually in effect).
+	if nodeSet.Status.CosmosignerSigningDigest == "" {
+		nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
+		return r.Status().Update(ctx, nodeSet)
+	}
+	return nil
 }
 
 // cosmosignerParams resolves the builder parameters, ensuring the software key secret exists when
@@ -273,6 +275,18 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 	name := cosmosignerName(nodeSet)
 	ns := nodeSet.GetNamespace()
 
+	// If a signer StatefulSet with this derived name exists but is owned by a different CR (a
+	// same-name ChainNode/ChainNodeSet collision), the whole signer — including its PVCs — belongs to
+	// that other owner. Do not touch anything.
+	sts := &appsv1k8s.StatefulSet{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, sts)
+	switch {
+	case err == nil && !metav1.IsControlledBy(sts, nodeSet):
+		return nil
+	case err != nil && !errors.IsNotFound(err):
+		return err
+	}
+
 	objects := []client.Object{
 		&appsv1k8s.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
@@ -296,28 +310,14 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 	}
 
 	// StatefulSet PVCs are not garbage-collected with the StatefulSet. Delete the per-pod raft-state
-	// PVCs so a later re-enable starts from a clean, consistent raft membership rather than reusing
-	// stale state rendered against a different member list. List+Delete (rather than DeleteAllOf) uses
-	// only the list/delete verbs the controller already holds.
-	return r.deleteCosmosignerPVCs(ctx, ns, name)
-}
-
-// deleteCosmosignerPVCs deletes the per-pod raft-state PVCs belonging to a signer instance.
-func (r *Reconciler) deleteCosmosignerPVCs(ctx context.Context, namespace, name string) error {
-	pvcs := &corev1.PersistentVolumeClaimList{}
-	if err := r.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(cosmosigner.InstanceLabels(name))); err != nil {
-		return err
-	}
-	for i := range pvcs.Items {
-		if err := r.Delete(ctx, &pvcs.Items[i]); err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
+	// PVCs so a later re-enable starts from a clean, consistent raft membership. The foreign-owner
+	// short-circuit above ensures these PVCs are ours.
+	return cosmosigner.DeletePVCs(ctx, r.Client, ns, name)
 }
 
 // applyCosmosignerObject sets the owner reference and creates or updates a managed object,
-// preserving StatefulSet fields that Kubernetes forbids updating.
+// preserving StatefulSet fields that Kubernetes forbids updating. It refuses to overwrite an
+// existing object owned by a different controller (a same-name CR collision).
 func (r *Reconciler) applyCosmosignerObject(ctx context.Context, nodeSet *appsv1.ChainNodeSet, obj client.Object) error {
 	if err := controllerutil.SetControllerReference(nodeSet, obj, r.Scheme); err != nil {
 		return err
@@ -333,16 +333,29 @@ func (r *Reconciler) applyCosmosignerObject(ctx context.Context, nodeSet *appsv1
 	if err != nil {
 		return err
 	}
+	if !metav1.IsControlledBy(existing, nodeSet) {
+		return fmt.Errorf("cosmosigner resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
+	}
 	k8s.PreserveImmutableStatefulSetFields(obj, existing)
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return r.Update(ctx, obj)
 }
 
-// ownedService sets the owner reference on a service built by the cosmosigner package so it can be
-// applied via the shared ensureService helper.
-func (r *Reconciler) ownedService(nodeSet *appsv1.ChainNodeSet, svc *corev1.Service) *corev1.Service {
-	_ = controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
-	return svc
+// ownedService sets the owner reference on a cosmosigner service and refuses to apply it if a
+// same-named service is owned by another controller.
+func (r *Reconciler) ensureOwnedCosmosignerService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, svc *corev1.Service) error {
+	if err := controllerutil.SetControllerReference(nodeSet, svc, r.Scheme); err != nil {
+		return err
+	}
+	existing := &corev1.Service{}
+	err := r.Get(ctx, client.ObjectKeyFromObject(svc), existing)
+	if err == nil && !metav1.IsControlledBy(existing, nodeSet) {
+		return fmt.Errorf("cosmosigner service %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", svc.GetName())
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return r.ensureService(ctx, svc)
 }
 
 func ptrString(s *string) string {

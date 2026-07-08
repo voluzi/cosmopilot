@@ -510,6 +510,22 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}).Should(Succeed())
 	})
 
+	It("rejects a sentry software key that collides with another validator's key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("shared-key")},
+			}},
+			[]appsv1.NodeGroupSpec{
+				{Name: "fullnodes"},
+				{Name: "v", Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("shared-key")}},
+			},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("distinct key"))
+	})
+
 	It("rejects an empty raftTLSSecret", func() {
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackend(), RaftTLSSecret: ptr.To("")},
