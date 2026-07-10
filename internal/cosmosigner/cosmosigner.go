@@ -28,6 +28,11 @@ const (
 
 	// discoveryServiceSuffix names the headless service the signer uses to discover target nodes.
 	discoveryServiceSuffix = "-privval"
+
+	// dataVolumeName is the volumeClaimTemplate name for the per-pod state PVC. The StatefulSet
+	// controller derives PVC names from it as `<dataVolumeName>-<sts>-<ordinal>`; DeletePVCs matches
+	// that exact pattern, so both must stay in sync through this constant.
+	dataVolumeName = "data"
 )
 
 // Params carries everything needed to render a cosmosigner deployment's resources. The owner
@@ -43,10 +48,11 @@ type Params struct {
 	Replicas int32
 	LogLevel string
 
-	StateStorageSize string
-	StorageClassName *string
-	Resources        corev1.ResourceRequirements
-	RaftTLSSecret    *string
+	StateStorageSize   string
+	StorageClassName   *string
+	Resources          corev1.ResourceRequirements
+	RaftTLSSecret      *string
+	ServiceAccountName string
 
 	Backend Backend
 
@@ -132,25 +138,23 @@ func (p Params) BuildConfig() *Config {
 	return cfg
 }
 
-// ConfigYAML renders the cosmosigner config.yaml.
+// ConfigYAML renders the cosmosigner config.yaml. Callers render once per reconcile and pass the
+// result to ConfigMap and StatefulSet, so the ConfigMap contents and the pod-template ROLLME hash
+// always come from the same render.
 func (p Params) ConfigYAML() (string, error) {
 	return p.BuildConfig().Render()
 }
 
 // ConfigMap builds the ConfigMap holding the rendered config.yaml.
-func (p Params) ConfigMap() (*corev1.ConfigMap, error) {
-	cfg, err := p.ConfigYAML()
-	if err != nil {
-		return nil, err
-	}
+func (p Params) ConfigMap(configYAML string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.Name,
 			Namespace: p.Namespace,
 			Labels:    p.Labels,
 		},
-		Data: map[string]string{configFileName: cfg},
-	}, nil
+		Data: map[string]string{configFileName: configYAML},
+	}
 }
 
 // RaftService builds the headless governing service that provides stable per-replica DNS for the
@@ -204,13 +208,9 @@ func (p Params) DiscoveryService() *corev1.Service {
 	}
 }
 
-// StatefulSet builds the signer StatefulSet.
-func (p Params) StatefulSet() (*appsv1.StatefulSet, error) {
-	configHash, err := p.ConfigYAML()
-	if err != nil {
-		return nil, err
-	}
-
+// StatefulSet builds the signer StatefulSet. configYAML is the rendered config (from ConfigYAML),
+// hashed into the pod template so a config change rolls the signer.
+func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 	storageQty, err := resource.ParseQuantity(p.StateStorageSize)
 	if err != nil {
 		return nil, fmt.Errorf("bad cosmosigner stateStorageSize: %w", err)
@@ -229,7 +229,7 @@ func (p Params) StatefulSet() (*appsv1.StatefulSet, error) {
 	volumes = append(volumes, p.Backend.volumes()...)
 
 	volumeMounts := []corev1.VolumeMount{
-		{Name: "data", MountPath: dataMountPath},
+		{Name: dataVolumeName, MountPath: dataMountPath},
 		{Name: "config", MountPath: configMountPath},
 	}
 	volumeMounts = append(volumeMounts, p.Backend.volumeMounts()...)
@@ -264,7 +264,7 @@ func (p Params) StatefulSet() (*appsv1.StatefulSet, error) {
 			{Name: "COSMOSIGNER_RAFT_NODE_ID", Value: "$(POD_NAME)"},
 			{Name: "COSMOSIGNER_RAFT_ADVERTISE", Value: fmt.Sprintf("$(POD_NAME).%s:%d", p.raftServiceDNS(), raftPort)},
 			// Force a rollout when the rendered config changes.
-			{Name: "ROLLME", Value: utils.Sha256(configHash)},
+			{Name: "ROLLME", Value: utils.Sha256(configYAML)},
 		},
 		Ports: []corev1.ContainerPort{
 			{Name: raftPortName, ContainerPort: raftPort, Protocol: corev1.ProtocolTCP},
@@ -301,6 +301,14 @@ func (p Params) StatefulSet() (*appsv1.StatefulSet, error) {
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas: ptr.To(p.Replicas),
+			// Delete the per-pod state PVCs when the StatefulSet is deleted (including via owner
+			// garbage collection when the ChainNode/ChainNodeSet is deleted), so a recreated signer
+			// never reuses stale raft state. Retained on scale-down, which cannot happen anyway —
+			// replicas are webhook-immutable.
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
 			// Raft needs a quorum to elect a leader; with OrderedReady a fresh multi-replica cluster
 			// would deadlock waiting for pod-0 readiness before pod-1 starts. Parallel lets the
 			// quorum form.
@@ -312,16 +320,17 @@ func (p Params) StatefulSet() (*appsv1.StatefulSet, error) {
 					Labels: p.podLabels(),
 				},
 				Spec: corev1.PodSpec{
-					SecurityContext: k8s.RestrictedPodSecurityContext(),
-					Containers:      containers,
-					Volumes:         volumes,
+					ServiceAccountName: p.ServiceAccountName,
+					SecurityContext:    k8s.RestrictedPodSecurityContext(),
+					Containers:         containers,
+					Volumes:            volumes,
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
 					// Label the per-pod PVCs so they can be selected for cleanup when the signer is
 					// removed (StatefulSet PVCs are not garbage-collected automatically).
-					ObjectMeta: metav1.ObjectMeta{Name: "data", Labels: p.selectorLabels()},
+					ObjectMeta: metav1.ObjectMeta{Name: dataVolumeName, Labels: p.selectorLabels()},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						StorageClassName: p.StorageClassName,

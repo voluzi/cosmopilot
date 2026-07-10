@@ -1,14 +1,14 @@
 package v1
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 // GetReplicas returns the configured number of signer replicas, defaulting to
@@ -43,6 +43,14 @@ func (c *Cosmosigner) GetLogLevel() string {
 		return *c.LogLevel
 	}
 	return DefaultCosmosignerLogLevel
+}
+
+// GetServiceAccountName returns the configured service account, empty for the namespace default.
+func (c *Cosmosigner) GetServiceAccountName() string {
+	if c != nil && c.ServiceAccountName != nil {
+		return *c.ServiceAccountName
+	}
+	return ""
 }
 
 // GetResources returns the compute resources for the signer container, defaulting to a small
@@ -102,6 +110,18 @@ func (b *CosmosignerVaultBackend) GetVaultMount() string {
 	return DefaultCosmosignerVaultMount
 }
 
+// TargetFingerprint returns a stable fingerprint of the Vault target a generated key is imported
+// into (address, namespace, mount, key), so a change to any of them triggers a fresh import. Both
+// controllers stamp this value into the key-imported annotation; sharing one implementation keeps
+// their import protocols in lockstep.
+func (b *CosmosignerVaultBackend) TargetFingerprint() string {
+	ns := ""
+	if b.Namespace != nil {
+		ns = *b.Namespace
+	}
+	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s", b.Address, ns, b.GetVaultMount(), b.KeyName))
+}
+
 // CosmosignerTargetGroups returns the set of node group names the cosmosigner deployment signs
 // for. An empty nodeGroups list defaults to the legacy singleton validator group. Returns nil when
 // no cosmosigner is configured.
@@ -142,8 +162,8 @@ func (nodeSet *ChainNodeSet) CosmosignerValidatorTargetSecret() (string, bool) {
 			if nodeSet.Spec.Validator == nil {
 				continue
 			}
-			if nodeSet.Spec.Validator.PrivateKeySecret != nil {
-				return *nodeSet.Spec.Validator.PrivateKeySecret, true
+			if s := nodeSet.Spec.Validator.PrivateKeySecret; s != nil && *s != "" {
+				return *s, true
 			}
 			return fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName()), true
 		}
@@ -151,8 +171,8 @@ func (nodeSet *ChainNodeSet) CosmosignerValidatorTargetSecret() (string, bool) {
 			if g.Name != name || g.Validator == nil {
 				continue
 			}
-			if g.Validator.PrivateKeySecret != nil {
-				return *g.Validator.PrivateKeySecret, true
+			if s := g.Validator.PrivateKeySecret; s != nil && *s != "" {
+				return *s, true
 			}
 			// Validator groups targeted by cosmosigner are single-instance (webhook-enforced), so
 			// instance 0's default key is the validator's key.
@@ -324,8 +344,7 @@ func (nodeSet *ChainNodeSet) CosmosignerSigningDigest() string {
 	sort.Strings(targets)
 	preimage := fmt.Sprintf("%s\x00%d\x00%d\x00%s",
 		nodeSet.CosmosignerSigningIdentity(), nodeSet.Spec.Cosmosigner.GetReplicas(), len(targets), strings.Join(targets, "\x00"))
-	sum := sha256.Sum256([]byte(preimage))
-	return hex.EncodeToString(sum[:])
+	return utils.Sha256(preimage)
 }
 
 // CosmosignerSigningDigest fingerprints a standalone ChainNode's managed signer for status
@@ -335,8 +354,7 @@ func (chainNode *ChainNode) CosmosignerSigningDigest() string {
 		return ""
 	}
 	preimage := fmt.Sprintf("%s\x00%d", chainNode.CosmosignerSigningIdentity(), chainNode.Spec.Cosmosigner.GetReplicas())
-	sum := sha256.Sum256([]byte(preimage))
-	return hex.EncodeToString(sum[:])
+	return utils.Sha256(preimage)
 }
 
 // equalStringSet reports whether two set-valued maps contain the same keys.
@@ -430,33 +448,4 @@ func validateCosmosignerReplicasImmutable(oldC, newC *Cosmosigner) error {
 		return fmt.Errorf(".spec.cosmosigner.replicas is immutable after creation: changing it does not migrate the raft membership in the signer's state and can break quorum")
 	}
 	return nil
-}
-
-// SigningKeyIdentity returns a stable identifier for the concrete signing key the backend
-// points at, and whether one is resolvable. It is used to reject two validators signing with
-// the same key and to fingerprint genesis signing material.
-//
-// The identity intentionally does not include the software secret name: that is handled by the
-// existing private-key-secret uniqueness tracking. Only the external (vault/gcp) backends yield
-// an identity here. The null-byte separators keep the fields unambiguous.
-func (c *Cosmosigner) SigningKeyIdentity() (string, bool) {
-	if c == nil {
-		return "", false
-	}
-	switch {
-	case c.UsesVaultBackend():
-		v := c.Backend.Vault
-		if v.Address == "" || v.KeyName == "" {
-			return "", false
-		}
-		return fmt.Sprintf("cosmosigner-vault\x00%s\x00%s\x00%s", v.Address, v.GetVaultMount(), v.KeyName), true
-	case c.UsesGcpKmsBackend():
-		g := c.Backend.GcpKMS
-		if g.KeyVersion == "" {
-			return "", false
-		}
-		return fmt.Sprintf("cosmosigner-gcpkms\x00%s", g.KeyVersion), true
-	default:
-		return "", false
-	}
 }

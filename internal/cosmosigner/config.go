@@ -51,7 +51,6 @@ const (
 type Config struct {
 	ChainID     string        `yaml:"chain_id"`
 	NodeService string        `yaml:"node_service,omitempty"`
-	Nodes       []string      `yaml:"nodes,omitempty"`
 	ConnKey     string        `yaml:"conn_key"`
 	StateDir    string        `yaml:"state_dir"`
 	LogLevel    string        `yaml:"log_level"`

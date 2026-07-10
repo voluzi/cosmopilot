@@ -84,6 +84,12 @@ type Cosmosigner struct {
 	// LogLevel is the log level for the signer. Defaults to `info`.
 	// +optional
 	LogLevel *string `json:"logLevel,omitempty"`
+
+	// ServiceAccountName is the Kubernetes service account the signer pods run as. Required in
+	// practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google
+	// service account to a specific Kubernetes service account). Defaults to the namespace default.
+	// +optional
+	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
 }
 
 // CosmosignerBackend selects the signing backend. Exactly one field must be set.

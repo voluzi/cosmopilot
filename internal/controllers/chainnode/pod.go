@@ -640,6 +640,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	// nodeset controller stamped on the child ChainNode (`<nodeset>-signer`).
 	if v, ok := cosmosignerTargetLabelValue(chainNode); ok {
 		podLabels[controllers.LabelCosmosignerTarget] = v
+		// A standalone target additionally carries the chain-node label its discovery-service
+		// selector scopes on, so a same-named ChainNodeSet's target pods are never selected.
+		if chainNode.UsesCosmosigner() {
+			podLabels[controllers.LabelChainNode] = chainNode.GetName()
+		}
 	}
 
 	pod := &corev1.Pod{

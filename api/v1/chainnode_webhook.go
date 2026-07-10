@@ -166,10 +166,15 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// validator set. Changing the effective signing key — including adding, removing or switching
 		// the cosmosigner backend — would make the node sign with a key not in that set. Equivalent
 		// keys (e.g. the same Vault key via tmKMS or cosmosigner) compare equal, so a same-key
-		// migration is still allowed.
-		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil) &&
-			old.EffectiveSigningIdentity() != chainNode.EffectiveSigningIdentity() {
-			return nil, fmt.Errorf("the consensus signing key is immutable after the chain is established: changing the cosmosigner/signing configuration would make the validator sign with a key not in the on-chain validator set")
+		// migration is still allowed. An empty identity (a non-validator sentry node, whose key is
+		// registered out-of-band) has nothing to compare, so adding/removing a sentry signer is not
+		// blocked.
+		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil) {
+			oldIdentity := old.EffectiveSigningIdentity()
+			newIdentity := chainNode.EffectiveSigningIdentity()
+			if oldIdentity != "" && newIdentity != "" && oldIdentity != newIdentity {
+				return nil, fmt.Errorf("the consensus signing key is immutable after the chain is established: changing the cosmosigner/signing configuration would make the validator sign with a key not in the on-chain validator set")
+			}
 		}
 	}
 
@@ -207,11 +212,12 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 				// identity so a same-key signer migration (e.g. tmKMS→cosmosigner on the same Vault key)
 				// is not misread as a genesis change; the init block and account settings are still
 				// compared, so genuine changes are rejected.
+				oldFP := old.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
+				newFP := chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
 				if old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil {
-					if old.effectiveGenesisFingerprint(defaultPrivKeySecret) != chainNode.effectiveGenesisFingerprint(defaultPrivKeySecret) {
-						return nil, fmt.Errorf(".spec.validator.init is immutable after genesis has been created: changing it would regenerate a different genesis for the same chain ID")
-					}
-				} else if old.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret) != chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret) {
+					oldFP, newFP = old.effectiveGenesisFingerprint(), chainNode.effectiveGenesisFingerprint()
+				}
+				if oldFP != newFP {
 					return nil, fmt.Errorf(".spec.validator.init is immutable after genesis has been created: changing it would regenerate a different genesis for the same chain ID")
 				}
 			}
@@ -238,19 +244,11 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 // effectiveGenesisFingerprint is like GenesisSigningFingerprint but uses the node's effective signing
 // identity (which normalizes equivalent keys — the same Vault key via tmKMS or cosmosigner) instead
 // of the raw private-key-secret + tmKMS material, so a same-key signer migration is not treated as a
-// genesis change while genuine init/account changes still are.
-func (chainNode *ChainNode) effectiveGenesisFingerprint(defaultPrivKeySecret string) string {
+// genesis change while genuine init/account changes still are. Callers guarantee Spec.Validator is
+// non-nil, so EffectiveSigningIdentity always resolves.
+func (chainNode *ChainNode) effectiveGenesisFingerprint() string {
 	v := chainNode.Spec.Validator
-	if v == nil {
-		return genesisSigningFingerprintWithIdentity("", nil, nil, "", "", "")
-	}
-	identity := chainNode.EffectiveSigningIdentity()
-	if identity == "" {
-		// Not a signer/validator path we can normalize; fall back to the local key secret.
-		identity = localKeySigningIdentity(v.GetPrivKeySecretName(chainNode))
-		_ = defaultPrivKeySecret
-	}
-	return genesisSigningFingerprintWithIdentity(identity, v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath())
+	return genesisSigningFingerprintWithIdentity(chainNode.EffectiveSigningIdentity(), v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath())
 }
 
 // GenesisSigningFingerprint mirrors NodeSetValidatorConfig.GenesisSigningFingerprint for a standalone

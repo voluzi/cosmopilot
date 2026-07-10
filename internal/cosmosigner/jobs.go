@@ -17,7 +17,12 @@ import (
 
 const (
 	jobActiveDeadlineSeconds int64 = 300
-	jobWaitTimeout                 = time.Minute
+	// jobWaitTimeout matches the pod's own ActiveDeadlineSeconds so a slow image pull or Vault
+	// round-trip is not killed by the controller before the kubelet would have given up anyway.
+	jobWaitTimeout = time.Duration(jobActiveDeadlineSeconds) * time.Second
+	// jobDeleteTimeout bounds waiting for a previous run's pod to finish terminating before
+	// recreating it (pod deletion is asynchronous; an immediate Create races AlreadyExists).
+	jobDeleteTimeout = time.Minute
 
 	// importSourceVolume mounts the source priv_validator_key.json for `cosmosigner import`.
 	importSourceVolume = "import-source"
@@ -109,7 +114,12 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 	}
 
 	ph := k8s.NewPodHelper(j.Client, nil, pod)
+	// Delete any pod left over from a previous attempt and wait for it to actually go away —
+	// deletion is asynchronous and an immediate Create would race AlreadyExists.
 	_ = ph.Delete(ctx)
+	if err := ph.WaitForPodDeleted(ctx, jobDeleteTimeout); err != nil {
+		return "", fmt.Errorf("waiting for previous %s pod to terminate: %w", nameSuffix, err)
+	}
 	defer func() { _ = ph.Delete(ctx) }()
 
 	if err := ph.Create(ctx); err != nil {

@@ -123,11 +123,19 @@ on-chain.
 
 ```yaml
 cosmosigner:
+  serviceAccountName: cosmosigner   # KSA bound to the Google SA (Workload Identity)
   backend:
     gcpKms:
       keyVersion: projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1
       # credentialsSecret omitted -> Workload Identity / ADC
 ```
+
+:::note[Workload Identity]
+When `credentialsSecret` is omitted, the signer authenticates via Application Default Credentials.
+On GKE with Workload Identity, set `serviceAccountName` to the Kubernetes service account bound to
+the Google service account that has `cloudkms.signerVerifier` on the key — the namespace default
+service account is usually not bound.
+:::
 
 ### Software (testing)
 

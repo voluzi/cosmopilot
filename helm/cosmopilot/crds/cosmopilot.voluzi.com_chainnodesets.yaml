@@ -621,6 +621,12 @@ spec:
                           More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                         type: object
                     type: object
+                  serviceAccountName:
+                    description: |-
+                      ServiceAccountName is the Kubernetes service account the signer pods run as. Required in
+                      practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google
+                      service account to a specific Kubernetes service account). Defaults to the namespace default.
+                    type: string
                   stateStorageSize:
                     description: |-
                       StateStorageSize is the size of the per-replica PVC used for the raft double-sign

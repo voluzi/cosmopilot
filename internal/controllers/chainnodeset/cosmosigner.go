@@ -4,19 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	appsv1k8s "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v2/internal/k8s"
-	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 // cosmosignerName is the base name for a ChainNodeSet's managed signer resources.
@@ -48,18 +43,19 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return err
 	}
 
-	cm, err := params.ConfigMap()
+	// Render once: the ConfigMap contents and the pod-template ROLLME hash come from the same render.
+	configYAML, err := params.ConfigYAML()
 	if err != nil {
 		return err
 	}
-	if err := r.applyCosmosignerObject(ctx, nodeSet, cm); err != nil {
+	if err := r.applyCosmosignerObject(ctx, nodeSet, params.ConfigMap(configYAML)); err != nil {
 		return err
 	}
 
-	if err := r.ensureOwnedCosmosignerService(ctx, nodeSet, params.RaftService()); err != nil {
+	if err := r.applyCosmosignerObject(ctx, nodeSet, params.RaftService()); err != nil {
 		return err
 	}
-	if err := r.ensureOwnedCosmosignerService(ctx, nodeSet, params.DiscoveryService()); err != nil {
+	if err := r.applyCosmosignerObject(ctx, nodeSet, params.DiscoveryService()); err != nil {
 		return err
 	}
 
@@ -70,7 +66,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
-	sts, err := params.StatefulSet()
+	sts, err := params.StatefulSet(configYAML)
 	if err != nil {
 		return err
 	}
@@ -78,10 +74,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return err
 	}
 
-	// Record the signing identity only after the signer has been successfully rolled out, so a
-	// broken initial config stays correctable (the no-webhook immutability guard then only protects
-	// an identity that is actually in effect).
-	if nodeSet.Status.CosmosignerSigningDigest == "" {
+	// Record the signing identity only after the signer has pods actually running (not merely a
+	// created StatefulSet), so a config that never worked stays correctable — the no-webhook
+	// immutability guard then only protects an identity that has been in effect.
+	if nodeSet.Status.CosmosignerSigningDigest == "" && sts.Status.ReadyReplicas > 0 {
 		nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
 		return r.Status().Update(ctx, nodeSet)
 	}
@@ -104,18 +100,19 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 	}
 
 	return cosmosigner.Params{
-		Name:             name,
-		Namespace:        nodeSet.GetNamespace(),
-		ChainID:          nodeSet.Status.ChainID,
-		Image:            c.GetImage(),
-		Replicas:         c.GetReplicas(),
-		LogLevel:         c.GetLogLevel(),
-		StateStorageSize: c.GetStateStorageSize(),
-		StorageClassName: c.StorageClassName,
-		Resources:        c.GetResources(),
-		RaftTLSSecret:    c.RaftTLSSecret,
-		Backend:          backend,
-		Labels:           labels,
+		Name:               name,
+		Namespace:          nodeSet.GetNamespace(),
+		ChainID:            nodeSet.Status.ChainID,
+		Image:              c.GetImage(),
+		Replicas:           c.GetReplicas(),
+		LogLevel:           c.GetLogLevel(),
+		StateStorageSize:   c.GetStateStorageSize(),
+		StorageClassName:   c.StorageClassName,
+		Resources:          c.GetResources(),
+		RaftTLSSecret:      c.RaftTLSSecret,
+		ServiceAccountName: c.GetServiceAccountName(),
+		Backend:            backend,
+		Labels:             labels,
 		TargetSelector: map[string]string{
 			controllers.LabelChainNodeSet:      nodeSet.GetName(),
 			controllers.LabelCosmosignerTarget: name,
@@ -143,7 +140,7 @@ func (r *Reconciler) cosmosignerBackend(nodeSet *appsv1.ChainNodeSet) (cosmosign
 			Address:           v.Address,
 			KeyName:           v.KeyName,
 			Mount:             v.GetVaultMount(),
-			Namespace:         ptrString(v.Namespace),
+			Namespace:         ptr.Deref(v.Namespace, ""),
 			TokenSecret:       v.TokenSecret,
 			CertificateSecret: v.CertificateSecret,
 			AutoRenewToken:    v.AutoRenewToken,
@@ -184,7 +181,7 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	// The annotation records a fingerprint of the Vault target so that changing the key name, mount
 	// or address re-imports into the new target instead of leaving the signer pointed at an empty
 	// or stale transit key.
-	want := cosmosignerVaultTargetFingerprint(c.Backend.Vault)
+	want := c.Backend.Vault.TargetFingerprint()
 	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
 		return false, nil
 	}
@@ -224,13 +221,6 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	return false, nil
 }
 
-// cosmosignerVaultTargetFingerprint returns a stable fingerprint of the Vault target a generated key
-// is imported into, so a change to the target (address, namespace, mount or key) triggers a fresh
-// import.
-func cosmosignerVaultTargetFingerprint(v *appsv1.CosmosignerVaultBackend) string {
-	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s", v.Address, ptrString(v.Namespace), v.GetVaultMount(), v.KeyName))
-}
-
 // markCosmosignerKeyImported records the import annotation, tolerating a concurrent update by
 // re-fetching and retrying.
 func (r *Reconciler) markCosmosignerKeyImported(ctx context.Context, nodeSet *appsv1.ChainNodeSet, value string) error {
@@ -267,100 +257,12 @@ func (r *Reconciler) secretHasKey(ctx context.Context, namespace, name, key stri
 	return len(secret.Data[key]) > 0, nil
 }
 
-// undeployCosmosigner removes managed signer resources when cosmosigner is no longer configured. It
-// only deletes resources this ChainNodeSet actually owns, so an unrelated resource that happens to
-// share the derived name is never touched.
+// undeployCosmosigner removes managed signer resources when cosmosigner is no longer configured,
+// deleting only resources this ChainNodeSet actually owns.
 func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
-	logger := log.FromContext(ctx)
-	name := cosmosignerName(nodeSet)
-	ns := nodeSet.GetNamespace()
-
-	// If a signer StatefulSet with this derived name exists but is owned by a different CR (a
-	// same-name ChainNode/ChainNodeSet collision), the whole signer — including its PVCs — belongs to
-	// that other owner. Do not touch anything.
-	sts := &appsv1k8s.StatefulSet{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, sts)
-	switch {
-	case err == nil && !metav1.IsControlledBy(sts, nodeSet):
-		return nil
-	case err != nil && !errors.IsNotFound(err):
-		return err
-	}
-
-	objects := []client.Object{
-		&appsv1k8s.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + "-privval", Namespace: ns}},
-	}
-	for _, obj := range objects {
-		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
-			if errors.IsNotFound(err) {
-				continue
-			}
-			return err
-		}
-		if !metav1.IsControlledBy(obj, nodeSet) {
-			continue
-		}
-		if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
-			logger.Error(err, "failed to delete cosmosigner resource", "name", obj.GetName())
-			return err
-		}
-	}
-
-	// StatefulSet PVCs are not garbage-collected with the StatefulSet. Delete the per-pod raft-state
-	// PVCs so a later re-enable starts from a clean, consistent raft membership. The foreign-owner
-	// short-circuit above ensures these PVCs are ours.
-	return cosmosigner.DeletePVCs(ctx, r.Client, ns, name)
+	return cosmosigner.Undeploy(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), cosmosignerName(nodeSet))
 }
 
-// applyCosmosignerObject sets the owner reference and creates or updates a managed object,
-// preserving StatefulSet fields that Kubernetes forbids updating. It refuses to overwrite an
-// existing object owned by a different controller (a same-name CR collision).
 func (r *Reconciler) applyCosmosignerObject(ctx context.Context, nodeSet *appsv1.ChainNodeSet, obj client.Object) error {
-	if err := controllerutil.SetControllerReference(nodeSet, obj, r.Scheme); err != nil {
-		return err
-	}
-	existing, ok := obj.DeepCopyObject().(client.Object)
-	if !ok {
-		return fmt.Errorf("object is not a client.Object")
-	}
-	err := r.Get(ctx, client.ObjectKeyFromObject(obj), existing)
-	if errors.IsNotFound(err) {
-		return r.Create(ctx, obj)
-	}
-	if err != nil {
-		return err
-	}
-	if !metav1.IsControlledBy(existing, nodeSet) {
-		return fmt.Errorf("cosmosigner resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
-	}
-	k8s.PreserveImmutableStatefulSetFields(obj, existing)
-	obj.SetResourceVersion(existing.GetResourceVersion())
-	return r.Update(ctx, obj)
-}
-
-// ownedService sets the owner reference on a cosmosigner service and refuses to apply it if a
-// same-named service is owned by another controller.
-func (r *Reconciler) ensureOwnedCosmosignerService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, svc *corev1.Service) error {
-	if err := controllerutil.SetControllerReference(nodeSet, svc, r.Scheme); err != nil {
-		return err
-	}
-	existing := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(svc), existing)
-	if err == nil && !metav1.IsControlledBy(existing, nodeSet) {
-		return fmt.Errorf("cosmosigner service %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", svc.GetName())
-	}
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	return r.ensureService(ctx, svc)
-}
-
-func ptrString(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
+	return cosmosigner.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, obj)
 }

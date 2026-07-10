@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -84,7 +85,7 @@ func TestRenderYAMLUsesSnakeCase(t *testing.T) {
 }
 
 func TestStatefulSetShape(t *testing.T) {
-	sts, err := testParams().StatefulSet()
+	sts, err := mustStatefulSet(t, testParams())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestDiscoveryServiceHeadlessPublishNotReady(t *testing.T) {
 }
 
 func TestVolumeClaimTemplateLabeledForCleanup(t *testing.T) {
-	sts, err := testParams().StatefulSet()
+	sts, err := mustStatefulSet(t, testParams())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +158,7 @@ func TestSoftwareBackendConfig(t *testing.T) {
 	if cfg.Backend.Type != "software" || cfg.Backend.KeyFile != "/keys/priv_validator_key.json" {
 		t.Fatalf("unexpected software backend: %+v", cfg.Backend)
 	}
-	sts, err := p.StatefulSet()
+	sts, err := mustStatefulSet(t, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,4 +171,14 @@ func TestSoftwareBackendConfig(t *testing.T) {
 	if !found {
 		t.Fatalf("software key secret volume not mounted")
 	}
+}
+
+// mustStatefulSet renders the config once and builds the StatefulSet, mirroring the controllers.
+func mustStatefulSet(t *testing.T, p Params) (*appsv1.StatefulSet, error) {
+	t.Helper()
+	cfg, err := p.ConfigYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.StatefulSet(cfg)
 }
