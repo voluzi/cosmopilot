@@ -457,20 +457,23 @@ func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *No
 	return localKeySigningIdentity(fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group))
 }
 
-// ValidateCosmosignerReservedName rejects creating a ChainNode/ChainNodeSet whose NAME ends in
-// "-signer" (or "-signer-privval"): every CR named `foo` that enables cosmosigner derives signer
-// resources named `foo-signer`/`foo-signer-privval`, while an ordinary ChainNode's own
-// Service/ConfigMap use the raw CR name — so a CR named `foo-signer` and a signer-enabled `foo` in
-// one namespace would fight over the same objects through reconcilers that update by name.
-// Reserving the suffix at create time removes the collision by construction. Only enforced on
-// create (isCreate) so pre-existing CRs with such names keep updating; the reconcilers' ownership
-// guards remain the backstop for them.
+// ValidateCosmosignerReservedName rejects creating a ChainNode/ChainNodeSet whose NAME collides
+// with the signer resource names another CR would derive. A CR named `foo` that enables cosmosigner
+// derives `foo-signer` (StatefulSet/ConfigMap/raft Service) and `foo-signer-privval` (discovery
+// Service), while an ordinary ChainNode's own Service/ConfigMap use the raw CR name. Both suffixes
+// are therefore reserved:
+//   - a CR named `foo-signer` collides with signer-enabled `foo`'s StatefulSet/ConfigMap/Service;
+//   - a CR named `foo-signer-privval` (which does NOT end in "-signer") collides with
+//     signer-enabled `foo`'s discovery Service.
+//
+// Only enforced on create (isCreate) so pre-existing CRs with such names keep updating; the
+// reconcilers' ownership guards remain the backstop for them.
 func ValidateCosmosignerReservedName(name string, isCreate bool) error {
 	if !isCreate {
 		return nil
 	}
 	if strings.HasSuffix(name, "-signer") || strings.HasSuffix(name, "-signer-privval") {
-		return fmt.Errorf("metadata.name %q is reserved: the \"-signer\" suffix collides with cosmosigner-managed resource names derived from other resources; choose a different name", name)
+		return fmt.Errorf("metadata.name %q is reserved: the \"-signer\"/\"-signer-privval\" suffixes collide with cosmosigner-managed resource names derived from other resources; choose a different name", name)
 	}
 	return nil
 }

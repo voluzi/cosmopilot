@@ -111,7 +111,7 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 	// see controllers.CosmosignerReservedSelectorLabels.
 	labels := utils.ExcludeMapKeys(WithChainNodeLabels(chainNode, map[string]string{
 		controllers.LabelChainNode: chainNode.GetName(),
-	}), controllers.CosmosignerReservedSelectorLabels...)
+	}), controllers.CosmosignerReservedSelectorLabels()...)
 
 	return cosmosigner.Params{
 		Name:               name,

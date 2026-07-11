@@ -57,14 +57,22 @@ const (
 	LabelCosmosignerTarget = "cosmosigner-target"
 )
 
-// CosmosignerReservedSelectorLabels are the internal selector/discovery label keys that must never
+// cosmosignerReservedSelectorLabels are the internal selector/discovery label keys that must never
 // be inherited onto signer resources from user metadata on the owning CR: they would make signer
 // pods/Services endpoints of group or global Services (group/validator/app/scope), advertise the
 // signer's Services as P2P peers (peer/seed/chain-id/node-id), or match resource-cleanup selectors.
-// Controllers exclude these (plus the per-nodeset global route names) when building signer labels.
-var CosmosignerReservedSelectorLabels = []string{
+// Unexported so it cannot be mutated from other packages; use CosmosignerReservedSelectorLabels().
+var cosmosignerReservedSelectorLabels = []string{
 	LabelChainNodeSetGroup, LabelChainNodeSetValidator, LabelApp, LabelScope,
 	LabelPeer, LabelSeed, LabelChainID, LabelNodeID,
+}
+
+// CosmosignerReservedSelectorLabels returns a fresh copy of the reserved selector label keys the
+// controllers exclude (plus the per-nodeset global route names) when building signer labels.
+func CosmosignerReservedSelectorLabels() []string {
+	out := make([]string, len(cosmosignerReservedSelectorLabels))
+	copy(out, cosmosignerReservedSelectorLabels)
+	return out
 }
 
 const (

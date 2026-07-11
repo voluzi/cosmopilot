@@ -108,7 +108,7 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 	// selectors, P2P peer discovery, resource-cleanup selectors) — see
 	// controllers.CosmosignerReservedSelectorLabels. The generated global ingress/gateway
 	// membership label names are per-nodeset and appended below.
-	exclude := append([]string{}, controllers.CosmosignerReservedSelectorLabels...)
+	exclude := controllers.CosmosignerReservedSelectorLabels()
 	for _, ingress := range nodeSet.Spec.Ingresses {
 		exclude = append(exclude, ingress.GetName(nodeSet))
 	}
