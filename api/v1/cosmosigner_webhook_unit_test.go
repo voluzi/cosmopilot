@@ -129,11 +129,11 @@ func TestChainNodeNoWebhookSentryReplicaImmutable(t *testing.T) {
 	}
 }
 
-// TestChainNodeNoWebhookUnverifiedValidatorSignerAddition exercises the standalone ChainNode
-// no-webhook path: adding a validator-targeted signer with a pre-provisioned Vault key
-// (uploadGenerated=false) to an established chain is refused, while an importing backend
-// (uploadGenerated / software) is accepted.
-func TestChainNodeNoWebhookUnverifiedValidatorSignerAddition(t *testing.T) {
+// TestChainNodeNoWebhookSignerLifecycle exercises the standalone ChainNode no-webhook path (Validate
+// with a nil old): a first signer rollout (no recorded digest) is admitted — including a
+// pre-provisioned Vault backend, so the rollout is not deadlocked — while modifying a signer that has
+// already recorded a digest is rejected, and removal is allowed (deferred to the admission webhook).
+func TestChainNodeNoWebhookSignerLifecycle(t *testing.T) {
 	tokenSecret := &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
 		Key:                  "token",
@@ -151,13 +151,25 @@ func TestChainNodeNoWebhookUnverifiedValidatorSignerAddition(t *testing.T) {
 		}
 	}
 
-	preProvisioned := CosmosignerBackend{Vault: &CosmosignerVaultBackend{Address: "https://vault:8200", KeyName: "val-key", TokenSecret: tokenSecret}}
-	if _, err := base(preProvisioned).Validate(nil); err == nil {
-		t.Fatal("adding a pre-provisioned Vault validator signer with webhooks disabled must be rejected")
+	// First rollout of a pre-provisioned Vault validator signer (no recorded digest): admitted.
+	preProvisioned := base(CosmosignerBackend{Vault: &CosmosignerVaultBackend{Address: "https://vault:8200", KeyName: "val-key", TokenSecret: tokenSecret}})
+	if _, err := preProvisioned.Validate(nil); err != nil {
+		t.Fatalf("first rollout of a pre-provisioned validator signer must be admitted, got: %v", err)
 	}
 
-	importing := CosmosignerBackend{Vault: &CosmosignerVaultBackend{Address: "https://vault:8200", KeyName: "val-key", TokenSecret: tokenSecret, UploadGenerated: true}}
-	if _, err := base(importing).Validate(nil); err != nil {
-		t.Fatalf("uploadGenerated validator signer imports the registered key and must be accepted, got: %v", err)
+	// Once its digest is recorded, changing the live signer's Vault key is rejected.
+	recorded := preProvisioned.DeepCopy()
+	recorded.Status.CosmosignerSigningDigest = recorded.CosmosignerSigningDigest()
+	changed := recorded.DeepCopy()
+	changed.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
+	if _, err := changed.Validate(nil); err == nil {
+		t.Fatal("changing a recorded signer's key with webhooks disabled must be rejected")
+	}
+
+	// Removing the signer entirely: allowed (deferred to the admission webhook).
+	removed := recorded.DeepCopy()
+	removed.Spec.Cosmosigner = nil
+	if _, err := removed.Validate(nil); err != nil {
+		t.Fatalf("removing the signer must be allowed on the no-webhook path, got: %v", err)
 	}
 }

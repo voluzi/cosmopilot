@@ -326,48 +326,66 @@ func TestValidateForReconcileRejectsSentryReplicaChange(t *testing.T) {
 	assert.Contains(t, err.Error(), ".spec.cosmosigner.replicas is immutable")
 }
 
-// TestValidateForReconcileRejectsUnverifiedValidatorSignerAddition verifies the no-webhook path
-// refuses adding a validator-targeted signer with a pre-provisioned Vault key (uploadGenerated=false)
-// to an established chain: its key cannot be verified against the on-chain validator key without
-// admission review.
-func TestValidateForReconcileRejectsUnverifiedValidatorSignerAddition(t *testing.T) {
-	base := func(backend appsv1.CosmosignerBackend) *appsv1.ChainNodeSet {
-		return &appsv1.ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
-			Spec: appsv1.ChainNodeSetSpec{
-				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-				Cosmosigner: &appsv1.Cosmosigner{
-					NodeGroups: []string{"validators"},
-					Backend:    backend,
-				},
-				Nodes: []appsv1.NodeGroupSpec{{
-					Name:      "validators",
-					Instances: ptr.To(1),
-					Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
-				}},
+// cosmosignerValidatorNodeSet builds an established (chainID set) ChainNodeSet whose validator group
+// is targeted by a cosmosigner with the given backend.
+func cosmosignerValidatorNodeSet(backend appsv1.CosmosignerBackend) *appsv1.ChainNodeSet {
+	return &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"validators"},
+				Backend:    backend,
 			},
-			Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
-		}
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(1),
+				Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
 	}
+}
 
-	// Pre-provisioned Vault key, no recorded digest: rejected.
-	_, err := validateForReconcile(base(cosmosignerVaultBackend()))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pre-provisioned Vault/GCP key")
-
-	// uploadGenerated imports the validator's own key: accepted (provably the registered key).
-	importing := base(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
-		Address:         "https://vault.example:8200",
-		KeyName:         "val-key",
-		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-		UploadGenerated: true,
-	}})
-	_, err = validateForReconcile(importing)
+// TestValidateForReconcileAllowsFirstSignerRollout verifies the no-webhook path admits a
+// validator-targeted signer that has not yet recorded a rollout digest — including a pre-provisioned
+// Vault backend. Blocking it here would deadlock the first rollout (chainID is set before
+// ensureCosmosigner can observe rollout and record the digest); add/reroute safety that needs the
+// previous spec is left to the admission webhook.
+func TestValidateForReconcileAllowsFirstSignerRollout(t *testing.T) {
+	// Pre-provisioned Vault key, no recorded digest (first rollout in progress): accepted.
+	_, err := validateForReconcile(cosmosignerValidatorNodeSet(cosmosignerVaultBackend()))
 	require.NoError(t, err)
 
-	// Software backend mounts the validator's own key secret: accepted.
-	software := base(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
-	_, err = validateForReconcile(software)
+	// Software backend, no recorded digest: accepted.
+	_, err = validateForReconcile(cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}}))
+	require.NoError(t, err)
+}
+
+// TestValidateForReconcileRejectsRecordedSignerKeyChange verifies that once a validator-targeted
+// signer's digest is recorded, changing its signing configuration (here the Vault key name) is
+// rejected — the live signer's key is fixed on-chain — while removing the signer is allowed (a safe
+// rollback to the validator's own key is judged by the admission webhook, not blocked here).
+func TestValidateForReconcileRejectsRecordedSignerKeyChange(t *testing.T) {
+	recorded := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recorded.Status.CosmosignerSigningDigest = recorded.CosmosignerSigningDigest()
+	recorded.Status.CosmosignerReplicas = ptr.To(recorded.Spec.Cosmosigner.GetReplicas())
+
+	// Unchanged config: accepted.
+	_, err := validateForReconcile(recorded)
+	require.NoError(t, err)
+
+	// Changed Vault key on the live signer: rejected.
+	changed := recorded.DeepCopy()
+	changed.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
+	_, err = validateForReconcile(changed)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "immutable after the chain is established")
+
+	// Removing the signer entirely: allowed on the no-webhook path (deferred to the admission webhook).
+	removed := recorded.DeepCopy()
+	removed.Spec.Cosmosigner = nil
+	_, err = validateForReconcile(removed)
 	require.NoError(t, err)
 }
 

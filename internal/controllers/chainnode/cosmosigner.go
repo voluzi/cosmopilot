@@ -216,13 +216,8 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 
 	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
 
-	// Fingerprint the Vault target AND the resolved source secret, so changing either re-imports
-	// rather than leaving the annotation set. Shared with the ChainNodeSet controller so both
-	// import protocols stay in lockstep.
-	want := c.Backend.Vault.ImportFingerprint(sourceSecret)
-	if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
-		return false, nil
-	}
+	// Fetch the source key material first: the fingerprint hashes the actual bytes (not just the
+	// secret name), so an in-place update of the source Secret re-imports rather than being skipped.
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: sourceSecret}, secret); err != nil {
 		if errors.IsNotFound(err) {
@@ -231,8 +226,17 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 		}
 		return false, err
 	}
-	if len(secret.Data[PrivKeyFilename]) == 0 {
+	keyMaterial := secret.Data[PrivKeyFilename]
+	if len(keyMaterial) == 0 {
 		return true, nil
+	}
+
+	// Fingerprint the Vault target, the resolved source secret name, AND the key material, so changing
+	// any of them re-imports rather than leaving the annotation set. Shared with the ChainNodeSet
+	// controller so both import protocols stay in lockstep.
+	want := c.Backend.Vault.ImportFingerprint(sourceSecret, keyMaterial)
+	if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
+		return false, nil
 	}
 
 	// Quiesce any already-running signer BEFORE the synchronous re-import, so it cannot keep

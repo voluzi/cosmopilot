@@ -240,21 +240,24 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return false, fmt.Errorf("cosmosigner uploadGenerated requires a targeted validator whose key can be imported")
 	}
 
-	// The annotation records a fingerprint of the Vault target AND the resolved source secret, so
-	// changing either the target (key name/mount/address/namespace) or the source key re-imports
-	// instead of leaving the signer pointed at a stale transit key.
-	want := c.Backend.Vault.ImportFingerprint(sourceSecret)
-	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
-		return false, nil
-	}
-
 	// The key is produced by the validator's genesis/create-validator flow; wait for it rather than
 	// generating (and thereby diverging from) a different key. The import is still pending until it
 	// exists, so the caller must not roll out the signer yet.
-	if exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), sourceSecret, privKeyFilename); err != nil {
+	keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), sourceSecret, privKeyFilename)
+	if err != nil {
 		return false, err
-	} else if !exists {
+	}
+	if len(keyMaterial) == 0 {
 		return true, nil
+	}
+
+	// The annotation records a fingerprint of the Vault target, the resolved source secret name, AND
+	// the key material, so changing the target (key name/mount/address/namespace), the source secret,
+	// or its bytes (an in-place update) re-imports instead of leaving the signer pointed at a stale
+	// transit key.
+	want := c.Backend.Vault.ImportFingerprint(sourceSecret, keyMaterial)
+	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
+		return false, nil
 	}
 
 	// Quiesce any already-running signer BEFORE the (synchronous) re-import: on a source/target
@@ -316,14 +319,24 @@ func (r *Reconciler) markCosmosignerKeyImported(ctx context.Context, nodeSet *ap
 
 // secretHasKey reports whether the named secret exists and contains a non-empty value for key.
 func (r *Reconciler) secretHasKey(ctx context.Context, namespace, name, key string) (bool, error) {
+	data, err := r.secretKey(ctx, namespace, name, key)
+	if err != nil {
+		return false, err
+	}
+	return len(data) > 0, nil
+}
+
+// secretKey returns the value stored under key in the named secret, or nil when the secret does not
+// exist yet (so callers can treat a missing secret as "not ready" rather than an error).
+func (r *Reconciler) secretKey(ctx context.Context, namespace, name, key string) ([]byte, error) {
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, secret); err != nil {
 		if errors.IsNotFound(err) {
-			return false, nil
+			return nil, nil
 		}
-		return false, err
+		return nil, err
 	}
-	return len(secret.Data[key]) > 0, nil
+	return secret.Data[key], nil
 }
 
 // undeployCosmosigner removes managed signer resources when cosmosigner is no longer configured,
