@@ -10,7 +10,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
@@ -79,22 +78,33 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return err
 	}
 
-	// Record the signing identity only after the CURRENT signer generation is fully rolled out
+	// Record persisted invariants only after the CURRENT signer generation is fully rolled out
 	// (observed + all replicas updated and ready, read from the live object — the freshly rendered
 	// sts carries no status). A config that never worked therefore stays correctable, and readiness
-	// left over from a previous revision cannot lock in a pending change. The digest is only
-	// meaningful when the signer serves a validator: a sentry-mode signer's key lives out-of-band
-	// and must remain add/remove/rotate-able, mirroring the webhook's empty-identity waiver.
-	if nodeSet.Status.CosmosignerSigningDigest == "" {
-		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); hasValidatorTarget {
-			rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), params.Name, params.Replicas)
-			if err != nil {
-				return err
+	// left over from a previous revision cannot lock in a pending change.
+	//
+	//   - Replicas is recorded for EVERY signer (validator-targeted and sentry alike): the raft
+	//     membership baked into the per-pod state cannot be migrated by re-rendering a bootstrap list,
+	//     so the no-webhook path rejects a later replica change from this recorded value.
+	//   - The signing digest is only meaningful when the signer serves a validator: a sentry-mode
+	//     signer's key lives out-of-band and must stay add/remove/rotate-able, mirroring the webhook's
+	//     empty-identity waiver — so it is recorded only for a validator target.
+	_, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret()
+	needReplicas := nodeSet.Status.CosmosignerReplicas == nil
+	needDigest := nodeSet.Status.CosmosignerSigningDigest == "" && hasValidatorTarget
+	if needReplicas || needDigest {
+		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), params.Name, params.Replicas)
+		if err != nil {
+			return err
+		}
+		if rolledOut {
+			if needReplicas {
+				nodeSet.Status.CosmosignerReplicas = ptr.To(params.Replicas)
 			}
-			if rolledOut {
+			if needDigest {
 				nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
-				return r.Status().Update(ctx, nodeSet)
 			}
+			return r.Status().Update(ctx, nodeSet)
 		}
 	}
 	return nil
@@ -159,19 +169,20 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		if !ok {
 			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software backend has no resolvable private-key secret")
 		}
-		// Sentry mode (no validator target): the explicit secret is the signer's own key, so
-		// generate it when absent (as the API documents) rather than leaving the pods stuck on a
-		// missing Secret mount. A validator-targeted secret is produced by the validator's own key
-		// flow and is never created here.
+		// Sentry mode (no validator target): the explicit secret holds the signer's own consensus
+		// key, which must already be registered on-chain out-of-band — created BEFORE genesis when
+		// listed in validator.init.genesisValidators (ensureGenesisValidatorSecrets generates it
+		// there), or provisioned by the user for an externally-registered key. ensureCosmosigner runs
+		// only after genesis is fixed (chainID set), so a key minted here could never be in the
+		// validator set: require the secret to already exist rather than silently signing with an
+		// unregistered key. A validator-targeted secret is produced by the validator's own key flow.
 		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget {
-			if err := r.ensureSecret(ctx, nodeSet, secretName, []string{privKeyFilename}, func() (map[string][]byte, error) {
-				key, err := cometbft.GeneratePrivKey()
-				if err != nil {
-					return nil, err
-				}
-				return map[string][]byte{privKeyFilename: key}, nil
-			}); err != nil {
+			exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)
+			if err != nil {
 				return cosmosigner.Backend{}, err
+			}
+			if !exists {
+				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner sentry software key secret %q not found: register its consensus key on-chain and provide the secret (e.g. list it in validator.init.genesisValidators so it is created before genesis) — refusing to mint an unregistered key after genesis is fixed", secretName)
 			}
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil

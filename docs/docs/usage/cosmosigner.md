@@ -143,8 +143,17 @@ service account is usually not bound.
 cosmosigner:
   backend:
     software:
-      privateKeySecret: my-validator-priv-key   # optional; generated if absent
+      privateKeySecret: my-validator-priv-key   # optional when targeting a validator (its own key
+                                                 # is used); required for a sentry-mode signer
 ```
+
+:::warning[Sentry-mode software keys are never minted]
+For a sentry-mode signer (no validator targeted) the referenced secret must already exist and hold a
+consensus key that is registered on-chain — list it in `validator.init.genesisValidators` so it is
+created **before** genesis, or provision it yourself for an externally-registered key. `Cosmopilot`
+refuses to mint a fresh key here: the signer only ever deploys after genesis is fixed, so a minted
+key could never be in the validator set.
+:::
 
 ## High availability
 

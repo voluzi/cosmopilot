@@ -247,21 +247,51 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 }
 
 // validateNoWebhookCosmosignerState mirrors the genesis no-webhook protection for the managed
-// cosmosigner: once its signing identity is recorded in status, reject a spec edit that removes or
-// changes it, since the targeted validator's key is fixed on-chain. A same-key migration keeps the
-// digest identical and is allowed. The digest is only ever recorded for validator-targeted signers
-// (sentry-mode signers stay freely add/remove/rotate-able), so an empty digest means nothing to
-// enforce.
+// cosmosigner. Reconcile only ever sees the current persisted object, never the previous spec, so
+// the admission diff-guards cannot run here; this reconstructs the equivalent invariants from status.
+//
+//   - A recorded signing digest means a validator-targeted signer rolled out and served this exact
+//     key: its removal or change is rejected (the on-chain key is fixed). A same-key migration keeps
+//     the digest identical and is allowed.
+//   - The raft replica count is recorded for every signer (including sentry) and is immutable once the
+//     cluster formed with it: re-rendering a bootstrap list does not migrate the recorded membership.
+//   - A validator-targeted signer newly added to an already-established chain reroutes that
+//     validator's signing. Without admission review we cannot verify a pre-provisioned Vault/GCP key
+//     matches the on-chain validator key, so it is refused unless the backend provably imports the
+//     registered key (software mounts the validator's own secret; vault.uploadGenerated imports it).
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
-	if nodeSet.Status.CosmosignerSigningDigest == "" {
+	c := nodeSet.Spec.Cosmosigner
+	recorded := nodeSet.Status.CosmosignerSigningDigest
+
+	if recorded != "" {
+		if c == nil {
+			return fmt.Errorf(".spec.cosmosigner cannot be removed after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain")
+		}
+		if nodeSet.CosmosignerSigningDigest() != recorded {
+			return fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled)")
+		}
 		return nil
 	}
-	if nodeSet.Spec.Cosmosigner == nil {
-		return fmt.Errorf(".spec.cosmosigner cannot be removed after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain")
+
+	// No signing digest recorded: no signer, a sentry-mode signer (which never records one), or a
+	// validator-targeted signer not yet rolled out. The remaining guards only bite once the chain is
+	// established — before that nothing is baked on-chain and the config is still freely correctable.
+	if c == nil || nodeSet.Status.ChainID == "" {
+		return nil
 	}
-	if nodeSet.CosmosignerSigningDigest() != nodeSet.Status.CosmosignerSigningDigest {
-		return fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled)")
+
+	if replicas := nodeSet.Status.CosmosignerReplicas; replicas != nil && *replicas != c.GetReplicas() {
+		return fmt.Errorf(".spec.cosmosigner.replicas is immutable after the signer is deployed (webhooks disabled): changing it does not migrate the raft membership and can break quorum")
 	}
+
+	if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); hasValidatorTarget {
+		importsRegisteredKey := c.UsesSoftwareBackend() ||
+			(c.UsesVaultBackend() && c.VaultUploadsGenerated(nodeSet.CosmosignerTargetInitializesGenesis()))
+		if !importsRegisteredKey {
+			return fmt.Errorf(".spec.cosmosigner cannot add a validator-targeted signer with a pre-provisioned Vault/GCP key to an established chain (webhooks disabled): its key cannot be verified against the on-chain validator key — use the software backend or vault.uploadGenerated so the registered key is used")
+		}
+	}
+
 	return nil
 }
 

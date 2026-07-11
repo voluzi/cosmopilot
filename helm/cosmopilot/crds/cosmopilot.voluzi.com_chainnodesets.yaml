@@ -15706,6 +15706,15 @@ spec:
               chainID:
                 description: Indicates the chain ID.
                 type: string
+              cosmosignerReplicas:
+                description: |-
+                  CosmosignerReplicas records the raft replica count the managed signer was rolled out with. It is
+                  captured for every signer (validator-targeted and sentry-mode alike) so the no-webhook reconcile
+                  path can reject a later replica change: scaling the embedded raft cluster is not a plain
+                  Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated
+                  by rendering a new bootstrap list. Not meant to be set by hand.
+                format: int32
+                type: integer
               cosmosignerSigningDigest:
                 description: |-
                   CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's

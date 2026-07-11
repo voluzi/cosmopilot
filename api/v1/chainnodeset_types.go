@@ -156,6 +156,14 @@ type ChainNodeSetStatus struct {
 	// by hand.
 	// +optional
 	CosmosignerSigningDigest string `json:"cosmosignerSigningDigest,omitempty"`
+
+	// CosmosignerReplicas records the raft replica count the managed signer was rolled out with. It is
+	// captured for every signer (validator-targeted and sentry-mode alike) so the no-webhook reconcile
+	// path can reject a later replica change: scaling the embedded raft cluster is not a plain
+	// Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated
+	// by rendering a new bootstrap list. Not meant to be set by hand.
+	// +optional
+	CosmosignerReplicas *int32 `json:"cosmosignerReplicas,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.

@@ -102,9 +102,15 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.createPod(ctx, chainNode, pod)
 	}
 
-	// Patch pod without restart when labels change
+	// Patch pod labels without restart ONLY when the spec is otherwise unchanged. When the spec has
+	// also changed the pod is recreated below (podSpecChanged), which applies the new labels together
+	// with the new spec atomically. Patching labels onto the still-running old pod in that case is
+	// unsafe during a signer migration: it would stamp the cosmosigner discovery label onto a pod that
+	// is still running the previous signing path (e.g. a tmKMS sidecar bound to the privval laddr),
+	// exposing it to the new signer while the old signer is still live — two signers racing on one
+	// consensus key. Deferring to recreation closes that window.
 	logger.V(1).Info("checking for labels changes", "current", currentPod.Labels, "new", pod.Labels)
-	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) {
+	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) && !podSpecChanged(ctx, currentPod, pod) {
 		logger.Info("updating pod labels", "pod", pod.GetName())
 		modifiedPod := currentPod.DeepCopy()
 		modifiedPod.Labels = pod.Labels

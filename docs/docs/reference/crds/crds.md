@@ -246,6 +246,7 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
 | seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
 | cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity and target set, captured once the chain is established. It lets the no-webhook reconcile path reject a later change or removal of the signing configuration that would make the validator sign with a key not in the on-chain validator set. Not meant to be set by hand. | string | false |
+| cosmosignerReplicas | CosmosignerReplicas records the raft replica count the managed signer was rolled out with. It is captured for every signer (validator-targeted and sentry-mode alike) so the no-webhook reconcile path can reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. Not meant to be set by hand. | *int32 | false |
 
 [Back to Custom Resources](#custom-resources)
 
