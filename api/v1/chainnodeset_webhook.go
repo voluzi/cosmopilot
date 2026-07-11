@@ -297,8 +297,13 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || nodeSet.Spec.Cosmosigner != nil) {
 			// Retargeting the signer to different groups after establishment would leave the previously
 			// targeted validator signing locally (or concurrently) with a different key, even if the
-			// signer's own key is unchanged. The target set is therefore immutable.
+			// signer's own key is unchanged. The target set is therefore immutable — but only when a
+			// validator is (or was) targeted: a sentry-only signer over regular groups protects no
+			// in-cluster validator identity, so moving it between fullnode groups stays allowed.
+			oldTargetsValidator := old.cosmosignerTargetSigningIdentity(old.CosmosignerTargetGroups()) != ""
+			newTargetsValidator := nodeSet.cosmosignerTargetSigningIdentity(nodeSet.CosmosignerTargetGroups()) != ""
 			if old.Spec.Cosmosigner != nil && nodeSet.Spec.Cosmosigner != nil &&
+				(oldTargetsValidator || newTargetsValidator) &&
 				!equalStringSet(old.CosmosignerTargetGroups(), nodeSet.CosmosignerTargetGroups()) {
 				return nil, fmt.Errorf(".spec.cosmosigner.nodeGroups is immutable after the chain is established: retargeting the signer would change which validator signs")
 			}

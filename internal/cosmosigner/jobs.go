@@ -116,27 +116,37 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 	}
 
 	// A pre-existing pod with this name is only ours to delete when this owner controls it — a
-	// same-named signer owner's (or unrelated) pod must not be touched.
+	// same-named signer owner's (or unrelated) pod must not be touched. The delete carries a UID
+	// precondition so a pod recreated by another owner between the check and the delete is never
+	// removed (the apiserver rejects the mismatched UID).
 	if existing, err := j.Client.CoreV1().Pods(j.Params.Namespace).Get(ctx, pod.GetName(), metav1.GetOptions{}); err == nil {
 		if !metav1.IsControlledBy(existing, j.Owner) {
 			return "", fmt.Errorf("pod %q already exists and is managed by another owner; rename the ChainNode/ChainNodeSet to avoid the name collision", pod.GetName())
+		}
+		uid := existing.GetUID()
+		if err := j.Client.CoreV1().Pods(j.Params.Namespace).Delete(ctx, pod.GetName(), metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		}); err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+			return "", err
 		}
 	} else if !errors.IsNotFound(err) {
 		return "", err
 	}
 
 	ph := k8s.NewPodHelper(j.Client, nil, pod)
-	// Delete any pod left over from a previous attempt and wait for it to actually go away —
-	// deletion is asynchronous and an immediate Create would race AlreadyExists.
-	_ = ph.Delete(ctx)
+	// Wait for the (asynchronously) deleted previous pod to actually go away — an immediate Create
+	// would race AlreadyExists.
 	if err := ph.WaitForPodDeleted(ctx, jobDeleteTimeout); err != nil {
 		return "", fmt.Errorf("waiting for previous %s pod to terminate: %w", nameSuffix, err)
 	}
-	defer func() { _ = ph.Delete(ctx) }()
 
 	if err := ph.Create(ctx); err != nil {
 		return "", err
 	}
+	// Cleanup is only deferred once THIS controller created the pod, so a failed Create (e.g.
+	// AlreadyExists from a concurrent same-named owner) never deletes a pod that is not ours.
+	defer func() { _ = ph.Delete(ctx) }()
+
 	if err := ph.WaitForPodSucceeded(ctx, jobWaitTimeout); err != nil {
 		return "", err
 	}

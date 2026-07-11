@@ -564,8 +564,10 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("raftTLSSecret must not be empty"))
 	})
 
-	It("rejects retargeting the signer to different groups after the chain is established", func() {
-		cs := &appsv1.ChainNodeSet{
+	It("rejects retargeting a validator-targeted signer, allows retargeting a sentry-only signer", func() {
+		// Sentry-only signer over regular groups: retargeting between fullnode groups stays
+		// allowed after establishment (no in-cluster validator identity is protected).
+		sentry := &appsv1.ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
 			Spec: appsv1.ChainNodeSetSpec{
 				App:         DefaultChainNodeSetTestApp,
@@ -574,21 +576,51 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 				Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"a"}, Backend: vaultBackend()},
 			},
 		}
-		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+		Expect(Framework().Client().Create(Framework().Context(), sentry)).To(Succeed())
 		Eventually(func() error {
 			fresh := &appsv1.ChainNodeSet{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(sentry), fresh); err != nil {
 				return err
 			}
 			fresh.Status.ChainID = "test-chain-1"
 			return Framework().Client().Status().Update(Framework().Context(), fresh)
 		}).Should(Succeed())
-		Eventually(func() string {
+		Eventually(func() error {
 			fresh := &appsv1.ChainNodeSet{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
-				return err.Error()
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(sentry), fresh); err != nil {
+				return err
 			}
 			fresh.Spec.Cosmosigner.NodeGroups = []string{"b"}
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+
+		// Validator-targeted signer: retargeting away from the validator is rejected.
+		valTarget := &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSetSpec{
+				App:       DefaultChainNodeSetTestApp,
+				Genesis:   &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("existing-val-key")},
+				Nodes:     []appsv1.NodeGroupSpec{{Name: "a"}},
+				// Empty nodeGroups targets the validator.
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), valTarget)).To(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(valTarget), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-chain-2"
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+		Eventually(func() string {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(valTarget), fresh); err != nil {
+				return err.Error()
+			}
+			fresh.Spec.Cosmosigner.NodeGroups = []string{"a"} // retarget validator -> sentry group
 			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
 				return err.Error()
 			}

@@ -109,10 +109,14 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 
 	// Exclude the internal selector labels (group/global Service selectors, P2P peer discovery,
 	// cleanup selectors) so signer resources can never be selected as node Services or peers —
-	// see controllers.CosmosignerReservedSelectorLabels.
+	// see controllers.CosmosignerReservedSelectorLabels. The ChainNodeSet label is excluded too:
+	// every ChainNodeSet global Service selector requires `nodeset=<name>`, so dropping that one
+	// key breaks any global-route selector match regardless of which per-nodeset route-membership
+	// labels (whose names are dynamic and unknowable here) were inherited.
+	exclude := append(controllers.CosmosignerReservedSelectorLabels(), controllers.LabelChainNodeSet)
 	labels := utils.ExcludeMapKeys(WithChainNodeLabels(chainNode, map[string]string{
 		controllers.LabelChainNode: chainNode.GetName(),
-	}), controllers.CosmosignerReservedSelectorLabels()...)
+	}), exclude...)
 
 	return cosmosigner.Params{
 		Name:               name,

@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
@@ -32,7 +33,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
-	params, err := r.cosmosignerParams(nodeSet)
+	params, err := r.cosmosignerParams(ctx, nodeSet)
 	if err != nil {
 		return err
 	}
@@ -101,7 +102,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 
 // cosmosignerParams resolves the builder parameters, ensuring the software key secret exists when
 // the software backend is used.
-func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigner.Params, error) {
+func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (cosmosigner.Params, error) {
 	c := nodeSet.Spec.Cosmosigner
 	name := cosmosignerName(nodeSet)
 
@@ -120,7 +121,7 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
 	}), exclude...)
 
-	backend, err := r.cosmosignerBackend(nodeSet)
+	backend, err := r.cosmosignerBackend(ctx, nodeSet)
 	if err != nil {
 		return cosmosigner.Params{}, err
 	}
@@ -150,13 +151,28 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 // generated here: the software backend references either an explicit secret or the targeted
 // validator's own key secret (produced by the validator's genesis/create-validator flow), so the
 // signer always signs with the exact consensus key registered on-chain.
-func (r *Reconciler) cosmosignerBackend(nodeSet *appsv1.ChainNodeSet) (cosmosigner.Backend, error) {
+func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (cosmosigner.Backend, error) {
 	c := nodeSet.Spec.Cosmosigner
 	switch {
 	case c.UsesSoftwareBackend():
 		secretName, ok := r.cosmosignerSoftwareSecretName(nodeSet)
 		if !ok {
 			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software backend has no resolvable private-key secret")
+		}
+		// Sentry mode (no validator target): the explicit secret is the signer's own key, so
+		// generate it when absent (as the API documents) rather than leaving the pods stuck on a
+		// missing Secret mount. A validator-targeted secret is produced by the validator's own key
+		// flow and is never created here.
+		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget {
+			if err := r.ensureSecret(ctx, nodeSet, secretName, []string{privKeyFilename}, func() (map[string][]byte, error) {
+				key, err := cometbft.GeneratePrivKey()
+				if err != nil {
+					return nil, err
+				}
+				return map[string][]byte{privKeyFilename: key}, nil
+			}); err != nil {
+				return cosmosigner.Backend{}, err
+			}
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 
