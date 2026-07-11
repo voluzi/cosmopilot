@@ -58,6 +58,23 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	return c.Update(ctx, obj)
 }
 
+// IsRolledOut reports whether the signer StatefulSet's CURRENT generation is fully deployed: the
+// controller has observed it, and every desired replica is both updated to the current revision and
+// ready. Gating on this (rather than bare ReadyReplicas) prevents treating readiness left over from
+// a previous revision as success for a pending change.
+func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, desiredReplicas int32) (bool, error) {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return sts.Status.ObservedGeneration == sts.Generation &&
+		sts.Status.UpdatedReplicas == desiredReplicas &&
+		sts.Status.ReadyReplicas == desiredReplicas, nil
+}
+
 // Undeploy removes the managed signer resources for the given base name, deleting only objects the
 // owner controls. If a signer StatefulSet with the derived name exists but is owned by a different
 // CR (a same-name collision), nothing — including PVCs — is touched.

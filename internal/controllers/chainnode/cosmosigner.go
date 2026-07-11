@@ -12,6 +12,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 // cosmosignerName is the base name for a standalone ChainNode's managed signer resources.
@@ -81,12 +82,20 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return err
 	}
 
-	// Record the signing identity only after the signer has pods actually running (not merely a
-	// created StatefulSet), so a config that never worked stays correctable — the no-webhook
-	// immutability guard then only protects an identity that has been in effect.
-	if chainNode.Status.CosmosignerSigningDigest == "" && sts.Status.ReadyReplicas > 0 {
-		chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
-		return r.Status().Update(ctx, chainNode)
+	// Record the signing identity only after the CURRENT signer generation is fully rolled out
+	// (read from the live object — the freshly rendered sts carries no status), so a config that
+	// never worked stays correctable and a pending change is never locked in by a previous
+	// revision's readiness. Only validators get a digest: a non-validator sentry's key lives
+	// out-of-band and must remain add/remove/rotate-able (mirrors the webhook waiver).
+	if chainNode.Status.CosmosignerSigningDigest == "" && chainNode.IsValidator() {
+		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
+		if err != nil {
+			return err
+		}
+		if rolledOut {
+			chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
+			return r.Status().Update(ctx, chainNode)
+		}
 	}
 	return nil
 }
@@ -95,9 +104,11 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 	c := chainNode.Spec.Cosmosigner
 	name := cosmosignerName(chainNode)
 
-	labels := WithChainNodeLabels(chainNode, map[string]string{
+	// Exclude the group/validator selector labels so signer pods can never become endpoints of a
+	// node group Service (which selects on chain-node-set + group).
+	labels := utils.ExcludeMapKeys(WithChainNodeLabels(chainNode, map[string]string{
 		controllers.LabelChainNode: chainNode.GetName(),
-	})
+	}), controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator)
 
 	return cosmosigner.Params{
 		Name:               name,

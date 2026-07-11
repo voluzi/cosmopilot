@@ -243,7 +243,9 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 // validateNoWebhookCosmosignerState mirrors the genesis no-webhook protection for the managed
 // cosmosigner: once its signing identity is recorded in status, reject a spec edit that removes or
 // changes it, since the targeted validator's key is fixed on-chain. A same-key migration keeps the
-// digest identical and is allowed.
+// digest identical and is allowed. The digest is only ever recorded for validator-targeted signers
+// (sentry-mode signers stay freely add/remove/rotate-able), so an empty digest means nothing to
+// enforce.
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Status.CosmosignerSigningDigest == "" {
 		return nil

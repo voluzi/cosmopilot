@@ -43,6 +43,8 @@ func isStatefulSetDataPVC(pvcName, stsName string) bool {
 	if ordinal == "" {
 		return false
 	}
-	_, err := strconv.Atoi(ordinal)
-	return err == nil
+	// Require a canonical non-negative ordinal (no sign, no leading zeros) — exactly what the
+	// StatefulSet controller produces — so names like "data-<name>--1" or "data-<name>-007" never match.
+	n, err := strconv.Atoi(ordinal)
+	return err == nil && n >= 0 && strconv.Itoa(n) == ordinal
 }

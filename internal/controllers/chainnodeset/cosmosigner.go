@@ -12,6 +12,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 // cosmosignerName is the base name for a ChainNodeSet's managed signer resources.
@@ -74,12 +75,23 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return err
 	}
 
-	// Record the signing identity only after the signer has pods actually running (not merely a
-	// created StatefulSet), so a config that never worked stays correctable — the no-webhook
-	// immutability guard then only protects an identity that has been in effect.
-	if nodeSet.Status.CosmosignerSigningDigest == "" && sts.Status.ReadyReplicas > 0 {
-		nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
-		return r.Status().Update(ctx, nodeSet)
+	// Record the signing identity only after the CURRENT signer generation is fully rolled out
+	// (observed + all replicas updated and ready, read from the live object — the freshly rendered
+	// sts carries no status). A config that never worked therefore stays correctable, and readiness
+	// left over from a previous revision cannot lock in a pending change. The digest is only
+	// meaningful when the signer serves a validator: a sentry-mode signer's key lives out-of-band
+	// and must remain add/remove/rotate-able, mirroring the webhook's empty-identity waiver.
+	if nodeSet.Status.CosmosignerSigningDigest == "" {
+		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); hasValidatorTarget {
+			rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), params.Name, params.Replicas)
+			if err != nil {
+				return err
+			}
+			if rolledOut {
+				nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
+				return r.Status().Update(ctx, nodeSet)
+			}
+		}
 	}
 	return nil
 }
@@ -90,9 +102,13 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 	c := nodeSet.Spec.Cosmosigner
 	name := cosmosignerName(nodeSet)
 
-	labels := WithChainNodeSetLabels(nodeSet, map[string]string{
+	// Signer pods must never inherit the group selector label: group Services select on
+	// chain-node-set + group, and a user label like `group: fullnodes` on the ChainNodeSet would
+	// otherwise make the signer pods endpoints of a node group Service (routing chain RPC traffic
+	// to the signer). The validator selector label is excluded for the same reason.
+	labels := utils.ExcludeMapKeys(WithChainNodeSetLabels(nodeSet, map[string]string{
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
-	})
+	}), controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator)
 
 	backend, err := r.cosmosignerBackend(nodeSet)
 	if err != nil {

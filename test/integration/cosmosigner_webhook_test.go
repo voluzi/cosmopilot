@@ -454,8 +454,11 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
 			Spec: appsv1.ChainNodeSpec{
-				App:         DefaultChainNodeTestApp,
-				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				App:     DefaultChainNodeTestApp,
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				// The immutability guard protects validators (a sentry's key is registered
+				// out-of-band and stays rotatable), so this node must be a validator.
+				Validator:   &appsv1.ValidatorConfig{},
 				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()},
 			},
 		}
@@ -472,6 +475,21 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 				return err.Error()
 			}
 			fresh.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
+			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
+				return err.Error()
+			}
+			return ""
+		}).Should(ContainSubstring("immutable after the chain is established"))
+
+		// Dropping both the signer and the validator block (emptying the signing identity) is
+		// rejected too — the on-chain validator would be left with no signing path.
+		Eventually(func() string {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err.Error()
+			}
+			fresh.Spec.Validator = nil
+			fresh.Spec.Cosmosigner = nil
 			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
 				return err.Error()
 			}

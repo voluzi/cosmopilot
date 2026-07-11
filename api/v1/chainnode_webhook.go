@@ -166,14 +166,16 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// validator set. Changing the effective signing key — including adding, removing or switching
 		// the cosmosigner backend — would make the node sign with a key not in that set. Equivalent
 		// keys (e.g. the same Vault key via tmKMS or cosmosigner) compare equal, so a same-key
-		// migration is still allowed. An empty identity (a non-validator sentry node, whose key is
-		// registered out-of-band) has nothing to compare, so adding/removing a sentry signer is not
-		// blocked.
+		// migration is still allowed. The guard only applies when the OLD node was a validator: a
+		// non-validator sentry node's key is registered out-of-band, so adding/removing its signer is
+		// not blocked. For an old validator, an update that empties the identity (dropping both the
+		// validator block and the signer) is also rejected — it would leave the on-chain validator
+		// with no signing path at all.
 		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil) {
 			oldIdentity := old.EffectiveSigningIdentity()
 			newIdentity := chainNode.EffectiveSigningIdentity()
-			if oldIdentity != "" && newIdentity != "" && oldIdentity != newIdentity {
-				return nil, fmt.Errorf("the consensus signing key is immutable after the chain is established: changing the cosmosigner/signing configuration would make the validator sign with a key not in the on-chain validator set")
+			if oldIdentity != "" && old.Spec.Validator != nil && (newIdentity == "" || oldIdentity != newIdentity) {
+				return nil, fmt.Errorf("the consensus signing key is immutable after the chain is established: changing or removing the cosmosigner/signing configuration would leave the validator signing with a key not in the on-chain validator set (or not signing at all)")
 			}
 		}
 	}

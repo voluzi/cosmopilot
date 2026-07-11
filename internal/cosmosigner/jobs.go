@@ -17,9 +17,10 @@ import (
 
 const (
 	jobActiveDeadlineSeconds int64 = 300
-	// jobWaitTimeout matches the pod's own ActiveDeadlineSeconds so a slow image pull or Vault
-	// round-trip is not killed by the controller before the kubelet would have given up anyway.
-	jobWaitTimeout = time.Duration(jobActiveDeadlineSeconds) * time.Second
+	// jobWaitTimeout is the pod's own execution deadline (ActiveDeadlineSeconds — which only starts
+	// counting once the pod is scheduled) plus an allowance for scheduling latency, so the
+	// controller never gives up on a pod the kubelet would still have let finish.
+	jobWaitTimeout = time.Duration(jobActiveDeadlineSeconds)*time.Second + 2*time.Minute
 	// jobDeleteTimeout bounds waiting for a previous run's pod to finish terminating before
 	// recreating it (pod deletion is asynchronous; an immediate Create races AlreadyExists).
 	jobDeleteTimeout = time.Minute

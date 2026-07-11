@@ -85,10 +85,7 @@ func TestRenderYAMLUsesSnakeCase(t *testing.T) {
 }
 
 func TestStatefulSetShape(t *testing.T) {
-	sts, err := mustStatefulSet(t, testParams())
-	if err != nil {
-		t.Fatal(err)
-	}
+	sts := mustStatefulSet(t, testParams())
 	if sts.Spec.PodManagementPolicy != "Parallel" {
 		t.Fatalf("expected Parallel pod management, got %q", sts.Spec.PodManagementPolicy)
 	}
@@ -138,10 +135,7 @@ func TestDiscoveryServiceHeadlessPublishNotReady(t *testing.T) {
 }
 
 func TestVolumeClaimTemplateLabeledForCleanup(t *testing.T) {
-	sts, err := mustStatefulSet(t, testParams())
-	if err != nil {
-		t.Fatal(err)
-	}
+	sts := mustStatefulSet(t, testParams())
 	pvc := sts.Spec.VolumeClaimTemplates[0]
 	want := InstanceLabels("mychain-signer")
 	for k, v := range want {
@@ -158,10 +152,7 @@ func TestSoftwareBackendConfig(t *testing.T) {
 	if cfg.Backend.Type != "software" || cfg.Backend.KeyFile != "/keys/priv_validator_key.json" {
 		t.Fatalf("unexpected software backend: %+v", cfg.Backend)
 	}
-	sts, err := mustStatefulSet(t, p)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sts := mustStatefulSet(t, p)
 	var found bool
 	for _, v := range sts.Spec.Template.Spec.Volumes {
 		if v.Secret != nil && v.Secret.SecretName == "mychain-priv-key" {
@@ -174,11 +165,16 @@ func TestSoftwareBackendConfig(t *testing.T) {
 }
 
 // mustStatefulSet renders the config once and builds the StatefulSet, mirroring the controllers.
-func mustStatefulSet(t *testing.T, p Params) (*appsv1.StatefulSet, error) {
+// All errors are fatal, so callers get a usable StatefulSet or the test ends here.
+func mustStatefulSet(t *testing.T, p Params) *appsv1.StatefulSet {
 	t.Helper()
 	cfg, err := p.ConfigYAML()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p.StatefulSet(cfg)
+	sts, err := p.StatefulSet(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sts
 }

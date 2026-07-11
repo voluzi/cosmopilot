@@ -303,15 +303,18 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			// registered on-chain by this controller. A sentry-mode signer over regular groups has
 			// its key registered out-of-band (e.g. init.genesisValidators), so adding or changing it
 			// resolves no in-cluster validator identity — there is nothing on the old side to
-			// compare, and rejecting would block the documented add-sentry-signer-later flow.
+			// compare, and rejecting would block the documented add-sentry-signer-later flow. When
+			// the old side DID resolve a validator identity, an update that empties it (dropping the
+			// signer and the validator's own signing path together) is rejected too: the on-chain
+			// validator would be left with no signing path.
 			targets := nodeSet.CosmosignerTargetGroups()
 			if len(targets) == 0 {
 				targets = old.CosmosignerTargetGroups()
 			}
 			oldIdentity := old.cosmosignerTargetSigningIdentity(targets)
 			newIdentity := nodeSet.cosmosignerTargetSigningIdentity(targets)
-			if oldIdentity != "" && newIdentity != "" && oldIdentity != newIdentity {
-				return nil, fmt.Errorf("the consensus signing key of the cosmosigner-targeted validator is immutable after the chain is established: changing the cosmosigner/signing configuration would make it sign with a key not in the on-chain validator set")
+			if oldIdentity != "" && (newIdentity == "" || oldIdentity != newIdentity) {
+				return nil, fmt.Errorf("the consensus signing key of the cosmosigner-targeted validator is immutable after the chain is established: changing or removing the cosmosigner/signing configuration would leave it signing with a key not in the on-chain validator set (or not signing at all)")
 			}
 		}
 	}
