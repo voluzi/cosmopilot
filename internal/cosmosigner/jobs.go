@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -111,6 +112,16 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 		},
 	}
 	if err := controllerutil.SetControllerReference(j.Owner, pod, j.Scheme); err != nil {
+		return "", err
+	}
+
+	// A pre-existing pod with this name is only ours to delete when this owner controls it — a
+	// same-named signer owner's (or unrelated) pod must not be touched.
+	if existing, err := j.Client.CoreV1().Pods(j.Params.Namespace).Get(ctx, pod.GetName(), metav1.GetOptions{}); err == nil {
+		if !metav1.IsControlledBy(existing, j.Owner) {
+			return "", fmt.Errorf("pod %q already exists and is managed by another owner; rename the ChainNode/ChainNodeSet to avoid the name collision", pod.GetName())
+		}
+	} else if !errors.IsNotFound(err) {
 		return "", err
 	}
 

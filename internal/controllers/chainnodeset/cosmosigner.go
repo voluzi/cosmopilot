@@ -102,13 +102,21 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 	c := nodeSet.Spec.Cosmosigner
 	name := cosmosignerName(nodeSet)
 
-	// Signer pods must never inherit the group selector label: group Services select on
-	// chain-node-set + group, and a user label like `group: fullnodes` on the ChainNodeSet would
-	// otherwise make the signer pods endpoints of a node group Service (routing chain RPC traffic
-	// to the signer). The validator selector label is excluded for the same reason.
+	// Signer pods must never inherit selector labels that would make them endpoints of node
+	// Services: the group/validator selector labels (group Services select chain-node-set + group)
+	// and the generated global ingress/gateway membership labels (global Services select
+	// chain-node-set + <route name>). A user label on the ChainNodeSet matching any of these would
+	// otherwise route chain RPC/LCD/GRPC traffic to signer pods.
+	exclude := []string{controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator}
+	for _, ingress := range nodeSet.Spec.Ingresses {
+		exclude = append(exclude, ingress.GetName(nodeSet))
+	}
+	for _, gw := range nodeSet.Spec.GatewayRoutes {
+		exclude = append(exclude, gw.GetName(nodeSet))
+	}
 	labels := utils.ExcludeMapKeys(WithChainNodeSetLabels(nodeSet, map[string]string{
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
-	}), controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator)
+	}), exclude...)
 
 	backend, err := r.cosmosignerBackend(nodeSet)
 	if err != nil {
@@ -194,18 +202,18 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return false, nil
 	}
 
-	// The annotation records a fingerprint of the Vault target so that changing the key name, mount
-	// or address re-imports into the new target instead of leaving the signer pointed at an empty
-	// or stale transit key.
-	want := c.Backend.Vault.TargetFingerprint()
-	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
-		return false, nil
-	}
-
 	sourceSecret, ok := nodeSet.CosmosignerValidatorTargetSecret()
 	if !ok {
 		// The webhook rejects uploadGenerated without a validator target; guard defensively.
 		return false, fmt.Errorf("cosmosigner uploadGenerated requires a targeted validator whose key can be imported")
+	}
+
+	// The annotation records a fingerprint of the Vault target AND the resolved source secret, so
+	// changing either the target (key name/mount/address/namespace) or the source key re-imports
+	// instead of leaving the signer pointed at a stale transit key.
+	want := c.Backend.Vault.ImportFingerprint(sourceSecret)
+	if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
+		return false, nil
 	}
 
 	// The key is produced by the validator's genesis/create-validator flow; wait for it rather than

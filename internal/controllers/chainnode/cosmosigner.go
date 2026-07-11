@@ -191,15 +191,15 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 		return false, nil
 	}
 
-	// Fingerprint the Vault target so changing it (address, namespace, mount or key) re-imports
+	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
+
+	// Fingerprint the Vault target AND the resolved source secret, so changing either re-imports
 	// rather than leaving the annotation set. Shared with the ChainNodeSet controller so both
 	// import protocols stay in lockstep.
-	want := c.Backend.Vault.TargetFingerprint()
+	want := c.Backend.Vault.ImportFingerprint(sourceSecret)
 	if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == want {
 		return false, nil
 	}
-
-	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: sourceSecret}, secret); err != nil {
 		if errors.IsNotFound(err) {

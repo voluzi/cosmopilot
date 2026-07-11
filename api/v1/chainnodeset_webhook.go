@@ -364,7 +364,14 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if old.Spec.Validator != nil && old.Spec.Validator.Init != nil &&
 			nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
 			defaultPrivKeySecret := fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName())
-			if genesisSigningMaterialChanged(old.Spec.Validator, nodeSet.Spec.Validator, defaultPrivKeySecret) {
+			// When cosmosigner is involved on either side, compare through the effective signing
+			// identity (same-key signer migrations compare equal); otherwise keep the raw fingerprint.
+			changed := genesisSigningMaterialChanged(old.Spec.Validator, nodeSet.Spec.Validator, defaultPrivKeySecret)
+			if old.Spec.Cosmosigner != nil || nodeSet.Spec.Cosmosigner != nil {
+				changed = old.nodeSetEffectiveGenesisFingerprint(ReservedValidatorGroupName, old.Spec.Validator) !=
+					nodeSet.nodeSetEffectiveGenesisFingerprint(ReservedValidatorGroupName, nodeSet.Spec.Validator)
+			}
+			if changed {
 				return nil, fmt.Errorf(".spec.validator signing material or genesis parameters cannot be changed after genesis has been created: they are part of the immutable genesis validator set")
 			}
 		}
@@ -393,7 +400,13 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			// privateKeySecret/tmKMS (rejected above) and their per-instance keys derive from stable
 			// names, so this only flags real changes.
 			defaultPrivKeySecret := fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group.Name)
-			if genesisSigningMaterialChanged(og.Validator, group.Validator, defaultPrivKeySecret) {
+			changed := genesisSigningMaterialChanged(og.Validator, group.Validator, defaultPrivKeySecret)
+			if old.Spec.Cosmosigner != nil || nodeSet.Spec.Cosmosigner != nil {
+				// Identity-normalized comparison so a same-key signer migration passes.
+				changed = old.nodeSetEffectiveGenesisFingerprint(group.Name, og.Validator) !=
+					nodeSet.nodeSetEffectiveGenesisFingerprint(group.Name, group.Validator)
+			}
+			if changed {
 				return nil, fmt.Errorf(".spec.nodes[%d] genesis-initializing validator group %q signing material or genesis parameters cannot be changed after creation: they are part of the immutable genesis validator set", i, group.Name)
 			}
 		}
@@ -1038,6 +1051,29 @@ func genesisSigningFingerprintWithIdentity(signingIdentity string, init *Genesis
 		infoJSON, _ = json.Marshal(info)
 	}
 	return strings.Join([]string{signingIdentity, accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
+}
+
+// nodeSetValidatorEffectiveIdentity returns the normalized signing identity of a nodeset validator
+// (legacy singleton via ReservedValidatorGroupName, or a validator group): the cosmosigner identity
+// when that group is the signer target on this revision, otherwise its own local/tmKMS identity.
+func (nodeSet *ChainNodeSet) nodeSetValidatorEffectiveIdentity(group string, cfg *NodeSetValidatorConfig) string {
+	if nodeSet.Spec.Cosmosigner != nil && nodeSet.IsCosmosignerTargetGroup(group) {
+		return nodeSet.CosmosignerSigningIdentity()
+	}
+	return nodeSet.validatorGroupSigningIdentity(group, cfg)
+}
+
+// nodeSetEffectiveGenesisFingerprint mirrors the ChainNode effectiveGenesisFingerprint for a nodeset
+// genesis-initializing validator: the genesis identity compared through the normalized signing
+// identity, so a same-key signer migration (e.g. tmKMS→cosmosigner on the same Vault key) is not
+// misread as a genesis change while genuine init/account changes still are.
+func (nodeSet *ChainNodeSet) nodeSetEffectiveGenesisFingerprint(group string, cfg *NodeSetValidatorConfig) string {
+	if cfg == nil {
+		return genesisSigningFingerprintWithIdentity("", nil, nil, "", "", "")
+	}
+	return genesisSigningFingerprintWithIdentity(
+		nodeSet.nodeSetValidatorEffectiveIdentity(group, cfg),
+		cfg.Init, cfg.Info, cfg.GetAccountPrefix(), cfg.GetValPrefix(), cfg.GetAccountHDPath())
 }
 
 // nodeSetSameKeyMigration reports whether an update keeps the effective consensus signing key of the

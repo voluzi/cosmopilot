@@ -110,16 +110,17 @@ func (b *CosmosignerVaultBackend) GetVaultMount() string {
 	return DefaultCosmosignerVaultMount
 }
 
-// TargetFingerprint returns a stable fingerprint of the Vault target a generated key is imported
-// into (address, namespace, mount, key), so a change to any of them triggers a fresh import. Both
-// controllers stamp this value into the key-imported annotation; sharing one implementation keeps
-// their import protocols in lockstep.
-func (b *CosmosignerVaultBackend) TargetFingerprint() string {
+// ImportFingerprint returns a stable fingerprint of a completed key import: the Vault target
+// (address, namespace, mount, key) plus the resolved source secret the key came from. A change to
+// either side triggers a fresh import — a new target must receive the key, and a new source means a
+// different key must be (re)imported and verified. Both controllers stamp this value into the
+// key-imported annotation; sharing one implementation keeps their import protocols in lockstep.
+func (b *CosmosignerVaultBackend) ImportFingerprint(sourceSecret string) string {
 	ns := ""
 	if b.Namespace != nil {
 		ns = *b.Namespace
 	}
-	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s", b.Address, ns, b.GetVaultMount(), b.KeyName))
+	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s", b.Address, ns, b.GetVaultMount(), b.KeyName, sourceSecret))
 }
 
 // CosmosignerTargetGroups returns the set of node group names the cosmosigner deployment signs
