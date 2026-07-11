@@ -215,9 +215,14 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// identity is unreachable through any local path, so removal would leave the validator signing
 		// with a key that is absent or different from the on-chain consensus key.
 		if c == nil && chainNode.Status.ChainID != "" {
-			if serving := chainNode.Status.CosmosignerServingIdentity; serving != "" &&
-				!chainNode.ValidatorResolvesSigningIdentity(serving) {
+			serving := chainNode.Status.CosmosignerServingIdentity
+			if serving != "" && !chainNode.ValidatorResolvesSigningIdentity(serving) {
 				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
+			}
+			// A digest with no serving identity is a legacy record (pre-field) whose identity can no
+			// longer be reconstructed once the spec is gone: unjudgeable, so reject conservatively.
+			if serving == "" && chainNode.Status.CosmosignerSigningDigest != "" {
+				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): a signer served this chain but its recorded identity predates this version and cannot be verified — restore the signer so the controller can record it, or remove it with webhooks enabled")
 			}
 		}
 		if c != nil && chainNode.Status.ChainID != "" {

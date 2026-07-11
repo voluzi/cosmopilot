@@ -15708,11 +15708,13 @@ spec:
                 type: string
               cosmosignerAtEstablishment:
                 description: |-
-                  CosmosignerAtEstablishment is a write-once record of the managed signer's effective signing
-                  identity at the moment the chain ID was first recorded (empty string when no signer was
-                  configured then). It lets the no-webhook reconcile path tell a signer that was part of the
-                  establishing configuration (admitted) apart from one whose identity was introduced afterwards
-                  (rejected unless the backend provably imports the registered key). Not meant to be set by hand.
+                  CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at
+                  the moment the chain ID was first recorded. Empty string when no signer targeted a validator
+                  then — including sentry-mode signers, whose key identity is deliberately excluded so that later
+                  retargeting the same key onto a validator does not masquerade as the establishing
+                  configuration. It lets the no-webhook reconcile path tell an establishing validator signer
+                  (admitted) apart from one introduced afterwards (rejected unless the backend provably imports
+                  the registered key). Not meant to be set by hand.
                 type: string
               cosmosignerReplicas:
                 description: |-

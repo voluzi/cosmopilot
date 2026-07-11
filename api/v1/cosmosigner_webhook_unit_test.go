@@ -166,10 +166,30 @@ func TestChainNodeNoWebhookSignerLifecycle(t *testing.T) {
 		t.Fatal("changing a recorded signer's key with webhooks disabled must be rejected")
 	}
 
-	// Removing the signer entirely: allowed (deferred to the admission webhook).
-	removed := recorded.DeepCopy()
-	removed.Spec.Cosmosigner = nil
-	if _, err := removed.Validate(nil); err != nil {
-		t.Fatalf("removing the signer must be allowed on the no-webhook path, got: %v", err)
+	// Removing a signer whose digest predates the serving-identity field (identity unverifiable):
+	// rejected conservatively.
+	removedLegacy := recorded.DeepCopy()
+	removedLegacy.Spec.Cosmosigner = nil
+	if _, err := removedLegacy.Validate(nil); err == nil {
+		t.Fatal("removing a legacy-digest signer with no recorded serving identity must be rejected")
+	}
+
+	// Removing a Vault signer whose serving identity is recorded but unreachable through the
+	// validator's own path: rejected.
+	removedVault := recorded.DeepCopy()
+	removedVault.Status.CosmosignerServingIdentity = recorded.CosmosignerSigningIdentity()
+	removedVault.Spec.Cosmosigner = nil
+	if _, err := removedVault.Validate(nil); err == nil {
+		t.Fatal("removing a pre-provisioned Vault signer must be rejected: the validator would fall back to a different local key")
+	}
+
+	// Removing a software signer that used the validator's own key: the serving identity is still
+	// resolved by the validator's local path, so removal is a safe rollback.
+	softwareServed := base(CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}})
+	softwareServed.Status.CosmosignerSigningDigest = softwareServed.CosmosignerSigningDigest()
+	softwareServed.Status.CosmosignerServingIdentity = softwareServed.CosmosignerSigningIdentity()
+	softwareServed.Spec.Cosmosigner = nil
+	if _, err := softwareServed.Validate(nil); err != nil {
+		t.Fatalf("removing a software signer backed by the validator's own key must be allowed, got: %v", err)
 	}
 }

@@ -35,7 +35,8 @@ func TestUndeployCosmosignerClearsStatusInvariants(t *testing.T) {
 	}
 	r := newValidatorTestReconciler(t, nodeSet)
 
-	require.NoError(t, r.undeployCosmosigner(context.Background(), nodeSet))
+	_, err := r.undeployCosmosigner(context.Background(), nodeSet)
+	require.NoError(t, err)
 
 	fresh := &appsv1.ChainNodeSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
@@ -72,7 +73,8 @@ func TestUndeployCosmosignerKeepsStatusWhileTerminating(t *testing.T) {
 
 	r := newValidatorTestReconciler(t, nodeSet, sts)
 
-	require.NoError(t, r.undeployCosmosigner(context.Background(), nodeSet))
+	_, err := r.undeployCosmosigner(context.Background(), nodeSet)
+	require.NoError(t, err)
 
 	fresh := &appsv1.ChainNodeSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
@@ -107,7 +109,8 @@ func TestUndeployCosmosignerClearsStatusWithForeignSameNameSigner(t *testing.T) 
 
 	r := newValidatorTestReconciler(t, nodeSet, sts)
 
-	require.NoError(t, r.undeployCosmosigner(context.Background(), nodeSet))
+	_, err := r.undeployCosmosigner(context.Background(), nodeSet)
+	require.NoError(t, err)
 
 	fresh := &appsv1.ChainNodeSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))

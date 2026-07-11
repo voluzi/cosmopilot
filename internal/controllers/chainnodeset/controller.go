@@ -129,6 +129,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// Backfill legacy cosmosigner status markers BEFORE any child ChainNode is reconciled: the
+	// no-webhook guards (validateForReconcile, above) judge these markers, and they must get that
+	// chance before ensureValidator/ensureNodes act on a potentially unverifiable signer spec (e.g.
+	// stamping RemoteSignerTarget on the validator and dropping its local key). When a backfill
+	// happened, requeue so validation re-runs against the fresh status first.
+	if backfilled, err := r.backfillCosmosignerLegacyStatus(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	} else if backfilled {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// When the signer was removed from the spec, tear it down BEFORE children are reconciled and wait
+	// for completion: children switching back to their local/tmKMS signing path while the old signer
+	// pods are still terminating would put two signers on the same consensus key. Deletion is
+	// asynchronous, so poll until the StatefulSet and PVCs are gone before letting the children move.
+	if nodeSet.Spec.Cosmosigner == nil {
+		tornDown, err := r.undeployCosmosigner(ctx, nodeSet)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !tornDown {
+			logger.Info("waiting for cosmosigner teardown before reconciling children")
+			return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+		}
+	}
+
 	// Validators that initialize a new genesis must run before ensureGenesis: they produce the
 	// genesis (and its ConfigMap) that the ChainNodeSet and every other node consume.
 	if nodeSet.ShouldInitGenesis() {
@@ -273,9 +299,16 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	c := nodeSet.Spec.Cosmosigner
 	if c == nil {
-		if serving := nodeSet.Status.CosmosignerServingIdentity; serving != "" && nodeSet.Status.ChainID != "" &&
-			!nodeSet.ServedValidatorResolvesSigningIdentity(nodeSet.Status.CosmosignerServingGroup, serving) {
-			return fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
+		if nodeSet.Status.ChainID != "" {
+			serving := nodeSet.Status.CosmosignerServingIdentity
+			if serving != "" && !nodeSet.ServedValidatorResolvesSigningIdentity(nodeSet.Status.CosmosignerServingGroup, serving) {
+				return fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
+			}
+			// A digest with no serving identity is a legacy record (pre-field) whose identity can no
+			// longer be reconstructed once the spec is gone: unjudgeable, so reject conservatively.
+			if serving == "" && nodeSet.Status.CosmosignerSigningDigest != "" {
+				return fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): a signer served this chain but its recorded identity predates this version and cannot be verified — restore the signer so the controller can record it, or remove it with webhooks enabled")
+			}
 		}
 		return nil
 	}

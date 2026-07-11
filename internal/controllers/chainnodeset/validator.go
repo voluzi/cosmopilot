@@ -38,6 +38,19 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 	if nodeSet.Spec.Validator != nil {
 		name := fmt.Sprintf("%s-validator", nodeSet.GetName())
 		desiredValidators[name] = struct{}{}
+
+		// User-listed init.genesisValidators reference secrets that must exist when initGenesis runs
+		// (the genesis pod mounts each privKeySecret and reads each accountMnemonicSecret). Create any
+		// missing ones before genesis — this is also how a sentry-mode cosmosigner key gets registered
+		// on-chain. Pre-provisioned complete secrets are left untouched (ensureSecret only fills
+		// missing keys on secrets it controls). Only before genesis: those keys are baked into the
+		// immutable validator set afterwards.
+		if nodeSet.Status.ChainID == "" && nodeSet.Spec.Validator.Init != nil && len(nodeSet.Spec.Validator.Init.GenesisValidators) > 0 {
+			if err := r.ensureGenesisValidatorSecrets(ctx, nodeSet, nodeSet.Spec.Validator, nodeSet.Spec.Validator.Init.GenesisValidators); err != nil {
+				return fmt.Errorf("failed to ensure genesis validator secrets for %s: %w", nodeSet.GetName(), err)
+			}
+		}
+
 		validator, err := r.getValidatorSpec(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator)
 		if err != nil {
 			return fmt.Errorf("failed to get validator spec for %s: %w", nodeSet.GetName(), err)
@@ -69,6 +82,12 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		// recovery to the operator instead of silently minting new key material.
 		if nodeSet.Status.ChainID == "" {
 			genesisValidators := groupGenesisValidators(nodeSet, group.Name, instances, group.Validator)
+			// User-listed init.genesisValidators must also exist before genesis (the genesis pod
+			// mounts their secrets) — this is how e.g. a sentry-mode cosmosigner key gets registered
+			// on-chain. Pre-provisioned complete secrets are left untouched by ensureSecret.
+			if group.Validator.Init != nil {
+				genesisValidators = append(genesisValidators, group.Validator.Init.GenesisValidators...)
+			}
 			if len(genesisValidators) > 0 {
 				if err := r.ensureGenesisValidatorSecrets(ctx, nodeSet, group.Validator, genesisValidators); err != nil {
 					return fmt.Errorf("failed to ensure genesis validator secrets for %s group %s: %w", nodeSet.GetName(), group.Name, err)

@@ -150,13 +150,16 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 // not. A claim already marked for deletion but held by a finalizer still counts as present, since a
 // fresh StatefulSet could bind it and inherit stale raft state.
 func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
+	foreign := false
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err == nil {
 		// A same-name StatefulSet exists. Only OUR StatefulSet blocks teardown completion; a foreign
-		// one falls through to the owner-scoped PVC check below.
+		// one falls through to the owner-scoped PVC check below (its unlabeled legacy claims are then
+		// not attributed to us, mirroring DeletePVCs).
 		if metav1.IsControlledBy(sts, owner) {
 			return false, nil
 		}
+		foreign = true
 	} else if !errors.IsNotFound(err) {
 		return false, err
 	}
@@ -166,7 +169,7 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 		return false, err
 	}
 	for i := range pvcs.Items {
-		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
+		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name, !foreign) {
 			return false, nil
 		}
 	}

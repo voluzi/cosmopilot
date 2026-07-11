@@ -185,6 +185,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	logger.Info("pre-checking pod status", "pod-running", nodePodRunning)
 
+	// Backfill legacy cosmosigner status markers BEFORE configs/pod are reconciled: the no-webhook
+	// guards judge these markers, and they must get that chance before the pod is switched to a
+	// potentially unverifiable remote-signer spec (dropping the validator's local key mount). When a
+	// backfill happened, requeue so validation re-runs against the fresh status first.
+	if backfilled, err := r.backfillCosmosignerLegacyStatus(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	} else if backfilled {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Create/update secret with node key for this node.
 	logger.V(1).Info("ensure node key exists")
 	if err := r.ensureNodeKey(ctx, chainNode); err != nil {
@@ -281,10 +291,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// Deploy a managed cosmosigner remote signer if configured on this standalone node.
+	// Deploy a managed cosmosigner remote signer if configured on this standalone node. While a
+	// removed signer's teardown is still in flight, STOP before pod reconciliation: switching the pod
+	// back to its local/tmKMS signing path while old signer pods can still sign the same consensus
+	// key would put two signers on one key.
 	logger.V(1).Info("ensure cosmosigner if applicable")
-	if err = r.ensureCosmosigner(ctx, chainNode); err != nil {
+	signerTeardownPending, err := r.ensureCosmosigner(ctx, chainNode)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if signerTeardownPending {
+		logger.Info("waiting for cosmosigner teardown before reconciling pod")
+		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
 	}
 
 	// Ensure pod is running

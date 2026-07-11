@@ -382,11 +382,15 @@ func TestValidateForReconcileRejectsRecordedSignerKeyChange(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "immutable after the chain is established")
 
-	// Removing the signer entirely: allowed on the no-webhook path (deferred to the admission webhook).
+	// Removing the Vault signer entirely: rejected — its serving identity (or, for a legacy digest,
+	// the inability to verify one) proves the validator would fall back to a different local key.
 	removed := recorded.DeepCopy()
+	removed.Status.CosmosignerServingIdentity = recorded.CosmosignerSigningIdentity()
+	removed.Status.CosmosignerServingGroup = "validators"
 	removed.Spec.Cosmosigner = nil
 	_, err = validateForReconcile(removed)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be removed")
 }
 
 // TestValidateForReconcileAllowsRecordedValidatorSigner verifies that once a validator-targeted

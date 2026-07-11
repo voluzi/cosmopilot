@@ -20,32 +20,57 @@ func cosmosignerName(nodeSet *appsv1.ChainNodeSet) string {
 	return fmt.Sprintf("%s-signer", nodeSet.GetName())
 }
 
-// ensureCosmosigner deploys (or tears down) the managed cosmosigner remote signer for a
-// ChainNodeSet. It is a no-op until the chain ID is known, since the signer config requires it.
-func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
-	// The at-establishment marker is normally recorded atomically with the chain ID (see
-	// SetEstablishedChainID). A nil marker on an established chain therefore only occurs on chains
-	// upgraded from a version predating it — backfill it conservatively: an identity proven by a
-	// recorded rollout digest (it served) is kept; anything unproven records "" and so stays subject
-	// to the no-webhook addition guard. The serving identity is backfilled from the same proof, so a
-	// pre-upgrade rolled-out signer is also removal-guarded (not just addition-guarded). Return before
-	// touching signer resources, so the guards judge the markers on the next reconcile BEFORE
-	// anything is deployed.
-	if nodeSet.Status.ChainID != "" && nodeSet.Status.CosmosignerAtEstablishment == nil {
+// backfillCosmosignerLegacyStatus backfills the cosmosigner status invariants on chains upgraded
+// from versions predating them. It runs at the TOP of Reconcile — before any child ChainNode or
+// signer resource is touched — and reports whether a status write happened, in which case the caller
+// must stop the current reconcile: the no-webhook validation (which runs before reconcile) must
+// judge the fresh markers before children are reconciled from a potentially unverifiable spec.
+//
+//   - CosmosignerAtEstablishment: normally recorded atomically with the chain ID (see
+//     SetEstablishedChainID), so nil only occurs on pre-marker chains. Backfilled conservatively: an
+//     identity proven by a recorded rollout digest (it served) is kept; anything unproven records ""
+//     and so stays subject to the addition guard.
+//   - CosmosignerServingIdentity/Group: a digest recorded by a pre-field version proves a
+//     validator-targeted signer served; backfill both so removal is guarded (and a pre-group-field
+//     serving identity is never permanently blocked by an unknown group). This runs regardless of
+//     the establishment marker.
+func (r *Reconciler) backfillCosmosignerLegacyStatus(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	if nodeSet.Status.ChainID == "" {
+		return false, nil
+	}
+	changed := false
+
+	if nodeSet.Status.CosmosignerSigningDigest != "" &&
+		(nodeSet.Status.CosmosignerServingIdentity == "" || nodeSet.Status.CosmosignerServingGroup == "") {
+		if identity := nodeSet.CosmosignerValidatorTargetedIdentity(); identity != "" {
+			nodeSet.Status.CosmosignerServingIdentity = identity
+			nodeSet.Status.CosmosignerServingGroup = nodeSet.CosmosignerTargetedValidatorGroup()
+			changed = true
+		}
+	}
+
+	if nodeSet.Status.CosmosignerAtEstablishment == nil {
 		identity := ""
 		if nodeSet.Status.CosmosignerSigningDigest != "" {
 			identity = nodeSet.CosmosignerValidatorTargetedIdentity()
-			if nodeSet.Status.CosmosignerServingIdentity == "" {
-				nodeSet.Status.CosmosignerServingIdentity = identity
-				nodeSet.Status.CosmosignerServingGroup = nodeSet.CosmosignerTargetedValidatorGroup()
-			}
 		}
 		nodeSet.Status.CosmosignerAtEstablishment = ptr.To(identity)
-		return r.Status().Update(ctx, nodeSet)
+		changed = true
 	}
 
+	if changed {
+		return true, r.Status().Update(ctx, nodeSet)
+	}
+	return false, nil
+}
+
+// ensureCosmosigner deploys (or tears down) the managed cosmosigner remote signer for a
+// ChainNodeSet. It is a no-op until the chain ID is known, since the signer config requires it.
+func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Spec.Cosmosigner == nil {
-		return r.undeployCosmosigner(ctx, nodeSet)
+		// Teardown is driven EARLY in Reconcile (before children are reconciled) so the child signing
+		// path is never switched while old signer pods can still sign; nothing to do here.
+		return nil
 	}
 
 	// The signer config needs the chain ID; wait for genesis to be available.
@@ -113,9 +138,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 	_, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret()
 	needReplicas := nodeSet.Status.CosmosignerReplicas == nil
 	needDigest := nodeSet.Status.CosmosignerSigningDigest == "" && hasValidatorTarget
-	// A digest recorded by a version predating the serving-identity field leaves it empty; backfill
-	// it under the same rolled-out proof so the removal guard also covers those signers.
-	needServing := nodeSet.Status.CosmosignerServingIdentity == "" &&
+	// A digest recorded by a version predating the serving-identity/group fields leaves them empty;
+	// backfill under the same rolled-out proof so the removal guard covers those signers and is never
+	// permanently blocked by an unknown group.
+	needServing := (nodeSet.Status.CosmosignerServingIdentity == "" || nodeSet.Status.CosmosignerServingGroup == "") &&
 		nodeSet.Status.CosmosignerSigningDigest != "" && hasValidatorTarget
 	if needReplicas || needDigest || needServing {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), params.Name, params.Replicas)
@@ -201,20 +227,33 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		if !ok {
 			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software backend has no resolvable private-key secret")
 		}
-		// Sentry mode (no validator target): the explicit secret holds the signer's own consensus
-		// key, which must already be registered on-chain out-of-band — created BEFORE genesis when
-		// listed in validator.init.genesisValidators (ensureGenesisValidatorSecrets generates it
-		// there), or provisioned by the user for an externally-registered key. ensureCosmosigner runs
-		// only after genesis is fixed (chainID set), so a key minted here could never be in the
-		// validator set: require the secret to already exist rather than silently signing with an
-		// unregistered key. A validator-targeted secret is produced by the validator's own key flow.
-		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget {
+		// Preflight the key secret whenever no controller flow creates it, instead of rolling out
+		// signer pods stuck on a missing Secret mount:
+		//   - sentry mode (no validator target): the key is registered on-chain out-of-band and always
+		//     user-supplied (pre-provision it before genesis is fixed — a key minted here could never
+		//     be in the validator set);
+		//   - a targeted EXTERNAL-GENESIS validator: its explicit privateKeySecret is user-supplied
+		//     too — only init/createValidator validator flows generate their own key secret.
+		targetGeneratesKey := false
+		if group := nodeSet.CosmosignerTargetedValidatorGroup(); group != "" {
+			if group == appsv1.ReservedValidatorGroupName {
+				v := nodeSet.Spec.Validator
+				targetGeneratesKey = v != nil && (v.Init != nil || v.CreateValidator != nil)
+			} else {
+				for _, g := range nodeSet.Spec.Nodes {
+					if g.Name == group && g.Validator != nil {
+						targetGeneratesKey = g.Validator.Init != nil || g.Validator.CreateValidator != nil
+					}
+				}
+			}
+		}
+		if !targetGeneratesKey {
 			exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)
 			if err != nil {
 				return cosmosigner.Backend{}, err
 			}
 			if !exists {
-				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner sentry software key secret %q not found: register its consensus key on-chain and provide the secret (e.g. list it in validator.init.genesisValidators so it is created before genesis) — refusing to mint an unregistered key after genesis is fixed", secretName)
+				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q not found: provide the consensus key registered on-chain — refusing to roll out a signer with no key", secretName)
 			}
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
@@ -380,25 +419,28 @@ func (r *Reconciler) secretKey(ctx context.Context, namespace, name, key string)
 }
 
 // undeployCosmosigner removes managed signer resources when cosmosigner is no longer configured,
-// deleting only resources this ChainNodeSet actually owns.
-func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+// deleting only resources this ChainNodeSet actually owns. It reports whether teardown is COMPLETE
+// (StatefulSet and PVCs gone): callers must not reconcile children onto their local/tmKMS signing
+// path until it is, or the old signer pods (deletion is asynchronous) could briefly sign the same
+// consensus key as the restored local signer.
+func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
 	name := cosmosignerName(nodeSet)
 	if err := cosmosigner.Undeploy(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), name); err != nil {
-		return err
-	}
-	if nodeSet.Status.CosmosignerReplicas == nil && nodeSet.Status.CosmosignerSigningDigest == "" {
-		return nil
+		return false, err
 	}
 
+	// Teardown completion gates both the invariant clear and the caller's child reconciliation.
+	tornDown, err := cosmosigner.IsTornDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), name)
+	if err != nil || !tornDown {
+		return false, err
+	}
+	if nodeSet.Status.CosmosignerReplicas == nil && nodeSet.Status.CosmosignerSigningDigest == "" {
+		return true, nil
+	}
 	// Clear the recorded signer invariants only once the StatefulSet AND its PVCs are actually gone.
 	// Undeploy just *requests* deletion (it is asynchronous): clearing while the old raft cluster is
 	// still terminating would let a remove-and-immediate-re-add bypass the replica guard and bind the
-	// surviving PVCs, inheriting stale raft membership. While teardown is in flight, leave the
-	// invariants for a later reconcile to clear.
-	tornDown, err := cosmosigner.IsTornDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), name)
-	if err != nil || !tornDown {
-		return err
-	}
+	// surviving PVCs, inheriting stale raft membership.
 	nodeSet.Status.CosmosignerReplicas = nil
 	nodeSet.Status.CosmosignerSigningDigest = ""
 	nodeSet.Status.CosmosignerServingIdentity = ""
@@ -406,9 +448,9 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 	// Tolerate a conflict: the signer is already gone and this clear is idempotent, so a concurrent
 	// update just defers it to the next reconcile rather than spinning the workqueue with no progress.
 	if err := r.Status().Update(ctx, nodeSet); err != nil && !errors.IsConflict(err) {
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 func (r *Reconciler) applyCosmosignerObject(ctx context.Context, nodeSet *appsv1.ChainNodeSet, obj client.Object) error {
