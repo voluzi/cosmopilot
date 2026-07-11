@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,7 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).

@@ -287,7 +287,19 @@ func (r *Reconciler) markCosmosignerKeyImported(ctx context.Context, chainNode *
 
 // undeployCosmosigner removes managed signer resources this ChainNode owns.
 func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	return cosmosigner.Undeploy(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode))
+	if err := cosmosigner.Undeploy(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode)); err != nil {
+		return err
+	}
+	// After teardown the raft StatefulSet and its PVCs are gone, so the recorded signer invariants no
+	// longer describe anything running: clear them so a later re-add records its own values. Otherwise
+	// the no-webhook guards would reject a fresh sentry signer with a different replica count against
+	// stale state, even though a brand-new raft membership would be safe.
+	if chainNode.Status.CosmosignerReplicas != nil || chainNode.Status.CosmosignerSigningDigest != "" {
+		chainNode.Status.CosmosignerReplicas = nil
+		chainNode.Status.CosmosignerSigningDigest = ""
+		return r.Status().Update(ctx, chainNode)
+	}
+	return nil
 }
 
 func (r *Reconciler) applyCosmosignerObject(ctx context.Context, chainNode *appsv1.ChainNode, obj client.Object) error {
