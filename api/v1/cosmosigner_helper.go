@@ -484,6 +484,18 @@ func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *No
 	return localKeySigningIdentity(fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group))
 }
 
+// ValidateCosmosignerReservedNameNoWebhook applies the reserved-name rule on the no-webhook
+// reconcile path, where create cannot be distinguished from update. It enforces only while the
+// object has never been successfully reconciled (isEstablished == false, i.e. empty status), so a
+// pre-existing legacy resource with a reserved name keeps updating while a NEW no-webhook resource
+// named `foo-signer` is rejected before the controllers start fighting over derived names.
+func ValidateCosmosignerReservedNameNoWebhook(name string, isEstablished bool) error {
+	if isEstablished {
+		return nil
+	}
+	return ValidateCosmosignerReservedName(name, true)
+}
+
 // ValidateCosmosignerReservedName rejects creating a ChainNode/ChainNodeSet whose NAME collides
 // with the signer resource names another CR would derive. A CR named `foo` that enables cosmosigner
 // derives `foo-signer` (StatefulSet/ConfigMap/raft Service) and `foo-signer-privval` (discovery
