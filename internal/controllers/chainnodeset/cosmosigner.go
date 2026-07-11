@@ -248,6 +248,13 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return false, err
 	}
 	if len(keyMaterial) == 0 {
+		// No source material available. If a prior import already recorded the annotation, Vault still
+		// holds the registered key and the bootstrap Secret is only needed at import time — so a Secret
+		// deleted after a completed import must NOT re-mark the import pending (which would scale the
+		// signer to zero). Only when nothing was ever imported is the import genuinely still pending.
+		if nodeSet.Annotations[controllers.AnnotationCosmosignerKeyImported] != "" {
+			return false, nil
+		}
 		return true, nil
 	}
 

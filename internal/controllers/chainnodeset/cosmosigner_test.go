@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
 
@@ -127,4 +128,51 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	return scheme
+}
+
+// TestMaybeImportCosmosignerKeyPreservesCompletedImport verifies that once the import annotation is
+// recorded, a missing/deleted source key Secret does NOT re-mark the import pending (which would scale
+// the signer to zero) — Vault still holds the registered key and the bootstrap Secret is only needed
+// at import time. When no import ever completed, an absent source is still pending.
+func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
+	mk := func(annotation string) *appsv1.ChainNodeSet {
+		ns := &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+			Spec: appsv1.ChainNodeSetSpec{
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Cosmosigner: &appsv1.Cosmosigner{
+					NodeGroups: []string{"validators"},
+					Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+						Address:         "https://vault.example:8200",
+						KeyName:         "val-key",
+						TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+						UploadGenerated: true,
+					}},
+				},
+				Nodes: []appsv1.NodeGroupSpec{{
+					Name:      "validators",
+					Instances: ptr.To(1),
+					Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
+				}},
+			},
+			Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
+		}
+		if annotation != "" {
+			ns.Annotations = map[string]string{controllers.AnnotationCosmosignerKeyImported: annotation}
+		}
+		return ns
+	}
+	params := cosmosigner.Params{Name: "test-nodeset-signer", Namespace: "default"}
+
+	// Source Secret absent but a prior import already recorded: NOT pending (signer keeps running).
+	r := newValidatorTestReconciler(t, mk("some-prior-fingerprint"))
+	pending, err := r.maybeImportCosmosignerKey(context.Background(), mk("some-prior-fingerprint"), params)
+	require.NoError(t, err)
+	assert.False(t, pending, "a completed import must survive deletion of the bootstrap source Secret")
+
+	// Source Secret absent and nothing imported yet: still pending.
+	r = newValidatorTestReconciler(t, mk(""))
+	pending, err = r.maybeImportCosmosignerKey(context.Background(), mk(""), params)
+	require.NoError(t, err)
+	assert.True(t, pending, "with no source key and no prior import the import is still pending")
 }

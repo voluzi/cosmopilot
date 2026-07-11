@@ -219,15 +219,19 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 	// Fetch the source key material first: the fingerprint hashes the actual bytes (not just the
 	// secret name), so an in-place update of the source Secret re-imports rather than being skipped.
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: sourceSecret}, secret); err != nil {
-		if errors.IsNotFound(err) {
-			// The node has not produced its key yet; import is pending, retry on a later reconcile.
-			return true, nil
-		}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: sourceSecret}, secret); err != nil && !errors.IsNotFound(err) {
 		return false, err
 	}
 	keyMaterial := secret.Data[PrivKeyFilename]
 	if len(keyMaterial) == 0 {
+		// No source material available. If a prior import already recorded the annotation, Vault still
+		// holds the registered key and the bootstrap Secret is only needed at import time — so a Secret
+		// deleted after a completed import must NOT re-mark the import pending (which would scale the
+		// signer to zero). Only when nothing was ever imported is the import genuinely still pending
+		// (the node has not produced its key yet); retry on a later reconcile.
+		if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] != "" {
+			return false, nil
+		}
 		return true, nil
 	}
 
