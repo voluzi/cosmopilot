@@ -622,44 +622,10 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}).Should(Succeed())
 	})
 
-	It("allows a nodeset init validator to migrate tmKMS to cosmosigner on the same key", func() {
-		cs := &appsv1.ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
-			Spec: appsv1.ChainNodeSetSpec{
-				App: DefaultChainNodeSetTestApp,
-				Validator: &appsv1.NodeSetValidatorConfig{
-					Init: &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi"},
-					TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-						Address:     "https://vault:8200",
-						Key:         "myval",
-						TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-					}}},
-				},
-				Nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes"}},
-			},
-		}
-		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
-		Eventually(func() error {
-			fresh := &appsv1.ChainNodeSet{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
-				return err
-			}
-			fresh.Status.ChainID = "test-localnet"
-			return Framework().Client().Status().Update(Framework().Context(), fresh)
-		}).Should(Succeed())
-
-		// Same Vault key through cosmosigner instead of tmKMS: the documented migration must pass
-		// both the cosmosigner validation and the genesis-immutability fingerprint.
-		Eventually(func() error {
-			fresh := &appsv1.ChainNodeSet{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
-				return err
-			}
-			fresh.Spec.Validator.TmKMS = nil
-			fresh.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: vaultBackend()} // same key "myval"
-			return Framework().Client().Update(Framework().Context(), fresh)
-		}).Should(Succeed())
-	})
+	// NOTE: the nodeset init-validator same-key migration (tmKMS→cosmosigner) is covered by a unit
+	// test on Validate directly (api/v1/cosmosigner_webhook_unit_test.go): creating a live init
+	// ChainNodeSet in envtest blocks a reconcile worker for minutes (its validator can never run
+	// here), starving the other specs.
 
 	It("rejects nodeGroups on a standalone ChainNode", func() {
 		cn := &appsv1.ChainNode{

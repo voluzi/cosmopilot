@@ -102,12 +102,17 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 	c := nodeSet.Spec.Cosmosigner
 	name := cosmosignerName(nodeSet)
 
-	// Signer pods must never inherit selector labels that would make them endpoints of node
-	// Services: the group/validator selector labels (group Services select chain-node-set + group)
-	// and the generated global ingress/gateway membership labels (global Services select
-	// chain-node-set + <route name>). A user label on the ChainNodeSet matching any of these would
-	// otherwise route chain RPC/LCD/GRPC traffic to signer pods.
-	exclude := []string{controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator}
+	// Signer pods/resources must never inherit internal selector labels: the group/validator
+	// selector labels (group Services select chain-node-set + group), the generated global
+	// ingress/gateway membership labels (global Services select chain-node-set + <route name>),
+	// and the app/scope cleanup selectors (the cosmoseed cleanup deletes Services matching
+	// app=cosmoseed + chain-node-set that are not in its expected set). A user label on the
+	// ChainNodeSet matching any of these would otherwise route traffic to — or delete — signer
+	// resources.
+	exclude := []string{
+		controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator,
+		controllers.LabelApp, controllers.LabelScope,
+	}
 	for _, ingress := range nodeSet.Spec.Ingresses {
 		exclude = append(exclude, ingress.GetName(nodeSet))
 	}

@@ -393,10 +393,30 @@ func (chainNode *ChainNode) EffectiveSigningIdentity() string {
 }
 
 // cosmosignerTargetSigningIdentity returns the effective consensus-key fingerprint of the validator
-// the cosmosigner targets (or would target). When cosmosigner is configured it is the signer's
-// identity; otherwise it is the targeted validator's own local/tmKMS identity. targets is the set of
-// targeted group names, resolved from whichever spec revision carries the cosmosigner block.
+// the cosmosigner targets (or would target). It is empty when the target set resolves no validator
+// (sentry mode over regular groups): such a signer's key is registered out-of-band and carries no
+// in-cluster validator identity to protect, so add/remove/rotate stays allowed. When a validator IS
+// targeted, the signer's identity (cosmosigner configured) or the validator's own local/tmKMS
+// identity (not configured) is returned. targets is the set of targeted group names, resolved from
+// whichever spec revision carries the cosmosigner block.
 func (nodeSet *ChainNodeSet) cosmosignerTargetSigningIdentity(targets map[string]struct{}) string {
+	hasValidatorTarget := false
+	for name := range targets {
+		if name == ReservedValidatorGroupName {
+			if nodeSet.Spec.Validator != nil {
+				hasValidatorTarget = true
+			}
+			continue
+		}
+		for _, g := range nodeSet.Spec.Nodes {
+			if g.Name == name && g.Validator != nil {
+				hasValidatorTarget = true
+			}
+		}
+	}
+	if !hasValidatorTarget {
+		return ""
+	}
 	if nodeSet.Spec.Cosmosigner != nil {
 		return nodeSet.CosmosignerSigningIdentity()
 	}
