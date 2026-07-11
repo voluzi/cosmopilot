@@ -112,12 +112,6 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, d
 // StatefulSet holds the name — so this owner's lingering raft-state claims are never stranded (which
 // would deadlock the IsTornDown gate waiting on them).
 func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
-	// Attribute legacy (pre-owner-label) claims to us while our StatefulSet still provably holds the
-	// name — after it is deleted below, unlabeled claims can no longer be safely attributed.
-	if err := AdoptLegacyPVCs(ctx, c, owner, namespace, name); err != nil {
-		return err
-	}
-
 	objects := []client.Object{
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
@@ -172,7 +166,11 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 		return false, err
 	}
 	for i := range pvcs.Items {
-		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
+		// Our own claims block until deleted. AMBIGUOUS legacy claims (no owner-UID label — cannot be
+		// attributed to any owner without a race) also block: treating them as gone would let a
+		// recreated signer bind stale raft state with unknown membership. They are never deleted
+		// automatically; the operator resolves them by deleting or labeling the claim.
+		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) || isAmbiguousLegacyDataPVC(&pvcs.Items[i], name) {
 			return false, nil
 		}
 	}

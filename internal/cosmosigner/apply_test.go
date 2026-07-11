@@ -205,10 +205,11 @@ func TestUndeployCleansOwnPVCsDespiteForeignStatefulSet(t *testing.T) {
 	}
 }
 
-// TestAdoptLegacyPVCsOwnershipProof verifies unlabeled legacy claims are labeled ONLY while our own
-// StatefulSet holds the signer name (race-free proof), and never under a foreign one; and that
-// strict delete matching then removes only labeled-ours claims.
-func TestAdoptLegacyPVCsOwnershipProof(t *testing.T) {
+// TestAmbiguousLegacyPVCBlocksTornDown verifies unlabeled legacy raft-state claims are never deleted
+// and never treated as torn down: they cannot be attributed to any owner without a race, so they
+// block completion until the operator resolves them (delete or label), preventing a recreated signer
+// from silently binding stale raft state.
+func TestAmbiguousLegacyPVCBlocksTornDown(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -218,46 +219,43 @@ func TestAdoptLegacyPVCsOwnershipProof(t *testing.T) {
 		name = "mychain-signer"
 	)
 	me := fakeOwner("me", types.UID("me-uid"))
-	other := fakeOwner("other", types.UID("other-uid"))
-	legacyPVC := func() *corev1.PersistentVolumeClaim {
-		return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-			Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: InstanceLabels(name),
-		}}
+	legacyPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: InstanceLabels(name),
+	}}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacyPVC).Build()
+
+	// Teardown never deletes the ambiguous claim...
+	if err := Undeploy(context.Background(), c, me, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: legacyPVC.GetName()}, &corev1.PersistentVolumeClaim{}); err != nil {
+		t.Fatalf("ambiguous legacy claim must never be deleted: %v", err)
 	}
 
-	// Our StatefulSet holds the name: the legacy claim is adopted (labeled with our UID).
-	ownSTS := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
-		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)},
-	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ownSTS, legacyPVC()).Build()
-	if err := AdoptLegacyPVCs(context.Background(), c, me, ns, name); err != nil {
+	// ...and it blocks torn-down until resolved.
+	torn, err := IsTornDown(context.Background(), c, me, ns, name)
+	if err != nil {
 		t.Fatal(err)
 	}
-	adopted := &corev1.PersistentVolumeClaim{}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: dataVolumeName + "-" + name + "-0"}, adopted); err != nil {
-		t.Fatal(err)
-	}
-	if adopted.Labels[labelOwnerUID] != "me-uid" {
-		t.Fatalf("legacy claim must be adopted while our StatefulSet holds the name, labels=%v", adopted.Labels)
+	if torn {
+		t.Fatal("an ambiguous legacy claim must block teardown completion")
 	}
 
-	// A FOREIGN StatefulSet holds the name: the legacy claim is left unlabeled, and strict delete
-	// matching then never removes it.
-	foreignSTS := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
-		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(other)},
-	}}
-	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreignSTS, legacyPVC()).Build()
-	if err := AdoptLegacyPVCs(context.Background(), c, me, ns, name); err != nil {
+	// Labeling it with our UID (the operator's resolution) unblocks and allows deletion.
+	labeled := legacyPVC.DeepCopy()
+	labeled.Labels = pvcOwnerLabels(name, "me-uid")
+	if err := c.Update(context.Background(), labeled); err != nil {
 		t.Fatal(err)
 	}
-	if err := DeletePVCs(context.Background(), c, me, ns, name); err != nil {
+	if err := Undeploy(context.Background(), c, me, ns, name); err != nil {
 		t.Fatal(err)
 	}
-	remaining := &corev1.PersistentVolumeClaim{}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: dataVolumeName + "-" + name + "-0"}, remaining); err != nil {
-		t.Fatalf("unlabeled legacy claim under a foreign StatefulSet must never be adopted or deleted: %v", err)
+	torn, err = IsTornDown(context.Background(), c, me, ns, name)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, labeled := remaining.Labels[labelOwnerUID]; labeled {
-		t.Fatal("claim must remain unlabeled under a foreign StatefulSet")
+	if !torn {
+		t.Fatal("teardown must complete once the claim is labeled and deleted")
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,9 +36,10 @@ func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, names
 
 // isOwnedStatefulSetDataPVC reports whether pvc is a per-pod raft-state claim of the signer named
 // `name` attributable to owner: its name matches the StatefulSet per-pod pattern and its owner-UID
-// label equals owner's UID. Matching is STRICT — an unlabeled claim is never deleted on a guess.
-// Legacy claims (created before the label existed) are attributed via AdoptLegacyPVCs, which labels
-// them only under a race-free ownership proof.
+// label equals owner's UID. Matching is STRICT — a claim without a matching label is never deleted,
+// regardless of any point-in-time StatefulSet ownership read (all such reads are racy: the
+// StatefulSet can be replaced between the check and the delete). Ambiguous unlabeled claims instead
+// BLOCK teardown completion (see isAmbiguousLegacyDataPVC), so no signer ever binds them silently.
 func isOwnedStatefulSetDataPVC(pvc *corev1.PersistentVolumeClaim, owner metav1.Object, name string) bool {
 	if !isStatefulSetDataPVC(pvc.GetName(), name) {
 		return false
@@ -47,49 +47,20 @@ func isOwnedStatefulSetDataPVC(pvc *corev1.PersistentVolumeClaim, owner metav1.O
 	return pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID())
 }
 
-// AdoptLegacyPVCs stamps the owner-UID label onto unlabeled legacy raft-state claims of the signer
-// named `name`, but ONLY while a StatefulSet with that name exists and is controlled by owner: while
-// our StatefulSet holds the name, its per-pod claims are necessarily ours (a foreign signer cannot
-// hold the same name concurrently), so labeling under that proof is race-free — unlike deciding at
-// delete time from a point-in-time "no foreign StatefulSet" read, which could adopt (and delete)
-// claims a concurrently-created foreign signer is about to bind. Claims that cannot be proven ours
-// are left unlabeled and are never deleted (preserved rather than guessed at). Labeling uses plain
-// Updates, so a concurrent writer surfaces as a conflict error and the reconcile retries.
-func AdoptLegacyPVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) error {
-	sts := &appsv1.StatefulSet{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
+// isAmbiguousLegacyDataPVC reports whether pvc is a per-pod raft-state claim of the signer named
+// `name` that carries NO owner-UID label. Such claims predate the owner label (an existing
+// StatefulSet keeps its original volumeClaimTemplates, since Kubernetes forbids updating them) and
+// cannot be attributed to any owner without a race, so they are never deleted NOR treated as gone:
+// they block IsTornDown until the operator resolves them (delete the claim, or label it with the
+// owning CR's UID). This keeps a recreated signer from silently binding stale raft state whose
+// membership is unknown. In practice such claims only exist on pre-release deployments of this
+// feature, so the block is a safety net rather than an operational path.
+func isAmbiguousLegacyDataPVC(pvc *corev1.PersistentVolumeClaim, name string) bool {
+	if !isStatefulSetDataPVC(pvc.GetName(), name) {
+		return false
 	}
-	if !metav1.IsControlledBy(sts, owner) {
-		return nil
-	}
-
-	pvcs := &corev1.PersistentVolumeClaimList{}
-	if err := c.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(InstanceLabels(name))); err != nil {
-		return err
-	}
-	for i := range pvcs.Items {
-		pvc := &pvcs.Items[i]
-		if !isStatefulSetDataPVC(pvc.GetName(), name) {
-			continue
-		}
-		if _, labeled := pvc.GetLabels()[labelOwnerUID]; labeled {
-			continue
-		}
-		labels := pvc.GetLabels()
-		if labels == nil {
-			labels = map[string]string{}
-		}
-		labels[labelOwnerUID] = string(owner.GetUID())
-		pvc.SetLabels(labels)
-		if err := c.Update(ctx, pvc); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, labeled := pvc.GetLabels()[labelOwnerUID]
+	return !labeled
 }
 
 // isStatefulSetDataPVC reports whether pvcName is exactly `<dataVolumeName>-<stsName>-<ordinal>`,
