@@ -133,6 +133,7 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 	return cosmosigner.Params{
 		Name:               name,
 		Namespace:          chainNode.GetNamespace(),
+		OwnerUID:           chainNode.GetUID(),
 		ChainID:            chainNode.Status.ChainID,
 		Image:              c.GetImage(),
 		Replicas:           c.GetReplicas(),

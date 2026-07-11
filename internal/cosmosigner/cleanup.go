@@ -7,22 +7,24 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// DeletePVCs deletes the per-pod raft-state PVCs of a signer instance. StatefulSet PVCs are not
-// garbage-collected with the StatefulSet, so they are cleaned up explicitly on teardown. A claim is
-// only deleted when it carries the instance labels AND its name matches the exact StatefulSet
-// per-pod claim pattern `<dataVolumeName>-<name>-<ordinal>`, so an unrelated claim that happens to
-// share the labels or a name prefix (e.g. `data-<name>-backup`) is never deleted. List+Delete uses
-// only the list/delete verbs the controllers already hold (no deletecollection).
-func DeletePVCs(ctx context.Context, c client.Client, namespace, name string) error {
+// DeletePVCs deletes the per-pod raft-state PVCs of a signer instance owned by owner. StatefulSet
+// PVCs are not garbage-collected with the StatefulSet, so they are cleaned up explicitly on teardown.
+// A claim is only deleted when it carries the instance labels, its name matches the exact StatefulSet
+// per-pod claim pattern `<dataVolumeName>-<name>-<ordinal>`, AND its owner-UID label matches owner —
+// so an unrelated claim that happens to share the labels or a name prefix (e.g. `data-<name>-backup`),
+// or a same-name signer's claim owned by another CR, is never deleted. List+Delete uses only the
+// list/delete verbs the controllers already hold (no deletecollection).
+func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) error {
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	if err := c.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(InstanceLabels(name))); err != nil {
 		return err
 	}
 	for i := range pvcs.Items {
-		if !isStatefulSetDataPVC(pvcs.Items[i].GetName(), name) {
+		if !isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
 			continue
 		}
 		if err := c.Delete(ctx, &pvcs.Items[i]); err != nil && !errors.IsNotFound(err) {
@@ -30,6 +32,16 @@ func DeletePVCs(ctx context.Context, c client.Client, namespace, name string) er
 		}
 	}
 	return nil
+}
+
+// isOwnedStatefulSetDataPVC reports whether pvc is a per-pod raft-state claim of the signer named
+// `name` owned by owner: its name matches the StatefulSet per-pod pattern and its owner-UID label
+// equals owner's UID (an empty owner UID, as in unit tests, matches a claim carrying no owner label).
+func isOwnedStatefulSetDataPVC(pvc *corev1.PersistentVolumeClaim, owner metav1.Object, name string) bool {
+	if !isStatefulSetDataPVC(pvc.GetName(), name) {
+		return false
+	}
+	return pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID())
 }
 
 // isStatefulSetDataPVC reports whether pvcName is exactly `<dataVolumeName>-<stsName>-<ordinal>`,

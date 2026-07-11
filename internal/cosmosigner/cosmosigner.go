@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -22,6 +23,12 @@ const (
 	labelAppName       = "app.kubernetes.io/name"
 	labelInstance      = "app.kubernetes.io/instance"
 	appNameCosmosigner = "cosmosigner"
+
+	// labelOwnerUID stamps the owning CR's UID on the per-pod PVCs so teardown can tell OUR raft-state
+	// claims apart from those of a same-name signer owned by a different CR (a ChainNode and a
+	// ChainNodeSet with the same name both derive "<name>-signer"). The instance label alone shares
+	// the collided name, so it cannot distinguish owners.
+	labelOwnerUID = "cosmopilot.voluzi.com/cosmosigner-owner"
 
 	// containerName is the name of the signer container.
 	containerName = "cosmosigner"
@@ -42,6 +49,10 @@ type Params struct {
 	// governing service name.
 	Name      string
 	Namespace string
+
+	// OwnerUID is the owning CR's UID, stamped on the per-pod PVCs so teardown distinguishes them from
+	// a same-name signer owned by a different CR. Empty in unit tests that don't exercise teardown.
+	OwnerUID types.UID
 
 	ChainID  string
 	Image    string
@@ -83,6 +94,23 @@ func (p Params) nodeServiceEndpoint() string {
 // selectorLabels are the immutable labels that identify signer pods.
 func (p Params) selectorLabels() map[string]string {
 	return InstanceLabels(p.Name)
+}
+
+// pvcTemplateLabels are the labels stamped on the per-pod raft-state PVCs: the instance labels plus
+// the owning CR's UID, so teardown can select OUR claims and never a same-name signer's owned by a
+// different CR. The owner label is omitted when no UID is set (unit tests that don't touch teardown).
+func (p Params) pvcTemplateLabels() map[string]string {
+	return pvcOwnerLabels(p.Name, p.OwnerUID)
+}
+
+// pvcOwnerLabels returns InstanceLabels plus the owner-UID label when ownerUID is non-empty. Shared
+// by the builder and the teardown selectors so they stay in lockstep.
+func pvcOwnerLabels(name string, ownerUID types.UID) map[string]string {
+	labels := InstanceLabels(name)
+	if ownerUID != "" {
+		labels[labelOwnerUID] = string(ownerUID)
+	}
+	return labels
 }
 
 // InstanceLabels returns the immutable labels identifying a signer instance's pods and PVCs, so the
@@ -329,8 +357,9 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
 					// Label the per-pod PVCs so they can be selected for cleanup when the signer is
-					// removed (StatefulSet PVCs are not garbage-collected automatically).
-					ObjectMeta: metav1.ObjectMeta{Name: dataVolumeName, Labels: p.selectorLabels()},
+					// removed (StatefulSet PVCs are not garbage-collected automatically), including the
+					// owner UID so a same-name signer owned by a different CR is never conflated.
+					ObjectMeta: metav1.ObjectMeta{Name: dataVolumeName, Labels: p.pvcTemplateLabels()},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						StorageClassName: p.StorageClassName,

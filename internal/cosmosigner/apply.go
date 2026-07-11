@@ -139,9 +139,9 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 		}
 	}
 
-	// StatefulSet PVCs are not garbage-collected with the StatefulSet; the foreign-owner
-	// short-circuit above guarantees these are ours.
-	return DeletePVCs(ctx, c, namespace, name)
+	// StatefulSet PVCs are not garbage-collected with the StatefulSet. DeletePVCs additionally
+	// filters on the owner-UID label, so only this owner's claims are removed.
+	return DeletePVCs(ctx, c, owner, namespace, name)
 }
 
 // IsTornDown reports whether the signer resources owned by owner are fully gone. Deletion is
@@ -149,17 +149,19 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 // cluster (e.g. clearing the recorded raft membership before allowing a re-add) gate on this.
 //
 // Only resources owned by owner count. A StatefulSet with the same name owned by ANOTHER CR (a name
-// collision) is not ours to wait on — Undeploy skips it too — so it is treated as unrelated; the
-// per-pod PVCs are then not attributable to us either (they carry no owner reference and share the
-// collided name), and a re-add over the foreign signer is blocked by ApplyOwned regardless. When no
-// StatefulSet holds the name, a lingering `data-<name>-<ordinal>` PVC (ours, even if already marked
-// for deletion but held by a finalizer) still counts as present, since a fresh StatefulSet could
-// bind it and inherit stale raft state.
+// collision) is not ours to wait on — Undeploy skips it too — so it does not block. The per-pod PVCs
+// are matched by the owner-UID label, so OUR lingering raft-state claims still gate the clear (even
+// when a foreign same-name StatefulSet exists), while the foreign CR's identically-named claims do
+// not. A claim already marked for deletion but held by a finalizer still counts as present, since a
+// fresh StatefulSet could bind it and inherit stale raft state.
 func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err == nil {
-		// A same-name StatefulSet exists. Only OUR StatefulSet blocks teardown completion.
-		return !metav1.IsControlledBy(sts, owner), nil
+		// A same-name StatefulSet exists. Only OUR StatefulSet blocks teardown completion; a foreign
+		// one falls through to the owner-scoped PVC check below.
+		if metav1.IsControlledBy(sts, owner) {
+			return false, nil
+		}
 	} else if !errors.IsNotFound(err) {
 		return false, err
 	}
@@ -169,7 +171,7 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 		return false, err
 	}
 	for i := range pvcs.Items {
-		if isStatefulSetDataPVC(pvcs.Items[i].GetName(), name) {
+		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
 			return false, nil
 		}
 	}
