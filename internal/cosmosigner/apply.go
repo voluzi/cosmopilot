@@ -58,6 +58,29 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	return c.Update(ctx, obj)
 }
 
+// ScaleDown scales an existing signer StatefulSet owned by owner to zero replicas. Used while a
+// key re-import is pending: an already-running signer must not keep signing with the previously
+// imported key while the target is being re-keyed. No-op when the StatefulSet does not exist, is
+// foreign-owned, or is already scaled to zero.
+func ScaleDown(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !metav1.IsControlledBy(sts, owner) {
+		return nil
+	}
+	if sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0 {
+		return nil
+	}
+	zero := int32(0)
+	sts.Spec.Replicas = &zero
+	return c.Update(ctx, sts)
+}
+
 // IsRolledOut reports whether the signer StatefulSet's CURRENT generation is fully deployed: the
 // controller has observed it, and every desired replica is both updated to the current revision and
 // ready. Gating on this (rather than bare ReadyReplicas) prevents treating readiness left over from

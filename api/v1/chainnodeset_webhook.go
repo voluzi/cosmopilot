@@ -24,6 +24,9 @@ func (nodeSet *ChainNodeSet) ValidateCreate(_ context.Context, obj *ChainNodeSet
 		"kind", "ChainNodeSet",
 		"resource", obj.GetNamespacedName(),
 	)
+	if err := ValidateCosmosignerReservedName(obj.GetName(), true); err != nil {
+		return nil, err
+	}
 	return obj.Validate(nil)
 }
 

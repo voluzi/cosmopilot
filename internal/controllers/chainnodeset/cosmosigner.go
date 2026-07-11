@@ -62,9 +62,11 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 
 	// Do not roll out the signer until the validator's generated key has been imported into Vault,
 	// otherwise the signer would come up against an empty/stale transit key while the validator
-	// registers the local pubkey. A later reconcile completes the import and deploys the signer.
+	// registers the local pubkey. An ALREADY-RUNNING signer is scaled to zero for the same reason:
+	// after a source/target change it would keep signing with the previously imported key while the
+	// re-import is pending. A later reconcile completes the import and (re)deploys the signer.
 	if importPending {
-		return nil
+		return cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name)
 	}
 
 	sts, err := params.StatefulSet(configYAML)
@@ -102,17 +104,11 @@ func (r *Reconciler) cosmosignerParams(nodeSet *appsv1.ChainNodeSet) (cosmosigne
 	c := nodeSet.Spec.Cosmosigner
 	name := cosmosignerName(nodeSet)
 
-	// Signer pods/resources must never inherit internal selector labels: the group/validator
-	// selector labels (group Services select chain-node-set + group), the generated global
-	// ingress/gateway membership labels (global Services select chain-node-set + <route name>),
-	// and the app/scope cleanup selectors (the cosmoseed cleanup deletes Services matching
-	// app=cosmoseed + chain-node-set that are not in its expected set). A user label on the
-	// ChainNodeSet matching any of these would otherwise route traffic to — or delete — signer
-	// resources.
-	exclude := []string{
-		controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator,
-		controllers.LabelApp, controllers.LabelScope,
-	}
+	// Signer pods/resources must never inherit internal selector labels (group/global Service
+	// selectors, P2P peer discovery, resource-cleanup selectors) — see
+	// controllers.CosmosignerReservedSelectorLabels. The generated global ingress/gateway
+	// membership label names are per-nodeset and appended below.
+	exclude := append([]string{}, controllers.CosmosignerReservedSelectorLabels...)
 	for _, ingress := range nodeSet.Spec.Ingresses {
 		exclude = append(exclude, ingress.GetName(nodeSet))
 	}

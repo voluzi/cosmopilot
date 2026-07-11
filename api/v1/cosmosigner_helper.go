@@ -457,6 +457,24 @@ func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *No
 	return localKeySigningIdentity(fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group))
 }
 
+// ValidateCosmosignerReservedName rejects creating a ChainNode/ChainNodeSet whose NAME ends in
+// "-signer" (or "-signer-privval"): every CR named `foo` that enables cosmosigner derives signer
+// resources named `foo-signer`/`foo-signer-privval`, while an ordinary ChainNode's own
+// Service/ConfigMap use the raw CR name — so a CR named `foo-signer` and a signer-enabled `foo` in
+// one namespace would fight over the same objects through reconcilers that update by name.
+// Reserving the suffix at create time removes the collision by construction. Only enforced on
+// create (isCreate) so pre-existing CRs with such names keep updating; the reconcilers' ownership
+// guards remain the backstop for them.
+func ValidateCosmosignerReservedName(name string, isCreate bool) error {
+	if !isCreate {
+		return nil
+	}
+	if strings.HasSuffix(name, "-signer") || strings.HasSuffix(name, "-signer-privval") {
+		return fmt.Errorf("metadata.name %q is reserved: the \"-signer\" suffix collides with cosmosigner-managed resource names derived from other resources; choose a different name", name)
+	}
+	return nil
+}
+
 // validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the
 // embedded raft cluster is not a plain Kubernetes scale: the membership recorded in the existing
 // per-pod raft state is not updated by rendering a new bootstrap list, so scaling down can lose

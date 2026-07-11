@@ -55,7 +55,19 @@ const (
 	// The cosmosigner discovery service selects pods carrying this label so a single service can
 	// target one or more node groups uniformly.
 	LabelCosmosignerTarget = "cosmosigner-target"
+)
 
+// CosmosignerReservedSelectorLabels are the internal selector/discovery label keys that must never
+// be inherited onto signer resources from user metadata on the owning CR: they would make signer
+// pods/Services endpoints of group or global Services (group/validator/app/scope), advertise the
+// signer's Services as P2P peers (peer/seed/chain-id/node-id), or match resource-cleanup selectors.
+// Controllers exclude these (plus the per-nodeset global route names) when building signer labels.
+var CosmosignerReservedSelectorLabels = []string{
+	LabelChainNodeSetGroup, LabelChainNodeSetValidator, LabelApp, LabelScope,
+	LabelPeer, LabelSeed, LabelChainID, LabelNodeID,
+}
+
+const (
 	StringValueTrue  = "true"
 	StringValueFalse = "false"
 

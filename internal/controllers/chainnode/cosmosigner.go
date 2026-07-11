@@ -69,9 +69,11 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return err
 	}
 
-	// Do not roll out the signer until the node's generated key has been imported into Vault.
+	// Do not roll out the signer until the node's generated key has been imported into Vault; an
+	// already-running signer is scaled to zero so it cannot keep signing with the previously
+	// imported key while a re-import is pending.
 	if importPending {
-		return nil
+		return cosmosigner.ScaleDown(ctx, r.Client, chainNode, chainNode.GetNamespace(), params.Name)
 	}
 
 	sts, err := params.StatefulSet(configYAML)
@@ -104,11 +106,12 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 	c := chainNode.Spec.Cosmosigner
 	name := cosmosignerName(chainNode)
 
-	// Exclude the group/validator selector labels so signer pods can never become endpoints of a
-	// node group Service (which selects on chain-node-set + group).
+	// Exclude the internal selector labels (group/global Service selectors, P2P peer discovery,
+	// cleanup selectors) so signer resources can never be selected as node Services or peers —
+	// see controllers.CosmosignerReservedSelectorLabels.
 	labels := utils.ExcludeMapKeys(WithChainNodeLabels(chainNode, map[string]string{
 		controllers.LabelChainNode: chainNode.GetName(),
-	}), controllers.LabelChainNodeSetGroup, controllers.LabelChainNodeSetValidator)
+	}), controllers.CosmosignerReservedSelectorLabels...)
 
 	return cosmosigner.Params{
 		Name:               name,

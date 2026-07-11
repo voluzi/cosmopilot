@@ -627,6 +627,25 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 	// ChainNodeSet in envtest blocks a reconcile worker for minutes (its validator can never run
 	// here), starving the other specs.
 
+	It("rejects creating a resource with the reserved -signer name suffix", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "foo-signer", Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:     DefaultChainNodeTestApp,
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("reserved"))
+
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: "fullnodes"}}, nil)
+		cs.ObjectMeta = metav1.ObjectMeta{Name: "bar-signer", Namespace: ns.Name}
+		err = Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("reserved"))
+	})
+
 	It("rejects nodeGroups on a standalone ChainNode", func() {
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
