@@ -601,3 +601,32 @@ func TestValidateForReconcileRejectsServedGroupConversion(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "can no longer be resolved")
 }
+
+// TestValidateForReconcileRejectsServedGroupSwap verifies that moving validator-ness from the served
+// group to ANOTHER targeted group is rejected even though both the digest and the signer identity
+// stay intact: the recorded serving GROUP no longer matches the resolved validator target, and the
+// original on-chain validator would lose its signing path.
+func TestValidateForReconcileRejectsServedGroupSwap(t *testing.T) {
+	served := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	// Target two groups: the served validator group and a plain group.
+	served.Spec.Cosmosigner.NodeGroups = []string{"validators", "others"}
+	served.Spec.Nodes = append(served.Spec.Nodes, appsv1.NodeGroupSpec{Name: "others", Instances: ptr.To(1)})
+	served.Status.CosmosignerSigningDigest = served.CosmosignerSigningDigest()
+	served.Status.CosmosignerServingIdentity = served.CosmosignerSigningIdentity()
+	served.Status.CosmosignerServingGroup = "validators"
+
+	// Unchanged: accepted.
+	_, err := validateForReconcile(served)
+	require.NoError(t, err)
+
+	// Swap validator-ness: "validators" becomes a plain group, "others" gains a validator. Same
+	// Vault identity, same group names → same digest; the served validator is gone.
+	swapped := served.DeepCopy()
+	swapped.Spec.Nodes[0].Validator = nil
+	swapped.Spec.Nodes[1].Validator = &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("other-key")}
+	require.Equal(t, served.Status.CosmosignerSigningDigest, swapped.CosmosignerSigningDigest(),
+		"test premise: the digest must be unchanged by the validator-ness swap")
+	_, err = validateForReconcile(swapped)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "group \"validators\"")
+}

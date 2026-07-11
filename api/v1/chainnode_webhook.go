@@ -237,9 +237,16 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 				// validator. Dropping .spec.validator keeps a Vault/GCP digest identical while removing
 				// the validator the signer was protecting, so additionally require the signer to still
 				// resolve the recorded serving identity through a validator target.
-				if serving := chainNode.Status.CosmosignerServingIdentity; serving != "" &&
-					chainNode.CosmosignerValidatorTargetedIdentity() != serving {
+				serving := chainNode.Status.CosmosignerServingIdentity
+				if serving != "" && chainNode.CosmosignerValidatorTargetedIdentity() != serving {
 					return nil, fmt.Errorf(".spec.cosmosigner: the validator the signer was serving can no longer be resolved (webhooks disabled) — removing the validator block would leave its on-chain key without its signing path")
+				}
+				// Legacy digest (pre-serving-identity) with no current validator target: the served
+				// validator was already dropped and its identity can no longer be reconstructed —
+				// unverifiable, so reject conservatively. An unchanged legacy spec still resolves a
+				// validator target and passes, letting the controller backfill the serving identity.
+				if serving == "" && chainNode.CosmosignerValidatorTargetedIdentity() == "" {
+					return nil, fmt.Errorf(".spec.cosmosigner: a signer served a validator on this chain but its recorded identity predates this version and the validator block is gone (webhooks disabled) — restore .spec.validator, or repair the configuration with webhooks enabled")
 				}
 				// A matching digest proves this identity rolled out and served; skip the addition guard.
 			} else if marker := chainNode.Status.CosmosignerAtEstablishment; marker != nil &&

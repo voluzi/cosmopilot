@@ -328,10 +328,24 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		// served group still contains a validator. Converting the served group into a regular node
 		// group keeps a Vault/GCP digest identical while removing the validator the signer was
 		// protecting, so additionally require the signer to still resolve the recorded serving
-		// identity through a validator target.
-		if serving := nodeSet.Status.CosmosignerServingIdentity; serving != "" &&
-			nodeSet.CosmosignerValidatorTargetedIdentity() != serving {
-			return fmt.Errorf(".spec.cosmosigner: the validator the signer was serving can no longer be resolved (webhooks disabled) — removing or converting the served validator group would leave its on-chain key without its signing path")
+		// identity through a validator target — and through the SAME group it served: swapping
+		// validator-ness between two targeted groups keeps identity and digest intact while the
+		// original on-chain validator loses its signing path.
+		if serving := nodeSet.Status.CosmosignerServingIdentity; serving != "" {
+			if nodeSet.CosmosignerValidatorTargetedIdentity() != serving {
+				return fmt.Errorf(".spec.cosmosigner: the validator the signer was serving can no longer be resolved (webhooks disabled) — removing or converting the served validator group would leave its on-chain key without its signing path")
+			}
+			// The group is empty only on a legacy record (pre-group-field); the identity check above
+			// still applies there, and the controller backfills the group before deploying anything.
+			if g := nodeSet.Status.CosmosignerServingGroup; g != "" && nodeSet.CosmosignerTargetedValidatorGroup() != g {
+				return fmt.Errorf(".spec.cosmosigner: the signer served the validator in group %q (webhooks disabled) — moving validator-ness to a different group would leave that validator's on-chain key without its signing path", g)
+			}
+		} else if nodeSet.CosmosignerValidatorTargetedIdentity() == "" {
+			// Legacy digest (pre-serving-identity) with no current validator target: the served
+			// validator was already dropped and its identity can no longer be reconstructed —
+			// unverifiable, so reject conservatively. An unchanged legacy spec still resolves a
+			// validator target here and passes, letting the controller backfill the serving identity.
+			return fmt.Errorf(".spec.cosmosigner: a signer served a validator on this chain but its recorded identity predates this version and the validator target is gone (webhooks disabled) — restore the validator, or repair the configuration with webhooks enabled")
 		}
 		// A matching digest proves this exact signer identity rolled out and served (regardless of how
 		// it was introduced — e.g. added under admission review before webhooks were disabled), so the
