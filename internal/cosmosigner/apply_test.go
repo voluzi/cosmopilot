@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -84,13 +85,13 @@ func TestIsRolledOutPropagatesErrors(t *testing.T) {
 	}
 }
 
-// fakeOwner is a minimal metav1.Object carrying a UID and a controller owner reference, so
-// metav1.IsControlledBy works against StatefulSets it owns.
-type fakeOwner struct {
-	metav1.ObjectMeta
+// fakeOwner builds a minimal client.Object carrying a name/UID, usable both as an owner argument and
+// as a target of metav1.IsControlledBy. PartialObjectMetadata implements client.Object.
+func fakeOwner(name string, uid types.UID) *metav1.PartialObjectMetadata {
+	return &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: uid}}
 }
 
-func ownerRef(o *fakeOwner) metav1.OwnerReference {
+func ownerRef(o metav1.Object) metav1.OwnerReference {
 	return metav1.OwnerReference{APIVersion: "v1", Kind: "Owner", Name: o.GetName(), UID: o.GetUID(), Controller: ptrBool(true)}
 }
 
@@ -109,10 +110,10 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 		ns   = "default"
 		name = "mychain-signer"
 	)
-	me := &fakeOwner{ObjectMeta: metav1.ObjectMeta{Name: "me", Namespace: ns, UID: types.UID("me-uid")}}
-	other := &fakeOwner{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: ns, UID: types.UID("other-uid")}}
+	me := fakeOwner("me", types.UID("me-uid"))
+	other := fakeOwner("other", types.UID("other-uid"))
 
-	ownedSTS := func(owner *fakeOwner) *appsv1.StatefulSet {
+	ownedSTS := func(owner metav1.Object) *appsv1.StatefulSet {
 		return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
 		}}
@@ -147,5 +148,59 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 				t.Fatalf("IsTornDown = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestUndeployCleansOwnPVCsDespiteForeignStatefulSet verifies that a same-name StatefulSet owned by
+// another CR does not short-circuit teardown: Undeploy skips the foreign StatefulSet but still
+// deletes THIS owner's lingering raft-state PVCs (matched by owner-UID label), so the IsTornDown gate
+// that waits on them cannot deadlock. The foreign StatefulSet and a foreign CR's PVC are untouched.
+func TestUndeployCleansOwnPVCsDespiteForeignStatefulSet(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		ns   = "default"
+		name = "mychain-signer"
+	)
+	me := fakeOwner("me", types.UID("me-uid"))
+	other := fakeOwner("other", types.UID("other-uid"))
+
+	foreignSTS := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(other)},
+	}}
+	myPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "me-uid"),
+	}}
+	foreignPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-1", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
+	}}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreignSTS, myPVC, foreignPVC).Build()
+
+	if err := Undeploy(context.Background(), c, me, ns, name); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Our PVC must be gone; teardown is now complete from our perspective.
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(myPVC), &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("our PVC must be deleted, got err=%v", err)
+	}
+	torn, err := IsTornDown(context.Background(), c, me, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !torn {
+		t.Fatal("IsTornDown must be true once our PVC is gone, even with a foreign StatefulSet present")
+	}
+
+	// The foreign StatefulSet and the foreign CR's PVC must be untouched.
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(foreignSTS), &appsv1.StatefulSet{}); err != nil {
+		t.Fatalf("foreign StatefulSet must remain, got err=%v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(foreignPVC), &corev1.PersistentVolumeClaim{}); err != nil {
+		t.Fatalf("foreign PVC must remain, got err=%v", err)
 	}
 }

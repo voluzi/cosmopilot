@@ -106,18 +106,12 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, d
 }
 
 // Undeploy removes the managed signer resources for the given base name, deleting only objects the
-// owner controls. If a signer StatefulSet with the derived name exists but is owned by a different
-// CR (a same-name collision), nothing — including PVCs — is touched.
+// owner controls. Each named resource is deleted only when this owner controls it, so a same-name
+// resource owned by a different CR (a "<name>-signer" collision) is skipped rather than
+// short-circuiting the whole teardown. Owner-scoped PVC cleanup always runs — even when a foreign
+// StatefulSet holds the name — so this owner's lingering raft-state claims are never stranded (which
+// would deadlock the IsTornDown gate waiting on them).
 func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
-	sts := &appsv1.StatefulSet{}
-	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts)
-	switch {
-	case err == nil && !metav1.IsControlledBy(sts, owner):
-		return nil
-	case err != nil && !errors.IsNotFound(err):
-		return err
-	}
-
 	objects := []client.Object{
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
@@ -139,8 +133,9 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 		}
 	}
 
-	// StatefulSet PVCs are not garbage-collected with the StatefulSet. DeletePVCs additionally
-	// filters on the owner-UID label, so only this owner's claims are removed.
+	// StatefulSet PVCs are not garbage-collected with the StatefulSet. DeletePVCs filters on the
+	// owner-UID label, so only this owner's claims are removed even when a foreign same-name signer
+	// exists.
 	return DeletePVCs(ctx, c, owner, namespace, name)
 }
 
