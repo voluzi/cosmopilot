@@ -684,14 +684,19 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	}
 
 	// cosmosignerLeavesLocalKeyUnused reports whether the group's validator is targeted by a
-	// pre-provisioned external cosmosigner backend (Vault without uploadGenerated, or GCP): the
-	// active signing identity is the backend key and the validator's resolved local secret is
-	// never mounted or imported, so reserving it would wrongly reject another validator that
-	// legitimately uses that name. Software and vault.uploadGenerated backends DO consume the
-	// local key, so it stays reserved for them.
-	cosmosignerLeavesLocalKeyUnused := func(group string) bool {
+	// pre-provisioned external cosmosigner backend (Vault without uploadGenerated, or GCP) AND its
+	// local secret provably never held the live consensus key. Only then may the secret be reused
+	// by another validator. Software and vault.uploadGenerated backends consume the local key, so
+	// it stays reserved for them — and so does any Init/CreateValidator target: its generated
+	// secret registered (or was imported as) the on-chain consensus key, e.g. after a same-key
+	// tmKMS→cosmosigner migration where the previously-uploaded key still lives in that secret;
+	// freeing it would let a second validator sign with the same identity.
+	cosmosignerLeavesLocalKeyUnused := func(group string, v *NodeSetValidatorConfig) bool {
 		c := nodeSet.Spec.Cosmosigner
 		if c == nil || !nodeSet.IsCosmosignerTargetGroup(group) {
+			return false
+		}
+		if v != nil && (v.Init != nil || v.CreateValidator != nil) {
 			return false
 		}
 		if c.UsesSoftwareBackend() {
@@ -715,7 +720,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		// An explicit privateKeySecret on a pure TmKMS validator is unused and must not be reserved. The
 		// same applies when a pre-provisioned external cosmosigner is the signer.
 		if (v.TmKMS == nil || v.Init != nil || tmkmsUploadsGeneratedPrivKey(v)) &&
-			!cosmosignerLeavesLocalKeyUnused(ReservedValidatorGroupName) {
+			!cosmosignerLeavesLocalKeyUnused(ReservedValidatorGroupName, v) {
 			secret := fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName())
 			if v.PrivateKeySecret != nil {
 				secret = *v.PrivateKeySecret
@@ -745,7 +750,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		// privateKeySecret is only valid on a single-instance group (multi-instance groups with
 		// privateKeySecret are rejected earlier); otherwise every instance resolves to its own default.
 		usesLocalKey := (group.Validator.TmKMS == nil || group.Validator.Init != nil || tmkmsUploadsGeneratedPrivKey(group.Validator)) &&
-			!cosmosignerLeavesLocalKeyUnused(group.Name)
+			!cosmosignerLeavesLocalKeyUnused(group.Name, group.Validator)
 		if !usesLocalKey {
 			// Nothing to reserve.
 		} else if group.Validator.PrivateKeySecret != nil {
