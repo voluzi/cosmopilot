@@ -143,3 +143,28 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 	// short-circuit above guarantees these are ours.
 	return DeletePVCs(ctx, c, namespace, name)
 }
+
+// IsTornDown reports whether a signer's StatefulSet and its per-pod raft-state PVCs are fully
+// absent. Deletion is asynchronous — Undeploy only requests removal — so callers that must not act
+// on a half-deleted cluster (e.g. clearing the recorded raft membership before allowing a re-add)
+// gate on this. A PVC that still exists counts as present even when already marked for deletion but
+// held by a finalizer, since a fresh StatefulSet could still bind it and inherit stale raft state.
+func IsTornDown(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err == nil {
+		return false, nil
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(InstanceLabels(name))); err != nil {
+		return false, err
+	}
+	for i := range pvcs.Items {
+		if isStatefulSetDataPVC(pvcs.Items[i].GetName(), name) {
+			return false, nil
+		}
+	}
+	return true, nil
+}

@@ -328,17 +328,29 @@ func (r *Reconciler) secretHasKey(ctx context.Context, namespace, name, key stri
 // undeployCosmosigner removes managed signer resources when cosmosigner is no longer configured,
 // deleting only resources this ChainNodeSet actually owns.
 func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
-	if err := cosmosigner.Undeploy(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), cosmosignerName(nodeSet)); err != nil {
+	name := cosmosignerName(nodeSet)
+	if err := cosmosigner.Undeploy(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), name); err != nil {
 		return err
 	}
-	// After teardown the raft StatefulSet and its PVCs are gone, so the recorded signer invariants no
-	// longer describe anything running: clear them so a later re-add records its own values. Otherwise
-	// the no-webhook guards would reject a fresh sentry signer with a different replica count against
-	// stale state, even though a brand-new raft membership would be safe.
-	if nodeSet.Status.CosmosignerReplicas != nil || nodeSet.Status.CosmosignerSigningDigest != "" {
-		nodeSet.Status.CosmosignerReplicas = nil
-		nodeSet.Status.CosmosignerSigningDigest = ""
-		return r.Status().Update(ctx, nodeSet)
+	if nodeSet.Status.CosmosignerReplicas == nil && nodeSet.Status.CosmosignerSigningDigest == "" {
+		return nil
+	}
+
+	// Clear the recorded signer invariants only once the StatefulSet AND its PVCs are actually gone.
+	// Undeploy just *requests* deletion (it is asynchronous): clearing while the old raft cluster is
+	// still terminating would let a remove-and-immediate-re-add bypass the replica guard and bind the
+	// surviving PVCs, inheriting stale raft membership. While teardown is in flight, leave the
+	// invariants for a later reconcile to clear.
+	tornDown, err := cosmosigner.IsTornDown(ctx, r.Client, nodeSet.GetNamespace(), name)
+	if err != nil || !tornDown {
+		return err
+	}
+	nodeSet.Status.CosmosignerReplicas = nil
+	nodeSet.Status.CosmosignerSigningDigest = ""
+	// Tolerate a conflict: the signer is already gone and this clear is idempotent, so a concurrent
+	// update just defers it to the next reconcile rather than spinning the workqueue with no progress.
+	if err := r.Status().Update(ctx, nodeSet); err != nil && !errors.IsConflict(err) {
+		return err
 	}
 	return nil
 }
