@@ -230,7 +230,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 				}
 				// A matching digest proves this identity rolled out and served; skip the addition guard.
 			} else if marker := chainNode.Status.CosmosignerAtEstablishment; marker != nil &&
-				chainNode.CosmosignerSigningIdentity() != *marker && chainNode.IsValidator() {
+				chainNode.CosmosignerValidatorTargetedIdentity() != *marker && chainNode.IsValidator() {
 				// A validator-targeted signer whose identity differs from the write-once record taken at
 				// establishment was added afterwards and has not rolled out yet. Its pre-provisioned key
 				// cannot be verified against the on-chain validator key without the old spec, so only

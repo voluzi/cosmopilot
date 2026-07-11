@@ -23,16 +23,22 @@ func cosmosignerName(nodeSet *appsv1.ChainNodeSet) string {
 // ensureCosmosigner deploys (or tears down) the managed cosmosigner remote signer for a
 // ChainNodeSet. It is a no-op until the chain ID is known, since the signer config requires it.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
-	// The at-establishment identity marker is normally recorded atomically with the chain ID (see
+	// The at-establishment marker is normally recorded atomically with the chain ID (see
 	// SetEstablishedChainID). A nil marker on an established chain therefore only occurs on chains
 	// upgraded from a version predating it — backfill it conservatively: an identity proven by a
 	// recorded rollout digest (it served) is kept; anything unproven records "" and so stays subject
-	// to the no-webhook addition guard. Return before touching signer resources, so the guard judges
-	// the marker on the next reconcile BEFORE anything is deployed.
+	// to the no-webhook addition guard. The serving identity is backfilled from the same proof, so a
+	// pre-upgrade rolled-out signer is also removal-guarded (not just addition-guarded). Return before
+	// touching signer resources, so the guards judge the markers on the next reconcile BEFORE
+	// anything is deployed.
 	if nodeSet.Status.ChainID != "" && nodeSet.Status.CosmosignerAtEstablishment == nil {
 		identity := ""
 		if nodeSet.Status.CosmosignerSigningDigest != "" {
-			identity = nodeSet.CosmosignerSigningIdentity()
+			identity = nodeSet.CosmosignerValidatorTargetedIdentity()
+			if nodeSet.Status.CosmosignerServingIdentity == "" {
+				nodeSet.Status.CosmosignerServingIdentity = identity
+				nodeSet.Status.CosmosignerServingGroup = nodeSet.CosmosignerTargetedValidatorGroup()
+			}
 		}
 		nodeSet.Status.CosmosignerAtEstablishment = ptr.To(identity)
 		return r.Status().Update(ctx, nodeSet)
@@ -107,7 +113,11 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 	_, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret()
 	needReplicas := nodeSet.Status.CosmosignerReplicas == nil
 	needDigest := nodeSet.Status.CosmosignerSigningDigest == "" && hasValidatorTarget
-	if needReplicas || needDigest {
+	// A digest recorded by a version predating the serving-identity field leaves it empty; backfill
+	// it under the same rolled-out proof so the removal guard also covers those signers.
+	needServing := nodeSet.Status.CosmosignerServingIdentity == "" &&
+		nodeSet.Status.CosmosignerSigningDigest != "" && hasValidatorTarget
+	if needReplicas || needDigest || needServing {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), params.Name, params.Replicas)
 		if err != nil {
 			return err
@@ -118,9 +128,12 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 			}
 			if needDigest {
 				nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
-				// The serving identity lets the no-webhook path judge a later REMOVAL: it is admitted
-				// only when a validator's own signing path still resolves this identity.
-				nodeSet.Status.CosmosignerServingIdentity = nodeSet.CosmosignerSigningIdentity()
+			}
+			if needDigest || needServing {
+				// The serving identity + group let the no-webhook path judge a later REMOVAL: it is
+				// admitted only when the SERVED validator's own signing path still resolves this identity.
+				nodeSet.Status.CosmosignerServingIdentity = nodeSet.CosmosignerValidatorTargetedIdentity()
+				nodeSet.Status.CosmosignerServingGroup = nodeSet.CosmosignerTargetedValidatorGroup()
 			}
 			return r.Status().Update(ctx, nodeSet)
 		}
@@ -389,6 +402,7 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 	nodeSet.Status.CosmosignerReplicas = nil
 	nodeSet.Status.CosmosignerSigningDigest = ""
 	nodeSet.Status.CosmosignerServingIdentity = ""
+	nodeSet.Status.CosmosignerServingGroup = ""
 	// Tolerate a conflict: the signer is already gone and this clear is idempotent, so a concurrent
 	// update just defers it to the next reconcile rather than spinning the workqueue with no progress.
 	if err := r.Status().Update(ctx, nodeSet); err != nil && !errors.IsConflict(err) {

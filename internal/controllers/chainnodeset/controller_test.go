@@ -485,15 +485,17 @@ func TestSetEstablishedChainIDRecordsMarkerAtomically(t *testing.T) {
 }
 
 // TestValidateForReconcileSignerRemoval verifies the no-webhook removal guard: removing a rolled-out
-// validator-targeted signer is admitted only when a validator's own signing path still resolves the
-// recorded serving identity (e.g. a software signer that used the validator's own key secret); a
-// pre-provisioned Vault signer's identity is unreachable locally, so its removal is rejected.
+// validator-targeted signer is admitted only when the SERVED validator's own signing path still
+// resolves the recorded serving identity (e.g. a software signer that used the validator's own key
+// secret); a pre-provisioned Vault signer's identity is unreachable locally, so its removal is
+// rejected — even when another validator happens to reference the same key.
 func TestValidateForReconcileSignerRemoval(t *testing.T) {
 	// Vault-backed signer served; removal would fall back to a local key that is not the on-chain key.
 	vaultServed := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	vaultIdentity := vaultServed.CosmosignerSigningIdentity()
 	vaultServed.Spec.Cosmosigner = nil
 	vaultServed.Status.CosmosignerServingIdentity = vaultIdentity
+	vaultServed.Status.CosmosignerServingGroup = "validators"
 	_, err := validateForReconcile(vaultServed)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot be removed")
@@ -503,12 +505,70 @@ func TestValidateForReconcileSignerRemoval(t *testing.T) {
 	softwareIdentity := softwareServed.CosmosignerSigningIdentity()
 	softwareServed.Spec.Cosmosigner = nil
 	softwareServed.Status.CosmosignerServingIdentity = softwareIdentity
+	softwareServed.Status.CosmosignerServingGroup = "validators"
 	_, err = validateForReconcile(softwareServed)
 	require.NoError(t, err)
+
+	// A DIFFERENT validator referencing the served identity must not satisfy the guard for the served
+	// one: the served group's own path resolves a different key.
+	otherResolves := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	servedIdentity := otherResolves.CosmosignerSigningIdentity()
+	otherResolves.Spec.Cosmosigner = nil
+	// The served group now points at a different explicit key, while an unrelated group references
+	// the served identity's secret.
+	otherResolves.Spec.Nodes[0].Validator.PrivateKeySecret = ptr.To("rotated-away-key")
+	otherResolves.Spec.Nodes = append(otherResolves.Spec.Nodes, appsv1.NodeGroupSpec{
+		Name:      "other",
+		Instances: ptr.To(1),
+		Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
+	})
+	otherResolves.Status.CosmosignerServingIdentity = servedIdentity
+	otherResolves.Status.CosmosignerServingGroup = "validators"
+	_, err = validateForReconcile(otherResolves)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be removed")
 
 	// No serving identity recorded (sentry, or the signer never rolled out): removal is free.
 	neverServed := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	neverServed.Spec.Cosmosigner = nil
 	_, err = validateForReconcile(neverServed)
 	require.NoError(t, err)
+}
+
+// TestValidateForReconcileSentryRetargetToValidator verifies that a sentry-mode signer records "" in
+// the at-establishment marker (its key identity is deliberately excluded), so retargeting the SAME
+// pre-provisioned key onto a validator with webhooks disabled does not masquerade as the establishing
+// configuration and is rejected.
+func TestValidateForReconcileSentryRetargetToValidator(t *testing.T) {
+	// Established with a sentry signer over fullnodes (pre-provisioned Vault key).
+	sentry := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"fullnodes"},
+				Backend:    cosmosignerVaultBackend(),
+			},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "fullnodes", Instances: ptr.To(3)},
+				{Name: "validators", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")}},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{},
+	}
+	sentry.SetEstablishedChainID("test-localnet")
+	require.NotNil(t, sentry.Status.CosmosignerAtEstablishment)
+	assert.Empty(t, *sentry.Status.CosmosignerAtEstablishment, "a sentry signer must record an empty validator-targeted identity")
+
+	// Sentry configuration itself validates fine.
+	_, err := validateForReconcile(sentry)
+	require.NoError(t, err)
+
+	// Retargeting the same key onto the validator group: now validator-targeted with an unverifiable
+	// pre-provisioned key that does not match the ("") establishment record → rejected.
+	retargeted := sentry.DeepCopy()
+	retargeted.Spec.Cosmosigner.NodeGroups = []string{"validators"}
+	_, err = validateForReconcile(retargeted)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pre-provisioned Vault/GCP key")
 }

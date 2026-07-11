@@ -106,11 +106,16 @@ func gcpCredsFilePath(g *GcpBackend) string {
 func (b Backend) volumes() []corev1.Volume {
 	switch {
 	case b.Software != nil:
+		// Project ONLY priv_validator_key.json: the referenced Secret may carry unrelated keys (e.g. a
+		// validator's account mnemonic in a shared Secret) that must not be readable by the signer.
 		return []corev1.Volume{
 			{
 				Name: softwareVolume,
 				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{SecretName: b.Software.SecretName},
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: b.Software.SecretName,
+						Items:      []corev1.KeyToPath{{Key: "priv_validator_key.json", Path: "priv_validator_key.json"}},
+					},
 				},
 			},
 		}

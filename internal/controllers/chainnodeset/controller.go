@@ -274,7 +274,7 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	c := nodeSet.Spec.Cosmosigner
 	if c == nil {
 		if serving := nodeSet.Status.CosmosignerServingIdentity; serving != "" && nodeSet.Status.ChainID != "" &&
-			!nodeSet.ValidatorResolvesSigningIdentity(serving) {
+			!nodeSet.ServedValidatorResolvesSigningIdentity(nodeSet.Status.CosmosignerServingGroup, serving) {
 			return fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
 		}
 		return nil
@@ -304,7 +304,7 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	// atomically with the chain ID (SetEstablishedChainID), so a nil marker only occurs on chains
 	// upgraded from a pre-marker version; the controller backfills it conservatively (before touching
 	// signer resources) on the next reconcile, so nothing unverified is ever deployed in that window.
-	if marker := nodeSet.Status.CosmosignerAtEstablishment; marker != nil && nodeSet.CosmosignerSigningIdentity() != *marker {
+	if marker := nodeSet.Status.CosmosignerAtEstablishment; marker != nil && nodeSet.CosmosignerValidatorTargetedIdentity() != *marker {
 		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); hasValidatorTarget {
 			importsRegisteredKey := c.UsesSoftwareBackend() ||
 				(c.UsesVaultBackend() && c.VaultUploadsGenerated(nodeSet.CosmosignerTargetInitializesGenesis()))

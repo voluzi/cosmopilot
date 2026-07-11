@@ -170,18 +170,57 @@ func ImportAnnotationMatchesTarget(annotation, targetFingerprint string) bool {
 	return strings.HasPrefix(annotation, targetFingerprint+".")
 }
 
+// CosmosignerValidatorTargetedIdentity returns the signer's effective signing identity ONLY when it
+// targets this node's validator, and "" otherwise (no signer, or the node is not a validator). The
+// at-establishment marker stores this value rather than the bare key identity: a sentry-mode signer
+// must record "" so that a later retargeting of the same key onto a validator does not masquerade as
+// the establishing configuration (the key may not be the on-chain validator key).
+func (chainNode *ChainNode) CosmosignerValidatorTargetedIdentity() string {
+	if chainNode.Spec.Cosmosigner == nil || !chainNode.IsValidator() {
+		return ""
+	}
+	return chainNode.CosmosignerSigningIdentity()
+}
+
+// CosmosignerValidatorTargetedIdentity is the ChainNodeSet counterpart: the signer's identity only
+// when its target set resolves a validator, "" otherwise (no signer, or sentry mode).
+func (nodeSet *ChainNodeSet) CosmosignerValidatorTargetedIdentity() string {
+	return nodeSet.cosmosignerTargetSigningIdentity(nodeSet.CosmosignerTargetGroups())
+}
+
+// CosmosignerTargetedValidatorGroup returns the name of the validator group the signer targets
+// (ReservedValidatorGroupName for the legacy singleton), or "" when no validator is targeted. At
+// most one validator target exists (webhook-enforced).
+func (nodeSet *ChainNodeSet) CosmosignerTargetedValidatorGroup() string {
+	for name := range nodeSet.CosmosignerTargetGroups() {
+		if name == ReservedValidatorGroupName {
+			if nodeSet.Spec.Validator != nil {
+				return ReservedValidatorGroupName
+			}
+			continue
+		}
+		for _, g := range nodeSet.Spec.Nodes {
+			if g.Name == name && g.Validator != nil {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 // SetEstablishedChainID records the chain ID and — atomically, in the same status write the caller
-// is about to perform — the write-once cosmosigner-at-establishment identity marker. Recording both
-// together closes the window in which a chain is established but the marker is still nil, during
-// which an unverifiable signer addition could slip past the no-webhook guard and then be blessed by
-// a late marker write. A no-op for an empty chainID (not yet known).
+// is about to perform — the write-once cosmosigner-at-establishment marker, holding the
+// validator-targeted signer identity ("" when none, including sentry mode). Recording both together
+// closes the window in which a chain is established but the marker is still nil, during which an
+// unverifiable signer addition could slip past the no-webhook guard and then be blessed by a late
+// marker write. A no-op for an empty chainID (not yet known).
 func (chainNode *ChainNode) SetEstablishedChainID(chainID string) {
 	if chainID == "" {
 		return
 	}
 	chainNode.Status.ChainID = chainID
 	if chainNode.Status.CosmosignerAtEstablishment == nil {
-		identity := chainNode.CosmosignerSigningIdentity()
+		identity := chainNode.CosmosignerValidatorTargetedIdentity()
 		chainNode.Status.CosmosignerAtEstablishment = &identity
 	}
 }
@@ -193,7 +232,7 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 	}
 	nodeSet.Status.ChainID = chainID
 	if nodeSet.Status.CosmosignerAtEstablishment == nil {
-		identity := nodeSet.CosmosignerSigningIdentity()
+		identity := nodeSet.CosmosignerValidatorTargetedIdentity()
 		nodeSet.Status.CosmosignerAtEstablishment = &identity
 	}
 }
@@ -527,23 +566,25 @@ func (chainNode *ChainNode) ValidatorResolvesSigningIdentity(identity string) bo
 	return localKeySigningIdentity(chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)) == identity
 }
 
-// ValidatorResolvesSigningIdentity reports whether any validator in the spec resolves the given
-// effective signing identity through its OWN signing path (local key or tmKMS) — i.e. ignoring any
-// .spec.cosmosigner. Used to judge a signer removal from status alone: when the previously-serving
-// identity is still reachable through a validator's own path (e.g. a software-backed signer that used
-// the validator's own key secret, or tmKMS on the same Vault key), the on-chain key keeps signing.
-func (nodeSet *ChainNodeSet) ValidatorResolvesSigningIdentity(identity string) bool {
-	if identity == "" {
+// ServedValidatorResolvesSigningIdentity reports whether the SPECIFIC validator the signer served
+// (recorded by group name) resolves the given effective signing identity through its OWN signing
+// path (local key or tmKMS) — i.e. ignoring any .spec.cosmosigner. Used to judge a signer removal
+// from status alone: only the formerly-served validator keeping the identity proves the on-chain key
+// keeps signing; a DIFFERENT validator that happens to reference the same key must not satisfy the
+// check (the served one would still fall back to a wrong/absent local key). An unknown group
+// (legacy status without the field, or the group was removed) resolves nothing.
+func (nodeSet *ChainNodeSet) ServedValidatorResolvesSigningIdentity(group, identity string) bool {
+	if identity == "" || group == "" {
 		return false
 	}
-	if nodeSet.Spec.Validator != nil &&
-		nodeSet.validatorGroupSigningIdentity(ReservedValidatorGroupName, nodeSet.Spec.Validator) == identity {
-		return true
+	if group == ReservedValidatorGroupName {
+		return nodeSet.Spec.Validator != nil &&
+			nodeSet.validatorGroupSigningIdentity(ReservedValidatorGroupName, nodeSet.Spec.Validator) == identity
 	}
 	for _, g := range nodeSet.Spec.Nodes {
-		if g.Validator != nil && g.GetInstances() > 0 &&
-			nodeSet.validatorGroupSigningIdentity(g.Name, g.Validator) == identity {
-			return true
+		if g.Name == group {
+			return g.Validator != nil && g.GetInstances() > 0 &&
+				nodeSet.validatorGroupSigningIdentity(g.Name, g.Validator) == identity
 		}
 	}
 	return false

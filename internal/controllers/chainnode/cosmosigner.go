@@ -39,16 +39,21 @@ func cosmosignerTargetLabelValue(chainNode *appsv1.ChainNode) (string, bool) {
 // ensureCosmosigner deploys (or tears down) a managed cosmosigner remote signer for a standalone
 // ChainNode. It is a no-op until the chain ID is known.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	// The at-establishment identity marker is normally recorded atomically with the chain ID (see
+	// The at-establishment marker is normally recorded atomically with the chain ID (see
 	// SetEstablishedChainID). A nil marker on an established chain therefore only occurs on chains
 	// upgraded from a version predating it — backfill it conservatively: an identity proven by a
 	// recorded rollout digest (it served) is kept; anything unproven records "" and so stays subject
-	// to the no-webhook addition guard. Return before touching signer resources, so the guard judges
-	// the marker on the next reconcile BEFORE anything is deployed.
+	// to the no-webhook addition guard. The serving identity is backfilled from the same proof, so a
+	// pre-upgrade rolled-out signer is also removal-guarded (not just addition-guarded). Return before
+	// touching signer resources, so the guards judge the markers on the next reconcile BEFORE
+	// anything is deployed.
 	if chainNode.Status.ChainID != "" && chainNode.Status.CosmosignerAtEstablishment == nil {
 		identity := ""
 		if chainNode.Status.CosmosignerSigningDigest != "" {
-			identity = chainNode.CosmosignerSigningIdentity()
+			identity = chainNode.CosmosignerValidatorTargetedIdentity()
+			if chainNode.Status.CosmosignerServingIdentity == "" {
+				chainNode.Status.CosmosignerServingIdentity = identity
+			}
 		}
 		chainNode.Status.CosmosignerAtEstablishment = ptr.To(identity)
 		return r.Status().Update(ctx, chainNode)
@@ -115,7 +120,11 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	//     out-of-band and must stay add/remove/rotate-able (mirrors the webhook waiver).
 	needReplicas := chainNode.Status.CosmosignerReplicas == nil
 	needDigest := chainNode.Status.CosmosignerSigningDigest == "" && chainNode.IsValidator()
-	if needReplicas || needDigest {
+	// A digest recorded by a version predating the serving-identity field leaves it empty; backfill
+	// it under the same rolled-out proof so the removal guard also covers those signers.
+	needServing := chainNode.Status.CosmosignerServingIdentity == "" &&
+		chainNode.Status.CosmosignerSigningDigest != "" && chainNode.IsValidator()
+	if needReplicas || needDigest || needServing {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
 		if err != nil {
 			return err
@@ -126,9 +135,11 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 			}
 			if needDigest {
 				chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
+			}
+			if needDigest || needServing {
 				// The serving identity lets the no-webhook path judge a later REMOVAL: it is admitted
 				// only when the validator's own signing path still resolves this identity.
-				chainNode.Status.CosmosignerServingIdentity = chainNode.CosmosignerSigningIdentity()
+				chainNode.Status.CosmosignerServingIdentity = chainNode.CosmosignerValidatorTargetedIdentity()
 			}
 			return r.Status().Update(ctx, chainNode)
 		}
