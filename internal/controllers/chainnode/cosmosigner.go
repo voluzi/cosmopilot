@@ -300,7 +300,7 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 	// still terminating would let a remove-and-immediate-re-add bypass the replica guard and bind the
 	// surviving PVCs, inheriting stale raft membership. While teardown is in flight, leave the
 	// invariants for a later reconcile to clear.
-	tornDown, err := cosmosigner.IsTornDown(ctx, r.Client, chainNode.GetNamespace(), name)
+	tornDown, err := cosmosigner.IsTornDown(ctx, r.Client, chainNode, chainNode.GetNamespace(), name)
 	if err != nil || !tornDown {
 		return err
 	}

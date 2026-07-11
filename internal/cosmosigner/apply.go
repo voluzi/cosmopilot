@@ -144,15 +144,22 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 	return DeletePVCs(ctx, c, namespace, name)
 }
 
-// IsTornDown reports whether a signer's StatefulSet and its per-pod raft-state PVCs are fully
-// absent. Deletion is asynchronous — Undeploy only requests removal — so callers that must not act
-// on a half-deleted cluster (e.g. clearing the recorded raft membership before allowing a re-add)
-// gate on this. A PVC that still exists counts as present even when already marked for deletion but
-// held by a finalizer, since a fresh StatefulSet could still bind it and inherit stale raft state.
-func IsTornDown(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
+// IsTornDown reports whether the signer resources owned by owner are fully gone. Deletion is
+// asynchronous — Undeploy only requests removal — so callers that must not act on a half-deleted
+// cluster (e.g. clearing the recorded raft membership before allowing a re-add) gate on this.
+//
+// Only resources owned by owner count. A StatefulSet with the same name owned by ANOTHER CR (a name
+// collision) is not ours to wait on — Undeploy skips it too — so it is treated as unrelated; the
+// per-pod PVCs are then not attributable to us either (they carry no owner reference and share the
+// collided name), and a re-add over the foreign signer is blocked by ApplyOwned regardless. When no
+// StatefulSet holds the name, a lingering `data-<name>-<ordinal>` PVC (ours, even if already marked
+// for deletion but held by a finalizer) still counts as present, since a fresh StatefulSet could
+// bind it and inherit stale raft state.
+func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err == nil {
-		return false, nil
+		// A same-name StatefulSet exists. Only OUR StatefulSet blocks teardown completion.
+		return !metav1.IsControlledBy(sts, owner), nil
 	} else if !errors.IsNotFound(err) {
 		return false, err
 	}
