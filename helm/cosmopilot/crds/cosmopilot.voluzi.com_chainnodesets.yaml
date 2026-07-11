@@ -15706,6 +15706,14 @@ spec:
               chainID:
                 description: Indicates the chain ID.
                 type: string
+              cosmosignerAtEstablishment:
+                description: |-
+                  CosmosignerAtEstablishment is a write-once record of the managed signer's effective signing
+                  identity at the moment the chain ID was first recorded (empty string when no signer was
+                  configured then). It lets the no-webhook reconcile path tell a signer that was part of the
+                  establishing configuration (admitted) apart from one whose identity was introduced afterwards
+                  (rejected unless the backend provably imports the registered key). Not meant to be set by hand.
+                type: string
               cosmosignerReplicas:
                 description: |-
                   CosmosignerReplicas records the raft replica count the managed signer was rolled out with. It is

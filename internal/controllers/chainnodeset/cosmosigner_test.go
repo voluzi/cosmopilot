@@ -130,10 +130,11 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// TestMaybeImportCosmosignerKeyPreservesCompletedImport verifies that once the import annotation is
-// recorded, a missing/deleted source key Secret does NOT re-mark the import pending (which would scale
-// the signer to zero) — Vault still holds the registered key and the bootstrap Secret is only needed
-// at import time. When no import ever completed, an absent source is still pending.
+// TestMaybeImportCosmosignerKeyPreservesCompletedImport verifies the absent-source fast-path: an
+// import annotation whose TARGET half matches the current Vault destination and source secret keeps a
+// completed import valid when the bootstrap Secret is deleted (the signer keeps running — Vault still
+// holds the registered key). An annotation from a DIFFERENT target/source, or none at all, keeps the
+// import pending: nothing usable was ever imported for the current spec.
 func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
 	mk := func(annotation string) *appsv1.ChainNodeSet {
 		ns := &appsv1.ChainNodeSet{
@@ -163,12 +164,25 @@ func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
 		return ns
 	}
 	params := cosmosigner.Params{Name: "test-nodeset-signer", Namespace: "default"}
+	// The annotation a completed import would have recorded for the CURRENT target/source (key
+	// material hash differs from target hash, but only the target half matters when the source is gone).
+	matching := mk("").Spec.Cosmosigner.Backend.Vault.ImportFingerprint("val-priv-key", []byte("imported-key-bytes"))
 
-	// Source Secret absent but a prior import already recorded: NOT pending (signer keeps running).
-	r := newValidatorTestReconciler(t, mk("some-prior-fingerprint"))
-	pending, err := r.maybeImportCosmosignerKey(context.Background(), mk("some-prior-fingerprint"), params)
+	// Source Secret absent but a prior import for the CURRENT target/source recorded: NOT pending.
+	r := newValidatorTestReconciler(t, mk(matching))
+	pending, err := r.maybeImportCosmosignerKey(context.Background(), mk(matching), params)
 	require.NoError(t, err)
 	assert.False(t, pending, "a completed import must survive deletion of the bootstrap source Secret")
+
+	// Source Secret absent and the recorded import belongs to a DIFFERENT Vault target: pending —
+	// nothing was ever imported for the current destination, so the signer must stay down.
+	otherTarget := mk("")
+	otherTarget.Spec.Cosmosigner.Backend.Vault.KeyName = "old-key"
+	stale := otherTarget.Spec.Cosmosigner.Backend.Vault.ImportFingerprint("val-priv-key", []byte("imported-key-bytes"))
+	r = newValidatorTestReconciler(t, mk(stale))
+	pending, err = r.maybeImportCosmosignerKey(context.Background(), mk(stale), params)
+	require.NoError(t, err)
+	assert.True(t, pending, "an import recorded for a different Vault target must not satisfy the current spec")
 
 	// Source Secret absent and nothing imported yet: still pending.
 	r = newValidatorTestReconciler(t, mk(""))

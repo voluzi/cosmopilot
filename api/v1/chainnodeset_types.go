@@ -164,6 +164,14 @@ type ChainNodeSetStatus struct {
 	// by rendering a new bootstrap list. Not meant to be set by hand.
 	// +optional
 	CosmosignerReplicas *int32 `json:"cosmosignerReplicas,omitempty"`
+
+	// CosmosignerAtEstablishment is a write-once record of the managed signer's effective signing
+	// identity at the moment the chain ID was first recorded (empty string when no signer was
+	// configured then). It lets the no-webhook reconcile path tell a signer that was part of the
+	// establishing configuration (admitted) apart from one whose identity was introduced afterwards
+	// (rejected unless the backend provably imports the registered key). Not meant to be set by hand.
+	// +optional
+	CosmosignerAtEstablishment *string `json:"cosmosignerAtEstablishment,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.

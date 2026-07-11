@@ -173,6 +173,16 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, chainNode.Spec.Cosmosigner); err != nil {
 			return nil, err
 		}
+		// The spec-diff helper above no-ops when the signer was removed in an earlier update
+		// (old.Spec.Cosmosigner is nil). While the previous signer's teardown is still in flight the
+		// controller has not yet cleared the recorded replica count, and its raft PVCs may still exist;
+		// a re-add with a different count could bind them with a mismatched membership. Enforce the
+		// recorded count until teardown completes and clears it.
+		if chainNode.Spec.Cosmosigner != nil {
+			if replicas := old.Status.CosmosignerReplicas; replicas != nil && *replicas != chainNode.Spec.Cosmosigner.GetReplicas() {
+				return nil, fmt.Errorf(".spec.cosmosigner.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", *replicas)
+			}
+		}
 		// Once the chain is established, the validator's consensus pubkey is fixed in the on-chain
 		// validator set. Changing the effective signing key — including adding, removing or switching
 		// the cosmosigner backend — would make the node sign with a key not in that set. Equivalent
@@ -191,21 +201,35 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		}
 	}
 
-	// No-webhook reconcile path (old is nil): the previous spec is unavailable, so only the
-	// immutability guards that can be judged from status alone are reconstructed here. Modifying a
-	// still-present signer that already rolled out (recorded digest differs from the current one) and
-	// changing the raft replica count are rejected. ADDING or REMOVING the signer is left to the
-	// admission webhook (which has the old spec) — approximating those from status mis-fired, blocking
-	// a safe software-signer rollback and deadlocking a first rollout; the webhook remains the real
-	// guard when enabled.
+	// No-webhook reconcile path (old is nil): the previous spec is unavailable, so the guards that can
+	// be judged from status alone are reconstructed here. Modifying a rolled-out signer (recorded
+	// digest differs), changing the raft replica count, and adding an unverifiable validator-targeted
+	// signer after establishment (see the at-establishment marker) are rejected. REMOVING the signer
+	// is left to the admission webhook (which has the old spec) — a software-signer removal returns
+	// the validator to the same local key and is safe, which status alone cannot establish.
 	if old == nil {
 		c := chainNode.Spec.Cosmosigner
 		if c != nil && chainNode.Status.ChainID != "" {
 			if replicas := chainNode.Status.CosmosignerReplicas; replicas != nil && *replicas != c.GetReplicas() {
 				return nil, fmt.Errorf(".spec.cosmosigner.replicas is immutable after the signer is deployed (webhooks disabled): changing it does not migrate the raft membership and can break quorum")
 			}
-			if recorded := chainNode.Status.CosmosignerSigningDigest; recorded != "" && chainNode.CosmosignerSigningDigest() != recorded {
-				return nil, fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled): the validator's key is fixed on-chain")
+			if recorded := chainNode.Status.CosmosignerSigningDigest; recorded != "" {
+				if chainNode.CosmosignerSigningDigest() != recorded {
+					return nil, fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled): the validator's key is fixed on-chain")
+				}
+				// A matching digest proves this identity rolled out and served; skip the addition guard.
+			} else if marker := chainNode.Status.CosmosignerAtEstablishment; marker != nil &&
+				chainNode.CosmosignerSigningIdentity() != *marker && chainNode.IsValidator() {
+				// A validator-targeted signer whose identity differs from the write-once record taken at
+				// establishment was added afterwards and has not rolled out yet. Its pre-provisioned key
+				// cannot be verified against the on-chain validator key without the old spec, so only
+				// backends that provably import the registered key are admitted. A nil marker means the
+				// controller has not recorded it yet — the signer in that window is the establishing one.
+				importsRegisteredKey := c.UsesSoftwareBackend() ||
+					(c.UsesVaultBackend() && c.VaultUploadsGenerated(chainNode.ShouldInitGenesis()))
+				if !importsRegisteredKey {
+					return nil, fmt.Errorf(".spec.cosmosigner: a validator-targeted signer with a pre-provisioned Vault/GCP key cannot be added to an established chain with webhooks disabled — its key cannot be verified against the on-chain validator key; use the software backend or vault.uploadGenerated (the import verifies the key), or perform the migration with webhooks enabled")
+				}
 			}
 		}
 	}

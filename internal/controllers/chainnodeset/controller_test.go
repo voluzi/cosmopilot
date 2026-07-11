@@ -414,3 +414,40 @@ func TestValidateForReconcileAllowsRecordedValidatorSigner(t *testing.T) {
 	_, err := validateForReconcile(nodeSet)
 	require.NoError(t, err)
 }
+
+// TestValidateForReconcilePostEstablishmentSignerAddition verifies the write-once at-establishment
+// marker: a validator-targeted pre-provisioned signer whose identity matches the marker (it was the
+// establishing configuration) is admitted even before its rollout digest is recorded, while one whose
+// identity was introduced AFTER establishment is rejected unless the backend provably imports the
+// registered key.
+func TestValidateForReconcilePostEstablishmentSignerAddition(t *testing.T) {
+	establishing := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	establishing.Status.CosmosignerAtEstablishment = ptr.To(establishing.CosmosignerSigningIdentity())
+
+	// Identity matches the establishment record (first rollout of the establishing signer): admitted.
+	_, err := validateForReconcile(establishing)
+	require.NoError(t, err)
+
+	// Established with NO signer, pre-provisioned Vault signer added later: rejected.
+	added := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	added.Status.CosmosignerAtEstablishment = ptr.To("")
+	_, err = validateForReconcile(added)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pre-provisioned Vault/GCP key")
+
+	// Same late addition but with uploadGenerated (import verifies the key): admitted.
+	importing := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:         "https://vault.example:8200",
+		KeyName:         "val-key",
+		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		UploadGenerated: true,
+	}})
+	importing.Status.CosmosignerAtEstablishment = ptr.To("")
+	_, err = validateForReconcile(importing)
+	require.NoError(t, err)
+
+	// Marker not recorded yet (nil): admitted — the controller records it on the same reconcile.
+	unrecorded := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	_, err = validateForReconcile(unrecorded)
+	require.NoError(t, err)
+}

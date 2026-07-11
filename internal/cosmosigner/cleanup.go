@@ -35,13 +35,21 @@ func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, names
 }
 
 // isOwnedStatefulSetDataPVC reports whether pvc is a per-pod raft-state claim of the signer named
-// `name` owned by owner: its name matches the StatefulSet per-pod pattern and its owner-UID label
-// equals owner's UID (an empty owner UID, as in unit tests, matches a claim carrying no owner label).
+// `name` attributable to owner: its name matches the StatefulSet per-pod pattern and its owner-UID
+// label equals owner's UID. A claim carrying NO owner-UID label is adopted as owner's (legacy claim
+// created before the label existed — an existing StatefulSet keeps its original volumeClaimTemplates,
+// since Kubernetes forbids updating them, so such claims can never gain the label); excluding them
+// would strand legacy raft state past teardown, letting a re-added signer bind it after the guards
+// cleared. This matches the pre-label deletion semantics exactly, so it is never broader than before.
 func isOwnedStatefulSetDataPVC(pvc *corev1.PersistentVolumeClaim, owner metav1.Object, name string) bool {
 	if !isStatefulSetDataPVC(pvc.GetName(), name) {
 		return false
 	}
-	return pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID())
+	uid, labeled := pvc.GetLabels()[labelOwnerUID]
+	if !labeled {
+		return true
+	}
+	return uid == string(owner.GetUID())
 }
 
 // isStatefulSetDataPVC reports whether pvcName is exactly `<dataVolumeName>-<stsName>-<ordinal>`,

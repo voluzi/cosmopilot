@@ -254,16 +254,20 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 //     digest differs) is rejected — changing the Vault key, replicas, or target set of a live signer
 //     would make the validator sign with a key not in the on-chain set. A same-key config keeps the
 //     digest identical and is allowed.
+//
 //   - The raft replica count is immutable once the cluster formed with it (re-rendering a bootstrap
 //     list does not migrate the recorded membership). Enforced from the persisted replica count so it
 //     also covers sentry signers, which record no signing digest.
 //
-// ADDING or REMOVING the signer is deliberately NOT judged here: whether either changes the effective
-// on-chain key depends on the previous spec, which this path cannot see. Approximating it from status
-// mis-fires — it blocked a safe software-signer rollback (removal returns to the validator's own key)
-// and deadlocked a first rollout of a validator-targeted pre-provisioned signer (chainID is set
-// before the rollout digest is recorded). Those cases are left to the admission webhook, which has
-// the old spec and remains the real guard when enabled; a webhooks-disabled cluster has opted into
+//   - ADDING a validator-targeted signer with an unverifiable (pre-provisioned Vault/GCP) key AFTER
+//     establishment is rejected, using the write-once at-establishment identity marker to tell it
+//     apart from the establishing signer's own first rollout (which must be admitted — the digest is
+//     only recorded after rollout, so keying on "chainID set + empty digest" would deadlock it).
+//
+// REMOVING the signer is deliberately NOT judged here: whether removal changes the effective on-chain
+// key depends on the previous spec (a software signer removal returns the validator to the same local
+// key — safe; a Vault signer removal does not). That is left to the admission webhook, which has the
+// old spec and remains the real guard when enabled; a webhooks-disabled cluster has opted into
 // best-effort validation.
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	c := nodeSet.Spec.Cosmosigner
@@ -275,8 +279,31 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		return fmt.Errorf(".spec.cosmosigner.replicas is immutable after the signer is deployed (webhooks disabled): changing it does not migrate the raft membership and can break quorum")
 	}
 
-	if recorded := nodeSet.Status.CosmosignerSigningDigest; recorded != "" && nodeSet.CosmosignerSigningDigest() != recorded {
-		return fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain")
+	if recorded := nodeSet.Status.CosmosignerSigningDigest; recorded != "" {
+		if nodeSet.CosmosignerSigningDigest() != recorded {
+			return fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain")
+		}
+		// A matching digest proves this exact signer identity rolled out and served (regardless of how
+		// it was introduced — e.g. added under admission review before webhooks were disabled), so the
+		// at-establishment marker below must not re-judge it.
+		return nil
+	}
+
+	// A validator-targeted signer whose identity differs from the write-once at-establishment record
+	// was added (or swapped in) after the chain was established and has not rolled out yet. Without
+	// the old spec its pre-provisioned key cannot be compared to the on-chain validator key, so only
+	// backends that provably import the registered key are admitted. A nil marker means it has not
+	// been recorded yet (first reconcile after establishment, or a chain from a pre-marker version) —
+	// the controller records it immediately, so the signer present in that window is the establishing
+	// one and is admitted.
+	if marker := nodeSet.Status.CosmosignerAtEstablishment; marker != nil && nodeSet.CosmosignerSigningIdentity() != *marker {
+		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); hasValidatorTarget {
+			importsRegisteredKey := c.UsesSoftwareBackend() ||
+				(c.UsesVaultBackend() && c.VaultUploadsGenerated(nodeSet.CosmosignerTargetInitializesGenesis()))
+			if !importsRegisteredKey {
+				return fmt.Errorf(".spec.cosmosigner: a validator-targeted signer with a pre-provisioned Vault/GCP key cannot be added to an established chain with webhooks disabled — its key cannot be verified against the on-chain validator key; use the software backend or vault.uploadGenerated (the import verifies the key), or perform the migration with webhooks enabled")
+			}
+		}
 	}
 
 	return nil

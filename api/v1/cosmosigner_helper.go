@@ -137,21 +137,37 @@ func (b *CosmosignerVaultBackend) GetVaultMount() string {
 	return DefaultCosmosignerVaultMount
 }
 
-// ImportFingerprint returns a stable fingerprint of a completed key import: the Vault target
-// (address, namespace, mount, key), the resolved source secret name, and a hash of the source key
-// MATERIAL. A change to any of them triggers a fresh import — a new target must receive the key, and
-// a new source secret OR new bytes under the same name means a different key must be (re)imported and
-// verified. Hashing the material (not just the name) prevents an in-place update of the source Secret
-// after a prior import from being silently skipped, which would leave Vault holding the stale key
-// while genesis/signing flows consume the new bytes. Both controllers stamp this value into the
-// key-imported annotation; sharing one implementation keeps their import protocols in lockstep.
-func (b *CosmosignerVaultBackend) ImportFingerprint(sourceSecret string, keyMaterial []byte) string {
+// ImportTargetFingerprint fingerprints the import TARGET half of a key import: the Vault destination
+// (address, namespace, mount, key) plus the resolved source secret name. It deliberately excludes the
+// key material, so a controller that can no longer read the source Secret (deleted after a completed
+// bootstrap import) can still verify that a recorded import annotation belongs to the CURRENT
+// target/source — a stale annotation from a different Vault destination or source secret never
+// satisfies the current spec.
+func (b *CosmosignerVaultBackend) ImportTargetFingerprint(sourceSecret string) string {
 	ns := ""
 	if b.Namespace != nil {
 		ns = *b.Namespace
 	}
-	material := utils.Sha256(string(keyMaterial))
-	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s", b.Address, ns, b.GetVaultMount(), b.KeyName, sourceSecret, material))
+	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s", b.Address, ns, b.GetVaultMount(), b.KeyName, sourceSecret))
+}
+
+// ImportFingerprint returns the full fingerprint of a completed key import:
+// "<targetFingerprint>.<materialHash>". A change to the Vault target, the source secret name, or the
+// key BYTES (an in-place Secret update) produces a different value and so triggers a fresh import —
+// preventing Vault from silently holding a stale key while genesis/signing flows consume new bytes.
+// The two-part form lets the absent-source fast-path match on the target half alone (see
+// ImportTargetFingerprint). Both controllers stamp this value into the key-imported annotation;
+// sharing one implementation keeps their import protocols in lockstep.
+func (b *CosmosignerVaultBackend) ImportFingerprint(sourceSecret string, keyMaterial []byte) string {
+	return b.ImportTargetFingerprint(sourceSecret) + "." + utils.Sha256(string(keyMaterial))
+}
+
+// ImportAnnotationMatchesTarget reports whether a recorded key-imported annotation belongs to the
+// given import target (see ImportTargetFingerprint) regardless of which key bytes were imported. Used
+// by the absent-source fast-path: only an import completed for the CURRENT target/source proves the
+// spec's Vault key holds the registered material.
+func ImportAnnotationMatchesTarget(annotation, targetFingerprint string) bool {
+	return strings.HasPrefix(annotation, targetFingerprint+".")
 }
 
 // CosmosignerTargetGroups returns the set of node group names the cosmosigner deployment signs

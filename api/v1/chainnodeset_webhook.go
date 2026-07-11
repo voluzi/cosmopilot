@@ -291,6 +291,16 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, nodeSet.Spec.Cosmosigner); err != nil {
 			return nil, err
 		}
+		// The spec-diff helper above no-ops when the signer was removed in an earlier update
+		// (old.Spec.Cosmosigner is nil). While the previous signer's teardown is still in flight the
+		// controller has not yet cleared the recorded replica count, and its raft PVCs may still exist;
+		// a re-add with a different count could bind them with a mismatched membership. Enforce the
+		// recorded count until teardown completes and clears it.
+		if nodeSet.Spec.Cosmosigner != nil {
+			if replicas := old.Status.CosmosignerReplicas; replicas != nil && *replicas != nodeSet.Spec.Cosmosigner.GetReplicas() {
+				return nil, fmt.Errorf(".spec.cosmosigner.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", *replicas)
+			}
+		}
 		// Once the chain is established, the targeted validator's consensus pubkey is fixed on-chain.
 		// Reject changes to its effective signing key — including adding, removing or switching the
 		// cosmosigner backend — while allowing same-key migrations (equivalent keys compare equal).

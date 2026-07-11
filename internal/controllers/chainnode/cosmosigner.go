@@ -39,6 +39,18 @@ func cosmosignerTargetLabelValue(chainNode *appsv1.ChainNode) (string, bool) {
 // ensureCosmosigner deploys (or tears down) a managed cosmosigner remote signer for a standalone
 // ChainNode. It is a no-op until the chain ID is known.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	// Record, write-once, which signer identity (possibly none — empty string) was in effect when the
+	// chain was established. The no-webhook path uses this to tell an establishing signer (admitted)
+	// apart from one added to an already-established chain (unverifiable without the old spec). Also
+	// backfilled on chains upgraded from a version predating the marker: an already-configured signer
+	// records its current identity, so it is never retroactively rejected.
+	if chainNode.Status.ChainID != "" && chainNode.Status.CosmosignerAtEstablishment == nil {
+		chainNode.Status.CosmosignerAtEstablishment = ptr.To(chainNode.CosmosignerSigningIdentity())
+		if err := r.Status().Update(ctx, chainNode); err != nil {
+			return err
+		}
+	}
+
 	if chainNode.Spec.Cosmosigner == nil {
 		return r.undeployCosmosigner(ctx, chainNode)
 	}
@@ -224,12 +236,13 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 	}
 	keyMaterial := secret.Data[PrivKeyFilename]
 	if len(keyMaterial) == 0 {
-		// No source material available. If a prior import already recorded the annotation, Vault still
-		// holds the registered key and the bootstrap Secret is only needed at import time — so a Secret
-		// deleted after a completed import must NOT re-mark the import pending (which would scale the
-		// signer to zero). Only when nothing was ever imported is the import genuinely still pending
-		// (the node has not produced its key yet); retry on a later reconcile.
-		if chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] != "" {
+		// No source material available. A completed import for the CURRENT Vault target and source
+		// (the annotation's target half matches) stays valid: Vault holds the registered key and the
+		// bootstrap Secret is only needed at import time, so a Secret deleted after that import must
+		// NOT re-mark the import pending (which would scale the signer to zero). An annotation from a
+		// DIFFERENT target/source proves nothing about this spec — the import is genuinely pending
+		// (nothing usable was ever imported for it), keeping the signer down until the source appears.
+		if appsv1.ImportAnnotationMatchesTarget(chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported], c.Backend.Vault.ImportTargetFingerprint(sourceSecret)) {
 			return false, nil
 		}
 		return true, nil
