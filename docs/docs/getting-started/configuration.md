@@ -42,7 +42,7 @@ $ helm show values oci://ghcr.io/voluzi/helm/cosmopilot
 
 ### `cosmosignerImage`
 - **Description**: The default container image of [Cosmosigner](https://github.com/voluzi/cosmosigner) (with version tag included), used when deploying managed remote signers. Can be overridden per-signer with `.spec.cosmosigner.image`.
-- **Default**: `ghcr.io/voluzi/cosmosigner:latest`
+- **Default**: unset — falls back to `ghcr.io/voluzi/cosmosigner:latest`, since Cosmosigner has not published versioned releases yet. Set this (or `.spec.cosmosigner.image`) to pin a specific tag once one is available.
 
 ### `imagePullSecrets`
 - **Description**: Secrets for pulling images from private repositories.

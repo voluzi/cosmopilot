@@ -14,10 +14,11 @@ separate `StatefulSet` that **dials** the targeted nodes' privval address. `Cosm
 wires everything for you.
 
 :::tip[Image]
-The signer image defaults to the operator-wide `cosmosignerImage` Helm value (`ghcr.io/voluzi/cosmosigner:latest`
-until versioned releases are available), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
-operator flag — see [Configuration](../getting-started/configuration.md#cosmosignerimage). Set
-`.spec.cosmosigner.image` to pin or override the image for one specific signer only.
+The signer image defaults to the operator-wide `cosmosignerImage` Helm value, configured via the
+`-cosmosigner-image` / `COSMOSIGNER_IMAGE` operator flag — see
+[Configuration](../getting-started/configuration.md#cosmosignerimage). It is unset out of the box
+(falling back to `ghcr.io/voluzi/cosmosigner:latest`), since Cosmosigner has no versioned releases
+yet. Set `cosmosignerImage` or `.spec.cosmosigner.image` to pin a tag once one is published.
 :::
 
 ## How it works
