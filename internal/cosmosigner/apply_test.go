@@ -1,0 +1,82 @@
+package cosmosigner
+
+import (
+	"context"
+	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+// TestIsRolledOut covers the rollout-gating logic that arms the signing-identity digest: only a
+// StatefulSet whose CURRENT generation is observed and fully updated+ready counts as rolled out, so
+// readiness left over from a previous revision (or a partial rollout) never locks in a pending
+// signing change.
+func TestIsRolledOut(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		ns       = "default"
+		name     = "mychain-signer"
+		replicas = int32(3)
+	)
+
+	sts := func(generation, observed int64, updated, ready int32) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Generation: generation},
+			Status: appsv1.StatefulSetStatus{
+				ObservedGeneration: observed,
+				UpdatedReplicas:    updated,
+				ReadyReplicas:      ready,
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		obj  *appsv1.StatefulSet
+		want bool
+	}{
+		{"fully rolled out", sts(2, 2, replicas, replicas), true},
+		{"missing statefulset", nil, false},
+		{"generation not yet observed (pending change)", sts(3, 2, replicas, replicas), false},
+		{"replicas ready but not updated (previous revision readiness)", sts(2, 2, 1, replicas), false},
+		{"replicas updated but not ready (crashlooping new revision)", sts(2, 2, replicas, 1), false},
+		{"fresh create, nothing ready", sts(1, 1, 0, 0), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			if tc.obj != nil {
+				builder = builder.WithObjects(tc.obj)
+			}
+			c := builder.Build()
+
+			got, err := IsRolledOut(context.Background(), c, ns, name, replicas)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("IsRolledOut = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsRolledOutPropagatesErrors verifies non-NotFound errors are surfaced, not treated as
+// not-rolled-out.
+func TestIsRolledOutPropagatesErrors(t *testing.T) {
+	scheme := runtime.NewScheme() // StatefulSet NOT registered → Get returns a non-NotFound error
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	if _, err := IsRolledOut(context.Background(), c, "default", "x", 1); err == nil {
+		t.Fatal("expected an error for an unregistered scheme, got nil")
+	}
+}
