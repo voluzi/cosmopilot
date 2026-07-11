@@ -324,6 +324,15 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		if nodeSet.CosmosignerSigningDigest() != recorded {
 			return fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain")
 		}
+		// The digest hashes the backend identity, replicas and target-group NAMES — not whether the
+		// served group still contains a validator. Converting the served group into a regular node
+		// group keeps a Vault/GCP digest identical while removing the validator the signer was
+		// protecting, so additionally require the signer to still resolve the recorded serving
+		// identity through a validator target.
+		if serving := nodeSet.Status.CosmosignerServingIdentity; serving != "" &&
+			nodeSet.CosmosignerValidatorTargetedIdentity() != serving {
+			return fmt.Errorf(".spec.cosmosigner: the validator the signer was serving can no longer be resolved (webhooks disabled) — removing or converting the served validator group would leave its on-chain key without its signing path")
+		}
 		// A matching digest proves this exact signer identity rolled out and served (regardless of how
 		// it was introduced — e.g. added under admission review before webhooks were disabled), so the
 		// at-establishment marker below must not re-judge it.

@@ -233,6 +233,14 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 				if chainNode.CosmosignerSigningDigest() != recorded {
 					return nil, fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled): the validator's key is fixed on-chain")
 				}
+				// The digest hashes the backend identity and replicas — not whether the node is still a
+				// validator. Dropping .spec.validator keeps a Vault/GCP digest identical while removing
+				// the validator the signer was protecting, so additionally require the signer to still
+				// resolve the recorded serving identity through a validator target.
+				if serving := chainNode.Status.CosmosignerServingIdentity; serving != "" &&
+					chainNode.CosmosignerValidatorTargetedIdentity() != serving {
+					return nil, fmt.Errorf(".spec.cosmosigner: the validator the signer was serving can no longer be resolved (webhooks disabled) — removing the validator block would leave its on-chain key without its signing path")
+				}
 				// A matching digest proves this identity rolled out and served; skip the addition guard.
 			} else if marker := chainNode.Status.CosmosignerAtEstablishment; marker != nil &&
 				chainNode.CosmosignerValidatorTargetedIdentity() != *marker && chainNode.IsValidator() {

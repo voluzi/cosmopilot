@@ -576,3 +576,28 @@ func TestValidateForReconcileSentryRetargetToValidator(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pre-provisioned Vault/GCP key")
 }
+
+// TestValidateForReconcileRejectsServedGroupConversion verifies that converting the served validator
+// group into a regular node group is rejected even though the signer digest stays identical (it
+// hashes the backend identity and group NAMES, not validator-ness): the serving-identity check
+// catches the transition that would leave the on-chain key without its signing path.
+func TestValidateForReconcileRejectsServedGroupConversion(t *testing.T) {
+	served := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	served.Status.CosmosignerSigningDigest = served.CosmosignerSigningDigest()
+	served.Status.CosmosignerServingIdentity = served.CosmosignerSigningIdentity()
+	served.Status.CosmosignerServingGroup = "validators"
+
+	// Unchanged: accepted.
+	_, err := validateForReconcile(served)
+	require.NoError(t, err)
+
+	// Convert the served group into a regular node group: the Vault digest is unchanged (same
+	// backend identity, same group name), but the served validator is gone → rejected.
+	converted := served.DeepCopy()
+	converted.Spec.Nodes[0].Validator = nil
+	require.Equal(t, served.Status.CosmosignerSigningDigest, converted.CosmosignerSigningDigest(),
+		"test premise: the digest must be unchanged by the group conversion")
+	_, err = validateForReconcile(converted)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "can no longer be resolved")
+}
