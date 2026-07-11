@@ -279,12 +279,12 @@ type ChainNodeStatus struct {
 	CosmosignerReplicas *int32 `json:"cosmosignerReplicas,omitempty"`
 
 	// CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at
-	// the moment the chain ID was first recorded. Empty string when no signer targeted a validator
-	// then — including sentry-mode signers, whose key identity is deliberately excluded so that later
-	// retargeting the same key onto a validator does not masquerade as the establishing
-	// configuration. It lets the no-webhook reconcile path tell an establishing validator signer
-	// (admitted) apart from one introduced afterwards (rejected unless the backend provably imports
-	// the registered key). Not meant to be set by hand.
+	// the moment the chain ID was first recorded. Empty string when no signer targeted a validator at
+	// chain establishment — including sentry-mode signers, whose key identity is deliberately
+	// excluded so that later retargeting the same key onto a validator does not masquerade as the
+	// establishing configuration. It lets the no-webhook reconcile path tell an establishing
+	// validator signer (admitted) apart from one introduced afterwards (rejected unless the backend
+	// provably imports the registered key). Not meant to be set by hand.
 	// +optional
 	CosmosignerAtEstablishment *string `json:"cosmosignerAtEstablishment,omitempty"`
 

@@ -242,13 +242,18 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 		}}, nil
 	default:
 		secretName := r.cosmosignerSoftwareSecretName(chainNode)
-		// Preflight the key secret whenever no controller flow creates it, instead of rolling out
-		// signer pods stuck on a missing Secret mount:
+		// Preflight the key secret whenever no controller flow will (re)create it, instead of rolling
+		// out signer pods stuck on a missing Secret mount:
 		//   - sentry mode (non-validator): the key is registered out-of-band and always user-supplied;
 		//   - an external-genesis validator: its key is user-supplied too (RequiresPrivKey only
-		//     generates keys for init/createValidator validators).
-		// Only init/createValidator validators — whose own key flow produces the secret — skip it.
-		if !chainNode.ShouldInitGenesis() && !(chainNode.IsValidator() && chainNode.Spec.Validator.CreateValidator != nil) {
+		//     generates keys for init/createValidator validators);
+		//   - an init/createValidator validator whose key flow already COMPLETED (Status.PubKey set):
+		//     RequiresPrivKey no longer regenerates the secret, so a deleted Secret stays deleted.
+		// Only an init/createValidator validator whose key flow is still pending skips the check —
+		// ensureSigningKey produces the secret on this same reconcile.
+		keyFlowPending := chainNode.Status.PubKey == "" &&
+			(chainNode.ShouldInitGenesis() || (chainNode.IsValidator() && chainNode.Spec.Validator.CreateValidator != nil))
+		if !keyFlowPending {
 			secret := &corev1.Secret{}
 			if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: secretName}, secret); err != nil {
 				if errors.IsNotFound(err) {

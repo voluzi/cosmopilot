@@ -227,27 +227,42 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		if !ok {
 			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software backend has no resolvable private-key secret")
 		}
-		// Preflight the key secret whenever no controller flow creates it, instead of rolling out
-		// signer pods stuck on a missing Secret mount:
+		// Preflight the key secret whenever no controller flow will (re)create it, instead of rolling
+		// out signer pods stuck on a missing Secret mount:
 		//   - sentry mode (no validator target): the key is registered on-chain out-of-band and always
 		//     user-supplied (pre-provision it before genesis is fixed — a key minted here could never
 		//     be in the validator set);
 		//   - a targeted EXTERNAL-GENESIS validator: its explicit privateKeySecret is user-supplied
-		//     too — only init/createValidator validator flows generate their own key secret.
-		targetGeneratesKey := false
+		//     too — only init/createValidator validator flows generate their own key secret;
+		//   - a targeted init/createValidator validator whose key flow already COMPLETED (its pubkey
+		//     is recorded in status): the key secret is never regenerated, so a deleted Secret stays
+		//     deleted.
+		// Only a target whose key-generation flow is still pending skips the check — the child
+		// ChainNode produces the secret during that flow.
+		keyFlowPending := false
 		if group := nodeSet.CosmosignerTargetedValidatorGroup(); group != "" {
+			generates := false
 			if group == appsv1.ReservedValidatorGroupName {
 				v := nodeSet.Spec.Validator
-				targetGeneratesKey = v != nil && (v.Init != nil || v.CreateValidator != nil)
+				generates = v != nil && (v.Init != nil || v.CreateValidator != nil)
 			} else {
 				for _, g := range nodeSet.Spec.Nodes {
 					if g.Name == group && g.Validator != nil {
-						targetGeneratesKey = g.Validator.Init != nil || g.Validator.CreateValidator != nil
+						generates = g.Validator.Init != nil || g.Validator.CreateValidator != nil
+					}
+				}
+			}
+			if generates {
+				keyFlowPending = true
+				for _, v := range nodeSet.Status.Validators {
+					if v.Group == group && v.PubKey != "" {
+						// The targeted validator already registered its key; the flow will not run again.
+						keyFlowPending = false
 					}
 				}
 			}
 		}
-		if !targetGeneratesKey {
+		if !keyFlowPending {
 			exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)
 			if err != nil {
 				return cosmosigner.Backend{}, err

@@ -204,3 +204,60 @@ func TestUndeployCleansOwnPVCsDespiteForeignStatefulSet(t *testing.T) {
 		t.Fatalf("foreign PVC must remain, got err=%v", err)
 	}
 }
+
+// TestAdoptLegacyPVCsOwnershipProof verifies unlabeled legacy claims are labeled ONLY while our own
+// StatefulSet holds the signer name (race-free proof), and never under a foreign one; and that
+// strict delete matching then removes only labeled-ours claims.
+func TestAdoptLegacyPVCsOwnershipProof(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		ns   = "default"
+		name = "mychain-signer"
+	)
+	me := fakeOwner("me", types.UID("me-uid"))
+	other := fakeOwner("other", types.UID("other-uid"))
+	legacyPVC := func() *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: InstanceLabels(name),
+		}}
+	}
+
+	// Our StatefulSet holds the name: the legacy claim is adopted (labeled with our UID).
+	ownSTS := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ownSTS, legacyPVC()).Build()
+	if err := AdoptLegacyPVCs(context.Background(), c, me, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	adopted := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: dataVolumeName + "-" + name + "-0"}, adopted); err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Labels[labelOwnerUID] != "me-uid" {
+		t.Fatalf("legacy claim must be adopted while our StatefulSet holds the name, labels=%v", adopted.Labels)
+	}
+
+	// A FOREIGN StatefulSet holds the name: the legacy claim is left unlabeled, and strict delete
+	// matching then never removes it.
+	foreignSTS := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(other)},
+	}}
+	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreignSTS, legacyPVC()).Build()
+	if err := AdoptLegacyPVCs(context.Background(), c, me, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeletePVCs(context.Background(), c, me, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	remaining := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: dataVolumeName + "-" + name + "-0"}, remaining); err != nil {
+		t.Fatalf("unlabeled legacy claim under a foreign StatefulSet must never be adopted or deleted: %v", err)
+	}
+	if _, labeled := remaining.Labels[labelOwnerUID]; labeled {
+		t.Fatal("claim must remain unlabeled under a foreign StatefulSet")
+	}
+}

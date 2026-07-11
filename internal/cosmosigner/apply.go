@@ -112,6 +112,12 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, d
 // StatefulSet holds the name — so this owner's lingering raft-state claims are never stranded (which
 // would deadlock the IsTornDown gate waiting on them).
 func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+	// Attribute legacy (pre-owner-label) claims to us while our StatefulSet still provably holds the
+	// name — after it is deleted below, unlabeled claims can no longer be safely attributed.
+	if err := AdoptLegacyPVCs(ctx, c, owner, namespace, name); err != nil {
+		return err
+	}
+
 	objects := []client.Object{
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
@@ -150,16 +156,13 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 // not. A claim already marked for deletion but held by a finalizer still counts as present, since a
 // fresh StatefulSet could bind it and inherit stale raft state.
 func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
-	foreign := false
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err == nil {
 		// A same-name StatefulSet exists. Only OUR StatefulSet blocks teardown completion; a foreign
-		// one falls through to the owner-scoped PVC check below (its unlabeled legacy claims are then
-		// not attributed to us, mirroring DeletePVCs).
+		// one falls through to the owner-scoped PVC check below.
 		if metav1.IsControlledBy(sts, owner) {
 			return false, nil
 		}
-		foreign = true
 	} else if !errors.IsNotFound(err) {
 		return false, err
 	}
@@ -169,7 +172,7 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 		return false, err
 	}
 	for i := range pvcs.Items {
-		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name, !foreign) {
+		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
 			return false, nil
 		}
 	}
