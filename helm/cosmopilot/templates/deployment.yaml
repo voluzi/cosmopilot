@@ -59,6 +59,8 @@ spec:
               value: {{ .Values.cosmoGuardImage }}
             - name: COSMOSEED_IMAGE
               value: {{ .Values.cosmoseedImage }}
+            - name: COSMOSIGNER_IMAGE
+              value: {{ .Values.cosmosignerImage }}
             - name: WORKER_NAME
               value: {{ .Values.workerName }}
             - name: WORKER_COUNT

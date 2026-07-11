@@ -13,6 +13,7 @@ type ControllerRunOptions struct {
 	DisableWebhooks          bool
 	CosmoGuardImage          string
 	CosmoseedImage           string
+	CosmosignerImage         string
 	ReleaseName              string
 	DisruptionCheckEnabled   bool
 	DisruptionMaxUnavailable int

@@ -52,8 +52,10 @@ type Cosmosigner struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// Image is the cosmosigner container image to use. Defaults to
-	// `ghcr.io/voluzi/cosmosigner:latest`.
+	// Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
+	// image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
+	// defaulting to `ghcr.io/voluzi/cosmosigner:latest`). Set this to pin or override the image for
+	// this specific signer only.
 	// +optional
 	Image *string `json:"image,omitempty"`
 

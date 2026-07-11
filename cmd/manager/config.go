@@ -44,6 +44,11 @@ func init() {
 		"image to be used in cosmoseed deployments when enabled.",
 	)
 
+	flag.StringVar(&runOpts.CosmosignerImage, "cosmosigner-image",
+		environ.GetString("COSMOSIGNER_IMAGE", ""),
+		"default image to be used in cosmosigner deployments when enabled; overridden per-resource by .spec.cosmosigner.image.",
+	)
+
 	flag.StringVar(&runOpts.WorkerName, "worker-name",
 		environ.GetString("WORKER_NAME", ""),
 		"name of the worker, passed in label `worker-name`. Used for limiting resources processed by this operator instance.",

@@ -40,6 +40,10 @@ $ helm show values oci://ghcr.io/voluzi/helm/cosmopilot
 - **Description**: The container image of [Cosmoseed](https://github.com/voluzi/cosmoseed) (with version tag included). Used when deploying seed nodes.
 - **Default**: `ghcr.io/voluzi/cosmoseed`
 
+### `cosmosignerImage`
+- **Description**: The default container image of [Cosmosigner](https://github.com/voluzi/cosmosigner) (with version tag included), used when deploying managed remote signers. Can be overridden per-signer with `.spec.cosmosigner.image`.
+- **Default**: `ghcr.io/voluzi/cosmosigner:latest`
+
 ### `imagePullSecrets`
 - **Description**: Secrets for pulling images from private repositories.
 - **Default**: `[]`

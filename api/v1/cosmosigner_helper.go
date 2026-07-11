@@ -20,10 +20,16 @@ func (c *Cosmosigner) GetReplicas() int32 {
 	return DefaultCosmosignerReplicas
 }
 
-// GetImage returns the configured signer image, defaulting to DefaultCosmosignerImage.
-func (c *Cosmosigner) GetImage() string {
+// GetImage returns the configured signer image: the explicit per-CR override when set, otherwise
+// operatorDefault (the operator-wide cosmosigner image, wired from the `-cosmosigner-image` /
+// `COSMOSIGNER_IMAGE` flag — see ControllerRunOptions.CosmosignerImage), and DefaultCosmosignerImage
+// only when even that is empty (e.g. a manager run with no image configured at all).
+func (c *Cosmosigner) GetImage(operatorDefault string) string {
 	if c != nil && c.Image != nil && *c.Image != "" {
 		return *c.Image
+	}
+	if operatorDefault != "" {
+		return operatorDefault
 	}
 	return DefaultCosmosignerImage
 }

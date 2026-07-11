@@ -1028,7 +1028,7 @@ Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
 | ----- | ----------- | ------ | -------- |
 | nodeGroups | NodeGroups is the list of node group names (.spec.nodes[].name) the signer will connect to and sign for. Only valid on a ChainNodeSet. When empty, the configured validator group is targeted by default. Every targeted node listens for the signer and shares the single consensus identity held by the configured backend. | []string | false |
 | replicas | Replicas is the number of signer instances to run. Must be an odd number so the embedded raft cluster can form a quorum. Defaults to `1` (a single-instance signer with no HA). | *int32 | false |
-| image | Image is the cosmosigner container image to use. Defaults to `ghcr.io/voluzi/cosmosigner:latest`. | *string | false |
+| image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:latest`). Set this to pin or override the image for this specific signer only. | *string | false |
 | backend | Backend selects and configures where the consensus key material lives and how signing is performed. Exactly one backend must be configured. | [CosmosignerBackend](#cosmosignerbackend) | true |
 | stateStorageSize | StateStorageSize is the size of the per-replica PVC used for the raft double-sign protection state and the persisted connection key. Defaults to `1Gi`. | *string | false |
 | storageClassName | StorageClassName is the storage class for the per-replica state PVC. Defaults to the cluster default storage class when unset. | *string | false |
