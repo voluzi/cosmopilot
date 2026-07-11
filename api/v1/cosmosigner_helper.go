@@ -86,6 +86,77 @@ func (c *Cosmosigner) UsesGcpKmsBackend() bool {
 	return c != nil && c.Backend.GcpKMS != nil
 }
 
+// VaultUploadsGenerated reports whether the Vault backend imports the validator's locally-generated
+// key: explicitly via uploadGenerated, or implicitly when the targeted validator initializes a new
+// genesis (the documented auto-default — a fresh genesis always generates its consensus key
+// locally, so it must be imported for the signer to hold it).
+func (c *Cosmosigner) VaultUploadsGenerated(initTarget bool) bool {
+	return c.UsesVaultBackend() && (c.Backend.Vault.UploadGenerated || initTarget)
+}
+
+// cosmosignerTargetAlreadyRegistered reports whether the cosmosigner-targeted validator has
+// already registered its consensus key on-chain: a genesis-init target once the chain exists
+// (its key is baked into genesis), or a createValidator target whose recorded validator status is
+// non-empty (the create-validator tx completed). Used by the no-webhook path: the
+// "registers ⇒ software/uploadGenerated" rule protects a PENDING registration from mismatching the
+// signer; once registration has happened it is moot, and key protection belongs to the
+// immutability guards.
+func (nodeSet *ChainNodeSet) cosmosignerTargetAlreadyRegistered() bool {
+	if nodeSet.Status.ChainID == "" {
+		return false
+	}
+	for name := range nodeSet.CosmosignerTargetGroups() {
+		var cfg *NodeSetValidatorConfig
+		var nodeName string
+		if name == ReservedValidatorGroupName {
+			cfg = nodeSet.Spec.Validator
+			nodeName = nodeSet.GetName() + "-validator"
+		} else {
+			for _, g := range nodeSet.Spec.Nodes {
+				if g.Name == name && g.Validator != nil {
+					cfg = g.Validator
+					nodeName = fmt.Sprintf("%s-%s-0", nodeSet.GetName(), name)
+				}
+			}
+		}
+		if cfg == nil {
+			continue
+		}
+		// Genesis-init: the chain existing means the key is registered in genesis.
+		if cfg.Init != nil {
+			return true
+		}
+		// createValidator: registered once its recorded status is non-empty.
+		if cfg.CreateValidator != nil {
+			for _, vs := range nodeSet.Status.Validators {
+				if vs.Name == nodeName && vs.Status != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// CosmosignerTargetInitializesGenesis reports whether the cosmosigner-targeted validator (legacy
+// singleton or a targeted validator group) initializes a new genesis.
+func (nodeSet *ChainNodeSet) CosmosignerTargetInitializesGenesis() bool {
+	for name := range nodeSet.CosmosignerTargetGroups() {
+		if name == ReservedValidatorGroupName {
+			if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
+				return true
+			}
+			continue
+		}
+		for _, g := range nodeSet.Spec.Nodes {
+			if g.Name == name && g.Validator != nil && g.Validator.Init != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // RequiresLocalPrivKey reports whether the backend needs a local priv_validator_key.json
 // secret to be present: the software backend mounts it directly, and the Vault backend with
 // uploadGenerated imports it. GCP and pre-provisioned Vault backends do not.

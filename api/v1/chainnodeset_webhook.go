@@ -577,13 +577,21 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 	// When the targeted validator registers a freshly-generated consensus key on-chain (genesis
 	// init or create-validator), Cosmopilot registers the validator's local key. The signer must
 	// therefore use that same key: only the software backend (which references it) or Vault with
-	// uploadGenerated (which imports it) match. A pre-provisioned Vault/GCP key would register a
+	// uploadGenerated (which imports it — implicitly auto-defaulted for genesis-init targets, per
+	// the documented tmKMS-parity behavior) match. A pre-provisioned Vault/GCP key would register a
 	// different pubkey than the signer holds, until external pubkey registration is wired. Waived
 	// for a same-key migration on an established chain (mirrors the ChainNode webhook): the previous
-	// signing path already put this exact key on-chain, e.g. tmKMS→cosmosigner on the same Vault key.
+	// signing path already put this exact key on-chain, e.g. tmKMS→cosmosigner on the same Vault
+	// key. On the no-webhook path (old == nil) the rule is waived once the target's key is ALREADY
+	// registered on-chain (genesis exists for an init target; validator status recorded for a
+	// createValidator target): the pending registration this rule protects has completed, so a
+	// pre-provisioned same-key backend is legitimate — key-change protection is the immutability
+	// guards' job, not this rule's.
 	registers := targetValidator.Init != nil || targetValidator.CreateValidator != nil
-	if registers && !nodeSetSameKeyMigration(old, nodeSet) {
-		matches := c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated)
+	sameKeyWaiver := nodeSetSameKeyMigration(old, nodeSet) ||
+		(old == nil && nodeSet.cosmosignerTargetAlreadyRegistered())
+	if registers && !sameKeyWaiver {
+		matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(targetValidator.Init != nil)
 		if !matches {
 			return fmt.Errorf(".spec.cosmosigner targeting a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
 		}

@@ -190,7 +190,9 @@ func (r *Reconciler) cosmosignerNodeKeySecret(chainNode *appsv1.ChainNode) strin
 // uploadGenerated is set.
 func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (bool, error) {
 	c := chainNode.Spec.Cosmosigner
-	if !c.UsesVaultBackend() || !c.Backend.Vault.UploadGenerated {
+	// uploadGenerated is auto-defaulted for genesis-init validators (their consensus key is always
+	// generated locally, so it must be imported), matching the documented tmKMS-parity behavior.
+	if !c.VaultUploadsGenerated(chainNode.ShouldInitGenesis()) {
 		return false, nil
 	}
 
@@ -213,6 +215,12 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 	}
 	if len(secret.Data[PrivKeyFilename]) == 0 {
 		return true, nil
+	}
+
+	// Quiesce any already-running signer BEFORE the synchronous re-import, so it cannot keep
+	// signing with the previously imported key while the new one lands; redeployed right after.
+	if err := cosmosigner.ScaleDown(ctx, r.Client, chainNode, chainNode.GetNamespace(), params.Name); err != nil {
+		return false, err
 	}
 
 	runner := cosmosigner.JobRunner{Client: r.ClientSet, Scheme: r.Scheme, Owner: chainNode, Params: params}

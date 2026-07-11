@@ -148,13 +148,21 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 
 		// A validator that registers a freshly-generated key on-chain must sign with that same key,
 		// so the backend must be software (which references it) or Vault uploadGenerated (which
-		// imports it) — not a pre-provisioned Vault/GCP key with a different pubkey. This is waived
-		// for a same-key migration on an established chain: the previous signing path already put this
-		// exact key on-chain, so a pre-provisioned key that matches it is correct (e.g. tmKMS→
-		// cosmosigner on the same Vault key, where the key is already in Vault).
-		sameKeyMigration := old != nil && old.Status.ChainID != "" && old.EffectiveSigningIdentity() == chainNode.EffectiveSigningIdentity()
-		if registers && !sameKeyMigration {
-			matches := c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated)
+		// imports it — auto-defaulted for genesis-init validators, matching the documented tmKMS
+		// parity) — not a pre-provisioned Vault/GCP key with a different pubkey. Waived for a
+		// same-key migration on an established chain: the previous signing path already put this
+		// exact key on-chain (e.g. tmKMS→cosmosigner on the same Vault key). On the no-webhook path
+		// (old == nil) the same waiver applies once the registration has completed — genesis exists
+		// for an init validator, or the validator status is recorded for createValidator — since the
+		// pending registration this rule protects is then done and key-change protection belongs to
+		// the immutability guards.
+		hasInit := chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
+		alreadyRegistered := chainNode.Status.ChainID != "" &&
+			(hasInit || chainNode.Status.ValidatorStatus != "")
+		sameKeyWaiver := (old != nil && old.Status.ChainID != "" && old.EffectiveSigningIdentity() == chainNode.EffectiveSigningIdentity()) ||
+			(old == nil && alreadyRegistered)
+		if registers && !sameKeyWaiver {
+			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(hasInit)
 			if !matches {
 				return nil, fmt.Errorf(".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
 			}

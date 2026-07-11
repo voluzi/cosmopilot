@@ -223,9 +223,14 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("cannot be set when targeting a validator"))
 	})
 
-	It("rejects a pre-provisioned Vault key for a genesis-init validator target", func() {
+	It("rejects a pre-provisioned GCP key for a genesis-init validator target", func() {
+		// Vault gets uploadGenerated auto-defaulted for init targets (accepted — covered by a unit
+		// test, since creating a live init nodeset here would starve envtest workers). GCP has no
+		// import path, so an init target with a pre-provisioned GCP key is still rejected.
 		cs := newNodeSet(
-			&appsv1.Cosmosigner{Backend: vaultBackend()}, // uploadGenerated=false
+			&appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+				GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"},
+			}},
 			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
 			&appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
 				ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
@@ -335,7 +340,9 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("managed by the ChainNodeSet controller"))
 	})
 
-	It("rejects a pre-provisioned Vault key for a standalone genesis-init validator", func() {
+	It("rejects a pre-provisioned GCP key for a standalone genesis-init validator", func() {
+		// Vault gets uploadGenerated auto-defaulted for init validators (accepted); GCP has no
+		// import path, so it is still rejected for a pending genesis-init registration.
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
 			Spec: appsv1.ChainNodeSpec{
@@ -343,7 +350,9 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 				Validator: &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
 					ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
 				}},
-				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()}, // uploadGenerated=false
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"},
+				}},
 			},
 		}
 		err := Framework().Client().Create(Framework().Context(), cn)
