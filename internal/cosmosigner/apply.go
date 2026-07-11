@@ -58,27 +58,34 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	return c.Update(ctx, obj)
 }
 
-// ScaleDown scales an existing signer StatefulSet owned by owner to zero replicas. Used while a
-// key re-import is pending: an already-running signer must not keep signing with the previously
-// imported key while the target is being re-keyed. No-op when the StatefulSet does not exist, is
-// foreign-owned, or is already scaled to zero.
-func ScaleDown(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+// ScaleDown scales an existing signer StatefulSet owned by owner to zero replicas and reports
+// whether the signer is fully quiesced (no pods left). Used while a key re-import is pending: an
+// already-running signer must not keep signing with the previously imported key while the target
+// is being re-keyed. The scale-down is asynchronous, so callers must treat quiesced=false as
+// "retry later" and NOT proceed with the import (nor re-apply the StatefulSet at full replicas,
+// which would cancel the scale-down). A missing or foreign-owned StatefulSet counts as quiesced.
+func ScaleDown(ctx context.Context, c client.Client, owner client.Object, namespace, name string) (quiesced bool, err error) {
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
 		if errors.IsNotFound(err) {
-			return nil
+			return true, nil
 		}
-		return err
+		return false, err
 	}
 	if !metav1.IsControlledBy(sts, owner) {
-		return nil
+		return true, nil
 	}
-	if sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0 {
-		return nil
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0 {
+		zero := int32(0)
+		sts.Spec.Replicas = &zero
+		if err := c.Update(ctx, sts); err != nil {
+			return false, err
+		}
+		// Just requested; pods are still terminating.
+		return false, nil
 	}
-	zero := int32(0)
-	sts.Spec.Replicas = &zero
-	return c.Update(ctx, sts)
+	// Already requested zero: quiesced only once the controller reports no replicas left.
+	return sts.Status.Replicas == 0, nil
 }
 
 // IsRolledOut reports whether the signer StatefulSet's CURRENT generation is fully deployed: the

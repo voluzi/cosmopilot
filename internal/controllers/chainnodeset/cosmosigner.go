@@ -66,7 +66,8 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 	// after a source/target change it would keep signing with the previously imported key while the
 	// re-import is pending. A later reconcile completes the import and (re)deploys the signer.
 	if importPending {
-		return cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name)
+		_, err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name)
+		return err
 	}
 
 	sts, err := params.StatefulSet(configYAML)
@@ -230,9 +231,15 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 
 	// Quiesce any already-running signer BEFORE the (synchronous) re-import: on a source/target
 	// change it would otherwise keep signing with the previously imported key while the new one is
-	// being imported. It is redeployed by the caller right after the import succeeds.
-	if err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name); err != nil {
+	// being imported. Scale-down is asynchronous — until every signer pod is actually gone the
+	// import stays pending (retried on a later reconcile), which also prevents the caller from
+	// re-applying the StatefulSet at full replicas and cancelling the scale-down.
+	quiesced, err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name)
+	if err != nil {
 		return false, err
+	}
+	if !quiesced {
+		return true, nil
 	}
 
 	runner := cosmosigner.JobRunner{

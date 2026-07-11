@@ -152,15 +152,15 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// parity) — not a pre-provisioned Vault/GCP key with a different pubkey. Waived for a
 		// same-key migration on an established chain: the previous signing path already put this
 		// exact key on-chain (e.g. tmKMS→cosmosigner on the same Vault key). On the no-webhook path
-		// (old == nil) the same waiver applies once the registration has completed — genesis exists
-		// for an init validator, or the validator status is recorded for createValidator — since the
-		// pending registration this rule protects is then done and key-change protection belongs to
-		// the immutability guards.
+		// (old == nil) the waiver requires the status-recorded signing digest to MATCH the current
+		// spec: the digest is only ever recorded after this exact signer identity was rolled out and
+		// serving, so a matching digest proves the pre-provisioned key is the in-effect one — while
+		// a NEWLY added signer (no digest, or digest from a different identity) stays subject to the
+		// rule, since "registration completed" alone says nothing about the new backend's key.
 		hasInit := chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
-		alreadyRegistered := chainNode.Status.ChainID != "" &&
-			(hasInit || chainNode.Status.ValidatorStatus != "")
 		sameKeyWaiver := (old != nil && old.Status.ChainID != "" && old.EffectiveSigningIdentity() == chainNode.EffectiveSigningIdentity()) ||
-			(old == nil && alreadyRegistered)
+			(old == nil && chainNode.Status.CosmosignerSigningDigest != "" &&
+				chainNode.CosmosignerSigningDigest() == chainNode.Status.CosmosignerSigningDigest)
 		if registers && !sameKeyWaiver {
 			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(hasInit)
 			if !matches {

@@ -582,14 +582,16 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 	// different pubkey than the signer holds, until external pubkey registration is wired. Waived
 	// for a same-key migration on an established chain (mirrors the ChainNode webhook): the previous
 	// signing path already put this exact key on-chain, e.g. tmKMS→cosmosigner on the same Vault
-	// key. On the no-webhook path (old == nil) the rule is waived once the target's key is ALREADY
-	// registered on-chain (genesis exists for an init target; validator status recorded for a
-	// createValidator target): the pending registration this rule protects has completed, so a
-	// pre-provisioned same-key backend is legitimate — key-change protection is the immutability
-	// guards' job, not this rule's.
+	// key. On the no-webhook path (old == nil) the waiver requires the status-recorded signing
+	// digest to MATCH the current spec: the digest is only recorded after this exact signer
+	// identity was rolled out and serving, so a matching digest proves the pre-provisioned key is
+	// the one in effect — while a newly added signer (no digest, or a different identity) stays
+	// subject to the rule. (A first-time no-webhook migration can set uploadGenerated=true: the
+	// import verifies the stored pubkey matches the source key, so it is a safe no-op on same-key.)
 	registers := targetValidator.Init != nil || targetValidator.CreateValidator != nil
 	sameKeyWaiver := nodeSetSameKeyMigration(old, nodeSet) ||
-		(old == nil && nodeSet.cosmosignerTargetAlreadyRegistered())
+		(old == nil && nodeSet.Status.CosmosignerSigningDigest != "" &&
+			nodeSet.CosmosignerSigningDigest() == nodeSet.Status.CosmosignerSigningDigest)
 	if registers && !sameKeyWaiver {
 		matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(targetValidator.Init != nil)
 		if !matches {
