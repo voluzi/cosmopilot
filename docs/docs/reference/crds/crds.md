@@ -148,6 +148,7 @@ ChainNodeStatus defines the observed state of ChainNode
 | pubKey | Public key of the validator. | string | false |
 | validatorStatus | Indicates the current status of validator if this node is one. | ValidatorStatus | false |
 | cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity, captured once the chain is established, so the no-webhook reconcile path can reject a later change or removal of the signing configuration. Not meant to be set by hand. | string | false |
+| cosmosignerReplicas | CosmosignerReplicas records the raft replica count the managed signer was rolled out with, captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. Not meant to be set by hand. | *int32 | false |
 
 [Back to Custom Resources](#custom-resources)
 

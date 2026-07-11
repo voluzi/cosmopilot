@@ -85,18 +85,30 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return err
 	}
 
-	// Record the signing identity only after the CURRENT signer generation is fully rolled out
-	// (read from the live object — the freshly rendered sts carries no status), so a config that
-	// never worked stays correctable and a pending change is never locked in by a previous
-	// revision's readiness. Only validators get a digest: a non-validator sentry's key lives
-	// out-of-band and must remain add/remove/rotate-able (mirrors the webhook waiver).
-	if chainNode.Status.CosmosignerSigningDigest == "" && chainNode.IsValidator() {
+	// Record persisted invariants only after the CURRENT signer generation is fully rolled out (read
+	// from the live object — the freshly rendered sts carries no status), so a config that never
+	// worked stays correctable and a pending change is never locked in by a previous revision's
+	// readiness.
+	//
+	//   - Replicas is recorded for EVERY signer (validator and sentry alike): the raft membership
+	//     baked into the per-pod state cannot be migrated by re-rendering a bootstrap list, so the
+	//     no-webhook path rejects a later replica change from this recorded value.
+	//   - The signing digest is recorded only for a validator: a non-validator sentry's key lives
+	//     out-of-band and must stay add/remove/rotate-able (mirrors the webhook waiver).
+	needReplicas := chainNode.Status.CosmosignerReplicas == nil
+	needDigest := chainNode.Status.CosmosignerSigningDigest == "" && chainNode.IsValidator()
+	if needReplicas || needDigest {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
 		if err != nil {
 			return err
 		}
 		if rolledOut {
-			chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
+			if needReplicas {
+				chainNode.Status.CosmosignerReplicas = ptr.To(params.Replicas)
+			}
+			if needDigest {
+				chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
+			}
 			return r.Status().Update(ctx, chainNode)
 		}
 	}
