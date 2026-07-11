@@ -171,7 +171,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 
 func updateValidatorStatus(nodeSet *appsv1.ChainNodeSet, validator *appsv1.ChainNode, cfg *appsv1.NodeSetValidatorConfig, group string, isGenesisInit, setLegacyAlias bool) {
 	if nodeSet.Status.ChainID == "" {
-		nodeSet.Status.ChainID = validator.Status.ChainID
+		nodeSet.SetEstablishedChainID(validator.Status.ChainID)
 	}
 	nodeStatus := appsv1.ChainNodeSetNodeStatus{
 		Name:    validator.Name,

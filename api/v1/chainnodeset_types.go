@@ -172,6 +172,15 @@ type ChainNodeSetStatus struct {
 	// (rejected unless the backend provably imports the registered key). Not meant to be set by hand.
 	// +optional
 	CosmosignerAtEstablishment *string `json:"cosmosignerAtEstablishment,omitempty"`
+
+	// CosmosignerServingIdentity records the effective signing identity of the rolled-out
+	// validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on
+	// teardown. It lets the no-webhook reconcile path judge a signer REMOVAL from status alone:
+	// removal is only admitted when a validator in the resulting spec still resolves to this same
+	// identity through its own signing path (e.g. a software-backed signer that used the validator's
+	// own key secret), so the on-chain key keeps signing. Not meant to be set by hand.
+	// +optional
+	CosmosignerServingIdentity string `json:"cosmosignerServingIdentity,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.

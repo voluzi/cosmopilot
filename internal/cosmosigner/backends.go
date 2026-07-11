@@ -43,8 +43,15 @@ const (
 	gcpCredsVolume   = "gcp-credentials"
 	softwareVolume   = "software-key"
 
-	vaultTokenFile = vaultMountDir + "/token"
-	vaultCaFile    = vaultMountDir + "/ca.crt"
+	// Credential files are exposed via DIRECTORY mounts with an items projection (never subPath):
+	// kubelet refreshes directory-mounted Secret contents in place via its symlink swap, whereas a
+	// subPath mount freezes the file at pod start — an in-place rotation of e.g. a short-lived Vault
+	// token would then never reach the signer until a manual restart. Each credential gets its own
+	// directory so the mounts cannot collide.
+	vaultTokenDir  = vaultMountDir + "/token-dir"
+	vaultTokenFile = vaultTokenDir + "/token"
+	vaultCaDir     = vaultMountDir + "/ca-dir"
+	vaultCaFile    = vaultCaDir + "/ca.crt"
 	gcpCredsFile   = gcpMountDir + "/credentials.json"
 )
 
@@ -108,11 +115,17 @@ func (b Backend) volumes() []corev1.Volume {
 			},
 		}
 	case b.Vault != nil:
+		// The items projection maps the (arbitrary) Secret key to a stable filename inside the
+		// directory mount, so rotation propagates (see the constants above) while the config keeps
+		// pointing at a fixed path.
 		vols := []corev1.Volume{
 			{
 				Name: vaultTokenVolume,
 				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{SecretName: b.Vault.TokenSecret.Name},
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: b.Vault.TokenSecret.Name,
+						Items:      []corev1.KeyToPath{{Key: b.Vault.TokenSecret.Key, Path: "token"}},
+					},
 				},
 			},
 		}
@@ -120,7 +133,10 @@ func (b Backend) volumes() []corev1.Volume {
 			vols = append(vols, corev1.Volume{
 				Name: vaultCaVolume,
 				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{SecretName: b.Vault.CertificateSecret.Name},
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: b.Vault.CertificateSecret.Name,
+						Items:      []corev1.KeyToPath{{Key: b.Vault.CertificateSecret.Key, Path: "ca.crt"}},
+					},
 				},
 			})
 		}
@@ -131,7 +147,10 @@ func (b Backend) volumes() []corev1.Volume {
 				{
 					Name: gcpCredsVolume,
 					VolumeSource: corev1.VolumeSource{
-						Secret: &corev1.SecretVolumeSource{SecretName: b.GCP.CredentialsSecret.Name},
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: b.GCP.CredentialsSecret.Name,
+							Items:      []corev1.KeyToPath{{Key: b.GCP.CredentialsSecret.Key, Path: "credentials.json"}},
+						},
 					},
 				},
 			}
@@ -144,23 +163,26 @@ func (b Backend) volumes() []corev1.Volume {
 func (b Backend) volumeMounts() []corev1.VolumeMount {
 	switch {
 	case b.Software != nil:
+		// Directory mount (no subPath): the secret's priv_validator_key.json lands at softwareKeyFile
+		// and an in-place rotation propagates into the container.
 		return []corev1.VolumeMount{
-			{Name: softwareVolume, ReadOnly: true, MountPath: softwareKeyFile, SubPath: "priv_validator_key.json"},
+			{Name: softwareVolume, ReadOnly: true, MountPath: softwareKeyDir},
 		}
 	case b.Vault != nil:
+		// Directory mounts (no subPath) so in-place Secret rotation propagates into the container.
 		mounts := []corev1.VolumeMount{
-			{Name: vaultTokenVolume, ReadOnly: true, MountPath: vaultTokenFile, SubPath: b.Vault.TokenSecret.Key},
+			{Name: vaultTokenVolume, ReadOnly: true, MountPath: vaultTokenDir},
 		}
 		if b.Vault.CertificateSecret != nil {
 			mounts = append(mounts, corev1.VolumeMount{
-				Name: vaultCaVolume, ReadOnly: true, MountPath: vaultCaFile, SubPath: b.Vault.CertificateSecret.Key,
+				Name: vaultCaVolume, ReadOnly: true, MountPath: vaultCaDir,
 			})
 		}
 		return mounts
 	case b.GCP != nil:
 		if b.GCP.CredentialsSecret != nil {
 			return []corev1.VolumeMount{
-				{Name: gcpCredsVolume, ReadOnly: true, MountPath: gcpCredsFile, SubPath: b.GCP.CredentialsSecret.Key},
+				{Name: gcpCredsVolume, ReadOnly: true, MountPath: gcpMountDir},
 			}
 		}
 	}
@@ -185,7 +207,7 @@ func (b Backend) sidecars() []corev1.Container {
 			{Name: "VAULT_TOKEN_PATH", Value: vaultTokenFile},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: vaultTokenVolume, ReadOnly: true, MountPath: vaultTokenFile, SubPath: b.Vault.TokenSecret.Key},
+			{Name: vaultTokenVolume, ReadOnly: true, MountPath: vaultTokenDir},
 		},
 		Resources: corev1.ResourceRequirements{Requests: renewerResources, Limits: renewerResources},
 	}
@@ -196,7 +218,7 @@ func (b Backend) sidecars() []corev1.Container {
 	if b.Vault.CertificateSecret != nil {
 		c.Env = append(c.Env, corev1.EnvVar{Name: "VAULT_CACERT", Value: vaultCaFile})
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-			Name: vaultCaVolume, ReadOnly: true, MountPath: vaultCaFile, SubPath: b.Vault.CertificateSecret.Key,
+			Name: vaultCaVolume, ReadOnly: true, MountPath: vaultCaDir,
 		})
 	}
 	return []corev1.Container{c}

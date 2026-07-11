@@ -39,16 +39,19 @@ func cosmosignerTargetLabelValue(chainNode *appsv1.ChainNode) (string, bool) {
 // ensureCosmosigner deploys (or tears down) a managed cosmosigner remote signer for a standalone
 // ChainNode. It is a no-op until the chain ID is known.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	// Record, write-once, which signer identity (possibly none — empty string) was in effect when the
-	// chain was established. The no-webhook path uses this to tell an establishing signer (admitted)
-	// apart from one added to an already-established chain (unverifiable without the old spec). Also
-	// backfilled on chains upgraded from a version predating the marker: an already-configured signer
-	// records its current identity, so it is never retroactively rejected.
+	// The at-establishment identity marker is normally recorded atomically with the chain ID (see
+	// SetEstablishedChainID). A nil marker on an established chain therefore only occurs on chains
+	// upgraded from a version predating it — backfill it conservatively: an identity proven by a
+	// recorded rollout digest (it served) is kept; anything unproven records "" and so stays subject
+	// to the no-webhook addition guard. Return before touching signer resources, so the guard judges
+	// the marker on the next reconcile BEFORE anything is deployed.
 	if chainNode.Status.ChainID != "" && chainNode.Status.CosmosignerAtEstablishment == nil {
-		chainNode.Status.CosmosignerAtEstablishment = ptr.To(chainNode.CosmosignerSigningIdentity())
-		if err := r.Status().Update(ctx, chainNode); err != nil {
-			return err
+		identity := ""
+		if chainNode.Status.CosmosignerSigningDigest != "" {
+			identity = chainNode.CosmosignerSigningIdentity()
 		}
+		chainNode.Status.CosmosignerAtEstablishment = ptr.To(identity)
+		return r.Status().Update(ctx, chainNode)
 	}
 
 	if chainNode.Spec.Cosmosigner == nil {
@@ -58,7 +61,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return nil
 	}
 
-	params := r.cosmosignerParams(chainNode)
+	params, err := r.cosmosignerParams(ctx, chainNode)
+	if err != nil {
+		return err
+	}
 
 	importPending, err := r.maybeImportCosmosignerKey(ctx, chainNode, params)
 	if err != nil {
@@ -120,6 +126,9 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 			}
 			if needDigest {
 				chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
+				// The serving identity lets the no-webhook path judge a later REMOVAL: it is admitted
+				// only when the validator's own signing path still resolves this identity.
+				chainNode.Status.CosmosignerServingIdentity = chainNode.CosmosignerSigningIdentity()
 			}
 			return r.Status().Update(ctx, chainNode)
 		}
@@ -127,7 +136,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	return nil
 }
 
-func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.Params {
+func (r *Reconciler) cosmosignerParams(ctx context.Context, chainNode *appsv1.ChainNode) (cosmosigner.Params, error) {
 	c := chainNode.Spec.Cosmosigner
 	name := cosmosignerName(chainNode)
 
@@ -142,6 +151,11 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 		controllers.LabelChainNode: chainNode.GetName(),
 	}), exclude...)
 
+	backend, err := r.cosmosignerBackend(ctx, chainNode)
+	if err != nil {
+		return cosmosigner.Params{}, err
+	}
+
 	return cosmosigner.Params{
 		Name:               name,
 		Namespace:          chainNode.GetNamespace(),
@@ -155,7 +169,7 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 		Resources:          c.GetResources(),
 		RaftTLSSecret:      c.RaftTLSSecret,
 		ServiceAccountName: c.GetServiceAccountName(),
-		Backend:            r.cosmosignerBackend(chainNode),
+		Backend:            backend,
 		Labels:             labels,
 		// The chain-node label disambiguates from a same-named ChainNodeSet's target pods, which
 		// carry the same cosmosigner-target value (`<name>-signer`) but never the chain-node label.
@@ -163,14 +177,14 @@ func (r *Reconciler) cosmosignerParams(chainNode *appsv1.ChainNode) cosmosigner.
 			controllers.LabelChainNode:         chainNode.GetName(),
 			controllers.LabelCosmosignerTarget: name,
 		},
-	}
+	}, nil
 }
 
 // cosmosignerBackend translates the CRD backend into the builder backend. The software backend
 // references the node's own priv-key secret (created by its genesis/create-validator flow) or an
 // explicit secret; no key is generated here, so the signer always signs with the node's registered
 // consensus key.
-func (r *Reconciler) cosmosignerBackend(chainNode *appsv1.ChainNode) cosmosigner.Backend {
+func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.ChainNode) (cosmosigner.Backend, error) {
 	c := chainNode.Spec.Cosmosigner
 	switch {
 	case c.UsesVaultBackend():
@@ -183,15 +197,32 @@ func (r *Reconciler) cosmosignerBackend(chainNode *appsv1.ChainNode) cosmosigner
 			TokenSecret:       v.TokenSecret,
 			CertificateSecret: v.CertificateSecret,
 			AutoRenewToken:    v.AutoRenewToken,
-		}}
+		}}, nil
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
 		return cosmosigner.Backend{GCP: &cosmosigner.GcpBackend{
 			KeyVersion:        g.KeyVersion,
 			CredentialsSecret: g.CredentialsSecret,
-		}}
+		}}, nil
 	default:
-		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: r.cosmosignerSoftwareSecretName(chainNode)}}
+		secretName := r.cosmosignerSoftwareSecretName(chainNode)
+		// Sentry mode (non-validator): the explicit secret is the signer's own out-of-band-registered
+		// key and no validator key flow ever creates it — require it to exist up front (mirrors the
+		// ChainNodeSet path) instead of rolling out pods stuck on a missing Secret mount. A validator's
+		// secret is produced by its own genesis/create-validator flow, so it is not preflighted here.
+		if !chainNode.IsValidator() {
+			secret := &corev1.Secret{}
+			if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: secretName}, secret); err != nil {
+				if errors.IsNotFound(err) {
+					return cosmosigner.Backend{}, fmt.Errorf("cosmosigner sentry software key secret %q not found: register its consensus key on-chain and provide the secret — refusing to roll out a signer with no key", secretName)
+				}
+				return cosmosigner.Backend{}, err
+			}
+			if len(secret.Data[PrivKeyFilename]) == 0 {
+				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner sentry software key secret %q has no %s: provide the signer's registered consensus key", secretName, PrivKeyFilename)
+			}
+		}
+		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 	}
 }
 
@@ -328,6 +359,7 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 	}
 	chainNode.Status.CosmosignerReplicas = nil
 	chainNode.Status.CosmosignerSigningDigest = ""
+	chainNode.Status.CosmosignerServingIdentity = ""
 	// Tolerate a conflict: the signer is already gone and this clear is idempotent, so a concurrent
 	// update just defers it to the next reconcile rather than spinning the workqueue with no progress.
 	if err := r.Status().Update(ctx, chainNode); err != nil && !errors.IsConflict(err) {

@@ -446,8 +446,69 @@ func TestValidateForReconcilePostEstablishmentSignerAddition(t *testing.T) {
 	_, err = validateForReconcile(importing)
 	require.NoError(t, err)
 
-	// Marker not recorded yet (nil): admitted — the controller records it on the same reconcile.
+	// Marker not recorded (nil — a pre-marker legacy chain): admitted here, but the controller
+	// backfills the marker conservatively (empty unless a rollout digest proves the identity served)
+	// BEFORE deploying any signer resources, so the guard bites on the next reconcile.
 	unrecorded := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	_, err = validateForReconcile(unrecorded)
+	require.NoError(t, err)
+}
+
+// TestSetEstablishedChainIDRecordsMarkerAtomically verifies the chain ID and the at-establishment
+// signer identity marker are recorded in the same status mutation, closing the window in which a
+// chain is established but the marker is nil (during which an unverifiable signer addition could
+// slip past the no-webhook guard and be blessed by a late marker write).
+func TestSetEstablishedChainIDRecordsMarkerAtomically(t *testing.T) {
+	// Established WITH a signer: the establishing identity is recorded.
+	withSigner := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	withSigner.Status = appsv1.ChainNodeSetStatus{}
+	withSigner.SetEstablishedChainID("test-localnet")
+	require.NotNil(t, withSigner.Status.CosmosignerAtEstablishment)
+	assert.Equal(t, withSigner.CosmosignerSigningIdentity(), *withSigner.Status.CosmosignerAtEstablishment)
+	assert.Equal(t, "test-localnet", withSigner.Status.ChainID)
+
+	// Established WITHOUT a signer: an empty identity is recorded, so any later validator-targeted
+	// pre-provisioned signer addition is caught by the guard.
+	noSigner := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	noSigner.Spec.Cosmosigner = nil
+	noSigner.Status = appsv1.ChainNodeSetStatus{}
+	noSigner.SetEstablishedChainID("test-localnet")
+	require.NotNil(t, noSigner.Status.CosmosignerAtEstablishment)
+	assert.Empty(t, *noSigner.Status.CosmosignerAtEstablishment)
+
+	// Empty chain ID: nothing is recorded (chain not established yet).
+	pending := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	pending.Status = appsv1.ChainNodeSetStatus{}
+	pending.SetEstablishedChainID("")
+	assert.Nil(t, pending.Status.CosmosignerAtEstablishment)
+	assert.Empty(t, pending.Status.ChainID)
+}
+
+// TestValidateForReconcileSignerRemoval verifies the no-webhook removal guard: removing a rolled-out
+// validator-targeted signer is admitted only when a validator's own signing path still resolves the
+// recorded serving identity (e.g. a software signer that used the validator's own key secret); a
+// pre-provisioned Vault signer's identity is unreachable locally, so its removal is rejected.
+func TestValidateForReconcileSignerRemoval(t *testing.T) {
+	// Vault-backed signer served; removal would fall back to a local key that is not the on-chain key.
+	vaultServed := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	vaultIdentity := vaultServed.CosmosignerSigningIdentity()
+	vaultServed.Spec.Cosmosigner = nil
+	vaultServed.Status.CosmosignerServingIdentity = vaultIdentity
+	_, err := validateForReconcile(vaultServed)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be removed")
+
+	// Software-backed signer served with the validator's own key; removal keeps the same identity.
+	softwareServed := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	softwareIdentity := softwareServed.CosmosignerSigningIdentity()
+	softwareServed.Spec.Cosmosigner = nil
+	softwareServed.Status.CosmosignerServingIdentity = softwareIdentity
+	_, err = validateForReconcile(softwareServed)
+	require.NoError(t, err)
+
+	// No serving identity recorded (sentry, or the signer never rolled out): removal is free.
+	neverServed := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	neverServed.Spec.Cosmosigner = nil
+	_, err = validateForReconcile(neverServed)
 	require.NoError(t, err)
 }

@@ -23,16 +23,19 @@ func cosmosignerName(nodeSet *appsv1.ChainNodeSet) string {
 // ensureCosmosigner deploys (or tears down) the managed cosmosigner remote signer for a
 // ChainNodeSet. It is a no-op until the chain ID is known, since the signer config requires it.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
-	// Record, write-once, which signer identity (possibly none — empty string) was in effect when the
-	// chain was established. The no-webhook path uses this to tell an establishing signer (admitted)
-	// apart from one added to an already-established chain (unverifiable without the old spec). Also
-	// backfilled on chains upgraded from a version predating the marker: an already-configured signer
-	// records its current identity, so it is never retroactively rejected.
+	// The at-establishment identity marker is normally recorded atomically with the chain ID (see
+	// SetEstablishedChainID). A nil marker on an established chain therefore only occurs on chains
+	// upgraded from a version predating it — backfill it conservatively: an identity proven by a
+	// recorded rollout digest (it served) is kept; anything unproven records "" and so stays subject
+	// to the no-webhook addition guard. Return before touching signer resources, so the guard judges
+	// the marker on the next reconcile BEFORE anything is deployed.
 	if nodeSet.Status.ChainID != "" && nodeSet.Status.CosmosignerAtEstablishment == nil {
-		nodeSet.Status.CosmosignerAtEstablishment = ptr.To(nodeSet.CosmosignerSigningIdentity())
-		if err := r.Status().Update(ctx, nodeSet); err != nil {
-			return err
+		identity := ""
+		if nodeSet.Status.CosmosignerSigningDigest != "" {
+			identity = nodeSet.CosmosignerSigningIdentity()
 		}
+		nodeSet.Status.CosmosignerAtEstablishment = ptr.To(identity)
+		return r.Status().Update(ctx, nodeSet)
 	}
 
 	if nodeSet.Spec.Cosmosigner == nil {
@@ -115,6 +118,9 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 			}
 			if needDigest {
 				nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
+				// The serving identity lets the no-webhook path judge a later REMOVAL: it is admitted
+				// only when a validator's own signing path still resolves this identity.
+				nodeSet.Status.CosmosignerServingIdentity = nodeSet.CosmosignerSigningIdentity()
 			}
 			return r.Status().Update(ctx, nodeSet)
 		}
@@ -382,6 +388,7 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, nodeSet *appsv1.Ch
 	}
 	nodeSet.Status.CosmosignerReplicas = nil
 	nodeSet.Status.CosmosignerSigningDigest = ""
+	nodeSet.Status.CosmosignerServingIdentity = ""
 	// Tolerate a conflict: the signer is already gone and this clear is idempotent, so a concurrent
 	// update just defers it to the next reconcile rather than spinning the workqueue with no progress.
 	if err := r.Status().Update(ctx, nodeSet); err != nil && !errors.IsConflict(err) {

@@ -209,6 +209,17 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	// the validator to the same local key and is safe, which status alone cannot establish.
 	if old == nil {
 		c := chainNode.Spec.Cosmosigner
+		// REMOVING a rolled-out validator-targeted signer (recorded serving identity) is admitted only
+		// when the validator's own signing path still resolves that identity (software signer on the
+		// validator's own secret, or tmKMS on the same Vault key). A pre-provisioned Vault/GCP signer's
+		// identity is unreachable through any local path, so removal would leave the validator signing
+		// with a key that is absent or different from the on-chain consensus key.
+		if c == nil && chainNode.Status.ChainID != "" {
+			if serving := chainNode.Status.CosmosignerServingIdentity; serving != "" &&
+				!chainNode.ValidatorResolvesSigningIdentity(serving) {
+				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
+			}
+		}
 		if c != nil && chainNode.Status.ChainID != "" {
 			if replicas := chainNode.Status.CosmosignerReplicas; replicas != nil && *replicas != c.GetReplicas() {
 				return nil, fmt.Errorf(".spec.cosmosigner.replicas is immutable after the signer is deployed (webhooks disabled): changing it does not migrate the raft membership and can break quorum")
@@ -223,8 +234,9 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 				// A validator-targeted signer whose identity differs from the write-once record taken at
 				// establishment was added afterwards and has not rolled out yet. Its pre-provisioned key
 				// cannot be verified against the on-chain validator key without the old spec, so only
-				// backends that provably import the registered key are admitted. A nil marker means the
-				// controller has not recorded it yet — the signer in that window is the establishing one.
+				// backends that provably import the registered key are admitted. The marker is recorded
+				// atomically with the chain ID (SetEstablishedChainID); a nil marker only occurs on
+				// pre-marker chains, which the controller backfills conservatively before deploying.
 				importsRegisteredKey := c.UsesSoftwareBackend() ||
 					(c.UsesVaultBackend() && c.VaultUploadsGenerated(chainNode.ShouldInitGenesis()))
 				if !importsRegisteredKey {

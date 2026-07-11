@@ -5815,6 +5815,15 @@ spec:
                   new bootstrap list. Not meant to be set by hand.
                 format: int32
                 type: integer
+              cosmosignerServingIdentity:
+                description: |-
+                  CosmosignerServingIdentity records the effective signing identity of the rolled-out
+                  validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on
+                  teardown. It lets the no-webhook reconcile path judge a signer REMOVAL from status alone:
+                  removal is only admitted when the validator's own signing path still resolves to this same
+                  identity (e.g. a software-backed signer that used the validator's own key secret), so the
+                  on-chain key keeps signing. Not meant to be set by hand.
+                type: string
               cosmosignerSigningDigest:
                 description: |-
                   CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's

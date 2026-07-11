@@ -264,14 +264,22 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 //     apart from the establishing signer's own first rollout (which must be admitted — the digest is
 //     only recorded after rollout, so keying on "chainID set + empty digest" would deadlock it).
 //
-// REMOVING the signer is deliberately NOT judged here: whether removal changes the effective on-chain
-// key depends on the previous spec (a software signer removal returns the validator to the same local
-// key — safe; a Vault signer removal does not). That is left to the admission webhook, which has the
-// old spec and remains the real guard when enabled; a webhooks-disabled cluster has opted into
-// best-effort validation.
+//   - REMOVING a validator-targeted signer that rolled out (recorded serving identity) is admitted
+//     only when a validator's own signing path in the resulting spec still resolves that identity —
+//     e.g. a software-backed signer that used the validator's own key secret, or tmKMS on the same
+//     Vault key. A pre-provisioned Vault/GCP signer's identity is unreachable through any local
+//     path, so its removal is rejected: the validator would fall back to a local key that is absent
+//     or different from the on-chain consensus key.
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	c := nodeSet.Spec.Cosmosigner
-	if c == nil || nodeSet.Status.ChainID == "" {
+	if c == nil {
+		if serving := nodeSet.Status.CosmosignerServingIdentity; serving != "" && nodeSet.Status.ChainID != "" &&
+			!nodeSet.ValidatorResolvesSigningIdentity(serving) {
+			return fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
+		}
+		return nil
+	}
+	if nodeSet.Status.ChainID == "" {
 		return nil
 	}
 
@@ -292,10 +300,10 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	// A validator-targeted signer whose identity differs from the write-once at-establishment record
 	// was added (or swapped in) after the chain was established and has not rolled out yet. Without
 	// the old spec its pre-provisioned key cannot be compared to the on-chain validator key, so only
-	// backends that provably import the registered key are admitted. A nil marker means it has not
-	// been recorded yet (first reconcile after establishment, or a chain from a pre-marker version) —
-	// the controller records it immediately, so the signer present in that window is the establishing
-	// one and is admitted.
+	// backends that provably import the registered key are admitted. The marker is recorded
+	// atomically with the chain ID (SetEstablishedChainID), so a nil marker only occurs on chains
+	// upgraded from a pre-marker version; the controller backfills it conservatively (before touching
+	// signer resources) on the next reconcile, so nothing unverified is ever deployed in that window.
 	if marker := nodeSet.Status.CosmosignerAtEstablishment; marker != nil && nodeSet.CosmosignerSigningIdentity() != *marker {
 		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); hasValidatorTarget {
 			importsRegisteredKey := c.UsesSoftwareBackend() ||

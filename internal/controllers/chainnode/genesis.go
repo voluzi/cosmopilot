@@ -115,7 +115,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 			if err = r.Update(ctx, pvc); err != nil {
 				return fmt.Errorf("failed to update pvc annotations: %w", err)
 			}
-			chainNode.Status.ChainID = *chainNode.Spec.Genesis.ChainID
+			chainNode.SetEstablishedChainID(*chainNode.Spec.Genesis.ChainID)
 			return r.Status().Update(ctx, chainNode)
 		}
 
@@ -172,7 +172,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 
 		// update chainID in status
 		logger.Info("updating .status.chainID", "chainID", chainID)
-		chainNode.Status.ChainID = chainID
+		chainNode.SetEstablishedChainID(chainID)
 		return r.Status().Update(ctx, chainNode)
 
 	default:
@@ -227,7 +227,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 
 	// update chainID in status
 	logger.Info("updating .status.chainID", "chainID", chainID)
-	chainNode.Status.ChainID = chainID
+	chainNode.SetEstablishedChainID(chainID)
 	return r.Status().Update(ctx, chainNode)
 }
 
@@ -374,7 +374,7 @@ func (r *Reconciler) initGenesis(ctx context.Context, app *chainutils.App, chain
 	// path can reject post-genesis changes to .validator.init (it validates with Validate(nil), with no
 	// previous spec to diff against).
 	logger.Info("updating .status.chainID", "chainID", chainNode.Spec.Validator.Init.ChainID)
-	chainNode.Status.ChainID = chainNode.Spec.Validator.Init.ChainID
+	chainNode.SetEstablishedChainID(chainNode.Spec.Validator.Init.ChainID)
 	chainNode.Status.GenesisSigningDigest = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
 	return r.Status().Update(ctx, chainNode)
 }

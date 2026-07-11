@@ -51,7 +51,7 @@ func TestBuildConfigMultiReplicaMembers(t *testing.T) {
 	if cfg.Backend.Type != "vault" || cfg.Backend.Vault == nil || cfg.Backend.Vault.KeyName != "myval" {
 		t.Fatalf("unexpected backend config: %+v", cfg.Backend)
 	}
-	if cfg.Backend.Vault.TokenFile != "/vault/token" {
+	if cfg.Backend.Vault.TokenFile != "/vault/token-dir/token" {
 		t.Fatalf("unexpected vault token file %q", cfg.Backend.Vault.TokenFile)
 	}
 }
