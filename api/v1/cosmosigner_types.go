@@ -5,9 +5,9 @@ import (
 )
 
 const (
-	// DefaultCosmosignerImage is the cosmosigner image used when none is specified.
-	// TODO: pin to a released tag once cosmosigner publishes versioned releases.
-	DefaultCosmosignerImage = "ghcr.io/voluzi/cosmosigner:latest"
+	// DefaultCosmosignerImage is the cosmosigner image used when none is specified (either via
+	// .spec.cosmosigner.image or the operator-wide cosmosignerImage Helm value / COSMOSIGNER_IMAGE).
+	DefaultCosmosignerImage = "ghcr.io/voluzi/cosmosigner:0.1.0"
 
 	// DefaultCosmosignerReplicas is the default number of signer replicas (single instance).
 	DefaultCosmosignerReplicas int32 = 1
@@ -54,7 +54,7 @@ type Cosmosigner struct {
 
 	// Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
 	// image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-	// defaulting to `ghcr.io/voluzi/cosmosigner:latest`). Set this to pin or override the image for
+	// defaulting to `ghcr.io/voluzi/cosmosigner:0.1.0`). Set this to pin or override the image for
 	// this specific signer only.
 	// +optional
 	Image *string `json:"image,omitempty"`

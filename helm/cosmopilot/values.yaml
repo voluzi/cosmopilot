@@ -2,11 +2,7 @@ image: ghcr.io/voluzi/cosmopilot
 nodeUtilsImage: ghcr.io/voluzi/node-utils:2.9.0
 cosmoGuardImage: ghcr.io/voluzi/cosmoguard:3.0.0
 cosmoseedImage: ghcr.io/voluzi/cosmoseed:0.11.0
-# cosmosignerImage is left unset (unlike the pinned images above): cosmosigner has not published
-# versioned releases yet, so there is no real tag to pin. Leaving it empty falls back to the
-# operator's own ghcr.io/voluzi/cosmosigner:latest default. Set this once versioned releases exist,
-# or override .spec.cosmosigner.image per-signer in the meantime.
-cosmosignerImage: ""
+cosmosignerImage: ghcr.io/voluzi/cosmosigner:0.1.0
 replicas: 1
 imagePullSecrets: []
 workerCount: 10
