@@ -129,30 +129,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// Backfill legacy cosmosigner status markers BEFORE any child ChainNode is reconciled: the
-	// no-webhook guards (validateForReconcile, above) judge these markers, and they must get that
-	// chance before ensureValidator/ensureNodes act on a potentially unverifiable signer spec (e.g.
-	// stamping RemoteSignerTarget on the validator and dropping its local key). When a backfill
-	// happened, requeue so validation re-runs against the fresh status first.
-	if backfilled, err := r.backfillCosmosignerLegacyStatus(ctx, nodeSet); err != nil {
+	// Tear down any managed signer the spec no longer desires BEFORE children are reconciled, and wait
+	// for completion: a child switching back to its local/tmKMS signing path while the old signer pods
+	// are still terminating would put two signers on the same consensus key. Deletion is asynchronous,
+	// so poll until every removed signer's StatefulSet and PVCs are gone before letting children move.
+	if tornDown, err := r.reconcileSignerTeardown(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
-	} else if backfilled {
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// When the signer was removed from the spec, tear it down BEFORE children are reconciled and wait
-	// for completion: children switching back to their local/tmKMS signing path while the old signer
-	// pods are still terminating would put two signers on the same consensus key. Deletion is
-	// asynchronous, so poll until the StatefulSet and PVCs are gone before letting the children move.
-	if nodeSet.Spec.Cosmosigner == nil {
-		tornDown, err := r.undeployCosmosigner(ctx, nodeSet)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !tornDown {
-			logger.Info("waiting for cosmosigner teardown before reconciling children")
-			return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
-		}
+	} else if !tornDown {
+		logger.Info("waiting for cosmosigner teardown before reconciling children")
+		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 	}
 
 	// Validators that initialize a new genesis must run before ensureGenesis: they produce the
@@ -296,76 +281,97 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 //     Vault key. A pre-provisioned Vault/GCP signer's identity is unreachable through any local
 //     path, so its removal is rejected: the validator would fall back to a local key that is absent
 //     or different from the on-chain consensus key.
-func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
-	c := nodeSet.Spec.Cosmosigner
-	if c == nil {
-		if nodeSet.Status.ChainID != "" {
-			serving := nodeSet.Status.CosmosignerServingIdentity
-			if serving != "" && !nodeSet.ServedValidatorResolvesSigningIdentity(nodeSet.Status.CosmosignerServingGroup, serving) {
-				return fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
-			}
-			// A digest with no serving identity is a legacy record (pre-field) whose identity can no
-			// longer be reconstructed once the spec is gone: unjudgeable, so reject conservatively.
-			if serving == "" && nodeSet.Status.CosmosignerSigningDigest != "" {
-				return fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): a signer served this chain but its recorded identity predates this version and cannot be verified — restore the signer so the controller can record it, or remove it with webhooks enabled")
-			}
-		}
-		return nil
+//
+// sameSignerInstance reports whether two served-instance pointers denote the same instance (both nil,
+// or both set to the same index).
+func sameSignerInstance(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
+	return *a == *b
+}
+
+func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Status.ChainID == "" {
 		return nil
 	}
 
-	if replicas := nodeSet.Status.CosmosignerReplicas; replicas != nil && *replicas != c.GetReplicas() {
-		return fmt.Errorf(".spec.cosmosigner.replicas is immutable after the signer is deployed (webhooks disabled): changing it does not migrate the raft membership and can break quorum")
+	desired := map[string]appsv1.ResolvedSigner{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		desired[s.Name] = s
 	}
 
-	if recorded := nodeSet.Status.CosmosignerSigningDigest; recorded != "" {
-		if nodeSet.CosmosignerSigningDigest() != recorded {
-			return fmt.Errorf(".spec.cosmosigner signing configuration is immutable after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain")
+	// REMOVED signers: a validator-targeted signer that rolled out (recorded serving identity) can only
+	// be removed when the SAME validator it served (group + instance) still resolves that identity
+	// through its OWN signing path in the resulting spec — e.g. a software-backed signer that used the
+	// validator's own key secret, or tmKMS on the same Vault key. A pre-provisioned Vault/GCP signer's
+	// identity is unreachable through any local path, so its removal is rejected: the validator would
+	// fall back to a local key that is absent or different from the on-chain consensus key.
+	for i := range nodeSet.Status.Cosmosigners {
+		st := &nodeSet.Status.Cosmosigners[i]
+		if _, ok := desired[st.Name]; ok {
+			continue
 		}
-		// The digest hashes the backend identity, replicas and target-group NAMES — not whether the
-		// served group still contains a validator. Converting the served group into a regular node
-		// group keeps a Vault/GCP digest identical while removing the validator the signer was
-		// protecting, so additionally require the signer to still resolve the recorded serving
-		// identity through a validator target — and through the SAME group it served: swapping
-		// validator-ness between two targeted groups keeps identity and digest intact while the
-		// original on-chain validator loses its signing path.
-		if serving := nodeSet.Status.CosmosignerServingIdentity; serving != "" {
-			if nodeSet.CosmosignerValidatorTargetedIdentity() != serving {
-				return fmt.Errorf(".spec.cosmosigner: the validator the signer was serving can no longer be resolved (webhooks disabled) — removing or converting the served validator group would leave its on-chain key without its signing path")
-			}
-			// The group is empty only on a legacy record (pre-group-field); the identity check above
-			// still applies there, and the controller backfills the group before deploying anything.
-			if g := nodeSet.Status.CosmosignerServingGroup; g != "" && nodeSet.CosmosignerTargetedValidatorGroup() != g {
-				return fmt.Errorf(".spec.cosmosigner: the signer served the validator in group %q (webhooks disabled) — moving validator-ness to a different group would leave that validator's on-chain key without its signing path", g)
-			}
-		} else if nodeSet.CosmosignerValidatorTargetedIdentity() == "" {
-			// Legacy digest (pre-serving-identity) with no current validator target: the served
-			// validator was already dropped and its identity can no longer be reconstructed —
-			// unverifiable, so reject conservatively. An unchanged legacy spec still resolves a
-			// validator target here and passes, letting the controller backfill the serving identity.
-			return fmt.Errorf(".spec.cosmosigner: a signer served a validator on this chain but its recorded identity predates this version and the validator target is gone (webhooks disabled) — restore the validator, or repair the configuration with webhooks enabled")
+		if st.ServingIdentity != "" &&
+			!nodeSet.ServedValidatorResolvesIdentity(st.ServingGroup, st.ServingInstance, st.ServingIdentity) {
+			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): the validator it served would fall back to a local key different from the on-chain consensus key — restore the signer, or migrate the validator's own signing path to the same key first", st.Name)
 		}
-		// A matching digest proves this exact signer identity rolled out and served (regardless of how
-		// it was introduced — e.g. added under admission review before webhooks were disabled), so the
-		// at-establishment marker below must not re-judge it.
-		return nil
 	}
 
-	// A validator-targeted signer whose identity differs from the write-once at-establishment record
-	// was added (or swapped in) after the chain was established and has not rolled out yet. Without
-	// the old spec its pre-provisioned key cannot be compared to the on-chain validator key, so only
-	// backends that provably import the registered key are admitted. The marker is recorded
-	// atomically with the chain ID (SetEstablishedChainID), so a nil marker only occurs on chains
-	// upgraded from a pre-marker version; the controller backfills it conservatively (before touching
-	// signer resources) on the next reconcile, so nothing unverified is ever deployed in that window.
-	if marker := nodeSet.Status.CosmosignerAtEstablishment; marker != nil && nodeSet.CosmosignerValidatorTargetedIdentity() != *marker {
-		if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); hasValidatorTarget {
-			importsRegisteredKey := c.UsesSoftwareBackend() ||
-				(c.UsesVaultBackend() && c.VaultUploadsGenerated(nodeSet.CosmosignerTargetInitializesGenesis()))
-			if !importsRegisteredKey {
-				return fmt.Errorf(".spec.cosmosigner: a validator-targeted signer with a pre-provisioned Vault/GCP key cannot be added to an established chain with webhooks disabled — its key cannot be verified against the on-chain validator key; use the software backend or vault.uploadGenerated (the import verifies the key), or perform the migration with webhooks enabled")
+	// PRESENT signers: modification and post-establishment-addition guards.
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+
+		if st != nil {
+			// The raft replica count is immutable once the cluster formed with it (re-rendering a
+			// bootstrap list does not migrate the recorded membership). Enforced from the persisted count
+			// so it also covers sentry signers, which record no signing digest.
+			if st.Replicas != nil && *st.Replicas != s.Spec.GetReplicas() {
+				return fmt.Errorf("cosmosigner %q replicas are immutable after deployment (webhooks disabled): changing them does not migrate the raft membership and can break quorum", s.Name)
+			}
+			if st.SigningDigest != "" {
+				// Modifying a still-present signer that already rolled out (recorded digest, current digest
+				// differs) is rejected — changing the Vault key, replicas, or target set of a live signer
+				// would make the validator sign with a key not in the on-chain set. A same-key config keeps
+				// the digest identical and is allowed.
+				if s.Digest() != st.SigningDigest {
+					return fmt.Errorf("cosmosigner %q signing configuration is immutable after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain", s.Name)
+				}
+				// The digest hashes the backend identity, replicas and target-group NAMES — not whether the
+				// served group still contains the validator. Converting the served group into a regular node
+				// group keeps a Vault/GCP digest identical while removing the validator, so additionally
+				// require the signer to still resolve the recorded serving identity — and through the SAME
+				// group+instance it served: swapping validator-ness between two targeted groups keeps the
+				// identity and digest intact while the original on-chain validator loses its signing path.
+				if st.ServingIdentity != "" {
+					if s.ValidatorTargetedIdentity() != st.ServingIdentity {
+						return fmt.Errorf("cosmosigner %q: the validator it was serving can no longer be resolved (webhooks disabled) — removing or converting the served validator would leave its on-chain key without its signing path", s.Name)
+					}
+					if s.ValidatorGroup != st.ServingGroup || !sameSignerInstance(s.ValidatorInstance, st.ServingInstance) {
+						return fmt.Errorf("cosmosigner %q served the validator in group %q (webhooks disabled) — moving validator-ness elsewhere would leave that validator's on-chain key without its signing path", s.Name, st.ServingGroup)
+					}
+				}
+				// A matching digest proves this exact signer identity rolled out and served, so the
+				// at-establishment guard below must not re-judge it.
+				continue
+			}
+		}
+
+		// ADDING a validator-targeted signer with an unverifiable (pre-provisioned Vault/GCP) key AFTER
+		// establishment is rejected. A signer present at establishment has a status entry whose write-once
+		// AtEstablishment marker equals its identity; a post-establishment addition has no entry (never
+		// reconciled) or an entry whose marker differs. Only backends that provably import the registered
+		// key are admitted for such an addition.
+		if s.TargetsValidator() {
+			addedAfterEstablishment := st == nil ||
+				(st.AtEstablishment != nil && s.ValidatorTargetedIdentity() != *st.AtEstablishment)
+			if addedAfterEstablishment {
+				c := s.Spec
+				importsRegisteredKey := c.UsesSoftwareBackend() ||
+					(c.UsesVaultBackend() && c.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)))
+				if !importsRegisteredKey {
+					return fmt.Errorf("cosmosigner %q: a validator-targeted signer with a pre-provisioned Vault/GCP key cannot be added to an established chain with webhooks disabled — its key cannot be verified against the on-chain validator key; use the software backend or vault.uploadGenerated (the import verifies the key), or perform the migration with webhooks enabled", s.Name)
+				}
 			}
 		}
 	}

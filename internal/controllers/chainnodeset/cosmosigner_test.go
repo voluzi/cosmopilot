@@ -2,6 +2,7 @@ package chainnodeset
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,47 +16,60 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
 
-// TestUndeployCosmosignerClearsStatusInvariants verifies that once the signer StatefulSet and its
-// PVCs are gone, teardown clears the recorded replica/digest invariants, so a later re-add (e.g. a
-// sentry signer with a different replica count) is not rejected against stale state on the
-// no-webhook path.
-func TestUndeployCosmosignerClearsStatusInvariants(t *testing.T) {
+// resolveSingleSigner returns the sole resolved signer of a ChainNodeSet, failing if there is not
+// exactly one.
+func resolveSingleSigner(t *testing.T, nodeSet *appsv1.ChainNodeSet) appsv1.ResolvedSigner {
+	t.Helper()
+	signers := nodeSet.ResolveCosmosigners()
+	require.Len(t, signers, 1, "expected exactly one resolved signer")
+	return signers[0]
+}
+
+// TestReconcileSignerTeardownDropsStatusEntry verifies that once a removed signer's StatefulSet and
+// its PVCs are gone, teardown drops its per-signer status entry, so a later re-add (e.g. a sentry
+// signer with a different replica count) is not rejected against stale state on the no-webhook path.
+func TestReconcileSignerTeardownDropsStatusEntry(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
 		Spec:       appsv1.ChainNodeSetSpec{},
 		Status: appsv1.ChainNodeSetStatus{
-			ChainID:                  "test-1",
-			CosmosignerReplicas:      ptr.To(int32(3)),
-			CosmosignerSigningDigest: "stale-digest",
+			ChainID: "test-1",
+			Cosmosigners: []appsv1.CosmosignerStatus{{
+				Name:          "test-nodeset-signer",
+				Replicas:      ptr.To(int32(3)),
+				SigningDigest: "stale-digest",
+			}},
 		},
 	}
 	r := newValidatorTestReconciler(t, nodeSet)
 
-	_, err := r.undeployCosmosigner(context.Background(), nodeSet)
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
 	require.NoError(t, err)
+	assert.True(t, done, "teardown of an absent signer is complete")
 
 	fresh := &appsv1.ChainNodeSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
-	assert.Nil(t, fresh.Status.CosmosignerReplicas, "recorded replica count must be cleared on teardown")
-	assert.Empty(t, fresh.Status.CosmosignerSigningDigest, "recorded signing digest must be cleared on teardown")
+	assert.Empty(t, fresh.Status.Cosmosigners, "the removed signer's status entry must be dropped on teardown")
 }
 
-// TestUndeployCosmosignerKeepsStatusWhileTerminating verifies that while the signer StatefulSet is
-// still present (teardown is asynchronous), the recorded invariants are preserved — clearing them
-// early would let a remove-and-immediate-re-add bind the surviving PVCs and inherit stale raft
-// membership.
-func TestUndeployCosmosignerKeepsStatusWhileTerminating(t *testing.T) {
+// TestReconcileSignerTeardownKeepsStatusWhileTerminating verifies that while the signer StatefulSet is
+// still present (teardown is asynchronous), the recorded status entry is preserved — dropping it early
+// would let a remove-and-immediate-re-add bind the surviving PVCs and inherit stale raft membership.
+func TestReconcileSignerTeardownKeepsStatusWhileTerminating(t *testing.T) {
+	const signerName = "test-nodeset-signer"
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
 		Spec:       appsv1.ChainNodeSetSpec{},
 		Status: appsv1.ChainNodeSetStatus{
-			ChainID:                  "test-1",
-			CosmosignerReplicas:      ptr.To(int32(3)),
-			CosmosignerSigningDigest: "stale-digest",
+			ChainID: "test-1",
+			Cosmosigners: []appsv1.CosmosignerStatus{{
+				Name:          signerName,
+				Replicas:      ptr.To(int32(3)),
+				SigningDigest: "stale-digest",
+			}},
 		},
 	}
 	// A StatefulSet owned by the nodeSet with a finalizer: Undeploy issues a delete, but the fake
@@ -63,64 +77,113 @@ func TestUndeployCosmosignerKeepsStatusWhileTerminating(t *testing.T) {
 	// window where teardown is still in flight.
 	sts := &k8sappsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       cosmosignerName(nodeSet),
+			Name:       signerName,
 			Namespace:  "default",
 			Finalizers: []string{"cosmopilot.voluzi.com/test-hold"},
-			Labels:     cosmosigner.InstanceLabels(cosmosignerName(nodeSet)),
+			Labels:     cosmosigner.InstanceLabels(signerName),
 		},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
 
 	r := newValidatorTestReconciler(t, nodeSet, sts)
 
-	_, err := r.undeployCosmosigner(context.Background(), nodeSet)
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
 	require.NoError(t, err)
+	assert.False(t, done, "teardown is not complete while the StatefulSet is still terminating")
 
 	fresh := &appsv1.ChainNodeSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
-	assert.Equal(t, ptr.To(int32(3)), fresh.Status.CosmosignerReplicas, "replica count must be preserved while the signer is still terminating")
-	assert.Equal(t, "stale-digest", fresh.Status.CosmosignerSigningDigest, "signing digest must be preserved while the signer is still terminating")
+	require.Len(t, fresh.Status.Cosmosigners, 1, "the status entry must be preserved while the signer is still terminating")
+	assert.Equal(t, ptr.To(int32(3)), fresh.Status.Cosmosigners[0].Replicas)
+	assert.Equal(t, "stale-digest", fresh.Status.Cosmosigners[0].SigningDigest)
 }
 
-// TestUndeployCosmosignerClearsStatusWithForeignSameNameSigner verifies that a same-name StatefulSet
-// owned by ANOTHER CR does not permanently block clearing this nodeSet's recorded invariants:
-// Undeploy skips the foreign resource, and IsTornDown treats it as unrelated, so the stale status is
-// cleared and a later valid re-add is not rejected against it.
-func TestUndeployCosmosignerClearsStatusWithForeignSameNameSigner(t *testing.T) {
+// TestReconcileSignerTeardownDropsStatusWithForeignSameNameSigner verifies that a same-name
+// StatefulSet owned by ANOTHER CR does not permanently block dropping this nodeSet's recorded status
+// entry: Undeploy skips the foreign resource, and IsTornDown treats it as unrelated, so the stale
+// entry is dropped and a later valid re-add is not rejected against it.
+func TestReconcileSignerTeardownDropsStatusWithForeignSameNameSigner(t *testing.T) {
+	const signerName = "test-nodeset-signer"
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
 		Spec:       appsv1.ChainNodeSetSpec{},
 		Status: appsv1.ChainNodeSetStatus{
-			ChainID:                  "test-1",
-			CosmosignerReplicas:      ptr.To(int32(3)),
-			CosmosignerSigningDigest: "stale-digest",
+			ChainID: "test-1",
+			Cosmosigners: []appsv1.CosmosignerStatus{{
+				Name:          signerName,
+				Replicas:      ptr.To(int32(3)),
+				SigningDigest: "stale-digest",
+			}},
 		},
 	}
 	// A same-name StatefulSet owned by a DIFFERENT ChainNodeSet (distinct UID).
 	foreignOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "other-nodeset", Namespace: "default", UID: "other-uid"}}
 	sts := &k8sappsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cosmosignerName(nodeSet),
+			Name:      signerName,
 			Namespace: "default",
-			Labels:    cosmosigner.InstanceLabels(cosmosignerName(nodeSet)),
+			Labels:    cosmosigner.InstanceLabels(signerName),
 		},
 	}
 	require.NoError(t, controllerutil.SetControllerReference(foreignOwner, sts, testScheme(t)))
 
 	r := newValidatorTestReconciler(t, nodeSet, sts)
 
-	_, err := r.undeployCosmosigner(context.Background(), nodeSet)
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
 	require.NoError(t, err)
+	assert.True(t, done, "a foreign same-name signer must not block completion")
 
 	fresh := &appsv1.ChainNodeSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
-	assert.Nil(t, fresh.Status.CosmosignerReplicas, "a foreign same-name signer must not block clearing our status")
-	assert.Empty(t, fresh.Status.CosmosignerSigningDigest, "a foreign same-name signer must not block clearing our status")
+	assert.Empty(t, fresh.Status.Cosmosigners, "a foreign same-name signer must not block dropping our status entry")
 
 	// The foreign StatefulSet must be left untouched.
 	remaining := &k8sappsv1.StatefulSet{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: cosmosignerName(nodeSet)}, remaining))
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: signerName}, remaining))
 	assert.True(t, metav1.IsControlledBy(remaining, foreignOwner), "foreign signer must remain owned by the other CR")
+}
+
+// TestSignerNameForNode verifies each node maps to the signer that must dial it: a per-instance
+// signer serves only its own validator instance, while every pod of a sentry target group is a
+// signing endpoint — including extra groups fronted alongside a single-instance validator by the
+// top-level signer.
+func TestSignerNameForNode(t *testing.T) {
+	// Top-level signer fronting a single-instance validator group AND a multi-instance sentry group.
+	topLevel := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"vg", "fullnodes"}, Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{Address: "https://v:8200", KeyName: "k", TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "t"}, Key: "token"}}}},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "vg", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("vgk")}},
+				{Name: "fullnodes", Instances: ptr.To(3)},
+			},
+		},
+	}
+	name, ok := signerNameForNode(topLevel, "vg", 0)
+	assert.True(t, ok)
+	assert.Equal(t, "cs-signer", name)
+	// Every fullnodes pod (sentry fan-out) must be labelled, not just index 0.
+	for i := 0; i < 3; i++ {
+		name, ok := signerNameForNode(topLevel, "fullnodes", i)
+		assert.True(t, ok, "fullnodes-%d must be a signing endpoint", i)
+		assert.Equal(t, "cs-signer", name)
+	}
+
+	// Multi-instance validator group with a per-group signer: each instance maps to its own signer.
+	multi := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "vg", Instances: ptr.To(3), Validator: &appsv1.NodeSetValidatorConfig{},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{Address: "https://v:8200", KeyName: "k", TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "t"}, Key: "token"}}}},
+			}},
+		},
+	}
+	for i := 0; i < 3; i++ {
+		name, ok := signerNameForNode(multi, "vg", i)
+		assert.True(t, ok)
+		assert.Equal(t, fmt.Sprintf("cs-vg-%d-signer", i), name, "instance %d must map to its own signer", i)
+	}
 }
 
 // testScheme builds a scheme with the API + core + apps types for owner references in tests.
@@ -133,13 +196,15 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// TestMaybeImportCosmosignerKeyPreservesCompletedImport verifies the absent-source fast-path: an
-// import annotation whose TARGET half matches the current Vault destination and source secret keeps a
-// completed import valid when the bootstrap Secret is deleted (the signer keeps running — Vault still
-// holds the registered key). An annotation from a DIFFERENT target/source, or none at all, keeps the
-// import pending: nothing usable was ever imported for the current spec.
+// TestMaybeImportCosmosignerKeyPreservesCompletedImport verifies the absent-source fast-path: a
+// recorded import (in the signer's CosmosignerStatus.KeyImported) whose TARGET half matches the
+// current Vault destination and source secret keeps a completed import valid when the bootstrap Secret
+// is deleted (the signer keeps running — Vault still holds the registered key). A record from a
+// DIFFERENT target/source, or none at all, keeps the import pending: nothing usable was ever imported
+// for the current spec.
 func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
-	mk := func(annotation string) *appsv1.ChainNodeSet {
+	const signerName = "test-nodeset-signer"
+	mk := func(imported string) *appsv1.ChainNodeSet {
 		ns := &appsv1.ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
 			Spec: appsv1.ChainNodeSetSpec{
@@ -161,19 +226,20 @@ func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
 			},
 			Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
 		}
-		if annotation != "" {
-			ns.Annotations = map[string]string{controllers.AnnotationCosmosignerKeyImported: annotation}
+		if imported != "" {
+			ns.Status.Cosmosigners = []appsv1.CosmosignerStatus{{Name: signerName, KeyImported: imported}}
 		}
 		return ns
 	}
-	params := cosmosigner.Params{Name: "test-nodeset-signer", Namespace: "default"}
-	// The annotation a completed import would have recorded for the CURRENT target/source (key
-	// material hash differs from target hash, but only the target half matters when the source is gone).
+	params := cosmosigner.Params{Name: signerName, Namespace: "default"}
+	// The value a completed import would have recorded for the CURRENT target/source (key material hash
+	// differs from target hash, but only the target half matters when the source is gone).
 	matching := mk("").Spec.Cosmosigner.Backend.Vault.ImportFingerprint("val-priv-key", []byte("imported-key-bytes"))
 
 	// Source Secret absent but a prior import for the CURRENT target/source recorded: NOT pending.
-	r := newValidatorTestReconciler(t, mk(matching))
-	pending, err := r.maybeImportCosmosignerKey(context.Background(), mk(matching), params)
+	ns := mk(matching)
+	r := newValidatorTestReconciler(t, ns)
+	pending, _, err := r.maybeImportCosmosignerKey(context.Background(), ns, resolveSingleSigner(t, ns), params)
 	require.NoError(t, err)
 	assert.False(t, pending, "a completed import must survive deletion of the bootstrap source Secret")
 
@@ -182,14 +248,16 @@ func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
 	otherTarget := mk("")
 	otherTarget.Spec.Cosmosigner.Backend.Vault.KeyName = "old-key"
 	stale := otherTarget.Spec.Cosmosigner.Backend.Vault.ImportFingerprint("val-priv-key", []byte("imported-key-bytes"))
-	r = newValidatorTestReconciler(t, mk(stale))
-	pending, err = r.maybeImportCosmosignerKey(context.Background(), mk(stale), params)
+	ns = mk(stale)
+	r = newValidatorTestReconciler(t, ns)
+	pending, _, err = r.maybeImportCosmosignerKey(context.Background(), ns, resolveSingleSigner(t, ns), params)
 	require.NoError(t, err)
 	assert.True(t, pending, "an import recorded for a different Vault target must not satisfy the current spec")
 
 	// Source Secret absent and nothing imported yet: still pending.
-	r = newValidatorTestReconciler(t, mk(""))
-	pending, err = r.maybeImportCosmosignerKey(context.Background(), mk(""), params)
+	ns = mk("")
+	r = newValidatorTestReconciler(t, ns)
+	pending, _, err = r.maybeImportCosmosignerKey(context.Background(), ns, resolveSingleSigner(t, ns), params)
 	require.NoError(t, err)
 	assert.True(t, pending, "with no source key and no prior import the import is still pending")
 }

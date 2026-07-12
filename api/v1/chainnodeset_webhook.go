@@ -287,54 +287,8 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	if err := nodeSet.validateCosmosigner(old); err != nil {
 		return nil, err
 	}
-	if old != nil {
-		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, nodeSet.Spec.Cosmosigner); err != nil {
-			return nil, err
-		}
-		// The spec-diff helper above no-ops when the signer was removed in an earlier update
-		// (old.Spec.Cosmosigner is nil). While the previous signer's teardown is still in flight the
-		// controller has not yet cleared the recorded replica count, and its raft PVCs may still exist;
-		// a re-add with a different count could bind them with a mismatched membership. Enforce the
-		// recorded count until teardown completes and clears it.
-		if nodeSet.Spec.Cosmosigner != nil {
-			if replicas := old.Status.CosmosignerReplicas; replicas != nil && *replicas != nodeSet.Spec.Cosmosigner.GetReplicas() {
-				return nil, fmt.Errorf(".spec.cosmosigner.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", *replicas)
-			}
-		}
-		// Once the chain is established, the targeted validator's consensus pubkey is fixed on-chain.
-		// Reject changes to its effective signing key — including adding, removing or switching the
-		// cosmosigner backend — while allowing same-key migrations (equivalent keys compare equal).
-		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || nodeSet.Spec.Cosmosigner != nil) {
-			// Retargeting the signer to different groups after establishment would leave the previously
-			// targeted validator signing locally (or concurrently) with a different key, even if the
-			// signer's own key is unchanged. The target set is therefore immutable — but only when a
-			// validator is (or was) targeted: a sentry-only signer over regular groups protects no
-			// in-cluster validator identity, so moving it between fullnode groups stays allowed.
-			oldTargetsValidator := old.cosmosignerTargetSigningIdentity(old.CosmosignerTargetGroups()) != ""
-			newTargetsValidator := nodeSet.cosmosignerTargetSigningIdentity(nodeSet.CosmosignerTargetGroups()) != ""
-			if old.Spec.Cosmosigner != nil && nodeSet.Spec.Cosmosigner != nil &&
-				(oldTargetsValidator || newTargetsValidator) &&
-				!equalStringSet(old.CosmosignerTargetGroups(), nodeSet.CosmosignerTargetGroups()) {
-				return nil, fmt.Errorf(".spec.cosmosigner.nodeGroups is immutable after the chain is established: retargeting the signer would change which validator signs")
-			}
-			// The identity check only applies when the signer serves a validator whose key is
-			// registered on-chain by this controller. A sentry-mode signer over regular groups has
-			// its key registered out-of-band (e.g. init.genesisValidators), so adding or changing it
-			// resolves no in-cluster validator identity — there is nothing on the old side to
-			// compare, and rejecting would block the documented add-sentry-signer-later flow. When
-			// the old side DID resolve a validator identity, an update that empties it (dropping the
-			// signer and the validator's own signing path together) is rejected too: the on-chain
-			// validator would be left with no signing path.
-			targets := nodeSet.CosmosignerTargetGroups()
-			if len(targets) == 0 {
-				targets = old.CosmosignerTargetGroups()
-			}
-			oldIdentity := old.cosmosignerTargetSigningIdentity(targets)
-			newIdentity := nodeSet.cosmosignerTargetSigningIdentity(targets)
-			if oldIdentity != "" && (newIdentity == "" || oldIdentity != newIdentity) {
-				return nil, fmt.Errorf("the consensus signing key of the cosmosigner-targeted validator is immutable after the chain is established: changing or removing the cosmosigner/signing configuration would leave it signing with a key not in the on-chain validator set (or not signing at all)")
-			}
-		}
+	if err := nodeSet.validateCosmosignerUpdate(old); err != nil {
+		return nil, err
 	}
 
 	// Two validators that explicitly reference the same signing material would sign with the same
@@ -483,50 +437,79 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	return nil, nil
 }
 
-// validateCosmosigner validates the managed cosmosigner deployment and how it targets node groups.
-//
-// A cosmosigner signs for a single consensus identity shared across every node it connects to.
-// Valid targets are therefore:
-//   - a regular (non-validator) node group of any size — "sentry mode", where the group nodes are
-//     the signing endpoints of the one identity;
-//   - the legacy singleton .spec.validator (the default when nodeGroups is empty);
-//   - a single-instance validator group — a drop-in remote signer for that one validator.
-//
-// A multi-instance validator group is rejected: each of its instances is a distinct validator with
-// its own consensus key, which cannot be collapsed onto a single signer identity. A targeted
-// validator must not also use TmKMS.
+// validateCosmosigner validates every managed cosmosigner a ChainNodeSet runs: the top-level
+// .spec.cosmosigner (which selects node groups) and each per-group .spec.nodes[].cosmosigner (whose
+// target is fixed to its enclosing group). Each signer signs for a single consensus identity shared
+// across the nodes it connects to; a multi-instance validator group carrying its own cosmosigner
+// expands to one signer per instance (each a distinct validator with its own key).
 //
 // old is the previous revision on the update path (nil on create); it enables the same-key
 // migration waiver mirroring the ChainNode webhook.
 func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
-	c := nodeSet.Spec.Cosmosigner
-	if c == nil {
+	anySigner := nodeSet.Spec.Cosmosigner != nil
+	for i := range nodeSet.Spec.Nodes {
+		if nodeSet.Spec.Nodes[i].Cosmosigner != nil {
+			anySigner = true
+		}
+	}
+	if !anySigner {
 		return nil
 	}
 
+	// A signer owns resources named "<nodeset>[-<group>]-signer" and "...-signer-privval"; a node
+	// group named "signer" or "signer-privval" would produce a colliding Service.
+	for i, g := range nodeSet.Spec.Nodes {
+		if g.Name == "signer" || g.Name == "signer-privval" {
+			return fmt.Errorf(".spec.nodes[%d].name %q is reserved when a cosmosigner is configured", i, g.Name)
+		}
+	}
+
+	// Shape rules for the top-level signer (target selection over node groups) and each per-group
+	// signer (target fixed to its enclosing group).
+	if c := nodeSet.Spec.Cosmosigner; c != nil {
+		if err := nodeSet.validateTopLevelCosmosigner(c); err != nil {
+			return err
+		}
+	}
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		if g.Cosmosigner == nil {
+			continue
+		}
+		if err := nodeSet.validateGroupCosmosigner(i, g); err != nil {
+			return err
+		}
+	}
+
+	// Per-resolved-signer backend/target consistency (software/uploadGenerated/registers rules), then
+	// cross-signer invariants (target uniqueness, derived name lengths).
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if err := nodeSet.validateResolvedSigner(old, s); err != nil {
+			return err
+		}
+	}
+	if err := nodeSet.validateCosmosignerTargetUniqueness(); err != nil {
+		return err
+	}
+	return nodeSet.validateCosmosignerNameLengths()
+}
+
+// validateTopLevelCosmosigner validates the shape of .spec.cosmosigner: exactly-one-backend (via
+// Cosmosigner.Validate) and how its nodeGroups select targets. A single top-level signer holds one
+// consensus identity, so it may target at most one validator, and never a multi-instance validator
+// group (use a per-group .spec.nodes[].cosmosigner for those — it expands per instance).
+func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 	if err := c.Validate(".spec.cosmosigner", true); err != nil {
 		return err
 	}
 
-	// The signer owns resources named "<nodeset>-signer" and "<nodeset>-signer-privval"; a node
-	// group with either name would produce a colliding Service.
-	for i, g := range nodeSet.Spec.Nodes {
-		if g.Name == "signer" || g.Name == "signer-privval" {
-			return fmt.Errorf(".spec.nodes[%d].name %q is reserved when .spec.cosmosigner is configured", i, g.Name)
-		}
-	}
-
-	// Index groups by name for target resolution.
 	groups := make(map[string]NodeGroupSpec, len(nodeSet.Spec.Nodes))
 	for _, g := range nodeSet.Spec.Nodes {
 		groups[g.Name] = g
 	}
 
 	validatorTargets := 0
-	var targetValidator *NodeSetValidatorConfig
-
 	if len(c.NodeGroups) == 0 {
-		// Default target is the legacy singleton validator.
 		if nodeSet.Spec.Validator == nil {
 			return fmt.Errorf(".spec.cosmosigner.nodeGroups is required when .spec.validator is not set")
 		}
@@ -534,7 +517,6 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 			return fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
 		}
 		validatorTargets = 1
-		targetValidator = nodeSet.Spec.Validator
 	} else {
 		seen := map[string]struct{}{}
 		for i, name := range c.NodeGroups {
@@ -547,89 +529,219 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 			if !ok {
 				return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q does not match any group in .spec.nodes", i, name)
 			}
-			// A group scaled to zero has no pods, so it can neither be a signing endpoint nor host a
-			// validator whose key the signer would use.
 			if group.GetInstances() == 0 {
 				return fmt.Errorf(".spec.cosmosigner cannot target group %q with zero instances", name)
 			}
 			if group.Validator != nil {
 				if group.GetInstances() > 1 {
-					return fmt.Errorf(".spec.cosmosigner cannot target validator group %q with multiple instances: each instance is a distinct validator with its own key", name)
+					return fmt.Errorf(".spec.cosmosigner cannot target validator group %q with multiple instances: use a per-group .spec.nodes[].cosmosigner, which deploys one signer per instance", name)
 				}
 				if group.Validator.TmKMS != nil {
 					return fmt.Errorf(".spec.cosmosigner cannot target group %q which uses tmKMS: cosmosigner and tmKMS are mutually exclusive", name)
 				}
 				validatorTargets++
-				targetValidator = group.Validator
 			}
 		}
 	}
-
-	// A single signer holds one consensus identity. Targeting more than one validator would make
-	// distinct validators share the same signing key.
 	if validatorTargets > 1 {
 		return fmt.Errorf(".spec.cosmosigner cannot target more than one validator: a signer holds a single consensus identity")
 	}
+	return nil
+}
 
-	if validatorTargets == 0 {
-		// Without a validator target there is no controller-registered consensus key to reuse, so the
-		// signer's key material must be supplied explicitly.
+// validateGroupCosmosigner validates a per-group .spec.nodes[i].cosmosigner: exactly-one-backend and
+// no nodeGroups (its target is the enclosing group), the group must have at least one instance, and
+// the group's validator must not also use tmKMS. A multi-instance validator group is allowed here: it
+// expands to one signer per instance.
+func (nodeSet *ChainNodeSet) validateGroupCosmosigner(i int, g *NodeGroupSpec) error {
+	path := fmt.Sprintf(".spec.nodes[%d].cosmosigner", i)
+	if err := g.Cosmosigner.Validate(path, false); err != nil {
+		return err
+	}
+	if g.GetInstances() == 0 {
+		return fmt.Errorf("%s cannot be set on group %q with zero instances", path, g.Name)
+	}
+	if g.Validator != nil && g.Validator.TmKMS != nil {
+		return fmt.Errorf("%s and .spec.nodes[%d].validator.tmKMS are mutually exclusive", path, i)
+	}
+	return nil
+}
+
+// validateResolvedSigner applies the backend/target consistency rules to one resolved signer,
+// regardless of whether it came from the top-level or a per-group block. A sentry signer (no
+// validator target) must carry its own key; a validator-targeted signer must reuse that validator's
+// registered consensus key.
+func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s ResolvedSigner) error {
+	c := s.Spec
+	path := nodeSet.signerFieldPath(s)
+
+	if s.ValidatorGroup == "" {
+		// Sentry signer: no controller-registered validator key to reuse, so key material must be
+		// supplied explicitly.
 		if c.UsesSoftwareBackend() && (c.Backend.Software.PrivateKeySecret == nil || *c.Backend.Software.PrivateKeySecret == "") {
-			return fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret is required when no validator is targeted")
+			return fmt.Errorf("%s.backend.software.privateKeySecret is required when no validator is targeted", path)
 		}
 		if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
-			return fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires targeting a validator whose generated key can be imported")
+			return fmt.Errorf("%s.backend.vault.uploadGenerated requires targeting a validator whose generated key can be imported", path)
 		}
 		return nil
 	}
 
-	// With a validator target the signer must use that validator's own key, so an explicit software
-	// secret (which could point elsewhere) is not allowed.
+	targetValidator := nodeSet.validatorConfigForGroup(s.ValidatorGroup)
+
+	// With a validator target the signer uses that validator's own key, so an explicit software secret
+	// (which could point elsewhere) is not allowed.
 	if c.UsesSoftwareBackend() && c.Backend.Software.PrivateKeySecret != nil && *c.Backend.Software.PrivateKeySecret != "" {
-		return fmt.Errorf(".spec.cosmosigner.backend.software.privateKeySecret cannot be set when targeting a validator: the validator's own key is used")
+		return fmt.Errorf("%s.backend.software.privateKeySecret cannot be set when targeting a validator: the validator's own key is used", path)
 	}
 
-	// When the targeted validator registers a freshly-generated consensus key on-chain (genesis
-	// init or create-validator), Cosmopilot registers the validator's local key. The signer must
-	// therefore use that same key: only the software backend (which references it) or Vault with
-	// uploadGenerated (which imports it — implicitly auto-defaulted for genesis-init targets, per
-	// the documented tmKMS-parity behavior) match. A pre-provisioned Vault/GCP key would register a
-	// different pubkey than the signer holds, until external pubkey registration is wired. Waived
-	// for a same-key migration on an established chain (mirrors the ChainNode webhook): the previous
-	// signing path already put this exact key on-chain, e.g. tmKMS→cosmosigner on the same Vault
-	// key. On the no-webhook path (old == nil) the waiver requires the status-recorded signing
-	// digest to MATCH the current spec: the digest is only recorded after this exact signer
-	// identity was rolled out and serving, so a matching digest proves the pre-provisioned key is
-	// the one in effect — while a newly added signer (no digest, or a different identity) stays
-	// subject to the rule. (A first-time no-webhook migration can set uploadGenerated=true: the
-	// import verifies the stored pubkey matches the source key, so it is a safe no-op on same-key.)
+	// When the targeted validator registers a freshly-generated consensus key on-chain (genesis init
+	// or create-validator), Cosmopilot registers the validator's local key. The signer must therefore
+	// use that same key: only the software backend (which references it) or Vault with uploadGenerated
+	// (which imports it — implicitly auto-defaulted for genesis-init targets). A pre-provisioned
+	// Vault/GCP key would register a different pubkey than the signer holds. Waived for a same-key
+	// migration on an established chain (the previous signing path already put this exact key on-chain,
+	// e.g. tmKMS→cosmosigner on the same Vault key). On the no-webhook path (old == nil) the waiver
+	// requires the status-recorded signing digest of THIS signer to match the current spec.
 	registers := targetValidator.Init != nil || targetValidator.CreateValidator != nil
-	sameKeyWaiver := nodeSetSameKeyMigration(old, nodeSet) ||
-		(old == nil && nodeSet.Status.CosmosignerSigningDigest != "" &&
-			nodeSet.CosmosignerSigningDigest() == nodeSet.Status.CosmosignerSigningDigest)
+	sameKeyWaiver := nodeSet.signerSameKeyMigration(old, s) ||
+		(old == nil && nodeSet.signerDigestRecordedMatches(s))
 	if registers && !sameKeyWaiver {
 		matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(targetValidator.Init != nil)
 		if !matches {
-			return fmt.Errorf(".spec.cosmosigner targeting a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
+			return fmt.Errorf("%s targeting a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer", path)
 		}
 	}
 
 	hasExplicitKey := targetValidator.PrivateKeySecret != nil && *targetValidator.PrivateKeySecret != ""
 
 	// uploadGenerated imports the targeted validator's key into Vault, so that key must exist: the
-	// validator must generate one (init/createValidator) or supply an explicit privateKeySecret. A
-	// plain external-genesis validator with only the default key never creates it, leaving nothing
-	// to import.
+	// validator must generate one (init/createValidator) or supply an explicit privateKeySecret.
 	if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
 		if !registers && !hasExplicitKey {
-			return fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires the targeted validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import")
+			return fmt.Errorf("%s.backend.vault.uploadGenerated requires the targeted validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import", path)
 		}
 	}
 
 	// The software backend mounts the targeted validator's key secret. A plain external-genesis
 	// validator never creates its default key, so an explicit privateKeySecret is required.
 	if c.UsesSoftwareBackend() && !registers && !hasExplicitKey {
-		return fmt.Errorf(".spec.cosmosigner software backend targeting a validator that consumes an external genesis requires the validator to set privateKeySecret: its consensus key is not generated")
+		return fmt.Errorf("%s software backend targeting a validator that consumes an external genesis requires the validator to set privateKeySecret: its consensus key is not generated", path)
+	}
+
+	return nil
+}
+
+// validateCosmosignerTargetUniqueness rejects a node group targeted by both the top-level
+// .spec.cosmosigner and its own .spec.nodes[].cosmosigner: two signers would then dial the same nodes
+// and fight over the single privval connection each node accepts.
+func (nodeSet *ChainNodeSet) validateCosmosignerTargetUniqueness() error {
+	topTargets := map[string]struct{}{}
+	if c := nodeSet.Spec.Cosmosigner; c != nil {
+		if len(c.NodeGroups) == 0 {
+			if nodeSet.Spec.Validator != nil {
+				topTargets[ReservedValidatorGroupName] = struct{}{}
+			}
+		} else {
+			for _, name := range c.NodeGroups {
+				topTargets[name] = struct{}{}
+			}
+		}
+	}
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		if g.Cosmosigner == nil {
+			continue
+		}
+		if _, dup := topTargets[g.Name]; dup {
+			return fmt.Errorf(".spec.nodes[%d].cosmosigner conflicts with .spec.cosmosigner, which already targets group %q; a group can be signed by only one signer", i, g.Name)
+		}
+	}
+	return nil
+}
+
+// validateCosmosignerNameLengths rejects a signer whose derived discovery Service name
+// "<signer>-privval" would exceed the 63-character Kubernetes name limit. This is the longest name
+// any signer derives, so it bounds all of them.
+func (nodeSet *ChainNodeSet) validateCosmosignerNameLengths() error {
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if svc := s.Name + "-privval"; len(svc) > 63 {
+			return fmt.Errorf("the cosmosigner discovery Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet or node-group name", svc, len(svc))
+		}
+	}
+	return nil
+}
+
+// validateCosmosignerUpdate enforces the update-path invariants of every managed signer, pairing the
+// old and new resolved signers by name: per-signer replica immutability (raft membership is not
+// migrated), the teardown-in-flight replica lock for a re-added signer, and — once the chain is
+// established — per-signer retargeting immutability and per-validator signing-key immutability.
+func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error {
+	if old == nil {
+		return nil
+	}
+
+	oldSigners := make(map[string]ResolvedSigner)
+	for _, s := range old.ResolveCosmosigners() {
+		oldSigners[s.Name] = s
+	}
+
+	for _, ns := range nodeSet.ResolveCosmosigners() {
+		path := nodeSet.signerFieldPath(ns)
+		if os, ok := oldSigners[ns.Name]; ok {
+			// Present in both revisions: the replica count is immutable — the membership recorded in the
+			// existing per-pod raft state is not updated by rendering a new bootstrap list.
+			if os.Spec.GetReplicas() != ns.Spec.GetReplicas() {
+				return fmt.Errorf("%s.replicas is immutable after creation: changing it does not migrate the raft membership in the signer's state and can break quorum", path)
+			}
+		} else if st := old.GetCosmosignerStatus(ns.Name); st != nil && st.Replicas != nil && *st.Replicas != ns.Spec.GetReplicas() {
+			// Re-added while a previous incarnation's teardown is still in flight: its raft PVCs may
+			// still exist, so the count must match until teardown clears the recorded value.
+			return fmt.Errorf("%s.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", path, *st.Replicas)
+		}
+	}
+
+	if old.Status.ChainID == "" {
+		return nil
+	}
+
+	// Retargeting a validator-serving signer to different groups after establishment would leave the
+	// previously targeted validator signing with a different key. The target set is therefore
+	// immutable when a validator is (or was) targeted; a sentry-only signer over regular groups
+	// protects no in-cluster validator identity, so moving it between fullnode groups stays allowed.
+	for _, ns := range nodeSet.ResolveCosmosigners() {
+		os, ok := oldSigners[ns.Name]
+		if !ok {
+			continue
+		}
+		if (os.ValidatorTargetedIdentity() != "" || ns.ValidatorTargetedIdentity() != "") &&
+			!equalGroupSet(os.TargetGroups, ns.TargetGroups) {
+			// Only the top-level signer selects groups (a per-group signer's target is structurally
+			// fixed), so this always refers to .spec.cosmosigner.nodeGroups.
+			return fmt.Errorf("%s.nodeGroups is immutable after the chain is established: retargeting the signer would change which validator signs", nodeSet.signerFieldPath(ns))
+		}
+	}
+
+	// Each validator a signer served has a consensus pubkey fixed on-chain. That validator must still
+	// resolve the same effective key on the new revision — whether through its (retarget-locked)
+	// signer or, if the signer was dropped, its own local/tmKMS path. Dropping it to nothing (removing
+	// both the signer and the validator's own signing path) is rejected too.
+	for _, os := range old.ResolveCosmosigners() {
+		oldIdentity := os.ValidatorTargetedIdentity()
+		if oldIdentity == "" {
+			continue
+		}
+		instance := 0
+		if os.ValidatorInstance != nil {
+			instance = *os.ValidatorInstance
+		}
+		if newIdentity := nodeSet.validatorEffectiveIdentity(os.ValidatorGroup, instance); newIdentity == "" || newIdentity != oldIdentity {
+			label := os.ValidatorGroup
+			if label == ReservedValidatorGroupName {
+				label = ".spec.validator"
+			}
+			return fmt.Errorf("the consensus signing key of the cosmosigner-targeted validator %q is immutable after the chain is established: changing or removing the cosmosigner/signing configuration would leave it signing with a key not in the on-chain validator set (or not signing at all)", label)
+		}
 	}
 
 	return nil
@@ -671,6 +783,18 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	registerVault := func(path, id string) error {
 		if prev, ok := vaultKeys[id]; ok {
 			return fmt.Errorf("%s references the same Vault signing key as %s; each validator must sign with a distinct key", path, prev)
+		}
+		vaultKeys[id] = path
+		return nil
+	}
+
+	// registerGcp registers a GCP KMS key version. Its identity namespace ("gcpkms\x00...") never
+	// collides with Vault/local/tmKMS identities, so sharing vaultKeys only ever detects a
+	// GCP-vs-GCP collision between two signers referencing the same key version.
+	registerGcp := func(path, keyVersion string) error {
+		id := "gcpkms\x00" + keyVersion
+		if prev, ok := vaultKeys[id]; ok {
+			return fmt.Errorf("%s references the same GCP KMS signing key as %s; each validator must sign with a distinct key", path, prev)
 		}
 		vaultKeys[id] = path
 		return nil
@@ -720,8 +844,8 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	// tmKMS→cosmosigner migration where the previously-uploaded key still lives in that secret;
 	// freeing it would let a second validator sign with the same identity.
 	cosmosignerLeavesLocalKeyUnused := func(group string, v *NodeSetValidatorConfig) bool {
-		c := nodeSet.Spec.Cosmosigner
-		if c == nil || !nodeSet.IsCosmosignerTargetGroup(group) {
+		c := nodeSet.groupCosmosigner(group)
+		if c == nil {
 			return false
 		}
 		if v != nil && (v.Init != nil || v.CreateValidator != nil) {
@@ -801,11 +925,20 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		}
 	}
 
-	// The managed cosmosigner deployment signs with a single consensus identity. When it targets a
-	// validator, that validator's own key is already registered above (the signer reuses it), so
-	// only the external backend identity and the sentry-mode software secret need registering here
-	// to catch collisions with other validators.
-	if c := nodeSet.Spec.Cosmosigner; c != nil {
+	// Every managed cosmosigner signs with a single consensus identity. When a signer targets a
+	// validator, that validator's own key is already registered above (the signer reuses it), so only
+	// the external backend identity and the sentry-mode software secret need registering here to catch
+	// collisions with other validators — and with each other, now that a ChainNodeSet can run several
+	// signers. A per-instance signer's s.Spec already carries the index-appended Vault key / GCP key
+	// version, so each instance registers a distinct identity.
+	//
+	// sentrySoftwareSecrets tracks the software key of every sentry signer so two sentry signers can
+	// never share one, even when that key is a genesis-validator secret (which the general
+	// uniqueness map skips — see below).
+	sentrySoftwareSecrets := map[string]string{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		c := s.Spec
+		path := nodeSet.signerFieldPath(s)
 		switch {
 		case c.UsesVaultBackend():
 			v := c.Backend.Vault
@@ -814,25 +947,36 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				if v.Namespace != nil {
 					ns = *v.Namespace
 				}
-				if err := registerVault(".spec.cosmosigner", normalizedVaultIdentity(v.Address, ns, v.GetVaultMount(), v.KeyName)); err != nil {
+				if err := registerVault(path, normalizedVaultIdentity(v.Address, ns, v.GetVaultMount(), v.KeyName)); err != nil {
 					return err
 				}
 			}
-		// A GCP KMS key is not registered: a ChainNodeSet has at most one cosmosigner and no other
-		// signing path (tmKMS, local key) can reference a GCP key, so there is no possible in-set
-		// collision to detect.
+		case c.UsesGcpKmsBackend():
+			if kv := c.Backend.GcpKMS.KeyVersion; kv != "" {
+				if err := registerGcp(path, kv); err != nil {
+					return err
+				}
+			}
 		case c.UsesSoftwareBackend():
 			// A validator-targeted software signer reuses that validator's already-registered key, so
-			// nothing extra is registered. A sentry-mode software key must still be unique versus other
-			// live validators — except when it is the priv-key secret of a genesis validator entry, which
-			// is the documented way to register the sentry signer's key on-chain (that overlap is allowed).
-			if _, hasValidatorTarget := nodeSet.CosmosignerValidatorTargetSecret(); !hasValidatorTarget &&
-				c.Backend.Software.PrivateKeySecret != nil {
-				secret := *c.Backend.Software.PrivateKeySecret
-				if _, sharedWithGenesis := genesisValidatorSecrets[secret]; !sharedWithGenesis {
-					if err := registerSecret(".spec.cosmosigner.backend.software", secret); err != nil {
-						return err
-					}
+			// nothing extra is registered.
+			if s.TargetsValidator() || c.Backend.Software.PrivateKeySecret == nil {
+				break
+			}
+			secret := *c.Backend.Software.PrivateKeySecret
+			// Two sentry signers holding the same key would sign the same identity from two independent
+			// raft clusters (double-signing), so reject that regardless of any genesis overlap.
+			if prev, ok := sentrySoftwareSecrets[secret]; ok {
+				return fmt.Errorf("%s.backend.software.privateKeySecret %q is already used by %s; each signer must sign with a distinct key", path, secret, prev)
+			}
+			sentrySoftwareSecrets[secret] = path
+			// A sentry-mode software key must still be unique versus other live validators — except when
+			// it is the priv-key secret of a genesis validator entry, which is the documented way to
+			// register the sentry signer's key on-chain (that single overlap is allowed; a second sentry
+			// on the same secret was already rejected above).
+			if _, sharedWithGenesis := genesisValidatorSecrets[secret]; !sharedWithGenesis {
+				if err := registerSecret(path+".backend.software", secret); err != nil {
+					return err
 				}
 			}
 		}
@@ -1110,11 +1254,13 @@ func genesisSigningFingerprintWithIdentity(signingIdentity string, init *Genesis
 }
 
 // nodeSetValidatorEffectiveIdentity returns the normalized signing identity of a nodeset validator
-// (legacy singleton via ReservedValidatorGroupName, or a validator group): the cosmosigner identity
-// when that group is the signer target on this revision, otherwise its own local/tmKMS identity.
+// (legacy singleton via ReservedValidatorGroupName, or a validator group): the identity of the signer
+// serving that group's representative instance when one exists, otherwise its own local/tmKMS
+// identity. Used for genesis-initializing validators, which are single-instance or represented by
+// instance 0.
 func (nodeSet *ChainNodeSet) nodeSetValidatorEffectiveIdentity(group string, cfg *NodeSetValidatorConfig) string {
-	if nodeSet.Spec.Cosmosigner != nil && nodeSet.IsCosmosignerTargetGroup(group) {
-		return nodeSet.CosmosignerSigningIdentity()
+	if id, ok := nodeSet.groupSignerIdentity(group, 0); ok {
+		return id
 	}
 	return nodeSet.validatorGroupSigningIdentity(group, cfg)
 }
@@ -1130,21 +1276,6 @@ func (nodeSet *ChainNodeSet) nodeSetEffectiveGenesisFingerprint(group string, cf
 	return genesisSigningFingerprintWithIdentity(
 		nodeSet.nodeSetValidatorEffectiveIdentity(group, cfg),
 		cfg.Init, cfg.Info, cfg.GetAccountPrefix(), cfg.GetValPrefix(), cfg.GetAccountHDPath())
-}
-
-// nodeSetSameKeyMigration reports whether an update keeps the effective consensus signing key of the
-// cosmosigner-targeted validator unchanged on an established chain (e.g. tmKMS→cosmosigner on the
-// same Vault key). Equivalent keys compare equal via the normalized signing identity.
-func nodeSetSameKeyMigration(old, nodeSet *ChainNodeSet) bool {
-	if old == nil || old.Status.ChainID == "" {
-		return false
-	}
-	targets := nodeSet.CosmosignerTargetGroups()
-	if len(targets) == 0 {
-		targets = old.CosmosignerTargetGroups()
-	}
-	oldIdentity := old.cosmosignerTargetSigningIdentity(targets)
-	return oldIdentity != "" && oldIdentity == nodeSet.cosmosignerTargetSigningIdentity(targets)
 }
 
 // normalizedVaultIdentity returns a backend-agnostic identifier for a Vault Transit key, so the

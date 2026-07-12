@@ -39,15 +39,21 @@ would deadlock.
 
 ## Targeting
 
-On a **ChainNodeSet**, `.spec.cosmosigner.nodeGroups` selects which node groups the signer signs for:
+A `Cosmosigner` can be attached to a **ChainNodeSet** in two places:
 
-- A **regular node group** — the group's nodes become the signing endpoints of a single validator
-  identity (sentry mode). This lets a group of full nodes validate.
-- The **validator** — leave `nodeGroups` empty to target the `.spec.validator` (a drop-in remote
-  signer for a single validator).
+- **Top-level `.spec.cosmosigner`** — one signer holding a single consensus identity.
+  `.spec.cosmosigner.nodeGroups` selects which node groups it signs for:
+  - A **regular node group** — the group's nodes become the signing endpoints of a single validator
+    identity (sentry mode). This lets a group of full nodes validate.
+  - The **validator** — leave `nodeGroups` empty to target the `.spec.validator` (a drop-in remote
+    signer for a single validator).
 
-A validator group with more than one instance cannot be targeted: each instance is a distinct
-validator with its own key, which cannot be collapsed onto one signer identity.
+  The top-level signer targets at most one validator, so a validator group with more than one
+  instance cannot be targeted here — use a per-group signer (below) instead.
+
+- **Per-group `.spec.nodes[].cosmosigner`** — a signer scoped to its enclosing group. Its target is
+  fixed to that group (so `nodeGroups` is not allowed). This is how you run **several signed
+  validators in one ChainNodeSet** (see [Multiple validators](#multiple-validators-one-signer-each)).
 
 On a standalone **ChainNode**, `.spec.cosmosigner` targets that node; `nodeGroups` is not used.
 
@@ -93,6 +99,72 @@ spec:
         keyName: my-validator
         tokenSecret: { name: vault-cosmosigner-token, key: token }
 ```
+
+## Multiple validators, one signer each
+
+To run several signed validators in a single ChainNodeSet, give each **validator group** its own
+`cosmosigner` block. Cosmopilot deploys one signer per validator:
+
+```yaml {5-12,17-24}
+spec:
+  nodes:
+    - name: validator-a
+      instances: 1
+      validator: { privateKeySecret: chain-validator-a-priv-key }
+      cosmosigner:                       # signer "<nodeset>-validator-a-signer"
+        replicas: 3
+        backend:
+          vault:
+            address: https://vault:8200
+            keyName: chain-validator-a   # distinct key per validator
+            tokenSecret: { name: vault-cosmosigner-token, key: token }
+    - name: validator-b
+      instances: 1
+      validator: { privateKeySecret: chain-validator-b-priv-key }
+      cosmosigner:                       # signer "<nodeset>-validator-b-signer"
+        replicas: 3
+        backend:
+          vault:
+            address: https://vault:8200
+            keyName: chain-validator-b   # must differ from validator-a's key
+            tokenSecret: { name: vault-cosmosigner-token, key: token }
+```
+
+Each signer holds a distinct consensus identity. Two signers may **not** reference the same Vault
+key, GCP key version, or software key secret — the webhook rejects it, since that would let two
+validators double-sign.
+
+### Multi-instance validator groups
+
+A multi-instance validator group is N distinct validators, so a per-group `cosmosigner` on it deploys
+**one signer per instance** (`<nodeset>-<group>-<index>-signer`). Each instance needs its own
+consensus key:
+
+- **Vault / GCP**: instance `i` uses the **index-appended** key `<keyName>-<i>` / `<keyVersion>-<i>`.
+  Pre-provision one key per instance (e.g. for a 3-instance group with `keyName: myval`, create
+  `myval-0`, `myval-1`, `myval-2`). With `uploadGenerated`, Cosmopilot imports instance `i`'s
+  generated key into `<keyName>-<i>`.
+- **Software**: instance `i` mounts its own generated key secret `<nodeset>-<group>-<i>-priv-key`.
+
+```yaml {5-11}
+spec:
+  nodes:
+    - name: validators
+      instances: 3                       # 3 validators -> 3 signers
+      validator: { ... }
+      cosmosigner:
+        replicas: 3
+        backend:
+          vault:
+            address: https://vault:8200
+            keyName: myval               # instance i signs with "myval-<i>"
+            tokenSecret: { name: vault-cosmosigner-token, key: token }
+```
+
+:::note[One signer per group]
+A node group can be signed by only one signer: you cannot list a group in the top-level
+`.spec.cosmosigner.nodeGroups` **and** give it its own `.spec.nodes[].cosmosigner`.
+:::
 
 ## Backends
 

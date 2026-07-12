@@ -20,6 +20,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmoseedConfig](#cosmoseedconfig)
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
 * [CosmoseedIngressConfig](#cosmoseedingressconfig)
+* [CosmosignerStatus](#cosmosignerstatus)
 * [GatewayConfig](#gatewayconfig)
 * [GatewayRef](#gatewayref)
 * [GlobalGatewayConfig](#globalgatewayconfig)
@@ -248,11 +249,7 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | upgrades | All scheduled or completed upgrades performed by cosmopilot on ChainNodes of this ChainNodeSet. | [][Upgrade](#upgrade) | false |
 | latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
 | seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
-| cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity and target set, captured once the chain is established. It lets the no-webhook reconcile path reject a later change or removal of the signing configuration that would make the validator sign with a key not in the on-chain validator set. Not meant to be set by hand. | string | false |
-| cosmosignerReplicas | CosmosignerReplicas records the raft replica count the managed signer was rolled out with. It is captured for every signer (validator-targeted and sentry-mode alike) so the no-webhook reconcile path can reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. Not meant to be set by hand. | *int32 | false |
-| cosmosignerAtEstablishment | CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at the moment the chain ID was first recorded. Empty string when no signer targeted a validator at chain establishment — including sentry-mode signers, whose key identity is deliberately excluded so that later retargeting the same key onto a validator does not masquerade as the establishing configuration. It lets the no-webhook reconcile path tell an establishing validator signer (admitted) apart from one introduced afterwards (rejected unless the backend provably imports the registered key). Not meant to be set by hand. | *string | false |
-| cosmosignerServingIdentity | CosmosignerServingIdentity records the effective signing identity of the rolled-out validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on teardown. It lets the no-webhook reconcile path judge a signer REMOVAL from status alone: removal is only admitted when the formerly-served validator still resolves to this same identity through its own signing path (e.g. a software-backed signer that used the validator's own key secret), so the on-chain key keeps signing. Not meant to be set by hand. | string | false |
-| cosmosignerServingGroup | CosmosignerServingGroup records WHICH validator group the rolled-out signer served (the reserved \"validator\" name for the legacy singleton), captured with CosmosignerServingIdentity and cleared on teardown. The no-webhook removal guard checks that this specific validator's own signing path resolves the serving identity — a different validator that happens to reference the same key must not satisfy the check for the served one. Not meant to be set by hand. | string | false |
+| cosmosigners | Cosmosigners records controller-managed state for each managed cosmosigner deployment (the top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner, expanded per instance for a multi-instance validator group). Keyed by the signer's resource name. Not meant to be set by hand. | [][CosmosignerStatus](#cosmosignerstatus) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -317,6 +314,23 @@ CosmoseedIngressConfig configures ingress for cosmoseed nodes.
 | disableTLS | Whether to disable TLS on ingress resource. | bool | false |
 | tlsSecretName | Name of the secret containing TLS certificate. | *string | false |
 | ingressClass | IngressClass specifies the ingress class to be used on ingresses | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerStatus
+
+CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All fields are controller-managed and not meant to be set by hand.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name is the signer's resource name (<nodeset>-signer \| <nodeset>-<group>-signer \| <nodeset>-<group>-<index>-signer) and the key of this entry. | string | true |
+| replicas | Replicas records the raft replica count this signer was rolled out with, so the no-webhook reconcile path can reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. | *int32 | false |
+| signingDigest | SigningDigest is a fingerprint of this signer's effective signing identity, replica count and target-group set, captured once it has rolled out. It lets the no-webhook reconcile path reject a later change to the signing configuration that would make the validator sign with a key not in the on-chain validator set. | string | false |
+| atEstablishment | AtEstablishment is a write-once record of this signer's VALIDATOR-TARGETED identity at the moment the chain ID was first recorded (empty string when it targeted no validator then, including sentry mode). It lets the no-webhook path tell an establishing validator signer (admitted) apart from one introduced afterwards (rejected unless the backend provably imports the registered key). Absent for a signer added after establishment. | *string | false |
+| servingIdentity | ServingIdentity records the effective signing identity this validator-targeted signer served, captured with SigningDigest and cleared on teardown. It lets the no-webhook path judge a REMOVAL: removal is only admitted when the served validator still resolves this identity through its own signing path (e.g. a software-backed signer using the validator's own key). | string | false |
+| servingGroup | ServingGroup records which validator group this signer served (the reserved \"validator\" name for the legacy singleton). The removal guard checks that this specific validator's own path resolves ServingIdentity — a different validator referencing the same key must not satisfy it. | string | false |
+| servingInstance | ServingInstance records which instance of ServingGroup this signer served (for a per-instance signer of a multi-instance validator group). Nil for a whole-group / legacy-singleton signer. | *int | false |
+| keyImported | KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -437,6 +451,7 @@ NodeGroupSpec sets chainnode configurations for a group.
 | instances | Number of ChainNode instances to run on this group. | *int | false |
 | config | Specific configurations for these nodes. | *[Config](#config) | false |
 | validator | Validator config for this node group. When set, every instance in this group is reconciled as a validator with its own consensus key and account secrets. | *[NodeSetValidatorConfig](#nodesetvalidatorconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer for this group. When the group is a validator group, the signer signs for that validator (one signer per instance for a multi-instance group); when it has no validator, the group's nodes are the signing endpoints of a single out-of-band-registered identity (sentry mode). Its `nodeGroups` field must be empty — the enclosing group is the target. | *[Cosmosigner](#cosmosigner) | false |
 | persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. | *[Persistence](#persistence) | false |
 | peers | Additional persistent peers that should be added to these nodes. | [][Peer](#peer) | false |
 | expose | Allows exposing P2P traffic to public. | *[ExposeConfig](#exposeconfig) | false |

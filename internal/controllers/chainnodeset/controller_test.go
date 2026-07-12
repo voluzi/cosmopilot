@@ -296,12 +296,27 @@ func cosmosignerVaultBackend() appsv1.CosmosignerBackend {
 	}}
 }
 
+// recordSignerRollout records the sole signer of a ChainNodeSet as rolled out and serving, mirroring
+// what ensureCosmosigner persists into the per-signer status entry after a successful rollout.
+func recordSignerRollout(t *testing.T, ns *appsv1.ChainNodeSet) {
+	t.Helper()
+	s := resolveSingleSigner(t, ns)
+	st := ns.EnsureCosmosignerStatus(s.Name)
+	st.Replicas = ptr.To(s.Spec.GetReplicas())
+	if s.TargetsValidator() {
+		st.SigningDigest = s.Digest()
+		st.ServingIdentity = s.ValidatorTargetedIdentity()
+		st.ServingGroup = s.ValidatorGroup
+		st.ServingInstance = s.ValidatorInstance
+	}
+}
+
 // TestValidateForReconcileRejectsSentryReplicaChange verifies the no-webhook path enforces raft
 // replica immutability for a sentry-mode signer, which never records a signing digest. The recorded
-// Status.CosmosignerReplicas is what makes a later replica change rejectable.
+// per-signer status Replicas is what makes a later replica change rejectable.
 func TestValidateForReconcileRejectsSentryReplicaChange(t *testing.T) {
 	mk := func(replicas int32) *appsv1.ChainNodeSet {
-		return &appsv1.ChainNodeSet{
+		ns := &appsv1.ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
 			Spec: appsv1.ChainNodeSetSpec{
 				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
@@ -312,8 +327,10 @@ func TestValidateForReconcileRejectsSentryReplicaChange(t *testing.T) {
 				},
 				Nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(3)}},
 			},
-			Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet", CosmosignerReplicas: ptr.To(int32(3))},
+			Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
 		}
+		ns.Status.Cosmosigners = []appsv1.CosmosignerStatus{{Name: "test-nodeset-signer", Replicas: ptr.To(int32(3))}}
+		return ns
 	}
 
 	// Same replica count as recorded: accepted.
@@ -323,13 +340,15 @@ func TestValidateForReconcileRejectsSentryReplicaChange(t *testing.T) {
 	// Changed replica count: rejected — the raft membership cannot be migrated.
 	_, err = validateForReconcile(mk(5))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), ".spec.cosmosigner.replicas is immutable")
+	assert.Contains(t, err.Error(), "replicas are immutable")
 }
 
-// cosmosignerValidatorNodeSet builds an established (chainID set) ChainNodeSet whose validator group
-// is targeted by a cosmosigner with the given backend.
+// cosmosignerValidatorNodeSet builds an established ChainNodeSet whose validator group is targeted by a
+// cosmosigner with the given backend. SetEstablishedChainID records the establishing at-establishment
+// marker for the signer (mirroring the controller), so a signer present at establishment is
+// distinguishable from a post-establishment addition.
 func cosmosignerValidatorNodeSet(backend appsv1.CosmosignerBackend) *appsv1.ChainNodeSet {
-	return &appsv1.ChainNodeSet{
+	ns := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
 		Spec: appsv1.ChainNodeSetSpec{
 			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
@@ -343,15 +362,16 @@ func cosmosignerValidatorNodeSet(backend appsv1.CosmosignerBackend) *appsv1.Chai
 				Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
 			}},
 		},
-		Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
+		Status: appsv1.ChainNodeSetStatus{},
 	}
+	ns.SetEstablishedChainID("test-localnet")
+	return ns
 }
 
 // TestValidateForReconcileAllowsFirstSignerRollout verifies the no-webhook path admits a
-// validator-targeted signer that has not yet recorded a rollout digest — including a pre-provisioned
-// Vault backend. Blocking it here would deadlock the first rollout (chainID is set before
-// ensureCosmosigner can observe rollout and record the digest); add/reroute safety that needs the
-// previous spec is left to the admission webhook.
+// validator-targeted signer present at establishment that has not yet recorded a rollout digest —
+// including a pre-provisioned Vault backend. Blocking it here would deadlock the first rollout (the
+// at-establishment marker matches the signer identity, so it is not a post-establishment addition).
 func TestValidateForReconcileAllowsFirstSignerRollout(t *testing.T) {
 	// Pre-provisioned Vault key, no recorded digest (first rollout in progress): accepted.
 	_, err := validateForReconcile(cosmosignerValidatorNodeSet(cosmosignerVaultBackend()))
@@ -364,12 +384,11 @@ func TestValidateForReconcileAllowsFirstSignerRollout(t *testing.T) {
 
 // TestValidateForReconcileRejectsRecordedSignerKeyChange verifies that once a validator-targeted
 // signer's digest is recorded, changing its signing configuration (here the Vault key name) is
-// rejected — the live signer's key is fixed on-chain — while removing the signer is allowed (a safe
-// rollback to the validator's own key is judged by the admission webhook, not blocked here).
+// rejected — the live signer's key is fixed on-chain — while removing the signer is judged by the
+// removal guard.
 func TestValidateForReconcileRejectsRecordedSignerKeyChange(t *testing.T) {
 	recorded := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
-	recorded.Status.CosmosignerSigningDigest = recorded.CosmosignerSigningDigest()
-	recorded.Status.CosmosignerReplicas = ptr.To(recorded.Spec.Cosmosigner.GetReplicas())
+	recordSignerRollout(t, recorded)
 
 	// Unchanged config: accepted.
 	_, err := validateForReconcile(recorded)
@@ -382,11 +401,9 @@ func TestValidateForReconcileRejectsRecordedSignerKeyChange(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "immutable after the chain is established")
 
-	// Removing the Vault signer entirely: rejected — its serving identity (or, for a legacy digest,
-	// the inability to verify one) proves the validator would fall back to a different local key.
+	// Removing the Vault signer entirely: rejected — its recorded serving identity proves the validator
+	// would fall back to a different local key.
 	removed := recorded.DeepCopy()
-	removed.Status.CosmosignerServingIdentity = recorded.CosmosignerSigningIdentity()
-	removed.Status.CosmosignerServingGroup = "validators"
 	removed.Spec.Cosmosigner = nil
 	_, err = validateForReconcile(removed)
 	require.Error(t, err)
@@ -397,23 +414,8 @@ func TestValidateForReconcileRejectsRecordedSignerKeyChange(t *testing.T) {
 // signer's digest is recorded (it rolled out and served), the same spec passes and a pre-provisioned
 // backend is no longer refused — the recorded digest proves the key is the one in effect.
 func TestValidateForReconcileAllowsRecordedValidatorSigner(t *testing.T) {
-	nodeSet := &appsv1.ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
-		Spec: appsv1.ChainNodeSetSpec{
-			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Cosmosigner: &appsv1.Cosmosigner{
-				NodeGroups: []string{"validators"},
-				Backend:    cosmosignerVaultBackend(),
-			},
-			Nodes: []appsv1.NodeGroupSpec{{
-				Name:      "validators",
-				Instances: ptr.To(1),
-				Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
-			}},
-		},
-		Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
-	}
-	nodeSet.Status.CosmosignerSigningDigest = nodeSet.CosmosignerSigningDigest()
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recordSignerRollout(t, nodeSet)
 
 	_, err := validateForReconcile(nodeSet)
 	require.NoError(t, err)
@@ -421,20 +423,18 @@ func TestValidateForReconcileAllowsRecordedValidatorSigner(t *testing.T) {
 
 // TestValidateForReconcilePostEstablishmentSignerAddition verifies the write-once at-establishment
 // marker: a validator-targeted pre-provisioned signer whose identity matches the marker (it was the
-// establishing configuration) is admitted even before its rollout digest is recorded, while one whose
-// identity was introduced AFTER establishment is rejected unless the backend provably imports the
-// registered key.
+// establishing configuration) is admitted even before its rollout digest is recorded, while one added
+// AFTER establishment (no status entry) is rejected unless the backend provably imports the registered
+// key.
 func TestValidateForReconcilePostEstablishmentSignerAddition(t *testing.T) {
+	// Established WITH the signer (entry AtEstablishment == identity): admitted.
 	establishing := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
-	establishing.Status.CosmosignerAtEstablishment = ptr.To(establishing.CosmosignerSigningIdentity())
-
-	// Identity matches the establishment record (first rollout of the establishing signer): admitted.
 	_, err := validateForReconcile(establishing)
 	require.NoError(t, err)
 
-	// Established with NO signer, pre-provisioned Vault signer added later: rejected.
+	// Established, then a pre-provisioned Vault signer added later (no status entry): rejected.
 	added := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
-	added.Status.CosmosignerAtEstablishment = ptr.To("")
+	added.Status.Cosmosigners = nil
 	_, err = validateForReconcile(added)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pre-provisioned Vault/GCP key")
@@ -446,45 +446,39 @@ func TestValidateForReconcilePostEstablishmentSignerAddition(t *testing.T) {
 		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
 		UploadGenerated: true,
 	}})
-	importing.Status.CosmosignerAtEstablishment = ptr.To("")
+	importing.Status.Cosmosigners = nil
 	_, err = validateForReconcile(importing)
-	require.NoError(t, err)
-
-	// Marker not recorded (nil — a pre-marker legacy chain): admitted here, but the controller
-	// backfills the marker conservatively (empty unless a rollout digest proves the identity served)
-	// BEFORE deploying any signer resources, so the guard bites on the next reconcile.
-	unrecorded := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
-	_, err = validateForReconcile(unrecorded)
 	require.NoError(t, err)
 }
 
-// TestSetEstablishedChainIDRecordsMarkerAtomically verifies the chain ID and the at-establishment
-// signer identity marker are recorded in the same status mutation, closing the window in which a
-// chain is established but the marker is nil (during which an unverifiable signer addition could
-// slip past the no-webhook guard and be blessed by a late marker write).
+// TestSetEstablishedChainIDRecordsMarkerAtomically verifies the chain ID and the per-signer
+// at-establishment identity marker are recorded in the same status mutation, closing the window in
+// which a chain is established but the marker is nil (during which an unverifiable signer addition
+// could slip past the no-webhook guard and be blessed by a late marker write).
 func TestSetEstablishedChainIDRecordsMarkerAtomically(t *testing.T) {
-	// Established WITH a signer: the establishing identity is recorded.
+	// Established WITH a signer: the establishing identity is recorded in the signer's status entry.
 	withSigner := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	withSigner.Status = appsv1.ChainNodeSetStatus{}
 	withSigner.SetEstablishedChainID("test-localnet")
-	require.NotNil(t, withSigner.Status.CosmosignerAtEstablishment)
-	assert.Equal(t, withSigner.CosmosignerSigningIdentity(), *withSigner.Status.CosmosignerAtEstablishment)
+	s := resolveSingleSigner(t, withSigner)
+	require.Len(t, withSigner.Status.Cosmosigners, 1)
+	require.NotNil(t, withSigner.Status.Cosmosigners[0].AtEstablishment)
+	assert.Equal(t, s.ValidatorTargetedIdentity(), *withSigner.Status.Cosmosigners[0].AtEstablishment)
 	assert.Equal(t, "test-localnet", withSigner.Status.ChainID)
 
-	// Established WITHOUT a signer: an empty identity is recorded, so any later validator-targeted
-	// pre-provisioned signer addition is caught by the guard.
+	// Established WITHOUT a signer: no status entry is recorded, so any later validator-targeted
+	// pre-provisioned signer addition (which also has no entry) is caught by the addition guard.
 	noSigner := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	noSigner.Spec.Cosmosigner = nil
 	noSigner.Status = appsv1.ChainNodeSetStatus{}
 	noSigner.SetEstablishedChainID("test-localnet")
-	require.NotNil(t, noSigner.Status.CosmosignerAtEstablishment)
-	assert.Empty(t, *noSigner.Status.CosmosignerAtEstablishment)
+	assert.Empty(t, noSigner.Status.Cosmosigners)
 
 	// Empty chain ID: nothing is recorded (chain not established yet).
 	pending := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	pending.Status = appsv1.ChainNodeSetStatus{}
 	pending.SetEstablishedChainID("")
-	assert.Nil(t, pending.Status.CosmosignerAtEstablishment)
+	assert.Empty(t, pending.Status.Cosmosigners)
 	assert.Empty(t, pending.Status.ChainID)
 }
 
@@ -496,27 +490,23 @@ func TestSetEstablishedChainIDRecordsMarkerAtomically(t *testing.T) {
 func TestValidateForReconcileSignerRemoval(t *testing.T) {
 	// Vault-backed signer served; removal would fall back to a local key that is not the on-chain key.
 	vaultServed := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
-	vaultIdentity := vaultServed.CosmosignerSigningIdentity()
+	recordSignerRollout(t, vaultServed)
 	vaultServed.Spec.Cosmosigner = nil
-	vaultServed.Status.CosmosignerServingIdentity = vaultIdentity
-	vaultServed.Status.CosmosignerServingGroup = "validators"
 	_, err := validateForReconcile(vaultServed)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot be removed")
 
 	// Software-backed signer served with the validator's own key; removal keeps the same identity.
 	softwareServed := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
-	softwareIdentity := softwareServed.CosmosignerSigningIdentity()
+	recordSignerRollout(t, softwareServed)
 	softwareServed.Spec.Cosmosigner = nil
-	softwareServed.Status.CosmosignerServingIdentity = softwareIdentity
-	softwareServed.Status.CosmosignerServingGroup = "validators"
 	_, err = validateForReconcile(softwareServed)
 	require.NoError(t, err)
 
 	// A DIFFERENT validator referencing the served identity must not satisfy the guard for the served
 	// one: the served group's own path resolves a different key.
 	otherResolves := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
-	servedIdentity := otherResolves.CosmosignerSigningIdentity()
+	recordSignerRollout(t, otherResolves)
 	otherResolves.Spec.Cosmosigner = nil
 	// The served group now points at a different explicit key, while an unrelated group references
 	// the served identity's secret.
@@ -526,21 +516,20 @@ func TestValidateForReconcileSignerRemoval(t *testing.T) {
 		Instances: ptr.To(1),
 		Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
 	})
-	otherResolves.Status.CosmosignerServingIdentity = servedIdentity
-	otherResolves.Status.CosmosignerServingGroup = "validators"
 	_, err = validateForReconcile(otherResolves)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot be removed")
 
-	// No serving identity recorded (sentry, or the signer never rolled out): removal is free.
+	// No serving identity recorded (the signer never rolled out): removal is free.
 	neverServed := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	neverServed.Status.Cosmosigners = nil
 	neverServed.Spec.Cosmosigner = nil
 	_, err = validateForReconcile(neverServed)
 	require.NoError(t, err)
 }
 
 // TestValidateForReconcileSentryRetargetToValidator verifies that a sentry-mode signer records "" in
-// the at-establishment marker (its key identity is deliberately excluded), so retargeting the SAME
+// its at-establishment marker (its key identity is deliberately excluded), so retargeting the SAME
 // pre-provisioned key onto a validator with webhooks disabled does not masquerade as the establishing
 // configuration and is rejected.
 func TestValidateForReconcileSentryRetargetToValidator(t *testing.T) {
@@ -561,8 +550,9 @@ func TestValidateForReconcileSentryRetargetToValidator(t *testing.T) {
 		Status: appsv1.ChainNodeSetStatus{},
 	}
 	sentry.SetEstablishedChainID("test-localnet")
-	require.NotNil(t, sentry.Status.CosmosignerAtEstablishment)
-	assert.Empty(t, *sentry.Status.CosmosignerAtEstablishment, "a sentry signer must record an empty validator-targeted identity")
+	require.Len(t, sentry.Status.Cosmosigners, 1)
+	require.NotNil(t, sentry.Status.Cosmosigners[0].AtEstablishment)
+	assert.Empty(t, *sentry.Status.Cosmosigners[0].AtEstablishment, "a sentry signer must record an empty validator-targeted identity")
 
 	// Sentry configuration itself validates fine.
 	_, err := validateForReconcile(sentry)
@@ -583,9 +573,7 @@ func TestValidateForReconcileSentryRetargetToValidator(t *testing.T) {
 // catches the transition that would leave the on-chain key without its signing path.
 func TestValidateForReconcileRejectsServedGroupConversion(t *testing.T) {
 	served := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
-	served.Status.CosmosignerSigningDigest = served.CosmosignerSigningDigest()
-	served.Status.CosmosignerServingIdentity = served.CosmosignerSigningIdentity()
-	served.Status.CosmosignerServingGroup = "validators"
+	recordSignerRollout(t, served)
 
 	// Unchanged: accepted.
 	_, err := validateForReconcile(served)
@@ -595,7 +583,7 @@ func TestValidateForReconcileRejectsServedGroupConversion(t *testing.T) {
 	// backend identity, same group name), but the served validator is gone → rejected.
 	converted := served.DeepCopy()
 	converted.Spec.Nodes[0].Validator = nil
-	require.Equal(t, served.Status.CosmosignerSigningDigest, converted.CosmosignerSigningDigest(),
+	require.Equal(t, served.Status.Cosmosigners[0].SigningDigest, resolveSingleSigner(t, converted).Digest(),
 		"test premise: the digest must be unchanged by the group conversion")
 	_, err = validateForReconcile(converted)
 	require.Error(t, err)
@@ -611,9 +599,7 @@ func TestValidateForReconcileRejectsServedGroupSwap(t *testing.T) {
 	// Target two groups: the served validator group and a plain group.
 	served.Spec.Cosmosigner.NodeGroups = []string{"validators", "others"}
 	served.Spec.Nodes = append(served.Spec.Nodes, appsv1.NodeGroupSpec{Name: "others", Instances: ptr.To(1)})
-	served.Status.CosmosignerSigningDigest = served.CosmosignerSigningDigest()
-	served.Status.CosmosignerServingIdentity = served.CosmosignerSigningIdentity()
-	served.Status.CosmosignerServingGroup = "validators"
+	recordSignerRollout(t, served)
 
 	// Unchanged: accepted.
 	_, err := validateForReconcile(served)
@@ -624,7 +610,7 @@ func TestValidateForReconcileRejectsServedGroupSwap(t *testing.T) {
 	swapped := served.DeepCopy()
 	swapped.Spec.Nodes[0].Validator = nil
 	swapped.Spec.Nodes[1].Validator = &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("other-key")}
-	require.Equal(t, served.Status.CosmosignerSigningDigest, swapped.CosmosignerSigningDigest(),
+	require.Equal(t, served.Status.Cosmosigners[0].SigningDigest, resolveSingleSigner(t, swapped).Digest(),
 		"test premise: the digest must be unchanged by the validator-ness swap")
 	_, err = validateForReconcile(swapped)
 	require.Error(t, err)

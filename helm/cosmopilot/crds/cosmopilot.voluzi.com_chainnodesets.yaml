@@ -3326,6 +3326,271 @@ spec:
                           format: int64
                           type: integer
                       type: object
+                    cosmosigner:
+                      description: |-
+                        Cosmosigner deploys a managed cosmosigner remote signer for this group. When the group is a
+                        validator group, the signer signs for that validator (one signer per instance for a
+                        multi-instance group); when it has no validator, the group's nodes are the signing endpoints of
+                        a single out-of-band-registered identity (sentry mode). Its `nodeGroups` field must be empty —
+                        the enclosing group is the target.
+                      properties:
+                        backend:
+                          description: |-
+                            Backend selects and configures where the consensus key material lives and how signing is
+                            performed. Exactly one backend must be configured.
+                          properties:
+                            gcpKms:
+                              description: GcpKMS uses a non-exportable EC_SIGN_ED25519
+                                key in Google Cloud KMS.
+                              properties:
+                                credentialsSecret:
+                                  description: |-
+                                    CredentialsSecret references a secret containing a Google service account JSON key. When
+                                    unset, Workload Identity / Application Default Credentials are used.
+                                  properties:
+                                    key:
+                                      description: The key of the secret to select
+                                        from.  Must be a valid secret key.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the Secret or its
+                                        key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                keyVersion:
+                                  description: |-
+                                    KeyVersion is the full resource name of the KMS crypto key version used for signing
+                                    (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`).
+                                  type: string
+                              required:
+                              - keyVersion
+                              type: object
+                            software:
+                              description: |-
+                                Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is
+                                the simplest backend and is mainly intended for testnets and testing.
+                              properties:
+                                privateKeySecret:
+                                  description: |-
+                                    PrivateKeySecret is the name of the secret holding `priv_validator_key.json`. Defaults to
+                                    `<owner>-priv-key` (the same default as .spec.validator.privateKeySecret). It is created
+                                    with a freshly generated key when it does not exist.
+                                  type: string
+                              type: object
+                            vault:
+                              description: Vault uses a non-exportable ed25519 key
+                                in HashiCorp Vault Transit.
+                              properties:
+                                address:
+                                  description: Address is the full address of the
+                                    Vault cluster (e.g. `https://vault:8200`).
+                                  type: string
+                                autoRenewToken:
+                                  description: |-
+                                    AutoRenewToken indicates whether to run a sidecar that automatically renews the Vault token.
+                                    Defaults to `false`.
+                                  type: boolean
+                                certificateSecret:
+                                  description: CertificateSecret references the secret
+                                    containing the CA certificate of the Vault cluster.
+                                  properties:
+                                    key:
+                                      description: The key of the secret to select
+                                        from.  Must be a valid secret key.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the Secret or its
+                                        key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                keyName:
+                                  description: KeyName is the name of the Vault transit
+                                    key used for signing.
+                                  type: string
+                                mount:
+                                  default: transit
+                                  description: Mount is the Vault transit mount path.
+                                    Defaults to `transit`.
+                                  type: string
+                                namespace:
+                                  description: Namespace is the Vault namespace (Vault
+                                    Enterprise), when applicable.
+                                  type: string
+                                tokenSecret:
+                                  description: TokenSecret references the secret containing
+                                    the Vault token used to authenticate.
+                                  properties:
+                                    key:
+                                      description: The key of the secret to select
+                                        from.  Must be a valid secret key.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the Secret or its
+                                        key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                uploadGenerated:
+                                  description: |-
+                                    UploadGenerated indicates that the controller should generate a consensus key locally and
+                                    import it into Vault. Defaults to `false`. It is set to `true` automatically when this
+                                    validator initializes a new genesis. This should not be used in production.
+                                  type: boolean
+                              required:
+                              - address
+                              - keyName
+                              - tokenSecret
+                              type: object
+                          type: object
+                        image:
+                          description: |-
+                            Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
+                            image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
+                            defaulting to `ghcr.io/voluzi/cosmosigner:0.1.0`). Set this to pin or override the image for
+                            this specific signer only.
+                          type: string
+                        logLevel:
+                          description: LogLevel is the log level for the signer. Defaults
+                            to `info`.
+                          type: string
+                        nodeGroups:
+                          description: |-
+                            NodeGroups is the list of node group names (.spec.nodes[].name) the signer will connect
+                            to and sign for. Only valid on a ChainNodeSet. When empty, the configured validator group
+                            is targeted by default. Every targeted node listens for the signer and shares the single
+                            consensus identity held by the configured backend.
+                          items:
+                            type: string
+                          type: array
+                        raftTLSSecret:
+                          description: |-
+                            RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to
+                            secure the inter-replica raft transport with mutual TLS. When unset, the raft transport is
+                            plain TCP (only safe on a trusted network).
+                          type: string
+                        replicas:
+                          default: 1
+                          description: |-
+                            Replicas is the number of signer instances to run. Must be an odd number so the embedded
+                            raft cluster can form a quorum. Defaults to `1` (a single-instance signer with no HA).
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        resources:
+                          description: Resources are the compute resources for the
+                            signer container.
+                          properties:
+                            claims:
+                              description: |-
+                                Claims lists the names of resources, defined in spec.resourceClaims,
+                                that are used by this container.
+
+                                This field depends on the
+                                DynamicResourceAllocation feature gate.
+
+                                This field is immutable. It can only be set for containers.
+                              items:
+                                description: ResourceClaim references one entry in
+                                  PodSpec.ResourceClaims.
+                                properties:
+                                  name:
+                                    description: |-
+                                      Name must match the name of one entry in pod.spec.resourceClaims of
+                                      the Pod where this field is used. It makes that resource available
+                                      inside a container.
+                                    type: string
+                                  request:
+                                    description: |-
+                                      Request is the name chosen for a request in the referenced claim.
+                                      If empty, everything from the claim is made available, otherwise
+                                      only the result of this request.
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                              type: array
+                              x-kubernetes-list-map-keys:
+                              - name
+                              x-kubernetes-list-type: map
+                            limits:
+                              additionalProperties:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              description: |-
+                                Limits describes the maximum amount of compute resources allowed.
+                                More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                              type: object
+                            requests:
+                              additionalProperties:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              description: |-
+                                Requests describes the minimum amount of compute resources required.
+                                If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                                otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                                More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                              type: object
+                          type: object
+                        serviceAccountName:
+                          description: |-
+                            ServiceAccountName is the Kubernetes service account the signer pods run as. Required in
+                            practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google
+                            service account to a specific Kubernetes service account). Defaults to the namespace default.
+                          type: string
+                        stateStorageSize:
+                          description: |-
+                            StateStorageSize is the size of the per-replica PVC used for the raft double-sign
+                            protection state and the persisted connection key. Defaults to `1Gi`.
+                          type: string
+                        storageClassName:
+                          description: |-
+                            StorageClassName is the storage class for the per-replica state PVC. Defaults to the
+                            cluster default storage class when unset.
+                          type: string
+                      required:
+                      - backend
+                      type: object
                     expose:
                       description: Allows exposing P2P traffic to public.
                       properties:
@@ -15708,50 +15973,75 @@ spec:
               chainID:
                 description: Indicates the chain ID.
                 type: string
-              cosmosignerAtEstablishment:
+              cosmosigners:
                 description: |-
-                  CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at
-                  the moment the chain ID was first recorded. Empty string when no signer targeted a validator at
-                  chain establishment — including sentry-mode signers, whose key identity is deliberately
-                  excluded so that later retargeting the same key onto a validator does not masquerade as the
-                  establishing configuration. It lets the no-webhook reconcile path tell an establishing
-                  validator signer (admitted) apart from one introduced afterwards (rejected unless the backend
-                  provably imports the registered key). Not meant to be set by hand.
-                type: string
-              cosmosignerReplicas:
-                description: |-
-                  CosmosignerReplicas records the raft replica count the managed signer was rolled out with. It is
-                  captured for every signer (validator-targeted and sentry-mode alike) so the no-webhook reconcile
-                  path can reject a later replica change: scaling the embedded raft cluster is not a plain
-                  Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated
-                  by rendering a new bootstrap list. Not meant to be set by hand.
-                format: int32
-                type: integer
-              cosmosignerServingGroup:
-                description: |-
-                  CosmosignerServingGroup records WHICH validator group the rolled-out signer served (the
-                  reserved "validator" name for the legacy singleton), captured with CosmosignerServingIdentity
-                  and cleared on teardown. The no-webhook removal guard checks that this specific validator's own
-                  signing path resolves the serving identity — a different validator that happens to reference
-                  the same key must not satisfy the check for the served one. Not meant to be set by hand.
-                type: string
-              cosmosignerServingIdentity:
-                description: |-
-                  CosmosignerServingIdentity records the effective signing identity of the rolled-out
-                  validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on
-                  teardown. It lets the no-webhook reconcile path judge a signer REMOVAL from status alone:
-                  removal is only admitted when the formerly-served validator still resolves to this same
-                  identity through its own signing path (e.g. a software-backed signer that used the validator's
-                  own key secret), so the on-chain key keeps signing. Not meant to be set by hand.
-                type: string
-              cosmosignerSigningDigest:
-                description: |-
-                  CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's
-                  effective signing identity and target set, captured once the chain is established. It lets the
-                  no-webhook reconcile path reject a later change or removal of the signing configuration that
-                  would make the validator sign with a key not in the on-chain validator set. Not meant to be set
+                  Cosmosigners records controller-managed state for each managed cosmosigner deployment (the
+                  top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner, expanded per instance
+                  for a multi-instance validator group). Keyed by the signer's resource name. Not meant to be set
                   by hand.
-                type: string
+                items:
+                  description: |-
+                    CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All
+                    fields are controller-managed and not meant to be set by hand.
+                  properties:
+                    atEstablishment:
+                      description: |-
+                        AtEstablishment is a write-once record of this signer's VALIDATOR-TARGETED identity at the
+                        moment the chain ID was first recorded (empty string when it targeted no validator then,
+                        including sentry mode). It lets the no-webhook path tell an establishing validator signer
+                        (admitted) apart from one introduced afterwards (rejected unless the backend provably imports
+                        the registered key). Absent for a signer added after establishment.
+                      type: string
+                    keyImported:
+                      description: |-
+                        KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret +
+                        key material). It lets the controller skip a repeated import and detect a source/target change.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the signer's resource name (<nodeset>-signer | <nodeset>-<group>-signer |
+                        <nodeset>-<group>-<index>-signer) and the key of this entry.
+                      type: string
+                    replicas:
+                      description: |-
+                        Replicas records the raft replica count this signer was rolled out with, so the no-webhook
+                        reconcile path can reject a later replica change: scaling the embedded raft cluster is not a
+                        plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not
+                        migrated by rendering a new bootstrap list.
+                      format: int32
+                      type: integer
+                    servingGroup:
+                      description: |-
+                        ServingGroup records which validator group this signer served (the reserved "validator" name for
+                        the legacy singleton). The removal guard checks that this specific validator's own path resolves
+                        ServingIdentity — a different validator referencing the same key must not satisfy it.
+                      type: string
+                    servingIdentity:
+                      description: |-
+                        ServingIdentity records the effective signing identity this validator-targeted signer served,
+                        captured with SigningDigest and cleared on teardown. It lets the no-webhook path judge a REMOVAL:
+                        removal is only admitted when the served validator still resolves this identity through its own
+                        signing path (e.g. a software-backed signer using the validator's own key).
+                      type: string
+                    servingInstance:
+                      description: |-
+                        ServingInstance records which instance of ServingGroup this signer served (for a per-instance
+                        signer of a multi-instance validator group). Nil for a whole-group / legacy-singleton signer.
+                      type: integer
+                    signingDigest:
+                      description: |-
+                        SigningDigest is a fingerprint of this signer's effective signing identity, replica count and
+                        target-group set, captured once it has rolled out. It lets the no-webhook reconcile path reject
+                        a later change to the signing configuration that would make the validator sign with a key not in
+                        the on-chain validator set.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               genesisInitGenerated:
                 description: |-
                   GenesisInitGenerated records whether this chain's genesis was generated by a genesis-initializing

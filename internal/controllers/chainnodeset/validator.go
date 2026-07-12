@@ -267,9 +267,10 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string
 		controllers.LabelChainNodeSetValidator: strconv.FormatBool(true),
 	})
 
-	// Mark validator nodes targeted by a managed cosmosigner deployment as remote-signer targets.
-	if nodeSet.IsCosmosignerTargetGroup(group) {
-		labels[controllers.LabelCosmosignerTarget] = cosmosignerName(nodeSet)
+	// Stamp the specific signer's discovery-service label when a managed cosmosigner targets this
+	// validator instance, so exactly that signer selects and dials this node's pod.
+	if signerName, ok := signerNameForNode(nodeSet, group, index); ok {
+		labels[controllers.LabelCosmosignerTarget] = signerName
 	}
 
 	// Carry the same global ingress/gateway membership labels regular group nodes get, so global
@@ -318,7 +319,7 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string
 
 	// A validator targeted by a managed cosmosigner deployment signs through the external signer:
 	// it listens for it and mounts no local key.
-	if nodeSet.IsCosmosignerTargetGroup(group) {
+	if _, ok := signerNameForNode(nodeSet, group, index); ok {
 		validator.Spec.RemoteSignerTarget = true
 	}
 

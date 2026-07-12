@@ -2,7 +2,6 @@ package v1
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -100,23 +99,62 @@ func (c *Cosmosigner) VaultUploadsGenerated(initTarget bool) bool {
 	return c.UsesVaultBackend() && (c.Backend.Vault.UploadGenerated || initTarget)
 }
 
-// CosmosignerTargetInitializesGenesis reports whether the cosmosigner-targeted validator (legacy
-// singleton or a targeted validator group) initializes a new genesis.
-func (nodeSet *ChainNodeSet) CosmosignerTargetInitializesGenesis() bool {
-	for name := range nodeSet.CosmosignerTargetGroups() {
-		if name == ReservedValidatorGroupName {
-			if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
-				return true
-			}
-			continue
-		}
-		for _, g := range nodeSet.Spec.Nodes {
-			if g.Name == name && g.Validator != nil && g.Validator.Init != nil {
-				return true
-			}
+// validatorGroupInitializesGenesis reports whether a validator group (legacy singleton via
+// ReservedValidatorGroupName) initializes a new genesis. "" resolves to false.
+func (nodeSet *ChainNodeSet) validatorGroupInitializesGenesis(group string) bool {
+	if group == "" {
+		return false
+	}
+	if group == ReservedValidatorGroupName {
+		return nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil
+	}
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		if g.Name == group && g.Validator != nil && g.Validator.Init != nil {
+			return true
 		}
 	}
 	return false
+}
+
+// groupCosmosigner returns the Cosmosigner block targeting the given group: the group's own
+// .spec.nodes[].cosmosigner, or the top-level .spec.cosmosigner when it lists that group. Returns nil
+// when no signer targets the group.
+func (nodeSet *ChainNodeSet) groupCosmosigner(group string) *Cosmosigner {
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		if g.Name == group && g.Cosmosigner != nil {
+			return g.Cosmosigner
+		}
+	}
+	if c := nodeSet.Spec.Cosmosigner; c != nil {
+		if len(c.NodeGroups) == 0 {
+			if group == ReservedValidatorGroupName && nodeSet.Spec.Validator != nil {
+				return c
+			}
+		} else {
+			for _, n := range c.NodeGroups {
+				if n == group {
+					return c
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// groupSignerIdentity returns the effective signing identity of the signer serving a validator
+// group's instance, and whether such a signer exists.
+func (nodeSet *ChainNodeSet) groupSignerIdentity(group string, instance int) (string, bool) {
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if s.ValidatorGroup != group {
+			continue
+		}
+		if s.ValidatorInstance == nil || *s.ValidatorInstance == instance {
+			return s.Identity(), true
+		}
+	}
+	return "", false
 }
 
 // RequiresLocalPrivKey reports whether the backend needs a local priv_validator_key.json
@@ -188,32 +226,6 @@ func (chainNode *ChainNode) CosmosignerValidatorTargetedIdentity() string {
 	return chainNode.CosmosignerSigningIdentity()
 }
 
-// CosmosignerValidatorTargetedIdentity is the ChainNodeSet counterpart: the signer's identity only
-// when its target set resolves a validator, "" otherwise (no signer, or sentry mode).
-func (nodeSet *ChainNodeSet) CosmosignerValidatorTargetedIdentity() string {
-	return nodeSet.cosmosignerTargetSigningIdentity(nodeSet.CosmosignerTargetGroups())
-}
-
-// CosmosignerTargetedValidatorGroup returns the name of the validator group the signer targets
-// (ReservedValidatorGroupName for the legacy singleton), or "" when no validator is targeted. At
-// most one validator target exists (webhook-enforced).
-func (nodeSet *ChainNodeSet) CosmosignerTargetedValidatorGroup() string {
-	for name := range nodeSet.CosmosignerTargetGroups() {
-		if name == ReservedValidatorGroupName {
-			if nodeSet.Spec.Validator != nil {
-				return ReservedValidatorGroupName
-			}
-			continue
-		}
-		for _, g := range nodeSet.Spec.Nodes {
-			if g.Name == name && g.Validator != nil {
-				return name
-			}
-		}
-	}
-	return ""
-}
-
 // SetEstablishedChainID records the chain ID and — atomically, in the same status write the caller
 // is about to perform — the write-once cosmosigner-at-establishment marker, holding the
 // validator-targeted signer identity ("" when none, including sentry mode). Recording both together
@@ -231,82 +243,42 @@ func (chainNode *ChainNode) SetEstablishedChainID(chainID string) {
 	}
 }
 
-// SetEstablishedChainID is the ChainNodeSet counterpart of the ChainNode method; see its doc.
+// SetEstablishedChainID is the ChainNodeSet counterpart of the ChainNode method: it records the
+// chain ID and, for every signer present at establishment, the write-once at-establishment marker
+// (its validator-targeted identity, "" for sentry). A signer added after establishment has no entry
+// and so stays subject to the no-webhook addition guard.
 func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 	if chainID == "" {
 		return
 	}
 	nodeSet.Status.ChainID = chainID
-	if nodeSet.Status.CosmosignerAtEstablishment == nil {
-		identity := nodeSet.CosmosignerValidatorTargetedIdentity()
-		nodeSet.Status.CosmosignerAtEstablishment = &identity
-	}
-}
-
-// CosmosignerTargetGroups returns the set of node group names the cosmosigner deployment signs
-// for. An empty nodeGroups list defaults to the legacy singleton validator group. Returns nil when
-// no cosmosigner is configured.
-func (nodeSet *ChainNodeSet) CosmosignerTargetGroups() map[string]struct{} {
-	if nodeSet.Spec.Cosmosigner == nil {
-		return nil
-	}
-	targets := map[string]struct{}{}
-	if len(nodeSet.Spec.Cosmosigner.NodeGroups) == 0 {
-		if nodeSet.Spec.Validator != nil {
-			targets[ReservedValidatorGroupName] = struct{}{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		st := nodeSet.EnsureCosmosignerStatus(s.Name)
+		if st.AtEstablishment == nil {
+			id := s.ValidatorTargetedIdentity()
+			st.AtEstablishment = &id
 		}
-		return targets
 	}
-	for _, g := range nodeSet.Spec.Cosmosigner.NodeGroups {
-		targets[g] = struct{}{}
-	}
-	return targets
 }
 
-// IsCosmosignerTargetGroup reports whether the given group is targeted by the cosmosigner
-// deployment.
+// IsCosmosignerTargetGroup reports whether any managed signer (top-level or per-group) targets the
+// given group — i.e. that group's nodes listen for a remote signer and mount no local key.
 func (nodeSet *ChainNodeSet) IsCosmosignerTargetGroup(group string) bool {
-	_, ok := nodeSet.CosmosignerTargetGroups()[group]
-	return ok
-}
-
-// CosmosignerValidatorTargetSecret resolves the private-key secret of the single validator the
-// cosmosigner deployment signs for, so the signer uses the exact consensus key that genesis or
-// create-validator registers. It returns ("", false) for a sentry-mode signer that targets only
-// regular (non-validator) groups. The webhook guarantees at most one validator target.
-func (nodeSet *ChainNodeSet) CosmosignerValidatorTargetSecret() (string, bool) {
-	if nodeSet.Spec.Cosmosigner == nil {
-		return "", false
-	}
-	for name := range nodeSet.CosmosignerTargetGroups() {
-		if name == ReservedValidatorGroupName {
-			if nodeSet.Spec.Validator == nil {
-				continue
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		for _, t := range s.TargetGroups {
+			if t == group {
+				return true
 			}
-			if s := nodeSet.Spec.Validator.PrivateKeySecret; s != nil && *s != "" {
-				return *s, true
-			}
-			return fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName()), true
-		}
-		for _, g := range nodeSet.Spec.Nodes {
-			if g.Name != name || g.Validator == nil {
-				continue
-			}
-			if s := g.Validator.PrivateKeySecret; s != nil && *s != "" {
-				return *s, true
-			}
-			// Validator groups targeted by cosmosigner are single-instance (webhook-enforced), so
-			// instance 0's default key is the validator's key.
-			return fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), name), true
 		}
 	}
-	return "", false
+	return false
 }
 
-// Validate performs self-contained validation of a Cosmosigner block. isNodeSet indicates whether
-// the block lives on a ChainNodeSet (where nodeGroups is meaningful) or a standalone ChainNode
-// (where nodeGroups must be empty). path is the field path used in error messages.
-func (c *Cosmosigner) Validate(path string, isNodeSet bool) error {
+// Validate performs self-contained validation of a Cosmosigner block. allowNodeGroups is true only
+// for the top-level .spec.cosmosigner on a ChainNodeSet; a standalone ChainNode's block and a
+// per-group .spec.nodes[].cosmosigner (whose target is the enclosing group) must leave nodeGroups
+// empty. path is the field path used in error messages.
+func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 	if c == nil {
 		return nil
 	}
@@ -371,9 +343,9 @@ func (c *Cosmosigner) Validate(path string, isNodeSet bool) error {
 		}
 	}
 
-	// nodeGroups only applies to a ChainNodeSet.
-	if !isNodeSet && len(c.NodeGroups) > 0 {
-		return fmt.Errorf("%s.nodeGroups is only valid on a ChainNodeSet", path)
+	// nodeGroups is only valid on the top-level .spec.cosmosigner of a ChainNodeSet.
+	if !allowNodeGroups && len(c.NodeGroups) > 0 {
+		return fmt.Errorf("%s.nodeGroups is not valid here (the target is fixed): only the top-level .spec.cosmosigner selects node groups", path)
 	}
 
 	// An empty raftTLSSecret would render a Secret volume with an empty name.
@@ -427,45 +399,9 @@ func (chainNode *ChainNode) CosmosignerSigningIdentity() string {
 	return c.effectiveSigningIdentity(softwareKey)
 }
 
-// CosmosignerSigningIdentity returns a fingerprint of the consensus key a ChainNodeSet's cosmosigner
-// signs with, resolving the software backend to the targeted validator's key secret.
-func (nodeSet *ChainNodeSet) CosmosignerSigningIdentity() string {
-	c := nodeSet.Spec.Cosmosigner
-	if c == nil {
-		return ""
-	}
-	softwareKey := ""
-	if c.UsesSoftwareBackend() {
-		if secret, ok := nodeSet.CosmosignerValidatorTargetSecret(); ok {
-			softwareKey = secret
-		} else if s := c.Backend.Software.PrivateKeySecret; s != nil {
-			softwareKey = *s
-		}
-	}
-	return c.effectiveSigningIdentity(softwareKey)
-}
-
 // localKeySigningIdentity fingerprints a locally-held consensus key by its secret name.
 func localKeySigningIdentity(secret string) string {
 	return "software\x00" + secret
-}
-
-// CosmosignerSigningDigest fingerprints a ChainNodeSet's managed signer for status persistence: the
-// effective signing identity, the replica count, and the target-group set. Empty when no cosmosigner
-// is set. The preimage is length-prefixed and NUL-separated so it stays unambiguous regardless of
-// group-name contents.
-func (nodeSet *ChainNodeSet) CosmosignerSigningDigest() string {
-	if nodeSet.Spec.Cosmosigner == nil {
-		return ""
-	}
-	targets := make([]string, 0)
-	for t := range nodeSet.CosmosignerTargetGroups() {
-		targets = append(targets, t)
-	}
-	sort.Strings(targets)
-	preimage := fmt.Sprintf("%s\x00%d\x00%d\x00%s",
-		nodeSet.CosmosignerSigningIdentity(), nodeSet.Spec.Cosmosigner.GetReplicas(), len(targets), strings.Join(targets, "\x00"))
-	return utils.Sha256(preimage)
 }
 
 // CosmosignerSigningDigest fingerprints a standalone ChainNode's managed signer for status
@@ -476,19 +412,6 @@ func (chainNode *ChainNode) CosmosignerSigningDigest() string {
 	}
 	preimage := fmt.Sprintf("%s\x00%d", chainNode.CosmosignerSigningIdentity(), chainNode.Spec.Cosmosigner.GetReplicas())
 	return utils.Sha256(preimage)
-}
-
-// equalStringSet reports whether two set-valued maps contain the same keys.
-func equalStringSet(a, b map[string]struct{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if _, ok := b[k]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // EffectiveSigningIdentity returns a normalized fingerprint of the consensus key this ChainNode
@@ -512,50 +435,6 @@ func (chainNode *ChainNode) EffectiveSigningIdentity() string {
 	}
 }
 
-// cosmosignerTargetSigningIdentity returns the effective consensus-key fingerprint of the validator
-// the cosmosigner targets (or would target). It is empty when the target set resolves no validator
-// (sentry mode over regular groups): such a signer's key is registered out-of-band and carries no
-// in-cluster validator identity to protect, so add/remove/rotate stays allowed. When a validator IS
-// targeted, the signer's identity (cosmosigner configured) or the validator's own local/tmKMS
-// identity (not configured) is returned. targets is the set of targeted group names, resolved from
-// whichever spec revision carries the cosmosigner block.
-func (nodeSet *ChainNodeSet) cosmosignerTargetSigningIdentity(targets map[string]struct{}) string {
-	hasValidatorTarget := false
-	for name := range targets {
-		if name == ReservedValidatorGroupName {
-			if nodeSet.Spec.Validator != nil {
-				hasValidatorTarget = true
-			}
-			continue
-		}
-		for _, g := range nodeSet.Spec.Nodes {
-			if g.Name == name && g.Validator != nil {
-				hasValidatorTarget = true
-			}
-		}
-	}
-	if !hasValidatorTarget {
-		return ""
-	}
-	if nodeSet.Spec.Cosmosigner != nil {
-		return nodeSet.CosmosignerSigningIdentity()
-	}
-	for name := range targets {
-		if name == ReservedValidatorGroupName {
-			if nodeSet.Spec.Validator == nil {
-				continue
-			}
-			return nodeSet.validatorGroupSigningIdentity(ReservedValidatorGroupName, nodeSet.Spec.Validator)
-		}
-		for _, g := range nodeSet.Spec.Nodes {
-			if g.Name == name && g.Validator != nil {
-				return nodeSet.validatorGroupSigningIdentity(name, g.Validator)
-			}
-		}
-	}
-	return ""
-}
-
 // ValidatorResolvesSigningIdentity reports whether the standalone node's validator resolves the
 // given effective signing identity through its OWN signing path (local key or tmKMS) — i.e. ignoring
 // any .spec.cosmosigner. See the ChainNodeSet counterpart for the rationale.
@@ -572,49 +451,10 @@ func (chainNode *ChainNode) ValidatorResolvesSigningIdentity(identity string) bo
 	return localKeySigningIdentity(chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)) == identity
 }
 
-// ServedValidatorResolvesSigningIdentity reports whether the SPECIFIC validator the signer served
-// (recorded by group name) resolves the given effective signing identity through its OWN signing
-// path (local key or tmKMS) — i.e. ignoring any .spec.cosmosigner. Used to judge a signer removal
-// from status alone: only the formerly-served validator keeping the identity proves the on-chain key
-// keeps signing; a DIFFERENT validator that happens to reference the same key must not satisfy the
-// check (the served one would still fall back to a wrong/absent local key). An unknown group
-// (legacy status without the field, or the group was removed) resolves nothing.
-func (nodeSet *ChainNodeSet) ServedValidatorResolvesSigningIdentity(group, identity string) bool {
-	if identity == "" || group == "" {
-		return false
-	}
-	if group == ReservedValidatorGroupName {
-		return nodeSet.Spec.Validator != nil &&
-			nodeSet.validatorGroupSigningIdentity(ReservedValidatorGroupName, nodeSet.Spec.Validator) == identity
-	}
-	for _, g := range nodeSet.Spec.Nodes {
-		if g.Name == group {
-			return g.Validator != nil && g.GetInstances() > 0 &&
-				nodeSet.validatorGroupSigningIdentity(g.Name, g.Validator) == identity
-		}
-	}
-	return false
-}
-
-// validatorGroupSigningIdentity returns the effective consensus-key fingerprint of a validator group
-// (or the legacy singleton) that signs through its own local key or tmKMS.
+// validatorGroupSigningIdentity returns the effective own-path (local key or tmKMS) consensus-key
+// fingerprint of a validator group's representative (instance 0), or the legacy singleton.
 func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *NodeSetValidatorConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	if id, ok := tmkmsNormalizedVaultKey(cfg.TmKMS); ok {
-		return id
-	}
-	if cfg.TmKMS != nil {
-		return "tmkms\x00unconfigured"
-	}
-	if cfg.PrivateKeySecret != nil && *cfg.PrivateKeySecret != "" {
-		return localKeySigningIdentity(*cfg.PrivateKeySecret)
-	}
-	if group == ReservedValidatorGroupName {
-		return localKeySigningIdentity(fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName()))
-	}
-	return localKeySigningIdentity(fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group))
+	return nodeSet.validatorInstanceSigningIdentity(group, 0, cfg)
 }
 
 // ValidateCosmosignerReservedNameNoWebhook applies the reserved-name rule on the no-webhook

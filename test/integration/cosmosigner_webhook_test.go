@@ -264,7 +264,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		)
 		err := Framework().Client().Create(Framework().Context(), cs)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("is reserved when .spec.cosmosigner is configured"))
+		Expect(err.Error()).To(ContainSubstring("is reserved when a cosmosigner is configured"))
 	})
 
 	It("rejects two validators using the same Vault key via tmKMS and cosmosigner", func() {
@@ -698,6 +698,101 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}
 		err := Framework().Client().Create(Framework().Context(), cn)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("nodeGroups is only valid on a ChainNodeSet"))
+		Expect(err.Error()).To(ContainSubstring("nodeGroups is not valid here"))
+	})
+
+	// --- per-group cosmosigner (multiple validators, one signer each) ---
+
+	perGroupVault := func(keyName string) appsv1.CosmosignerBackend {
+		return appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+			Address:     "https://vault:8200",
+			KeyName:     keyName,
+			TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		}}
+	}
+	gcpBackend := func(keyVersion string) appsv1.CosmosignerBackend {
+		return appsv1.CosmosignerBackend{GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: keyVersion}}
+	}
+
+	It("accepts a per-group signer on a multi-instance validator group (one signer per instance)", func() {
+		// A 3-instance validator group with its own cosmosigner expands to three signers, each holding
+		// the index-appended Vault key <keyName>-<i>, so their identities are distinct.
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{
+			Name:        "validators",
+			Instances:   ptr.To(3),
+			Validator:   &appsv1.NodeSetValidatorConfig{},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("groupkey")},
+		}}, nil)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects two per-group signers sharing the same Vault key", func() {
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "va", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("shared-key")}},
+			{Name: "vb", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("shared-key")}},
+		}, nil)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("same Vault signing key"))
+	})
+
+	It("rejects two per-group signers sharing the same GCP KMS key version", func() {
+		kv := "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "va", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: gcpBackend(kv)}},
+			{Name: "vb", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: gcpBackend(kv)}},
+		}, nil)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("same GCP KMS signing key"))
+	})
+
+	It("rejects a group targeted by both the top-level and its own cosmosigner", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes", Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("othergroupkey")}}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("a group can be signed by only one signer"))
+	})
+
+	It("rejects two sentry signers sharing the same software key, even a genesis-validator key", func() {
+		// "shared-key" is registered on-chain via a genesis-validator entry, which normally lets a
+		// sentry signer legitimately reuse it. Two sentry signers holding it would double-sign, so the
+		// pair must still be rejected.
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "sa", Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("shared-key")}}}},
+			{Name: "sb", Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("shared-key")}}}},
+			{Name: "v", Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+				ChainID:     "test-localnet",
+				Assets:      []string{"10000000unibi"},
+				StakeAmount: "1000000unibi",
+				GenesisValidators: []appsv1.GenesisValidator{{
+					PrivKeySecret:         "shared-key",
+					AccountMnemonicSecret: "shared-mnemonic",
+					Moniker:               "preserved",
+					Assets:                []string{"10000000unibi"},
+					StakeAmount:           "1000000unibi",
+				}},
+			}}},
+		}, nil)
+		// Genesis-init + external genesis are mutually exclusive.
+		cs.Spec.Genesis = nil
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("each signer must sign with a distinct key"))
+	})
+
+	It("rejects nodeGroups on a per-group cosmosigner", func() {
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{
+			Name:        "validators",
+			Validator:   &appsv1.NodeSetValidatorConfig{},
+			Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"x"}, Backend: vaultBackend()},
+		}}, nil)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("nodeGroups is not valid here"))
 	})
 })

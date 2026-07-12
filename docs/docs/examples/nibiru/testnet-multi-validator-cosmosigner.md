@@ -1,0 +1,100 @@
+# Nibiru Testnet Multi Validator Cosmosigner
+
+```yaml
+# Multiple validators, each fronted by its own Cosmopilot-managed Cosmosigner. A per-group
+# `cosmosigner` block deploys one remote signer per validator: a single-instance validator group
+# gets one signer, and a multi-instance validator group gets ONE SIGNER PER INSTANCE (each holds a
+# distinct consensus key). This is the way to run several signed validators in a single ChainNodeSet
+# — the top-level `.spec.cosmosigner` only ever fronts one validator identity.
+apiVersion: cosmopilot.voluzi.com/v1
+kind: ChainNodeSet
+metadata:
+  name: nibiru-testnet
+spec:
+  app:
+    image: ghcr.io/nibiruchain/nibiru
+    version: 2.9.0
+    app: nibid
+    sdkVersion: v0.47
+
+  genesis:
+    # Placeholder — replace with the real genesis URL of the network you are joining. Each signer's
+    # consensus key (the Vault transit keys below) must already belong to that network's validator set.
+    url: https://replace-me.example/nibiru-testnet-0/genesis.json
+
+  nodes:
+    # A single-instance validator group with its own signer. The signer resource is named
+    # "<nodeset>-<group>-signer" (here "nibiru-testnet-validator-a-signer") and uses the Vault key
+    # named below.
+    - name: validator-a
+      instances: 1
+      validator:
+        # An external-genesis validator supplies its own consensus key; here it lives in Vault, so no
+        # local key secret is referenced.
+        privateKeySecret: nibiru-testnet-validator-a-priv-key
+      cosmosigner:
+        replicas: 3
+        backend:
+          vault:
+            address: https://vault.vault-system.svc.cluster.local:8200
+            keyName: nibiru-testnet-validator-a
+            tokenSecret:
+              name: vault-cosmosigner-token
+              key: token
+            certificateSecret:
+              name: vault-ca
+              key: ca.crt
+
+    # A second single-instance validator group with its own, DISTINCT signer key. Two signers must
+    # never reference the same Vault/GCP key or the same software key secret — the webhook rejects it
+    # (double-signing).
+    - name: validator-b
+      instances: 1
+      validator:
+        privateKeySecret: nibiru-testnet-validator-b-priv-key
+      cosmosigner:
+        replicas: 3
+        backend:
+          vault:
+            address: https://vault.vault-system.svc.cluster.local:8200
+            keyName: nibiru-testnet-validator-b
+            tokenSecret:
+              name: vault-cosmosigner-token
+              key: token
+            certificateSecret:
+              name: vault-ca
+              key: ca.crt
+
+    # A multi-instance validator group: three distinct validators, each getting its own signer
+    # ("<nodeset>-validators-<i>-signer"). For Vault/GCP backends, instance i uses the index-appended
+    # key "<keyName>-<i>" — here "nibiru-testnet-validators-0", "...-1", "...-2" — so you must
+    # pre-provision one transit key per instance.
+    - name: validators
+      instances: 3
+      validator:
+        config:
+          override:
+            app.toml:
+              minimum-gas-prices: 0.025unibi
+      cosmosigner:
+        replicas: 3
+        backend:
+          vault:
+            address: https://vault.vault-system.svc.cluster.local:8200
+            keyName: nibiru-testnet-validators
+            tokenSecret:
+              name: vault-cosmosigner-token
+              key: token
+            certificateSecret:
+              name: vault-ca
+              key: ca.crt
+
+    # Regular (non-validator) full nodes.
+    - name: fullnodes
+      instances: 2
+      config:
+        override:
+          app.toml:
+            minimum-gas-prices: 0.025unibi
+
+```
