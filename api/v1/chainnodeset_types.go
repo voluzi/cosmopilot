@@ -159,59 +159,6 @@ type ChainNodeSetStatus struct {
 	Cosmosigners []CosmosignerStatus `json:"cosmosigners,omitempty"`
 }
 
-// CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All
-// fields are controller-managed and not meant to be set by hand.
-type CosmosignerStatus struct {
-	// Name is the signer's resource name (<nodeset>-signer | <nodeset>-<group>-signer |
-	// <nodeset>-<group>-<index>-signer) and the key of this entry.
-	Name string `json:"name"`
-
-	// Replicas records the raft replica count this signer was rolled out with, so the no-webhook
-	// reconcile path can reject a later replica change: scaling the embedded raft cluster is not a
-	// plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not
-	// migrated by rendering a new bootstrap list.
-	// +optional
-	Replicas *int32 `json:"replicas,omitempty"`
-
-	// SigningDigest is a fingerprint of this signer's effective signing identity, replica count and
-	// target-group set, captured once it has rolled out. It lets the no-webhook reconcile path reject
-	// a later change to the signing configuration that would make the validator sign with a key not in
-	// the on-chain validator set.
-	// +optional
-	SigningDigest string `json:"signingDigest,omitempty"`
-
-	// AtEstablishment is a write-once record of this signer's VALIDATOR-TARGETED identity at the
-	// moment the chain ID was first recorded (empty string when it targeted no validator then,
-	// including sentry mode). It lets the no-webhook path tell an establishing validator signer
-	// (admitted) apart from one introduced afterwards (rejected unless the backend provably imports
-	// the registered key). Absent for a signer added after establishment.
-	// +optional
-	AtEstablishment *string `json:"atEstablishment,omitempty"`
-
-	// ServingIdentity records the effective signing identity this validator-targeted signer served,
-	// captured with SigningDigest and cleared on teardown. It lets the no-webhook path judge a REMOVAL:
-	// removal is only admitted when the served validator still resolves this identity through its own
-	// signing path (e.g. a software-backed signer using the validator's own key).
-	// +optional
-	ServingIdentity string `json:"servingIdentity,omitempty"`
-
-	// ServingGroup records which validator group this signer served (the reserved "validator" name for
-	// the legacy singleton). The removal guard checks that this specific validator's own path resolves
-	// ServingIdentity — a different validator referencing the same key must not satisfy it.
-	// +optional
-	ServingGroup string `json:"servingGroup,omitempty"`
-
-	// ServingInstance records which instance of ServingGroup this signer served (for a per-instance
-	// signer of a multi-instance validator group). Nil for a whole-group / legacy-singleton signer.
-	// +optional
-	ServingInstance *int `json:"servingInstance,omitempty"`
-
-	// KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret +
-	// key material). It lets the controller skip a repeated import and detect a source/target change.
-	// +optional
-	KeyImported string `json:"keyImported,omitempty"`
-}
-
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.
 type ChainNodeSetNodeStatus struct {
 	// Name of the node.

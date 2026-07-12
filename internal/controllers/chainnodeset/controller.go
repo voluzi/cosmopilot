@@ -359,12 +359,15 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 
 		// ADDING a validator-targeted signer with an unverifiable (pre-provisioned Vault/GCP) key AFTER
 		// establishment is rejected. A signer present at establishment has a status entry whose write-once
-		// AtEstablishment marker equals its identity; a post-establishment addition has no entry (never
-		// reconciled) or an entry whose marker differs. Only backends that provably import the registered
-		// key are admitted for such an addition.
+		// AtEstablishment marker equals its identity (recorded atomically with the chain ID); a
+		// post-establishment addition has no entry (never reconciled), an entry with a NIL marker (its
+		// first reconcile ran after establishment — SetEstablishedChainID never runs again, so the
+		// marker stays nil), or an entry whose marker differs. Only backends that provably import the
+		// registered key are admitted for such an addition.
 		if s.TargetsValidator() {
 			addedAfterEstablishment := st == nil ||
-				(st.AtEstablishment != nil && s.ValidatorTargetedIdentity() != *st.AtEstablishment)
+				st.AtEstablishment == nil ||
+				s.ValidatorTargetedIdentity() != *st.AtEstablishment
 			if addedAfterEstablishment {
 				c := s.Spec
 				importsRegisteredKey := c.UsesSoftwareBackend() ||

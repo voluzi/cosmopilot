@@ -25,13 +25,11 @@ spec:
   nodes:
     # A single-instance validator group with its own signer. The signer resource is named
     # "<nodeset>-<group>-signer" (here "nibiru-testnet-validator-a-signer") and uses the Vault key
-    # named below.
+    # named below. The consensus key lives in Vault, so no local priv-key secret is referenced or
+    # mounted — the validator signs exclusively through the signer.
     - name: validator-a
       instances: 1
-      validator:
-        # An external-genesis validator supplies its own consensus key; here it lives in Vault, so no
-        # local key secret is referenced.
-        privateKeySecret: nibiru-testnet-validator-a-priv-key
+      validator: {}
       cosmosigner:
         replicas: 3
         backend:
@@ -50,8 +48,7 @@ spec:
     # (double-signing).
     - name: validator-b
       instances: 1
-      validator:
-        privateKeySecret: nibiru-testnet-validator-b-priv-key
+      validator: {}
       cosmosigner:
         replicas: 3
         backend:

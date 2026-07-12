@@ -99,24 +99,6 @@ func (c *Cosmosigner) VaultUploadsGenerated(initTarget bool) bool {
 	return c.UsesVaultBackend() && (c.Backend.Vault.UploadGenerated || initTarget)
 }
 
-// validatorGroupInitializesGenesis reports whether a validator group (legacy singleton via
-// ReservedValidatorGroupName) initializes a new genesis. "" resolves to false.
-func (nodeSet *ChainNodeSet) validatorGroupInitializesGenesis(group string) bool {
-	if group == "" {
-		return false
-	}
-	if group == ReservedValidatorGroupName {
-		return nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil
-	}
-	for i := range nodeSet.Spec.Nodes {
-		g := &nodeSet.Spec.Nodes[i]
-		if g.Name == group && g.Validator != nil && g.Validator.Init != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // groupCosmosigner returns the Cosmosigner block targeting the given group: the group's own
 // .spec.nodes[].cosmosigner, or the top-level .spec.cosmosigner when it lists that group. Returns nil
 // when no signer targets the group.
@@ -471,12 +453,16 @@ func ValidateCosmosignerReservedNameNoWebhook(name string, isEstablished bool) e
 
 // ValidateCosmosignerReservedName rejects creating a ChainNode/ChainNodeSet whose NAME collides
 // with the signer resource names another CR would derive. A CR named `foo` that enables cosmosigner
-// derives `foo-signer` (StatefulSet/ConfigMap/raft Service) and `foo-signer-privval` (discovery
-// Service), while an ordinary ChainNode's own Service/ConfigMap use the raw CR name. Both suffixes
-// are therefore reserved:
+// derives `foo-signer` (StatefulSet/ConfigMap/raft Service), `foo-signer-privval` (discovery
+// Service) and the one-shot key-management pods `foo-signer-import`/`foo-signer-pubkey`, while an
+// ordinary ChainNode's own Pod/Service/ConfigMap use the raw CR name. All suffixes are therefore
+// reserved:
 //   - a CR named `foo-signer` collides with signer-enabled `foo`'s StatefulSet/ConfigMap/Service;
 //   - a CR named `foo-signer-privval` (which does NOT end in "-signer") collides with
-//     signer-enabled `foo`'s discovery Service.
+//     signer-enabled `foo`'s discovery Service;
+//   - a ChainNode named `foo-signer-import`/`foo-signer-pubkey` would create its node Pod at the
+//     name of signer-enabled `foo`'s one-shot job pod, making the key import fail forever on the
+//     foreign pod.
 //
 // Only enforced on create (isCreate) so pre-existing CRs with such names keep updating; the
 // reconcilers' ownership guards remain the backstop for them.
@@ -484,8 +470,10 @@ func ValidateCosmosignerReservedName(name string, isCreate bool) error {
 	if !isCreate {
 		return nil
 	}
-	if strings.HasSuffix(name, "-signer") || strings.HasSuffix(name, "-signer-privval") {
-		return fmt.Errorf("metadata.name %q is reserved: the \"-signer\"/\"-signer-privval\" suffixes collide with cosmosigner-managed resource names derived from other resources; choose a different name", name)
+	for _, suffix := range []string{"-signer", "-signer-privval", "-signer-import", "-signer-pubkey"} {
+		if strings.HasSuffix(name, suffix) {
+			return fmt.Errorf("metadata.name %q is reserved: the \"-signer*\" suffixes collide with cosmosigner-managed resource names derived from other resources; choose a different name", name)
+		}
 	}
 	return nil
 }

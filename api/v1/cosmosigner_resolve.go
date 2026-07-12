@@ -171,16 +171,15 @@ func (nodeSet *ChainNodeSet) validatorKeySecret(group string, instance int) stri
 	return ""
 }
 
-// indexedBackendCopy returns a deep copy of the signer spec with the Vault keyName / GCP keyVersion
-// suffixed by the instance index, so each per-instance signer of a multi-instance validator group
-// holds a distinct consensus key (the documented `<keyName>-<index>` convention).
+// indexedBackendCopy returns a deep copy of the signer spec with the Vault keyName suffixed by the
+// instance index, so each per-instance signer of a multi-instance validator group holds a distinct
+// consensus key (the documented `<keyName>-<index>` convention). The software backend derives
+// per-instance key secrets via SoftwareKeySecret instead; GCP KMS cannot be index-derived (a
+// keyVersion is a full resource path) and is rejected by the webhook for multi-instance groups.
 func (c *Cosmosigner) indexedBackendCopy(index int) *Cosmosigner {
 	out := c.DeepCopy()
-	switch {
-	case out.UsesVaultBackend():
+	if out.UsesVaultBackend() {
 		out.Backend.Vault.KeyName = fmt.Sprintf("%s-%d", out.Backend.Vault.KeyName, index)
-	case out.UsesGcpKmsBackend():
-		out.Backend.GcpKMS.KeyVersion = fmt.Sprintf("%s-%d", out.Backend.GcpKMS.KeyVersion, index)
 	}
 	return out
 }

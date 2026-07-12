@@ -105,6 +105,11 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		if err := c.Validate(".spec.cosmosigner", false); err != nil {
 			return nil, err
 		}
+		// The signer derives "<name>-signer-privval" (its longest resource name); reject a node name
+		// that would push it past the 63-character Kubernetes name limit and fail every reconcile.
+		if svc := chainNode.GetName() + "-signer-privval"; len(svc) > 63 {
+			return nil, fmt.Errorf("the cosmosigner discovery Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNode name", svc, len(svc))
+		}
 		// A node cannot both sign through a TmKMS sidecar and a cosmosigner deployment.
 		if chainNode.UsesTmKms() {
 			return nil, fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")

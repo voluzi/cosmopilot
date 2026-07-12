@@ -456,11 +456,37 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 		return nil
 	}
 
-	// A signer owns resources named "<nodeset>[-<group>]-signer" and "...-signer-privval"; a node
-	// group named "signer" or "signer-privval" would produce a colliding Service.
+	// A signer owns resources named "<nodeset>[-<group>[-<index>]]-signer", "...-signer-privval" and
+	// the one-shot "...-signer-import" pod; a node group named "signer" or "signer-privval" would
+	// produce a colliding Service.
 	for i, g := range nodeSet.Spec.Nodes {
 		if g.Name == "signer" || g.Name == "signer-privval" {
 			return fmt.Errorf(".spec.nodes[%d].name %q is reserved when a cosmosigner is configured", i, g.Name)
+		}
+	}
+
+	// Every derived signer resource name must be unique and must not collide with a node group's own
+	// Services: distinct groups can derive the SAME signer name (a 2-instance group "foo" and a group
+	// "foo-0" both derive "<nodeset>-foo-0-signer"), and a group named "<g>-signer" has a group
+	// Service colliding with group <g>'s signer StatefulSet/raft Service. Either collision would have
+	// two reconcilers overwrite one object.
+	signerNames := map[string]string{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		path := nodeSet.signerFieldPath(s)
+		if prev, dup := signerNames[s.Name]; dup {
+			return fmt.Errorf("%s derives signer resource name %q, which %s also derives: rename one of the groups so every signer name is unique", path, s.Name, prev)
+		}
+		signerNames[s.Name] = path
+	}
+	for i, g := range nodeSet.Spec.Nodes {
+		groupService := fmt.Sprintf("%s-%s", nodeSet.GetName(), g.Name)
+		if _, collides := signerNames[groupService]; collides {
+			return fmt.Errorf(".spec.nodes[%d].name %q collides with a cosmosigner's derived resource name %q: rename the group", i, g.Name, groupService)
+		}
+		if trimmed, ok := strings.CutSuffix(groupService, "-privval"); ok {
+			if _, collides := signerNames[trimmed]; collides {
+				return fmt.Errorf(".spec.nodes[%d].name %q collides with a cosmosigner's derived discovery Service name %q: rename the group", i, g.Name, groupService)
+			}
 		}
 	}
 
@@ -563,6 +589,14 @@ func (nodeSet *ChainNodeSet) validateGroupCosmosigner(i int, g *NodeGroupSpec) e
 	}
 	if g.Validator != nil && g.Validator.TmKMS != nil {
 		return fmt.Errorf("%s and .spec.nodes[%d].validator.tmKMS are mutually exclusive", path, i)
+	}
+	// Per-instance keys are derived by index-appending the backend key name, which works for Vault
+	// transit keys ("<keyName>-<i>") and per-instance software secrets, but NOT for GCP KMS: a
+	// keyVersion is a full resource path ending in ".../cryptoKeyVersions/<n>", and appending "-<i>"
+	// produces a name that matches no real CryptoKeyVersion. There is no per-instance keyVersion
+	// field yet, so reject the combination instead of rolling out signers that cannot open their keys.
+	if g.Validator != nil && g.GetInstances() > 1 && g.Cosmosigner.UsesGcpKmsBackend() {
+		return fmt.Errorf("%s: the GCP KMS backend cannot be used on a multi-instance validator group — a keyVersion is a full resource path and cannot be index-derived per instance; use the Vault or software backend, or split the group into single-instance validator groups each with its own keyVersion", path)
 	}
 	return nil
 }
@@ -722,25 +756,51 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 		}
 	}
 
-	// Each validator a signer served has a consensus pubkey fixed on-chain. That validator must still
-	// resolve the same effective key on the new revision — whether through its (retarget-locked)
-	// signer or, if the signer was dropped, its own local/tmKMS path. Dropping it to nothing (removing
-	// both the signer and the validator's own signing path) is rejected too.
-	for _, os := range old.ResolveCosmosigners() {
-		oldIdentity := os.ValidatorTargetedIdentity()
+	// Each validator touched by a signer — served by an OLD signer (signer changed/removed) or newly
+	// served by a NEW one (signer added) — has a consensus pubkey fixed on-chain. Its effective
+	// signing identity must therefore be unchanged across the update: through its (retarget-locked)
+	// signer, or its own local/tmKMS path when the signer was dropped. This also covers ADDING a
+	// signer to an established validator that previously signed through its own path: the new
+	// signer's key must equal that path's key (a same-key migration), otherwise the validator would
+	// stop mounting the on-chain local key and sign with a different one. Dropping the identity to
+	// nothing (removing both the signer and the validator's own signing path) is rejected too.
+	type servedValidator struct {
+		group    string
+		instance int
+	}
+	served := map[servedValidator]struct{}{}
+	for _, s := range old.ResolveCosmosigners() {
+		if s.ValidatorGroup != "" {
+			instance := 0
+			if s.ValidatorInstance != nil {
+				instance = *s.ValidatorInstance
+			}
+			served[servedValidator{s.ValidatorGroup, instance}] = struct{}{}
+		}
+	}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if s.ValidatorGroup != "" {
+			instance := 0
+			if s.ValidatorInstance != nil {
+				instance = *s.ValidatorInstance
+			}
+			served[servedValidator{s.ValidatorGroup, instance}] = struct{}{}
+		}
+	}
+	for v := range served {
+		oldIdentity := old.validatorEffectiveIdentity(v.group, v.instance)
 		if oldIdentity == "" {
+			// The validator did not exist (or resolved no identity) on the old revision — e.g. a
+			// createValidator group added together with its signer; the registers rule in
+			// validateResolvedSigner already constrains its key provenance.
 			continue
 		}
-		instance := 0
-		if os.ValidatorInstance != nil {
-			instance = *os.ValidatorInstance
-		}
-		if newIdentity := nodeSet.validatorEffectiveIdentity(os.ValidatorGroup, instance); newIdentity == "" || newIdentity != oldIdentity {
-			label := os.ValidatorGroup
+		if newIdentity := nodeSet.validatorEffectiveIdentity(v.group, v.instance); newIdentity == "" || newIdentity != oldIdentity {
+			label := v.group
 			if label == ReservedValidatorGroupName {
 				label = ".spec.validator"
 			}
-			return fmt.Errorf("the consensus signing key of the cosmosigner-targeted validator %q is immutable after the chain is established: changing or removing the cosmosigner/signing configuration would leave it signing with a key not in the on-chain validator set (or not signing at all)", label)
+			return fmt.Errorf("the consensus signing key of the cosmosigner-targeted validator %q is immutable after the chain is established: changing, adding or removing the cosmosigner/signing configuration would leave it signing with a key not in the on-chain validator set (or not signing at all)", label)
 		}
 	}
 

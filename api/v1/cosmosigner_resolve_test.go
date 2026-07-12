@@ -142,6 +142,114 @@ func TestResolveCosmosignersTopLevelPlusPerGroup(t *testing.T) {
 	assert.ElementsMatch(t, []string{"cs-signer", "cs-vg-signer"}, names)
 }
 
+// TestValidateCosmosignerSignerNameCollisions verifies two distinct groups deriving the same signer
+// resource name are rejected (e.g. a 2-instance group "foo" and a group "foo-0" both derive
+// "<nodeset>-foo-0-signer"), and a group whose own Service name equals a signer's resource name is
+// rejected too.
+func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
+	base := func(nodes []NodeGroupSpec) *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes:   nodes,
+			},
+		}
+	}
+
+	// Duplicate derived signer name: multi-instance "foo" derives cs-foo-0-signer, and single-instance
+	// "foo-0" derives cs-foo-0-signer too.
+	dup := base([]NodeGroupSpec{
+		{Name: "foo", Instances: ptr.To(2), Validator: &NodeSetValidatorConfig{},
+			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
+		{Name: "foo-0", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("b")}},
+	})
+	_, err := dup.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "also derives")
+
+	// Group Service name shadowing a signer resource name: group "vg-signer"'s Service is
+	// cs-vg-signer, the raft Service of group "vg"'s signer.
+	shadow := base([]NodeGroupSpec{
+		{Name: "vg", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
+		{Name: "vg-signer", Instances: ptr.To(1)},
+	})
+	_, err = shadow.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "collides with a cosmosigner's derived resource name")
+
+	// Group Service name shadowing a signer's discovery Service: group "vg-signer-privval"'s Service
+	// is cs-vg-signer-privval.
+	shadowPrivval := base([]NodeGroupSpec{
+		{Name: "vg", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
+		{Name: "vg-signer-privval", Instances: ptr.To(1)},
+	})
+	_, err = shadowPrivval.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "discovery Service name")
+}
+
+// TestValidateCosmosignerGcpMultiInstanceRejected verifies GCP KMS cannot back a multi-instance
+// validator group: a keyVersion resource path cannot be index-derived per instance.
+func TestValidateCosmosignerGcpMultiInstanceRejected(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:      "vg",
+				Instances: ptr.To(3),
+				Validator: &NodeSetValidatorConfig{},
+				Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+					GcpKMS: &CosmosignerGcpKmsBackend{KeyVersion: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"},
+				}},
+			}},
+		},
+	}
+	_, err := nodeSet.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be used on a multi-instance validator group")
+}
+
+// TestValidateCosmosignerSignerAdditionToEstablishedValidator verifies that adding a pre-provisioned
+// signer to an ESTABLISHED validator that previously signed with its own local key is rejected (the
+// validator would stop mounting the on-chain key), while a same-key software signer is accepted.
+func TestValidateCosmosignerSignerAdditionToEstablishedValidator(t *testing.T) {
+	base := func(c *Cosmosigner) *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes: []NodeGroupSpec{{
+					Name:        "vg",
+					Instances:   ptr.To(1),
+					Validator:   &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("vg-key")},
+					Cosmosigner: c,
+				}},
+			},
+			Status: ChainNodeSetStatus{ChainID: "test-1"},
+		}
+	}
+	old := base(nil) // established, signing through its own local key
+
+	// Adding a pre-provisioned Vault signer: different effective identity -> rejected.
+	vaultAdded := base(&Cosmosigner{Backend: vaultBackendFor("prekey")})
+	_, err := vaultAdded.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "immutable after the chain is established")
+
+	// Adding a software signer that uses the validator's own key: same identity -> accepted.
+	softwareAdded := base(&Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}}})
+	_, err = softwareAdded.Validate(old)
+	require.NoError(t, err)
+}
+
 // TestValidateCosmosignerNameLengthRejected verifies the derived discovery Service name is bounded to
 // 63 characters.
 func TestValidateCosmosignerNameLengthRejected(t *testing.T) {

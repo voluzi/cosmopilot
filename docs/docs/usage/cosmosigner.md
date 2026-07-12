@@ -110,7 +110,7 @@ spec:
   nodes:
     - name: validator-a
       instances: 1
-      validator: { privateKeySecret: chain-validator-a-priv-key }
+      validator: {}
       cosmosigner:                       # signer "<nodeset>-validator-a-signer"
         replicas: 3
         backend:
@@ -120,7 +120,7 @@ spec:
             tokenSecret: { name: vault-cosmosigner-token, key: token }
     - name: validator-b
       instances: 1
-      validator: { privateKeySecret: chain-validator-b-priv-key }
+      validator: {}
       cosmosigner:                       # signer "<nodeset>-validator-b-signer"
         replicas: 3
         backend:
@@ -140,11 +140,14 @@ A multi-instance validator group is N distinct validators, so a per-group `cosmo
 **one signer per instance** (`<nodeset>-<group>-<index>-signer`). Each instance needs its own
 consensus key:
 
-- **Vault / GCP**: instance `i` uses the **index-appended** key `<keyName>-<i>` / `<keyVersion>-<i>`.
-  Pre-provision one key per instance (e.g. for a 3-instance group with `keyName: myval`, create
-  `myval-0`, `myval-1`, `myval-2`). With `uploadGenerated`, Cosmopilot imports instance `i`'s
-  generated key into `<keyName>-<i>`.
+- **Vault**: instance `i` uses the **index-appended** transit key `<keyName>-<i>`. Pre-provision one
+  key per instance (e.g. for a 3-instance group with `keyName: myval`, create `myval-0`, `myval-1`,
+  `myval-2`). With `uploadGenerated`, Cosmopilot imports instance `i`'s generated key into
+  `<keyName>-<i>`.
 - **Software**: instance `i` mounts its own generated key secret `<nodeset>-<group>-<i>-priv-key`.
+- **GCP KMS** cannot be used on a multi-instance group: a `keyVersion` is a full resource path that
+  cannot be derived per instance, so the webhook rejects the combination. Split the group into
+  single-instance validator groups, each with its own `keyVersion`.
 
 ```yaml {5-11}
 spec:

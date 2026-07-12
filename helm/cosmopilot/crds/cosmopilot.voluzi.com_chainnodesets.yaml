@@ -436,9 +436,12 @@ spec:
                         properties:
                           privateKeySecret:
                             description: |-
-                              PrivateKeySecret is the name of the secret holding `priv_validator_key.json`. Defaults to
-                              `<owner>-priv-key` (the same default as .spec.validator.privateKeySecret). It is created
-                              with a freshly generated key when it does not exist.
+                              PrivateKeySecret is the name of the secret holding `priv_validator_key.json`. When the signer
+                              targets a validator this must be left empty — the validator's own key secret is used (created
+                              by its genesis/create-validator flow when it generates one). For a sentry-mode signer (no
+                              validator targeted) it is required and must reference a pre-provisioned secret whose consensus
+                              key is already registered on-chain (e.g. via init.genesisValidators): a fresh key is never
+                              generated here, since it could not be in the validator set.
                             type: string
                         type: object
                       vault:
@@ -3384,9 +3387,12 @@ spec:
                               properties:
                                 privateKeySecret:
                                   description: |-
-                                    PrivateKeySecret is the name of the secret holding `priv_validator_key.json`. Defaults to
-                                    `<owner>-priv-key` (the same default as .spec.validator.privateKeySecret). It is created
-                                    with a freshly generated key when it does not exist.
+                                    PrivateKeySecret is the name of the secret holding `priv_validator_key.json`. When the signer
+                                    targets a validator this must be left empty — the validator's own key secret is used (created
+                                    by its genesis/create-validator flow when it generates one). For a sentry-mode signer (no
+                                    validator targeted) it is required and must reference a pre-provisioned secret whose consensus
+                                    key is already registered on-chain (e.g. via init.genesisValidators): a fresh key is never
+                                    generated here, since it could not be in the validator set.
                                   type: string
                               type: object
                             vault:

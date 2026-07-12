@@ -83,6 +83,24 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
+	// PERSIST a status entry for every desired signer BEFORE creating any signer resource:
+	// reconcileSignerTeardown derives the set of removable signers from status, so a signer whose
+	// resources exist without an entry (e.g. after a crash between resource creation and the batched
+	// status write below) would never be undeployed — it would keep dialing and signing after the
+	// spec dropped it. Writing the entries first makes that window crash-safe: no entry, no resources.
+	entriesAdded := false
+	for _, s := range signers {
+		if nodeSet.GetCosmosignerStatus(s.Name) == nil {
+			nodeSet.EnsureCosmosignerStatus(s.Name)
+			entriesAdded = true
+		}
+	}
+	if entriesAdded {
+		if err := r.Status().Update(ctx, nodeSet); err != nil {
+			return err
+		}
+	}
+
 	changed := false
 	for _, s := range signers {
 		c, err := r.reconcileSigner(ctx, nodeSet, s)
@@ -106,9 +124,9 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 		return false, err
 	}
 
-	// Ensure a status entry exists as soon as we start managing a signer, so reconcileSignerTeardown
-	// can reliably detect its removal even before it finishes rolling out.
-	changed := nodeSet.GetCosmosignerStatus(s.Name) == nil
+	// The status entry was persisted by ensureCosmosigner before any resource creation (so teardown
+	// can always discover this signer from status, even across a crash).
+	changed := false
 	st := nodeSet.EnsureCosmosignerStatus(s.Name)
 
 	// Import a locally-generated key into Vault when requested (one-shot, once-only). Returns pending
