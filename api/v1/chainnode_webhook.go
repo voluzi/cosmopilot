@@ -370,13 +370,18 @@ func (chainNode *ChainNode) validateGenesisValidators() error {
 	return nil
 }
 
-// isControlledByChainNodeSet reports whether the ChainNode carries a controller owner reference to a
+// isControlledByChainNodeSet is the webhook-local alias of IsControlledByChainNodeSet.
+func isControlledByChainNodeSet(chainNode *ChainNode) bool {
+	return chainNode.IsControlledByChainNodeSet()
+}
+
+// IsControlledByChainNodeSet reports whether the ChainNode carries a controller owner reference to a
 // ChainNodeSet of this API group, i.e. it is a generated child rather than a user-created standalone
 // node. It checks the APIVersion, controller flag and a non-empty UID so a hand-written reference to
-// a foreign or non-existent object does not pass as easily; this is a footgun guard for a
-// controller-managed field, not a security boundary (a user able to create ChainNodes can already
-// disrupt their own validators).
-func isControlledByChainNodeSet(chainNode *ChainNode) bool {
+// a foreign or non-existent object does not pass as easily; this is a footgun guard for
+// controller-managed fields and labels, not a security boundary (a user able to create ChainNodes
+// can already disrupt their own validators).
+func (chainNode *ChainNode) IsControlledByChainNodeSet() bool {
 	for _, ref := range chainNode.GetOwnerReferences() {
 		if ref.Kind == "ChainNodeSet" &&
 			ref.APIVersion == GroupVersion.String() &&

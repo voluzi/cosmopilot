@@ -17,8 +17,12 @@ func TestChainNodeSetTargetPodKeepsDiscoveryLabel(t *testing.T) {
 	const nodeSetName = "mychain"
 	signerName := nodeSetName + "-signer"
 
-	// A ChainNodeSet-managed target: RemoteSignerTarget with the nodeset-stamped metadata labels, but
-	// no .spec.cosmosigner of its own.
+	// A ChainNodeSet-managed target: RemoteSignerTarget with the nodeset-stamped metadata labels and
+	// the controller owner reference every generated child carries, but no .spec.cosmosigner of its
+	// own. The owner reference matters: WithChainNodeLabels strips the nodeset label from STANDALONE
+	// nodes (where it can only be a user label spoofing a nodeset signer's discovery scope) and keeps
+	// it on genuine children.
+	isController := true
 	child := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: nodeSetName + "-fullnodes-0",
@@ -26,6 +30,13 @@ func TestChainNodeSetTargetPodKeepsDiscoveryLabel(t *testing.T) {
 				controllers.LabelChainNodeSet:      nodeSetName,
 				controllers.LabelCosmosignerTarget: signerName,
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.GroupVersion.String(),
+				Kind:       "ChainNodeSet",
+				Name:       nodeSetName,
+				UID:        "nodeset-uid",
+				Controller: &isController,
+			}},
 		},
 		Spec: appsv1.ChainNodeSpec{RemoteSignerTarget: true},
 	}
@@ -83,5 +94,23 @@ func TestNonTargetNodeHasNoDiscoveryLabel(t *testing.T) {
 	final := WithChainNodeLabels(cn, map[string]string{})
 	if _, present := final[controllers.LabelCosmosignerTarget]; present {
 		t.Fatalf("inherited cosmosigner-target label must be stripped from non-target pods: %+v", final)
+	}
+}
+
+// TestStandaloneNodeSetLabelStripped verifies a STANDALONE node (no ChainNodeSet controller owner)
+// never inherits the nodeset label onto its resources: that label is the discovery scope of every
+// ChainNodeSet signer, so a user-set copy would let a same-named nodeset's signer select and dial
+// this node's privval endpoint.
+func TestStandaloneNodeSetLabelStripped(t *testing.T) {
+	cn := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "solo",
+			Labels: map[string]string{controllers.LabelChainNodeSet: "victim-nodeset"},
+		},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
+	}
+	final := WithChainNodeLabels(cn, map[string]string{})
+	if _, present := final[controllers.LabelChainNodeSet]; present {
+		t.Fatalf("user-set nodeset label must be stripped from standalone node resources: %+v", final)
 	}
 }
