@@ -184,6 +184,18 @@ type CosmosignerStatus struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// StateStorageSize records the per-replica raft-state PVC size this signer was rolled out with.
+	// Together with StateStorageClassName it locks the PVC template while the signer (or its
+	// still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot
+	// be updated and surviving claims would be re-bound at their old size/class.
+	// +optional
+	StateStorageSize string `json:"stateStorageSize,omitempty"`
+
+	// StateStorageClassName records the storage class of this signer's raft-state PVCs. Empty means
+	// the cluster default class. See StateStorageSize.
+	// +optional
+	StateStorageClassName *string `json:"stateStorageClassName,omitempty"`
+
 	// SigningDigest is a fingerprint of this signer's effective signing identity, replica count and
 	// target-group set, captured once it has rolled out. It lets the no-webhook reconcile path reject
 	// a later change to the signing configuration that would make the validator sign with a key not in

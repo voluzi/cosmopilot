@@ -467,6 +467,11 @@ func (in *ChainNodeStatus) DeepCopyInto(out *ChainNodeStatus) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.CosmosignerStateStorageClassName != nil {
+		in, out := &in.CosmosignerStateStorageClassName, &out.CosmosignerStateStorageClassName
+		*out = new(string)
+		**out = **in
+	}
 	if in.CosmosignerAtEstablishment != nil {
 		in, out := &in.CosmosignerAtEstablishment, &out.CosmosignerAtEstablishment
 		*out = new(string)
@@ -934,6 +939,11 @@ func (in *CosmosignerStatus) DeepCopyInto(out *CosmosignerStatus) {
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas
 		*out = new(int32)
+		**out = **in
+	}
+	if in.StateStorageClassName != nil {
+		in, out := &in.StateStorageClassName, &out.StateStorageClassName
+		*out = new(string)
 		**out = **in
 	}
 	if in.AtEstablishment != nil {

@@ -97,7 +97,10 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 			// Kubelet reaps the pod even if cosmopilot dies mid-call before the deferred delete runs.
 			ActiveDeadlineSeconds: ptr.To(jobActiveDeadlineSeconds),
 			SecurityContext:       k8s.RestrictedPodSecurityContext(),
-			Volumes:               volumes,
+			// Same service account as the signer pods: it may carry the imagePullSecrets or identity
+			// bindings the cosmosigner image needs, without which this one-shot pod could never start.
+			ServiceAccountName: j.Params.ServiceAccountName,
+			Volumes:            volumes,
 			Containers: []corev1.Container{
 				{
 					Name:            containerName,

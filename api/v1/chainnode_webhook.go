@@ -180,12 +180,17 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		}
 		// The spec-diff helper above no-ops when the signer was removed in an earlier update
 		// (old.Spec.Cosmosigner is nil). While the previous signer's teardown is still in flight the
-		// controller has not yet cleared the recorded replica count, and its raft PVCs may still exist;
-		// a re-add with a different count could bind them with a mismatched membership. Enforce the
-		// recorded count until teardown completes and clears it.
-		if chainNode.Spec.Cosmosigner != nil {
-			if replicas := old.Status.CosmosignerReplicas; replicas != nil && *replicas != chainNode.Spec.Cosmosigner.GetReplicas() {
+		// controller has not yet cleared the recorded replica count and PVC template, and its raft PVCs
+		// may still exist; a re-add with a different count could bind them with a mismatched membership,
+		// and a different storage size/class would be silently ignored on the surviving claims. Enforce
+		// the recorded values until teardown completes and clears them.
+		if c := chainNode.Spec.Cosmosigner; c != nil {
+			if replicas := old.Status.CosmosignerReplicas; replicas != nil && *replicas != c.GetReplicas() {
 				return nil, fmt.Errorf(".spec.cosmosigner.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", *replicas)
+			}
+			if recorded := old.Status.CosmosignerStateStorageSize; recorded != "" &&
+				(recorded != c.GetStateStorageSize() || !ptrValueEqual(old.Status.CosmosignerStateStorageClassName, c.StorageClassName)) {
+				return nil, fmt.Errorf(".spec.cosmosigner.stateStorageSize/.storageClassName must stay unchanged until the previous signer's teardown completes: its raft state PVCs may still exist at the old size/class")
 			}
 		}
 		// Once the chain is established, the validator's consensus pubkey is fixed in the on-chain
@@ -200,8 +205,13 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		if old.Status.ChainID != "" && (old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil) {
 			oldIdentity := old.EffectiveSigningIdentity()
 			newIdentity := chainNode.EffectiveSigningIdentity()
-			if oldIdentity != "" && old.Spec.Validator != nil && (newIdentity == "" || oldIdentity != newIdentity) {
-				return nil, fmt.Errorf("the consensus signing key is immutable after the chain is established: changing or removing the cosmosigner/signing configuration would leave the validator signing with a key not in the on-chain validator set (or not signing at all)")
+			// The key must stay the same AND keep being a validator's key: dropping .spec.validator
+			// while keeping the signer leaves the identity unchanged (the signer still holds it) but
+			// demotes the on-chain validator to a sentry — losing validator status/priority/disruption
+			// handling and wedging the no-webhook guard (the signer is no longer validator-targeted).
+			if oldIdentity != "" && old.Spec.Validator != nil &&
+				(newIdentity == "" || oldIdentity != newIdentity || chainNode.Spec.Validator == nil) {
+				return nil, fmt.Errorf("the consensus signing key is immutable after the chain is established: changing or removing the cosmosigner/validator/signing configuration would leave the on-chain validator demoted or signing with a key not in the validator set (or not signing at all)")
 			}
 		}
 	}
@@ -233,6 +243,12 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		if c != nil && chainNode.Status.ChainID != "" {
 			if replicas := chainNode.Status.CosmosignerReplicas; replicas != nil && *replicas != c.GetReplicas() {
 				return nil, fmt.Errorf(".spec.cosmosigner.replicas is immutable after the signer is deployed (webhooks disabled): changing it does not migrate the raft membership and can break quorum")
+			}
+			// The PVC template is immutable too: StatefulSet volumeClaimTemplates cannot be updated and
+			// existing claims stay at their old size/class, so a change would be silently ignored.
+			if recorded := chainNode.Status.CosmosignerStateStorageSize; recorded != "" &&
+				(recorded != c.GetStateStorageSize() || !ptrValueEqual(chainNode.Status.CosmosignerStateStorageClassName, c.StorageClassName)) {
+				return nil, fmt.Errorf(".spec.cosmosigner.stateStorageSize/.storageClassName are immutable after the signer is deployed (webhooks disabled): its raft state PVCs cannot be resized or moved — remove the signer and re-add it")
 			}
 			if recorded := chainNode.Status.CosmosignerSigningDigest; recorded != "" {
 				if chainNode.CosmosignerSigningDigest() != recorded {

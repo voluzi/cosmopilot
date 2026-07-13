@@ -16042,6 +16042,18 @@ spec:
                         a later change to the signing configuration that would make the validator sign with a key not in
                         the on-chain validator set.
                       type: string
+                    stateStorageClassName:
+                      description: |-
+                        StateStorageClassName records the storage class of this signer's raft-state PVCs. Empty means
+                        the cluster default class. See StateStorageSize.
+                      type: string
+                    stateStorageSize:
+                      description: |-
+                        StateStorageSize records the per-replica raft-state PVC size this signer was rolled out with.
+                        Together with StateStorageClassName it locks the PVC template while the signer (or its
+                        still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot
+                        be updated and surviving claims would be re-bound at their old size/class.
+                      type: string
                   required:
                   - name
                   type: object

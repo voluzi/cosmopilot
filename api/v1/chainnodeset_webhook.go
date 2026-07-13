@@ -742,10 +742,18 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			if err := validateCosmosignerStateStorageImmutable(path, os.Spec, ns.Spec); err != nil {
 				return err
 			}
-		} else if st := old.GetCosmosignerStatus(ns.Name); st != nil && st.Replicas != nil && *st.Replicas != ns.Spec.GetReplicas() {
+		} else if st := old.GetCosmosignerStatus(ns.Name); st != nil {
 			// Re-added while a previous incarnation's teardown is still in flight: its raft PVCs may
-			// still exist, so the count must match until teardown clears the recorded value.
-			return fmt.Errorf("%s.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", path, *st.Replicas)
+			// still exist, so the replica count AND the PVC template must match until teardown clears
+			// the recorded values — surviving claims would be re-bound with the old membership and at
+			// their old size/class.
+			if st.Replicas != nil && *st.Replicas != ns.Spec.GetReplicas() {
+				return fmt.Errorf("%s.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", path, *st.Replicas)
+			}
+			if st.StateStorageSize != "" &&
+				(st.StateStorageSize != ns.Spec.GetStateStorageSize() || !ptrValueEqual(st.StateStorageClassName, ns.Spec.StorageClassName)) {
+				return fmt.Errorf("%s.stateStorageSize/.storageClassName must stay unchanged until the previous signer's teardown completes: its raft state PVCs may still exist at the old size/class", path)
+			}
 		}
 	}
 

@@ -291,6 +291,14 @@ func sameSignerInstance(a, b *int) bool {
 	return *a == *b
 }
 
+// ptrStringEqual reports whether two string pointers hold the same value (both nil counts as equal).
+func ptrStringEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Status.ChainID == "" {
 		return nil
@@ -328,6 +336,12 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			// so it also covers sentry signers, which record no signing digest.
 			if st.Replicas != nil && *st.Replicas != s.Spec.GetReplicas() {
 				return fmt.Errorf("cosmosigner %q replicas are immutable after deployment (webhooks disabled): changing them does not migrate the raft membership and can break quorum", s.Name)
+			}
+			// The PVC template is immutable too: StatefulSet volumeClaimTemplates cannot be updated and
+			// existing claims stay at their old size/class, so a change would be silently ignored.
+			if st.StateStorageSize != "" &&
+				(st.StateStorageSize != s.Spec.GetStateStorageSize() || !ptrStringEqual(st.StateStorageClassName, s.Spec.StorageClassName)) {
+				return fmt.Errorf("cosmosigner %q state storage (size/class) is immutable after deployment (webhooks disabled): its raft state PVCs cannot be resized or moved — remove the signer and re-add it", s.Name)
 			}
 			if st.SigningDigest != "" {
 				// Modifying a still-present signer that already rolled out (recorded digest, current digest

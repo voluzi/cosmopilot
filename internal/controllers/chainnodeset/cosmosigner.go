@@ -191,6 +191,10 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 		if rolledOut {
 			if needReplicas {
 				st.Replicas = ptr.To(params.Replicas)
+				// Recorded together with Replicas: it locks the PVC template on the no-webhook path and
+				// across a remove-and-re-add while the old PVCs may still exist.
+				st.StateStorageSize = s.Spec.GetStateStorageSize()
+				st.StateStorageClassName = s.Spec.StorageClassName
 				changed = true
 			}
 			if needServing {
@@ -361,6 +365,16 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	}
 
 	st := nodeSet.EnsureCosmosignerStatus(s.Name)
+
+	// A signer that already rolled out and served (digest recorded) WITHOUT ever importing can only be
+	// a pre-provisioned signer whose uploadGenerated was flipped on afterwards. Vault already holds the
+	// key that is serving on-chain; quiescing the live signer to import bootstrap material that may be
+	// absent or different would leave the validator not signing. Treat the late flip as a no-op. (A
+	// signer that legitimately imports records KeyImported BEFORE its first rollout, so this state is
+	// unambiguous.)
+	if st.SigningDigest != "" && st.KeyImported == "" {
+		return false, false, nil
+	}
 
 	// The key is produced by the validator's genesis/create-validator flow; wait for it rather than
 	// generating (and thereby diverging from) a different key. The import is still pending until it

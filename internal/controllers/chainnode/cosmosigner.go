@@ -157,6 +157,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		if rolledOut {
 			if needReplicas {
 				chainNode.Status.CosmosignerReplicas = ptr.To(params.Replicas)
+				// Recorded together with Replicas: it locks the PVC template on the no-webhook path and
+				// across a remove-and-re-add while the old PVCs may still exist.
+				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
+				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
 			}
 			if needDigest {
 				chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
@@ -302,6 +306,17 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 
 	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
 
+	// A signer that already rolled out and served (digest recorded) WITHOUT ever importing can only be
+	// a pre-provisioned signer whose uploadGenerated was flipped on afterwards. Vault already holds the
+	// key that is serving on-chain; quiescing the live signer to import bootstrap material that may be
+	// absent or different would leave the validator not signing. Treat the late flip as a no-op. (A
+	// signer that legitimately imports records the annotation BEFORE its first rollout, so this state
+	// is unambiguous.)
+	if chainNode.Status.CosmosignerSigningDigest != "" &&
+		chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == "" {
+		return false, nil
+	}
+
 	// Fetch the source key material first: the fingerprint hashes the actual bytes (not just the
 	// secret name), so an in-place update of the source Secret re-imports rather than being skipped.
 	secret := &corev1.Secret{}
@@ -413,6 +428,8 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 	// still terminating would let a remove-and-immediate-re-add bypass the replica guard and bind the
 	// surviving PVCs, inheriting stale raft membership.
 	chainNode.Status.CosmosignerReplicas = nil
+	chainNode.Status.CosmosignerStateStorageSize = ""
+	chainNode.Status.CosmosignerStateStorageClassName = nil
 	chainNode.Status.CosmosignerSigningDigest = ""
 	chainNode.Status.CosmosignerServingIdentity = ""
 	// Tolerate a conflict: the signer is already gone and this clear is idempotent, so a concurrent

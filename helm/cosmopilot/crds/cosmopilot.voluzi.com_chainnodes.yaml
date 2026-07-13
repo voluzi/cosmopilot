@@ -5838,6 +5838,20 @@ spec:
                   path can reject a later change or removal of the signing configuration. Not meant to be set by
                   hand.
                 type: string
+              cosmosignerStateStorageClassName:
+                description: |-
+                  CosmosignerStateStorageClassName records the storage class of the managed signer's raft-state
+                  PVCs. Empty means the cluster default class. See CosmosignerStateStorageSize. Not meant to be
+                  set by hand.
+                type: string
+              cosmosignerStateStorageSize:
+                description: |-
+                  CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was
+                  rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while
+                  the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet
+                  volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old
+                  size/class. Not meant to be set by hand.
+                type: string
               dataUsage:
                 description: Usage percentage of data volume.
                 type: string

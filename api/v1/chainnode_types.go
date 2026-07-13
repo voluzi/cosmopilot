@@ -278,6 +278,20 @@ type ChainNodeStatus struct {
 	// +optional
 	CosmosignerReplicas *int32 `json:"cosmosignerReplicas,omitempty"`
 
+	// CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was
+	// rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while
+	// the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet
+	// volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old
+	// size/class. Not meant to be set by hand.
+	// +optional
+	CosmosignerStateStorageSize string `json:"cosmosignerStateStorageSize,omitempty"`
+
+	// CosmosignerStateStorageClassName records the storage class of the managed signer's raft-state
+	// PVCs. Empty means the cluster default class. See CosmosignerStateStorageSize. Not meant to be
+	// set by hand.
+	// +optional
+	CosmosignerStateStorageClassName *string `json:"cosmosignerStateStorageClassName,omitempty"`
+
 	// CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at
 	// the moment the chain ID was first recorded. Empty string when no signer targeted a validator at
 	// chain establishment — including sentry-mode signers, whose key identity is deliberately
