@@ -190,7 +190,12 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	//   - The signing digest, serving identity/group/instance are only meaningful when the signer serves
 	//     a validator: a sentry-mode signer's key lives out-of-band and must stay add/remove/rotate-able.
 	needReplicas := st.Replicas == nil
-	needServing := s.TargetsValidator() && st.SigningDigest == ""
+	// A new signer being rolled out has no digest yet. A legacy signer upgraded from a status shape
+	// predating serving-identity/group/instance also has a non-empty digest but empty serving
+	// fields — that combination blocks the no-webhook removal guard (treated as unverifiable) and
+	// skips the served-validator check, so it must be backfilled on the next rolled-out reconcile.
+	needServing := (s.TargetsValidator() && st.SigningDigest == "") ||
+		(st.SigningDigest != "" && st.ServingIdentity == "")
 	// Backfilled independently of Replicas so a signer that recorded its replica count before the
 	// storage fields existed still gets its PVC template locked.
 	needStorage := st.StateStorageSize == ""

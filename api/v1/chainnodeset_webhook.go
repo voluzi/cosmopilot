@@ -561,6 +561,21 @@ func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 			}
 			seen[name] = struct{}{}
 
+			// The reserved "validator" name targets the legacy .spec.validator singleton, not a
+			// group in .spec.nodes: handle it here so a single signer can dial both the legacy
+			// validator AND a sentry/fullnode group together. The per-target rules below (multi-instance,
+			// tmKMS) only apply to a real .spec.nodes[] group.
+			if name == ReservedValidatorGroupName {
+				if nodeSet.Spec.Validator == nil {
+					return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q targets the legacy .spec.validator, which is not set", i, name)
+				}
+				if nodeSet.Spec.Validator.TmKMS != nil {
+					return fmt.Errorf(".spec.cosmosigner cannot target the legacy .spec.validator, which uses tmKMS: cosmosigner and tmKMS are mutually exclusive")
+				}
+				validatorTargets++
+				continue
+			}
+
 			group, ok := groups[name]
 			if !ok {
 				return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q does not match any group in .spec.nodes", i, name)
