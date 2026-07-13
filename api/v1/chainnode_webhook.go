@@ -274,15 +274,21 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			} else if marker := chainNode.Status.CosmosignerAtEstablishment; marker != nil &&
 				chainNode.CosmosignerValidatorTargetedIdentity() != *marker && chainNode.IsValidator() {
 				// A validator-targeted signer whose identity differs from the write-once record taken at
-				// establishment was added afterwards and has not rolled out yet. Its pre-provisioned key
-				// cannot be verified against the on-chain validator key without the old spec, so only
-				// backends that provably import the registered key are admitted. The marker is recorded
-				// atomically with the chain ID (SetEstablishedChainID); a nil marker only occurs on
-				// pre-marker chains, which the controller backfills conservatively before deploying.
-				importsRegisteredKey := c.UsesSoftwareBackend() ||
-					(c.UsesVaultBackend() && c.VaultUploadsGenerated(chainNode.ShouldInitGenesis()))
+				// establishment was added afterwards and has not rolled out yet. Without the old spec its
+				// key cannot be compared to the on-chain validator key, so the addition is only admitted
+				// when the key source is provably the registered one: the backend must reference/import
+				// the validator's own key (software or vault.uploadGenerated) AND that key's secret must
+				// itself be status-pinned — which is only true for a genesis-init validator, whose
+				// recorded genesis fingerprint includes privateKeySecret. An external-genesis or
+				// create-validator target has no such pin, so the same no-webhook edit could swap
+				// privateKeySecret and add the signer, deploying a key that is not in the validator set.
+				// The marker is recorded atomically with the chain ID (SetEstablishedChainID); a nil
+				// marker only occurs on pre-marker chains, which the controller backfills conservatively
+				// before deploying.
+				importsRegisteredKey := chainNode.ShouldInitGenesis() &&
+					(c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.VaultUploadsGenerated(true)))
 				if !importsRegisteredKey {
-					return nil, fmt.Errorf(".spec.cosmosigner: a validator-targeted signer with a pre-provisioned Vault/GCP key cannot be added to an established chain with webhooks disabled — its key cannot be verified against the on-chain validator key; use the software backend or vault.uploadGenerated (the import verifies the key), or perform the migration with webhooks enabled")
+					return nil, fmt.Errorf(".spec.cosmosigner: a validator-targeted signer cannot be added to an established chain with webhooks disabled — its key cannot be verified against the on-chain validator key from status alone; perform the migration with webhooks enabled")
 				}
 			}
 		}

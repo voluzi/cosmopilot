@@ -424,8 +424,9 @@ func TestValidateForReconcileAllowsRecordedValidatorSigner(t *testing.T) {
 // TestValidateForReconcilePostEstablishmentSignerAddition verifies the write-once at-establishment
 // marker: a validator-targeted pre-provisioned signer whose identity matches the marker (it was the
 // establishing configuration) is admitted even before its rollout digest is recorded, while one added
-// AFTER establishment (no status entry) is rejected unless the backend provably imports the registered
-// key.
+// AFTER establishment (no status entry) is rejected — the validator's own key secret is not
+// status-pinned for an external-genesis target, so even a software/uploadGenerated backend could be
+// pointed at a swapped key in the same no-webhook edit.
 func TestValidateForReconcilePostEstablishmentSignerAddition(t *testing.T) {
 	// Established WITH the signer (entry AtEstablishment == identity): admitted.
 	establishing := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
@@ -437,9 +438,11 @@ func TestValidateForReconcilePostEstablishmentSignerAddition(t *testing.T) {
 	added.Status.Cosmosigners = nil
 	_, err = validateForReconcile(added)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pre-provisioned Vault/GCP key")
+	assert.Contains(t, err.Error(), "cannot be added to an established chain")
 
-	// Same late addition but with uploadGenerated (import verifies the key): admitted.
+	// The same late addition with uploadGenerated on an EXTERNAL-GENESIS target: still rejected —
+	// the import source (privateKeySecret) is not pinned by any status record, so the same edit
+	// could swap the key.
 	importing := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
 		Address:         "https://vault.example:8200",
 		KeyName:         "val-key",
@@ -448,7 +451,8 @@ func TestValidateForReconcilePostEstablishmentSignerAddition(t *testing.T) {
 	}})
 	importing.Status.Cosmosigners = nil
 	_, err = validateForReconcile(importing)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be added to an established chain")
 }
 
 // TestSetEstablishedChainIDRecordsMarkerAtomically verifies the chain ID and the per-signer
@@ -564,7 +568,7 @@ func TestValidateForReconcileSentryRetargetToValidator(t *testing.T) {
 	retargeted.Spec.Cosmosigner.NodeGroups = []string{"validators"}
 	_, err = validateForReconcile(retargeted)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pre-provisioned Vault/GCP key")
+	assert.Contains(t, err.Error(), "cannot be added to an established chain")
 }
 
 // TestValidateForReconcileRejectsServedGroupConversion verifies that converting the served validator
