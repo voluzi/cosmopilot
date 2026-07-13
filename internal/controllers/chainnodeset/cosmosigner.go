@@ -83,29 +83,37 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
-	// PERSIST a status entry AND the PVC/raft membership locks for every desired signer BEFORE
-	// creating/updating any signer resource:
-	//   - reconcileSignerTeardown derives the set of removable signers from status, so a signer whose
-	//     resources exist without an entry would never be undeployed;
-	//   - once the StatefulSet is created, raft membership and PVC templates may already exist, so the
-	//     replica/storage locks must survive a crash or failed later status update.
-	// Writing them first makes the window crash-safe: no recorded locks, no resources yet.
+	// PERSIST a status entry for every desired signer BEFORE creating any signer resource:
+	// reconcileSignerTeardown derives the set of removable signers from status, so a signer whose
+	// resources exist without an entry would never be undeployed. Writing the entries first makes that
+	// window crash-safe: no entry, no resources.
 	entriesChanged := false
 	for _, s := range signers {
-		st := nodeSet.EnsureCosmosignerStatus(s.Name)
-		if st.Replicas == nil {
-			st.Replicas = ptr.To(s.Spec.GetReplicas())
-			entriesChanged = true
-		}
-		if st.StateStorageSize == "" {
-			st.StateStorageSize = s.Spec.GetStateStorageSize()
-			st.StateStorageClassName = s.Spec.StorageClassName
+		if nodeSet.GetCosmosignerStatus(s.Name) == nil {
+			nodeSet.EnsureCosmosignerStatus(s.Name)
 			entriesChanged = true
 		}
 	}
 	if entriesChanged {
 		if err := r.Status().Update(ctx, nodeSet); err != nil {
 			return err
+		}
+	}
+
+	// INITIALISE the PVC/raft membership locks. The values must come from the live signer state
+	// (if any), so an existing unrecorded StatefulSet is not "re-locked" to a different replica
+	// count or PVC template than the one the raft cluster was actually formed with. Falls back to the
+	// spec only when no signer state exists yet (true first rollout). This window is crash-safe
+	// because no resource is created until reconcileSigner applies it.
+	for _, s := range signers {
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		if st == nil {
+			continue
+		}
+		if st.Replicas == nil || st.StateStorageSize == "" {
+			if err := r.adoptSignerLockFromLive(ctx, nodeSet, s, st); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -121,6 +129,35 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
+}
+
+// adoptSignerLockFromLive initialises the per-signer Replicas/StateStorageSize/ClassName from the
+// live signer state owned by this controller, falling back to the spec when no signer state exists.
+// Anchoring on the live state prevents an in-flight roll-out (failed first reconcile, or an
+// already-deployed signer whose status was lost) from being "re-locked" to a different replica count
+// or PVC template than the one the raft cluster was actually formed with.
+func (r *Reconciler) adoptSignerLockFromLive(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, st *appsv1.CosmosignerStatus) error {
+	liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name)
+	if err != nil {
+		return err
+	}
+	if st.Replicas == nil {
+		if foundReplicas {
+			st.Replicas = ptr.To(liveReplicas)
+		} else {
+			st.Replicas = ptr.To(s.Spec.GetReplicas())
+		}
+	}
+	if st.StateStorageSize == "" {
+		if foundStorage {
+			st.StateStorageSize = liveSize
+			st.StateStorageClassName = &liveClass
+		} else {
+			st.StateStorageSize = s.Spec.GetStateStorageSize()
+			st.StateStorageClassName = s.Spec.StorageClassName
+		}
+	}
+	return r.Status().Update(ctx, nodeSet)
 }
 
 // reconcileSigner deploys one resolved signer and records its persisted status invariants, mutating

@@ -91,20 +91,32 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return false, nil
 	}
 
-	// Persist the raft membership/PVC-template locks before creating/updating any signer resource.
-	// Once the StatefulSet exists, the recorded membership and claims may already be formed; a crash
-	// or failed later status update must not leave the no-webhook path without values to enforce.
-	locksChanged := false
-	if chainNode.Status.CosmosignerReplicas == nil {
-		chainNode.Status.CosmosignerReplicas = ptr.To(chainNode.Spec.Cosmosigner.GetReplicas())
-		locksChanged = true
-	}
-	if chainNode.Status.CosmosignerStateStorageSize == "" {
-		chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
-		chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
-		locksChanged = true
-	}
-	if locksChanged {
+	// INITIALISE the raft membership/PVC-template locks. The values must come from the live signer
+	// state (if any), so an existing unrecorded StatefulSet is not "re-locked" to a different
+	// replica count or PVC template than the one the raft cluster was actually formed with. Falls
+	// back to the spec only when no signer state exists yet (true first rollout). This window is
+	// crash-safe because no resource is created until reconcileSigner applies it.
+	if chainNode.Status.CosmosignerReplicas == nil || chainNode.Status.CosmosignerStateStorageSize == "" {
+		liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode))
+		if err != nil {
+			return false, err
+		}
+		if chainNode.Status.CosmosignerReplicas == nil {
+			if foundReplicas {
+				chainNode.Status.CosmosignerReplicas = ptr.To(liveReplicas)
+			} else {
+				chainNode.Status.CosmosignerReplicas = ptr.To(chainNode.Spec.Cosmosigner.GetReplicas())
+			}
+		}
+		if chainNode.Status.CosmosignerStateStorageSize == "" {
+			if foundStorage {
+				chainNode.Status.CosmosignerStateStorageSize = liveSize
+				chainNode.Status.CosmosignerStateStorageClassName = &liveClass
+			} else {
+				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
+				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
+			}
+		}
 		if err := r.Status().Update(ctx, chainNode); err != nil {
 			return false, err
 		}
