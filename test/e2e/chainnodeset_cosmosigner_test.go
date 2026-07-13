@@ -59,9 +59,12 @@ var _ = Describe("ChainNodeSet Cosmosigner", func() {
 
 				WaitForChainNodeSetHeight(cns, 3)
 
-				// Verify the key was imported into Vault exactly once.
+				// Verify the key was imported into Vault exactly once (recorded in the signer's
+				// per-signer status entry).
 				RefreshChainNodeSet(cns)
-				Expect(cns.Annotations).To(HaveKey("cosmopilot.voluzi.com/cosmosigner-key-imported"))
+				st := cns.GetCosmosignerStatus(fmt.Sprintf("%s-signer", cns.GetName()))
+				Expect(st).NotTo(BeNil())
+				Expect(st.KeyImported).NotTo(BeEmpty())
 			}),
 		)
 	})

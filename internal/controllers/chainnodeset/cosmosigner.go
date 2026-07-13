@@ -383,9 +383,21 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 
 	// The record fingerprints the Vault target, the resolved source secret name, AND the key material,
 	// so changing the target (key name/mount/address/namespace), the source secret, or its bytes (an
-	// in-place update) re-imports instead of leaving the signer pointed at a stale transit key.
+	// in-place update during bootstrap) re-imports instead of leaving the signer pointed at a stale
+	// transit key.
 	want := c.Backend.Vault.ImportFingerprint(sourceSecret, keyMaterial)
 	if st.KeyImported == want {
+		return false, false, nil
+	}
+
+	// BYTE-only change after the signer already rolled out and served (digest recorded) with an import
+	// completed for this same target/source: the source Secret is stale bootstrap material by then —
+	// Vault holds the key that was verified at import time and is signing on-chain. Re-importing the
+	// edited bytes would scale the live signer to zero and, at best, fail the import (pubkey mismatch)
+	// leaving the validator not signing — so the edit is ignored instead. During bootstrap (no digest
+	// yet) a byte change still re-imports: the registered key may legitimately have been regenerated.
+	if st.SigningDigest != "" &&
+		appsv1.ImportAnnotationMatchesTarget(st.KeyImported, c.Backend.Vault.ImportTargetFingerprint(sourceSecret)) {
 		return false, false, nil
 	}
 

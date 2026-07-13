@@ -489,5 +489,29 @@ func validateCosmosignerReplicasImmutable(oldC, newC *Cosmosigner) error {
 	if oldC.GetReplicas() != newC.GetReplicas() {
 		return fmt.Errorf(".spec.cosmosigner.replicas is immutable after creation: changing it does not migrate the raft membership in the signer's state and can break quorum")
 	}
+	return validateCosmosignerStateStorageImmutable(".spec.cosmosigner", oldC, newC)
+}
+
+// validateCosmosignerStateStorageImmutable rejects a change to the signer's raft-state PVC template
+// (size or storage class). A StatefulSet's volumeClaimTemplates cannot be updated in place — the
+// reconciler preserves the live template to keep the update admissible — so an accepted change would
+// be silently ignored forever. Rejecting it makes the limitation explicit: recreate the signer
+// (remove + re-add) to change its state storage.
+func validateCosmosignerStateStorageImmutable(path string, oldC, newC *Cosmosigner) error {
+	if oldC == nil || newC == nil {
+		return nil
+	}
+	if oldC.GetStateStorageSize() != newC.GetStateStorageSize() ||
+		!ptrValueEqual(oldC.StorageClassName, newC.StorageClassName) {
+		return fmt.Errorf("%s.stateStorageSize and .storageClassName are immutable after creation: a StatefulSet's volumeClaimTemplates cannot be updated — remove the cosmosigner and re-add it to change its state storage", path)
+	}
 	return nil
+}
+
+// ptrValueEqual reports whether two string pointers hold the same value (both nil counts as equal).
+func ptrValueEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }

@@ -728,6 +728,11 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			if os.Spec.GetReplicas() != ns.Spec.GetReplicas() {
 				return fmt.Errorf("%s.replicas is immutable after creation: changing it does not migrate the raft membership in the signer's state and can break quorum", path)
 			}
+			// The raft-state PVC template is immutable too: StatefulSet volumeClaimTemplates cannot be
+			// updated, so an accepted change would be silently ignored by the reconciler.
+			if err := validateCosmosignerStateStorageImmutable(path, os.Spec, ns.Spec); err != nil {
+				return err
+			}
 		} else if st := old.GetCosmosignerStatus(ns.Name); st != nil && st.Replicas != nil && *st.Replicas != ns.Spec.GetReplicas() {
 			// Re-added while a previous incarnation's teardown is still in flight: its raft PVCs may
 			// still exist, so the count must match until teardown clears the recorded value.
