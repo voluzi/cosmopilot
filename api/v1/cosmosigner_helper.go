@@ -503,7 +503,7 @@ func validateCosmosignerStateStorageImmutable(path string, oldC, newC *Cosmosign
 	}
 	if oldC.GetStateStorageSize() != newC.GetStateStorageSize() ||
 		!ptrValueEqual(oldC.StorageClassName, newC.StorageClassName) {
-		return fmt.Errorf("%s.stateStorageSize and .storageClassName are immutable after creation: a StatefulSet's volumeClaimTemplates cannot be updated — remove the cosmosigner and re-add it to change its state storage", path)
+		return fmt.Errorf("%s.stateStorageSize and %s.storageClassName are immutable after creation: a StatefulSet's volumeClaimTemplates cannot be updated — remove the cosmosigner and re-add it to change its state storage", path, path)
 	}
 	return nil
 }
