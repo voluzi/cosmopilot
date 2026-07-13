@@ -67,18 +67,28 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 // recordGenesisDigestIfMissing records the genesis signing fingerprint (for a node that initialized
 // genesis) or the external sentinel (for one that consumed an external genesis) into status the first
 // time genesis is established, so the no-webhook reconcile path can reject post-genesis changes to
-// .spec.validator.init without a previous spec to diff against. It is recorded once and never
-// overwritten — the genesis is immutable — and also backfills nodes upgraded from a version that
-// predates the digest. Returns whether it performed a status update.
+// .spec.validator.init without a previous spec to diff against. It also backfills nodes upgraded from
+// a version that predates the digest. Returns whether it performed a status update.
+//
+// While webhooks are ENABLED the recorded digest is additionally refreshed when the current spec's
+// fingerprint diverged: any such change was admission-validated with a real old/new diff (e.g. a
+// same-key tmKMS→cosmosigner migration, whose raw signing material legitimately changes), so keeping
+// the stale fingerprint would poison the no-webhook guard if webhooks are later disabled — it would
+// reject every reconcile of the already-admitted spec. On the NO-WEBHOOK path the digest is the guard
+// itself and is never rewritten (the guard runs before reconcile, so a disallowed change never
+// reaches this refresh).
 func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if chainNode.Status.GenesisSigningDigest != "" {
+	current := appsv1.GenesisDigestExternal
+	if chainNode.ShouldInitGenesis() {
+		current = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
+	}
+	if chainNode.Status.GenesisSigningDigest == current {
 		return false, nil
 	}
-	if chainNode.ShouldInitGenesis() {
-		chainNode.Status.GenesisSigningDigest = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
-	} else {
-		chainNode.Status.GenesisSigningDigest = appsv1.GenesisDigestExternal
+	if chainNode.Status.GenesisSigningDigest != "" && r.opts.DisableWebhooks {
+		return false, nil
 	}
+	chainNode.Status.GenesisSigningDigest = current
 	return true, r.Status().Update(ctx, chainNode)
 }
 

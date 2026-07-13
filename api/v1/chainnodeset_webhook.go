@@ -149,6 +149,13 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	// Validate each node group
 	seenGroupNames := make(map[string]int, len(nodeSet.Spec.Nodes))
 	for i, group := range nodeSet.Spec.Nodes {
+		// An empty group name would derive broken child names (<nodeset>--<index>) and doubles as the
+		// internal "no validator group" sentinel in signer resolution, silently disabling
+		// validator-targeted safeguards.
+		if group.Name == "" {
+			return nil, fmt.Errorf(".spec.nodes[%d].name must not be empty", i)
+		}
+
 		// The validator group name is reserved for the legacy singleton .spec.validator.
 		if group.Name == ReservedValidatorGroupName {
 			return nil, fmt.Errorf(".spec.nodes[%d].name %q is reserved", i, ReservedValidatorGroupName)
@@ -336,10 +343,11 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if old.Spec.Validator != nil && old.Spec.Validator.Init != nil &&
 			nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
 			defaultPrivKeySecret := fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName())
-			// When cosmosigner is involved on either side, compare through the effective signing
-			// identity (same-key signer migrations compare equal); otherwise keep the raw fingerprint.
+			// When a cosmosigner serves this validator on either side, compare through the effective
+			// signing identity (same-key signer migrations compare equal); otherwise keep the raw
+			// fingerprint.
 			changed := genesisSigningMaterialChanged(old.Spec.Validator, nodeSet.Spec.Validator, defaultPrivKeySecret)
-			if old.Spec.Cosmosigner != nil || nodeSet.Spec.Cosmosigner != nil {
+			if old.groupCosmosigner(ReservedValidatorGroupName) != nil || nodeSet.groupCosmosigner(ReservedValidatorGroupName) != nil {
 				changed = old.nodeSetEffectiveGenesisFingerprint(ReservedValidatorGroupName, old.Spec.Validator) !=
 					nodeSet.nodeSetEffectiveGenesisFingerprint(ReservedValidatorGroupName, nodeSet.Spec.Validator)
 			}
@@ -373,8 +381,9 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			// names, so this only flags real changes.
 			defaultPrivKeySecret := fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group.Name)
 			changed := genesisSigningMaterialChanged(og.Validator, group.Validator, defaultPrivKeySecret)
-			if old.Spec.Cosmosigner != nil || nodeSet.Spec.Cosmosigner != nil {
-				// Identity-normalized comparison so a same-key signer migration passes.
+			if old.groupCosmosigner(group.Name) != nil || nodeSet.groupCosmosigner(group.Name) != nil {
+				// A cosmosigner (top-level or per-group) serves this group on either side:
+				// identity-normalized comparison so a same-key signer migration passes.
 				changed = old.nodeSetEffectiveGenesisFingerprint(group.Name, og.Validator) !=
 					nodeSet.nodeSetEffectiveGenesisFingerprint(group.Name, group.Validator)
 			}

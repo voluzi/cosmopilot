@@ -320,6 +320,7 @@ type NodeSetValidatorConfig struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.individualIngresses) && has(self.individualGatewayRoutes))",message="individualIngresses and individualGatewayRoutes are mutually exclusive"
 type NodeGroupSpec struct {
 	// Name of this group.
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Number of ChainNode instances to run on this group.
