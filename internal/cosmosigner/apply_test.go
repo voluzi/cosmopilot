@@ -304,6 +304,16 @@ func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
 		t.Fatal("creating a fresh signer StatefulSet over an unlabeled legacy PVC must be refused")
 	}
 
+	// Claim with ALL labels stripped: still refused — the StatefulSet controller binds claims by
+	// NAME, so a label-scoped scan would miss it while Kubernetes re-binds it anyway.
+	strippedPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
+	}}
+	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(strippedPVC).Build()
+	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS()); err == nil {
+		t.Fatal("creating a fresh signer StatefulSet over a label-stripped name-matching PVC must be refused")
+	}
+
 	// Own claim: creation proceeds (normal restart path).
 	ownPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "me-uid"),
