@@ -271,3 +271,74 @@ func TestValidateCosmosignerNameLengthRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds the 63-character limit")
 }
+
+// TestCosmosignerStateStorageEqual verifies size is compared as a parsed quantity (so 1024Mi==1Gi)
+// and class is compared by pointer value (nil default distinct from explicit "").
+func TestCosmosignerStateStorageEqual(t *testing.T) {
+	// Quantity-equivalent sizes with matching (nil) class.
+	assert.True(t, CosmosignerStateStorageEqual("1024Mi", nil, "1Gi", nil))
+	// Different sizes.
+	assert.False(t, CosmosignerStateStorageEqual("10Gi", nil, "20Gi", nil))
+	// nil (cluster default) vs explicit "" are distinct.
+	assert.False(t, CosmosignerStateStorageEqual("10Gi", nil, "10Gi", ptr.To("")))
+	// Same explicit class.
+	assert.True(t, CosmosignerStateStorageEqual("10Gi", ptr.To("fast"), "10240Mi", ptr.To("fast")))
+	// Different class.
+	assert.False(t, CosmosignerStateStorageEqual("10Gi", ptr.To("fast"), "10Gi", ptr.To("slow")))
+	// Unparseable falls back to string equality.
+	assert.True(t, CosmosignerStateStorageEqual("bogus", nil, "bogus", nil))
+	assert.False(t, CosmosignerStateStorageEqual("bogus", nil, "other", nil))
+}
+
+// TestValidateCosmosignerGenesisSentryKeyImmutable verifies a sentry software signer whose key is
+// registered in init.genesisValidators cannot switch to a different key after establishment (that key
+// is part of the immutable genesis validator set), while a sentry key NOT in genesis stays rotatable.
+func TestValidateCosmosignerGenesisSentryKeyImmutable(t *testing.T) {
+	base := func(sentryKey string) *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App: AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+					ChainID:     "test-1",
+					Assets:      []string{"1stake"},
+					StakeAmount: "1stake",
+					GenesisValidators: []GenesisValidator{{
+						PrivKeySecret:         "genesis-sentry-key",
+						AccountMnemonicSecret: "mn",
+						Moniker:               "preserved",
+						Assets:                []string{"1stake"},
+						StakeAmount:           "1stake",
+					}},
+				}},
+				Nodes: []NodeGroupSpec{{
+					Name:        "sentries",
+					Instances:   ptr.To(3),
+					Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(sentryKey)}}},
+				}},
+			},
+			Status: ChainNodeSetStatus{ChainID: "test-1"},
+		}
+	}
+
+	// Established with the sentry signer using the genesis-registered key.
+	old := base("genesis-sentry-key")
+
+	// Rotating that key to a different one after establishment is rejected.
+	rotated := base("some-other-key")
+	_, err := rotated.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "registered in the immutable genesis validator set")
+
+	// Unchanged: accepted.
+	_, err = base("genesis-sentry-key").Validate(old)
+	require.NoError(t, err)
+
+	// A sentry signer whose key is NOT a genesis key stays rotatable.
+	oldFree := base("free-key")
+	oldFree.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key")
+	freeRotated := base("free-key-2")
+	freeRotated.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key-2")
+	_, err = freeRotated.Validate(oldFree)
+	require.NoError(t, err)
+}

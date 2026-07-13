@@ -10,7 +10,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -139,6 +138,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	} else if !tornDown {
 		logger.Info("waiting for cosmosigner teardown before reconciling children")
 		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+	}
+
+	// Preflight the desired signers BEFORE ensureValidator/ensureNodes stamp RemoteSignerTarget on the
+	// child ChainNodes. If a signer can never come up (missing software key, missing import source),
+	// fail here so children keep their existing local signing path instead of dropping the local key
+	// for a signer that will never deploy. Skipped until the chain ID is known (signers do not deploy
+	// before then, and validator key-generation flows are still pending).
+	if nodeSet.Status.ChainID != "" {
+		if err := r.preflightCosmosigners(ctx, nodeSet); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Validators that initialize a new genesis must run before ensureGenesis: they produce the
@@ -335,7 +345,7 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			// The PVC template is immutable too: StatefulSet volumeClaimTemplates cannot be updated and
 			// existing claims stay at their old size/class, so a change would be silently ignored.
 			if st.StateStorageSize != "" &&
-				(st.StateStorageSize != s.Spec.GetStateStorageSize() || !ptr.Equal(st.StateStorageClassName, s.Spec.StorageClassName)) {
+				!appsv1.CosmosignerStateStorageEqual(st.StateStorageSize, st.StateStorageClassName, s.Spec.GetStateStorageSize(), s.Spec.StorageClassName) {
 				return fmt.Errorf("cosmosigner %q state storage (size/class) is immutable after deployment (webhooks disabled): its raft state PVCs cannot be resized or moved — remove the signer and re-add it", s.Name)
 			}
 			if st.SigningDigest != "" {
@@ -359,6 +369,14 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 					if s.ValidatorGroup != st.ServingGroup || !sameSignerInstance(s.ValidatorInstance, st.ServingInstance) {
 						return fmt.Errorf("cosmosigner %q served the validator in group %q (webhooks disabled) — moving validator-ness elsewhere would leave that validator's on-chain key without its signing path", s.Name, st.ServingGroup)
 					}
+				} else if !s.TargetsValidator() {
+					// A LEGACY digest (recorded before the serving fields existed) carries no served
+					// group/instance, so the group+instance demotion check above cannot run. If the signer
+					// no longer targets a validator at all, the served validator was demoted to a
+					// regular/sentry group while the digest still matches — unverifiable from status alone.
+					// Reject; leaving the signer targeting a validator lets the next reconcile backfill the
+					// serving fields (reconcileSigner), after which the precise check applies.
+					return fmt.Errorf("cosmosigner %q: its recorded identity predates this version and it no longer targets a validator (webhooks disabled) — the served validator may have been demoted; keep it targeting the validator so the controller can record the serving identity, or repair the configuration with webhooks enabled", s.Name)
 				}
 				// A matching digest proves this exact signer identity rolled out and served, so the
 				// at-establishment guard below must not re-judge it.

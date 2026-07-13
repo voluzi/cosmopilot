@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -767,7 +766,7 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 				return fmt.Errorf("%s.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", path, *st.Replicas)
 			}
 			if st.StateStorageSize != "" &&
-				(st.StateStorageSize != ns.Spec.GetStateStorageSize() || !ptr.Equal(st.StateStorageClassName, ns.Spec.StorageClassName)) {
+				!CosmosignerStateStorageEqual(st.StateStorageSize, st.StateStorageClassName, ns.Spec.GetStateStorageSize(), ns.Spec.StorageClassName) {
 				return fmt.Errorf("%s.stateStorageSize/.storageClassName must stay unchanged until the previous signer's teardown completes: its raft state PVCs may still exist at the old size/class", path)
 			}
 		}
@@ -842,7 +841,53 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 		}
 	}
 
+	// A SENTRY software signer whose key is registered in genesis (init.genesisValidators) holds a
+	// consensus identity that IS part of the immutable genesis validator set — the guards above skip it
+	// because ValidatorTargetedIdentity() is empty for a sentry. Changing that key after establishment
+	// would roll the signer to a key that was never in the set, so it is immutable. (A sentry key NOT
+	// registered in genesis stays freely rotatable: it protects no in-cluster identity.)
+	oldGenesisSecrets := old.genesisValidatorPrivKeySecrets()
+	for _, ns := range nodeSet.ResolveCosmosigners() {
+		if ns.ValidatorGroup != "" {
+			continue
+		}
+		os, ok := oldSigners[ns.Name]
+		if !ok || os.ValidatorGroup != "" || os.SoftwareKeySecret == "" {
+			continue
+		}
+		if _, genesis := oldGenesisSecrets[os.SoftwareKeySecret]; !genesis {
+			continue
+		}
+		if ns.SoftwareKeySecret != os.SoftwareKeySecret {
+			return fmt.Errorf("%s.backend.software.privateKeySecret is immutable after the chain is established: %q is registered in the immutable genesis validator set (init.genesisValidators), so this sentry signer cannot switch to a different consensus key", nodeSet.signerFieldPath(ns), os.SoftwareKeySecret)
+		}
+	}
+
 	return nil
+}
+
+// genesisValidatorPrivKeySecrets returns the set of priv-key secret names preserved on-chain via
+// init.genesisValidators across the legacy singleton and every validator group. Those keys are part
+// of the immutable genesis validator set.
+func (nodeSet *ChainNodeSet) genesisValidatorPrivKeySecrets() map[string]struct{} {
+	out := map[string]struct{}{}
+	add := func(init *GenesisInitConfig) {
+		if init == nil {
+			return
+		}
+		for _, gv := range init.GenesisValidators {
+			out[gv.PrivKeySecret] = struct{}{}
+		}
+	}
+	if nodeSet.Spec.Validator != nil {
+		add(nodeSet.Spec.Validator.Init)
+	}
+	for i := range nodeSet.Spec.Nodes {
+		if nodeSet.Spec.Nodes[i].Validator != nil {
+			add(nodeSet.Spec.Nodes[i].Validator.Init)
+		}
+	}
+	return out
 }
 
 // validateUniqueSigningKeys rejects two running validators that would sign with the same

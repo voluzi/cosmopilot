@@ -502,9 +502,26 @@ func validateCosmosignerStateStorageImmutable(path string, oldC, newC *Cosmosign
 	if oldC == nil || newC == nil {
 		return nil
 	}
-	if oldC.GetStateStorageSize() != newC.GetStateStorageSize() ||
-		!ptr.Equal(oldC.StorageClassName, newC.StorageClassName) {
+	if !CosmosignerStateStorageEqual(oldC.GetStateStorageSize(), oldC.StorageClassName, newC.GetStateStorageSize(), newC.StorageClassName) {
 		return fmt.Errorf("%s.stateStorageSize and %s.storageClassName are immutable after creation: a StatefulSet's volumeClaimTemplates cannot be updated — remove the cosmosigner and re-add it to change its state storage", path, path)
 	}
 	return nil
+}
+
+// CosmosignerStateStorageEqual reports whether two (size, storageClassName) pairs describe the same
+// PVC template. The size is compared as a parsed resource.Quantity so equivalent forms (e.g. "1024Mi"
+// and "1Gi") are equal — the live StatefulSet may serialize a quantity in a different canonical form
+// than the spec string, and a recorded lock adopted from live state must not then reject its own
+// unchanged spec. The class is compared by pointer value so nil (cluster default) and an explicit ""
+// stay distinct. Unparseable sizes fall back to string equality.
+func CosmosignerStateStorageEqual(sizeA string, classA *string, sizeB string, classB *string) bool {
+	if !ptr.Equal(classA, classB) {
+		return false
+	}
+	qa, ea := resource.ParseQuantity(sizeA)
+	qb, eb := resource.ParseQuantity(sizeB)
+	if ea != nil || eb != nil {
+		return sizeA == sizeB
+	}
+	return qa.Cmp(qb) == 0
 }

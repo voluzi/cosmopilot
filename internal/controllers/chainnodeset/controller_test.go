@@ -620,3 +620,34 @@ func TestValidateForReconcileRejectsServedGroupSwap(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "group \"validators\"")
 }
+
+// TestValidateForReconcileRejectsLegacyDigestDemotion verifies the no-webhook guard rejects demoting
+// the served validator group of a LEGACY-digest signer (SigningDigest recorded, serving fields empty —
+// an upgrade from a status shape predating them) into a regular/sentry group. Without the serving
+// fields the precise group+instance check cannot run, so a signer that no longer targets any validator
+// while its digest still matches is unverifiable and rejected. Kept targeting a validator, it passes so
+// the controller can backfill the serving identity.
+func TestValidateForReconcileRejectsLegacyDigestDemotion(t *testing.T) {
+	// Legacy status: digest recorded, but no serving identity/group/instance.
+	served := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	served.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name:             "test-nodeset-signer",
+		Replicas:         ptr.To(int32(1)),
+		StateStorageSize: "1Gi",
+		SigningDigest:    resolveSingleSigner(t, served).Digest(),
+	}}
+
+	// Unchanged (still targets the validator): admitted — the controller backfills serving fields.
+	_, err := validateForReconcile(served)
+	require.NoError(t, err)
+
+	// Demote the served validator group to a plain group: digest still matches (same vault key, same
+	// group name), but the signer no longer targets a validator -> unverifiable -> rejected.
+	demoted := served.DeepCopy()
+	demoted.Spec.Nodes[0].Validator = nil
+	require.Equal(t, served.Status.Cosmosigners[0].SigningDigest, resolveSingleSigner(t, demoted).Digest(),
+		"test premise: the digest must be unchanged by the demotion")
+	_, err = validateForReconcile(demoted)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no longer targets a validator")
+}

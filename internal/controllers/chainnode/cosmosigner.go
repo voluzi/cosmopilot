@@ -91,11 +91,14 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return false, nil
 	}
 
-	// INITIALISE the raft membership/PVC-template locks. The values must come from the live signer
-	// state (if any), so an existing unrecorded StatefulSet is not "re-locked" to a different
-	// replica count or PVC template than the one the raft cluster was actually formed with. Falls
-	// back to the spec only when no signer state exists yet (true first rollout). This window is
-	// crash-safe because no resource is created until reconcileSigner applies it.
+	// INITIALISE the raft membership/PVC-template locks BEFORE creating any signer resource. The
+	// values come from the live signer state (if any), so an existing unrecorded StatefulSet is not
+	// "re-locked" to a different replica count or PVC template than the one the raft cluster was
+	// actually formed with; they fall back to the spec only when no signer state exists yet (a true
+	// first rollout). When anything is recorded here, RETURN (wait=true): the status write re-triggers
+	// a reconcile, which runs Validate against the freshly recorded locks BEFORE any resource is
+	// applied — otherwise a legacy/status-lost signer could record the live lock and then apply a
+	// lock-violating spec change in the same pass. Deferring is crash-safe: no lock, no resource.
 	if chainNode.Status.CosmosignerReplicas == nil || chainNode.Status.CosmosignerStateStorageSize == "" {
 		liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode))
 		if err != nil {
@@ -111,7 +114,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		if chainNode.Status.CosmosignerStateStorageSize == "" {
 			if foundStorage {
 				chainNode.Status.CosmosignerStateStorageSize = liveSize
-				chainNode.Status.CosmosignerStateStorageClassName = &liveClass
+				chainNode.Status.CosmosignerStateStorageClassName = liveClass
 			} else {
 				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
 				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
@@ -120,6 +123,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		if err := r.Status().Update(ctx, chainNode); err != nil {
 			return false, err
 		}
+		return true, nil
 	}
 
 	params, err := r.cosmosignerParams(ctx, chainNode)
@@ -164,48 +168,27 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return false, err
 	}
 
-	// Record persisted invariants only after the CURRENT signer generation is fully rolled out (read
-	// from the live object — the freshly rendered sts carries no status), so a config that never
-	// worked stays correctable and a pending change is never locked in by a previous revision's
-	// readiness.
-	//
-	//   - Replicas is recorded for EVERY signer (validator and sentry alike): the raft membership
-	//     baked into the per-pod state cannot be migrated by re-rendering a bootstrap list, so the
-	//     no-webhook path rejects a later replica change from this recorded value.
-	//   - The signing digest is recorded only for a validator: a non-validator sentry's key lives
-	//     out-of-band and must stay add/remove/rotate-able (mirrors the webhook waiver).
-	needReplicas := chainNode.Status.CosmosignerReplicas == nil
+	// The replica/PVC-template locks are recorded before any resource is applied (above). Here we
+	// record the signing digest + serving identity — only for a validator (a sentry key lives
+	// out-of-band and stays add/remove/rotate-able) and only after the current generation is fully
+	// rolled out (read from the live object — the freshly rendered sts carries no status), so a config
+	// that never worked stays correctable. A digest recorded by a version predating the serving field
+	// leaves it empty; backfill it under the same rolled-out proof so the removal guard covers those.
 	needDigest := chainNode.Status.CosmosignerSigningDigest == "" && chainNode.IsValidator()
-	// A digest recorded by a version predating the serving-identity field leaves it empty; backfill
-	// it under the same rolled-out proof so the removal guard also covers those signers.
 	needServing := chainNode.Status.CosmosignerServingIdentity == "" &&
 		chainNode.Status.CosmosignerSigningDigest != "" && chainNode.IsValidator()
-	// Backfilled independently of Replicas so a signer that recorded its replica count before the
-	// storage fields existed still gets its PVC template locked.
-	needStorage := chainNode.Status.CosmosignerStateStorageSize == ""
-	if needReplicas || needDigest || needServing || needStorage {
+	if needDigest || needServing {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
 		if err != nil {
 			return false, err
 		}
 		if rolledOut {
-			if needReplicas {
-				chainNode.Status.CosmosignerReplicas = ptr.To(params.Replicas)
-			}
-			if needStorage {
-				// Locks the PVC template on the no-webhook path and across a remove-and-re-add while the
-				// old PVCs may still exist.
-				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
-				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
-			}
 			if needDigest {
 				chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
 			}
-			if needDigest || needServing {
-				// The serving identity lets the no-webhook path judge a later REMOVAL: it is admitted
-				// only when the validator's own signing path still resolves this identity.
-				chainNode.Status.CosmosignerServingIdentity = chainNode.CosmosignerValidatorTargetedIdentity()
-			}
+			// The serving identity lets the no-webhook path judge a later REMOVAL: it is admitted only
+			// when the validator's own signing path still resolves this identity.
+			chainNode.Status.CosmosignerServingIdentity = chainNode.CosmosignerValidatorTargetedIdentity()
 			return false, r.Status().Update(ctx, chainNode)
 		}
 	}
@@ -359,14 +342,15 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 
 	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
 
-	// A signer that already rolled out and served (digest recorded) WITHOUT ever importing can only be
-	// a pre-provisioned signer whose uploadGenerated was flipped on afterwards. Vault already holds the
-	// key that is serving on-chain; quiescing the live signer to import bootstrap material that may be
-	// absent or different would leave the validator not signing. Treat the late flip as a no-op. (A
-	// signer that legitimately imports records the annotation BEFORE its first rollout, so this state
-	// is unambiguous.)
-	if chainNode.Status.CosmosignerSigningDigest != "" &&
-		chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported] == "" {
+	// The import is TERMINAL once the signer has rolled out and served (SigningDigest recorded). For a
+	// uploadGenerated signer, a recorded digest implies a completed import (rollout is blocked while the
+	// import is pending), and the served validator's on-chain key is immutable thereafter, so no later
+	// edit to the source Secret — its bytes, or (since it is the node's own privateKeySecret) its name —
+	// can legitimately require a re-import. Re-importing would only quiesce the live signer to import
+	// possibly-absent/different bootstrap material and stop signing. It also covers a late uploadGenerated
+	// flip on a served pre-provisioned signer (digest set, never imported): Vault already holds the
+	// serving key. During bootstrap (no digest yet) a byte change still re-imports below.
+	if chainNode.Status.CosmosignerSigningDigest != "" {
 		return false, nil
 	}
 
