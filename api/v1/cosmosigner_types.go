@@ -191,8 +191,9 @@ type CosmosignerStatus struct {
 	// +optional
 	StateStorageSize string `json:"stateStorageSize,omitempty"`
 
-	// StateStorageClassName records the storage class of this signer's raft-state PVCs. Empty means
-	// the cluster default class. See StateStorageSize.
+	// StateStorageClassName records the storage class of this signer's raft-state PVCs, mirroring the
+	// spec's storageClassName semantics: absent (nil) means the cluster default class was selected,
+	// while an explicit "" means no class was requested. See StateStorageSize.
 	// +optional
 	StateStorageClassName *string `json:"stateStorageClassName,omitempty"`
 

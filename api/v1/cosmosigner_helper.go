@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
@@ -502,16 +503,8 @@ func validateCosmosignerStateStorageImmutable(path string, oldC, newC *Cosmosign
 		return nil
 	}
 	if oldC.GetStateStorageSize() != newC.GetStateStorageSize() ||
-		!ptrValueEqual(oldC.StorageClassName, newC.StorageClassName) {
+		!ptr.Equal(oldC.StorageClassName, newC.StorageClassName) {
 		return fmt.Errorf("%s.stateStorageSize and %s.storageClassName are immutable after creation: a StatefulSet's volumeClaimTemplates cannot be updated — remove the cosmosigner and re-add it to change its state storage", path, path)
 	}
 	return nil
-}
-
-// ptrValueEqual reports whether two string pointers hold the same value (both nil counts as equal).
-func ptrValueEqual(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
 }

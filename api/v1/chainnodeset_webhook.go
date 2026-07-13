@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -751,7 +752,7 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 				return fmt.Errorf("%s.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", path, *st.Replicas)
 			}
 			if st.StateStorageSize != "" &&
-				(st.StateStorageSize != ns.Spec.GetStateStorageSize() || !ptrValueEqual(st.StateStorageClassName, ns.Spec.StorageClassName)) {
+				(st.StateStorageSize != ns.Spec.GetStateStorageSize() || !ptr.Equal(st.StateStorageClassName, ns.Spec.StorageClassName)) {
 				return fmt.Errorf("%s.stateStorageSize/.storageClassName must stay unchanged until the previous signer's teardown completes: its raft state PVCs may still exist at the old size/class", path)
 			}
 		}

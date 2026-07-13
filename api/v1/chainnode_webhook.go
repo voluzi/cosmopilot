@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -189,7 +190,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 				return nil, fmt.Errorf(".spec.cosmosigner.replicas must stay %d until the previous signer's teardown completes: its raft state PVCs may still exist and their membership does not match", *replicas)
 			}
 			if recorded := old.Status.CosmosignerStateStorageSize; recorded != "" &&
-				(recorded != c.GetStateStorageSize() || !ptrValueEqual(old.Status.CosmosignerStateStorageClassName, c.StorageClassName)) {
+				(recorded != c.GetStateStorageSize() || !ptr.Equal(old.Status.CosmosignerStateStorageClassName, c.StorageClassName)) {
 				return nil, fmt.Errorf(".spec.cosmosigner.stateStorageSize/.storageClassName must stay unchanged until the previous signer's teardown completes: its raft state PVCs may still exist at the old size/class")
 			}
 		}
@@ -247,7 +248,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			// The PVC template is immutable too: StatefulSet volumeClaimTemplates cannot be updated and
 			// existing claims stay at their old size/class, so a change would be silently ignored.
 			if recorded := chainNode.Status.CosmosignerStateStorageSize; recorded != "" &&
-				(recorded != c.GetStateStorageSize() || !ptrValueEqual(chainNode.Status.CosmosignerStateStorageClassName, c.StorageClassName)) {
+				(recorded != c.GetStateStorageSize() || !ptr.Equal(chainNode.Status.CosmosignerStateStorageClassName, c.StorageClassName)) {
 				return nil, fmt.Errorf(".spec.cosmosigner.stateStorageSize/.storageClassName are immutable after the signer is deployed (webhooks disabled): its raft state PVCs cannot be resized or moved — remove the signer and re-add it")
 			}
 			if recorded := chainNode.Status.CosmosignerSigningDigest; recorded != "" {

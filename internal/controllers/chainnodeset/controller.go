@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -257,6 +258,15 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 	return nodeSet.Validate(nil)
 }
 
+// sameSignerInstance reports whether two served-instance pointers denote the same instance (both nil,
+// or both set to the same index).
+func sameSignerInstance(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // validateNoWebhookCosmosignerState reconstructs the parts of the admission guard that can be judged
 // from status alone. Reconcile only ever sees the current persisted object, never the previous spec,
 // so it enforces exactly the invariants that do NOT need an old/new diff:
@@ -281,24 +291,6 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 //     Vault key. A pre-provisioned Vault/GCP signer's identity is unreachable through any local
 //     path, so its removal is rejected: the validator would fall back to a local key that is absent
 //     or different from the on-chain consensus key.
-//
-// sameSignerInstance reports whether two served-instance pointers denote the same instance (both nil,
-// or both set to the same index).
-func sameSignerInstance(a, b *int) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
-// ptrStringEqual reports whether two string pointers hold the same value (both nil counts as equal).
-func ptrStringEqual(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Status.ChainID == "" {
 		return nil
@@ -340,7 +332,7 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			// The PVC template is immutable too: StatefulSet volumeClaimTemplates cannot be updated and
 			// existing claims stay at their old size/class, so a change would be silently ignored.
 			if st.StateStorageSize != "" &&
-				(st.StateStorageSize != s.Spec.GetStateStorageSize() || !ptrStringEqual(st.StateStorageClassName, s.Spec.StorageClassName)) {
+				(st.StateStorageSize != s.Spec.GetStateStorageSize() || !ptr.Equal(st.StateStorageClassName, s.Spec.StorageClassName)) {
 				return fmt.Errorf("cosmosigner %q state storage (size/class) is immutable after deployment (webhooks disabled): its raft state PVCs cannot be resized or moved — remove the signer and re-add it", s.Name)
 			}
 			if st.SigningDigest != "" {
