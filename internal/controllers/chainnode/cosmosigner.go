@@ -91,6 +91,25 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return false, nil
 	}
 
+	// Persist the raft membership/PVC-template locks before creating/updating any signer resource.
+	// Once the StatefulSet exists, the recorded membership and claims may already be formed; a crash
+	// or failed later status update must not leave the no-webhook path without values to enforce.
+	locksChanged := false
+	if chainNode.Status.CosmosignerReplicas == nil {
+		chainNode.Status.CosmosignerReplicas = ptr.To(chainNode.Spec.Cosmosigner.GetReplicas())
+		locksChanged = true
+	}
+	if chainNode.Status.CosmosignerStateStorageSize == "" {
+		chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
+		chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
+		locksChanged = true
+	}
+	if locksChanged {
+		if err := r.Status().Update(ctx, chainNode); err != nil {
+			return false, err
+		}
+	}
+
 	params, err := r.cosmosignerParams(ctx, chainNode)
 	if err != nil {
 		return false, err
@@ -299,6 +318,23 @@ func (r *Reconciler) cosmosignerNodeKeySecret(chainNode *appsv1.ChainNode) strin
 	return fmt.Sprintf("%s-priv-key", chainNode.GetName())
 }
 
+// cosmosignerImportSourcePending reports whether the source key Secret for a Vault upload may still
+// be created by this controller. Explicit privateKeySecret values are user-supplied and are never
+// generated; after a validator pubkey is recorded, the init/createValidator key flow is complete and
+// a missing Secret is an error rather than a pending condition.
+func (r *Reconciler) cosmosignerImportSourcePending(chainNode *appsv1.ChainNode) bool {
+	if chainNode.Spec.Validator == nil {
+		return false
+	}
+	if chainNode.Spec.Validator.PrivateKeySecret != nil && *chainNode.Spec.Validator.PrivateKeySecret != "" {
+		return false
+	}
+	if chainNode.Status.PubKey != "" {
+		return false
+	}
+	return chainNode.Spec.Validator.Init != nil || chainNode.Spec.Validator.CreateValidator != nil
+}
+
 // maybeImportCosmosignerKey imports the node's generated consensus key into Vault once, when
 // uploadGenerated is set.
 func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (bool, error) {
@@ -334,12 +370,17 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 		// (the annotation's target half matches) stays valid: Vault holds the registered key and the
 		// bootstrap Secret is only needed at import time, so a Secret deleted after that import must
 		// NOT re-mark the import pending (which would scale the signer to zero). An annotation from a
-		// DIFFERENT target/source proves nothing about this spec — the import is genuinely pending
-		// (nothing usable was ever imported for it), keeping the signer down until the source appears.
+		// DIFFERENT target/source proves nothing about this spec.
 		if appsv1.ImportAnnotationMatchesTarget(chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported], c.Backend.Vault.ImportTargetFingerprint(sourceSecret)) {
 			return false, nil
 		}
-		return true, nil
+		// Wait only while a controller-owned key-generation flow is genuinely pending. For an explicit
+		// external-genesis key (or a completed init/createValidator flow), nothing will create this
+		// source later; surfacing an error avoids silently scaling the signer to zero forever.
+		if r.cosmosignerImportSourcePending(chainNode) {
+			return true, nil
+		}
+		return false, fmt.Errorf("cosmosigner Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", sourceSecret, PrivKeyFilename)
 	}
 
 	// Fingerprint the Vault target, the resolved source secret name, AND the key material, so changing

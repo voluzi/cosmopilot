@@ -243,21 +243,32 @@ func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, pending, "a completed import must survive deletion of the bootstrap source Secret")
 
-	// Source Secret absent and the recorded import belongs to a DIFFERENT Vault target: pending —
-	// nothing was ever imported for the current destination, so the signer must stay down.
+	// Source Secret absent and the recorded import belongs to a DIFFERENT Vault target: error — this
+	// validator uses an explicit external-genesis privateKeySecret, so no controller flow will create it
+	// later. Keeping the signer merely pending would leave target children in remote-signer mode forever.
 	otherTarget := mk("")
 	otherTarget.Spec.Cosmosigner.Backend.Vault.KeyName = "old-key"
 	stale := otherTarget.Spec.Cosmosigner.Backend.Vault.ImportFingerprint("val-priv-key", []byte("imported-key-bytes"))
 	ns = mk(stale)
 	r = newValidatorTestReconciler(t, ns)
 	pending, _, err = r.maybeImportCosmosignerKey(context.Background(), ns, resolveSingleSigner(t, ns), params)
-	require.NoError(t, err)
-	assert.True(t, pending, "an import recorded for a different Vault target must not satisfy the current spec")
+	require.Error(t, err)
+	assert.False(t, pending)
 
-	// Source Secret absent and nothing imported yet: still pending.
+	// Source Secret absent and nothing imported yet: explicit external-genesis key is missing -> error.
 	ns = mk("")
 	r = newValidatorTestReconciler(t, ns)
 	pending, _, err = r.maybeImportCosmosignerKey(context.Background(), ns, resolveSingleSigner(t, ns), params)
+	require.Error(t, err)
+	assert.False(t, pending)
+
+	// Generated init/createValidator key flow still pending (no status pubkey yet, no explicit secret):
+	// wait instead of erroring because ensureValidator will create the source key.
+	ns = mk("")
+	ns.Spec.Nodes[0].Validator.PrivateKeySecret = nil
+	ns.Spec.Nodes[0].Validator.Init = &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"100stake"}, StakeAmount: "1stake"}
+	r = newValidatorTestReconciler(t, ns)
+	pending, _, err = r.maybeImportCosmosignerKey(context.Background(), ns, resolveSingleSigner(t, ns), params)
 	require.NoError(t, err)
-	assert.True(t, pending, "with no source key and no prior import the import is still pending")
+	assert.True(t, pending, "generated key flow with no recorded pubkey may still produce the source key")
 }

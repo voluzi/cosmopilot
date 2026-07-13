@@ -316,6 +316,9 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			!nodeSet.ServedValidatorResolvesIdentity(st.ServingGroup, st.ServingInstance, st.ServingIdentity) {
 			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): the validator it served would fall back to a local key different from the on-chain consensus key — restore the signer, or migrate the validator's own signing path to the same key first", st.Name)
 		}
+		if st.ServingIdentity == "" && st.SigningDigest != "" {
+			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): it served a validator but its recorded identity predates this version and cannot be verified — restore the signer so the controller can record it, or remove it with webhooks enabled", st.Name)
+		}
 	}
 
 	// PRESENT signers: modification and post-establishment-addition guards.

@@ -83,19 +83,27 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
-	// PERSIST a status entry for every desired signer BEFORE creating any signer resource:
-	// reconcileSignerTeardown derives the set of removable signers from status, so a signer whose
-	// resources exist without an entry (e.g. after a crash between resource creation and the batched
-	// status write below) would never be undeployed — it would keep dialing and signing after the
-	// spec dropped it. Writing the entries first makes that window crash-safe: no entry, no resources.
-	entriesAdded := false
+	// PERSIST a status entry AND the PVC/raft membership locks for every desired signer BEFORE
+	// creating/updating any signer resource:
+	//   - reconcileSignerTeardown derives the set of removable signers from status, so a signer whose
+	//     resources exist without an entry would never be undeployed;
+	//   - once the StatefulSet is created, raft membership and PVC templates may already exist, so the
+	//     replica/storage locks must survive a crash or failed later status update.
+	// Writing them first makes the window crash-safe: no recorded locks, no resources yet.
+	entriesChanged := false
 	for _, s := range signers {
-		if nodeSet.GetCosmosignerStatus(s.Name) == nil {
-			nodeSet.EnsureCosmosignerStatus(s.Name)
-			entriesAdded = true
+		st := nodeSet.EnsureCosmosignerStatus(s.Name)
+		if st.Replicas == nil {
+			st.Replicas = ptr.To(s.Spec.GetReplicas())
+			entriesChanged = true
+		}
+		if st.StateStorageSize == "" {
+			st.StateStorageSize = s.Spec.GetStateStorageSize()
+			st.StateStorageClassName = s.Spec.StorageClassName
+			entriesChanged = true
 		}
 	}
-	if entriesAdded {
+	if entriesChanged {
 		if err := r.Status().Update(ctx, nodeSet); err != nil {
 			return err
 		}
@@ -394,11 +402,17 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		// recorded target half matches) stays valid: Vault holds the registered key and the bootstrap
 		// Secret is only needed at import time, so a Secret deleted after that import must NOT re-mark
 		// the import pending (which would scale the signer to zero). A record from a DIFFERENT
-		// target/source proves nothing about this spec — the import is genuinely pending.
+		// target/source proves nothing about this spec.
 		if appsv1.ImportAnnotationMatchesTarget(st.KeyImported, c.Backend.Vault.ImportTargetFingerprint(sourceSecret)) {
 			return false, false, nil
 		}
-		return true, false, nil
+		// Wait only while a controller-owned key-generation flow is genuinely pending. For an explicit
+		// external-genesis key (or a generated key whose pubkey is already recorded), nothing will create
+		// this source later; surfacing an error avoids silently scaling the signer to zero forever.
+		if r.signerImportSourcePending(nodeSet, s) {
+			return true, false, nil
+		}
+		return false, false, fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", s.Name, sourceSecret, privKeyFilename)
 	}
 
 	// The record fingerprints the Vault target, the resolved source secret name, AND the key material,
@@ -480,6 +494,48 @@ func signerNameForNode(nodeSet *appsv1.ChainNodeSet, group string, index int) (s
 		return s.Name, true
 	}
 	return "", false
+}
+
+// signerImportSourcePending reports whether the source key Secret for a Vault upload may still be
+// created by this controller. Explicit privateKeySecret values are user-supplied and are never
+// generated; after the target validator pubkey is recorded, the init/createValidator key flow is
+// complete and a missing Secret is an error rather than a pending condition.
+func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) bool {
+	if s.ValidatorGroup == "" {
+		return false
+	}
+	cfg := nodeSet.Spec.Validator
+	if s.ValidatorGroup != appsv1.ReservedValidatorGroupName {
+		cfg = nil
+		for i := range nodeSet.Spec.Nodes {
+			g := &nodeSet.Spec.Nodes[i]
+			if g.Name == s.ValidatorGroup {
+				cfg = g.Validator
+				break
+			}
+		}
+	}
+	if cfg == nil {
+		return false
+	}
+	if cfg.PrivateKeySecret != nil && *cfg.PrivateKeySecret != "" {
+		return false
+	}
+	generates := cfg.Init != nil || cfg.CreateValidator != nil
+	if !generates {
+		return false
+	}
+	instance := 0
+	if s.ValidatorInstance != nil {
+		instance = *s.ValidatorInstance
+	}
+	name := validatorNodeName(nodeSet, s.ValidatorGroup, instance)
+	for _, v := range nodeSet.Status.Validators {
+		if v.Name == name && v.PubKey != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // signerTargetInitializesGenesis reports whether the validator a signer targets initializes a new
