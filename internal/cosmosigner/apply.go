@@ -31,6 +31,18 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	}
 	err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing)
 	if errors.IsNotFound(err) {
+		// A FRESH signer StatefulSet must never bind raft-state PVCs left behind by another owner —
+		// e.g. a CR deleted and recreated under the same name (new UID), whose StatefulSet was
+		// garbage-collected but whose per-pod claims were not. In this branch no same-name StatefulSet
+		// exists at all, so any exact-match data claim not attributable to THIS owner is an orphan
+		// carrying unknown raft membership/state; refuse to deploy until the operator deletes or
+		// relabels it. (Claims owned by this CR are fine: re-binding its own state is the normal
+		// restart path, guarded by the replica/storage locks.)
+		if sts, isSts := obj.(*appsv1.StatefulSet); isSts {
+			if err := ensureNoForeignDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName()); err != nil {
+				return err
+			}
+		}
 		return c.Create(ctx, obj)
 	}
 	if err != nil {

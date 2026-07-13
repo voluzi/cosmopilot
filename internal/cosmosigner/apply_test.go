@@ -259,3 +259,57 @@ func TestAmbiguousLegacyPVCBlocksTornDown(t *testing.T) {
 		t.Fatal("teardown must complete once the claim is labeled and deleted")
 	}
 }
+
+// TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet verifies a FRESH signer StatefulSet (no
+// same-name StatefulSet exists) is never created while exact-match raft-state PVCs of a DIFFERENT
+// owner remain — e.g. a CR deleted and recreated under the same name (new UID) whose claims were
+// left behind. Binding them would silently inherit stale raft membership/double-sign state. Claims
+// owned by THIS owner must not block (rebinding own state is the normal restart path).
+func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		ns   = "default"
+		name = "mychain-signer"
+	)
+	// A scheme-registered owner: ApplyOwned sets a controller reference on the object, which needs
+	// the owner's GVK resolvable from the scheme (the PartialObjectMetadata fakeOwner is not).
+	me := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "me", Namespace: ns, UID: types.UID("me-uid")}}
+
+	newSTS := func() *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	}
+
+	// Foreign exact-match claim present: creation must be refused.
+	foreignPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreignPVC).Build()
+	err := ApplyOwned(context.Background(), c, scheme, me, newSTS())
+	if err == nil {
+		t.Fatal("creating a fresh signer StatefulSet over a foreign raft-state PVC must be refused")
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the StatefulSet must not have been created, got err=%v", err)
+	}
+
+	// Unlabeled legacy claim: refused too (unattributable).
+	legacyPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: InstanceLabels(name),
+	}}
+	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacyPVC).Build()
+	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS()); err == nil {
+		t.Fatal("creating a fresh signer StatefulSet over an unlabeled legacy PVC must be refused")
+	}
+
+	// Own claim: creation proceeds (normal restart path).
+	ownPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "me-uid"),
+	}}
+	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(ownPVC).Build()
+	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS()); err != nil {
+		t.Fatalf("own claims must not block a fresh StatefulSet: %v", err)
+	}
+}

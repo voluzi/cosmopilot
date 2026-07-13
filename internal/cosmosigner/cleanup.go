@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -61,6 +62,28 @@ func isAmbiguousLegacyDataPVC(pvc *corev1.PersistentVolumeClaim, name string) bo
 	}
 	_, labeled := pvc.GetLabels()[labelOwnerUID]
 	return !labeled
+}
+
+// ensureNoForeignDataPVCs fails when any per-pod raft-state claim of the signer named `name` exists
+// that is NOT attributable to owner — a FOREIGN claim (different owner-UID label, e.g. left behind by
+// a deleted CR recreated under the same name with a new UID) or an ambiguous unlabeled legacy claim.
+// Called before creating a fresh StatefulSet, which would otherwise silently bind those claims and
+// inherit raft membership/double-sign-protection state from a different owner.
+func ensureNoForeignDataPVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) error {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(InstanceLabels(name))); err != nil {
+		return err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if !isStatefulSetDataPVC(pvc.GetName(), name) {
+			continue
+		}
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) {
+			return fmt.Errorf("refusing to deploy cosmosigner %q: raft-state PVC %q belongs to a different owner (a previous same-name signer) and would be silently re-bound with its stale raft state — delete the claim, or label it with this owner's UID to adopt it", name, pvc.GetName())
+		}
+	}
+	return nil
 }
 
 // isStatefulSetDataPVC reports whether pvcName is exactly `<dataVolumeName>-<stsName>-<ordinal>`,
