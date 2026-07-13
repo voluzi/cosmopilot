@@ -77,10 +77,34 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 // reject every reconcile of the already-admitted spec. On the NO-WEBHOOK path the digest is the guard
 // itself and is never rewritten (the guard runs before reconcile, so a disallowed change never
 // reaches this refresh).
+//
+// A LEGACY backfill (digest empty, chainID already set — the node predates this field) cannot blindly
+// trust the current spec's init-ness: an external-genesis node converted to .validator.init before
+// its first post-upgrade reconcile would otherwise get the mutated init fingerprint recorded as the
+// trusted baseline. The init claim is corroborated before an init fingerprint is recorded:
+//   - the genesis on the data volume was DOWNLOADED (external marker persisted by the version that
+//     ran it) → record the external sentinel regardless of the spec;
+//   - the claimed init.chainID does not match the established chainID → record the external sentinel
+//     (a genuine initializer's chainID always came from its own init block).
+//
+// A deliberate conversion that also fakes init.chainID on a non-data-volume node remains undetectable
+// from status alone (the persisted genesis carries no initializer marker); like the other no-webhook
+// guards, this is an anti-footgun, not a security boundary against the resource owner.
 func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	isLegacyBackfill := chainNode.Status.GenesisSigningDigest == "" && chainNode.Status.ChainID != ""
+
 	current := appsv1.GenesisDigestExternal
 	if chainNode.ShouldInitGenesis() {
 		current = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
+		if isLegacyBackfill {
+			if chainNode.Spec.Validator.Init.ChainID != chainNode.Status.ChainID {
+				current = appsv1.GenesisDigestExternal
+			} else if downloaded, err := r.genesisWasDownloaded(ctx, chainNode); err != nil {
+				return false, err
+			} else if downloaded {
+				current = appsv1.GenesisDigestExternal
+			}
+		}
 	}
 	if chainNode.Status.GenesisSigningDigest == current {
 		return false, nil
@@ -90,6 +114,20 @@ func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode
 	}
 	chainNode.Status.GenesisSigningDigest = current
 	return true, r.Status().Update(ctx, chainNode)
+}
+
+// genesisWasDownloaded reports whether this node's data-volume PVC carries the genesis-downloaded
+// marker — persisted evidence (from any operator version) that the genesis was obtained from an
+// EXTERNAL source, contradicting a .validator.init claim.
+func (r *Reconciler) genesisWasDownloaded(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(chainNode), pvc); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return pvc.Annotations[controllers.AnnotationGenesisDownloaded] == controllers.StringValueTrue, nil
 }
 
 func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode) error {

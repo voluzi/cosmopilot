@@ -183,7 +183,10 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	//     a validator: a sentry-mode signer's key lives out-of-band and must stay add/remove/rotate-able.
 	needReplicas := st.Replicas == nil
 	needServing := s.TargetsValidator() && st.SigningDigest == ""
-	if needReplicas || needServing {
+	// Backfilled independently of Replicas so a signer that recorded its replica count before the
+	// storage fields existed still gets its PVC template locked.
+	needStorage := st.StateStorageSize == ""
+	if needReplicas || needServing || needStorage {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), params.Name, params.Replicas)
 		if err != nil {
 			return false, err
@@ -191,8 +194,11 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 		if rolledOut {
 			if needReplicas {
 				st.Replicas = ptr.To(params.Replicas)
-				// Recorded together with Replicas: it locks the PVC template on the no-webhook path and
-				// across a remove-and-re-add while the old PVCs may still exist.
+				changed = true
+			}
+			if needStorage {
+				// Locks the PVC template on the no-webhook path and across a remove-and-re-add while the
+				// old PVCs may still exist.
 				st.StateStorageSize = s.Spec.GetStateStorageSize()
 				st.StateStorageClassName = s.Spec.StorageClassName
 				changed = true

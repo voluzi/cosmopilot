@@ -149,7 +149,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	// it under the same rolled-out proof so the removal guard also covers those signers.
 	needServing := chainNode.Status.CosmosignerServingIdentity == "" &&
 		chainNode.Status.CosmosignerSigningDigest != "" && chainNode.IsValidator()
-	if needReplicas || needDigest || needServing {
+	// Backfilled independently of Replicas so a signer that recorded its replica count before the
+	// storage fields existed still gets its PVC template locked.
+	needStorage := chainNode.Status.CosmosignerStateStorageSize == ""
+	if needReplicas || needDigest || needServing || needStorage {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
 		if err != nil {
 			return false, err
@@ -157,8 +160,10 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		if rolledOut {
 			if needReplicas {
 				chainNode.Status.CosmosignerReplicas = ptr.To(params.Replicas)
-				// Recorded together with Replicas: it locks the PVC template on the no-webhook path and
-				// across a remove-and-re-add while the old PVCs may still exist.
+			}
+			if needStorage {
+				// Locks the PVC template on the no-webhook path and across a remove-and-re-add while the
+				// old PVCs may still exist.
 				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
 				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
 			}
