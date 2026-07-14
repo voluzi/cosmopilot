@@ -639,11 +639,14 @@ func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s a
 	}
 
 	cfg := nodeSet.Spec.Validator
+	groupValidator := nodeSet.Spec.Validator
 	if s.ValidatorGroup != appsv1.ReservedValidatorGroupName {
 		cfg = nil
+		groupValidator = nil
 		for i := range nodeSet.Spec.Nodes {
 			g := &nodeSet.Spec.Nodes[i]
 			if g.Name == s.ValidatorGroup && g.Validator != nil {
+				groupValidator = g.Validator
 				cfg = deriveGroupValidatorConfig(nodeSet, g.Name, instance, g.GetInstances(), g.Validator)
 				break
 			}
@@ -654,6 +657,12 @@ func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s a
 	}
 	if cfg.PrivateKeySecret != nil && *cfg.PrivateKeySecret != "" {
 		return false
+	}
+	// Pre-genesis: ensureValidator creates ALL of a genesis-init group's instance keys together during
+	// bootstrap, so every instance's import source is still pending while the chain ID is empty — even a
+	// nonzero instance whose DERIVED config has Init cleared. Use the GROUP-level Init here, not cfg.
+	if groupValidator != nil && groupValidator.Init != nil && nodeSet.Status.ChainID == "" {
+		return true
 	}
 	generates := cfg.Init != nil || cfg.CreateValidator != nil
 	if !generates {
