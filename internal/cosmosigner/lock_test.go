@@ -118,3 +118,62 @@ func TestReadSignerLockIgnoresForeignStatefulSet(t *testing.T) {
 		t.Fatal("a foreign-owned StatefulSet must not seed this owner's lock")
 	}
 }
+
+// TestReadSignerLockRecoversFromOrphanedOwnedPVCs verifies that when the StatefulSet is gone but this
+// owner's per-pod raft-state PVCs survive, the lock is recovered from those claims (replica count =
+// number of claims, size/class from a claim) rather than falling back to the spec — a fresh
+// StatefulSet would re-bind them, so the recorded lock must match their membership and size/class.
+func TestReadSignerLockRecoversFromOrphanedOwnedPVCs(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	owner := fakeOwner("cs", types.UID("cs-uid"))
+	pvc := func(ordinal int) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      dataVolumeName + "-" + name + "-" + string(rune('0'+ordinal)),
+				Namespace: ns,
+				Labels:    pvcOwnerLabels(name, "cs-uid"),
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: ptr.To("fast"),
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("5Gi")},
+				},
+			},
+		}
+	}
+	// No StatefulSet; three owned data PVCs survive.
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc(0), pvc(1), pvc(2)).Build()
+
+	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !foundR || replicas != 3 {
+		t.Fatalf("replicas from orphaned PVCs: got %d found=%v, want 3 true", replicas, foundR)
+	}
+	if !foundS || size != "5Gi" || class == nil || *class != "fast" {
+		t.Fatalf("storage from orphaned PVCs: got %q class=%v found=%v", size, class, foundS)
+	}
+}
+
+// TestReadSignerLockIgnoresForeignOrphanedPVCs verifies orphaned PVCs owned by ANOTHER CR are not
+// adopted as this owner's lock.
+func TestReadSignerLockIgnoresForeignOrphanedPVCs(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	me := fakeOwner("cs", types.UID("me-uid"))
+	foreign := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dataVolumeName + "-" + name + "-0",
+			Namespace: ns,
+			Labels:    pvcOwnerLabels(name, "other-uid"),
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreign).Build()
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foundR || foundS {
+		t.Fatal("a foreign-owned orphaned PVC must not seed this owner's lock")
+	}
+}

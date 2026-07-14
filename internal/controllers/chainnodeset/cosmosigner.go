@@ -81,10 +81,17 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			return err
 		}
 		// A Vault uploadGenerated signer imports the validator's own key; if that source secret is
-		// missing and no controller flow will create it — and no import has already completed (a served
-		// signer's import is terminal) — the signer can never roll out, so fail before children switch.
+		// missing and no controller flow will create it, the signer can never roll out, so fail before
+		// children switch. But the source is only bootstrap material: once the import for the CURRENT
+		// target/source has completed (matching KeyImported, mirroring maybeImportCosmosignerKey's
+		// absent-source fast path), or the signer has served (SigningDigest recorded), Vault already
+		// holds the key and the missing Secret is fine.
 		if s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) {
-			if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.SigningDigest != "" {
+			st := nodeSet.GetCosmosignerStatus(s.Name)
+			if st != nil && st.SigningDigest != "" {
+				continue
+			}
+			if st != nil && appsv1.ImportAnnotationMatchesTarget(st.KeyImported, s.Spec.Backend.Vault.ImportTargetFingerprint(s.SoftwareKeySecret)) {
 				continue
 			}
 			if r.signerImportSourcePending(nodeSet, s) {
@@ -497,11 +504,18 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return false, false, err
 	}
 
-	// Record the import fingerprint in the signer's status entry. A transient failure of the batched
-	// status write just re-runs the (idempotent) import; the import command itself verifies the stored
-	// pubkey matches the source key.
+	// Persist the import fingerprint IMMEDIATELY — before the caller rolls out the StatefulSet — so a
+	// later status-write conflict cannot leave a live signer without its KeyImported record (the next
+	// reconcile would then ScaleDown and re-import, taking a correct live signer offline even though
+	// Vault already holds the key). On failure we abort before the StatefulSet is applied (no live
+	// signer to disrupt); the next reconcile re-imports (ImportKey is idempotent — it verifies the
+	// stored pubkey) and re-persists. r.Status().Update refreshes nodeSet's resourceVersion on success,
+	// so the caller's later batched status write stays consistent. Mirrors the standalone path.
 	st.KeyImported = want
-	return false, true, nil
+	if err := r.Status().Update(ctx, nodeSet); err != nil {
+		return false, false, err
+	}
+	return false, false, nil
 }
 
 // signerNameForNode returns the name of the managed signer that targets a specific node — a group's
@@ -536,18 +550,26 @@ func signerNameForNode(nodeSet *appsv1.ChainNodeSet, group string, index int) (s
 // signerImportSourcePending reports whether the source key Secret for a Vault upload may still be
 // created by this controller. Explicit privateKeySecret values are user-supplied and are never
 // generated; after the target validator pubkey is recorded, the init/createValidator key flow is
-// complete and a missing Secret is an error rather than a pending condition.
+// complete and a missing Secret is an error rather than a pending condition. It uses the PER-INSTANCE
+// validator config: in a multi-instance genesis-initializing group only instance 0 keeps Init, so the
+// non-init instances (whose keys are pre-created before genesis and never regenerated) are correctly
+// treated as terminal, not perpetually pending.
 func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) bool {
 	if s.ValidatorGroup == "" {
 		return false
 	}
+	instance := 0
+	if s.ValidatorInstance != nil {
+		instance = *s.ValidatorInstance
+	}
+
 	cfg := nodeSet.Spec.Validator
 	if s.ValidatorGroup != appsv1.ReservedValidatorGroupName {
 		cfg = nil
 		for i := range nodeSet.Spec.Nodes {
 			g := &nodeSet.Spec.Nodes[i]
-			if g.Name == s.ValidatorGroup {
-				cfg = g.Validator
+			if g.Name == s.ValidatorGroup && g.Validator != nil {
+				cfg = deriveGroupValidatorConfig(nodeSet, g.Name, instance, g.GetInstances(), g.Validator)
 				break
 			}
 		}
@@ -561,10 +583,6 @@ func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s a
 	generates := cfg.Init != nil || cfg.CreateValidator != nil
 	if !generates {
 		return false
-	}
-	instance := 0
-	if s.ValidatorInstance != nil {
-		instance = *s.ValidatorInstance
 	}
 	name := validatorNodeName(nodeSet, s.ValidatorGroup, instance)
 	for _, v := range nodeSet.Status.Validators {

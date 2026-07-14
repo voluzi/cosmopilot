@@ -54,7 +54,36 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 			}
 		}
 	case errors.IsNotFound(stsErr):
-		// No signer state: true first rollout, caller uses the spec.
+		// The StatefulSet is gone, but StatefulSet PVCs are not garbage-collected with it, so this
+		// owner's per-pod raft-state claims may survive (a manually deleted StatefulSet, or a partial
+		// teardown). A fresh StatefulSet would re-bind them, inheriting their raft membership and
+		// size/class, so recover the lock from those OWNED exact-match claims rather than falling back
+		// to the (possibly changed) spec: the surviving claim count is the membership the cluster was
+		// formed with, and each claim carries its own size/class.
+		pvcs := &corev1.PersistentVolumeClaimList{}
+		if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+			return 0, "", nil, false, false, err
+		}
+		owned := 0
+		var sample *corev1.PersistentVolumeClaim
+		for i := range pvcs.Items {
+			if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
+				owned++
+				if sample == nil {
+					sample = &pvcs.Items[i]
+				}
+			}
+		}
+		if owned > 0 {
+			replicas = int32(owned)
+			foundReplicas = true
+			storageClass = sample.Spec.StorageClassName
+			if q, ok := sample.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+				storageSize = q.String()
+			}
+			foundStorage = true
+		}
+		// No StatefulSet and no owned claims: a true first rollout, caller uses the spec.
 	default:
 		return 0, "", nil, false, false, stsErr
 	}

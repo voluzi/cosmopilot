@@ -334,6 +334,13 @@ func TestValidateCosmosignerGenesisSentryKeyImmutable(t *testing.T) {
 	_, err = base("genesis-sentry-key").Validate(old)
 	require.NoError(t, err)
 
+	// REMOVING the signer entirely (the genesis key loses its only signing path) is rejected too.
+	removed := base("genesis-sentry-key")
+	removed.Spec.Nodes[0].Cosmosigner = nil
+	_, err = removed.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "registered in the immutable genesis validator set")
+
 	// A sentry signer whose key is NOT a genesis key stays rotatable.
 	oldFree := base("free-key")
 	oldFree.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key")
@@ -341,4 +348,28 @@ func TestValidateCosmosignerGenesisSentryKeyImmutable(t *testing.T) {
 	freeRotated.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key-2")
 	_, err = freeRotated.Validate(oldFree)
 	require.NoError(t, err)
+}
+
+// TestGenesisValidatorPrivKeySecretsExcludesZeroInstance verifies a genesisValidators entry on a
+// zero-instance group (which runs no validators and contributes nothing to genesis) is not collected
+// as an on-chain genesis key, so a sentry key matching it is not treated as immutable.
+func TestGenesisValidatorPrivKeySecretsExcludesZeroInstance(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes: []NodeGroupSpec{
+				{Name: "active", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+					GenesisValidators: []GenesisValidator{{PrivKeySecret: "active-key"}},
+				}}},
+				{Name: "inactive", Instances: ptr.To(0), Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+					GenesisValidators: []GenesisValidator{{PrivKeySecret: "inactive-key"}},
+				}}},
+			},
+		},
+	}
+	secrets := nodeSet.genesisValidatorPrivKeySecrets()
+	_, active := secrets["active-key"]
+	_, inactive := secrets["inactive-key"]
+	assert.True(t, active, "active group's genesis key must be collected")
+	assert.False(t, inactive, "zero-instance group's genesis key must be excluded")
 }

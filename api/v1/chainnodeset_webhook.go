@@ -846,20 +846,28 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 	// because ValidatorTargetedIdentity() is empty for a sentry. Changing that key after establishment
 	// would roll the signer to a key that was never in the set, so it is immutable. (A sentry key NOT
 	// registered in genesis stays freely rotatable: it protects no in-cluster identity.)
+	// The invariant is keyed on the genesis-registered KEY, not the signer name, so it also holds
+	// across a remove-and-re-add (a new signer name serving a different key) and an outright removal
+	// (no signer left for the key). For every genesis-registered secret a sentry signer served on the
+	// OLD revision, the NEW revision must still have a sentry signer holding that exact key — otherwise
+	// the genesis validator loses its only signing path or its key changed. The genesis validator set
+	// is immutable (enforced separately), so the old genesis-secret set still describes the new one.
 	oldGenesisSecrets := old.genesisValidatorPrivKeySecrets()
+	newSentryKeys := map[string]struct{}{}
 	for _, ns := range nodeSet.ResolveCosmosigners() {
-		if ns.ValidatorGroup != "" {
-			continue
+		if ns.ValidatorGroup == "" && ns.SoftwareKeySecret != "" {
+			newSentryKeys[ns.SoftwareKeySecret] = struct{}{}
 		}
-		os, ok := oldSigners[ns.Name]
-		if !ok || os.ValidatorGroup != "" || os.SoftwareKeySecret == "" {
+	}
+	for _, os := range old.ResolveCosmosigners() {
+		if os.ValidatorGroup != "" || os.SoftwareKeySecret == "" {
 			continue
 		}
 		if _, genesis := oldGenesisSecrets[os.SoftwareKeySecret]; !genesis {
-			continue
+			continue // a sentry key not in genesis stays freely rotatable/removable
 		}
-		if ns.SoftwareKeySecret != os.SoftwareKeySecret {
-			return fmt.Errorf("%s.backend.software.privateKeySecret is immutable after the chain is established: %q is registered in the immutable genesis validator set (init.genesisValidators), so this sentry signer cannot switch to a different consensus key", nodeSet.signerFieldPath(ns), os.SoftwareKeySecret)
+		if _, kept := newSentryKeys[os.SoftwareKeySecret]; !kept {
+			return fmt.Errorf(".spec.cosmosigner sentry signer key %q is immutable after the chain is established: it is registered in the immutable genesis validator set (init.genesisValidators), so its signer cannot be removed or switched to a different consensus key", os.SoftwareKeySecret)
 		}
 	}
 
@@ -867,8 +875,9 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 }
 
 // genesisValidatorPrivKeySecrets returns the set of priv-key secret names preserved on-chain via
-// init.genesisValidators across the legacy singleton and every validator group. Those keys are part
-// of the immutable genesis validator set.
+// init.genesisValidators across the legacy singleton and every ACTIVE (non-zero-instance) validator
+// group. Those keys are part of the immutable genesis validator set; a zero-instance group runs no
+// validators and contributes nothing to genesis, so its entries are excluded.
 func (nodeSet *ChainNodeSet) genesisValidatorPrivKeySecrets() map[string]struct{} {
 	out := map[string]struct{}{}
 	add := func(init *GenesisInitConfig) {
@@ -883,8 +892,9 @@ func (nodeSet *ChainNodeSet) genesisValidatorPrivKeySecrets() map[string]struct{
 		add(nodeSet.Spec.Validator.Init)
 	}
 	for i := range nodeSet.Spec.Nodes {
-		if nodeSet.Spec.Nodes[i].Validator != nil {
-			add(nodeSet.Spec.Nodes[i].Validator.Init)
+		g := &nodeSet.Spec.Nodes[i]
+		if g.Validator != nil && g.GetInstances() > 0 {
+			add(g.Validator.Init)
 		}
 	}
 	return out
