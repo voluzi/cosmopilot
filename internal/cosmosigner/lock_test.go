@@ -68,25 +68,22 @@ func TestReadSignerLockPreservesNilStorageClass(t *testing.T) {
 	}
 }
 
-// TestReadSignerLockIgnoresQuiescedReplicas verifies a signer scaled to zero (transient quiesce
-// during a Vault re-import) is not recorded as the raft membership: the CRD forbids replicas==0, so
-// recording it would wedge every later comparison. foundReplicas stays false -> caller uses the spec.
-func TestReadSignerLockIgnoresQuiescedReplicas(t *testing.T) {
+// TestReadSignerLockFailsClosedOnQuiescedReplicas verifies that when the only live StatefulSet is
+// scaled to zero (a transient Vault re-import quiesce) and no status lock is recorded, ReadSignerLock
+// fails closed rather than reporting foundReplicas=false — otherwise the caller would fall back to the
+// (mutable) spec and could record a changed replica count as the immutable raft membership.
+func TestReadSignerLockFailsClosedOnQuiescedReplicas(t *testing.T) {
 	const ns, name = "default", "cs-signer"
 	owner := fakeOwner("cs", types.UID("cs-uid"))
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
 		WithObjects(signerSTS(name, ns, owner, 0, "10Gi", ptr.To("fast"))).Build()
 
-	_, _, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
-	if err != nil {
-		t.Fatal(err)
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
+	if err == nil {
+		t.Fatal("a quiesced (replicas=0) StatefulSet with no recorded lock must fail closed, got nil error")
 	}
-	if foundR {
-		t.Fatal("a quiesced (replicas=0) StatefulSet must not report a replica lock")
-	}
-	// Storage is still adopted from the live template.
-	if !foundS || class == nil || *class != "fast" {
-		t.Fatalf("storage class: got %v found=%v, want fast", class, foundS)
+	if foundR || foundS {
+		t.Fatal("no lock may be reported for a quiesced StatefulSet")
 	}
 }
 

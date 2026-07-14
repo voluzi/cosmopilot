@@ -37,14 +37,22 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 	switch {
 	case stsErr == nil:
 		if metav1.IsControlledBy(sts, owner) {
-			// A signer scaled to zero is transiently quiesced (a Vault re-import in flight, or a
-			// failed one): spec.replicas == 0 is NOT the raft membership the cluster was formed with,
-			// and the CRD forbids replicas == 0, so recording it would wedge every later comparison.
-			// Leave foundReplicas false so the caller falls back to the (immutable) desired count.
-			if sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0 {
-				replicas = *sts.Spec.Replicas
-				foundReplicas = true
+			// ReadSignerLock is only called when the status lock is MISSING (the caller records it once).
+			// A signer scaled to zero is transiently quiesced (a Vault re-import in flight, or a failed
+			// one): spec.replicas == 0 is NOT the raft membership the cluster was formed with. With the
+			// lock missing we cannot otherwise recover that membership, and falling back to the CURRENT
+			// spec would let a replica change made during the quiesce be recorded as the immutable
+			// membership and later scale the surviving PVCs up with the wrong member list. So fail closed:
+			// the operator lets the re-import finish (which scales back to the real count) or restores the
+			// recorded lock before the membership can be re-established.
+			if sts.Spec.Replicas == nil || *sts.Spec.Replicas == 0 {
+				return 0, "", nil, false, false, fmt.Errorf(
+					"cosmosigner %q StatefulSet is quiesced (replicas=0) and no raft-membership lock is recorded: cannot "+
+						"establish the lock from a scaled-down signer; wait for the in-flight re-import to complete or restore "+
+						"the recorded lock before reconciling", name)
 			}
+			replicas = *sts.Spec.Replicas
+			foundReplicas = true
 			for _, t := range sts.Spec.VolumeClaimTemplates {
 				if t.Name == dataVolumeName {
 					storageClass = t.Spec.StorageClassName

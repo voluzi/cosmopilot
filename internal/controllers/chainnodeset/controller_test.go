@@ -736,7 +736,7 @@ func TestValidateForReconcileProtectsGenesisSentryKey(t *testing.T) {
 	changed.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("other-key")
 	_, err = validateForReconcile(changed)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sentry key is immutable")
+	assert.Contains(t, err.Error(), "must keep serving that validator/genesis key")
 
 	// Removing it (genesis validator loses its only signing path): rejected.
 	removed := base.DeepCopy()
@@ -756,4 +756,23 @@ func TestValidateForReconcileProtectsGenesisSentryKey(t *testing.T) {
 	freeRemoved.Spec.Nodes[0].Cosmosigner = nil
 	_, err = validateForReconcile(freeRemoved)
 	require.NoError(t, err)
+}
+
+// TestValidateForReconcileRejectsPreDigestValidatorDemotion verifies the pre-digest window is guarded:
+// a validator-targeted signer present at establishment (AtEstablishment recorded) but not yet rolled out
+// (no SigningDigest) cannot have its validator dropped while the same pre-provisioned Vault signer is
+// kept — that would demote the node to a sentry and strip the validator's signing path before the
+// digest/serving guards ever apply.
+func TestValidateForReconcileRejectsPreDigestValidatorDemotion(t *testing.T) {
+	// Validator signer present at establishment (marker recorded), not yet rolled out (no digest).
+	ns := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	_, err := validateForReconcile(ns)
+	require.NoError(t, err)
+
+	// Demote: the targeted group loses its validator while the same pre-provisioned Vault signer stays.
+	demoted := ns.DeepCopy()
+	demoted.Spec.Nodes[0].Validator = nil
+	_, err = validateForReconcile(demoted)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must keep serving that validator/genesis key")
 }

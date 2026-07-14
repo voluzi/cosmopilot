@@ -7,6 +7,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -42,5 +43,45 @@ func TestRequireSecretSelector(t *testing.T) {
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ok).Build()
 	if err := RequireSecretSelector(context.Background(), c, ns, "Vault token", sel); err != nil {
 		t.Fatalf("valid secret must be accepted, got %v", err)
+	}
+}
+
+// TestRequireRaftTLSSecret verifies the raft mTLS preflight: nil (not configured) is accepted, a
+// missing Secret or one lacking any of tls.crt/tls.key/ca.crt errors, and a complete Secret passes.
+func TestRequireRaftTLSSecret(t *testing.T) {
+	const ns, name = "default", "raft-tls"
+	full := map[string][]byte{"tls.crt": []byte("c"), "tls.key": []byte("k"), "ca.crt": []byte("a")}
+
+	// nil: accepted.
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
+	if err := RequireRaftTLSSecret(context.Background(), c, ns, nil); err != nil {
+		t.Fatalf("nil raft TLS secret must be accepted, got %v", err)
+	}
+
+	// missing Secret: error.
+	if err := RequireRaftTLSSecret(context.Background(), c, ns, ptr.To(name)); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing raft TLS secret must error, got %v", err)
+	}
+
+	// missing one key: error naming the key.
+	for k := range full {
+		partial := map[string][]byte{}
+		for kk, vv := range full {
+			if kk != k {
+				partial[kk] = vv
+			}
+		}
+		sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Data: partial}
+		cc := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sec).Build()
+		if err := RequireRaftTLSSecret(context.Background(), cc, ns, ptr.To(name)); err == nil || !strings.Contains(err.Error(), k) {
+			t.Fatalf("raft TLS secret missing %q must error, got %v", k, err)
+		}
+	}
+
+	// complete: accepted.
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Data: full}
+	cc := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sec).Build()
+	if err := RequireRaftTLSSecret(context.Background(), cc, ns, ptr.To(name)); err != nil {
+		t.Fatalf("complete raft TLS secret must be accepted, got %v", err)
 	}
 }

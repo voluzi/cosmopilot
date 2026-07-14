@@ -89,6 +89,11 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name, usesImportPod); err != nil {
 			return err
 		}
+		// The raft mTLS Secret (when set) is mounted at startup; a missing/incomplete one keeps every
+		// signer pod from coming up. Verify it before children are retargeted, like the backend auth Secrets.
+		if err := cosmosigner.RequireRaftTLSSecret(ctx, r.Client, nodeSet.GetNamespace(), s.Spec.RaftTLSSecret); err != nil {
+			return err
+		}
 		// A Vault uploadGenerated signer imports the validator's own key; if that source secret is
 		// missing and no controller flow will create it, the signer can never roll out, so fail before
 		// children switch. But the source is only bootstrap material: once the import for the CURRENT
