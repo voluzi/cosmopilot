@@ -30,6 +30,9 @@ const (
 	importSourceVolume = "import-source"
 	importSourceDir    = "/import"
 	importSourceFile   = importSourceDir + "/priv_validator_key.json"
+
+	// importJobSuffix names the one-shot `cosmosigner import` pod: <signer>-import.
+	importJobSuffix = "import"
 )
 
 // JobRunner runs the one-shot cosmosigner key-management pods (pubkey, import). It needs the
@@ -170,6 +173,6 @@ func (j JobRunner) ImportKey(ctx context.Context, sourceSecret string) error {
 	mounts := []corev1.VolumeMount{
 		{Name: importSourceVolume, ReadOnly: true, MountPath: importSourceFile, SubPath: "priv_validator_key.json"},
 	}
-	_, err := j.runJob(ctx, "import", []string{"import", "--from", importSourceFile}, volumes, mounts)
+	_, err := j.runJob(ctx, importJobSuffix, []string{"import", "--from", importSourceFile}, volumes, mounts)
 	return err
 }

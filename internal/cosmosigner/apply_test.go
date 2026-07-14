@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -321,5 +322,50 @@ func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
 	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(ownPVC).Build()
 	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS()); err != nil {
 		t.Fatalf("own claims must not block a fresh StatefulSet: %v", err)
+	}
+}
+
+// TestPreflightDeployableRefusesForeignObjects verifies PreflightDeployable fails when ANY object the
+// signer deployment creates by name (ConfigMap, raft/discovery Services, one-shot import pod,
+// StatefulSet) already exists owned by a different controller — so a collision is caught before the
+// ChainNodeSet retargets its validators, not after ApplyOwned refuses mid-deploy. Objects this owner
+// controls, or absent objects, do not block.
+func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	me := fakeOwner("cs", types.UID("me-uid"))
+	other := fakeOwner("other", types.UID("other-uid"))
+	foreign := []metav1.OwnerReference{ownerRef(other)}
+
+	cases := []struct {
+		obj  client.Object
+		want string
+	}{
+		{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: foreign}}, "ConfigMap"},
+		{&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: foreign}}, "raft Service"},
+		{&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: foreign}}, "discovery Service"},
+		{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: foreign}}, "import pod"},
+		{&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: foreign}}, "StatefulSet"},
+	}
+	for _, tc := range cases {
+		c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(tc.obj).Build()
+		err := PreflightDeployable(context.Background(), c, me, ns, name)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("foreign %s must block preflight; got err=%v", tc.want, err)
+		}
+	}
+
+	// Nothing present (true first rollout): allowed.
+	empty := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
+	if err := PreflightDeployable(context.Background(), empty, me, ns, name); err != nil {
+		t.Fatalf("empty namespace must be deployable, got %v", err)
+	}
+
+	// Our own objects: allowed.
+	mine := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
+	).Build()
+	if err := PreflightDeployable(context.Background(), mine, me, ns, name); err != nil {
+		t.Fatalf("own objects must be deployable, got %v", err)
 	}
 }

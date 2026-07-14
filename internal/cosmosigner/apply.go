@@ -18,28 +18,66 @@ import (
 )
 
 // PreflightDeployable reports (as an error) whether the signer named `name` can be deployed by owner,
-// running the SAME blocking checks ApplyOwned performs when it creates the signer StatefulSet — the
-// name-collision guard and the foreign/ambiguous raft-state PVC guard — without applying anything. The
-// ChainNodeSet controller calls this BEFORE it retargets child validators to the remote signer, so a
-// signer that ApplyOwned would later refuse to create (a stale foreign `data-<signer>-<ordinal>` claim,
-// or a same-name StatefulSet owned by another CR) does not leave a validator with neither its local key
-// nor a deployable signer. When this owner already controls the StatefulSet (steady state / update
-// path), there is nothing to block, so it returns nil.
+// running the SAME blocking checks its deployment performs — a name-collision refusal on EVERY object
+// the deployment creates/updates (each is applied with ApplyOwned, which refuses to overwrite an object
+// owned by a different controller; the one-shot import pod refuses the same way), plus the foreign/
+// ambiguous raft-state PVC guard on a fresh StatefulSet — without applying anything. The ChainNodeSet
+// controller calls this BEFORE it retargets child validators to the remote signer, so a signer that a
+// later apply would refuse (a same-name ConfigMap/Service/StatefulSet/pod owned by another CR, or a
+// stale foreign `data-<signer>-<ordinal>` claim) does not leave a validator with neither its local key
+// nor a deployable signer. Objects this owner already controls (steady state) do not block.
 func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+	// Every object the signer deployment applies by name, other than the StatefulSet (handled below with
+	// its extra PVC guard): the config ConfigMap, the raft and discovery Services, and the one-shot
+	// `cosmosigner import` pod. ApplyOwned / runJob refuse to overwrite any of these when owned by a
+	// different controller.
+	named := []struct {
+		kind string
+		obj  client.Object
+	}{
+		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
+		{"raft Service", &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
+		{"discovery Service", &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + discoveryServiceSuffix}}},
+		{"import pod", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + "-" + importJobSuffix}}},
+	}
+	for _, n := range named {
+		if err := ensureNoForeignObject(ctx, c, owner, n.kind, n.obj); err != nil {
+			return err
+		}
+	}
+
 	sts := &appsv1.StatefulSet{}
-	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts)
-	switch {
+	switch err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); {
 	case err == nil:
 		if !metav1.IsControlledBy(sts, owner) {
-			return fmt.Errorf("cosmosigner resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", name)
+			return foreignObjectErr("StatefulSet", name)
 		}
 		return nil
 	case errors.IsNotFound(err):
-		// A fresh deploy: ApplyOwned's Create path runs exactly this guard.
+		// A fresh StatefulSet: ApplyOwned's Create path runs exactly this guard.
 		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
 	default:
 		return err
 	}
+}
+
+// ensureNoForeignObject errors when obj exists and is controlled by a different owner (a same-name
+// collision an apply would refuse). A missing object is fine.
+func ensureNoForeignObject(ctx context.Context, c client.Client, owner client.Object, kind string, obj client.Object) error {
+	switch err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); {
+	case errors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return err
+	case !metav1.IsControlledBy(obj, owner):
+		return foreignObjectErr(kind, obj.GetName())
+	default:
+		return nil
+	}
+}
+
+func foreignObjectErr(kind, name string) error {
+	return fmt.Errorf("cosmosigner %s %q is managed by another owner; refusing to deploy over it — rename the ChainNode/ChainNodeSet to avoid the name collision", kind, name)
 }
 
 // ApplyOwned creates or updates a cosmosigner-managed object owned by owner. It refuses to

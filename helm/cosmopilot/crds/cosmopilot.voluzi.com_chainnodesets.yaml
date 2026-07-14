@@ -15995,12 +15995,14 @@ spec:
                       description: |-
                         AtEstablishment is a write-once record of the on-chain consensus identity this signer was
                         responsible for at the moment the chain ID was first recorded: its validator-targeted identity,
-                        or — for a SENTRY signer whose key is registered in the immutable genesis validator set — that
-                        sentry key's identity. It is the empty string when the signer was responsible for no on-chain key
-                        then (a sentry signer whose key is not in genesis). It lets the no-webhook path tell an
-                        establishing signer (admitted) apart from one introduced afterwards (rejected unless the backend
-                        provably imports the registered key), and reject a later key change/removal of a genesis-registered
-                        sentry signer. Absent for a signer added after establishment.
+                        or — for a SOFTWARE sentry signer whose privateKeySecret is listed in this ChainNodeSet's own
+                        init.genesisValidators — that sentry key's identity. It is the empty string when the signer was
+                        responsible for no such provable on-chain key then; this includes sentries the controller cannot
+                        tie to a genesis entry from spec alone (a Vault/GCP-backed sentry, or a sentry for an
+                        externally-imported genesis), which stay rotatable/removable on the no-webhook path. It lets that
+                        path tell an establishing signer (admitted) apart from one introduced afterwards (rejected unless
+                        the backend provably imports the registered key), and reject a later key change/removal of a
+                        genesis-registered software sentry signer. Absent for a signer added after establishment.
                       type: string
                     keyImported:
                       description: |-
