@@ -26,11 +26,16 @@ import (
 // later apply would refuse (a same-name ConfigMap/Service/StatefulSet/pod owned by another CR, or a
 // stale foreign `data-<signer>-<ordinal>` claim) does not leave a validator with neither its local key
 // nor a deployable signer. Objects this owner already controls (steady state) do not block.
-func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+//
+// usesImportPod must be true only when the signer actually runs the one-shot `<name>-import` pod (a
+// Vault uploadGenerated signer). Software, GCP KMS and pre-provisioned Vault signers never create it, so
+// checking that name for them would let an unrelated foreign pod block an otherwise-deployable signer on
+// every reconcile.
+func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, usesImportPod bool) error {
 	// Every object the signer deployment applies by name, other than the StatefulSet (handled below with
-	// its extra PVC guard): the config ConfigMap, the raft and discovery Services, and the one-shot
-	// `cosmosigner import` pod. ApplyOwned / runJob refuse to overwrite any of these when owned by a
-	// different controller.
+	// its extra PVC guard): the config ConfigMap, the raft and discovery Services, and — only for an
+	// uploadGenerated signer — the one-shot `cosmosigner import` pod. ApplyOwned / runJob refuse to
+	// overwrite any of these when owned by a different controller.
 	named := []struct {
 		kind string
 		obj  client.Object
@@ -38,7 +43,12 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
 		{"raft Service", &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
 		{"discovery Service", &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + discoveryServiceSuffix}}},
-		{"import pod", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + "-" + importJobSuffix}}},
+	}
+	if usesImportPod {
+		named = append(named, struct {
+			kind string
+			obj  client.Object
+		}{"import pod", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + "-" + importJobSuffix}}})
 	}
 	for _, n := range named {
 		if err := ensureNoForeignObject(ctx, c, owner, n.kind, n.obj); err != nil {

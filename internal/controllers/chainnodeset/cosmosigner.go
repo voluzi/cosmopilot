@@ -83,8 +83,10 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		}
 		// Run the same deploy-time blockers ApplyOwned would hit when it creates the StatefulSet (name
 		// collision, foreign/ambiguous raft-state PVCs), so a signer that can never be created does not
-		// cause children to be retargeted to a remote signer that will never come up.
-		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name); err != nil {
+		// cause children to be retargeted to a remote signer that will never come up. Only an
+		// uploadGenerated signer runs the one-shot <name>-import pod, so only it checks that name.
+		usesImportPod := s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s))
+		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name, usesImportPod); err != nil {
 			return err
 		}
 		// A Vault uploadGenerated signer imports the validator's own key; if that source secret is

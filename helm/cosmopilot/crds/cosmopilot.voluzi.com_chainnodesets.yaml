@@ -15995,14 +15995,16 @@ spec:
                       description: |-
                         AtEstablishment is a write-once record of the on-chain consensus identity this signer was
                         responsible for at the moment the chain ID was first recorded: its validator-targeted identity,
-                        or — for a SOFTWARE sentry signer whose privateKeySecret is listed in this ChainNodeSet's own
-                        init.genesisValidators — that sentry key's identity. It is the empty string when the signer was
-                        responsible for no such provable on-chain key then; this includes sentries the controller cannot
-                        tie to a genesis entry from spec alone (a Vault/GCP-backed sentry, or a sentry for an
-                        externally-imported genesis), which stay rotatable/removable on the no-webhook path. It lets that
-                        path tell an establishing signer (admitted) apart from one introduced afterwards (rejected unless
-                        the backend provably imports the registered key), and reject a later key change/removal of a
-                        genesis-registered software sentry signer. Absent for a signer added after establishment.
+                        or — for a SOFTWARE sentry signer whose privateKeySecret is listed in an ACTIVE (non-zero-instance)
+                        validator's spec.validator.init.genesisValidators or spec.nodes[].validator.init.genesisValidators
+                        — that sentry key's identity. It is the empty string when the signer was responsible for no such
+                        provable on-chain key then; this includes sentries the controller cannot tie to a genesis entry
+                        from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key
+                        listed only under a zero-instance group, which contributes nothing to genesis), which stay
+                        rotatable/removable on the no-webhook path. It lets that path tell an establishing signer
+                        (admitted) apart from one introduced afterwards (rejected unless the backend provably imports the
+                        registered key), and reject a later key change/removal of a genesis-registered software sentry
+                        signer. Absent for a signer added after establishment.
                       type: string
                     keyImported:
                       description: |-
