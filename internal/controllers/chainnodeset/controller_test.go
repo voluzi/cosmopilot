@@ -854,3 +854,45 @@ func TestValidateForReconcileAllowsLegacyPreDigestSingleTarget(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sibling-group swap")
 }
+
+// TestSignerImportSourcePendingGenesisInitExplicitKey reproduces the e2e drop-in Vault signer setup: a
+// genesis-initializing legacy validator with an EXPLICIT privateKeySecret, fronted by a top-level Vault
+// uploadGenerated signer. The key is GENERATED into that explicit secret during bootstrap, so the import
+// source must be PENDING pre-genesis (else the every-pass preflight demands the secret before
+// ensureValidator creates it and wedges the chain at height 0), and terminal once the pubkey is recorded.
+func TestSignerImportSourcePendingGenesisInitExplicitKey(t *testing.T) {
+	mk := func() *appsv1.ChainNodeSet {
+		return &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+			Spec: appsv1.ChainNodeSetSpec{
+				Validator: &appsv1.NodeSetValidatorConfig{
+					PrivateKeySecret: ptr.To("shared-key"),
+					Init:             &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1stake"}, StakeAmount: "1stake"},
+				},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+					Address: "https://vault:8200", KeyName: "k",
+					TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+					UploadGenerated: true,
+				}}},
+			},
+		}
+	}
+	r := &Reconciler{}
+
+	// Pre-genesis: the generated key does not exist yet, so the import source is pending.
+	pre := mk()
+	signers := pre.ResolveCosmosigners()
+	require.Len(t, signers, 1)
+	require.True(t, r.signerImportSourcePending(pre, signers[0]), "genesis-init explicit key must be pending pre-genesis")
+
+	// Post-genesis, pubkey not yet recorded: still pending.
+	mid := mk()
+	mid.Status.ChainID = "test-localnet"
+	require.True(t, r.signerImportSourcePending(mid, mid.ResolveCosmosigners()[0]), "must stay pending until the pubkey is recorded")
+
+	// Post-genesis, pubkey recorded: terminal (the generated key exists, so the source is required).
+	done := mk()
+	done.Status.ChainID = "test-localnet"
+	done.Status.Validators = []appsv1.ChainNodeSetValidatorStatus{{Name: validatorNodeName(done, appsv1.ReservedValidatorGroupName, 0), PubKey: "pk"}}
+	require.False(t, r.signerImportSourcePending(done, done.ResolveCosmosigners()[0]), "must be terminal once the pubkey is recorded")
+}
