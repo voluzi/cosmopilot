@@ -873,11 +873,51 @@ func TestSignerImportSourcePendingGenesisInitExplicitKey(t *testing.T) {
 	require.Len(t, signers, 1)
 	require.True(t, r.signerImportSourcePending(pre, signers[0]), "genesis-init explicit key must be pending pre-genesis")
 
-	// Post-genesis: the key was generated into the explicit secret during bootstrap, so it exists now and
-	// the source is terminal (the demand succeeds); it is not gated on the pubkey.
-	post := mk()
-	post.Status.ChainID = "test-localnet"
-	require.False(t, r.signerImportSourcePending(post, post.ResolveCosmosigners()[0]), "explicit key is terminal post-genesis")
+	// Post-genesis, pubkey not yet recorded: still pending — the generating validator records its key
+	// itself, and an explicit privateKeySecret does not make it user-supplied.
+	mid := mk()
+	mid.Status.ChainID = "test-localnet"
+	require.True(t, r.signerImportSourcePending(mid, mid.ResolveCosmosigners()[0]), "generating validator is pending until pubkey")
+
+	// Post-genesis, pubkey recorded: terminal (the generated key now exists, so the source is required).
+	done := mk()
+	done.Status.ChainID = "test-localnet"
+	done.Status.Validators = []appsv1.ChainNodeSetValidatorStatus{{Name: validatorNodeName(done, appsv1.ReservedValidatorGroupName, 0), PubKey: "pk"}}
+	require.False(t, r.signerImportSourcePending(done, done.ResolveCosmosigners()[0]), "terminal once the pubkey is recorded")
+}
+
+// TestSignerImportSourcePendingCreateValidatorExplicitKey verifies a createValidator validator with an
+// explicit privateKeySecret stays pending until its pubkey is recorded: the child ChainNode generates
+// the key into that secret when it runs, so demanding it earlier would block a valid first-time config.
+func TestSignerImportSourcePendingCreateValidatorExplicitKey(t *testing.T) {
+	mk := func() *appsv1.ChainNodeSet {
+		return &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+			Spec: appsv1.ChainNodeSetSpec{
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Validator: &appsv1.NodeSetValidatorConfig{
+					PrivateKeySecret: ptr.To("cv-key"),
+					CreateValidator:  &appsv1.CreateValidatorConfig{},
+				},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+					Address: "https://vault:8200", KeyName: "k",
+					TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+					UploadGenerated: true,
+				}}},
+			},
+			Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
+		}
+	}
+	r := &Reconciler{}
+
+	// Pubkey not yet recorded: pending (the child will generate the key into the explicit secret).
+	pre := mk()
+	require.True(t, r.signerImportSourcePending(pre, pre.ResolveCosmosigners()[0]), "createValidator explicit key must be pending until pubkey")
+
+	// Pubkey recorded: terminal.
+	done := mk()
+	done.Status.Validators = []appsv1.ChainNodeSetValidatorStatus{{Name: validatorNodeName(done, appsv1.ReservedValidatorGroupName, 0), PubKey: "pk"}}
+	require.False(t, r.signerImportSourcePending(done, done.ResolveCosmosigners()[0]), "terminal once the pubkey is recorded")
 }
 
 // TestSignerImportSourcePendingMultiInstancePostGenesis verifies a NONZERO instance of a multi-instance
