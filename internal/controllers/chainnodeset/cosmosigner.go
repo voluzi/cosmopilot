@@ -439,6 +439,12 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 					}
 				}
 			}
+		} else if nodeSet.Status.ChainID == "" && nodeSet.GenesisSentryEstablishmentIdentity(s) != "" {
+			// A SENTRY signer whose key is registered in an init validator's genesisValidators is created
+			// (or healed) by ensureValidator during genesis bootstrap, so pre-genesis it is still pending —
+			// do not demand it before that flow runs. A non-genesis sentry key is user-supplied out-of-band
+			// and must exist even pre-genesis, so it is NOT treated as pending here.
+			keyFlowPending = true
 		}
 		if !keyFlowPending {
 			exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)

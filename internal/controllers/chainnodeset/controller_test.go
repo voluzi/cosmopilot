@@ -820,39 +820,27 @@ func TestValidateForReconcileRejectsPreDigestSiblingSwap(t *testing.T) {
 	assert.Contains(t, err.Error(), "sibling-group swap")
 }
 
-// TestValidateForReconcileAllowsLegacyPreDigestSingleTarget verifies the pre-digest guard tolerates a
-// LEGACY establishment marker recorded before the served group/instance were persisted: an unchanged
-// single-target validator signer (no sibling to swap with) is admitted so the controller can backfill
-// the served group on rollout, while a multi-target legacy signer stays unverifiable and is rejected.
-func TestValidateForReconcileAllowsLegacyPreDigestSingleTarget(t *testing.T) {
-	// Single-target validator signer, marker recorded but served group cleared (legacy shape).
+// TestValidateForReconcileRejectsLegacyPreDigestValidator verifies a LEGACY establishment marker with
+// no served group is treated as unverifiable for validator-ness: even a single-target validator signer
+// is rejected, because a top-level signer can retarget .spec.cosmosigner.nodeGroups from [a] to [b]
+// while keeping the same status entry, cardinality and identity — cardinality cannot tell a retarget
+// from an unchanged config. A genesis SENTRY with no served group stays admitted (via its genesis-key
+// identity). This shape only occurs on an intermediate pre-release status.
+func TestValidateForReconcileRejectsLegacyPreDigestValidator(t *testing.T) {
+	// Single-target validator signer, marker recorded but served group cleared (legacy shape): rejected.
 	ns := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	ns.Status.Cosmosigners[0].ServingGroup = ""
 	ns.Status.Cosmosigners[0].ServingInstance = nil
 	_, err := validateForReconcile(ns)
-	require.NoError(t, err)
-
-	// Multi-target legacy signer: unverifiable without the served group, so rejected.
-	multi := &appsv1.ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
-		Spec: appsv1.ChainNodeSetSpec{
-			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Cosmosigner: &appsv1.Cosmosigner{
-				NodeGroups: []string{"validators", "others"},
-				Backend:    cosmosignerVaultBackend(),
-			},
-			Nodes: []appsv1.NodeGroupSpec{
-				{Name: "validators", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")}},
-				{Name: "others", Instances: ptr.To(1)},
-			},
-		},
-	}
-	multi.SetEstablishedChainID("test-localnet")
-	multi.Status.Cosmosigners[0].ServingGroup = "" // legacy shape
-	multi.Status.Cosmosigners[0].ServingInstance = nil
-	_, err = validateForReconcile(multi)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "sibling-group swap")
+	assert.Contains(t, err.Error(), "must keep serving that exact validator/genesis key")
+
+	// A genesis sentry (no served group by design) with the same legacy-empty ServingGroup is still
+	// admitted, because its key identity is verifiable against the immutable genesis set.
+	sentry := genesisSentryNodeSet("genesis-sentry-key", "genesis-sentry-key")
+	require.Empty(t, sentry.Status.Cosmosigners[0].ServingGroup)
+	_, err = validateForReconcile(sentry)
+	require.NoError(t, err)
 }
 
 // TestSignerImportSourcePendingGenesisInitExplicitKey reproduces the e2e drop-in Vault signer setup: a
