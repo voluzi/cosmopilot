@@ -140,14 +140,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 	}
 
-	// Preflight the desired signers BEFORE ensureValidator/ensureNodes stamp RemoteSignerTarget on the
-	// child ChainNodes. If a signer can never come up (missing software key, missing import source),
-	// fail here so children keep their existing local signing path instead of dropping the local key
-	// for a signer that will never deploy. Skipped until the chain ID is known (signers do not deploy
-	// before then, and validator key-generation flows are still pending).
-	if nodeSet.Status.ChainID != "" {
+	chainIDKnownAtStart := nodeSet.Status.ChainID != ""
+
+	// Preflight the desired signers, and record their status entries + raft/PVC locks, BEFORE
+	// ensureValidator/ensureNodes stamp RemoteSignerTarget on the child ChainNodes. If a signer can never
+	// come up (missing key/auth Secret, foreign PVC), fail here so children keep their existing local
+	// signing path instead of dropping the local key for a signer that will never deploy. Recording the
+	// locks here (not only in ensureCosmosigner, which runs AFTER children are retargeted) ensures the
+	// signer is deployed in the SAME pass it is retargeted rather than deferred to a later reconcile,
+	// which would leave a retargeted validator without a signer. Requeue when locks were just recorded so
+	// validateForReconcile judges them before any resource is applied. Skipped until the chain ID is
+	// known (handled again after ensureGenesis discovers it — see below).
+	if chainIDKnownAtStart {
 		if err := r.preflightCosmosigners(ctx, nodeSet); err != nil {
 			return ctrl.Result{}, err
+		}
+		if recorded, err := r.initCosmosignerLocks(ctx, nodeSet); err != nil {
+			return ctrl.Result{}, err
+		} else if recorded {
+			return ctrl.Result{Requeue: true}, nil
 		}
 	}
 
@@ -161,6 +172,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err := r.ensureGenesis(ctx, app, nodeSet); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// If the chain ID was only just discovered this pass (an external genesis, or an init validator that
+	// produced it above), the signer preflight + lock recording near the top was skipped because the
+	// chain ID was still empty then. Requeue now — ensureGenesis has persisted the chain ID — so the next
+	// reconcile runs them BEFORE ensureValidator/ensureNodes retarget child validators to a signer whose
+	// deployability has not been checked and whose StatefulSet does not exist yet.
+	if !chainIDKnownAtStart && nodeSet.Status.ChainID != "" && len(nodeSet.ResolveCosmosigners()) > 0 {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Once a genesis is available (chainID known), reconcile validators that consume an external

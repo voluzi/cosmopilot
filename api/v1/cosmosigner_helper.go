@@ -235,26 +235,41 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 		return
 	}
 	nodeSet.Status.ChainID = chainID
-	genesisSecrets := nodeSet.genesisValidatorPrivKeySecrets()
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		st := nodeSet.EnsureCosmosignerStatus(s.Name)
 		if st.AtEstablishment == nil {
 			id := s.ValidatorTargetedIdentity()
-			// A SOFTWARE sentry signer whose privateKeySecret is listed in init.genesisValidators is also
-			// responsible for an on-chain consensus key, but ValidatorTargetedIdentity() is "" for it.
-			// Record its identity so the no-webhook path can reject a later key change or removal (a
-			// genesis validator losing its only signing path). Only software sentries populate
-			// SoftwareKeySecret, and the genesis set is keyed by privateKeySecret name, so this is exactly
-			// the case the controller can prove from spec; every other sentry records "" and stays freely
-			// rotatable/removable.
-			if id == "" && s.SoftwareKeySecret != "" {
-				if _, genesis := genesisSecrets[s.SoftwareKeySecret]; genesis {
-					id = s.Identity()
-				}
+			if id == "" {
+				id = nodeSet.genesisSentryEstablishmentIdentity(s)
 			}
 			st.AtEstablishment = &id
 		}
 	}
+}
+
+// genesisSentryEstablishmentIdentity returns the at-establishment identity to record for a SOFTWARE
+// SENTRY signer whose key is listed in this ChainNodeSet's own init.genesisValidators — that key's
+// signing identity — or "" for any signer that is not such a sentry. Only software sentries populate
+// SoftwareKeySecret, and the genesis set is keyed by privateKeySecret name, so this is exactly the
+// genesis-registered sentry case the controller can prove from spec; every other sentry (Vault/GCP, or
+// software but not genesis-registered) records "" and stays freely rotatable/removable on the no-webhook
+// path. Because the genesis set is immutable, this is stable whether evaluated at establishment or when
+// a genesis-sentry signer's status entry is first created later (see ensureCosmosigner's backfill).
+func (nodeSet *ChainNodeSet) genesisSentryEstablishmentIdentity(s ResolvedSigner) string {
+	if s.ValidatorGroup != "" || s.SoftwareKeySecret == "" {
+		return ""
+	}
+	if _, genesis := nodeSet.genesisValidatorPrivKeySecrets()[s.SoftwareKeySecret]; genesis {
+		return s.Identity()
+	}
+	return ""
+}
+
+// GenesisSentryEstablishmentIdentity is the exported form of genesisSentryEstablishmentIdentity, used
+// by the controller to backfill AtEstablishment when a genesis-registered software sentry signer's
+// status entry is first created after establishment (SetEstablishedChainID runs only once).
+func (nodeSet *ChainNodeSet) GenesisSentryEstablishmentIdentity(s ResolvedSigner) string {
+	return nodeSet.genesisSentryEstablishmentIdentity(s)
 }
 
 // IsCosmosignerTargetGroup reports whether any managed signer (top-level or per-group) targets the

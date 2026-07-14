@@ -26,13 +26,10 @@ import (
 //
 // The storage class is returned as a *string so a template that OMITS storageClassName (the normal
 // "use the cluster default" case) round-trips as nil rather than "": callers and the no-webhook guard
-// distinguish nil (default class) from an explicit "" (no class). `desiredClass` is the class the
-// current spec's template would use; the orphaned-PVC recovery path reports it verbatim, because a
-// recreated StatefulSet re-binds the surviving claims by name (its template class governs only new
-// ordinals, and the membership is locked) — so the recovered cluster's class is fixed by the existing
-// PVs, and recording the desired value keeps an unchanged template from reading as a storage change
-// without needing a cluster-scoped StorageClass lookup.
-func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string, desiredClass *string) (
+// distinguish nil (default class) from an explicit "" (no class). When the StatefulSet is gone but its
+// raft-state PVCs survive, the lock cannot be reconstructed from the claims alone, so it fails closed
+// rather than adopting an unverifiable membership.
+func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (
 	replicas int32, storageSize string, storageClass *string, foundReplicas, foundStorage bool, err error,
 ) {
 	sts := &appsv1.StatefulSet{}
@@ -60,78 +57,31 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 			}
 		}
 	case errors.IsNotFound(stsErr):
-		// The StatefulSet is gone, but StatefulSet PVCs are not garbage-collected with it, so this
-		// owner's per-pod raft-state claims may survive (a manually deleted StatefulSet, or a partial
-		// teardown). A fresh StatefulSet would re-bind them, inheriting their raft membership, so recover
-		// the lock from those OWNED exact-match claims rather than falling back to the (possibly changed)
-		// spec: the surviving claim count is the membership the cluster was formed with.
+		// The StatefulSet is gone but its per-pod raft-state PVCs are not garbage-collected with it, so
+		// this owner's `data-<name>-<ordinal>` claims (or unlabeled legacy ones) may survive. Their raft
+		// logs were bootstrapped with a membership that CANNOT be reconstructed from the claims alone: a
+		// surviving subset of ordinals is indistinguishable from a smaller original cluster (a lone
+		// `data-<name>-0` looks identical whether the raft cluster was 1 replica or the truncated remains
+		// of 3), and an unlabeled claim cannot even be attributed to this owner. Recording any lock while
+		// such a claim exists would let a recreated StatefulSet re-bind that state under a membership it
+		// was never formed with (breaking quorum) or let a drifted spec pass validation, so fail closed
+		// the moment one is found and let the operator resolve it (delete the claims, or restore the
+		// StatefulSet). A namespace with no surviving state claim is a true first rollout.
 		pvcs := &corev1.PersistentVolumeClaimList{}
 		if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 			return 0, "", nil, false, false, err
 		}
-		owned := 0
-		maxOrdinal := -1
-		var sample *corev1.PersistentVolumeClaim
 		for i := range pvcs.Items {
 			pvc := &pvcs.Items[i]
-			// An exact-name state PVC WITHOUT this owner's UID label is ambiguous: a fresh StatefulSet
-			// would still bind it by name, but its raft membership cannot be attributed to this owner
-			// (ApplyOwned blocks on it for exactly this reason). Falling through to record a spec-derived
-			// lock while it exists would let a spec that drifted before this reconcile pass validation,
-			// and a later manual adoption of the claim would then re-bind old raft state under that wrong
-			// lock. Fail closed instead — mirroring the teardown/adopt path — so no lock is recorded
-			// until the operator deletes or labels the claim.
-			if isAmbiguousLegacyDataPVC(pvc, name) {
+			_, owned := ownedStatefulSetDataPVCOrdinal(pvc, owner, name)
+			if owned || isAmbiguousLegacyDataPVC(pvc, name) {
 				return 0, "", nil, false, false, fmt.Errorf(
-					"cosmosigner %q has state PVC %q without an owner-UID label: cannot attribute its raft membership; "+
-						"delete the claim or label it with this owner's UID before reconciling",
-					name, pvc.GetName())
-			}
-			ordinal, ok := ownedStatefulSetDataPVCOrdinal(pvc, owner, name)
-			if !ok {
-				continue
-			}
-			owned++
-			if ordinal > maxOrdinal {
-				maxOrdinal = ordinal
-			}
-			if sample == nil {
-				sample = pvc
+					"cosmosigner %q has an orphaned raft-state PVC %q but no StatefulSet or recorded lock: its raft "+
+						"membership cannot be reconstructed from the claim alone; delete the stale claims or restore the "+
+						"signer before reconciling", name, pvc.GetName())
 			}
 		}
-		if owned > 0 {
-			// The recovered replica count is only trustworthy when the surviving ordinals form the
-			// complete contiguous set {0..owned-1}. Claim names are distinct and each ordinal is a
-			// canonical non-negative integer, so owned == maxOrdinal+1 proves exactly that set. A gap
-			// (e.g. {0, 2}) means a claim was deleted from the MIDDLE of the raft membership: a fresh
-			// StatefulSet would recreate that ordinal with empty state while re-binding the survivors,
-			// forming a cluster with a different membership than the one it was bootstrapped with. That
-			// is unsafe to guess through, so fail closed and let the operator resolve the claims rather
-			// than record a membership the count cannot prove. (A set truncated from the TOP — a plain
-			// scale-down — stays contiguous and is accepted.)
-			if owned != maxOrdinal+1 {
-				return 0, "", nil, false, false, fmt.Errorf(
-					"cosmosigner %q has an incomplete set of orphaned state PVCs (%d claims, highest ordinal %d): "+
-						"cannot determine the original raft membership; remove the stale claims or restore the missing ones",
-					name, owned, maxOrdinal)
-			}
-			replicas = int32(owned)
-			foundReplicas = true
-			if q, ok := sample.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
-				storageSize = q.String()
-			}
-			// Report the DESIRED storage class, not the one read off the PVC. A fresh StatefulSet re-binds
-			// these claims by NAME regardless of its template's storageClassName (which only governs claims
-			// created for NEW ordinals — and the membership is locked above, so none are), so the class the
-			// recovered cluster runs on is fixed by the existing PVs, not the template. Recording the raw
-			// PVC class would also misread an omitting template (whose PVC carries the admission-materialised
-			// cluster default) as a storage change, and reading it back would need a cluster-scoped
-			// StorageClass lookup the operator is not granted. The desired value round-trips against the
-			// no-webhook guard while a genuine size change is still caught above.
-			storageClass = desiredClass
-			foundStorage = true
-		}
-		// No StatefulSet and no owned claims: a true first rollout, caller uses the spec.
+		// No StatefulSet and no surviving state claim: a true first rollout, caller uses the spec.
 	default:
 		return 0, "", nil, false, false, stsErr
 	}

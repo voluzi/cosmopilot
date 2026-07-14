@@ -132,31 +132,15 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return nil
 	}
 
-	// PERSIST a status entry and the raft-membership/PVC-template locks for every desired signer
-	// BEFORE creating any signer resource:
-	//   - reconcileSignerTeardown derives the set of removable signers from status, so a signer whose
-	//     resources exist without an entry would never be undeployed;
-	//   - the locks (adopted from live signer state, or the spec on a true first rollout) must exist
-	//     before ANY resource is applied, so the no-webhook guard can reject a lock-violating change.
-	// When anything is recorded here, RETURN: the status write re-triggers a reconcile, which runs
-	// validateForReconcile against the freshly recorded locks BEFORE reconcileSigner applies the spec.
-	// Otherwise a legacy/status-lost signer with a live 1-replica cluster would record the live lock
-	// here and then, in the same pass, apply a spec change to replicas:3 before the lock could reject
-	// it. Deferring is crash-safe: no lock, no resource.
-	locksChanged := false
-	for _, s := range signers {
-		created := nodeSet.GetCosmosignerStatus(s.Name) == nil
-		st := nodeSet.EnsureCosmosignerStatus(s.Name)
-		locksChanged = locksChanged || created
-		if st.Replicas == nil || st.StateStorageSize == "" {
-			if err := r.initSignerLock(ctx, nodeSet, s, st); err != nil {
-				return err
-			}
-			locksChanged = true
-		}
-	}
-	if locksChanged {
-		return r.Status().Update(ctx, nodeSet)
+	// Locks are normally recorded before children are retargeted (initCosmosignerLocks runs in Reconcile
+	// ahead of ensureValidator/ensureNodes). Call it again here so ensureCosmosigner is self-contained: on
+	// the pass that records them it returns (the status write re-triggers a reconcile that runs
+	// validateForReconcile against the fresh locks before any resource is applied); once recorded it is a
+	// no-op and we proceed straight to deploy.
+	if changed, err := r.initCosmosignerLocks(ctx, nodeSet); err != nil {
+		return err
+	} else if changed {
+		return nil
 	}
 
 	changed := false
@@ -173,6 +157,51 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 	return nil
 }
 
+// initCosmosignerLocks persists a status entry and the raft-membership/PVC-template locks for every
+// desired signer, plus the at-establishment marker for a genesis-registered software sentry whose entry
+// is first created after establishment. It reports whether anything was written. It is invoked from
+// Reconcile BEFORE ensureValidator/ensureNodes retarget children, so the entries and locks exist before
+// a child is switched to a signer whose StatefulSet is created later in the same reconcile — otherwise a
+// retargeted validator would point at a signer that does not yet exist. The caller requeues when it
+// returns true so validateForReconcile runs against the fresh locks before any signer resource is
+// applied (a legacy/status-lost signer with a live 1-replica cluster must not record the live lock and
+// then apply a replicas:3 change in the same pass). Recording an entry also lets reconcileSignerTeardown
+// see the signer. No-op once everything is recorded; safe to call repeatedly.
+func (r *Reconciler) initCosmosignerLocks(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	if nodeSet.Status.ChainID == "" {
+		return false, nil
+	}
+	changed := false
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		created := nodeSet.GetCosmosignerStatus(s.Name) == nil
+		st := nodeSet.EnsureCosmosignerStatus(s.Name)
+		if created {
+			changed = true
+			// Backfill the genesis-sentry establishment marker for an entry first created AFTER
+			// establishment: SetEstablishedChainID runs only once, so a genesis-registered software sentry
+			// whose signer was added later would otherwise keep a nil marker and escape the no-webhook
+			// key-change/removal guards. The genesis set is immutable, so this is the identity establishment
+			// would have recorded. A validator-targeted signer keeps its nil marker — that nil is how the
+			// no-webhook ADD guard detects a post-establishment addition — so only genesis sentries backfill.
+			if st.AtEstablishment == nil {
+				if id := nodeSet.GenesisSentryEstablishmentIdentity(s); id != "" {
+					st.AtEstablishment = &id
+				}
+			}
+		}
+		if st.Replicas == nil || st.StateStorageSize == "" {
+			if err := r.initSignerLock(ctx, nodeSet, s, st); err != nil {
+				return false, err
+			}
+			changed = true
+		}
+	}
+	if changed {
+		return true, r.Status().Update(ctx, nodeSet)
+	}
+	return false, nil
+}
+
 // initSignerLock initialises a signer's Replicas/StateStorageSize/ClassName from the live signer
 // state owned by this controller, falling back to the spec when no signer state exists (a true first
 // rollout). Anchoring on the live state prevents an in-flight roll-out (failed first reconcile, or an
@@ -180,7 +209,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 // or PVC template than the one the raft cluster was actually formed with. It mutates st in memory;
 // the caller persists it.
 func (r *Reconciler) initSignerLock(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, st *appsv1.CosmosignerStatus) error {
-	liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name, s.Spec.StorageClassName)
+	liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name)
 	if err != nil {
 		return err
 	}
@@ -359,6 +388,14 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		// produces the secret during that flow.
 		keyFlowPending := false
 		if s.ValidatorGroup != "" {
+			instance := 0
+			if s.ValidatorInstance != nil {
+				instance = *s.ValidatorInstance
+			}
+			// Whether THIS instance generates its own key must come from its PER-INSTANCE config, not the
+			// group's: in a multi-instance genesis-init group only instance 0 keeps Init, so the other
+			// instances' keys are pre-created before genesis and never regenerated once the chain is
+			// established — treating them as "pending" would let the signer deploy with a missing key.
 			generates := false
 			if s.ValidatorGroup == appsv1.ReservedValidatorGroupName {
 				v := nodeSet.Spec.Validator
@@ -366,16 +403,13 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			} else {
 				for _, g := range nodeSet.Spec.Nodes {
 					if g.Name == s.ValidatorGroup && g.Validator != nil {
-						generates = g.Validator.Init != nil || g.Validator.CreateValidator != nil
+						cfg := deriveGroupValidatorConfig(nodeSet, g.Name, instance, g.GetInstances(), g.Validator)
+						generates = cfg.Init != nil || cfg.CreateValidator != nil
 					}
 				}
 			}
 			if generates {
 				keyFlowPending = true
-				instance := 0
-				if s.ValidatorInstance != nil {
-					instance = *s.ValidatorInstance
-				}
 				vname := validatorNodeName(nodeSet, s.ValidatorGroup, instance)
 				for _, v := range nodeSet.Status.Validators {
 					if v.Name == vname && v.PubKey != "" {

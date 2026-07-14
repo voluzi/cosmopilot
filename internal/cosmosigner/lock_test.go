@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -52,7 +53,7 @@ func TestReadSignerLockPreservesNilStorageClass(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
 		WithObjects(signerSTS(name, ns, owner, 3, "10Gi", nil)).Build()
 
-	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, nil)
+	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestReadSignerLockIgnoresQuiescedReplicas(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
 		WithObjects(signerSTS(name, ns, owner, 0, "10Gi", ptr.To("fast"))).Build()
 
-	_, _, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, ptr.To("fast"))
+	_, _, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestReadSignerLockIgnoresQuiescedReplicas(t *testing.T) {
 // TestReadSignerLockNoSignerState verifies a missing StatefulSet reports nothing (true first rollout).
 func TestReadSignerLockNoSignerState(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
-	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, fakeOwner("cs", types.UID("u")), "default", "cs-signer", nil)
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, fakeOwner("cs", types.UID("u")), "default", "cs-signer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestReadSignerLockIgnoresForeignStatefulSet(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
 		WithObjects(signerSTS(name, ns, other, 5, "20Gi", nil)).Build()
 
-	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name, nil)
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,40 +120,30 @@ func TestReadSignerLockIgnoresForeignStatefulSet(t *testing.T) {
 	}
 }
 
-// TestReadSignerLockRecoversFromOrphanedOwnedPVCs verifies that when the StatefulSet is gone but this
-// owner's per-pod raft-state PVCs survive, the lock is recovered from those claims (replica count =
-// number of claims, size/class from a claim) rather than falling back to the spec — a fresh
-// StatefulSet would re-bind them, so the recorded lock must match their membership and size/class.
-func TestReadSignerLockRecoversFromOrphanedOwnedPVCs(t *testing.T) {
+// TestReadSignerLockRejectsOrphanedOwnedPVCs verifies that when the StatefulSet is gone but this
+// owner's per-pod raft-state PVCs survive, the lock FAILS CLOSED rather than adopting a membership the
+// claims cannot prove: a surviving subset of ordinals is indistinguishable from a smaller original
+// cluster (a truncated {0} looks the same whether the raft cluster was 1 replica or 3), so recreating a
+// StatefulSet from it could re-bind stale raft state under a membership it was never formed with.
+func TestReadSignerLockRejectsOrphanedOwnedPVCs(t *testing.T) {
 	const ns, name = "default", "cs-signer"
 	owner := fakeOwner("cs", types.UID("cs-uid"))
-	pvc := func(ordinal int) *corev1.PersistentVolumeClaim {
-		return &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      dataVolumeName + "-" + name + "-" + string(rune('0'+ordinal)),
-				Namespace: ns,
-				Labels:    pvcOwnerLabels(name, "cs-uid"),
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				StorageClassName: ptr.To("fast"),
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("5Gi")},
-				},
-			},
-		}
-	}
-	// No StatefulSet; three owned data PVCs survive.
-	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc(0), pvc(1), pvc(2)).Build()
 
-	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, ptr.To("fast"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !foundR || replicas != 3 {
-		t.Fatalf("replicas from orphaned PVCs: got %d found=%v, want 3 true", replicas, foundR)
-	}
-	if !foundS || size != "5Gi" || class == nil || *class != "fast" {
-		t.Fatalf("storage from orphaned PVCs: got %q class=%v found=%v", size, class, foundS)
+	// A "complete-looking" set {0,1,2} and a top-truncated {0} are BOTH rejected — neither proves the
+	// original raft membership without the StatefulSet or a recorded lock.
+	for _, ordinals := range [][]int{{0, 1, 2}, {0}} {
+		objs := make([]client.Object, 0, len(ordinals))
+		for _, o := range ordinals {
+			objs = append(objs, ownedDataPVC(name, ns, o, "cs-uid", "5Gi", ptr.To("fast")))
+		}
+		c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(objs...).Build()
+		_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
+		if err == nil {
+			t.Fatalf("orphaned owned PVC set %v must fail closed, got nil error", ordinals)
+		}
+		if foundR || foundS {
+			t.Fatalf("no lock may be reported for orphaned set %v", ordinals)
+		}
 	}
 }
 
@@ -169,7 +160,7 @@ func TestReadSignerLockIgnoresForeignOrphanedPVCs(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreign).Build()
-	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name, nil)
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,65 +185,6 @@ func ownedDataPVC(name, ns string, ordinal int, uid types.UID, size string, clas
 	}
 }
 
-// TestReadSignerLockRejectsGappedOrphanedPVCs verifies that a non-contiguous set of orphaned claims
-// (a claim deleted from the MIDDLE of the membership) is refused rather than mistaken for a smaller
-// raft cluster: the claim count cannot prove the original membership, so recovery fails closed.
-func TestReadSignerLockRejectsGappedOrphanedPVCs(t *testing.T) {
-	const ns, name = "default", "cs-signer"
-	owner := fakeOwner("cs", types.UID("cs-uid"))
-	// Ordinals {0, 2} — ordinal 1 was deleted from the middle.
-	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
-		WithObjects(
-			ownedDataPVC(name, ns, 0, "cs-uid", "5Gi", ptr.To("fast")),
-			ownedDataPVC(name, ns, 2, "cs-uid", "5Gi", ptr.To("fast")),
-		).Build()
-
-	_, _, _, foundR, _, err := ReadSignerLock(context.Background(), c, owner, ns, name, ptr.To("fast"))
-	if err == nil {
-		t.Fatal("a gapped orphaned-PVC set must fail closed, got nil error")
-	}
-	if foundR {
-		t.Fatal("no replica lock may be reported for a gapped set")
-	}
-}
-
-// TestReadSignerLockRecoveryUsesDesiredStorageClass verifies the orphaned-PVC recovery reports the
-// DESIRED template class, independent of the class materialised on the PVC. A recreated StatefulSet
-// re-binds the claims by name, so the class is fixed by the existing PVs; recording the desired value
-// keeps an unchanged (omitting) template from reading as a storage change, and needs no cluster-scoped
-// StorageClass lookup.
-func TestReadSignerLockRecoveryUsesDesiredStorageClass(t *testing.T) {
-	const ns, name = "default", "cs-signer"
-	owner := fakeOwner("cs", types.UID("cs-uid"))
-	// PVCs carry the admission-materialised default class "standard".
-	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
-		WithObjects(
-			ownedDataPVC(name, ns, 0, "cs-uid", "5Gi", ptr.To("standard")),
-			ownedDataPVC(name, ns, 1, "cs-uid", "5Gi", ptr.To("standard")),
-		).Build()
-
-	// Desired template omits the class (nil): recovery reports nil, not "standard".
-	_, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !foundR || !foundS || size != "5Gi" {
-		t.Fatalf("recovery: foundR=%v foundS=%v size=%q", foundR, foundS, size)
-	}
-	if class != nil {
-		t.Fatalf("omitting template must recover nil class, got %q", *class)
-	}
-
-	// Desired template names an explicit class: recovery reports that class.
-	_, _, class2, _, _, err := ReadSignerLock(context.Background(), c, owner, ns, name, ptr.To("gold"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if class2 == nil || *class2 != "gold" {
-		t.Fatalf("explicit desired class must round-trip, got %v", class2)
-	}
-}
-
 // TestReadSignerLockRejectsAmbiguousOrphanedPVCs verifies that an exact-name state PVC WITHOUT the
 // owner-UID label fails closed instead of falling through to a spec-derived lock: a fresh StatefulSet
 // would re-bind it by name, so recording a (possibly drifted) spec lock while it exists is unsafe.
@@ -268,7 +200,7 @@ func TestReadSignerLockRejectsAmbiguousOrphanedPVCs(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ambiguous).Build()
 
-	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, nil)
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
 	if err == nil {
 		t.Fatal("an unlabeled exact-name state PVC must fail closed, got nil error")
 	}

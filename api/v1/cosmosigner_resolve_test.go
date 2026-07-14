@@ -373,3 +373,46 @@ func TestGenesisValidatorPrivKeySecretsExcludesZeroInstance(t *testing.T) {
 	assert.True(t, active, "active group's genesis key must be collected")
 	assert.False(t, inactive, "zero-instance group's genesis key must be excluded")
 }
+
+// TestGenesisSentryEstablishmentIdentity verifies the marker helper returns an identity only for a
+// SOFTWARE sentry whose key is registered in init.genesisValidators (the case the controller can prove
+// from spec), and "" for validator-targeted signers, non-genesis sentries, and non-software sentries.
+// This is what SetEstablishedChainID records and what ensureCosmosigner backfills for a genesis-sentry
+// signer whose status entry is first created after establishment.
+func TestGenesisSentryEstablishmentIdentity(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+				GenesisValidators: []GenesisValidator{{PrivKeySecret: "genesis-key"}},
+			}},
+			Nodes: []NodeGroupSpec{
+				{Name: "gsentry", Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("genesis-key")}}}},
+				{Name: "fsentry", Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("free-key")}}}},
+			},
+		},
+	}
+
+	byGroup := map[string]ResolvedSigner{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if len(s.TargetGroups) == 1 {
+			byGroup[s.TargetGroups[0]] = s
+		}
+	}
+
+	// Genesis-registered software sentry: records its key identity.
+	gs := byGroup["gsentry"]
+	if got := nodeSet.GenesisSentryEstablishmentIdentity(gs); got == "" || got != gs.Identity() {
+		t.Fatalf("genesis sentry must record its identity, got %q", got)
+	}
+	// Non-genesis software sentry: records nothing.
+	if got := nodeSet.GenesisSentryEstablishmentIdentity(byGroup["fsentry"]); got != "" {
+		t.Fatalf("non-genesis sentry must record nothing, got %q", got)
+	}
+	// A validator-targeted signer: records nothing here (ValidatorTargetedIdentity handles it; nil marker
+	// is how the no-webhook ADD guard detects post-establishment validator additions).
+	validatorSigner := ResolvedSigner{ValidatorGroup: "validators", SoftwareKeySecret: "genesis-key", Spec: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}}}}
+	if got := nodeSet.GenesisSentryEstablishmentIdentity(validatorSigner); got != "" {
+		t.Fatalf("validator-targeted signer must record nothing via the sentry helper, got %q", got)
+	}
+}
