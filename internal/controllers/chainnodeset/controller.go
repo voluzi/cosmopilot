@@ -389,14 +389,24 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			// init.genesisValidators). A non-genesis sentry records "" and is unaffected; a post-establishment
 			// validator addition keeps a nil marker and is judged by the addition guard below instead.
 			if st.SigningDigest == "" && st.AtEstablishment != nil && *st.AtEstablishment != "" {
-				// Pin the served group+instance recorded at establishment, not just the identity: a signer
-				// targeting multiple groups could otherwise move validator-ness to a sibling group while
-				// keeping the same backend identity, and the identity check alone would still pass while the
-				// original on-chain validator lost its signing path.
-				stillValidator := s.TargetsValidator() &&
-					s.ValidatorGroup == st.ServingGroup &&
-					sameSignerInstance(s.ValidatorInstance, st.ServingInstance) &&
-					s.ValidatorTargetedIdentity() == *st.AtEstablishment
+				// The signer must still serve the recorded identity through the SAME group+instance it was
+				// pinned to at establishment: a signer targeting multiple groups could otherwise move
+				// validator-ness to a sibling group while keeping the same backend identity, and the identity
+				// check alone would pass while the original on-chain validator lost its signing path.
+				stillValidator := s.TargetsValidator() && s.ValidatorTargetedIdentity() == *st.AtEstablishment
+				if st.ServingGroup != "" {
+					stillValidator = stillValidator &&
+						s.ValidatorGroup == st.ServingGroup &&
+						sameSignerInstance(s.ValidatorInstance, st.ServingInstance)
+				} else {
+					// LEGACY marker: recorded before the served group/instance were persisted at
+					// establishment (validateForReconcile runs before any controller backfill, so it may be
+					// empty on the first post-upgrade reconcile). The group cannot be pinned, so require a
+					// SINGLE target — a single-target signer has no sibling to swap validator-ness with, while
+					// a multi-target one is unverifiable and rejected. reconcileSigner backfills the served
+					// group on rollout, after which the precise pin applies.
+					stillValidator = stillValidator && len(s.TargetGroups) == 1
+				}
 				stillGenesisSentry := nodeSet.GenesisSentryEstablishmentIdentity(s) == *st.AtEstablishment
 				if !stillValidator && !stillGenesisSentry {
 					return fmt.Errorf("cosmosigner %q was responsible for an on-chain consensus key at establishment but has not recorded a rollout digest (webhooks disabled): it must keep serving that exact validator/genesis key until the digest is recorded — a demotion, retarget, sibling-group swap, or key change here would leave the on-chain key without its signing path; repair with webhooks enabled", s.Name)

@@ -85,3 +85,21 @@ func TestRequireRaftTLSSecret(t *testing.T) {
 		t.Fatalf("complete raft TLS secret must be accepted, got %v", err)
 	}
 }
+
+// TestRequireServiceAccount verifies the ServiceAccount preflight: empty (namespace default) is
+// accepted, a missing named SA errors, and an existing one passes.
+func TestRequireServiceAccount(t *testing.T) {
+	const ns, name = "default", "signer-sa"
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
+	if err := RequireServiceAccount(context.Background(), c, ns, ""); err != nil {
+		t.Fatalf("empty SA (default) must be accepted, got %v", err)
+	}
+	if err := RequireServiceAccount(context.Background(), c, ns, name); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing SA must error, got %v", err)
+	}
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	cc := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sa).Build()
+	if err := RequireServiceAccount(context.Background(), cc, ns, name); err != nil {
+		t.Fatalf("existing SA must be accepted, got %v", err)
+	}
+}

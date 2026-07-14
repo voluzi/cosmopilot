@@ -819,3 +819,38 @@ func TestValidateForReconcileRejectsPreDigestSiblingSwap(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sibling-group swap")
 }
+
+// TestValidateForReconcileAllowsLegacyPreDigestSingleTarget verifies the pre-digest guard tolerates a
+// LEGACY establishment marker recorded before the served group/instance were persisted: an unchanged
+// single-target validator signer (no sibling to swap with) is admitted so the controller can backfill
+// the served group on rollout, while a multi-target legacy signer stays unverifiable and is rejected.
+func TestValidateForReconcileAllowsLegacyPreDigestSingleTarget(t *testing.T) {
+	// Single-target validator signer, marker recorded but served group cleared (legacy shape).
+	ns := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	ns.Status.Cosmosigners[0].ServingGroup = ""
+	ns.Status.Cosmosigners[0].ServingInstance = nil
+	_, err := validateForReconcile(ns)
+	require.NoError(t, err)
+
+	// Multi-target legacy signer: unverifiable without the served group, so rejected.
+	multi := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"validators", "others"},
+				Backend:    cosmosignerVaultBackend(),
+			},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "validators", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")}},
+				{Name: "others", Instances: ptr.To(1)},
+			},
+		},
+	}
+	multi.SetEstablishedChainID("test-localnet")
+	multi.Status.Cosmosigners[0].ServingGroup = "" // legacy shape
+	multi.Status.Cosmosigners[0].ServingInstance = nil
+	_, err = validateForReconcile(multi)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sibling-group swap")
+}

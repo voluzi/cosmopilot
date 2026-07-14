@@ -9,6 +9,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// RequireServiceAccount errors when a non-empty ServiceAccount name does not exist in the namespace —
+// the signer StatefulSet and its one-shot import pod run as it, so a missing one keeps Kubernetes from
+// starting/creating them. An empty name (the namespace default ServiceAccount) is accepted.
+func RequireServiceAccount(ctx context.Context, c client.Client, namespace, name string) error {
+	if name == "" {
+		return nil
+	}
+	sa := &corev1.ServiceAccount{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sa); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("cosmosigner serviceAccountName %q not found: create it before deploying the signer", name)
+		}
+		return err
+	}
+	return nil
+}
+
 // raftTLSKeys are the files the signer pod mounts from its raft mTLS Secret (the whole Secret is
 // mounted, so its data keys must be exactly these file names).
 var raftTLSKeys = []string{"tls.crt", "tls.key", "ca.crt"}

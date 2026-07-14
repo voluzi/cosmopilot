@@ -94,6 +94,11 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		if err := cosmosigner.RequireRaftTLSSecret(ctx, r.Client, nodeSet.GetNamespace(), s.Spec.RaftTLSSecret); err != nil {
 			return err
 		}
+		// The signer StatefulSet and import pod run as the configured ServiceAccount; a missing one keeps
+		// Kubernetes from starting them. Verify it before children are retargeted.
+		if err := cosmosigner.RequireServiceAccount(ctx, r.Client, nodeSet.GetNamespace(), s.Spec.GetServiceAccountName()); err != nil {
+			return err
+		}
 		// A Vault uploadGenerated signer imports the validator's own key; if that source secret is
 		// missing and no controller flow will create it, the signer can never roll out, so fail before
 		// children switch. But the source is only bootstrap material: once the import for the CURRENT
@@ -399,23 +404,32 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			if s.ValidatorInstance != nil {
 				instance = *s.ValidatorInstance
 			}
-			// Whether THIS instance generates its own key must come from its PER-INSTANCE config, not the
-			// group's: in a multi-instance genesis-init group only instance 0 keeps Init, so the other
-			// instances' keys are pre-created before genesis and never regenerated once the chain is
-			// established — treating them as "pending" would let the signer deploy with a missing key.
+			// `generates` is the PER-INSTANCE determination (used once the chain exists): in a multi-instance
+			// genesis-init group only instance 0 keeps Init after derivation, so a nonzero instance's key is
+			// terminal (never regenerated) post-genesis and a missing Secret must fail. `groupInitializes`
+			// is the GROUP-level Init: ensureValidator generates ALL of a genesis-init group's instance keys
+			// together during genesis bootstrap, so BEFORE the chain ID exists every instance's key is still
+			// pending (ensureValidator has not run yet) regardless of the derived per-instance config.
 			generates := false
+			groupInitializes := false
 			if s.ValidatorGroup == appsv1.ReservedValidatorGroupName {
 				v := nodeSet.Spec.Validator
 				generates = v != nil && (v.Init != nil || v.CreateValidator != nil)
+				groupInitializes = v != nil && v.Init != nil
 			} else {
 				for _, g := range nodeSet.Spec.Nodes {
 					if g.Name == s.ValidatorGroup && g.Validator != nil {
 						cfg := deriveGroupValidatorConfig(nodeSet, g.Name, instance, g.GetInstances(), g.Validator)
 						generates = cfg.Init != nil || cfg.CreateValidator != nil
+						groupInitializes = g.Validator.Init != nil
 					}
 				}
 			}
-			if generates {
+			switch {
+			case groupInitializes && nodeSet.Status.ChainID == "":
+				// Pre-genesis: ensureValidator has not yet created any of this init group's instance keys.
+				keyFlowPending = true
+			case generates:
 				keyFlowPending = true
 				vname := validatorNodeName(nodeSet, s.ValidatorGroup, instance)
 				for _, v := range nodeSet.Status.Validators {

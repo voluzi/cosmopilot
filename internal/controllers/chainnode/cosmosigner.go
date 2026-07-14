@@ -104,6 +104,24 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	if err != nil {
 		return false, err
 	}
+	// The signer StatefulSet and import pod run as the configured ServiceAccount; a missing one keeps
+	// Kubernetes from starting them.
+	if err := cosmosigner.RequireServiceAccount(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.GetServiceAccountName()); err != nil {
+		return false, err
+	}
+	// Run the same deploy-time blockers ApplyOwned/runJob would hit (name collision, foreign/ambiguous
+	// raft-state PVCs) BEFORE recording locks or importing into Vault — otherwise a foreign same-name
+	// signer would persist locks (and, for uploadGenerated, mutate the Vault key) for a signer ApplyOwned
+	// then refuses. Only an uploadGenerated signer runs the one-shot <name>-import pod.
+	usesImportPod := chainNode.Spec.Cosmosigner.VaultUploadsGenerated(chainNode.ShouldInitGenesis())
+	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), usesImportPod); err != nil {
+		return false, err
+	}
+	// Preflight the uploadGenerated import SOURCE (read-only) before locks/import: a terminally missing
+	// source key would otherwise be found only inside maybeImportCosmosignerKey, after locks are recorded.
+	if err := r.preflightCosmosignerImportSource(ctx, chainNode); err != nil {
+		return false, err
+	}
 
 	// INITIALISE the raft membership/PVC-template locks BEFORE creating any signer resource. The
 	// values come from the live signer state (if any), so an existing unrecorded StatefulSet is not
@@ -349,6 +367,36 @@ func (r *Reconciler) cosmosignerImportSourcePending(chainNode *appsv1.ChainNode)
 		return false
 	}
 	return chainNode.Spec.Validator.Init != nil || chainNode.Spec.Validator.CreateValidator != nil
+}
+
+// preflightCosmosignerImportSource errors when a Vault uploadGenerated signer's source key Secret is
+// TERMINALLY missing — read-only, so it can run before the raft/PVC locks are recorded and before any
+// import mutates Vault. It mirrors maybeImportCosmosignerKey's terminal-missing path: a completed import
+// for the current target (annotation matches) or a genuinely pending key-generation flow is fine; only a
+// source that no controller flow will create is an error.
+func (r *Reconciler) preflightCosmosignerImportSource(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	c := chainNode.Spec.Cosmosigner
+	if !c.VaultUploadsGenerated(chainNode.ShouldInitGenesis()) || chainNode.Status.CosmosignerSigningDigest != "" {
+		return nil
+	}
+	sourceSecret := r.cosmosignerNodeKeySecret(chainNode)
+	if appsv1.ImportAnnotationMatchesTarget(chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported], c.Backend.Vault.ImportTargetFingerprint(sourceSecret)) {
+		return nil
+	}
+	if r.cosmosignerImportSourcePending(chainNode) {
+		return nil
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: sourceSecret}, secret); err != nil {
+		if errors.IsNotFound(err) {
+			return fmt.Errorf("cosmosigner Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", sourceSecret, PrivKeyFilename)
+		}
+		return err
+	}
+	if len(secret.Data[PrivKeyFilename]) == 0 {
+		return fmt.Errorf("cosmosigner Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", sourceSecret, PrivKeyFilename)
+	}
+	return nil
 }
 
 // maybeImportCosmosignerKey imports the node's generated consensus key into Vault once, when
