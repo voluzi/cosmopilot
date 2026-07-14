@@ -91,6 +91,20 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return false, nil
 	}
 
+	// Preflight deployability BEFORE the immutable raft/PVC locks are recorded below, so a signer that
+	// cannot deploy yet (a missing/incomplete raft-TLS Secret, or a missing backend auth/software Secret
+	// resolved inside cosmosignerParams) fails WITHOUT first trapping the operator into the
+	// initially-chosen replica count / storage template — which the webhook would then refuse to change
+	// even though no signer was ever created. The raft mTLS Secret is mounted at pod startup; the params
+	// resolution verifies the backend Secrets. Neither depends on the recorded locks.
+	if err := cosmosigner.RequireRaftTLSSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.RaftTLSSecret); err != nil {
+		return false, err
+	}
+	params, err := r.cosmosignerParams(ctx, chainNode)
+	if err != nil {
+		return false, err
+	}
+
 	// INITIALISE the raft membership/PVC-template locks BEFORE creating any signer resource. The
 	// values come from the live signer state (if any), so an existing unrecorded StatefulSet is not
 	// "re-locked" to a different replica count or PVC template than the one the raft cluster was
@@ -124,19 +138,6 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 			return false, err
 		}
 		return true, nil
-	}
-
-	// The raft mTLS Secret (when set) is mounted at signer pod startup; verify it before creating any
-	// signer resource so a missing/incomplete Secret does not create a StatefulSet that never comes up
-	// (and, once ensurePod retargets this node, strip its local signing path). Mirrors the auth-Secret
-	// preflight in cosmosignerBackend and the ChainNodeSet preflight.
-	if err := cosmosigner.RequireRaftTLSSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.RaftTLSSecret); err != nil {
-		return false, err
-	}
-
-	params, err := r.cosmosignerParams(ctx, chainNode)
-	if err != nil {
-		return false, err
 	}
 
 	importPending, err := r.maybeImportCosmosignerKey(ctx, chainNode, params)
