@@ -243,6 +243,16 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 				id = nodeSet.genesisSentryEstablishmentIdentity(s)
 			}
 			st.AtEstablishment = &id
+			// Pin the served group/instance for a validator-targeted signer, so the pre-digest no-webhook
+			// guard can reject moving validator-ness to a SIBLING target group before the rollout digest
+			// records the served group. Without this, a signer targeting multiple groups could swap which
+			// group is the validator while keeping the same backend identity — the identity check alone
+			// would still pass. Recorded once, alongside the write-once marker; the rollout later records
+			// the same values with the digest.
+			if s.ValidatorGroup != "" {
+				st.ServingGroup = s.ValidatorGroup
+				st.ServingInstance = s.ValidatorInstance
+			}
 		}
 	}
 }

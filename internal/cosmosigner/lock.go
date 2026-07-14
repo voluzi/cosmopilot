@@ -45,13 +45,18 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 			// membership and later scale the surviving PVCs up with the wrong member list. So fail closed:
 			// the operator lets the re-import finish (which scales back to the real count) or restores the
 			// recorded lock before the membership can be re-established.
-			if sts.Spec.Replicas == nil || *sts.Spec.Replicas == 0 {
+			// Kubernetes defaults an omitted spec.replicas to 1, so nil is a live single-replica signer,
+			// not a quiesce; only a resolved count of 0 is the transient scale-down we cannot lock from.
+			replicas = 1
+			if sts.Spec.Replicas != nil {
+				replicas = *sts.Spec.Replicas
+			}
+			if replicas == 0 {
 				return 0, "", nil, false, false, fmt.Errorf(
 					"cosmosigner %q StatefulSet is quiesced (replicas=0) and no raft-membership lock is recorded: cannot "+
 						"establish the lock from a scaled-down signer; wait for the in-flight re-import to complete or restore "+
 						"the recorded lock before reconciling", name)
 			}
-			replicas = *sts.Spec.Replicas
 			foundReplicas = true
 			for _, t := range sts.Spec.VolumeClaimTemplates {
 				if t.Name == dataVolumeName {

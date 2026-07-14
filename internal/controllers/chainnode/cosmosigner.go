@@ -126,6 +126,14 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		return true, nil
 	}
 
+	// The raft mTLS Secret (when set) is mounted at signer pod startup; verify it before creating any
+	// signer resource so a missing/incomplete Secret does not create a StatefulSet that never comes up
+	// (and, once ensurePod retargets this node, strip its local signing path). Mirrors the auth-Secret
+	// preflight in cosmosignerBackend and the ChainNodeSet preflight.
+	if err := cosmosigner.RequireRaftTLSSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.RaftTLSSecret); err != nil {
+		return false, err
+	}
+
 	params, err := r.cosmosignerParams(ctx, chainNode)
 	if err != nil {
 		return false, err

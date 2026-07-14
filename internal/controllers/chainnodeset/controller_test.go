@@ -736,7 +736,7 @@ func TestValidateForReconcileProtectsGenesisSentryKey(t *testing.T) {
 	changed.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("other-key")
 	_, err = validateForReconcile(changed)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must keep serving that validator/genesis key")
+	assert.Contains(t, err.Error(), "must keep serving that exact validator/genesis key")
 
 	// Removing it (genesis validator loses its only signing path): rejected.
 	removed := base.DeepCopy()
@@ -766,6 +766,14 @@ func TestValidateForReconcileProtectsGenesisSentryKey(t *testing.T) {
 func TestValidateForReconcileRejectsPreDigestValidatorDemotion(t *testing.T) {
 	// Validator signer present at establishment (marker recorded), not yet rolled out (no digest).
 	ns := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	// The fixture must record the establishment marker + served group, or the guard would be a no-op and
+	// the test would pass for the wrong reason.
+	require.Len(t, ns.Status.Cosmosigners, 1)
+	require.NotNil(t, ns.Status.Cosmosigners[0].AtEstablishment)
+	require.NotEmpty(t, *ns.Status.Cosmosigners[0].AtEstablishment)
+	require.Equal(t, "validators", ns.Status.Cosmosigners[0].ServingGroup)
+	require.Empty(t, ns.Status.Cosmosigners[0].SigningDigest, "must be pre-digest")
+
 	_, err := validateForReconcile(ns)
 	require.NoError(t, err)
 
@@ -774,5 +782,40 @@ func TestValidateForReconcileRejectsPreDigestValidatorDemotion(t *testing.T) {
 	demoted.Spec.Nodes[0].Validator = nil
 	_, err = validateForReconcile(demoted)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must keep serving that validator/genesis key")
+	assert.Contains(t, err.Error(), "must keep serving that exact validator/genesis key")
+}
+
+// TestValidateForReconcileRejectsPreDigestSiblingSwap verifies the pre-digest guard pins the SERVED
+// group: a signer targeting multiple groups cannot move validator-ness from the originally served group
+// to a sibling (keeping the same backend identity) before its rollout digest is recorded, which would
+// otherwise pass the identity check while stripping the original validator's signing path.
+func TestValidateForReconcileRejectsPreDigestSiblingSwap(t *testing.T) {
+	ns := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"validators", "others"},
+				Backend:    cosmosignerVaultBackend(),
+			},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "validators", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")}},
+				{Name: "others", Instances: ptr.To(1)},
+			},
+		},
+	}
+	ns.SetEstablishedChainID("test-localnet")
+	require.Equal(t, "validators", ns.Status.Cosmosigners[0].ServingGroup)
+
+	// Pre-digest, unchanged: accepted.
+	_, err := validateForReconcile(ns)
+	require.NoError(t, err)
+
+	// Swap validator-ness to the sibling group (same Vault identity), still pre-digest: rejected.
+	swapped := ns.DeepCopy()
+	swapped.Spec.Nodes[0].Validator = nil
+	swapped.Spec.Nodes[1].Validator = &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("other-priv-key")}
+	_, err = validateForReconcile(swapped)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sibling-group swap")
 }
