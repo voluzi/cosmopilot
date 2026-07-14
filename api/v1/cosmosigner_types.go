@@ -204,11 +204,14 @@ type CosmosignerStatus struct {
 	// +optional
 	SigningDigest string `json:"signingDigest,omitempty"`
 
-	// AtEstablishment is a write-once record of this signer's VALIDATOR-TARGETED identity at the
-	// moment the chain ID was first recorded (empty string when it targeted no validator then,
-	// including sentry mode). It lets the no-webhook path tell an establishing validator signer
-	// (admitted) apart from one introduced afterwards (rejected unless the backend provably imports
-	// the registered key). Absent for a signer added after establishment.
+	// AtEstablishment is a write-once record of the on-chain consensus identity this signer was
+	// responsible for at the moment the chain ID was first recorded: its validator-targeted identity,
+	// or — for a SENTRY signer whose key is registered in the immutable genesis validator set — that
+	// sentry key's identity. It is the empty string when the signer was responsible for no on-chain key
+	// then (a sentry signer whose key is not in genesis). It lets the no-webhook path tell an
+	// establishing signer (admitted) apart from one introduced afterwards (rejected unless the backend
+	// provably imports the registered key), and reject a later key change/removal of a genesis-registered
+	// sentry signer. Absent for a signer added after establishment.
 	// +optional
 	AtEstablishment *string `json:"atEstablishment,omitempty"`
 

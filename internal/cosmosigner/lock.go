@@ -6,16 +6,10 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-// defaultStorageClassAnnotation marks the cluster's default StorageClass (the class the API server
-// materialises into a PVC that omits storageClassName).
-const defaultStorageClassAnnotation = "storageclass.kubernetes.io/is-default-class"
 
 // ReadSignerLock initialises the per-signer Replicas/StateStorageSize/ClassName from the live signer
 // state owned by `owner` (the StatefulSet, when present). It falls back to no value (found=false) when
@@ -33,9 +27,11 @@ const defaultStorageClassAnnotation = "storageclass.kubernetes.io/is-default-cla
 // The storage class is returned as a *string so a template that OMITS storageClassName (the normal
 // "use the cluster default" case) round-trips as nil rather than "": callers and the no-webhook guard
 // distinguish nil (default class) from an explicit "" (no class). `desiredClass` is the class the
-// current spec's template would use; it lets the orphaned-PVC recovery path report the desired value
-// (rather than the admission-materialised default) when the two are equivalent, so an unchanged
-// template is not misread as a storage change.
+// current spec's template would use; the orphaned-PVC recovery path reports it verbatim, because a
+// recreated StatefulSet re-binds the surviving claims by name (its template class governs only new
+// ordinals, and the membership is locked) — so the recovered cluster's class is fixed by the existing
+// PVs, and recording the desired value keeps an unchanged template from reading as a storage change
+// without needing a cluster-scoped StorageClass lookup.
 func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string, desiredClass *string) (
 	replicas int32, storageSize string, storageClass *string, foundReplicas, foundStorage bool, err error,
 ) {
@@ -66,10 +62,9 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 	case errors.IsNotFound(stsErr):
 		// The StatefulSet is gone, but StatefulSet PVCs are not garbage-collected with it, so this
 		// owner's per-pod raft-state claims may survive (a manually deleted StatefulSet, or a partial
-		// teardown). A fresh StatefulSet would re-bind them, inheriting their raft membership and
-		// size/class, so recover the lock from those OWNED exact-match claims rather than falling back
-		// to the (possibly changed) spec: the surviving claim count is the membership the cluster was
-		// formed with, and each claim carries its own size/class.
+		// teardown). A fresh StatefulSet would re-bind them, inheriting their raft membership, so recover
+		// the lock from those OWNED exact-match claims rather than falling back to the (possibly changed)
+		// spec: the surviving claim count is the membership the cluster was formed with.
 		pvcs := &corev1.PersistentVolumeClaimList{}
 		if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 			return 0, "", nil, false, false, err
@@ -78,7 +73,21 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 		maxOrdinal := -1
 		var sample *corev1.PersistentVolumeClaim
 		for i := range pvcs.Items {
-			ordinal, ok := ownedStatefulSetDataPVCOrdinal(&pvcs.Items[i], owner, name)
+			pvc := &pvcs.Items[i]
+			// An exact-name state PVC WITHOUT this owner's UID label is ambiguous: a fresh StatefulSet
+			// would still bind it by name, but its raft membership cannot be attributed to this owner
+			// (ApplyOwned blocks on it for exactly this reason). Falling through to record a spec-derived
+			// lock while it exists would let a spec that drifted before this reconcile pass validation,
+			// and a later manual adoption of the claim would then re-bind old raft state under that wrong
+			// lock. Fail closed instead — mirroring the teardown/adopt path — so no lock is recorded
+			// until the operator deletes or labels the claim.
+			if isAmbiguousLegacyDataPVC(pvc, name) {
+				return 0, "", nil, false, false, fmt.Errorf(
+					"cosmosigner %q has state PVC %q without an owner-UID label: cannot attribute its raft membership; "+
+						"delete the claim or label it with this owner's UID before reconciling",
+					name, pvc.GetName())
+			}
+			ordinal, ok := ownedStatefulSetDataPVCOrdinal(pvc, owner, name)
 			if !ok {
 				continue
 			}
@@ -87,7 +96,7 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 				maxOrdinal = ordinal
 			}
 			if sample == nil {
-				sample = &pvcs.Items[i]
+				sample = pvc
 			}
 		}
 		if owned > 0 {
@@ -111,16 +120,15 @@ func ReadSignerLock(ctx context.Context, c client.Client, owner metav1.Object, n
 			if q, ok := sample.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
 				storageSize = q.String()
 			}
-			// A PVC created from a template that OMITTED storageClassName carries the admission-filled
-			// cluster default class, while the desired template still omits it. Reporting the raw default
-			// class would make the no-webhook guard reject an unchanged template as a storage change, so
-			// map the recovered class back to the desired value when the two are equivalent under
-			// default-class semantics; report the raw class only when it genuinely differs.
-			recovered, err := reconcileRecoveredStorageClass(ctx, c, sample.Spec.StorageClassName, desiredClass)
-			if err != nil {
-				return 0, "", nil, false, false, err
-			}
-			storageClass = recovered
+			// Report the DESIRED storage class, not the one read off the PVC. A fresh StatefulSet re-binds
+			// these claims by NAME regardless of its template's storageClassName (which only governs claims
+			// created for NEW ordinals — and the membership is locked above, so none are), so the class the
+			// recovered cluster runs on is fixed by the existing PVs, not the template. Recording the raw
+			// PVC class would also misread an omitting template (whose PVC carries the admission-materialised
+			// cluster default) as a storage change, and reading it back would need a cluster-scoped
+			// StorageClass lookup the operator is not granted. The desired value round-trips against the
+			// no-webhook guard while a genuine size change is still caught above.
+			storageClass = desiredClass
 			foundStorage = true
 		}
 		// No StatefulSet and no owned claims: a true first rollout, caller uses the spec.
@@ -137,42 +145,4 @@ func ownedStatefulSetDataPVCOrdinal(pvc *corev1.PersistentVolumeClaim, owner met
 		return 0, false
 	}
 	return statefulSetDataPVCOrdinal(pvc.GetName(), name)
-}
-
-// reconcileRecoveredStorageClass maps the storage class read off an orphaned PVC back to the desired
-// template's class when the two are equivalent under Kubernetes default-class semantics: a template
-// that omits storageClassName binds a PVC carrying the admission-filled cluster default, so reporting
-// that default verbatim would later read as a storage change against the still-omitted template. It
-// returns `desiredClass` when they match exactly, or when `desiredClass` omits the class and the PVC's
-// class is the cluster default; otherwise it returns the PVC's class unchanged (a genuine difference
-// the guard must catch).
-func reconcileRecoveredStorageClass(ctx context.Context, c client.Client, pvcClass, desiredClass *string) (*string, error) {
-	if ptr.Equal(pvcClass, desiredClass) {
-		return desiredClass, nil
-	}
-	if (desiredClass == nil || *desiredClass == "") && pvcClass != nil && *pvcClass != "" {
-		def, err := defaultStorageClassName(ctx, c)
-		if err != nil {
-			return nil, err
-		}
-		if def != "" && *pvcClass == def {
-			return desiredClass, nil
-		}
-	}
-	return pvcClass, nil
-}
-
-// defaultStorageClassName returns the name of the cluster's default StorageClass (annotated
-// is-default-class=true), or "" when none is marked default.
-func defaultStorageClassName(ctx context.Context, c client.Client) (string, error) {
-	list := &storagev1.StorageClassList{}
-	if err := c.List(ctx, list); err != nil {
-		return "", err
-	}
-	for i := range list.Items {
-		if list.Items[i].Annotations[defaultStorageClassAnnotation] == "true" {
-			return list.Items[i].Name, nil
-		}
-	}
-	return "", nil
 }

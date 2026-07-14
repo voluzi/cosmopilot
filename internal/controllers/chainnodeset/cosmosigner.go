@@ -75,9 +75,16 @@ func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv
 // validator key-generation flow that has not run yet) are NOT failures.
 func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	for _, s := range nodeSet.ResolveCosmosigners() {
-		// Resolving params verifies a software backend's key secret exists (unless a validator
-		// key-generation flow is still pending — handled inside cosmosignerBackend).
+		// Resolving params verifies a software backend's key secret and the backend's referenced auth
+		// Secrets (Vault token/certificate, GCP credentials) exist (unless a validator key-generation
+		// flow is still pending — handled inside cosmosignerBackend).
 		if _, err := r.cosmosignerParams(ctx, nodeSet, s); err != nil {
+			return err
+		}
+		// Run the same deploy-time blockers ApplyOwned would hit when it creates the StatefulSet (name
+		// collision, foreign/ambiguous raft-state PVCs), so a signer that can never be created does not
+		// cause children to be retargeted to a remote signer that will never come up.
+		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name); err != nil {
 			return err
 		}
 		// A Vault uploadGenerated signer imports the validator's own key; if that source secret is
@@ -391,6 +398,15 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 
 	case c.UsesVaultBackend():
 		v := c.Backend.Vault
+		// The Vault token authenticates every signing call and the optional CA certificate is mounted at
+		// startup; a missing Secret would roll out a signer that can never reach Vault. Verify them before
+		// deploy (and, via preflightCosmosigners, before children are retargeted).
+		if err := r.requireSecretSelector(ctx, nodeSet.GetNamespace(), s.Name, "Vault token", v.TokenSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
+		if err := r.requireSecretSelector(ctx, nodeSet.GetNamespace(), s.Name, "Vault certificate", v.CertificateSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
 		return cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
 			Address:           v.Address,
 			KeyName:           v.KeyName,
@@ -403,6 +419,10 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
+		// The GCP credentials Secret (when set — omitted for Workload Identity) is mounted at startup.
+		if err := r.requireSecretSelector(ctx, nodeSet.GetNamespace(), s.Name, "GCP credentials", g.CredentialsSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
 		return cosmosigner.Backend{GCP: &cosmosigner.GcpBackend{
 			KeyVersion:        g.KeyVersion,
 			CredentialsSecret: g.CredentialsSecret,
@@ -609,6 +629,23 @@ func signerTargetInitializesGenesis(nodeSet *appsv1.ChainNodeSet, s appsv1.Resol
 		}
 	}
 	return false
+}
+
+// requireSecretSelector errors when a referenced Secret key is absent, so a signer that mounts a
+// missing auth Secret is caught at preflight instead of crash-looping after deploy. A nil selector (an
+// optional reference left unset) is accepted.
+func (r *Reconciler) requireSecretSelector(ctx context.Context, namespace, signer, purpose string, sel *corev1.SecretKeySelector) error {
+	if sel == nil {
+		return nil
+	}
+	exists, err := r.secretHasKey(ctx, namespace, sel.Name, sel.Key)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("cosmosigner %q %s secret %q is missing key %q: provide it before deploying the signer", signer, purpose, sel.Name, sel.Key)
+	}
+	return nil
 }
 
 // secretHasKey reports whether the named secret exists and contains a non-empty value for key.

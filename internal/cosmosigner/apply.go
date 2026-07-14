@@ -17,6 +17,31 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
 
+// PreflightDeployable reports (as an error) whether the signer named `name` can be deployed by owner,
+// running the SAME blocking checks ApplyOwned performs when it creates the signer StatefulSet — the
+// name-collision guard and the foreign/ambiguous raft-state PVC guard — without applying anything. The
+// ChainNodeSet controller calls this BEFORE it retargets child validators to the remote signer, so a
+// signer that ApplyOwned would later refuse to create (a stale foreign `data-<signer>-<ordinal>` claim,
+// or a same-name StatefulSet owned by another CR) does not leave a validator with neither its local key
+// nor a deployable signer. When this owner already controls the StatefulSet (steady state / update
+// path), there is nothing to block, so it returns nil.
+func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+	sts := &appsv1.StatefulSet{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts)
+	switch {
+	case err == nil:
+		if !metav1.IsControlledBy(sts, owner) {
+			return fmt.Errorf("cosmosigner resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", name)
+		}
+		return nil
+	case errors.IsNotFound(err):
+		// A fresh deploy: ApplyOwned's Create path runs exactly this guard.
+		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
+	default:
+		return err
+	}
+}
+
 // ApplyOwned creates or updates a cosmosigner-managed object owned by owner. It refuses to
 // overwrite an object owned by a different controller (a same-name CR collision), preserves
 // StatefulSet fields Kubernetes forbids updating, and skips the write entirely when nothing

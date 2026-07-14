@@ -649,5 +649,111 @@ func TestValidateForReconcileRejectsLegacyDigestDemotion(t *testing.T) {
 		"test premise: the digest must be unchanged by the demotion")
 	_, err = validateForReconcile(demoted)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no longer targets a validator")
+	assert.Contains(t, err.Error(), "validator target cannot be verified from status alone")
+}
+
+// TestValidateForReconcileRejectsLegacyMultiTargetDigestSwap verifies that a LEGACY-digest signer
+// (SigningDigest recorded, serving fields empty) that targets MULTIPLE groups is rejected even when its
+// digest is unchanged: the digest hashes the backend identity, replica count and target-group NAMES —
+// not which targeted group is the validator — so a no-webhook edit could have swapped validator-ness
+// between the targets (e.g. served group a -> b) with the digest intact, which status alone cannot
+// disprove. Only a single-target legacy signer (no sibling to swap with) is admitted for backfill.
+func TestValidateForReconcileRejectsLegacyMultiTargetDigestSwap(t *testing.T) {
+	ns := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"validators", "others"},
+				Backend:    cosmosignerVaultBackend(),
+			},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "validators", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")}},
+				{Name: "others", Instances: ptr.To(1)},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
+	}
+	// Legacy status: digest recorded, no serving identity/group/instance.
+	ns.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name:             "test-nodeset-signer",
+		Replicas:         ptr.To(int32(1)),
+		StateStorageSize: "1Gi",
+		SigningDigest:    resolveSingleSigner(t, ns).Digest(),
+	}}
+
+	// Unchanged, but multi-target legacy: unverifiable -> rejected.
+	_, err := validateForReconcile(ns)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validator target cannot be verified from status alone")
+}
+
+// genesisSentryNodeSet builds an ESTABLISHED ChainNodeSet whose legacy validator registers `genesisKey`
+// in init.genesisValidators, with a sentry-mode software signer (over a non-validator group) using
+// `sentryKey`. SetEstablishedChainID records the sentry signer's at-establishment identity — its genesis
+// key when sentryKey is registered in genesis, else the empty (unprotected) marker.
+func genesisSentryNodeSet(genesisKey, sentryKey string) *appsv1.ChainNodeSet {
+	ns := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			App: appsv1.AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+				ChainID:     "test-localnet",
+				Assets:      []string{"1stake"},
+				StakeAmount: "1stake",
+				GenesisValidators: []appsv1.GenesisValidator{{
+					PrivKeySecret:         genesisKey,
+					AccountMnemonicSecret: "mn",
+					Moniker:               "preserved",
+					Assets:                []string{"1stake"},
+					StakeAmount:           "1stake",
+				}},
+			}},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name:        "sentries",
+				Instances:   ptr.To(3),
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(sentryKey)}}},
+			}},
+		},
+	}
+	ns.SetEstablishedChainID("test-localnet")
+	return ns
+}
+
+// TestValidateForReconcileProtectsGenesisSentryKey verifies the no-webhook path protects a sentry-mode
+// signer whose key is registered in the immutable genesis validator set — which records no SigningDigest,
+// so the digest-based guards never fire for it. Its key cannot change and it cannot be removed; a sentry
+// whose key is not in genesis stays freely rotatable and removable.
+func TestValidateForReconcileProtectsGenesisSentryKey(t *testing.T) {
+	base := genesisSentryNodeSet("genesis-sentry-key", "genesis-sentry-key")
+
+	// Unchanged: accepted.
+	_, err := validateForReconcile(base)
+	require.NoError(t, err)
+
+	// Rotating the genesis-registered sentry key: rejected.
+	changed := base.DeepCopy()
+	changed.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("other-key")
+	_, err = validateForReconcile(changed)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sentry key is immutable")
+
+	// Removing it (genesis validator loses its only signing path): rejected.
+	removed := base.DeepCopy()
+	removed.Spec.Nodes[0].Cosmosigner = nil
+	_, err = validateForReconcile(removed)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "genesis validator set")
+
+	// A sentry whose key is NOT in genesis stays rotatable and removable.
+	free := genesisSentryNodeSet("some-genesis-key", "free-key")
+	freeChanged := free.DeepCopy()
+	freeChanged.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key-2")
+	_, err = validateForReconcile(freeChanged)
+	require.NoError(t, err)
+
+	freeRemoved := free.DeepCopy()
+	freeRemoved.Spec.Nodes[0].Cosmosigner = nil
+	_, err = validateForReconcile(freeRemoved)
+	require.NoError(t, err)
 }

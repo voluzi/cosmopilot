@@ -235,10 +235,21 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 		return
 	}
 	nodeSet.Status.ChainID = chainID
+	genesisSecrets := nodeSet.genesisValidatorPrivKeySecrets()
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		st := nodeSet.EnsureCosmosignerStatus(s.Name)
 		if st.AtEstablishment == nil {
 			id := s.ValidatorTargetedIdentity()
+			// A SENTRY signer whose key is registered in the immutable genesis validator set is also
+			// responsible for an on-chain consensus key, but ValidatorTargetedIdentity() is "" for it.
+			// Record its identity so the no-webhook path can reject a later key change or removal (a
+			// genesis validator losing its only signing path). A sentry key NOT in genesis records "" and
+			// stays freely rotatable.
+			if id == "" && s.SoftwareKeySecret != "" {
+				if _, genesis := genesisSecrets[s.SoftwareKeySecret]; genesis {
+					id = s.Identity()
+				}
+			}
 			st.AtEstablishment = &id
 		}
 	}

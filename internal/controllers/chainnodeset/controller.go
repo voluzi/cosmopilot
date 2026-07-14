@@ -329,6 +329,13 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		if st.ServingIdentity == "" && st.SigningDigest != "" {
 			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): it served a validator but its recorded identity predates this version and cannot be verified — restore the signer so the controller can record it, or remove it with webhooks enabled", st.Name)
 		}
+		// A SENTRY signer whose key was registered in the immutable genesis validator set at
+		// establishment (AtEstablishment holds its identity; validator-targeted signers are handled by
+		// the ServingIdentity check above) cannot be removed: the genesis validator would be left with no
+		// signing path. A non-genesis sentry records an empty marker and is freely removable.
+		if st.ServingIdentity == "" && st.AtEstablishment != nil && *st.AtEstablishment != "" {
+			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): its key is registered in the immutable genesis validator set, so removing it would leave that genesis validator without a signer — remove it with webhooks enabled, or keep the signer", st.Name)
+		}
 	}
 
 	// PRESENT signers: modification and post-establishment-addition guards.
@@ -347,6 +354,17 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			if st.StateStorageSize != "" &&
 				!appsv1.CosmosignerStateStorageEqual(st.StateStorageSize, st.StateStorageClassName, s.Spec.GetStateStorageSize(), s.Spec.StorageClassName) {
 				return fmt.Errorf("cosmosigner %q state storage (size/class) is immutable after deployment (webhooks disabled): its raft state PVCs cannot be resized or moved — remove the signer and re-add it", s.Name)
+			}
+			// A SENTRY signer whose key was in the genesis validator set at establishment (AtEstablishment
+			// holds its identity) cannot switch to a different consensus key: sentries record no signing
+			// digest, so the digest-based immutability below never fires for them, yet the key is fixed
+			// on-chain. Validator-targeted signers keep AtEstablishment == ValidatorTargetedIdentity and
+			// are covered by the digest/serving checks below; a non-genesis sentry records "" and stays
+			// rotatable. A post-establishment sentry has no entry here (genesis keys cannot be added after
+			// establishment — validateNoWebhookGenesisInitState), so nil is correctly unprotected.
+			if !s.TargetsValidator() && st.AtEstablishment != nil && *st.AtEstablishment != "" &&
+				s.Identity() != *st.AtEstablishment {
+				return fmt.Errorf("cosmosigner %q sentry key is immutable after the chain is established (webhooks disabled): it is registered in the genesis validator set, so its consensus key cannot change — repair it with webhooks enabled", s.Name)
 			}
 			if st.SigningDigest != "" {
 				// Modifying a still-present signer that already rolled out (recorded digest, current digest
@@ -369,14 +387,22 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 					if s.ValidatorGroup != st.ServingGroup || !sameSignerInstance(s.ValidatorInstance, st.ServingInstance) {
 						return fmt.Errorf("cosmosigner %q served the validator in group %q (webhooks disabled) — moving validator-ness elsewhere would leave that validator's on-chain key without its signing path", s.Name, st.ServingGroup)
 					}
-				} else if !s.TargetsValidator() {
+				} else if !s.TargetsValidator() || len(s.TargetGroups) > 1 {
 					// A LEGACY digest (recorded before the serving fields existed) carries no served
-					// group/instance, so the group+instance demotion check above cannot run. If the signer
-					// no longer targets a validator at all, the served validator was demoted to a
-					// regular/sentry group while the digest still matches — unverifiable from status alone.
-					// Reject; leaving the signer targeting a validator lets the next reconcile backfill the
-					// serving fields (reconcileSigner), after which the precise check applies.
-					return fmt.Errorf("cosmosigner %q: its recorded identity predates this version and it no longer targets a validator (webhooks disabled) — the served validator may have been demoted; keep it targeting the validator so the controller can record the serving identity, or repair the configuration with webhooks enabled", s.Name)
+					// group/instance, so the group+instance demotion check above cannot run. The digest
+					// hashes the backend identity, replica count and target-group NAMES — not WHICH targeted
+					// group is the validator — so it stays identical when validator-ness moves between the
+					// targeted groups. Two cases are therefore unverifiable from status alone and rejected:
+					//   - the signer no longer targets a validator at all (the served group was demoted); or
+					//   - it still targets a validator but among MULTIPLE groups, so a no-webhook edit could
+					//     have demoted the originally-served group and promoted a sibling (e.g. served group
+					//     a → b) with the digest unchanged; the next reconcile would then backfill the WRONG
+					//     serving group, permanently losing the original validator's signing path.
+					// A single-target validator signer is safe: it has no sibling to swap with, and a plain
+					// demotion falls into the first case. Keep such signers targeting exactly the validator
+					// so the next reconcile can backfill the serving fields, after which the precise check
+					// applies; repair anything else with webhooks enabled.
+					return fmt.Errorf("cosmosigner %q: its recorded identity predates this version and its validator target cannot be verified from status alone (webhooks disabled) — the served validator may have been demoted or swapped with a sibling group; reduce it to the single validator it serves so the controller can record the serving identity, or repair the configuration with webhooks enabled", s.Name)
 				}
 				// A matching digest proves this exact signer identity rolled out and served, so the
 				// at-establishment guard below must not re-judge it.
