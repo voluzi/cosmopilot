@@ -251,10 +251,10 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 		// The Vault token authenticates every signing call and the optional CA certificate is mounted at
 		// startup; a missing/mistyped Secret would recreate the validator pod without its local key for a
 		// signer that can never reach Vault. Verify them before the backend is allowed to deploy.
-		if err := r.requireSignerSecret(ctx, chainNode.GetNamespace(), "Vault token", v.TokenSecret); err != nil {
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "Vault token", v.TokenSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
-		if err := r.requireSignerSecret(ctx, chainNode.GetNamespace(), "Vault certificate", v.CertificateSecret); err != nil {
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "Vault certificate", v.CertificateSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
 		return cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
@@ -268,7 +268,7 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 		}}, nil
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
-		if err := r.requireSignerSecret(ctx, chainNode.GetNamespace(), "GCP credentials", g.CredentialsSecret); err != nil {
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "GCP credentials", g.CredentialsSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
 		return cosmosigner.Backend{GCP: &cosmosigner.GcpBackend{
@@ -302,26 +302,6 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 	}
-}
-
-// requireSignerSecret errors when a referenced Secret key is absent, so a pre-provisioned external
-// signer that mounts a missing auth Secret is caught before the validator pod is recreated without its
-// local key. A nil selector (an optional reference left unset) is accepted.
-func (r *Reconciler) requireSignerSecret(ctx context.Context, namespace, purpose string, sel *corev1.SecretKeySelector) error {
-	if sel == nil {
-		return nil
-	}
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: sel.Name}, secret); err != nil {
-		if errors.IsNotFound(err) {
-			return fmt.Errorf("cosmosigner %s secret %q not found: provide it before deploying the signer", purpose, sel.Name)
-		}
-		return err
-	}
-	if len(secret.Data[sel.Key]) == 0 {
-		return fmt.Errorf("cosmosigner %s secret %q is missing key %q: provide it before deploying the signer", purpose, sel.Name, sel.Key)
-	}
-	return nil
 }
 
 func (r *Reconciler) cosmosignerSoftwareSecretName(chainNode *appsv1.ChainNode) string {

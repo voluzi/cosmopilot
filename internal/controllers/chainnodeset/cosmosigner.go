@@ -435,10 +435,10 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		// The Vault token authenticates every signing call and the optional CA certificate is mounted at
 		// startup; a missing Secret would roll out a signer that can never reach Vault. Verify them before
 		// deploy (and, via preflightCosmosigners, before children are retargeted).
-		if err := r.requireSecretSelector(ctx, nodeSet.GetNamespace(), s.Name, "Vault token", v.TokenSecret); err != nil {
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "Vault token", v.TokenSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
-		if err := r.requireSecretSelector(ctx, nodeSet.GetNamespace(), s.Name, "Vault certificate", v.CertificateSecret); err != nil {
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "Vault certificate", v.CertificateSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
 		return cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
@@ -454,7 +454,7 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
 		// The GCP credentials Secret (when set — omitted for Workload Identity) is mounted at startup.
-		if err := r.requireSecretSelector(ctx, nodeSet.GetNamespace(), s.Name, "GCP credentials", g.CredentialsSecret); err != nil {
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "GCP credentials", g.CredentialsSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
 		return cosmosigner.Backend{GCP: &cosmosigner.GcpBackend{
@@ -663,23 +663,6 @@ func signerTargetInitializesGenesis(nodeSet *appsv1.ChainNodeSet, s appsv1.Resol
 		}
 	}
 	return false
-}
-
-// requireSecretSelector errors when a referenced Secret key is absent, so a signer that mounts a
-// missing auth Secret is caught at preflight instead of crash-looping after deploy. A nil selector (an
-// optional reference left unset) is accepted.
-func (r *Reconciler) requireSecretSelector(ctx context.Context, namespace, signer, purpose string, sel *corev1.SecretKeySelector) error {
-	if sel == nil {
-		return nil
-	}
-	exists, err := r.secretHasKey(ctx, namespace, sel.Name, sel.Key)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("cosmosigner %q %s secret %q is missing key %q: provide it before deploying the signer", signer, purpose, sel.Name, sel.Key)
-	}
-	return nil
 }
 
 // secretHasKey reports whether the named secret exists and contains a non-empty value for key.
