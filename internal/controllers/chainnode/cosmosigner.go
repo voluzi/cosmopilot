@@ -100,7 +100,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	// applied — otherwise a legacy/status-lost signer could record the live lock and then apply a
 	// lock-violating spec change in the same pass. Deferring is crash-safe: no lock, no resource.
 	if chainNode.Status.CosmosignerReplicas == nil || chainNode.Status.CosmosignerStateStorageSize == "" {
-		liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode))
+		liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), chainNode.Spec.Cosmosigner.StorageClassName)
 		if err != nil {
 			return false, err
 		}

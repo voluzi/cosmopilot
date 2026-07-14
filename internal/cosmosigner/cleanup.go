@@ -93,16 +93,26 @@ func ensureNoForeignDataPVCs(ctx context.Context, c client.Client, owner metav1.
 // isStatefulSetDataPVC reports whether pvcName is exactly `<dataVolumeName>-<stsName>-<ordinal>`,
 // the name the StatefulSet controller gives the signer's per-pod state claims.
 func isStatefulSetDataPVC(pvcName, stsName string) bool {
+	_, ok := statefulSetDataPVCOrdinal(pvcName, stsName)
+	return ok
+}
+
+// statefulSetDataPVCOrdinal parses the pod ordinal from a `<dataVolumeName>-<stsName>-<ordinal>` claim
+// name, returning ok=false for any name that is not exactly that shape. It requires a canonical
+// non-negative ordinal (no sign, no leading zeros) — exactly what the StatefulSet controller produces —
+// so names like "data-<name>--1" or "data-<name>-007" never match.
+func statefulSetDataPVCOrdinal(pvcName, stsName string) (int, bool) {
 	prefix := dataVolumeName + "-" + stsName + "-"
 	if !strings.HasPrefix(pvcName, prefix) {
-		return false
+		return 0, false
 	}
 	ordinal := strings.TrimPrefix(pvcName, prefix)
 	if ordinal == "" {
-		return false
+		return 0, false
 	}
-	// Require a canonical non-negative ordinal (no sign, no leading zeros) — exactly what the
-	// StatefulSet controller produces — so names like "data-<name>--1" or "data-<name>-007" never match.
 	n, err := strconv.Atoi(ordinal)
-	return err == nil && n >= 0 && strconv.Itoa(n) == ordinal
+	if err != nil || n < 0 || strconv.Itoa(n) != ordinal {
+		return 0, false
+	}
+	return n, true
 }

@@ -173,7 +173,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 // or PVC template than the one the raft cluster was actually formed with. It mutates st in memory;
 // the caller persists it.
 func (r *Reconciler) initSignerLock(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, st *appsv1.CosmosignerStatus) error {
-	liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name)
+	liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name, s.Spec.StorageClassName)
 	if err != nil {
 		return err
 	}

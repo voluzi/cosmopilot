@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,7 +53,7 @@ func TestReadSignerLockPreservesNilStorageClass(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
 		WithObjects(signerSTS(name, ns, owner, 3, "10Gi", nil)).Build()
 
-	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
+	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestReadSignerLockIgnoresQuiescedReplicas(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
 		WithObjects(signerSTS(name, ns, owner, 0, "10Gi", ptr.To("fast"))).Build()
 
-	_, _, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
+	_, _, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, ptr.To("fast"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestReadSignerLockIgnoresQuiescedReplicas(t *testing.T) {
 // TestReadSignerLockNoSignerState verifies a missing StatefulSet reports nothing (true first rollout).
 func TestReadSignerLockNoSignerState(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
-	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, fakeOwner("cs", types.UID("u")), "default", "cs-signer")
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, fakeOwner("cs", types.UID("u")), "default", "cs-signer", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestReadSignerLockIgnoresForeignStatefulSet(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
 		WithObjects(signerSTS(name, ns, other, 5, "20Gi", nil)).Build()
 
-	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name)
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +145,7 @@ func TestReadSignerLockRecoversFromOrphanedOwnedPVCs(t *testing.T) {
 	// No StatefulSet; three owned data PVCs survive.
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc(0), pvc(1), pvc(2)).Build()
 
-	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name)
+	replicas, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, ptr.To("fast"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,11 +170,82 @@ func TestReadSignerLockIgnoresForeignOrphanedPVCs(t *testing.T) {
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreign).Build()
-	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name)
+	_, _, _, foundR, foundS, err := ReadSignerLock(context.Background(), c, me, ns, name, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if foundR || foundS {
 		t.Fatal("a foreign-owned orphaned PVC must not seed this owner's lock")
+	}
+}
+
+func ownedDataPVC(name, ns string, ordinal int, uid types.UID, size string, class *string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dataVolumeName + "-" + name + "-" + string(rune('0'+ordinal)),
+			Namespace: ns,
+			Labels:    pvcOwnerLabels(name, uid),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: class,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+			},
+		},
+	}
+}
+
+// TestReadSignerLockRejectsGappedOrphanedPVCs verifies that a non-contiguous set of orphaned claims
+// (a claim deleted from the MIDDLE of the membership) is refused rather than mistaken for a smaller
+// raft cluster: the claim count cannot prove the original membership, so recovery fails closed.
+func TestReadSignerLockRejectsGappedOrphanedPVCs(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	owner := fakeOwner("cs", types.UID("cs-uid"))
+	// Ordinals {0, 2} — ordinal 1 was deleted from the middle.
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
+		WithObjects(
+			ownedDataPVC(name, ns, 0, "cs-uid", "5Gi", ptr.To("fast")),
+			ownedDataPVC(name, ns, 2, "cs-uid", "5Gi", ptr.To("fast")),
+		).Build()
+
+	_, _, _, foundR, _, err := ReadSignerLock(context.Background(), c, owner, ns, name, ptr.To("fast"))
+	if err == nil {
+		t.Fatal("a gapped orphaned-PVC set must fail closed, got nil error")
+	}
+	if foundR {
+		t.Fatal("no replica lock may be reported for a gapped set")
+	}
+}
+
+// TestReadSignerLockRecoveryNormalizesDefaultStorageClass verifies that when the desired template
+// OMITS storageClassName, an orphaned PVC carrying the admission-filled cluster default class is
+// reported as the desired (nil) value, not the raw default — otherwise the no-webhook guard would read
+// an unchanged template as a storage change.
+func TestReadSignerLockRecoveryNormalizesDefaultStorageClass(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	owner := fakeOwner("cs", types.UID("cs-uid"))
+	defaultSC := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "standard",
+			Annotations: map[string]string{defaultStorageClassAnnotation: "true"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).
+		WithObjects(
+			defaultSC,
+			ownedDataPVC(name, ns, 0, "cs-uid", "5Gi", ptr.To("standard")),
+			ownedDataPVC(name, ns, 1, "cs-uid", "5Gi", ptr.To("standard")),
+		).Build()
+
+	// Desired template omits the class (nil): recovery must normalise "standard" back to nil.
+	_, size, class, foundR, foundS, err := ReadSignerLock(context.Background(), c, owner, ns, name, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !foundR || !foundS || size != "5Gi" {
+		t.Fatalf("recovery: foundR=%v foundS=%v size=%q", foundR, foundS, size)
+	}
+	if class != nil {
+		t.Fatalf("default-class PVC must normalise to nil for an omitting template, got %q", *class)
 	}
 }
