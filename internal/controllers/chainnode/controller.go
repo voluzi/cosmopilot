@@ -286,18 +286,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// Deploy TMKMS configs if configured
-	logger.V(1).Info("ensure tmkms config if applicable")
-	if err = r.ensureTmKMSConfig(ctx, chainNode); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Deploy a managed cosmosigner remote signer if configured on this standalone node. While a
+	// Reconcile local tmKMS and managed cosmosigner signing configs. Cosmosigner deployability is
+	// preflighted before an old tmKMS config is removed during a migration. While a
 	// removed signer's teardown is still in flight, STOP before pod reconciliation: switching the pod
 	// back to its local/tmKMS signing path while old signer pods can still sign the same consensus
 	// key would put two signers on one key.
-	logger.V(1).Info("ensure cosmosigner if applicable")
-	signerTeardownPending, err := r.ensureCosmosigner(ctx, chainNode)
+	logger.V(1).Info("ensure signing configs")
+	signerTeardownPending, err := r.reconcileSigningConfigs(ctx, chainNode)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

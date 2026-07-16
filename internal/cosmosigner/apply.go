@@ -64,24 +64,34 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		if !metav1.IsControlledBy(sts, owner) {
 			return foreignObjectErr("StatefulSet", name)
 		}
-		return nil
+		return ensureReplicaPodNamesAvailable(ctx, c, namespace, name, replicas, sts)
 	case errors.IsNotFound(err):
 		// A fresh StatefulSet cannot create a replica while any pod already holds its deterministic
 		// <name>-<ordinal> name, regardless of that pod's owner.
-		for ordinal := int32(0); ordinal < replicas; ordinal++ {
-			podName := fmt.Sprintf("%s-%d", name, ordinal)
-			pod := &corev1.Pod{}
-			if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podName}, pod); err == nil {
-				return fmt.Errorf("cosmosigner replica pod %q already exists; refusing to create a StatefulSet that cannot start all replicas", podName)
-			} else if !errors.IsNotFound(err) {
-				return err
-			}
+		if err := ensureReplicaPodNamesAvailable(ctx, c, namespace, name, replicas, nil); err != nil {
+			return err
 		}
 		// ApplyOwned's Create path runs the PVC guard below.
 		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
 	default:
 		return err
 	}
+}
+
+func ensureReplicaPodNamesAvailable(ctx context.Context, c client.Client, namespace, name string, replicas int32, sts *appsv1.StatefulSet) error {
+	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+		podName := fmt.Sprintf("%s-%d", name, ordinal)
+		pod := &corev1.Pod{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podName}, pod); errors.IsNotFound(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if sts == nil || !metav1.IsControlledBy(pod, sts) {
+			return fmt.Errorf("cosmosigner replica pod %q already exists; refusing to create or scale a StatefulSet that cannot start all replicas", podName)
+		}
+	}
+	return nil
 }
 
 // ensureNoForeignObject errors when obj exists and is controlled by a different owner (a same-name

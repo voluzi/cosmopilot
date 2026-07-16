@@ -70,9 +70,9 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 // .spec.validator.init without a previous spec to diff against. It also backfills nodes upgraded from
 // a version that predates the digest. Returns whether it performed a status update.
 //
-// With admission webhooks enabled, an old/new-validated signer migration may legitimately change the
-// fingerprint, so the recorded baseline follows the admitted spec. With webhooks disabled the digest
-// is the reconcile-time immutability guard and is never refreshed.
+// With admission webhooks enabled, the baseline may refresh only when the recorded fingerprint itself
+// proves all non-signing genesis fields are unchanged and the original signing path resolves to the
+// current effective key. With webhooks disabled the digest is never refreshed.
 //
 // A LEGACY backfill (digest empty, chainID already set — the node predates this field) cannot blindly
 // trust the current spec's init-ness: an external-genesis node converted to .validator.init before
@@ -88,10 +88,11 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 // guards, this is an anti-footgun, not a security boundary against the resource owner.
 func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
 	isLegacyBackfill := chainNode.Status.GenesisSigningDigest == "" && chainNode.Status.ChainID != ""
+	defaultPrivKeySecret := fmt.Sprintf("%s-priv-key", chainNode.GetName())
 
 	current := appsv1.GenesisDigestExternal
 	if chainNode.ShouldInitGenesis() {
-		current = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
+		current = chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
 		if isLegacyBackfill {
 			if chainNode.Spec.Validator.Init.ChainID != chainNode.Status.ChainID {
 				current = appsv1.GenesisDigestExternal
@@ -105,8 +106,11 @@ func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode
 	if chainNode.Status.GenesisSigningDigest == current {
 		return false, nil
 	}
-	if chainNode.Status.GenesisSigningDigest != "" && r.opts != nil && r.opts.DisableWebhooks {
-		return false, nil
+	if chainNode.Status.GenesisSigningDigest != "" {
+		if r.opts == nil || r.opts.DisableWebhooks ||
+			!chainNode.GenesisSigningDigestAllowsRefresh(chainNode.Status.GenesisSigningDigest) {
+			return false, nil
+		}
 	}
 	chainNode.Status.GenesisSigningDigest = current
 	return true, r.Status().Update(ctx, chainNode)

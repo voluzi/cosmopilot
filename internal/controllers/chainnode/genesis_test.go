@@ -36,10 +36,12 @@ func TestRecordGenesisDigestRefreshesOnlyWithWebhooksEnabled(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		disableWebhooks bool
+		mutateInit      bool
 		wantUpdated     bool
 	}{
 		{name: "enabled", wantUpdated: true},
 		{name: "disabled", disableWebhooks: true},
+		{name: "enabled with unrelated init mutation", mutateInit: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			chainNode := original.DeepCopy()
@@ -50,6 +52,9 @@ func TestRecordGenesisDigestRefreshesOnlyWithWebhooksEnabled(t *testing.T) {
 			chainNode.Status.CosmosignerSigningDigest = chainNode.CosmosignerSigningDigest()
 			chainNode.Status.CosmosignerServingIdentity = chainNode.EffectiveSigningIdentity()
 			chainNode.Status.CosmosignerReplicas = ptr.To(int32(1))
+			if tc.mutateInit {
+				chainNode.Spec.Validator.Init.StakeAmount = "2stake"
+			}
 			require.NotEqual(t, chainNode.Spec.Validator.GenesisSigningFingerprint("validator-priv-key"), chainNode.Status.GenesisSigningDigest)
 			_, err := chainNode.Validate(nil)
 			require.Error(t, err)

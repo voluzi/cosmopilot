@@ -388,6 +388,22 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		t.Fatalf("a foreign signer replica pod must block preflight, got %v", err)
 	}
 
+	ownedSTS := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns, UID: "signer-sts-uid", OwnerReferences: []metav1.OwnerReference{ownerRef(me)},
+	}}
+	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, foreignReplicaPod).Build()
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
+		t.Fatalf("a foreign replica pod must block re-scaling an owned StatefulSet, got %v", err)
+	}
+
+	ownedReplicaPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(ownedSTS)},
+	}}
+	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, ownedReplicaPod).Build()
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err != nil {
+		t.Fatalf("a replica pod controlled by the owned StatefulSet must remain deployable, got %v", err)
+	}
+
 	// Nothing present (true first rollout): allowed.
 	empty := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
 	if err := PreflightDeployable(context.Background(), empty, me, ns, name, 1, true); err != nil {

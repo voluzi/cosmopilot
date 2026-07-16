@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -365,6 +366,39 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 func (chainNode *ChainNode) effectiveGenesisFingerprint() string {
 	v := chainNode.Spec.Validator
 	return genesisSigningFingerprintWithIdentity(chainNode.EffectiveSigningIdentity(), v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath())
+}
+
+// GenesisSigningDigestAllowsRefresh reports whether a recorded raw genesis fingerprint
+// has the same non-signing genesis configuration as the current spec and resolves its original
+// signing path to the current effective key. It proves a fingerprint mismatch is only a same-key
+// signing-path migration, so the controller may safely refresh the raw baseline.
+func (chainNode *ChainNode) GenesisSigningDigestAllowsRefresh(recorded string) bool {
+	if chainNode.Spec.Validator == nil || recorded == "" || recorded == GenesisDigestExternal {
+		return false
+	}
+	v := chainNode.Spec.Validator
+	configuration := genesisConfigurationFingerprint(v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath())
+	suffix := "\x00" + configuration
+	if !strings.HasSuffix(recorded, suffix) {
+		return false
+	}
+	signingMaterial := strings.TrimSuffix(recorded, suffix)
+	secret, tmKMSID, ok := strings.Cut(signingMaterial, "\x00")
+	if !ok {
+		return false
+	}
+
+	var recordedIdentity string
+	if tmKMSID == "" {
+		recordedIdentity = localKeySigningIdentity(secret)
+	} else {
+		parts := strings.Split(tmKMSID, "\x00")
+		if len(parts) != 3 || parts[0] != "hashicorp" {
+			return false
+		}
+		recordedIdentity = normalizedVaultIdentity(parts[1], "", DefaultCosmosignerVaultMount, parts[2])
+	}
+	return recordedIdentity == chainNode.EffectiveSigningIdentity()
 }
 
 // GenesisSigningFingerprint mirrors NodeSetValidatorConfig.GenesisSigningFingerprint for a standalone

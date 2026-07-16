@@ -114,6 +114,10 @@ func TestHasLegacyPerInstanceCosmosignerStatusIgnoresModernNumericGroup(t *testi
 
 	nodeSet.Status.Cosmosigners[1].AtEstablishment = nil
 	assert.True(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Spec.Nodes = nodeSet.Spec.Nodes[:1]
+	nodeSet.Status.Cosmosigners[1] = CosmosignerStatus{Name: "cs-foo-1-signer", AtEstablishment: ptr.To("")}
+	assert.False(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"), "a removed modern sentry must not masquerade as a legacy per-instance validator signer")
 }
 
 // TestResolveCosmosignersMultiInstanceValidatorGroup verifies a multi-instance validator group with

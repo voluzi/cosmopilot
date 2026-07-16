@@ -1469,6 +1469,11 @@ func genesisSigningFingerprint(privateKeySecret *string, tmKMS *TmKMS, init *Gen
 	if privateKeySecret != nil {
 		secret = *privateKeySecret
 	}
+	tmKMSID, _ := tmKMSSigningKeyIdentity(tmKMS)
+	return strings.Join([]string{secret, tmKMSID, genesisConfigurationFingerprint(init, info, accountPrefix, valPrefix, accountHDPath)}, "\x00")
+}
+
+func genesisConfigurationFingerprint(init *GenesisInitConfig, info *ValidatorInfo, accountPrefix, valPrefix, accountHDPath string) string {
 	var initJSON []byte
 	if init != nil {
 		// The account derivation fields also have deprecated copies inside init; they are included
@@ -1486,9 +1491,7 @@ func genesisSigningFingerprint(privateKeySecret *string, tmKMS *TmKMS, init *Gen
 	if info != nil {
 		infoJSON, _ = json.Marshal(info)
 	}
-	tmKMSID, _ := tmKMSSigningKeyIdentity(tmKMS)
-
-	return strings.Join([]string{secret, tmKMSID, accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
+	return strings.Join([]string{accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
 }
 
 // genesisSigningFingerprintWithIdentity is like genesisSigningFingerprint but takes a precomputed
@@ -1497,19 +1500,7 @@ func genesisSigningFingerprint(privateKeySecret *string, tmKMS *TmKMS, init *Gen
 // account-derivation and info fields are compared identically, so genuine genesis changes are still
 // detected.
 func genesisSigningFingerprintWithIdentity(signingIdentity string, init *GenesisInitConfig, info *ValidatorInfo, accountPrefix, valPrefix, accountHDPath string) string {
-	var initJSON []byte
-	if init != nil {
-		initCopy := init.DeepCopy()
-		initCopy.AccountPrefix = nil
-		initCopy.ValPrefix = nil
-		initCopy.AccountHDPath = nil
-		initJSON, _ = json.Marshal(initCopy)
-	}
-	var infoJSON []byte
-	if info != nil {
-		infoJSON, _ = json.Marshal(info)
-	}
-	return strings.Join([]string{signingIdentity, accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
+	return strings.Join([]string{signingIdentity, genesisConfigurationFingerprint(init, info, accountPrefix, valPrefix, accountHDPath)}, "\x00")
 }
 
 // nodeSetValidatorEffectiveIdentity returns the normalized signing identity of a nodeset validator

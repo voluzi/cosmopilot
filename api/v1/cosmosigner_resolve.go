@@ -27,6 +27,9 @@ func (nodeSet *ChainNodeSet) HasLegacyPerInstanceCosmosignerStatus(group string)
 		if st.ServingGroup != "" && st.ServingGroup != group {
 			continue
 		}
+		if st.ServingGroup == "" && st.AtEstablishment != nil && *st.AtEstablishment == "" {
+			continue
+		}
 		if _, current := modernSentries[st.Name]; current {
 			continue
 		}

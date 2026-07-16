@@ -90,39 +90,14 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	if chainNode.Status.ChainID == "" {
 		return false, nil
 	}
-
-	// Preflight deployability BEFORE the immutable raft/PVC locks are recorded below, so a signer that
-	// cannot deploy yet (a missing/incomplete raft-TLS Secret, or a missing backend auth/software Secret
-	// resolved inside cosmosignerParams) fails WITHOUT first trapping the operator into the
-	// initially-chosen replica count / storage template — which the webhook would then refuse to change
-	// even though no signer was ever created. The raft mTLS Secret is mounted at pod startup; the params
-	// resolution verifies the backend Secrets. Neither depends on the recorded locks.
-	if err := cosmosigner.RequireRaftTLSSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.RaftTLSSecret); err != nil {
-		return false, err
-	}
-	params, err := r.cosmosignerParams(ctx, chainNode)
+	params, err := r.preflightCosmosigner(ctx, chainNode)
 	if err != nil {
 		return false, err
 	}
-	// The signer StatefulSet and import pod run as the configured ServiceAccount; a missing one keeps
-	// Kubernetes from starting them.
-	if err := cosmosigner.RequireServiceAccount(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.GetServiceAccountName()); err != nil {
-		return false, err
-	}
-	// Run the same deploy-time blockers ApplyOwned/runJob would hit (name collision, foreign/ambiguous
-	// raft-state PVCs) BEFORE recording locks or importing into Vault — otherwise a foreign same-name
-	// signer would persist locks (and, for uploadGenerated, mutate the Vault key) for a signer ApplyOwned
-	// then refuses. Only an uploadGenerated signer runs the one-shot <name>-import pod.
-	usesImportPod := chainNode.Spec.Cosmosigner.VaultUploadsGenerated(chainNode.ShouldInitGenesis())
-	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), chainNode.Spec.Cosmosigner.GetReplicas(), usesImportPod); err != nil {
-		return false, err
-	}
-	// Preflight the uploadGenerated import SOURCE (read-only) before locks/import: a terminally missing
-	// source key would otherwise be found only inside maybeImportCosmosignerKey, after locks are recorded.
-	if err := r.preflightCosmosignerImportSource(ctx, chainNode); err != nil {
-		return false, err
-	}
+	return r.ensureCosmosignerWithParams(ctx, chainNode, params)
+}
 
+func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (wait bool, err error) {
 	// INITIALISE the raft membership/PVC-template locks BEFORE creating any signer resource. The
 	// values come from the live signer state (if any), so an existing unrecorded StatefulSet is not
 	// "re-locked" to a different replica count or PVC template than the one the raft cluster was
@@ -220,6 +195,58 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 		}
 	}
 	return false, nil
+}
+
+func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) (cosmosigner.Params, error) {
+	// Preflight deployability BEFORE the immutable raft/PVC locks are recorded, so a signer that
+	// cannot deploy yet (a missing/incomplete raft-TLS Secret, or a missing backend auth/software Secret
+	// resolved inside cosmosignerParams) fails WITHOUT first trapping the operator into the
+	// initially-chosen replica count / storage template — which the webhook would then refuse to change
+	// even though no signer was ever created. The raft mTLS Secret is mounted at pod startup; the params
+	// resolution verifies the backend Secrets. Neither depends on the recorded locks.
+	if err := cosmosigner.RequireRaftTLSSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.RaftTLSSecret); err != nil {
+		return cosmosigner.Params{}, err
+	}
+	params, err := r.cosmosignerParams(ctx, chainNode)
+	if err != nil {
+		return cosmosigner.Params{}, err
+	}
+	// The signer StatefulSet and import pod run as the configured ServiceAccount; a missing one keeps
+	// Kubernetes from starting them.
+	if err := cosmosigner.RequireServiceAccount(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Cosmosigner.GetServiceAccountName()); err != nil {
+		return cosmosigner.Params{}, err
+	}
+	// Run the same deploy-time blockers ApplyOwned/runJob would hit (name collision, foreign/ambiguous
+	// raft-state PVCs) BEFORE recording locks or importing into Vault — otherwise a foreign same-name
+	// signer would persist locks (and, for uploadGenerated, mutate the Vault key) for a signer ApplyOwned
+	// then refuses. Only an uploadGenerated signer runs the one-shot <name>-import pod.
+	usesImportPod := chainNode.Spec.Cosmosigner.VaultUploadsGenerated(chainNode.ShouldInitGenesis())
+	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), chainNode.Spec.Cosmosigner.GetReplicas(), usesImportPod); err != nil {
+		return cosmosigner.Params{}, err
+	}
+	// Preflight the uploadGenerated import SOURCE (read-only) before locks/import: a terminally missing
+	// source key would otherwise be found only inside maybeImportCosmosignerKey, after locks are recorded.
+	if err := r.preflightCosmosignerImportSource(ctx, chainNode); err != nil {
+		return cosmosigner.Params{}, err
+	}
+	return params, nil
+}
+
+func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	if chainNode.Spec.Cosmosigner == nil || chainNode.Status.ChainID == "" {
+		if err := r.ensureTmKMSConfig(ctx, chainNode); err != nil {
+			return false, err
+		}
+		return r.ensureCosmosigner(ctx, chainNode)
+	}
+	params, err := r.preflightCosmosigner(ctx, chainNode)
+	if err != nil {
+		return false, err
+	}
+	if err := r.ensureTmKMSConfig(ctx, chainNode); err != nil {
+		return false, err
+	}
+	return r.ensureCosmosignerWithParams(ctx, chainNode, params)
 }
 
 func (r *Reconciler) cosmosignerParams(ctx context.Context, chainNode *appsv1.ChainNode) (cosmosigner.Params, error) {
