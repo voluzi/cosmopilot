@@ -486,6 +486,12 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessRaftService(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not headless") {
 		t.Fatalf("owned non-headless raft Service must block preflight, got %v", err)
 	}
+	externalName := normal.DeepCopy()
+	externalName.Spec = corev1.ServiceSpec{Type: corev1.ServiceTypeExternalName, ExternalName: "example.com"}
+	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(externalName).Build()
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "not headless") {
+		t.Fatalf("owned ExternalName raft Service must block preflight, got %v", err)
+	}
 
 	headless := normal.DeepCopy()
 	headless.Spec.ClusterIP = corev1.ClusterIPNone

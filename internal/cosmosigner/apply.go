@@ -93,7 +93,7 @@ func ensureRaftServiceDeployable(ctx context.Context, c client.Client, owner cli
 		return err
 	case !metav1.IsControlledBy(svc, owner):
 		return foreignObjectErr("raft Service", name)
-	case svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != corev1.ClusterIPNone:
+	case svc.Spec.ClusterIP != corev1.ClusterIPNone:
 		return fmt.Errorf("cosmosigner raft Service %q is not headless and cannot be converted in place; delete the stale owned Service before deploying the signer", name)
 	default:
 		return nil
