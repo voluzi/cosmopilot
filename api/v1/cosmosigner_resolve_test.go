@@ -232,6 +232,19 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 		})
 	}
 
+	legacyGroup := base([]NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}})
+	_, err := legacyGroup.Validate(legacyGroup.DeepCopy())
+	require.NoError(t, err, "an unchanged pre-existing reserved group name must remain updateable")
+	legacyGroup.Status.Phase = PhaseChainNodeSetRunning
+	_, err = legacyGroup.Validate(nil)
+	require.NoError(t, err, "a reconciled legacy group must remain valid on the no-webhook path")
+
+	introducedGroup := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+	oldWithoutReservedGroup := introducedGroup.DeepCopy()
+	introducedGroup.Spec.Nodes[0].Name = "fullnodes-signer"
+	_, err = introducedGroup.Validate(oldWithoutReservedGroup)
+	require.Error(t, err, "introducing a reserved group name on update must be rejected")
+
 	for _, route := range []struct {
 		name      string
 		ingresses []GlobalIngressConfig
@@ -262,6 +275,16 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 		})
 	}
 
+	legacyRoute := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+	legacyRoute.Spec.Ingresses = []GlobalIngressConfig{{
+		Name: "rpc-signer", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+	}}
+	_, err = legacyRoute.Validate(legacyRoute.DeepCopy())
+	require.NoError(t, err, "an unchanged pre-existing reserved route name must remain updateable")
+	legacyRoute.Status.Phase = PhaseChainNodeSetRunning
+	_, err = legacyRoute.Validate(nil)
+	require.NoError(t, err, "a reconciled legacy route must remain valid on the no-webhook path")
+
 	// Group Service name shadowing a signer resource name: group "vg-signer"'s Service is
 	// cs-vg-signer, the raft Service of group "vg"'s signer.
 	shadow := base([]NodeGroupSpec{
@@ -269,7 +292,7 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
 		{Name: "vg-signer", Instances: ptr.To(1)},
 	})
-	_, err := shadow.Validate(nil)
+	_, err = shadow.Validate(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "collides with a cosmosigner's derived resource name")
 

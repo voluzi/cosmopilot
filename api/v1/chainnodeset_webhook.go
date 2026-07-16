@@ -481,11 +481,35 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 // old is the previous revision on the update path (nil on create); it enables the same-key
 // migration waiver mirroring the ChainNode webhook.
 func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
+	legacyStandaloneSignerServices := map[string]struct{}{}
+	rememberServiceNames := func(source *ChainNodeSet) {
+		for i := range source.Spec.Nodes {
+			legacyStandaloneSignerServices[source.Spec.Nodes[i].GetServiceName(source)] = struct{}{}
+		}
+		for i := range source.Spec.Ingresses {
+			legacyStandaloneSignerServices[source.Spec.Ingresses[i].GetName(source)] = struct{}{}
+		}
+		for i := range source.Spec.GatewayRoutes {
+			name := fmt.Sprintf("%s-global-%s", source.GetName(), source.Spec.GatewayRoutes[i].Name)
+			legacyStandaloneSignerServices[name] = struct{}{}
+		}
+	}
+	if old != nil {
+		rememberServiceNames(old)
+	} else if nodeSet.Status.Phase != "" {
+		// The no-webhook path has no old object. Controller-managed status proves this object has
+		// already reconciled, so its existing names receive the same update exemption.
+		rememberServiceNames(nodeSet)
+	}
+
 	// A Service named "<node>-signer" or "<node>-signer-privval" collides with the raft/discovery
 	// Service of a standalone ChainNode named <node>, even when this ChainNodeSet has no signer.
 	checkStandaloneSignerService := func(path, serviceName string) error {
 		for _, suffix := range []string{"-signer", "-signer-privval"} {
 			if strings.HasSuffix(serviceName, suffix) {
+				if _, legacy := legacyStandaloneSignerServices[serviceName]; legacy {
+					return nil
+				}
 				return fmt.Errorf("%s derives Service name %q, which collides with a standalone ChainNode cosmosigner Service: choose a name without a reserved signer suffix", path, serviceName)
 			}
 		}
