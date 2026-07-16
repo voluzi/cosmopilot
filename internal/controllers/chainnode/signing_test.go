@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
@@ -176,5 +177,89 @@ func TestReconcileSigningConfigsImportsCosmosignerBeforeRemovingTmKMS(t *testing
 	}
 	if got := deleteRequests.Load(); got != 0 {
 		t.Fatalf("failed Vault import issued %d tmKMS delete requests, want 0", got)
+	}
+}
+
+func TestReconcileSigningConfigsWaitsForCosmosignerRollout(t *testing.T) {
+	const namespace, name = "default", "sentry"
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sappsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := cometbft.GeneratePrivKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: namespace},
+		Data:       map[string][]byte{PrivKeyFilename: key},
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: "sentry-uid"},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{
+			Replicas: ptr.To(int32(1)),
+			Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(keySecret.Name)},
+			},
+		}},
+		Status: appsv1.ChainNodeStatus{
+			ChainID:                      "chain-1",
+			CosmosignerReplicas:          ptr.To(int32(1)),
+			CosmosignerStateStorageSize:  "1Gi",
+			CosmosignerValidatorTargeted: ptr.To(false),
+		},
+	}
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","reason":"NotFound","code":404}`)),
+			Request:    req,
+		}, nil
+	})
+	clientSet, err := kubernetes.NewForConfig(&rest.Config{Host: "https://kubernetes.invalid", Transport: transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Reconciler{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&k8sappsv1.StatefulSet{}).WithObjects(keySecret).Build(),
+		ClientSet: clientSet,
+		Scheme:    scheme,
+		recorder:  record.NewFakeRecorder(10),
+		opts:      &controllers.ControllerRunOptions{},
+	}
+
+	pending, err := r.reconcileSigningConfigs(context.Background(), chainNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending {
+		t.Fatal("a newly applied cosmosigner must keep the node on its existing signing path until rollout")
+	}
+
+	sts := &k8sappsv1.StatefulSet{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: cosmosignerName(chainNode)}, sts); err != nil {
+		t.Fatal(err)
+	}
+	sts.Status.ObservedGeneration = sts.Generation
+	sts.Status.UpdatedReplicas = 1
+	sts.Status.ReadyReplicas = 1
+	if err := r.Status().Update(context.Background(), sts); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err = r.reconcileSigningConfigs(context.Background(), chainNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending {
+		t.Fatal("a fully rolled-out cosmosigner must allow the node signing-config transition")
 	}
 }

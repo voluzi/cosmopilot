@@ -278,6 +278,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Prepare the desired signing path before publishing config that enables it. A failed or pending
+	// transition leaves the existing ConfigMap and pod template on their current signing mode.
+	logger.V(1).Info("ensure signing configs")
+	signingConfigPending, err := r.reconcileSigningConfigs(ctx, chainNode)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if signingConfigPending {
+		logger.Info("waiting for signing configuration transition before updating config")
+		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
+	}
+
 	// Create/update configmap with config files
 	logger.V(1).Info("ensure config")
 	configHash, err := r.ensureConfigs(ctx, app, chainNode, nodePodRunning)
@@ -289,18 +301,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	logger.V(1).Info("ensure upgrades")
 	if err = r.ensureUpgrades(ctx, chainNode, nodePodRunning); err != nil {
 		return ctrl.Result{}, err
-	}
-
-	// Reconcile local tmKMS and managed cosmosigner signing configs. Migration preparation and signer
-	// teardown must complete before pod reconciliation changes the active signing path.
-	logger.V(1).Info("ensure signing configs")
-	signingConfigPending, err := r.reconcileSigningConfigs(ctx, chainNode)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if signingConfigPending {
-		logger.Info("waiting for signing configuration transition before reconciling pod")
-		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
 	}
 
 	// Ensure pod is running

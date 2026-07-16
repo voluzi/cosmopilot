@@ -230,22 +230,11 @@ func TestPreflightCosmosignersRequiresGenesisSentrySecrets(t *testing.T) {
 }
 
 func TestCosmosignerBackendRejectsMalformedSoftwareKey(t *testing.T) {
-	nodeSet := &appsv1.ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
-		Spec: appsv1.ChainNodeSetSpec{
-			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Nodes: []appsv1.NodeGroupSpec{{
-				Name:      "sentries",
-				Instances: ptr.To(1),
-				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
-					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
-				}},
-			}},
-		},
-		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
-	}
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	nodeSet.UID = "nodeset-uid"
+	nodeSet.Spec.Nodes[0].Validator.CreateValidator = &appsv1.CreateValidatorConfig{}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "val-priv-key", Namespace: "default"},
 		Data: map[string][]byte{privKeyFilename: []byte(`{
 			"address":"0000000000000000000000000000000000000000",
 			"pub_key":{"type":"tendermint/PubKeyEd25519","value":"eA=="},

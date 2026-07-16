@@ -14,14 +14,12 @@ import (
 
 // DeletePVCs deletes the per-pod raft-state PVCs of a signer instance owned by owner. StatefulSet
 // PVCs are not garbage-collected with the StatefulSet, so they are cleaned up explicitly on teardown.
-// A claim is only deleted when it carries the instance labels, its name matches the exact StatefulSet
-// per-pod claim pattern `<dataVolumeName>-<name>-<ordinal>`, AND its owner-UID label matches owner —
-// so an unrelated claim that happens to share the labels or a name prefix (e.g. `data-<name>-backup`),
-// or a same-name signer's claim owned by another CR, is never deleted. List+Delete uses only the
-// list/delete verbs the controllers already hold (no deletecollection).
+// A claim is only deleted when its name matches the exact StatefulSet per-pod claim pattern
+// `<dataVolumeName>-<name>-<ordinal>` and its owner-UID label matches owner, so edited selector labels
+// cannot hide a name-bound claim and a same-name signer's claim owned by another CR is never deleted.
 func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) error {
 	pvcs := &corev1.PersistentVolumeClaimList{}
-	if err := c.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(InstanceLabels(name))); err != nil {
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return err
 	}
 	for i := range pvcs.Items {

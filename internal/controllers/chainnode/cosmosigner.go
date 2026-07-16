@@ -339,7 +339,15 @@ func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *app
 	if err := r.ensureTmKMSConfig(ctx, chainNode); err != nil {
 		return false, err
 	}
-	return r.ensureCosmosignerWithParams(ctx, chainNode, params)
+	wait, err := r.ensureCosmosignerWithParams(ctx, chainNode, params)
+	if err != nil || wait {
+		return wait, err
+	}
+	rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
+	if err != nil {
+		return false, err
+	}
+	return !rolledOut, nil
 }
 
 func (r *Reconciler) cosmosignerParams(ctx context.Context, chainNode *appsv1.ChainNode) (cosmosigner.Params, error) {
@@ -431,24 +439,29 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 		//     generates keys for init/createValidator validators);
 		//   - an init/createValidator validator whose key flow already COMPLETED (Status.PubKey set):
 		//     RequiresPrivKey no longer regenerates the secret, so a deleted Secret stays deleted.
-		// Only an init/createValidator validator whose key flow is still pending skips the check —
-		// ensureSigningKey produces the secret on this same reconcile.
+		// A pending init/createValidator flow may omit the Secret or key field because ensureSigningKey
+		// creates/fills it. If key bytes already exist, validate them now: the key flow reuses them.
 		keyFlowPending := chainNode.Status.PubKey == "" &&
 			(chainNode.ShouldInitGenesis() || (chainNode.IsValidator() && chainNode.Spec.Validator.CreateValidator != nil))
-		if !keyFlowPending {
-			secret := &corev1.Secret{}
-			if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: secretName}, secret); err != nil {
-				if errors.IsNotFound(err) {
-					return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q not found: provide the consensus key registered on-chain — refusing to roll out a signer with no key", secretName)
-				}
-				return cosmosigner.Backend{}, err
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: secretName}, secret); err != nil {
+			if errors.IsNotFound(err) && keyFlowPending {
+				return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 			}
-			if len(secret.Data[PrivKeyFilename]) == 0 {
-				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q has no %s: provide the registered consensus key", secretName, PrivKeyFilename)
+			if errors.IsNotFound(err) {
+				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q not found: provide the consensus key registered on-chain — refusing to roll out a signer with no key", secretName)
 			}
-			if _, err := cometbft.LoadPrivKey(secret.Data[PrivKeyFilename]); err != nil {
-				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q contains an invalid %s: %w", secretName, PrivKeyFilename, err)
-			}
+			return cosmosigner.Backend{}, err
+		}
+		keyMaterial, keyExists := secret.Data[PrivKeyFilename]
+		if !keyExists && keyFlowPending {
+			return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
+		}
+		if len(keyMaterial) == 0 {
+			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q has no %s: provide the registered consensus key", secretName, PrivKeyFilename)
+		}
+		if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
+			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q contains an invalid %s: %w", secretName, PrivKeyFilename, err)
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 	}

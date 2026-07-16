@@ -316,7 +316,7 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 	}
 
 	pvcs := &corev1.PersistentVolumeClaimList{}
-	if err := c.List(ctx, pvcs, client.InNamespace(namespace), client.MatchingLabels(InstanceLabels(name))); err != nil {
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return false, err
 	}
 	for i := range pvcs.Items {

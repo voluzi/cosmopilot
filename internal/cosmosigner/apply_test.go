@@ -280,6 +280,38 @@ func TestAmbiguousLegacyPVCBlocksTornDown(t *testing.T) {
 	}
 }
 
+func TestUndeployFindsOwnedPVCWithSelectorLabelsStripped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		ns   = "default"
+		name = "mychain-signer"
+	)
+	me := fakeOwner("me", types.UID("me-uid"))
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      dataVolumeName + "-" + name + "-0",
+		Namespace: ns,
+		Labels:    map[string]string{labelOwnerUID: "me-uid"},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+
+	torn, err := IsTornDown(context.Background(), c, me, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if torn {
+		t.Fatal("a deterministic owned claim must block teardown even when selector labels were stripped")
+	}
+	if err := Undeploy(context.Background(), c, me, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned name-matching claim must be deleted despite missing selector labels, got %v", err)
+	}
+}
+
 // TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet verifies a FRESH signer StatefulSet (no
 // same-name StatefulSet exists) is never created while exact-match raft-state PVCs of a DIFFERENT
 // owner remain — e.g. a CR deleted and recreated under the same name (new UID) whose claims were

@@ -156,14 +156,18 @@ func TestPreflightCosmosignerFallbackRequiresTmKMSTarget(t *testing.T) {
 
 func TestCosmosignerBackendRejectsMalformedSoftwareKey(t *testing.T) {
 	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
-			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
-		}}},
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{
+			Validator: &appsv1.ValidatorConfig{
+				PrivateKeySecret: ptr.To("validator-key"),
+				CreateValidator:  &appsv1.CreateValidatorConfig{},
+			},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}}},
+		},
 		Status: appsv1.ChainNodeStatus{ChainID: "test-1"},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: "default"},
 		Data: map[string][]byte{PrivKeyFilename: []byte(`{
 			"address":"0000000000000000000000000000000000000000",
 			"pub_key":{"type":"tendermint/PubKeyEd25519","value":"eA=="},

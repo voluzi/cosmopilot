@@ -649,8 +649,8 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		//   - a targeted init/createValidator validator whose key flow already COMPLETED (its pubkey
 		//     is recorded in status): the key secret is never regenerated, so a deleted Secret stays
 		//     deleted.
-		// Only a target whose key-generation flow is still pending skips the check — the child ChainNode
-		// produces the secret during that flow.
+		// A pending key-generation flow may omit the Secret or key field because the child ChainNode
+		// creates/fills it. If key bytes already exist, validate them now: the child reuses them.
 		keyFlowPending := false
 		if s.ValidatorGroup != "" {
 			// `generates` says whether the targeted validator generates its own key (genesis init or
@@ -686,17 +686,25 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 				}
 			}
 		}
-		if !keyFlowPending {
-			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)
-			if err != nil {
-				return cosmosigner.Backend{}, err
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: secretName}, secret); err != nil {
+			if errors.IsNotFound(err) && keyFlowPending {
+				return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 			}
-			if len(keyMaterial) == 0 {
+			if errors.IsNotFound(err) {
 				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q not found: provide the consensus key registered on-chain — refusing to roll out a signer with no key", secretName)
 			}
-			if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
-				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q contains an invalid %s: %w", secretName, privKeyFilename, err)
-			}
+			return cosmosigner.Backend{}, err
+		}
+		keyMaterial, keyExists := secret.Data[privKeyFilename]
+		if !keyExists && keyFlowPending {
+			return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
+		}
+		if len(keyMaterial) == 0 {
+			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q has no %s: provide the registered consensus key", secretName, privKeyFilename)
+		}
+		if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
+			return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q contains an invalid %s: %w", secretName, privKeyFilename, err)
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil
 
