@@ -54,6 +54,16 @@ func TestEnsureCosmosignerPreflightsLocalFallbackBeforeTeardown(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid")
 
+	keySecret.Data[PrivKeyFilename] = []byte(`{
+		"address":"0000000000000000000000000000000000000000",
+		"pub_key":{"type":"tendermint/PubKeyEd25519","value":"eA=="},
+		"priv_key":{"type":"tendermint/PrivKeyEd25519","value":"eA=="}
+	}`)
+	require.NoError(t, client.Update(context.Background(), keySecret))
+	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid")
+
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
 	keySecret.Data[PrivKeyFilename] = key
