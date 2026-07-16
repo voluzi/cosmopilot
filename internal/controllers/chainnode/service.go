@@ -285,6 +285,9 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 		}
 		return fmt.Errorf("failed to get service %s: %w", svc.GetName(), err)
 	}
+	if err := requireSameControllerOwner(currentSvc, svc, "Service"); err != nil {
+		return err
+	}
 
 	patchResult, err := patch.DefaultPatchMaker.Calculate(currentSvc, svc)
 	if err != nil {

@@ -311,6 +311,9 @@ func (r *Reconciler) ensureConfigMap(ctx context.Context, cm *corev1.ConfigMap) 
 		}
 		return fmt.Errorf("failed to get configmap %s: %w", cm.GetName(), err)
 	}
+	if err := requireSameControllerOwner(currentCm, cm, "ConfigMap"); err != nil {
+		return err
+	}
 
 	patchResult, err := patch.DefaultPatchMaker.Calculate(currentCm, cm, patch.IgnoreStatusFields(), patch.IgnoreField("data"))
 	if err != nil {
