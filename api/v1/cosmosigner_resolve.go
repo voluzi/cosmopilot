@@ -359,3 +359,19 @@ func (nodeSet *ChainNodeSet) ServedValidatorResolvesIdentity(group string, ident
 	}
 	return false
 }
+
+// ServedValidatorHasMultipleInstances reports whether a removed signer served a validator group
+// whose pods were redundant endpoints of one signer-held identity. Without the signer, those pods
+// regain per-instance local/createValidator semantics and no longer represent one validator.
+func (nodeSet *ChainNodeSet) ServedValidatorHasMultipleInstances(group string) bool {
+	if group == "" || group == ReservedValidatorGroupName {
+		return false
+	}
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		if g.Name == group {
+			return g.Validator != nil && g.GetInstances() > 1
+		}
+	}
+	return false
+}

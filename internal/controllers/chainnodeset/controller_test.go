@@ -820,6 +820,30 @@ func TestValidateForReconcileSignerRemoval(t *testing.T) {
 	_, err = validateForReconcile(softwareServed)
 	require.NoError(t, err)
 
+	// A multi-instance validator group targeted by one signer is one validator with redundant
+	// endpoints. Removing the signer would restore per-instance createValidator/local-key behavior
+	// and expand it into multiple validator identities, even though instance 0 resolves the same key.
+	multiInstance := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(2),
+				Validator: &appsv1.NodeSetValidatorConfig{
+					CreateValidator: &appsv1.CreateValidatorConfig{},
+				},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}}},
+			}},
+		},
+	}
+	multiInstance.SetEstablishedChainID("test-localnet")
+	recordSignerRollout(t, multiInstance)
+	multiInstance.Spec.Nodes[0].Cosmosigner = nil
+	_, err = validateForReconcile(multiInstance)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multi-instance")
+
 	// A DIFFERENT validator referencing the served identity must not satisfy the guard for the served
 	// one: the served group's own path resolves a different key.
 	otherResolves := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})

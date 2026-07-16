@@ -337,6 +337,9 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		if _, ok := desired[st.Name]; ok {
 			continue
 		}
+		if st.ServingIdentity != "" && nodeSet.ServedValidatorHasMultipleInstances(st.ServingGroup) {
+			return fmt.Errorf("cosmosigner %q cannot be removed from multi-instance validator group %q (webhooks disabled): the group currently represents one signer-held validator identity, but removing the signer would restore per-instance validator identities", st.Name, st.ServingGroup)
+		}
 		if st.ServingIdentity != "" &&
 			!nodeSet.ServedValidatorResolvesIdentity(st.ServingGroup, st.ServingIdentity) {
 			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): the validator it served would fall back to a local key different from the on-chain consensus key — restore the signer, or migrate the validator's own signing path to the same key first", st.Name)
