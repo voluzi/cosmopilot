@@ -33,6 +33,9 @@ func (chainNode *ChainNode) ValidateCreate(_ context.Context, obj *ChainNode) (w
 	if err := ValidateCosmosignerReservedName(obj.GetName(), true); err != nil {
 		return nil, err
 	}
+	if err := ValidateCosmosignerStatefulChildName(obj.GetName(), true); err != nil {
+		return nil, err
+	}
 	return obj.Validate(nil)
 }
 

@@ -508,9 +508,7 @@ func ValidateCosmosignerReservedNameNoWebhook(name string, isEstablished bool) e
 //     signer-enabled `foo`'s discovery Service;
 //   - a ChainNode named `foo-signer-import`/`foo-signer-pubkey` would create its node Pod at the
 //     name of signer-enabled `foo`'s one-shot job pod, making the key import fail forever on the
-//     foreign pod;
-//   - `foo-signer-0` and `data-foo-signer-0` collide with a signer's deterministic StatefulSet pod
-//     and raft-state PVC names.
+//     foreign pod.
 //
 // Only enforced on create (isCreate) so pre-existing CRs with such names keep updating; the
 // reconcilers' ownership guards remain the backstop for them.
@@ -523,12 +521,24 @@ func ValidateCosmosignerReservedName(name string, isCreate bool) error {
 			return fmt.Errorf("metadata.name %q is reserved: the \"-signer*\" suffixes collide with cosmosigner-managed resource names derived from other resources; choose a different name", name)
 		}
 	}
-	if lastDash := strings.LastIndexByte(name, '-'); lastDash >= 0 && strings.HasSuffix(name[:lastDash], "-signer") {
-		if _, err := strconv.ParseUint(name[lastDash+1:], 10, 32); err == nil {
-			return fmt.Errorf("metadata.name %q is reserved: it collides with a cosmosigner StatefulSet pod or raft-state PVC name; choose a different name", name)
-		}
-	}
 	return nil
+}
+
+// ValidateCosmosignerStatefulChildName rejects a standalone ChainNode name that exactly matches a
+// signer's canonical StatefulSet pod or raft-state PVC name.
+func ValidateCosmosignerStatefulChildName(name string, isCreate bool) error {
+	if !isCreate {
+		return nil
+	}
+	lastDash := strings.LastIndexByte(name, '-')
+	if lastDash < 0 || !strings.HasSuffix(name[:lastDash], "-signer") {
+		return nil
+	}
+	ordinal, err := strconv.ParseInt(name[lastDash+1:], 10, 32)
+	if err != nil || ordinal < 0 || strconv.FormatInt(ordinal, 10) != name[lastDash+1:] {
+		return nil
+	}
+	return fmt.Errorf("metadata.name %q is reserved: it collides with a cosmosigner StatefulSet pod or raft-state PVC name; choose a different name", name)
 }
 
 // validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the
