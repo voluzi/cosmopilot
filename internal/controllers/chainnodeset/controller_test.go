@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
@@ -102,6 +103,78 @@ func TestReconcileKeepsLocalValidatorWhenVaultImportFails(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(localValidator), fresh))
 	assert.False(t, fresh.Spec.RemoteSignerTarget, "a failed import must leave the validator on its local signing path")
 	assert.NotContains(t, fresh.Labels, controllers.LabelCosmosignerTarget)
+}
+
+func TestReconcileImportsReplacementBeforeSignerTeardown(t *testing.T) {
+	const namespace = "default"
+	backend := appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:         "https://vault.example:8200",
+		KeyName:         "val-key",
+		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		UploadGenerated: true,
+	}}
+	nodeSet := cosmosignerValidatorNodeSet(backend)
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Spec.App = appsv1.AppSpec{Image: "image", App: "appd", Version: ptr.To("1.0.0")}
+	recordSignerRollout(t, nodeSet)
+	oldSignerName := nodeSet.Status.Cosmosigners[0].Name
+
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Cosmosigner = &appsv1.Cosmosigner{Backend: backend}
+	replacement := resolveSingleSigner(t, nodeSet)
+	replacementStatus := nodeSet.EnsureCosmosignerStatus(replacement.Name)
+	replacementStatus.Replicas = ptr.To(replacement.Spec.GetReplicas())
+	replacementStatus.StateStorageSize = replacement.Spec.GetStateStorageSize()
+	replacementStatus.StateStorageClassName = replacement.Spec.StorageClassName
+	replacementStatus.ServingGroup = replacement.ValidatorGroup
+
+	oldSigner := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: oldSignerName, Namespace: namespace}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, oldSigner, testScheme(t)))
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: namespace},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: replacement.SoftwareKeySecret, Namespace: namespace},
+		Data:       map[string][]byte{privKeyFilename: key},
+	}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+	r := newValidatorTestReconciler(t, ns, nodeSet, oldSigner, token, source)
+
+	var importCreates int
+	transport := chainNodeSetRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		statusCode := http.StatusNotFound
+		body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
+		if req.Method == http.MethodPost {
+			importCreates++
+			statusCode = http.StatusInternalServerError
+			body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","message":"forced import failure","code":500}`
+		}
+		return &http.Response{
+			StatusCode: statusCode,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	restConfig := &rest.Config{Host: "https://kubernetes.invalid", Transport: transport}
+	clientSet, err := kubernetes.NewForConfig(restConfig)
+	require.NoError(t, err)
+	r.ClientSet = clientSet
+	r.RestConfig = restConfig
+
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: namespace,
+		Name:      nodeSet.Name,
+	}})
+	require.Error(t, err)
+	require.Equal(t, 1, importCreates, "the reconcile must reach the forced replacement import failure")
+
+	remaining := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: oldSignerName}, remaining),
+		"a failed replacement import must leave the working signer intact")
 }
 
 func TestPrepareCosmosignerImportsBootstrapsCreateValidatorLocally(t *testing.T) {

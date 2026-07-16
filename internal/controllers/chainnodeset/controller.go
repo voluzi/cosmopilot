@@ -143,6 +143,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	chainIDKnownAtStart := nodeSet.Status.ChainID != ""
+
+	// Record replacement signer locks and complete any immediately-runnable Vault import while the
+	// existing signing path is still intact. A failed replacement import must not delete the old signer.
+	if recorded, err := r.initCosmosignerLocks(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	} else if recorded {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	blockedSignerTargets, ready, err := r.prepareCosmosignerImports(ctx, nodeSet)
+	if err != nil {
+		return ctrl.Result{}, err
+	} else if !ready {
+		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+	}
+
 	// Tear down any managed signer the spec no longer desires before children are reconciled, and wait
 	// for completion: a child switching back to its local/tmKMS signing path while old signer pods are
 	// still terminating would put two signers on the same consensus key.
@@ -150,28 +166,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	} else if !tornDown {
 		logger.Info("waiting for cosmosigner teardown before reconciling children")
-		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
-	}
-
-	chainIDKnownAtStart := nodeSet.Status.ChainID != ""
-
-	// Record status entries + raft/PVC locks before children are retargeted, so ensureCosmosigner deploys
-	// the signer in the SAME pass it is retargeted rather than deferring to a later reconcile (which would
-	// leave a retargeted validator without a signer). Needs the chain ID, so it is a no-op until then;
-	// requeue when just recorded so validateForReconcile judges the locks before any resource is applied.
-	if recorded, err := r.initCosmosignerLocks(ctx, nodeSet); err != nil {
-		return ctrl.Result{}, err
-	} else if recorded {
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Complete any immediately-runnable Vault key import before child ChainNodes are reconciled.
-	// A failed import must leave an existing validator on its current signing path, and a signer
-	// scaling down for re-import must become quiescent before any child is touched.
-	blockedSignerTargets, ready, err := r.prepareCosmosignerImports(ctx, nodeSet)
-	if err != nil {
-		return ctrl.Result{}, err
-	} else if !ready {
 		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 	}
 

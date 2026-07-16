@@ -174,43 +174,8 @@ func (r *Reconciler) requireFallbackTmKMSSecret(ctx context.Context, namespace, 
 }
 
 func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (wait bool, err error) {
-	// INITIALISE the raft membership/PVC-template locks BEFORE creating any signer resource. The
-	// values come from the live signer state (if any), so an existing unrecorded StatefulSet is not
-	// "re-locked" to a different replica count or PVC template than the one the raft cluster was
-	// actually formed with; they fall back to the spec only when no signer state exists yet (a true
-	// first rollout). When anything is recorded here, RETURN (wait=true): the status write re-triggers
-	// a reconcile, which runs Validate against the freshly recorded locks BEFORE any resource is
-	// applied — otherwise a legacy/status-lost signer could record the live lock and then apply a
-	// lock-violating spec change in the same pass. Deferring is crash-safe: no lock, no resource.
-	if chainNode.Status.CosmosignerReplicas == nil || chainNode.Status.CosmosignerStateStorageSize == "" ||
-		chainNode.Status.CosmosignerValidatorTargeted == nil {
-		liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode))
-		if err != nil {
-			return false, err
-		}
-		if chainNode.Status.CosmosignerReplicas == nil {
-			if foundReplicas {
-				chainNode.Status.CosmosignerReplicas = ptr.To(liveReplicas)
-			} else {
-				chainNode.Status.CosmosignerReplicas = ptr.To(chainNode.Spec.Cosmosigner.GetReplicas())
-			}
-		}
-		if chainNode.Status.CosmosignerStateStorageSize == "" {
-			if foundStorage {
-				chainNode.Status.CosmosignerStateStorageSize = liveSize
-				chainNode.Status.CosmosignerStateStorageClassName = liveClass
-			} else {
-				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
-				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
-			}
-		}
-		if chainNode.Status.CosmosignerValidatorTargeted == nil {
-			chainNode.Status.CosmosignerValidatorTargeted = ptr.To(chainNode.IsValidator())
-		}
-		if err := r.Status().Update(ctx, chainNode); err != nil {
-			return false, err
-		}
-		return true, nil
+	if wait, err := r.initCosmosignerLocks(ctx, chainNode); err != nil || wait {
+		return wait, err
 	}
 
 	importPending, err := r.maybeImportCosmosignerKey(ctx, chainNode, params)
@@ -277,6 +242,48 @@ func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode 
 	return false, nil
 }
 
+func (r *Reconciler) initCosmosignerLocks(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	// INITIALISE the raft membership/PVC-template locks BEFORE creating any signer resource. The
+	// values come from the live signer state (if any), so an existing unrecorded StatefulSet is not
+	// "re-locked" to a different replica count or PVC template than the one the raft cluster was
+	// actually formed with; they fall back to the spec only when no signer state exists yet (a true
+	// first rollout). When anything is recorded here, RETURN (wait=true): the status write re-triggers
+	// a reconcile, which runs Validate against the freshly recorded locks BEFORE any resource is
+	// applied — otherwise a legacy/status-lost signer could record the live lock and then apply a
+	// lock-violating spec change in the same pass. Deferring is crash-safe: no lock, no resource.
+	if chainNode.Status.CosmosignerReplicas == nil || chainNode.Status.CosmosignerStateStorageSize == "" ||
+		chainNode.Status.CosmosignerValidatorTargeted == nil {
+		liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode))
+		if err != nil {
+			return false, err
+		}
+		if chainNode.Status.CosmosignerReplicas == nil {
+			if foundReplicas {
+				chainNode.Status.CosmosignerReplicas = ptr.To(liveReplicas)
+			} else {
+				chainNode.Status.CosmosignerReplicas = ptr.To(chainNode.Spec.Cosmosigner.GetReplicas())
+			}
+		}
+		if chainNode.Status.CosmosignerStateStorageSize == "" {
+			if foundStorage {
+				chainNode.Status.CosmosignerStateStorageSize = liveSize
+				chainNode.Status.CosmosignerStateStorageClassName = liveClass
+			} else {
+				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
+				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
+			}
+		}
+		if chainNode.Status.CosmosignerValidatorTargeted == nil {
+			chainNode.Status.CosmosignerValidatorTargeted = ptr.To(chainNode.IsValidator())
+		}
+		if err := r.Status().Update(ctx, chainNode); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) (cosmosigner.Params, error) {
 	// Preflight deployability BEFORE the immutable raft/PVC locks are recorded, so a signer that
 	// cannot deploy yet (a missing/incomplete raft-TLS Secret, or a missing backend auth/software Secret
@@ -322,6 +329,12 @@ func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *app
 	params, err := r.preflightCosmosigner(ctx, chainNode)
 	if err != nil {
 		return false, err
+	}
+	if wait, err := r.initCosmosignerLocks(ctx, chainNode); err != nil || wait {
+		return wait, err
+	}
+	if importPending, err := r.maybeImportCosmosignerKey(ctx, chainNode, params); err != nil || importPending {
+		return importPending, err
 	}
 	if err := r.ensureTmKMSConfig(ctx, chainNode); err != nil {
 		return false, err
@@ -432,6 +445,9 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 			}
 			if len(secret.Data[PrivKeyFilename]) == 0 {
 				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q has no %s: provide the registered consensus key", secretName, PrivKeyFilename)
+			}
+			if _, err := cometbft.LoadPrivKey(secret.Data[PrivKeyFilename]); err != nil {
+				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q contains an invalid %s: %w", secretName, PrivKeyFilename, err)
 			}
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil

@@ -687,12 +687,15 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			}
 		}
 		if !keyFlowPending {
-			exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)
+			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)
 			if err != nil {
 				return cosmosigner.Backend{}, err
 			}
-			if !exists {
+			if len(keyMaterial) == 0 {
 				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q not found: provide the consensus key registered on-chain — refusing to roll out a signer with no key", secretName)
+			}
+			if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
+				return cosmosigner.Backend{}, fmt.Errorf("cosmosigner software key secret %q contains an invalid %s: %w", secretName, privKeyFilename, err)
 			}
 		}
 		return cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secretName}}, nil

@@ -229,6 +229,36 @@ func TestPreflightCosmosignersRequiresGenesisSentrySecrets(t *testing.T) {
 	})
 }
 
+func TestCosmosignerBackendRejectsMalformedSoftwareKey(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name:      "sentries",
+				Instances: ptr.To(1),
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: "default"},
+		Data: map[string][]byte{privKeyFilename: []byte(`{
+			"address":"0000000000000000000000000000000000000000",
+			"pub_key":{"type":"tendermint/PubKeyEd25519","value":"eA=="},
+			"priv_key":{"type":"tendermint/PrivKeyEd25519","value":"eA=="}
+		}`)},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, secret)
+
+	_, err := r.cosmosignerBackend(context.Background(), nodeSet, resolveSingleSigner(t, nodeSet))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+}
+
 // TestReconcileSignerTeardownKeepsStatusWhileTerminating verifies that while the signer StatefulSet is
 // still present (teardown is asynchronous), the recorded status entry is preserved — dropping it early
 // would let a remove-and-immediate-re-add bind the surviving PVCs and inherit stale raft membership.
