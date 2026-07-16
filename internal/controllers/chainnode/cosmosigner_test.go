@@ -4,15 +4,104 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
+
+func TestEnsureCosmosignerPreflightsLocalFallbackBeforeTeardown(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{
+			PrivateKeySecret: ptr.To("validator-key"),
+		}},
+		Status: appsv1.ChainNodeStatus{
+			ChainID:                      "chain-1",
+			CosmosignerReplicas:          ptr.To(int32(1)),
+			CosmosignerValidatorTargeted: ptr.To(true),
+		},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace}}
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode, sts).Build()
+	r := &Reconciler{Client: client, Scheme: scheme}
+
+	_, err := r.ensureCosmosigner(context.Background(), chainNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validator-key")
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Namespace: chainNode.Namespace, Name: sts.Name}, &k8sappsv1.StatefulSet{}))
+
+	keySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{PrivKeyFilename: []byte("{}")},
+	}
+	require.NoError(t, client.Create(context.Background(), keySecret))
+	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid")
+
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	keySecret.Data[PrivKeyFilename] = key
+	require.NoError(t, client.Update(context.Background(), keySecret))
+	require.NoError(t, r.preflightCosmosignerFallback(context.Background(), chainNode))
+}
+
+func TestPreflightCosmosignerFallbackRequiresTmKMSSecrets(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+			Hashicorp: &appsv1.TmKmsHashicorpProvider{
+				Address: "https://vault:8200",
+				Key:     "validator-key",
+				TokenSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
+					Key:                  "token",
+				},
+				CertificateSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-ca"},
+					Key:                  "ca.crt",
+				},
+			},
+		}}}},
+		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &Reconciler{Client: client, Scheme: scheme}
+
+	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tmKMS Vault token")
+	require.NoError(t, client.Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{"token": []byte("token")},
+	}))
+	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tmKMS Vault certificate")
+	require.NoError(t, client.Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-ca", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{"ca.crt": []byte("certificate")},
+	}))
+	require.NoError(t, r.preflightCosmosignerFallback(context.Background(), chainNode))
+}
 
 func TestBackfillCosmosignerLegacyStatusRecordsTargetKind(t *testing.T) {
 	for _, tc := range []struct {
