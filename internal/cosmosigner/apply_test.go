@@ -466,7 +466,10 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	// Our own objects: allowed.
 	mine := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}},
+			Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
+		},
 	).Build()
 	if err := PreflightDeployable(context.Background(), mine, me, ns, name, 1, true); err != nil {
 		t.Fatalf("own objects must be deployable, got %v", err)
@@ -498,5 +501,27 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessRaftService(t *testing.T) {
 	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(headless).Build()
 	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false); err != nil {
 		t.Fatalf("owned headless raft Service must remain deployable, got %v", err)
+	}
+}
+
+func TestPreflightDeployableRefusesOwnedNonHeadlessDiscoveryService(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	me := fakeOwner("cs", types.UID("me-uid"))
+	normal := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.0.0.11"},
+	}
+	client := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(normal).Build()
+
+	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false)
+	if err == nil || !strings.Contains(err.Error(), "discovery Service") || !strings.Contains(err.Error(), "not headless") {
+		t.Fatalf("owned non-headless discovery Service must block preflight, got %v", err)
+	}
+
+	headless := normal.DeepCopy()
+	headless.Spec.ClusterIP = corev1.ClusterIPNone
+	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(headless).Build()
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false); err != nil {
+		t.Fatalf("owned headless discovery Service must remain deployable, got %v", err)
 	}
 }

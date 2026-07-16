@@ -35,16 +35,13 @@ import (
 // replicas is the desired StatefulSet replica count; fresh deployment also reserves each deterministic
 // `<name>-<ordinal>` pod name before validators are retargeted.
 func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, replicas int32, usesImportPod bool) error {
-	// Every object the signer deployment applies by name, other than the StatefulSet (handled below with
-	// its extra PVC guard): the config ConfigMap, the raft and discovery Services, and — only for an
-	// uploadGenerated signer — the one-shot `cosmosigner import` pod. ApplyOwned / runJob refuse to
-	// overwrite any of these when owned by a different controller.
+	// Objects that need only the same-owner check. Services are handled separately because their
+	// headless shape is immutable and must also match before deployment.
 	named := []struct {
 		kind string
 		obj  client.Object
 	}{
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
-		{"discovery Service", &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + discoveryServiceSuffix}}},
 	}
 	if usesImportPod {
 		named = append(named, struct {
@@ -57,7 +54,10 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 			return err
 		}
 	}
-	if err := ensureRaftServiceDeployable(ctx, c, owner, namespace, name); err != nil {
+	if err := ensureHeadlessServiceDeployable(ctx, c, owner, namespace, "raft Service", name); err != nil {
+		return err
+	}
+	if err := ensureHeadlessServiceDeployable(ctx, c, owner, namespace, "discovery Service", name+discoveryServiceSuffix); err != nil {
 		return err
 	}
 
@@ -84,7 +84,7 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 	}
 }
 
-func ensureRaftServiceDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+func ensureHeadlessServiceDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, kind, name string) error {
 	svc := &corev1.Service{}
 	switch err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, svc); {
 	case errors.IsNotFound(err):
@@ -92,9 +92,9 @@ func ensureRaftServiceDeployable(ctx context.Context, c client.Client, owner cli
 	case err != nil:
 		return err
 	case !metav1.IsControlledBy(svc, owner):
-		return foreignObjectErr("raft Service", name)
+		return foreignObjectErr(kind, name)
 	case svc.Spec.ClusterIP != corev1.ClusterIPNone:
-		return fmt.Errorf("cosmosigner raft Service %q is not headless and cannot be converted in place; delete the stale owned Service before deploying the signer", name)
+		return fmt.Errorf("cosmosigner %s %q is not headless and cannot be converted in place; delete the stale owned Service before deploying the signer", kind, name)
 	default:
 		return nil
 	}
