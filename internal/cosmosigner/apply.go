@@ -25,7 +25,8 @@ import (
 // controller calls this BEFORE it retargets child validators to the remote signer, so a signer that a
 // later apply would refuse (a same-name ConfigMap/Service/StatefulSet/pod owned by another CR, or a
 // stale foreign `data-<signer>-<ordinal>` claim) does not leave a validator with neither its local key
-// nor a deployable signer. Objects this owner already controls (steady state) do not block.
+// nor a deployable signer. Objects this owner already controls remain deployable only when their
+// immutable shape is compatible with the signer resource that will reuse the name.
 //
 // usesImportPod must be true only when the signer actually runs the one-shot `<name>-import` pod (a
 // Vault uploadGenerated signer). Software, GCP KMS and pre-provisioned Vault signers never create it, so
@@ -43,7 +44,6 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		obj  client.Object
 	}{
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
-		{"raft Service", &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
 		{"discovery Service", &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + discoveryServiceSuffix}}},
 	}
 	if usesImportPod {
@@ -56,6 +56,9 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		if err := ensureNoForeignObject(ctx, c, owner, n.kind, n.obj); err != nil {
 			return err
 		}
+	}
+	if err := ensureRaftServiceDeployable(ctx, c, owner, namespace, name); err != nil {
+		return err
 	}
 
 	sts := &appsv1.StatefulSet{}
@@ -78,6 +81,22 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
 	default:
 		return err
+	}
+}
+
+func ensureRaftServiceDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+	svc := &corev1.Service{}
+	switch err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, svc); {
+	case errors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return err
+	case !metav1.IsControlledBy(svc, owner):
+		return foreignObjectErr("raft Service", name)
+	case svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != corev1.ClusterIPNone:
+		return fmt.Errorf("cosmosigner raft Service %q is not headless and cannot be converted in place; delete the stale owned Service before deploying the signer", name)
+	default:
+		return nil
 	}
 }
 
