@@ -64,7 +64,10 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		if !metav1.IsControlledBy(sts, owner) {
 			return foreignObjectErr("StatefulSet", name)
 		}
-		return ensureReplicaPodNamesAvailable(ctx, c, namespace, name, replicas, sts)
+		if err := ensureReplicaPodNamesAvailable(ctx, c, namespace, name, replicas, sts); err != nil {
+			return err
+		}
+		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
 	case errors.IsNotFound(err):
 		// A fresh StatefulSet cannot create a replica while any pod already holds its deterministic
 		// <name>-<ordinal> name, regardless of that pod's owner.
@@ -149,6 +152,11 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	}
 	if !metav1.IsControlledBy(existing, owner) {
 		return fmt.Errorf("cosmosigner resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
+	}
+	if sts, isSts := obj.(*appsv1.StatefulSet); isSts {
+		if err := ensureNoForeignDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName()); err != nil {
+			return err
+		}
 	}
 
 	k8s.PreserveImmutableStatefulSetFields(obj, existing)

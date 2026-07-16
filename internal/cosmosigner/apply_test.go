@@ -344,6 +344,43 @@ func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
 	}
 }
 
+func TestApplyOwnedRechecksDataPVCsBeforeUpdatingStatefulSet(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("me-uid")}}
+	zero := int32(0)
+	existing := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, UID: types.UID("signer-sts-uid"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "v1", Kind: "ConfigMap", Name: owner.Name, UID: owner.UID, Controller: ptrBool(true),
+			}},
+		},
+		Spec: appsv1.StatefulSetSpec{Replicas: &zero},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireNoError(PreflightDeployable(context.Background(), c, owner, ns, name, 1, false))
+	requireNoError(c.Create(context.Background(), &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
+	}}))
+
+	one := int32(1)
+	desired := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &one},
+	}
+	err := ApplyOwned(context.Background(), c, scheme, owner, desired)
+	if err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
+		t.Fatalf("a foreign PVC appearing after preflight must block StatefulSet scale-up, got %v", err)
+	}
+}
+
 // TestPreflightDeployableRefusesForeignObjects verifies PreflightDeployable fails when ANY object the
 // signer deployment creates by name (ConfigMap, raft/discovery Services, one-shot import pod,
 // StatefulSet) already exists owned by a different controller — so a collision is caught before the
@@ -402,6 +439,22 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, ownedReplicaPod).Build()
 	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err != nil {
 		t.Fatalf("a replica pod controlled by the owned StatefulSet must remain deployable, got %v", err)
+	}
+
+	foreignDataPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
+	}}
+	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, foreignDataPVC).Build()
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
+		t.Fatalf("a foreign retained data PVC must block re-scaling an owned StatefulSet, got %v", err)
+	}
+
+	ownDataPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "me-uid"),
+	}}
+	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, ownDataPVC).Build()
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err != nil {
+		t.Fatalf("an owned retained data PVC must remain deployable, got %v", err)
 	}
 
 	// Nothing present (true first rollout): allowed.

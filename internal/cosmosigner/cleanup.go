@@ -67,8 +67,8 @@ func isAmbiguousLegacyDataPVC(pvc *corev1.PersistentVolumeClaim, name string) bo
 // ensureNoForeignDataPVCs fails when any per-pod raft-state claim of the signer named `name` exists
 // that is NOT attributable to owner — a FOREIGN claim (different owner-UID label, e.g. left behind by
 // a deleted CR recreated under the same name with a new UID) or an ambiguous claim without the label.
-// Called before creating a fresh StatefulSet, which would otherwise silently bind those claims and
-// inherit raft membership/double-sign-protection state from a different owner.
+// Called before creating or updating a StatefulSet, which would otherwise silently bind those claims
+// and inherit raft membership/double-sign-protection state from a different owner.
 //
 // The list is deliberately NOT label-scoped: the StatefulSet controller binds claims purely by NAME
 // (`<dataVolumeName>-<sts>-<ordinal>`), so a claim whose labels were stripped or edited would evade a
