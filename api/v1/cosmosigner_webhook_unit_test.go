@@ -8,6 +8,17 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestValidateCosmosignerReservedNameRejectsStatefulSetChildren(t *testing.T) {
+	for _, name := range []string{"foo-signer-0", "foo-signer-12", "data-foo-signer-0"} {
+		if err := ValidateCosmosignerReservedName(name, true); err == nil {
+			t.Fatalf("metadata.name %q must be reserved for a cosmosigner StatefulSet child", name)
+		}
+	}
+	if err := ValidateCosmosignerReservedName("foo-signer-canary", true); err != nil {
+		t.Fatalf("non-ordinal suffix must remain available, got %v", err)
+	}
+}
+
 // TestNodeSetInitValidatorSameKeyMigration exercises Validate directly (no controller): an
 // established genesis-init ChainNodeSet migrating from Vault tmKMS to a cosmosigner Vault backend
 // on the SAME transit key must be accepted (both the cosmosigner validation and the genesis

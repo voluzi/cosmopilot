@@ -2,6 +2,7 @@ package v1
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -507,7 +508,9 @@ func ValidateCosmosignerReservedNameNoWebhook(name string, isEstablished bool) e
 //     signer-enabled `foo`'s discovery Service;
 //   - a ChainNode named `foo-signer-import`/`foo-signer-pubkey` would create its node Pod at the
 //     name of signer-enabled `foo`'s one-shot job pod, making the key import fail forever on the
-//     foreign pod.
+//     foreign pod;
+//   - `foo-signer-0` and `data-foo-signer-0` collide with a signer's deterministic StatefulSet pod
+//     and raft-state PVC names.
 //
 // Only enforced on create (isCreate) so pre-existing CRs with such names keep updating; the
 // reconcilers' ownership guards remain the backstop for them.
@@ -518,6 +521,11 @@ func ValidateCosmosignerReservedName(name string, isCreate bool) error {
 	for _, suffix := range []string{"-signer", "-signer-privval", "-signer-import", "-signer-pubkey"} {
 		if strings.HasSuffix(name, suffix) {
 			return fmt.Errorf("metadata.name %q is reserved: the \"-signer*\" suffixes collide with cosmosigner-managed resource names derived from other resources; choose a different name", name)
+		}
+	}
+	if lastDash := strings.LastIndexByte(name, '-'); lastDash >= 0 && strings.HasSuffix(name[:lastDash], "-signer") {
+		if _, err := strconv.ParseUint(name[lastDash+1:], 10, 32); err == nil {
+			return fmt.Errorf("metadata.name %q is reserved: it collides with a cosmosigner StatefulSet pod or raft-state PVC name; choose a different name", name)
 		}
 	}
 	return nil
