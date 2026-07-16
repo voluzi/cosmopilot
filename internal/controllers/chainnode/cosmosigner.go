@@ -67,6 +67,12 @@ func (r *Reconciler) backfillCosmosignerLegacyStatus(ctx context.Context, chainN
 		chainNode.Status.CosmosignerAtEstablishment = ptr.To(identity)
 		changed = true
 	}
+	if chainNode.Status.CosmosignerValidatorTargeted == nil && chainNode.Spec.Cosmosigner != nil &&
+		(chainNode.Status.CosmosignerReplicas != nil || chainNode.Status.CosmosignerStateStorageSize != "" ||
+			chainNode.Status.CosmosignerSigningDigest != "" || chainNode.Status.CosmosignerServingIdentity != "") {
+		chainNode.Status.CosmosignerValidatorTargeted = ptr.To(chainNode.IsValidator())
+		changed = true
+	}
 
 	if changed {
 		return true, r.Status().Update(ctx, chainNode)
@@ -106,7 +112,8 @@ func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode 
 	// a reconcile, which runs Validate against the freshly recorded locks BEFORE any resource is
 	// applied — otherwise a legacy/status-lost signer could record the live lock and then apply a
 	// lock-violating spec change in the same pass. Deferring is crash-safe: no lock, no resource.
-	if chainNode.Status.CosmosignerReplicas == nil || chainNode.Status.CosmosignerStateStorageSize == "" {
+	if chainNode.Status.CosmosignerReplicas == nil || chainNode.Status.CosmosignerStateStorageSize == "" ||
+		chainNode.Status.CosmosignerValidatorTargeted == nil {
 		liveReplicas, liveSize, liveClass, foundReplicas, foundStorage, err := cosmosigner.ReadSignerLock(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode))
 		if err != nil {
 			return false, err
@@ -126,6 +133,9 @@ func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode 
 				chainNode.Status.CosmosignerStateStorageSize = chainNode.Spec.Cosmosigner.GetStateStorageSize()
 				chainNode.Status.CosmosignerStateStorageClassName = chainNode.Spec.Cosmosigner.StorageClassName
 			}
+		}
+		if chainNode.Status.CosmosignerValidatorTargeted == nil {
+			chainNode.Status.CosmosignerValidatorTargeted = ptr.To(chainNode.IsValidator())
 		}
 		if err := r.Status().Update(ctx, chainNode); err != nil {
 			return false, err
@@ -547,7 +557,8 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 	if err != nil || !tornDown {
 		return false, err
 	}
-	if chainNode.Status.CosmosignerReplicas == nil && chainNode.Status.CosmosignerSigningDigest == "" {
+	if chainNode.Status.CosmosignerReplicas == nil && chainNode.Status.CosmosignerSigningDigest == "" &&
+		chainNode.Status.CosmosignerValidatorTargeted == nil {
 		return true, nil
 	}
 	// Clear the recorded signer invariants only once the StatefulSet AND its PVCs are actually gone.
@@ -555,6 +566,7 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 	// still terminating would let a remove-and-immediate-re-add bypass the replica guard and bind the
 	// surviving PVCs, inheriting stale raft membership.
 	chainNode.Status.CosmosignerReplicas = nil
+	chainNode.Status.CosmosignerValidatorTargeted = nil
 	chainNode.Status.CosmosignerStateStorageSize = ""
 	chainNode.Status.CosmosignerStateStorageClassName = nil
 	chainNode.Status.CosmosignerSigningDigest = ""

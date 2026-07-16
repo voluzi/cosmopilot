@@ -1,13 +1,66 @@
 package chainnode
 
 import (
+	"context"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
+
+func TestBackfillCosmosignerLegacyStatusRecordsTargetKind(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		validator *appsv1.ValidatorConfig
+		want      bool
+	}{
+		{name: "validator", validator: &appsv1.ValidatorConfig{}, want: true},
+		{name: "sentry", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chainNode := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: "default"},
+				Spec: appsv1.ChainNodeSpec{
+					Validator:   tc.validator,
+					Cosmosigner: &appsv1.Cosmosigner{},
+				},
+				Status: appsv1.ChainNodeStatus{
+					ChainID:                     "test-1",
+					CosmosignerReplicas:         ptr.To(int32(1)),
+					CosmosignerStateStorageSize: "1Gi",
+				},
+			}
+			scheme := runtime.NewScheme()
+			if err := appsv1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build()
+			r := &Reconciler{Client: cl}
+
+			changed, err := r.backfillCosmosignerLegacyStatus(context.Background(), chainNode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatal("legacy status backfill must record the signer target kind")
+			}
+
+			fresh := &appsv1.ChainNode{}
+			if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: tc.name}, fresh); err != nil {
+				t.Fatal(err)
+			}
+			if fresh.Status.CosmosignerValidatorTargeted == nil || *fresh.Status.CosmosignerValidatorTargeted != tc.want {
+				t.Fatalf("CosmosignerValidatorTargeted = %v, want %v", fresh.Status.CosmosignerValidatorTargeted, tc.want)
+			}
+		})
+	}
+}
 
 // TestChainNodeSetTargetPodKeepsDiscoveryLabel is a regression test for the discovery-selector bug:
 // WithChainNodeLabels strips the controller-managed cosmosigner-target label from inherited metadata,

@@ -193,6 +193,39 @@ func TestChainNodeNoWebhookSignerLifecycle(t *testing.T) {
 		t.Fatal("removing a migrated signer before its serving identity is recorded must be rejected")
 	}
 
+	// Removing both the signer and validator in the same no-webhook edit must not erase the evidence
+	// that the in-flight signer targeted an on-chain validator.
+	removedPendingAndValidator := preProvisioned.DeepCopy()
+	removedPendingAndValidator.Status.CosmosignerReplicas = ptr.To(int32(1))
+	removedPendingAndValidator.Status.CosmosignerStateStorageSize = "1Gi"
+	removedPendingAndValidator.Status.CosmosignerValidatorTargeted = ptr.To(true)
+	removedPendingAndValidator.Spec.Cosmosigner = nil
+	removedPendingAndValidator.Spec.Validator = nil
+	if _, err := removedPendingAndValidator.Validate(nil); err == nil {
+		t.Fatal("removing an in-flight validator signer together with the validator must be rejected")
+	}
+
+	// A pre-rollout sentry signer protects no in-cluster validator identity, so its recorded false
+	// marker keeps no-webhook removal available.
+	pendingSentry := &ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry"},
+		Spec: ChainNodeSpec{
+			App:         AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis:     &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")}}},
+		},
+		Status: ChainNodeStatus{
+			ChainID:                      "test-1",
+			CosmosignerReplicas:          ptr.To(int32(1)),
+			CosmosignerStateStorageSize:  "1Gi",
+			CosmosignerValidatorTargeted: ptr.To(false),
+		},
+	}
+	pendingSentry.Spec.Cosmosigner = nil
+	if _, err := pendingSentry.Validate(nil); err != nil {
+		t.Fatalf("removing a pre-rollout sentry signer must remain allowed, got: %v", err)
+	}
+
 	// Removing a software signer that used the validator's own key: the serving identity is still
 	// resolved by the validator's local path, so removal is a safe rollback.
 	softwareServed := base(CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}})

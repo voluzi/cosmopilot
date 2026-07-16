@@ -278,6 +278,13 @@ type ChainNodeStatus struct {
 	// +optional
 	CosmosignerReplicas *int32 `json:"cosmosignerReplicas,omitempty"`
 
+	// CosmosignerValidatorTargeted records whether the managed signer targeted this node as a
+	// validator when its deployment locks were initialized. The nullable marker lets the no-webhook
+	// path distinguish a pending validator rollout from a sentry after the current spec has already
+	// removed both .spec.cosmosigner and .spec.validator. Not meant to be set by hand.
+	// +optional
+	CosmosignerValidatorTargeted *bool `json:"cosmosignerValidatorTargeted,omitempty"`
+
 	// CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was
 	// rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while
 	// the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet

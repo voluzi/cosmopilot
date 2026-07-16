@@ -5853,6 +5853,13 @@ spec:
                   volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old
                   size/class. Not meant to be set by hand.
                 type: string
+              cosmosignerValidatorTargeted:
+                description: |-
+                  CosmosignerValidatorTargeted records whether the managed signer targeted this node as a
+                  validator when its deployment locks were initialized. The nullable marker lets the no-webhook
+                  path distinguish a pending validator rollout from a sentry after the current spec has already
+                  removed both .spec.cosmosigner and .spec.validator. Not meant to be set by hand.
+                type: boolean
               dataUsage:
                 description: Usage percentage of data volume.
                 type: string

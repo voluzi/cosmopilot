@@ -472,6 +472,11 @@ func (in *ChainNodeStatus) DeepCopyInto(out *ChainNodeStatus) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.CosmosignerValidatorTargeted != nil {
+		in, out := &in.CosmosignerValidatorTargeted, &out.CosmosignerValidatorTargeted
+		*out = new(bool)
+		**out = **in
+	}
 	if in.CosmosignerStateStorageClassName != nil {
 		in, out := &in.CosmosignerStateStorageClassName, &out.CosmosignerStateStorageClassName
 		*out = new(string)

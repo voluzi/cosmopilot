@@ -233,9 +233,14 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			if serving != "" && !chainNode.ValidatorResolvesSigningIdentity(serving) {
 				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
 			}
-			if serving == "" && chainNode.Status.CosmosignerSigningDigest == "" && chainNode.Spec.Validator != nil &&
+			if serving == "" && chainNode.Status.CosmosignerSigningDigest == "" &&
 				(chainNode.Status.CosmosignerReplicas != nil || chainNode.Status.CosmosignerStateStorageSize != "") {
-				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): its validator rollout identity has not been recorded yet, so the controller cannot prove the local fallback key is safe — restore the signer until rollout completes, or remove it with webhooks enabled")
+				switch targeted := chainNode.Status.CosmosignerValidatorTargeted; {
+				case targeted == nil:
+					return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): its pre-rollout target kind was not recorded, so the controller cannot prove whether an on-chain validator would lose its signing path — restore the signer so the controller can record it, or remove it with webhooks enabled")
+				case *targeted:
+					return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): its validator rollout identity has not been recorded yet, so the controller cannot prove the local fallback key is safe — restore the signer until rollout completes, or remove it with webhooks enabled")
+				}
 			}
 			// A digest with no serving identity is a legacy record (pre-field) whose identity can no
 			// longer be reconstructed once the spec is gone: unjudgeable, so reject conservatively.
