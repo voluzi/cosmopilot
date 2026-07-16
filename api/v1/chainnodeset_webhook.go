@@ -481,6 +481,14 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 // old is the previous revision on the update path (nil on create); it enables the same-key
 // migration waiver mirroring the ChainNode webhook.
 func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
+	// These group Services collide with the raft/discovery Services of a same-named standalone
+	// ChainNode signer, so they are reserved even when this ChainNodeSet has no signer of its own.
+	for i, g := range nodeSet.Spec.Nodes {
+		if g.Name == "signer" || g.Name == "signer-privval" {
+			return fmt.Errorf(".spec.nodes[%d].name %q is reserved because it collides with a standalone ChainNode cosmosigner Service", i, g.Name)
+		}
+	}
+
 	anySigner := nodeSet.Spec.Cosmosigner != nil
 	for i := range nodeSet.Spec.Nodes {
 		if nodeSet.Spec.Nodes[i].Cosmosigner != nil {
@@ -489,15 +497,6 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 	}
 	if !anySigner {
 		return nil
-	}
-
-	// A signer owns resources named "<nodeset>[-<group>]-signer", "...-signer-privval" and the
-	// one-shot "...-signer-import" pod; a node group named "signer" or "signer-privval" would
-	// produce a colliding Service.
-	for i, g := range nodeSet.Spec.Nodes {
-		if g.Name == "signer" || g.Name == "signer-privval" {
-			return fmt.Errorf(".spec.nodes[%d].name %q is reserved when a cosmosigner is configured", i, g.Name)
-		}
 	}
 
 	// Every derived signer resource name must be unique and must not collide with a node group's own
@@ -519,6 +518,43 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 		if trimmed, ok := strings.CutSuffix(groupService, "-privval"); ok {
 			if _, collides := signerNames[trimmed]; collides {
 				return fmt.Errorf(".spec.nodes[%d].name %q collides with a cosmosigner's derived discovery Service name %q: rename the group", i, g.Name, groupService)
+			}
+		}
+	}
+
+	checkRouteService := func(path, serviceName string) error {
+		if signerPath, collides := signerNames[serviceName]; collides {
+			return fmt.Errorf("%s derives global route Service name %q, which collides with the raft Service from %s", path, serviceName, signerPath)
+		}
+		if signerName, ok := strings.CutSuffix(serviceName, "-privval"); ok {
+			if signerPath, collides := signerNames[signerName]; collides {
+				return fmt.Errorf("%s derives global route Service name %q, which collides with the discovery Service from %s", path, serviceName, signerPath)
+			}
+		}
+		return nil
+	}
+	for i := range nodeSet.Spec.Ingresses {
+		ing := &nodeSet.Spec.Ingresses[i]
+		path := fmt.Sprintf(".spec.ingresses[%d]", i)
+		if err := checkRouteService(path, ing.GetName(nodeSet)); err != nil {
+			return err
+		}
+		if ing.UseInternal() {
+			if err := checkRouteService(path, fmt.Sprintf("%s-internal", ing.GetName(nodeSet))); err != nil {
+				return err
+			}
+		}
+	}
+	for i := range nodeSet.Spec.GatewayRoutes {
+		gw := &nodeSet.Spec.GatewayRoutes[i]
+		path := fmt.Sprintf(".spec.gatewayRoutes[%d]", i)
+		serviceName := fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)
+		if err := checkRouteService(path, serviceName); err != nil {
+			return err
+		}
+		if gw.UseInternal() {
+			if err := checkRouteService(path, serviceName+"-internal"); err != nil {
+				return err
 			}
 		}
 	}

@@ -114,7 +114,7 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 	// signer would persist locks (and, for uploadGenerated, mutate the Vault key) for a signer ApplyOwned
 	// then refuses. Only an uploadGenerated signer runs the one-shot <name>-import pod.
 	usesImportPod := chainNode.Spec.Cosmosigner.VaultUploadsGenerated(chainNode.ShouldInitGenesis())
-	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), usesImportPod); err != nil {
+	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), chainNode.Spec.Cosmosigner.GetReplicas(), usesImportPod); err != nil {
 		return false, err
 	}
 	// Preflight the uploadGenerated import SOURCE (read-only) before locks/import: a terminally missing

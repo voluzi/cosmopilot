@@ -192,6 +192,14 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 		}
 	}
 
+	// These group Services collide with a same-named standalone ChainNode's signer Services even when
+	// this ChainNodeSet does not configure its own signer.
+	for _, name := range []string{"signer", "signer-privval"} {
+		_, err := base([]NodeGroupSpec{{Name: name, Instances: ptr.To(1)}}).Validate(nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reserved")
+	}
+
 	// Group Service name shadowing a signer resource name: group "vg-signer"'s Service is
 	// cs-vg-signer, the raft Service of group "vg"'s signer.
 	shadow := base([]NodeGroupSpec{
@@ -213,6 +221,39 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 	_, err = shadowPrivval.Validate(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "discovery Service name")
+
+	for _, route := range []struct {
+		name      string
+		ingresses []GlobalIngressConfig
+		gateways  []GlobalGatewayConfig
+	}{
+		{
+			name: "global ingress",
+			ingresses: []GlobalIngressConfig{{
+				Name: "signer", Groups: []string{"global"}, Host: "nodes.example.com", EnableRPC: true,
+			}},
+		},
+		{
+			name: "global gateway",
+			gateways: []GlobalGatewayConfig{{
+				Name: "signer", Groups: []string{"global"}, Host: "nodes.example.com", EnableRPC: true,
+				Gateway: GatewayRef{Name: "gateway"},
+			}},
+		},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			nodeSet := base([]NodeGroupSpec{{
+				Name: "global", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")},
+			}})
+			nodeSet.Spec.Ingresses = route.ingresses
+			nodeSet.Spec.GatewayRoutes = route.gateways
+
+			_, err := nodeSet.Validate(nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "global route Service")
+		})
+	}
 }
 
 // TestValidateCosmosignerSignerAdditionToEstablishedValidator verifies that adding a pre-provisioned

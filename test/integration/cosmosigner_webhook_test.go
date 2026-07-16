@@ -262,7 +262,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		)
 		err := Framework().Client().Create(Framework().Context(), cs)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("is reserved when a cosmosigner is configured"))
+		Expect(err.Error()).To(ContainSubstring("is reserved because it collides with a standalone ChainNode cosmosigner Service"))
 	})
 
 	It("rejects two validators using the same Vault key via tmKMS and cosmosigner", func() {

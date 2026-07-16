@@ -368,7 +368,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	for _, tc := range cases {
 		c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(tc.obj).Build()
 		// usesImportPod=true so the import-pod name is included in the collision checks.
-		err := PreflightDeployable(context.Background(), c, me, ns, name, true)
+		err := PreflightDeployable(context.Background(), c, me, ns, name, 1, true)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("foreign %s must block preflight; got err=%v", tc.want, err)
 		}
@@ -378,13 +378,19 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	// / pre-provisioned Vault): usesImportPod=false skips that name so an unrelated pod cannot wedge it.
 	foreignImportPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: foreign}}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignImportPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err != nil {
 		t.Fatalf("a non-uploadGenerated signer must ignore a foreign import pod, got %v", err)
+	}
+
+	foreignReplicaPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns, OwnerReferences: foreign}}
+	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignReplicaPod).Build()
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
+		t.Fatalf("a foreign signer replica pod must block preflight, got %v", err)
 	}
 
 	// Nothing present (true first rollout): allowed.
 	empty := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
-	if err := PreflightDeployable(context.Background(), empty, me, ns, name, true); err != nil {
+	if err := PreflightDeployable(context.Background(), empty, me, ns, name, 1, true); err != nil {
 		t.Fatalf("empty namespace must be deployable, got %v", err)
 	}
 
@@ -393,7 +399,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
 	).Build()
-	if err := PreflightDeployable(context.Background(), mine, me, ns, name, true); err != nil {
+	if err := PreflightDeployable(context.Background(), mine, me, ns, name, 1, true); err != nil {
 		t.Fatalf("own objects must be deployable, got %v", err)
 	}
 }

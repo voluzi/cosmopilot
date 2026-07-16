@@ -31,7 +31,9 @@ import (
 // Vault uploadGenerated signer). Software, GCP KMS and pre-provisioned Vault signers never create it, so
 // checking that name for them would let an unrelated foreign pod block an otherwise-deployable signer on
 // every reconcile.
-func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, usesImportPod bool) error {
+// replicas is the desired StatefulSet replica count; fresh deployment also reserves each deterministic
+// `<name>-<ordinal>` pod name before validators are retargeted.
+func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, replicas int32, usesImportPod bool) error {
 	// Every object the signer deployment applies by name, other than the StatefulSet (handled below with
 	// its extra PVC guard): the config ConfigMap, the raft and discovery Services, and — only for an
 	// uploadGenerated signer — the one-shot `cosmosigner import` pod. ApplyOwned / runJob refuse to
@@ -64,7 +66,18 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		}
 		return nil
 	case errors.IsNotFound(err):
-		// A fresh StatefulSet: ApplyOwned's Create path runs exactly this guard.
+		// A fresh StatefulSet cannot create a replica while any pod already holds its deterministic
+		// <name>-<ordinal> name, regardless of that pod's owner.
+		for ordinal := int32(0); ordinal < replicas; ordinal++ {
+			podName := fmt.Sprintf("%s-%d", name, ordinal)
+			pod := &corev1.Pod{}
+			if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podName}, pod); err == nil {
+				return fmt.Errorf("cosmosigner replica pod %q already exists; refusing to create a StatefulSet that cannot start all replicas", podName)
+			} else if !errors.IsNotFound(err) {
+				return err
+			}
+		}
+		// ApplyOwned's Create path runs the PVC guard below.
 		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
 	default:
 		return err

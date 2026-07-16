@@ -106,7 +106,7 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		// cause children to be retargeted to a remote signer that will never come up. Only an
 		// uploadGenerated signer runs the one-shot <name>-import pod, so only it checks that name.
 		usesImportPod := s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s))
-		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name, usesImportPod); err != nil {
+		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), s.Name, s.Spec.GetReplicas(), usesImportPod); err != nil {
 			return err
 		}
 		// The raft mTLS Secret (when set) is mounted at startup; a missing/incomplete one keeps every
