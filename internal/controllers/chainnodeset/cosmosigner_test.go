@@ -350,6 +350,28 @@ func TestPreflightRemovedSignerFallbacksRequiresLocalKey(t *testing.T) {
 	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
 }
 
+func TestPreflightRemovedSignerFallbacksUsesDesiredReplacement(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Cosmosigner = &appsv1.Cosmosigner{Backend: cosmosignerVaultBackend()}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
+}
+
+func TestPreflightRemovedSignerFallbacksSkipsUncreatedSigner(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	signer := resolveSingleSigner(t, nodeSet)
+	status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	status.ServingGroup = signer.ValidatorGroup
+	status.Replicas = ptr.To(int32(1))
+	nodeSet.Spec.Cosmosigner = nil
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
+}
+
 func TestReconcilePreflightsRemovedSignerFallbackBeforeTeardown(t *testing.T) {
 	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
 	nodeSet.UID = types.UID("nodeset-uid")
@@ -427,6 +449,25 @@ func TestPreflightRemovedSignerFallbacksRequiresSupportedTmKMSProvider(t *testin
 	err := r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "supported tmKMS provider")
+}
+
+func TestPreflightRemovedSignerFallbacksRequiresTmKMSTarget(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Validator.TmKMS = &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+		Hashicorp: &appsv1.TmKmsHashicorpProvider{
+			TokenSecret: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
+				Key:                  "token",
+			},
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	err := r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "address and key")
 }
 
 // TestSignerNameForNode verifies each node maps to the signer that must dial it: every pod of a

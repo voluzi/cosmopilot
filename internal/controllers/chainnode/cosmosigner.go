@@ -3,6 +3,7 @@ package chainnode
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -121,6 +122,9 @@ func (r *Reconciler) preflightCosmosignerFallback(ctx context.Context, chainNode
 		hashicorp := t.Provider.Hashicorp
 		if hashicorp == nil {
 			return fmt.Errorf("cosmosigner cannot be removed: validator has no supported tmKMS provider configured")
+		}
+		if strings.TrimSpace(hashicorp.Address) == "" || strings.TrimSpace(hashicorp.Key) == "" {
+			return fmt.Errorf("cosmosigner cannot be removed: tmKMS Hashicorp address and key are required")
 		}
 		if err := r.requireFallbackTmKMSSecret(ctx, chainNode.GetNamespace(), "tmKMS Vault token", hashicorp.TokenSecret); err != nil {
 			return err

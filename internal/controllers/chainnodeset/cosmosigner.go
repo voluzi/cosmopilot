@@ -3,6 +3,7 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -154,8 +155,9 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 // preflightRemovedSignerFallbacks verifies the validator signing path that will replace each stale
 // signer before teardown makes that signer unavailable.
 func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	desiredSigners := nodeSet.ResolveCosmosigners()
 	desired := map[string]struct{}{}
-	for _, s := range nodeSet.ResolveCosmosigners() {
+	for _, s := range desiredSigners {
 		desired[s.Name] = struct{}{}
 	}
 
@@ -163,6 +165,33 @@ func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSe
 		st := &nodeSet.Status.Cosmosigners[i]
 		if _, ok := desired[st.Name]; ok || st.ServingGroup == "" {
 			continue
+		}
+		replaced := false
+		for _, s := range desiredSigners {
+			if s.ValidatorGroup != st.ServingGroup {
+				continue
+			}
+			switch {
+			case st.ServingIdentity != "":
+				replaced = s.ValidatorTargetedIdentity() == st.ServingIdentity
+			case st.SigningDigest == "":
+				replaced = true
+			}
+			if replaced {
+				break
+			}
+		}
+		if replaced {
+			continue
+		}
+		if st.ServingIdentity == "" && st.SigningDigest == "" {
+			live, err := r.ownedSignerStatefulSetExists(ctx, nodeSet, st.Name)
+			if err != nil {
+				return err
+			}
+			if !live {
+				continue
+			}
 		}
 
 		var cfg *appsv1.NodeSetValidatorConfig
@@ -184,6 +213,9 @@ func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSe
 			hashicorp := cfg.TmKMS.Provider.Hashicorp
 			if hashicorp == nil {
 				return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has no supported tmKMS provider configured", st.Name, st.ServingGroup)
+			}
+			if strings.TrimSpace(hashicorp.Address) == "" || strings.TrimSpace(hashicorp.Key) == "" {
+				return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q tmKMS Hashicorp address and key are required", st.Name, st.ServingGroup)
 			}
 			if err := r.requireTmKMSSecret(ctx, nodeSet.GetNamespace(), "tmKMS Vault token", hashicorp.TokenSecret); err != nil {
 				return fmt.Errorf("cosmosigner %q cannot be removed: %w", st.Name, err)

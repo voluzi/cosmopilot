@@ -121,6 +121,29 @@ func TestPreflightCosmosignerFallbackUsesRecordedServingIdentity(t *testing.T) {
 	require.Contains(t, err.Error(), "validator-key")
 }
 
+func TestPreflightCosmosignerFallbackRequiresTmKMSTarget(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+			Hashicorp: &appsv1.TmKmsHashicorpProvider{
+				TokenSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
+					Key:                  "token",
+				},
+			},
+		}}}},
+		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+
+	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "address and key")
+}
+
 func TestBackfillCosmosignerLegacyStatusRecordsTargetKind(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
