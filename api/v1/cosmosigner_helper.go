@@ -127,13 +127,10 @@ func (nodeSet *ChainNodeSet) groupCosmosigner(group string) *Cosmosigner {
 }
 
 // groupSignerIdentity returns the effective signing identity of the signer serving a validator
-// group's instance, and whether such a signer exists.
-func (nodeSet *ChainNodeSet) groupSignerIdentity(group string, instance int) (string, bool) {
+// group, and whether such a signer exists.
+func (nodeSet *ChainNodeSet) groupSignerIdentity(group string) (string, bool) {
 	for _, s := range nodeSet.ResolveCosmosigners() {
-		if s.ValidatorGroup != group {
-			continue
-		}
-		if s.ValidatorInstance == nil || *s.ValidatorInstance == instance {
+		if s.ValidatorGroup == group {
 			return s.Identity(), true
 		}
 	}
@@ -243,15 +240,14 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 				id = nodeSet.genesisSentryEstablishmentIdentity(s)
 			}
 			st.AtEstablishment = &id
-			// Pin the served group/instance for a validator-targeted signer, so the pre-digest no-webhook
-			// guard can reject moving validator-ness to a SIBLING target group before the rollout digest
+			// Pin the served group for a validator-targeted signer, so the pre-digest no-webhook guard
+			// can reject moving validator-ness to a SIBLING target group before the rollout digest
 			// records the served group. Without this, a signer targeting multiple groups could swap which
 			// group is the validator while keeping the same backend identity — the identity check alone
 			// would still pass. Recorded once, alongside the write-once marker; the rollout later records
-			// the same values with the digest.
+			// the same value with the digest.
 			if s.ValidatorGroup != "" {
 				st.ServingGroup = s.ValidatorGroup
-				st.ServingInstance = s.ValidatorInstance
 			}
 		}
 	}
@@ -473,9 +469,19 @@ func (chainNode *ChainNode) ValidatorResolvesSigningIdentity(identity string) bo
 }
 
 // validatorGroupSigningIdentity returns the effective own-path (local key or tmKMS) consensus-key
-// fingerprint of a validator group's representative (instance 0), or the legacy singleton.
+// fingerprint of a validator group's representative (instance 0), or the legacy singleton, ignoring
+// any cosmosigner.
 func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *NodeSetValidatorConfig) string {
-	return nodeSet.validatorInstanceSigningIdentity(group, 0, cfg)
+	if cfg == nil {
+		return ""
+	}
+	if id, ok := tmkmsNormalizedVaultKey(cfg.TmKMS); ok {
+		return id
+	}
+	if cfg.TmKMS != nil {
+		return "tmkms\x00unconfigured"
+	}
+	return localKeySigningIdentity(nodeSet.validatorKeySecret(group))
 }
 
 // ValidateCosmosignerReservedNameNoWebhook applies the reserved-name rule on the no-webhook

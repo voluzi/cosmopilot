@@ -331,8 +331,13 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 	// Mark nodes of groups targeted by a managed cosmosigner deployment as remote-signer targets, so
 	// they listen for the signer and carry its discovery-service selector label (valued with the signer
 	// name so that signer's service selects the targeted group's pods).
-	if signerName, ok := signerNameForNode(nodeSet, group.Name, index); ok {
+	if signerName, ok := signerNameForNode(nodeSet, group.Name); ok {
 		node.Spec.RemoteSignerTarget = true
+		// A targeted ChainNodeSet child must not inherit a user-set chain-node label: a same-named
+		// standalone signer's discovery Service selects chain-node + cosmosigner-target, and the
+		// target label below may equal that standalone signer's name. Preserve the user label on
+		// non-target resources, but drop it from target children before adding the signer selector.
+		delete(node.Labels, controllers.LabelChainNode)
 		node.Labels = utils.MergeMaps(node.Labels, map[string]string{
 			controllers.LabelCosmosignerTarget: signerName,
 		})

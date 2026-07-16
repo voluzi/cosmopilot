@@ -182,6 +182,79 @@ func TestDeriveGroupValidatorConfigNoInitOrSingleInstance(t *testing.T) {
 	assert.Same(t, withInit, deriveGroupValidatorConfig(nodeSet, "validators", 0, 1, withInit))
 }
 
+// TestDeriveGroupValidatorConfigCosmosignerTargeted verifies the one-identity derivation for a
+// multi-instance validator group targeted by a cosmosigner: the group is ONE validator (the
+// signer's identity) with redundant signing endpoints, so no sibling genesis validators are
+// recorded on instance 0, instances > 0 get Init cleared, and CreateValidator only survives on
+// instance 0 (N registration flows would race to register the same pubkey).
+func TestDeriveGroupValidatorConfigCosmosignerTargeted(t *testing.T) {
+	vaultBackend := appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:     "https://vault:8200",
+		KeyName:     "k",
+		TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+	}}
+	mk := func(cfg *appsv1.NodeSetValidatorConfig) *appsv1.ChainNodeSet {
+		return &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+			Spec: appsv1.ChainNodeSetSpec{
+				Nodes: []appsv1.NodeGroupSpec{{
+					Name:        "validators",
+					Instances:   ptr.To(3),
+					Validator:   cfg,
+					Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend},
+				}},
+			},
+		}
+	}
+
+	// Genesis-init group: instance 0 keeps Init with NO sibling genesis validators; others cleared.
+	initCfg := &appsv1.NodeSetValidatorConfig{
+		Init: &appsv1.GenesisInitConfig{ChainID: "test-chain", Assets: []string{"1stake"}, StakeAmount: "1stake"},
+	}
+	nodeSet := mk(initCfg)
+	v0 := deriveGroupValidatorConfig(nodeSet, "validators", 0, 3, initCfg)
+	require.NotNil(t, v0.Init)
+	assert.Empty(t, v0.Init.GenesisValidators, "no sibling genesis validators for a signer-targeted group")
+	for _, i := range []int{1, 2} {
+		v := deriveGroupValidatorConfig(nodeSet, "validators", i, 3, initCfg)
+		assert.Nil(t, v.Init, "instance %d must not initialize genesis", i)
+	}
+	// groupGenesisValidators must not expand either (so no per-instance secrets are minted).
+	assert.Nil(t, groupGenesisValidators(nodeSet, "validators", 3, initCfg))
+
+	// CreateValidator group: only instance 0 keeps the registration flow.
+	cvCfg := &appsv1.NodeSetValidatorConfig{CreateValidator: &appsv1.CreateValidatorConfig{}}
+	nodeSet = mk(cvCfg)
+	v0 = deriveGroupValidatorConfig(nodeSet, "validators", 0, 3, cvCfg)
+	assert.NotNil(t, v0.CreateValidator, "instance 0 keeps createValidator")
+	for _, i := range []int{1, 2} {
+		v := deriveGroupValidatorConfig(nodeSet, "validators", i, 3, cvCfg)
+		assert.Nil(t, v.CreateValidator, "instance %d must not run createValidator", i)
+	}
+	assert.NotNil(t, cvCfg.CreateValidator, "original config must not be mutated")
+}
+
+// TestSignerNameForNodeMultiInstanceValidatorGroup verifies every instance of a signer-targeted
+// multi-instance validator group maps to the group's single signer (all N pods are redundant
+// signing endpoints of the same identity and must carry the discovery label).
+func TestSignerNameForNodeMultiInstanceValidatorGroup(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "vg", Instances: ptr.To(3), Validator: &appsv1.NodeSetValidatorConfig{},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+					Address: "https://v:8200", KeyName: "k",
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "t"}, Key: "token"},
+				}}},
+			}},
+		},
+	}
+	name, ok := signerNameForNode(nodeSet, "vg")
+	require.True(t, ok)
+	assert.Equal(t, "cs-vg-signer", name, "the group's single signer dials every instance")
+}
+
 // TestEnsureGenesisValidatorSecrets verifies the extra genesis validators' account and
 // priv-key secrets are created deterministically with the expected keys, and that existing
 // secrets are left untouched (key material is stable across reconciles).

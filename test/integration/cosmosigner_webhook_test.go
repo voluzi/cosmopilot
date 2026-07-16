@@ -105,15 +105,13 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("nodeGroups is required when .spec.validator is not set"))
 	})
 
-	It("rejects targeting a multi-instance validator group", func() {
+	It("accepts targeting a multi-instance validator group (one identity, redundant endpoints)", func() {
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{NodeGroups: []string{"validators"}, Backend: vaultBackend()},
 			[]appsv1.NodeGroupSpec{{Name: "validators", Instances: ptr.To(3), Validator: &appsv1.NodeSetValidatorConfig{}}},
 			nil,
 		)
-		err := Framework().Client().Create(Framework().Context(), cs)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("multiple instances"))
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
 	})
 
 	It("rejects a signer and tmKMS on the same targeted validator", func() {
@@ -714,15 +712,26 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		return appsv1.CosmosignerBackend{GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: keyVersion}}
 	}
 
-	It("accepts a per-group signer on a multi-instance validator group (one signer per instance)", func() {
-		// A 3-instance validator group with its own cosmosigner expands to three signers, each holding
-		// the index-appended Vault key <keyName>-<i>, so their identities are distinct.
+	It("accepts a per-group signer on a multi-instance validator group (one identity, redundant endpoints)", func() {
+		// A 3-instance validator group with its own cosmosigner is ONE validator: a single signer
+		// ("<nodeset>-validators-signer") holds one consensus identity and dials all three pods as
+		// redundant signing endpoints.
 		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{
 			Name:        "validators",
 			Instances:   ptr.To(3),
 			Validator:   &appsv1.NodeSetValidatorConfig{},
 			Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("groupkey")},
 		}}, nil)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("accepts separate single-instance validator groups, each with its own signer and key", func() {
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "validator-a", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("key-a")}},
+			{Name: "validator-b", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("key-b")}},
+		}, nil)
 		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
 	})
 

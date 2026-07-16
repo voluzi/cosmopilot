@@ -150,9 +150,8 @@ type ChainNodeSetStatus struct {
 	Seeds []SeedStatus `json:"seeds,omitempty"`
 
 	// Cosmosigners records controller-managed state for each managed cosmosigner deployment (the
-	// top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner, expanded per instance
-	// for a multi-instance validator group). Keyed by the signer's resource name. Not meant to be set
-	// by hand.
+	// top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner). Keyed by the
+	// signer's resource name. Not meant to be set by hand.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -339,10 +338,11 @@ type NodeGroupSpec struct {
 	Validator *NodeSetValidatorConfig `json:"validator,omitempty"`
 
 	// Cosmosigner deploys a managed cosmosigner remote signer for this group. When the group is a
-	// validator group, the signer signs for that validator (one signer per instance for a
-	// multi-instance group); when it has no validator, the group's nodes are the signing endpoints of
-	// a single out-of-band-registered identity (sentry mode). Its `nodeGroups` field must be empty —
-	// the enclosing group is the target.
+	// validator group, the signer signs for that group's single consensus identity — a multi-instance
+	// group is ONE validator whose instances are redundant signing endpoints, not N validators
+	// (multiple validators require multiple groups, each with its own signer). When the group has no
+	// validator, its nodes are the signing endpoints of a single out-of-band-registered identity
+	// (sentry mode). Its `nodeGroups` field must be empty — the enclosing group is the target.
 	// +optional
 	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
 

@@ -1,7 +1,6 @@
 package v1
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -35,8 +34,6 @@ func TestResolveCosmosignersTopLevel(t *testing.T) {
 	assert.Equal(t, "cs-signer", signers[0].Name)
 	assert.Equal(t, []string{ReservedValidatorGroupName}, signers[0].TargetGroups)
 	assert.Equal(t, ReservedValidatorGroupName, signers[0].ValidatorGroup)
-	require.NotNil(t, signers[0].ValidatorInstance)
-	assert.Equal(t, 0, *signers[0].ValidatorInstance)
 	assert.Equal(t, "val-key", signers[0].SoftwareKeySecret)
 
 	// Sentry over a regular group.
@@ -52,11 +49,10 @@ func TestResolveCosmosignersTopLevel(t *testing.T) {
 	assert.Equal(t, "cs-signer", signers[0].Name)
 	assert.Equal(t, []string{"fullnodes"}, signers[0].TargetGroups)
 	assert.Empty(t, signers[0].ValidatorGroup)
-	assert.Nil(t, signers[0].ValidatorInstance)
 }
 
-// TestResolveCosmosignersPerGroup covers per-group .spec.nodes[].cosmosigner resolutions, including
-// the one-signer-per-instance expansion of a multi-instance validator group.
+// TestResolveCosmosignersPerGroup covers per-group .spec.nodes[].cosmosigner resolutions: one signer
+// per group, for a single-instance validator group or a sentry group.
 func TestResolveCosmosignersPerGroup(t *testing.T) {
 	// Single-instance validator group.
 	single := &ChainNodeSet{
@@ -74,34 +70,7 @@ func TestResolveCosmosignersPerGroup(t *testing.T) {
 	require.Len(t, signers, 1)
 	assert.Equal(t, "cs-vg-signer", signers[0].Name)
 	assert.Equal(t, "vg", signers[0].ValidatorGroup)
-	require.NotNil(t, signers[0].ValidatorInstance)
-	assert.Equal(t, 0, *signers[0].ValidatorInstance)
 	assert.Equal(t, "vg-key", signers[0].SoftwareKeySecret)
-
-	// Multi-instance validator group -> one signer per instance with index-appended Vault keys.
-	multi := &ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
-		Spec: ChainNodeSetSpec{
-			Nodes: []NodeGroupSpec{{
-				Name:        "vg",
-				Instances:   ptr.To(3),
-				Validator:   &NodeSetValidatorConfig{},
-				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("basekey")},
-			}},
-		},
-	}
-	signers = multi.ResolveCosmosigners()
-	require.Len(t, signers, 3)
-	for i, s := range signers {
-		assert.Equal(t, fmt.Sprintf("cs-vg-%d-signer", i), s.Name)
-		assert.Equal(t, "vg", s.ValidatorGroup)
-		require.NotNil(t, s.ValidatorInstance)
-		assert.Equal(t, i, *s.ValidatorInstance)
-		require.True(t, s.Spec.UsesVaultBackend())
-		assert.Equal(t, fmt.Sprintf("basekey-%d", i), s.Spec.Backend.Vault.KeyName,
-			"each per-instance signer holds a distinct index-appended Vault key")
-		assert.Equal(t, fmt.Sprintf("cs-vg-%d-priv-key", i), s.SoftwareKeySecret)
-	}
 
 	// Sentry per-group signer on a regular group.
 	sentry := &ChainNodeSet{
@@ -118,8 +87,75 @@ func TestResolveCosmosignersPerGroup(t *testing.T) {
 	require.Len(t, signers, 1)
 	assert.Equal(t, "cs-sg-signer", signers[0].Name)
 	assert.Empty(t, signers[0].ValidatorGroup)
-	assert.Nil(t, signers[0].ValidatorInstance)
 	assert.Equal(t, "sentry-key", signers[0].SoftwareKeySecret)
+}
+
+// TestResolveCosmosignersMultiInstanceValidatorGroup verifies a multi-instance validator group with
+// a cosmosigner is ONE validator: the webhook accepts it, it resolves to a single signer targeting
+// the whole group (one consensus identity, N redundant signing endpoints), and an explicit
+// privateKeySecret names that single identity. tmKMS on a multi-instance group stays rejected (a
+// per-pod sidecar would make every instance sign independently with the same key).
+func TestResolveCosmosignersMultiInstanceValidatorGroup(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:        "vg",
+				Instances:   ptr.To(3),
+				Validator:   &NodeSetValidatorConfig{},
+				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("basekey")},
+			}},
+		},
+	}
+	_, err := nodeSet.Validate(nil)
+	require.NoError(t, err, "multi-instance validator group with cosmosigner must be accepted (one identity, redundant endpoints)")
+
+	signers := nodeSet.ResolveCosmosigners()
+	require.Len(t, signers, 1, "one signer for the whole group, never one per instance")
+	assert.Equal(t, "cs-vg-signer", signers[0].Name)
+	assert.Equal(t, []string{"vg"}, signers[0].TargetGroups)
+	assert.Equal(t, "vg", signers[0].ValidatorGroup)
+	assert.Equal(t, "basekey", signers[0].Spec.Backend.Vault.KeyName, "no index-appended keys")
+	assert.Equal(t, "cs-vg-0-priv-key", signers[0].SoftwareKeySecret, "default identity key is instance 0's")
+
+	// An explicit privateKeySecret on the signer-targeted multi-instance group names the single
+	// identity and is honored.
+	explicit := nodeSet.DeepCopy()
+	explicit.Spec.Nodes[0].Validator.PrivateKeySecret = ptr.To("vg-key")
+	_, err = explicit.Validate(nil)
+	require.NoError(t, err, "explicit privateKeySecret is allowed on a signer-targeted multi-instance group")
+	signers = explicit.ResolveCosmosigners()
+	require.Len(t, signers, 1)
+	assert.Equal(t, "vg-key", signers[0].SoftwareKeySecret)
+
+	// Without a cosmosigner the shared privateKeySecret stays rejected (N validators, one key).
+	noSigner := explicit.DeepCopy()
+	noSigner.Spec.Nodes[0].Cosmosigner = nil
+	_, err = noSigner.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "privateKeySecret cannot be set when the validator group has multiple instances")
+
+	// tmKMS on a multi-instance validator group stays rejected.
+	tmkms := nodeSet.DeepCopy()
+	tmkms.Spec.Nodes[0].Cosmosigner = nil
+	tmkms.Spec.Nodes[0].Validator.TmKMS = &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
+		Address: "https://vault:8200",
+		Key:     "k",
+		TokenSecret: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+	}}}
+	_, err = tmkms.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tmKMS cannot be set when the validator group has multiple instances")
+
+	// A multi-instance SENTRY group with a cosmosigner stays valid too (one signer, whole group).
+	sentry := nodeSet.DeepCopy()
+	sentry.Spec.Nodes[0].Validator = nil
+	sentry.Spec.Nodes[0].Cosmosigner.Backend = CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")}}
+	_, err = sentry.Validate(nil)
+	require.NoError(t, err)
 }
 
 // TestResolveCosmosignersTopLevelPlusPerGroup verifies the two sources compose into independent signers.
@@ -142,10 +178,8 @@ func TestResolveCosmosignersTopLevelPlusPerGroup(t *testing.T) {
 	assert.ElementsMatch(t, []string{"cs-signer", "cs-vg-signer"}, names)
 }
 
-// TestValidateCosmosignerSignerNameCollisions verifies two distinct groups deriving the same signer
-// resource name are rejected (e.g. a 2-instance group "foo" and a group "foo-0" both derive
-// "<nodeset>-foo-0-signer"), and a group whose own Service name equals a signer's resource name is
-// rejected too.
+// TestValidateCosmosignerSignerNameCollisions verifies a group whose own Service name equals a
+// signer's derived resource name is rejected.
 func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 	base := func(nodes []NodeGroupSpec) *ChainNodeSet {
 		return &ChainNodeSet{
@@ -158,18 +192,6 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 		}
 	}
 
-	// Duplicate derived signer name: multi-instance "foo" derives cs-foo-0-signer, and single-instance
-	// "foo-0" derives cs-foo-0-signer too.
-	dup := base([]NodeGroupSpec{
-		{Name: "foo", Instances: ptr.To(2), Validator: &NodeSetValidatorConfig{},
-			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
-		{Name: "foo-0", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
-			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("b")}},
-	})
-	_, err := dup.Validate(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "also derives")
-
 	// Group Service name shadowing a signer resource name: group "vg-signer"'s Service is
 	// cs-vg-signer, the raft Service of group "vg"'s signer.
 	shadow := base([]NodeGroupSpec{
@@ -177,7 +199,7 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
 		{Name: "vg-signer", Instances: ptr.To(1)},
 	})
-	_, err = shadow.Validate(nil)
+	_, err := shadow.Validate(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "collides with a cosmosigner's derived resource name")
 
@@ -191,29 +213,6 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 	_, err = shadowPrivval.Validate(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "discovery Service name")
-}
-
-// TestValidateCosmosignerGcpMultiInstanceRejected verifies GCP KMS cannot back a multi-instance
-// validator group: a keyVersion resource path cannot be index-derived per instance.
-func TestValidateCosmosignerGcpMultiInstanceRejected(t *testing.T) {
-	nodeSet := &ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
-		Spec: ChainNodeSetSpec{
-			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
-			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Nodes: []NodeGroupSpec{{
-				Name:      "vg",
-				Instances: ptr.To(3),
-				Validator: &NodeSetValidatorConfig{},
-				Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
-					GcpKMS: &CosmosignerGcpKmsBackend{KeyVersion: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"},
-				}},
-			}},
-		},
-	}
-	_, err := nodeSet.Validate(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot be used on a multi-instance validator group")
 }
 
 // TestValidateCosmosignerSignerAdditionToEstablishedValidator verifies that adding a pre-provisioned

@@ -232,11 +232,6 @@ type CosmosignerStatus struct {
 	// +optional
 	ServingGroup string `json:"servingGroup,omitempty"`
 
-	// ServingInstance records which instance of ServingGroup this signer served (for a per-instance
-	// signer of a multi-instance validator group). Nil for a whole-group / legacy-singleton signer.
-	// +optional
-	ServingInstance *int `json:"servingInstance,omitempty"`
-
 	// KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret +
 	// key material). It lets the controller skip a repeated import and detect a source/target change.
 	// +optional

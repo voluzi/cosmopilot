@@ -197,26 +197,34 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			if group.Validator.Init != nil && group.Validator.CreateValidator != nil {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.init and .spec.nodes[%d].validator.createValidator are mutually exclusive", i, i)
 			}
-			// A multi-instance validator group runs one validator per instance, each of which must
-			// sign with its own consensus key. A shared privateKeySecret or a shared tmKMS key would
-			// make every instance sign with the same key (double-signing), so both are rejected
-			// regardless of genesis mode; the controller generates a distinct key per instance.
-			if group.GetInstances() > 1 && group.Validator.PrivateKeySecret != nil {
+			// A multi-instance validator group WITHOUT a cosmosigner runs one validator per instance,
+			// each of which must sign with its own consensus key. A shared privateKeySecret or a shared
+			// tmKMS key would make every instance sign with the same key (double-signing), so both are
+			// rejected regardless of genesis mode; the controller generates a distinct key per instance.
+			// A cosmosigner-targeted group instead holds ONE consensus identity (the signer's) and its
+			// nodes mount no local key, so an explicit privateKeySecret there names the signer's
+			// identity/import source and is allowed. tmKMS stays rejected either way: it is a per-pod
+			// sidecar, and cosmosigner+tmKMS are mutually exclusive anyway.
+			signerTargeted := nodeSet.groupCosmosigner(group.Name) != nil
+			if group.GetInstances() > 1 && group.Validator.PrivateKeySecret != nil && !signerTargeted {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.privateKeySecret cannot be set when the validator group has multiple instances", i)
 			}
 			if group.GetInstances() > 1 && group.Validator.TmKMS != nil {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.tmKMS cannot be set when the validator group has multiple instances (every instance would sign with the same key)", i)
 			}
-			// For a genesis-initializing multi-instance group the controller also manages the
-			// per-instance account mnemonic secrets, so a shared one cannot be provided.
-			if group.Validator.Init != nil && group.GetInstances() > 1 && group.Validator.Init.AccountMnemonicSecret != nil {
+			// For a genesis-initializing multi-instance group (no cosmosigner) the controller also
+			// manages the per-instance account mnemonic secrets, so a shared one cannot be provided.
+			// A cosmosigner-targeted group has a single validator (instance 0's flow), so its one
+			// account may be named explicitly.
+			if group.Validator.Init != nil && group.GetInstances() > 1 && group.Validator.Init.AccountMnemonicSecret != nil && !signerTargeted {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.init.accountMnemonicSecret cannot be set when validator.init is used with multiple instances", i)
 			}
-			// A multi-instance createValidator group derives a distinct per-instance account for each
-			// generated validator. A single shared accountMnemonicSecret would make every instance
-			// submit a create-validator tx for the same operator account, so it is rejected (mirroring
-			// the init guard above).
-			if group.Validator.CreateValidator != nil && group.GetInstances() > 1 && group.Validator.CreateValidator.AccountMnemonicSecret != nil {
+			// A multi-instance createValidator group (no cosmosigner) derives a distinct per-instance
+			// account for each generated validator. A single shared accountMnemonicSecret would make
+			// every instance submit a create-validator tx for the same operator account, so it is
+			// rejected (mirroring the init guard above). A cosmosigner-targeted group runs only
+			// instance 0's create-validator flow, so its explicit account is allowed.
+			if group.Validator.CreateValidator != nil && group.GetInstances() > 1 && group.Validator.CreateValidator.AccountMnemonicSecret != nil && !signerTargeted {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.createValidator.accountMnemonicSecret cannot be set when the validator group has multiple instances", i)
 			}
 			// A create-validator ChainNode registers Status.PubKey derived from its local priv-key
@@ -363,20 +371,37 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			if !ok || og.Validator == nil || og.Validator.Init == nil {
 				return nil, fmt.Errorf(".spec.nodes[%d]: a genesis-initializing validator group cannot be added after genesis has been created", i)
 			}
-			if group.GetInstances() > og.GetInstances() {
+			// A multi-instance init group's semantics depend on whether a cosmosigner targets it: with
+			// a signer it is ONE genesis validator with redundant signing endpoints, without one it is
+			// N genesis validators. Toggling that after genesis would flip instances 1..n-1 between
+			// "redundant endpoint" and "genesis validator" — either stranding recorded genesis
+			// validators without their init flow or desiring init validators absent from the immutable
+			// genesis — so the signer-targeted-ness of such a group is frozen.
+			oldSignerTargeted := old.groupCosmosigner(group.Name) != nil
+			newSignerTargeted := nodeSet.groupCosmosigner(group.Name) != nil
+			if og.GetInstances() > 1 && oldSignerTargeted != newSignerTargeted {
+				return nil, fmt.Errorf(".spec.nodes[%d]: a cosmosigner cannot be added to or removed from multi-instance genesis-initializing validator group %q after genesis has been created: it changes which instances are genesis validators", i, group.Name)
+			}
+			// Scaling changes the genesis validator set for a plain init group (one validator per
+			// instance). A cosmosigner-targeted group holds ONE identity — its instances are redundant
+			// signing endpoints, only instance 0 is in genesis — so scaling it (while it stays
+			// signer-targeted on both sides, keeping instance 0 intact) does not touch the genesis set.
+			signerTargetedBothSides := oldSignerTargeted && newSignerTargeted
+			if group.GetInstances() > og.GetInstances() && !signerTargetedBothSides {
 				return nil, fmt.Errorf(".spec.nodes[%d] genesis-initializing validator group %q cannot be scaled up after creation", i, group.Name)
 			}
 			// Shrinking is rejected too: the removed validators' voting power stays in the immutable
 			// genesis validator set, so dropping them can halt the chain (it may never reach the
 			// 2/3 voting power required to produce blocks). There is no API field to opt into this
 			// unsafe operation, so it is rejected outright; decommissioning must be done on-chain.
-			if group.GetInstances() < og.GetInstances() {
+			// A signer-targeted group may shrink to no fewer than one instance (instance 0 must stay).
+			if group.GetInstances() < og.GetInstances() && !(signerTargetedBothSides && group.GetInstances() >= 1) {
 				return nil, fmt.Errorf(".spec.nodes[%d] genesis-initializing validator group %q cannot be scaled down after creation: its validators are part of the immutable genesis validator set", i, group.Name)
 			}
 			// The group's validators are in the immutable genesis with fixed consensus keys and gentx
-			// parameters. Reject changing their signing material (single-instance privateKeySecret or
-			// tmKMS key) or any genesis parameter in .init (assets, stake, accounts, genesisValidators,
-			// ...) — a recreated genesis would otherwise differ. Multi-instance groups cannot set
+			// parameters. Reject changing their signing material (privateKeySecret or tmKMS key) or any
+			// genesis parameter in .init (assets, stake, accounts, genesisValidators, ...) — a recreated
+			// genesis would otherwise differ. Non-signer multi-instance groups cannot set
 			// privateKeySecret/tmKMS (rejected above) and their per-instance keys derive from stable
 			// names, so this only flags real changes.
 			defaultPrivKeySecret := fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group.Name)
@@ -449,8 +474,9 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 // validateCosmosigner validates every managed cosmosigner a ChainNodeSet runs: the top-level
 // .spec.cosmosigner (which selects node groups) and each per-group .spec.nodes[].cosmosigner (whose
 // target is fixed to its enclosing group). Each signer signs for a single consensus identity shared
-// across the nodes it connects to; a multi-instance validator group carrying its own cosmosigner
-// expands to one signer per instance (each a distinct validator with its own key).
+// across the nodes it connects to — a multi-instance validator group with a cosmosigner is ONE
+// validator with N redundant signing endpoints (multiple validators require multiple groups, each
+// with its own signer and key).
 //
 // old is the previous revision on the update path (nil on create); it enables the same-key
 // migration waiver mirroring the ChainNode webhook.
@@ -465,8 +491,8 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 		return nil
 	}
 
-	// A signer owns resources named "<nodeset>[-<group>[-<index>]]-signer", "...-signer-privval" and
-	// the one-shot "...-signer-import" pod; a node group named "signer" or "signer-privval" would
+	// A signer owns resources named "<nodeset>[-<group>]-signer", "...-signer-privval" and the
+	// one-shot "...-signer-import" pod; a node group named "signer" or "signer-privval" would
 	// produce a colliding Service.
 	for i, g := range nodeSet.Spec.Nodes {
 		if g.Name == "signer" || g.Name == "signer-privval" {
@@ -475,10 +501,8 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 	}
 
 	// Every derived signer resource name must be unique and must not collide with a node group's own
-	// Services: distinct groups can derive the SAME signer name (a 2-instance group "foo" and a group
-	// "foo-0" both derive "<nodeset>-foo-0-signer"), and a group named "<g>-signer" has a group
-	// Service colliding with group <g>'s signer StatefulSet/raft Service. Either collision would have
-	// two reconcilers overwrite one object.
+	// Services: a group named "<g>-signer" has a group Service colliding with group <g>'s signer
+	// StatefulSet/raft Service. Either collision would have two reconcilers overwrite one object.
 	signerNames := map[string]string{}
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		path := nodeSet.signerFieldPath(s)
@@ -531,8 +555,9 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 
 // validateTopLevelCosmosigner validates the shape of .spec.cosmosigner: exactly-one-backend (via
 // Cosmosigner.Validate) and how its nodeGroups select targets. A single top-level signer holds one
-// consensus identity, so it may target at most one validator, and never a multi-instance validator
-// group (use a per-group .spec.nodes[].cosmosigner for those — it expands per instance).
+// consensus identity, so it may target at most one validator. A multi-instance validator group is a
+// valid target: its instances are redundant signing endpoints of that one identity, not N
+// validators (multiple validators require multiple groups, each with its own signer).
 func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 	if err := c.Validate(".spec.cosmosigner", true); err != nil {
 		return err
@@ -583,9 +608,6 @@ func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 				return fmt.Errorf(".spec.cosmosigner cannot target group %q with zero instances", name)
 			}
 			if group.Validator != nil {
-				if group.GetInstances() > 1 {
-					return fmt.Errorf(".spec.cosmosigner cannot target validator group %q with multiple instances: use a per-group .spec.nodes[].cosmosigner, which deploys one signer per instance", name)
-				}
 				if group.Validator.TmKMS != nil {
 					return fmt.Errorf(".spec.cosmosigner cannot target group %q which uses tmKMS: cosmosigner and tmKMS are mutually exclusive", name)
 				}
@@ -601,8 +623,9 @@ func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 
 // validateGroupCosmosigner validates a per-group .spec.nodes[i].cosmosigner: exactly-one-backend and
 // no nodeGroups (its target is the enclosing group), the group must have at least one instance, and
-// the group's validator must not also use tmKMS. A multi-instance validator group is allowed here: it
-// expands to one signer per instance.
+// the group's validator must not also use tmKMS. A multi-instance group is fine — validator or
+// sentry — the signer holds ONE consensus identity and dials every instance pod (for a validator
+// group the instances are redundant signing endpoints of the same validator, never N validators).
 func (nodeSet *ChainNodeSet) validateGroupCosmosigner(i int, g *NodeGroupSpec) error {
 	path := fmt.Sprintf(".spec.nodes[%d].cosmosigner", i)
 	if err := g.Cosmosigner.Validate(path, false); err != nil {
@@ -613,14 +636,6 @@ func (nodeSet *ChainNodeSet) validateGroupCosmosigner(i int, g *NodeGroupSpec) e
 	}
 	if g.Validator != nil && g.Validator.TmKMS != nil {
 		return fmt.Errorf("%s and .spec.nodes[%d].validator.tmKMS are mutually exclusive", path, i)
-	}
-	// Per-instance keys are derived by index-appending the backend key name, which works for Vault
-	// transit keys ("<keyName>-<i>") and per-instance software secrets, but NOT for GCP KMS: a
-	// keyVersion is a full resource path ending in ".../cryptoKeyVersions/<n>", and appending "-<i>"
-	// produces a name that matches no real CryptoKeyVersion. There is no per-instance keyVersion
-	// field yet, so reject the combination instead of rolling out signers that cannot open their keys.
-	if g.Validator != nil && g.GetInstances() > 1 && g.Cosmosigner.UsesGcpKmsBackend() {
-		return fmt.Errorf("%s: the GCP KMS backend cannot be used on a multi-instance validator group — a keyVersion is a full resource path and cannot be index-derived per instance; use the Vault or software backend, or split the group into single-instance validator groups each with its own keyVersion", path)
 	}
 	return nil
 }
@@ -801,39 +816,27 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 	// signer's key must equal that path's key (a same-key migration), otherwise the validator would
 	// stop mounting the on-chain local key and sign with a different one. Dropping the identity to
 	// nothing (removing both the signer and the validator's own signing path) is rejected too.
-	type servedValidator struct {
-		group    string
-		instance int
-	}
-	served := map[servedValidator]struct{}{}
+	served := map[string]struct{}{}
 	for _, s := range old.ResolveCosmosigners() {
 		if s.ValidatorGroup != "" {
-			instance := 0
-			if s.ValidatorInstance != nil {
-				instance = *s.ValidatorInstance
-			}
-			served[servedValidator{s.ValidatorGroup, instance}] = struct{}{}
+			served[s.ValidatorGroup] = struct{}{}
 		}
 	}
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		if s.ValidatorGroup != "" {
-			instance := 0
-			if s.ValidatorInstance != nil {
-				instance = *s.ValidatorInstance
-			}
-			served[servedValidator{s.ValidatorGroup, instance}] = struct{}{}
+			served[s.ValidatorGroup] = struct{}{}
 		}
 	}
-	for v := range served {
-		oldIdentity := old.validatorEffectiveIdentity(v.group, v.instance)
+	for group := range served {
+		oldIdentity := old.validatorEffectiveIdentity(group)
 		if oldIdentity == "" {
 			// The validator did not exist (or resolved no identity) on the old revision — e.g. a
 			// createValidator group added together with its signer; the registers rule in
 			// validateResolvedSigner already constrains its key provenance.
 			continue
 		}
-		if newIdentity := nodeSet.validatorEffectiveIdentity(v.group, v.instance); newIdentity == "" || newIdentity != oldIdentity {
-			label := v.group
+		if newIdentity := nodeSet.validatorEffectiveIdentity(group); newIdentity == "" || newIdentity != oldIdentity {
+			label := group
 			if label == ReservedValidatorGroupName {
 				label = ".spec.validator"
 			}
@@ -1052,8 +1055,10 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		// here — another validator may use that name. Only reserve when the group actually uses a local
 		// key: it does not use TmKMS, it initializes genesis, or it runs create-validator with Hashicorp
 		// uploadGenerated (the last two create/upload the local priv-key via RequiresPrivKey). An explicit
-		// privateKeySecret is only valid on a single-instance group (multi-instance groups with
-		// privateKeySecret are rejected earlier); otherwise every instance resolves to its own default.
+		// privateKeySecret names one key (single-instance group, or the single identity of a
+		// cosmosigner-targeted group); otherwise every instance resolves to its own default — except in a
+		// cosmosigner-targeted group, which holds one identity (instance 0's key) and has no per-instance
+		// keys to reserve.
 		usesLocalKey := (group.Validator.TmKMS == nil || group.Validator.Init != nil || tmkmsUploadsGeneratedPrivKey(group.Validator)) &&
 			!cosmosignerLeavesLocalKeyUnused(group.Name, group.Validator)
 		if !usesLocalKey {
@@ -1063,7 +1068,11 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				return err
 			}
 		} else {
-			for idx := 0; idx < group.GetInstances(); idx++ {
+			keyInstances := group.GetInstances()
+			if nodeSet.groupCosmosigner(group.Name) != nil {
+				keyInstances = 1
+			}
+			for idx := 0; idx < keyInstances; idx++ {
 				secret := fmt.Sprintf("%s-%s-%d-priv-key", nodeSet.GetName(), group.Name, idx)
 				if err := registerSecret(path, secret); err != nil {
 					return err
@@ -1082,8 +1091,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	// validator, that validator's own key is already registered above (the signer reuses it), so only
 	// the external backend identity and the sentry-mode software secret need registering here to catch
 	// collisions with other validators — and with each other, now that a ChainNodeSet can run several
-	// signers. A per-instance signer's s.Spec already carries the index-appended Vault key / GCP key
-	// version, so each instance registers a distinct identity.
+	// signers.
 	//
 	// sentrySoftwareSecrets tracks the software key of every sentry signer so two sentry signers can
 	// never share one, even when that key is a genesis-validator secret (which the general
@@ -1204,8 +1212,12 @@ func (nodeSet *ChainNodeSet) validateUniqueCreateValidatorAccounts() error {
 		for _, gv := range group.Validator.Init.GenesisValidators {
 			accountSecrets[gv.AccountMnemonicSecret] = path + ".init.genesisValidators"
 		}
-		for idx := 1; idx < group.GetInstances(); idx++ {
-			accountSecrets[fmt.Sprintf("%s-%s-%d-account", nodeSet.GetName(), group.Name, idx)] = path
+		// A cosmosigner-targeted group has one identity (instance 0's account); no per-instance
+		// accounts exist for the redundant signing endpoints.
+		if nodeSet.groupCosmosigner(group.Name) == nil {
+			for idx := 1; idx < group.GetInstances(); idx++ {
+				accountSecrets[fmt.Sprintf("%s-%s-%d-account", nodeSet.GetName(), group.Name, idx)] = path
+			}
 		}
 	}
 
@@ -1226,15 +1238,20 @@ func (nodeSet *ChainNodeSet) validateUniqueCreateValidatorAccounts() error {
 			continue
 		}
 		path := fmt.Sprintf(".spec.nodes[%d].validator", i)
-		// An explicit accountMnemonicSecret is only valid on a single-instance group (multi-instance
-		// create-validator groups with a shared secret are rejected earlier). Otherwise every instance
-		// resolves to its own default <nodeset>-<group>-<index>-account.
+		// An explicit accountMnemonicSecret names one account (single-instance group, or the single
+		// create-validator flow of a cosmosigner-targeted group). Otherwise every instance resolves
+		// to its own default <nodeset>-<group>-<index>-account — except in a cosmosigner-targeted
+		// group, where only instance 0 runs create-validator.
 		if group.Validator.CreateValidator.AccountMnemonicSecret != nil {
 			if err := register(path, *group.Validator.CreateValidator.AccountMnemonicSecret); err != nil {
 				return err
 			}
 		} else {
-			for idx := 0; idx < group.GetInstances(); idx++ {
+			accountInstances := group.GetInstances()
+			if nodeSet.groupCosmosigner(group.Name) != nil {
+				accountInstances = 1
+			}
+			for idx := 0; idx < accountInstances; idx++ {
 				secret := fmt.Sprintf("%s-%s-%d-account", nodeSet.GetName(), group.Name, idx)
 				if err := register(path, secret); err != nil {
 					return err
@@ -1305,15 +1322,20 @@ func (nodeSet *ChainNodeSet) validateUniqueGenesisValidatorAccounts() error {
 		}
 		path := fmt.Sprintf(".spec.nodes[%d].validator", i)
 		// Instance 0 is the genesis initializer; its account defaults to <nodeset>-<group>-0-account.
-		if err := registerInit(path, fmt.Sprintf("%s-%s-0-account", nodeSet.GetName(), group.Name), group.Validator.Init); err != nil {
+		defaultAccount := fmt.Sprintf("%s-%s-0-account", nodeSet.GetName(), group.Name)
+		if err := registerInit(path, defaultAccount, group.Validator.Init); err != nil {
 			return err
 		}
 		// Instances 1..n-1 are recorded as generated genesis validators with deterministic accounts
-		// <nodeset>-<group>-<index>-account (see groupGenesisValidators).
-		for idx := 1; idx < group.GetInstances(); idx++ {
-			secret := fmt.Sprintf("%s-%s-%d-account", nodeSet.GetName(), group.Name, idx)
-			if err := register(fmt.Sprintf("%s (instance %d)", path, idx), secret); err != nil {
-				return err
+		// <nodeset>-<group>-<index>-account (see groupGenesisValidators) — unless a cosmosigner
+		// targets the group, in which case there is only one genesis validator (instance 0) and no
+		// per-instance accounts.
+		if nodeSet.groupCosmosigner(group.Name) == nil {
+			for idx := 1; idx < group.GetInstances(); idx++ {
+				secret := fmt.Sprintf("%s-%s-%d-account", nodeSet.GetName(), group.Name, idx)
+				if err := register(fmt.Sprintf("%s (instance %d)", path, idx), secret); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -1412,7 +1434,7 @@ func genesisSigningFingerprintWithIdentity(signingIdentity string, init *Genesis
 // identity. Used for genesis-initializing validators, which are single-instance or represented by
 // instance 0.
 func (nodeSet *ChainNodeSet) nodeSetValidatorEffectiveIdentity(group string, cfg *NodeSetValidatorConfig) string {
-	if id, ok := nodeSet.groupSignerIdentity(group, 0); ok {
+	if id, ok := nodeSet.groupSignerIdentity(group); ok {
 		return id
 	}
 	return nodeSet.validatorGroupSigningIdentity(group, cfg)

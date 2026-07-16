@@ -2,7 +2,6 @@ package chainnodeset
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -143,10 +142,9 @@ func TestReconcileSignerTeardownDropsStatusWithForeignSameNameSigner(t *testing.
 	assert.True(t, metav1.IsControlledBy(remaining, foreignOwner), "foreign signer must remain owned by the other CR")
 }
 
-// TestSignerNameForNode verifies each node maps to the signer that must dial it: a per-instance
-// signer serves only its own validator instance, while every pod of a sentry target group is a
-// signing endpoint — including extra groups fronted alongside a single-instance validator by the
-// top-level signer.
+// TestSignerNameForNode verifies each node maps to the signer that must dial it: every pod of a
+// signer's target groups is a signing endpoint — the (single-instance) validator group it serves and
+// any sentry groups fronted alongside it.
 func TestSignerNameForNode(t *testing.T) {
 	// Top-level signer fronting a single-instance validator group AND a multi-instance sentry group.
 	topLevel := &appsv1.ChainNodeSet{
@@ -159,31 +157,31 @@ func TestSignerNameForNode(t *testing.T) {
 			},
 		},
 	}
-	name, ok := signerNameForNode(topLevel, "vg", 0)
+	name, ok := signerNameForNode(topLevel, "vg")
 	assert.True(t, ok)
 	assert.Equal(t, "cs-signer", name)
-	// Every fullnodes pod (sentry fan-out) must be labelled, not just index 0.
-	for i := 0; i < 3; i++ {
-		name, ok := signerNameForNode(topLevel, "fullnodes", i)
-		assert.True(t, ok, "fullnodes-%d must be a signing endpoint", i)
-		assert.Equal(t, "cs-signer", name)
-	}
+	// The sentry fan-out group is a signing endpoint too.
+	name, ok = signerNameForNode(topLevel, "fullnodes")
+	assert.True(t, ok, "fullnodes must be a signing endpoint")
+	assert.Equal(t, "cs-signer", name)
 
-	// Multi-instance validator group with a per-group signer: each instance maps to its own signer.
-	multi := &appsv1.ChainNodeSet{
+	// An untargeted group maps to no signer.
+	_, ok = signerNameForNode(topLevel, "other")
+	assert.False(t, ok)
+
+	// A single-instance validator group with its own per-group signer maps to that signer.
+	perGroup := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec: appsv1.ChainNodeSetSpec{
 			Nodes: []appsv1.NodeGroupSpec{{
-				Name: "vg", Instances: ptr.To(3), Validator: &appsv1.NodeSetValidatorConfig{},
+				Name: "vg", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{},
 				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{Address: "https://v:8200", KeyName: "k", TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "t"}, Key: "token"}}}},
 			}},
 		},
 	}
-	for i := 0; i < 3; i++ {
-		name, ok := signerNameForNode(multi, "vg", i)
-		assert.True(t, ok)
-		assert.Equal(t, fmt.Sprintf("cs-vg-%d-signer", i), name, "instance %d must map to its own signer", i)
-	}
+	name, ok = signerNameForNode(perGroup, "vg")
+	assert.True(t, ok)
+	assert.Equal(t, "cs-vg-signer", name)
 }
 
 // testScheme builds a scheme with the API + core + apps types for owner references in tests.

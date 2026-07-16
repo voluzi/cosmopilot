@@ -10,29 +10,24 @@ import (
 
 // ResolvedSigner describes one managed cosmosigner deployment a ChainNodeSet should run. A
 // ChainNodeSet can run many: the top-level .spec.cosmosigner (one signer over its target groups)
-// plus one per .spec.nodes[].cosmosigner (a per-group signer, expanded to one signer per instance
-// for a multi-instance validator group). The whole controller/webhook operates on this struct so the
-// single-signer assumptions live in one place: ResolveCosmosigners.
+// plus one per .spec.nodes[].cosmosigner (a per-group signer). The whole controller/webhook operates
+// on this struct so the single-signer assumptions live in one place: ResolveCosmosigners.
 type ResolvedSigner struct {
 	// Name is the signer's resource base name and the key of its status entry:
-	// <nodeset>-signer | <nodeset>-<group>-signer | <nodeset>-<group>-<index>-signer.
+	// <nodeset>-signer | <nodeset>-<group>-signer.
 	Name string
 
-	// Spec is the signer configuration. For a per-instance signer of a multi-instance validator group
-	// the Vault keyName / GCP keyVersion are already index-appended, so effectiveSigningIdentity is
-	// instance-specific without any caller awareness.
+	// Spec is the signer configuration.
 	Spec *Cosmosigner
 
 	// TargetGroups are the node groups whose pods this signer dials.
 	TargetGroups []string
 
 	// ValidatorGroup is the validator group this signer serves (ReservedValidatorGroupName for the
-	// legacy singleton), or "" for a sentry-mode signer over regular groups.
+	// legacy singleton), or "" for a sentry-mode signer over regular groups. A signer-targeted
+	// validator group holds ONE consensus identity regardless of instances — the instances are
+	// redundant signing endpoints of the same validator, whose key flow runs on instance 0.
 	ValidatorGroup string
-
-	// ValidatorInstance is the served validator instance index (0-based). Set for validator-targeted
-	// signers; nil for sentry signers.
-	ValidatorInstance *int
 
 	// SoftwareKeySecret is the resolved priv-key secret the software backend mounts and the Vault
 	// import source. "" for a sentry signer with no explicit key or a pre-provisioned Vault/GCP signer.
@@ -80,16 +75,14 @@ func (nodeSet *ChainNodeSet) resolveTopLevelSigner(c *Cosmosigner) ResolvedSigne
 		}
 	}
 
-	s.SoftwareKeySecret = nodeSet.resolveSignerKeySecret(c, s.ValidatorGroup, 0)
-	if s.ValidatorGroup != "" {
-		idx := 0
-		s.ValidatorInstance = &idx
-	}
+	s.SoftwareKeySecret = nodeSet.resolveSignerKeySecret(c, s.ValidatorGroup)
 	return s
 }
 
-// resolveGroupSigners resolves the signer(s) for a group carrying .cosmosigner: one for a sentry or
-// single-instance validator group, one per instance for a multi-instance validator group.
+// resolveGroupSigners resolves the signer for a group carrying .cosmosigner: one signer per group,
+// holding a single consensus identity and dialing every instance pod. A multi-instance validator
+// group is ONE validator with redundant signing endpoints, never N validators — multiple validators
+// require multiple groups, each with its own signer.
 func (nodeSet *ChainNodeSet) resolveGroupSigners(g *NodeGroupSpec) []ResolvedSigner {
 	c := g.Cosmosigner
 
@@ -99,44 +92,25 @@ func (nodeSet *ChainNodeSet) resolveGroupSigners(g *NodeGroupSpec) []ResolvedSig
 			Name:              fmt.Sprintf("%s-%s-signer", nodeSet.GetName(), g.Name),
 			Spec:              c,
 			TargetGroups:      []string{g.Name},
-			SoftwareKeySecret: nodeSet.resolveSignerKeySecret(c, "", 0),
+			SoftwareKeySecret: nodeSet.resolveSignerKeySecret(c, ""),
 		}}
 	}
 
-	instances := g.GetInstances()
-	if instances <= 1 {
-		idx := 0
-		return []ResolvedSigner{{
-			Name:              fmt.Sprintf("%s-%s-signer", nodeSet.GetName(), g.Name),
-			Spec:              c,
-			TargetGroups:      []string{g.Name},
-			ValidatorGroup:    g.Name,
-			ValidatorInstance: &idx,
-			SoftwareKeySecret: nodeSet.resolveSignerKeySecret(c, g.Name, 0),
-		}}
-	}
-
-	out := make([]ResolvedSigner, 0, instances)
-	for i := 0; i < instances; i++ {
-		idx := i
-		out = append(out, ResolvedSigner{
-			Name:              fmt.Sprintf("%s-%s-%d-signer", nodeSet.GetName(), g.Name, i),
-			Spec:              c.indexedBackendCopy(i),
-			TargetGroups:      []string{g.Name},
-			ValidatorGroup:    g.Name,
-			ValidatorInstance: &idx,
-			SoftwareKeySecret: nodeSet.resolveSignerKeySecret(c, g.Name, i),
-		})
-	}
-	return out
+	return []ResolvedSigner{{
+		Name:              fmt.Sprintf("%s-%s-signer", nodeSet.GetName(), g.Name),
+		Spec:              c,
+		TargetGroups:      []string{g.Name},
+		ValidatorGroup:    g.Name,
+		SoftwareKeySecret: nodeSet.resolveSignerKeySecret(c, g.Name),
+	}}
 }
 
 // resolveSignerKeySecret resolves the priv-key secret a signer's software backend mounts and its
-// Vault import source: the targeted validator instance's own key when a validator is targeted,
-// otherwise the sentry signer's explicit privateKeySecret.
-func (nodeSet *ChainNodeSet) resolveSignerKeySecret(c *Cosmosigner, validatorGroup string, instance int) string {
+// Vault import source: the targeted validator group's single identity key when a validator is
+// targeted, otherwise the sentry signer's explicit privateKeySecret.
+func (nodeSet *ChainNodeSet) resolveSignerKeySecret(c *Cosmosigner, validatorGroup string) string {
 	if validatorGroup != "" {
-		return nodeSet.validatorKeySecret(validatorGroup, instance)
+		return nodeSet.validatorKeySecret(validatorGroup)
 	}
 	if c.UsesSoftwareBackend() && c.Backend.Software.PrivateKeySecret != nil {
 		return *c.Backend.Software.PrivateKeySecret
@@ -144,10 +118,12 @@ func (nodeSet *ChainNodeSet) resolveSignerKeySecret(c *Cosmosigner, validatorGro
 	return ""
 }
 
-// validatorKeySecret resolves the priv-key secret of a validator group's instance: the legacy
-// singleton's key, a single-instance group's explicit or default key, or a multi-instance group's
-// per-instance default key.
-func (nodeSet *ChainNodeSet) validatorKeySecret(group string, instance int) string {
+// validatorKeySecret resolves the priv-key secret of a signer-targeted validator group: the legacy
+// singleton's key, or the group's explicit or default key. A signer-targeted group holds ONE
+// consensus identity regardless of its instance count, so an explicit privateKeySecret always names
+// that identity; the default follows the generated instance-0 ChainNode name convention (instance
+// 0's genesis/create-validator flow produces the key).
+func (nodeSet *ChainNodeSet) validatorKeySecret(group string) string {
 	if group == ReservedValidatorGroupName {
 		if v := nodeSet.Spec.Validator; v != nil {
 			if s := v.PrivateKeySecret; s != nil && *s != "" {
@@ -161,27 +137,12 @@ func (nodeSet *ChainNodeSet) validatorKeySecret(group string, instance int) stri
 		if g.Name != group || g.Validator == nil {
 			continue
 		}
-		// A multi-instance validator group cannot share one explicit key (that would be one identity
-		// for N validators), so an explicit privateKeySecret only applies to single-instance groups.
-		if s := g.Validator.PrivateKeySecret; s != nil && *s != "" && g.GetInstances() <= 1 {
+		if s := g.Validator.PrivateKeySecret; s != nil && *s != "" {
 			return *s
 		}
-		return fmt.Sprintf("%s-%s-%d-priv-key", nodeSet.GetName(), group, instance)
+		return fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group)
 	}
 	return ""
-}
-
-// indexedBackendCopy returns a deep copy of the signer spec with the Vault keyName suffixed by the
-// instance index, so each per-instance signer of a multi-instance validator group holds a distinct
-// consensus key (the documented `<keyName>-<index>` convention). The software backend derives
-// per-instance key secrets via SoftwareKeySecret instead; GCP KMS cannot be index-derived (a
-// keyVersion is a full resource path) and is rejected by the webhook for multi-instance groups.
-func (c *Cosmosigner) indexedBackendCopy(index int) *Cosmosigner {
-	out := c.DeepCopy()
-	if out.UsesVaultBackend() {
-		out.Backend.Vault.KeyName = fmt.Sprintf("%s-%d", out.Backend.Vault.KeyName, index)
-	}
-	return out
 }
 
 // Identity returns this signer's effective consensus-key fingerprint.
@@ -293,14 +254,14 @@ func (nodeSet *ChainNodeSet) validatorConfigForGroup(group string) *NodeSetValid
 }
 
 // validatorEffectiveIdentity returns the effective consensus-key fingerprint of a validator group's
-// instance: the identity of whatever managed signer serves it, or — when none does — the validator's
-// own local/tmKMS path. Empty when the group has no validator, the instance is out of range, or the
-// group no longer exists.
-func (nodeSet *ChainNodeSet) validatorEffectiveIdentity(group string, instance int) string {
+// single signing identity: the identity of whatever managed signer serves it, or — when none does —
+// the validator's own local/tmKMS path (its representative instance 0). Empty when the group has no
+// validator, has zero instances, or no longer exists.
+func (nodeSet *ChainNodeSet) validatorEffectiveIdentity(group string) string {
 	if group == "" {
 		return ""
 	}
-	if id, ok := nodeSet.groupSignerIdentity(group, instance); ok {
+	if id, ok := nodeSet.groupSignerIdentity(group); ok {
 		return id
 	}
 	cfg := nodeSet.validatorConfigForGroup(group)
@@ -309,12 +270,12 @@ func (nodeSet *ChainNodeSet) validatorEffectiveIdentity(group string, instance i
 	}
 	if group != ReservedValidatorGroupName {
 		for i := range nodeSet.Spec.Nodes {
-			if nodeSet.Spec.Nodes[i].Name == group && instance >= nodeSet.Spec.Nodes[i].GetInstances() {
+			if nodeSet.Spec.Nodes[i].Name == group && nodeSet.Spec.Nodes[i].GetInstances() == 0 {
 				return ""
 			}
 		}
 	}
-	return nodeSet.validatorInstanceSigningIdentity(group, instance, cfg)
+	return nodeSet.validatorGroupSigningIdentity(group, cfg)
 }
 
 // signerSameKeyMigration reports whether, on an established chain, the validator this signer serves
@@ -326,11 +287,7 @@ func (nodeSet *ChainNodeSet) signerSameKeyMigration(old *ChainNodeSet, s Resolve
 	if old == nil || old.Status.ChainID == "" || s.ValidatorGroup == "" {
 		return false
 	}
-	instance := 0
-	if s.ValidatorInstance != nil {
-		instance = *s.ValidatorInstance
-	}
-	oldIdentity := old.validatorEffectiveIdentity(s.ValidatorGroup, instance)
+	oldIdentity := old.validatorEffectiveIdentity(s.ValidatorGroup)
 	return oldIdentity != "" && oldIdentity == s.Identity()
 }
 
@@ -343,46 +300,26 @@ func (nodeSet *ChainNodeSet) signerDigestRecordedMatches(s ResolvedSigner) bool 
 	return st != nil && st.SigningDigest != "" && st.SigningDigest == s.Digest()
 }
 
-// validatorInstanceSigningIdentity returns the effective own-path (local key or tmKMS) consensus-key
-// fingerprint of a specific validator group instance, ignoring any cosmosigner.
-func (nodeSet *ChainNodeSet) validatorInstanceSigningIdentity(group string, instance int, cfg *NodeSetValidatorConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	if id, ok := tmkmsNormalizedVaultKey(cfg.TmKMS); ok {
-		return id
-	}
-	if cfg.TmKMS != nil {
-		return "tmkms\x00unconfigured"
-	}
-	return localKeySigningIdentity(nodeSet.validatorKeySecret(group, instance))
-}
-
 // ServedValidatorResolvesIdentity reports whether the specific validator a removed signer served
-// (group + instance) still resolves `identity` through its OWN signing path — the condition under
-// which dropping the signer keeps the on-chain key signing. An unknown/removed validator resolves
-// nothing.
-func (nodeSet *ChainNodeSet) ServedValidatorResolvesIdentity(group string, instance *int, identity string) bool {
+// still resolves `identity` through its OWN signing path — the condition under which dropping the
+// signer keeps the on-chain key signing. An unknown/removed validator resolves nothing.
+func (nodeSet *ChainNodeSet) ServedValidatorResolvesIdentity(group string, identity string) bool {
 	if identity == "" || group == "" {
 		return false
 	}
 	if group == ReservedValidatorGroupName {
 		return nodeSet.Spec.Validator != nil &&
-			nodeSet.validatorInstanceSigningIdentity(ReservedValidatorGroupName, 0, nodeSet.Spec.Validator) == identity
-	}
-	idx := 0
-	if instance != nil {
-		idx = *instance
+			nodeSet.validatorGroupSigningIdentity(ReservedValidatorGroupName, nodeSet.Spec.Validator) == identity
 	}
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
 		if g.Name != group {
 			continue
 		}
-		if g.Validator == nil || idx >= g.GetInstances() {
+		if g.Validator == nil || g.GetInstances() == 0 {
 			return false
 		}
-		return nodeSet.validatorInstanceSigningIdentity(group, idx, g.Validator) == identity
+		return nodeSet.validatorGroupSigningIdentity(group, g.Validator) == identity
 	}
 	return false
 }

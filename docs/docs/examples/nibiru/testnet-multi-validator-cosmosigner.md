@@ -2,10 +2,12 @@
 
 ```yaml
 # Multiple validators, each fronted by its own Cosmopilot-managed Cosmosigner. A per-group
-# `cosmosigner` block deploys one remote signer per validator: a single-instance validator group
-# gets one signer, and a multi-instance validator group gets ONE SIGNER PER INSTANCE (each holds a
-# distinct consensus key). This is the way to run several signed validators in a single ChainNodeSet
-# — the top-level `.spec.cosmosigner` only ever fronts one validator identity.
+# `cosmosigner` block deploys one remote signer per validator group, and each signer holds ONE
+# consensus identity. To run several validators in one ChainNodeSet, declare one group per
+# validator, each with its own cosmosigner block and its own key — the top-level
+# `.spec.cosmosigner` only ever fronts one validator identity. A validator group may also run
+# MULTIPLE instances (see validator-c below): they are redundant signing endpoints of the SAME
+# validator (HA), never extra validators.
 apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
@@ -62,11 +64,12 @@ spec:
               name: vault-ca
               key: ca.crt
 
-    # A multi-instance validator group: three distinct validators, each getting its own signer
-    # ("<nodeset>-validators-<i>-signer"). For Vault/GCP backends, instance i uses the index-appended
-    # key "<keyName>-<i>" — here "nibiru-testnet-validators-0", "...-1", "...-2" — so you must
-    # pre-provision one transit key per instance.
-    - name: validators
+    # A third validator, this time with THREE instances: still ONE validator (one signer, one Vault
+    # key). The signer dials all three pods as redundant signing endpoints — the raft leader
+    # produces exactly one signature per height and every node can relay it, so the validator
+    # stays live through node restarts (HA). Adding more VALIDATORS means adding more groups;
+    # adding more INSTANCES to a signed group only adds redundancy.
+    - name: validator-c
       instances: 3
       validator:
         config:
@@ -78,7 +81,7 @@ spec:
         backend:
           vault:
             address: https://vault.vault-system.svc.cluster.local:8200
-            keyName: nibiru-testnet-validators
+            keyName: nibiru-testnet-validator-c
             tokenSecret:
               name: vault-cosmosigner-token
               key: token

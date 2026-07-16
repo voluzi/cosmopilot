@@ -129,8 +129,8 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 }
 
 // ensureCosmosigner deploys every managed cosmosigner a ChainNodeSet runs (the top-level
-// .spec.cosmosigner plus each per-group .spec.nodes[].cosmosigner, expanded per instance for a
-// multi-instance validator group). It is a no-op until the chain ID is known, since a signer's config
+// .spec.cosmosigner plus each per-group .spec.nodes[].cosmosigner). It is a no-op until the
+// chain ID is known, since a signer's config
 // requires it. Teardown of REMOVED signers is driven earlier by reconcileSignerTeardown so a child's
 // signing path is never switched while old signer pods can still sign.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
@@ -302,7 +302,7 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	}
 
 	// The replica/PVC-template locks are recorded before any resource is applied (see
-	// ensureCosmosigner). Here we record the signing digest + serving identity/group/instance, which
+	// ensureCosmosigner). Here we record the signing digest + serving identity/group, which
 	// are only meaningful for a validator-targeted signer (a sentry key lives out-of-band and stays
 	// add/remove/rotate-able) and only AFTER the signer's current generation is fully rolled out
 	// (observed + updated + ready). A new validator signer has no digest yet; a legacy signer upgraded
@@ -320,7 +320,6 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 			st.SigningDigest = s.Digest()
 			st.ServingIdentity = s.ValidatorTargetedIdentity()
 			st.ServingGroup = s.ValidatorGroup
-			st.ServingInstance = s.ValidatorInstance
 			changed = true
 		}
 	}
@@ -400,16 +399,10 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		// produces the secret during that flow.
 		keyFlowPending := false
 		if s.ValidatorGroup != "" {
-			instance := 0
-			if s.ValidatorInstance != nil {
-				instance = *s.ValidatorInstance
-			}
-			// `generates` is the PER-INSTANCE determination (used once the chain exists): in a multi-instance
-			// genesis-init group only instance 0 keeps Init after derivation, so a nonzero instance's key is
-			// terminal (never regenerated) post-genesis and a missing Secret must fail. `groupInitializes`
-			// is the GROUP-level Init: ensureValidator generates ALL of a genesis-init group's instance keys
-			// together during genesis bootstrap, so BEFORE the chain ID exists every instance's key is still
-			// pending (ensureValidator has not run yet) regardless of the derived per-instance config.
+			// `generates` says whether the targeted validator generates its own key (genesis init or
+			// createValidator, used once the chain exists); `groupInitializes` is the genesis-init case:
+			// ensureValidator generates that key during genesis bootstrap, so BEFORE the chain ID exists
+			// it is still pending (ensureValidator has not run yet).
 			generates := false
 			groupInitializes := false
 			if s.ValidatorGroup == appsv1.ReservedValidatorGroupName {
@@ -419,19 +412,18 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			} else {
 				for _, g := range nodeSet.Spec.Nodes {
 					if g.Name == s.ValidatorGroup && g.Validator != nil {
-						cfg := deriveGroupValidatorConfig(nodeSet, g.Name, instance, g.GetInstances(), g.Validator)
-						generates = cfg.Init != nil || cfg.CreateValidator != nil
+						generates = g.Validator.Init != nil || g.Validator.CreateValidator != nil
 						groupInitializes = g.Validator.Init != nil
 					}
 				}
 			}
 			switch {
 			case groupInitializes && nodeSet.Status.ChainID == "":
-				// Pre-genesis: ensureValidator has not yet created any of this init group's instance keys.
+				// Pre-genesis: ensureValidator has not yet created this init group's key.
 				keyFlowPending = true
 			case generates:
 				keyFlowPending = true
-				vname := validatorNodeName(nodeSet, s.ValidatorGroup, instance)
+				vname := validatorNodeName(nodeSet, s.ValidatorGroup, 0)
 				for _, v := range nodeSet.Status.Validators {
 					if v.Name == vname && v.PubKey != "" {
 						// The targeted validator already registered its key; the flow will not run again.
@@ -599,31 +591,18 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	return false, false, nil
 }
 
-// signerNameForNode returns the name of the managed signer that targets a specific node — a group's
-// instance — and whether one does. A sentry signer (no per-instance identity) fronts every pod of its
-// target group; a validator signer targets one instance, so a multi-instance validator group's
-// instances each map to their own per-instance signer. The returned name is stamped as the node's
-// LabelCosmosignerTarget so the signer's discovery Service selects exactly that node's pod(s).
-func signerNameForNode(nodeSet *appsv1.ChainNodeSet, group string, index int) (string, bool) {
+// signerNameForNode returns the name of the managed signer that targets a group's nodes, and
+// whether one does. A signer fronts every pod of its target groups: sentry fan-out, and every
+// instance of the validator group it serves (redundant signing endpoints of one identity). The
+// returned name is stamped as the node's LabelCosmosignerTarget so the signer's discovery Service
+// selects exactly those pods.
+func signerNameForNode(nodeSet *appsv1.ChainNodeSet, group string) (string, bool) {
 	for _, s := range nodeSet.ResolveCosmosigners() {
-		targetsGroup := false
 		for _, t := range s.TargetGroups {
 			if t == group {
-				targetsGroup = true
-				break
+				return s.Name, true
 			}
 		}
-		if !targetsGroup {
-			continue
-		}
-		// The per-instance filter applies ONLY to the signer's validator group (a per-instance signer
-		// serves exactly one validator instance). Every pod of any OTHER target group — sentry fan-out,
-		// including extra groups fronted alongside a single-instance validator by the top-level signer —
-		// is a signing endpoint regardless of its index.
-		if s.ValidatorInstance != nil && group == s.ValidatorGroup && *s.ValidatorInstance != index {
-			continue
-		}
-		return s.Name, true
 	}
 	return "", false
 }
@@ -631,29 +610,19 @@ func signerNameForNode(nodeSet *appsv1.ChainNodeSet, group string, index int) (s
 // signerImportSourcePending reports whether the source key Secret for a Vault upload may still be
 // created by this controller. Explicit privateKeySecret values are user-supplied and are never
 // generated; after the target validator pubkey is recorded, the init/createValidator key flow is
-// complete and a missing Secret is an error rather than a pending condition. It uses the PER-INSTANCE
-// validator config: in a multi-instance genesis-initializing group only instance 0 keeps Init, so the
-// non-init instances (whose keys are pre-created before genesis and never regenerated) are correctly
-// treated as terminal, not perpetually pending.
+// complete and a missing Secret is an error rather than a pending condition.
 func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) bool {
 	if s.ValidatorGroup == "" {
 		return false
 	}
-	instance := 0
-	if s.ValidatorInstance != nil {
-		instance = *s.ValidatorInstance
-	}
 
 	cfg := nodeSet.Spec.Validator
-	groupValidator := nodeSet.Spec.Validator
 	if s.ValidatorGroup != appsv1.ReservedValidatorGroupName {
 		cfg = nil
-		groupValidator = nil
 		for i := range nodeSet.Spec.Nodes {
 			g := &nodeSet.Spec.Nodes[i]
 			if g.Name == s.ValidatorGroup && g.Validator != nil {
-				groupValidator = g.Validator
-				cfg = deriveGroupValidatorConfig(nodeSet, g.Name, instance, g.GetInstances(), g.Validator)
+				cfg = g.Validator
 				break
 			}
 		}
@@ -661,7 +630,7 @@ func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s a
 	if cfg == nil {
 		return false
 	}
-	name := validatorNodeName(nodeSet, s.ValidatorGroup, instance)
+	name := validatorNodeName(nodeSet, s.ValidatorGroup, 0)
 	pubKeyRecorded := func() bool {
 		for _, v := range nodeSet.Status.Validators {
 			if v.Name == name && v.PubKey != "" {
@@ -670,22 +639,20 @@ func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s a
 		}
 		return false
 	}
-	// PRE-GENESIS: a genesis-init GROUP creates ALL of its instance keys together during bootstrap
-	// (ensureValidator, into each instance's PrivateKeySecret — explicit or default), and none exist yet
-	// while the chain ID is empty. So every instance is pending — even one whose DERIVED config has Init
-	// cleared, and even with an explicit key name (the key is generated INTO it). This must precede the
-	// explicit-key and per-instance checks below, which would otherwise demand a not-yet-created key.
-	if groupValidator != nil && groupValidator.Init != nil && nodeSet.Status.ChainID == "" {
+	// PRE-GENESIS: a genesis-init validator's key is created during bootstrap (ensureValidator, into
+	// its PrivateKeySecret — explicit or default), and does not exist yet while the chain ID is empty.
+	// So it is pending — even with an explicit key name (the key is generated INTO it). This must
+	// precede the explicit-key check below, which would otherwise demand a not-yet-created key.
+	if cfg.Init != nil && nodeSet.Status.ChainID == "" {
 		return true
 	}
-	// POST-GENESIS (and non-init): judge by the PER-INSTANCE derived config. A validator that GENERATES its
-	// own key — its derived Init or createValidator — is pending until its pubkey is recorded, because the
-	// child ChainNode creates that key WHEN IT RUNS, whether into an explicit or a default-named Secret
-	// (an explicit privateKeySecret does not make a createValidator source user-supplied). A validator
-	// that does NOT generate is terminal, so its source Secret must already exist: an external-genesis
-	// validator's user-supplied key, or a nonzero instance of a genesis-init group whose key was
-	// pre-created during bootstrap and is never regenerated — failing fast rather than waiting forever for
-	// a pubkey the child can never record while its Secret is missing.
+	// POST-GENESIS (and non-init): a validator that GENERATES its own key — Init or createValidator —
+	// is pending until its pubkey is recorded, because the child ChainNode creates that key WHEN IT
+	// RUNS, whether into an explicit or a default-named Secret (an explicit privateKeySecret does not
+	// make a createValidator source user-supplied). A validator that does NOT generate is terminal, so
+	// its source Secret must already exist: an external-genesis validator's user-supplied key —
+	// failing fast rather than waiting forever for a pubkey the child can never record while its
+	// Secret is missing.
 	if cfg.Init == nil && cfg.CreateValidator == nil {
 		return false
 	}

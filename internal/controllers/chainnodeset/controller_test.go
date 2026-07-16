@@ -307,7 +307,6 @@ func recordSignerRollout(t *testing.T, ns *appsv1.ChainNodeSet) {
 		st.SigningDigest = s.Digest()
 		st.ServingIdentity = s.ValidatorTargetedIdentity()
 		st.ServingGroup = s.ValidatorGroup
-		st.ServingInstance = s.ValidatorInstance
 	}
 }
 
@@ -830,7 +829,6 @@ func TestValidateForReconcileRejectsLegacyPreDigestValidator(t *testing.T) {
 	// Single-target validator signer, marker recorded but served group cleared (legacy shape): rejected.
 	ns := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	ns.Status.Cosmosigners[0].ServingGroup = ""
-	ns.Status.Cosmosigners[0].ServingInstance = nil
 	_, err := validateForReconcile(ns)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must keep serving that exact validator/genesis key")
@@ -918,49 +916,4 @@ func TestSignerImportSourcePendingCreateValidatorExplicitKey(t *testing.T) {
 	done := mk()
 	done.Status.Validators = []appsv1.ChainNodeSetValidatorStatus{{Name: validatorNodeName(done, appsv1.ReservedValidatorGroupName, 0), PubKey: "pk"}}
 	require.False(t, r.signerImportSourcePending(done, done.ResolveCosmosigners()[0]), "terminal once the pubkey is recorded")
-}
-
-// TestSignerImportSourcePendingMultiInstancePostGenesis verifies a NONZERO instance of a multi-instance
-// genesis-init group is terminal post-genesis (its key is pre-created during bootstrap and never
-// regenerated), so a missing source Secret fails rather than waiting forever for a pubkey the child can
-// never record — while pre-genesis it is still pending.
-func TestSignerImportSourcePendingMultiInstancePostGenesis(t *testing.T) {
-	mk := func() *appsv1.ChainNodeSet {
-		return &appsv1.ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
-			Spec: appsv1.ChainNodeSetSpec{
-				Nodes: []appsv1.NodeGroupSpec{{
-					Name:      "validators",
-					Instances: ptr.To(3),
-					Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1stake"}, StakeAmount: "1stake"}},
-					Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
-						Address: "https://vault:8200", KeyName: "k",
-						TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-						UploadGenerated: true,
-					}}},
-				}},
-			},
-		}
-	}
-	r := &Reconciler{}
-
-	// Resolve the per-instance signer for instance 2 (>0).
-	signerFor := func(ns *appsv1.ChainNodeSet, instance int) appsv1.ResolvedSigner {
-		for _, s := range ns.ResolveCosmosigners() {
-			if s.ValidatorInstance != nil && *s.ValidatorInstance == instance {
-				return s
-			}
-		}
-		t.Fatalf("no signer for instance %d", instance)
-		return appsv1.ResolvedSigner{}
-	}
-
-	// Pre-genesis: pending (keys created during bootstrap).
-	pre := mk()
-	require.True(t, r.signerImportSourcePending(pre, signerFor(pre, 2)), "nonzero instance must be pending pre-genesis")
-
-	// Post-genesis, no pubkey: terminal for the nonzero instance (its pre-created key must exist).
-	post := mk()
-	post.Status.ChainID = "test-localnet"
-	require.False(t, r.signerImportSourcePending(post, signerFor(post, 2)), "nonzero instance must be terminal post-genesis")
 }

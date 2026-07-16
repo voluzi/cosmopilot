@@ -48,8 +48,9 @@ A `Cosmosigner` can be attached to a **ChainNodeSet** in two places:
   - The **validator** — leave `nodeGroups` empty to target the `.spec.validator` (a drop-in remote
     signer for a single validator).
 
-  The top-level signer targets at most one validator, so a validator group with more than one
-  instance cannot be targeted here — use a per-group signer (below) instead.
+  The top-level signer targets at most one validator. A multi-instance validator group is a valid
+  target: it counts as ONE validator whose instances are redundant signing endpoints (see
+  [High-availability validators](#high-availability-validators-multiple-instances-one-identity)).
 
 - **Per-group `.spec.nodes[].cosmosigner`** — a signer scoped to its enclosing group. Its target is
   fixed to that group (so `nodeGroups` is not allowed). This is how you run **several signed
@@ -134,35 +135,43 @@ Each signer holds a distinct consensus identity. Two signers may **not** referen
 key, GCP key version, or software key secret — the webhook rejects it, since that would let two
 validators double-sign.
 
-### Multi-instance validator groups
+:::note[One group = one validator identity]
+A signer holds a single consensus identity, so a **validator group with a `cosmosigner` is always
+ONE validator** — even with `instances > 1` (see below). To run N distinct validators, declare N
+validator groups as above, each with its own signer and key.
+:::
 
-A multi-instance validator group is N distinct validators, so a per-group `cosmosigner` on it deploys
-**one signer per instance** (`<nodeset>-<group>-<index>-signer`). Each instance needs its own
-consensus key:
+## High-availability validators: multiple instances, one identity
 
-- **Vault**: instance `i` uses the **index-appended** transit key `<keyName>-<i>`. Pre-provision one
-  key per instance (e.g. for a 3-instance group with `keyName: myval`, create `myval-0`, `myval-1`,
-  `myval-2`). With `uploadGenerated`, Cosmopilot imports instance `i`'s generated key into
-  `<keyName>-<i>`.
-- **Software**: instance `i` mounts its own generated key secret `<nodeset>-<group>-<i>-priv-key`.
-- **GCP KMS** cannot be used on a multi-instance group: a `keyVersion` is a full resource path that
-  cannot be derived per instance, so the webhook rejects the combination. Split the group into
-  single-instance validator groups, each with its own `keyVersion`.
+A validator group with a `cosmosigner` may run **multiple instances**. They are **redundant signing
+endpoints of the same validator**, not extra validators: the group's single signer
+(`<nodeset>-<group>-signer`) holds the one consensus key and dials **all** instance pods — exactly
+like sentry-mode fan-out, but the group *is* the validator. The raft leader produces exactly one
+signature per height, so there is no double-signing risk, and the validator keeps signing while
+individual nodes restart or catch up.
 
-```yaml {5-11}
+```yaml {4-5}
 spec:
   nodes:
-    - name: validators
-      instances: 3                       # 3 validators -> 3 signers
-      validator: { ... }
+    - name: validator
+      instances: 3                       # 3 redundant nodes, ONE validator
+      validator: {}
       cosmosigner:
         replicas: 3
         backend:
           vault:
             address: https://vault:8200
-            keyName: myval               # instance i signs with "myval-<i>"
+            keyName: chain-validator     # the group's single consensus identity
             tokenSecret: { name: vault-cosmosigner-token, key: token }
 ```
+
+Only instance 0 runs the validator's key flow (genesis init or `createValidator`); the other
+instances join as ordinary nodes of the same identity. An explicit `validator.privateKeySecret` on
+such a group names that single identity (e.g. as the Vault `uploadGenerated` import source) — the
+nodes themselves mount no local key.
+
+Without a `cosmosigner`, a multi-instance validator group keeps its usual meaning: N distinct
+validators, one per instance, each with its own generated key.
 
 :::note[One signer per group]
 A node group can be signed by only one signer: you cannot list a group in the top-level

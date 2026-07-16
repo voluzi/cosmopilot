@@ -290,15 +290,6 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 	return nodeSet.Validate(nil)
 }
 
-// sameSignerInstance reports whether two served-instance pointers denote the same instance (both nil,
-// or both set to the same index).
-func sameSignerInstance(a, b *int) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
-}
-
 // validateNoWebhookCosmosignerState reconstructs the parts of the admission guard that can be judged
 // from status alone. Reconcile only ever sees the current persisted object, never the previous spec,
 // so it enforces exactly the invariants that do NOT need an old/new diff:
@@ -334,8 +325,8 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	}
 
 	// REMOVED signers: a validator-targeted signer that rolled out (recorded serving identity) can only
-	// be removed when the SAME validator it served (group + instance) still resolves that identity
-	// through its OWN signing path in the resulting spec — e.g. a software-backed signer that used the
+	// be removed when the SAME validator it served (group) still resolves that identity through its
+	// OWN signing path in the resulting spec — e.g. a software-backed signer that used the
 	// validator's own key secret, or tmKMS on the same Vault key. A pre-provisioned Vault/GCP signer's
 	// identity is unreachable through any local path, so its removal is rejected: the validator would
 	// fall back to a local key that is absent or different from the on-chain consensus key.
@@ -345,7 +336,7 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			continue
 		}
 		if st.ServingIdentity != "" &&
-			!nodeSet.ServedValidatorResolvesIdentity(st.ServingGroup, st.ServingInstance, st.ServingIdentity) {
+			!nodeSet.ServedValidatorResolvesIdentity(st.ServingGroup, st.ServingIdentity) {
 			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): the validator it served would fall back to a local key different from the on-chain consensus key — restore the signer, or migrate the validator's own signing path to the same key first", st.Name)
 		}
 		if st.ServingIdentity == "" && st.SigningDigest != "" {
@@ -390,7 +381,7 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			// init.genesisValidators). A non-genesis sentry records "" and is unaffected; a post-establishment
 			// validator addition keeps a nil marker and is judged by the addition guard below instead.
 			if st.SigningDigest == "" && st.AtEstablishment != nil && *st.AtEstablishment != "" {
-				// The signer must still serve the recorded identity through the SAME group+instance it was
+				// The signer must still serve the recorded identity through the SAME group it was
 				// pinned to at establishment. The served group MUST have been recorded (ServingGroup
 				// non-empty): a signer targeting multiple groups could otherwise move validator-ness to a
 				// sibling group with the same backend identity, and even a SINGLE-target top-level signer can
@@ -403,7 +394,6 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 				stillValidator := s.TargetsValidator() &&
 					st.ServingGroup != "" &&
 					s.ValidatorGroup == st.ServingGroup &&
-					sameSignerInstance(s.ValidatorInstance, st.ServingInstance) &&
 					s.ValidatorTargetedIdentity() == *st.AtEstablishment
 				stillGenesisSentry := nodeSet.GenesisSentryEstablishmentIdentity(s) == *st.AtEstablishment
 				if !stillValidator && !stillGenesisSentry {
@@ -422,18 +412,18 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 				// served group still contains the validator. Converting the served group into a regular node
 				// group keeps a Vault/GCP digest identical while removing the validator, so additionally
 				// require the signer to still resolve the recorded serving identity — and through the SAME
-				// group+instance it served: swapping validator-ness between two targeted groups keeps the
+				// group it served: swapping validator-ness between two targeted groups keeps the
 				// identity and digest intact while the original on-chain validator loses its signing path.
 				if st.ServingIdentity != "" {
 					if s.ValidatorTargetedIdentity() != st.ServingIdentity {
 						return fmt.Errorf("cosmosigner %q: the validator it was serving can no longer be resolved (webhooks disabled) — removing or converting the served validator would leave its on-chain key without its signing path", s.Name)
 					}
-					if s.ValidatorGroup != st.ServingGroup || !sameSignerInstance(s.ValidatorInstance, st.ServingInstance) {
+					if s.ValidatorGroup != st.ServingGroup {
 						return fmt.Errorf("cosmosigner %q served the validator in group %q (webhooks disabled) — moving validator-ness elsewhere would leave that validator's on-chain key without its signing path", s.Name, st.ServingGroup)
 					}
 				} else if !s.TargetsValidator() || len(s.TargetGroups) > 1 {
 					// A LEGACY digest (recorded before the serving fields existed) carries no served
-					// group/instance, so the group+instance demotion check above cannot run. The digest
+					// group, so the group demotion check above cannot run. The digest
 					// hashes the backend identity, replica count and target-group NAMES — not WHICH targeted
 					// group is the validator — so it stays identical when validator-ness moves between the
 					// targeted groups. Two cases are therefore unverifiable from status alone and rejected:
@@ -502,9 +492,15 @@ func validateNoWebhookGenesisInitState(nodeSet *appsv1.ChainNodeSet) error {
 			continue
 		}
 		instances := group.GetInstances()
+		// A cosmosigner-targeted group holds ONE consensus identity: only instance 0 is a genesis
+		// validator (the other instances are redundant signing endpoints and are never recorded as
+		// init validators), so only its fingerprint belongs in the desired init set.
+		if nodeSet.IsCosmosignerTargetGroup(group.Name) {
+			instances = 1
+		}
 		for i := 0; i < instances; i++ {
 			name := validatorNodeName(nodeSet, group.Name, i)
-			cfg := deriveGroupValidatorConfig(nodeSet, group.Name, i, instances, group.Validator)
+			cfg := deriveGroupValidatorConfig(nodeSet, group.Name, i, group.GetInstances(), group.Validator)
 			desired[name] = desiredInit{
 				group:  group.Name,
 				digest: cfg.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", name)),
