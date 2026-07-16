@@ -54,6 +54,90 @@ func TestReconcileSignerTeardownDropsStatusEntry(t *testing.T) {
 	assert.Empty(t, fresh.Status.Cosmosigners, "the removed signer's status entry must be dropped on teardown")
 }
 
+func TestReconcileSignerTeardownPreservesLegacyPerInstanceSigners(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(2),
+			Validator: &appsv1.NodeSetValidatorConfig{},
+			Cosmosigner: &appsv1.Cosmosigner{
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}},
+			},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "test-1",
+			Cosmosigners: []appsv1.CosmosignerStatus{
+				{Name: "test-nodeset-validators-0-signer"},
+				{Name: "test-nodeset-validators-1-signer"},
+			},
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), "legacy per-instance cosmosigners")
+
+	fresh := &appsv1.ChainNodeSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
+	require.Len(t, fresh.Status.Cosmosigners, 2)
+}
+
+func TestPreflightCosmosignersRequiresGenesisSentrySecrets(t *testing.T) {
+	const (
+		privSecret    = "genesis-sentry-key"
+		accountSecret = "genesis-sentry-account"
+	)
+	newNodeSet := func() *appsv1.ChainNodeSet {
+		return &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+			Spec: appsv1.ChainNodeSetSpec{
+				Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+					ChainID:     "test-1",
+					Assets:      []string{"1stake"},
+					StakeAmount: "1stake",
+					GenesisValidators: []appsv1.GenesisValidator{{
+						PrivKeySecret:         privSecret,
+						AccountMnemonicSecret: accountSecret,
+						Moniker:               "sentry",
+						Assets:                []string{"1stake"},
+						StakeAmount:           "1stake",
+					}},
+				}},
+				Nodes: []appsv1.NodeGroupSpec{{
+					Name:      "sentries",
+					Instances: ptr.To(1),
+					Cosmosigner: &appsv1.Cosmosigner{
+						Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(privSecret)}},
+					},
+				}},
+			},
+		}
+	}
+
+	t.Run("missing private key", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		r := newValidatorTestReconciler(t, nodeSet)
+		err := r.preflightCosmosigners(context.Background(), nodeSet)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), privSecret)
+	})
+
+	t.Run("missing account mnemonic", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		key := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: privSecret, Namespace: "default"},
+			Data:       map[string][]byte{privKeyFilename: []byte("key")},
+		}
+		r := newValidatorTestReconciler(t, nodeSet, key)
+		err := r.preflightCosmosigners(context.Background(), nodeSet)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), accountSecret)
+	})
+}
+
 // TestReconcileSignerTeardownKeepsStatusWhileTerminating verifies that while the signer StatefulSet is
 // still present (teardown is asynchronous), the recorded status entry is preserved — dropping it early
 // would let a remove-and-immediate-re-add bind the surviving PVCs and inherit stale raft membership.

@@ -3,10 +3,28 @@ package v1
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
+
+// HasLegacyPerInstanceCosmosignerStatus reports whether status still records the pre-group-identity
+// signer naming scheme for group. Those entries must not be collapsed automatically on upgrade.
+func (nodeSet *ChainNodeSet) HasLegacyPerInstanceCosmosignerStatus(group string) bool {
+	prefix := fmt.Sprintf("%s-%s-", nodeSet.GetName(), group)
+	const suffix = "-signer"
+	for _, st := range nodeSet.Status.Cosmosigners {
+		if !strings.HasPrefix(st.Name, prefix) || !strings.HasSuffix(st.Name, suffix) {
+			continue
+		}
+		instance := strings.TrimSuffix(strings.TrimPrefix(st.Name, prefix), suffix)
+		if index, err := strconv.Atoi(instance); err == nil && index >= 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // ResolvedSigner describes one managed cosmosigner deployment a ChainNodeSet should run. A
 // ChainNodeSet can run many: the top-level .spec.cosmosigner (one signer over its target groups)

@@ -1444,6 +1444,26 @@ func TestChainNodeSetValidateRejectsInitParamChangeAfterCreation(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestValidateCosmosignerUpdateRejectsAddingSignerToEstablishedMultiInstanceGroup(t *testing.T) {
+	old := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "ns"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(2),
+			Validator: &NodeSetValidatorConfig{CreateValidator: &CreateValidatorConfig{}},
+		}}},
+		Status: ChainNodeSetStatus{ChainID: "chain-1"},
+	}
+	updated := old.DeepCopy()
+	updated.Spec.Nodes[0].Cosmosigner = &Cosmosigner{
+		Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}},
+	}
+
+	err := updated.validateCosmosignerUpdate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multi-instance validator group")
+}
+
 // TestChainNodeSetValidateRejectsAccountSettingsChangeAfterCreation verifies that changing the
 // validator-level account derivation settings (accountPrefix/valPrefix/accountHDPath) after genesis is
 // rejected — they live on the validator config (outside .init) yet determine the operator/account

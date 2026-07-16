@@ -39,6 +39,7 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 		Client:   cl,
 		Scheme:   scheme,
 		recorder: record.NewFakeRecorder(100),
+		opts:     &controllers.ControllerRunOptions{},
 	}
 }
 

@@ -23,6 +23,10 @@ import (
 // signer pods (deletion is asynchronous) could briefly sign the same consensus key as the restored
 // local signer. Each signer's resources are name-scoped, so per-signer teardown never touches another.
 func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	if group, ok := legacyPerInstanceCosmosignerGroup(nodeSet); ok {
+		return false, fmt.Errorf("validator group %q still has legacy per-instance cosmosigners recorded in status; refusing to replace or delete those signing identities during an automatic operator upgrade", group)
+	}
+
 	desired := map[string]struct{}{}
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		desired[s.Name] = struct{}{}
@@ -67,6 +71,19 @@ func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv
 	return allDone, nil
 }
 
+func legacyPerInstanceCosmosignerGroup(nodeSet *appsv1.ChainNodeSet) (string, bool) {
+	for i := range nodeSet.Spec.Nodes {
+		group := &nodeSet.Spec.Nodes[i]
+		if group.Validator == nil || group.Cosmosigner == nil {
+			continue
+		}
+		if nodeSet.HasLegacyPerInstanceCosmosignerStatus(group.Name) {
+			return group.Name, true
+		}
+	}
+	return "", false
+}
+
 // preflightCosmosigners fails the reconcile when any desired signer cannot be deployed, so children
 // are not switched to a remote signer that will never come up. It is READ-ONLY (resolves params and
 // reads Secrets; never applies resources). It runs before ensureValidator/ensureNodes stamp
@@ -75,6 +92,9 @@ func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv
 // validator key-generation flow that has not run yet) are NOT failures.
 func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	for _, s := range nodeSet.ResolveCosmosigners() {
+		if err := r.requireGenesisSentrySecrets(ctx, nodeSet, s); err != nil {
+			return err
+		}
 		// Resolving params verifies a software backend's key secret and the backend's referenced auth
 		// Secrets (Vault token/certificate, GCP credentials) exist (unless a validator key-generation
 		// flow is still pending — handled inside cosmosignerBackend).
@@ -123,6 +143,56 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			if !exists {
 				return fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", s.Name, s.SoftwareKeySecret, privKeyFilename)
 			}
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) requireGenesisSentrySecrets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) error {
+	if nodeSet.Status.ChainID != "" || nodeSet.GenesisSentryEstablishmentIdentity(s) == "" {
+		return nil
+	}
+
+	var match *appsv1.GenesisValidator
+	find := func(init *appsv1.GenesisInitConfig) {
+		if init == nil || match != nil {
+			return
+		}
+		for i := range init.GenesisValidators {
+			if init.GenesisValidators[i].PrivKeySecret == s.SoftwareKeySecret {
+				match = &init.GenesisValidators[i]
+				return
+			}
+		}
+	}
+	if nodeSet.Spec.Validator != nil {
+		find(nodeSet.Spec.Validator.Init)
+	}
+	for i := range nodeSet.Spec.Nodes {
+		group := &nodeSet.Spec.Nodes[i]
+		if group.Validator != nil && group.GetInstances() > 0 {
+			find(group.Validator.Init)
+		}
+	}
+	if match == nil {
+		return nil
+	}
+
+	required := []struct {
+		name string
+		key  string
+		kind string
+	}{
+		{name: match.PrivKeySecret, key: privKeyFilename, kind: "private-key"},
+		{name: match.AccountMnemonicSecret, key: mnemonicKey, kind: "account-mnemonic"},
+	}
+	for _, secret := range required {
+		exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), secret.name, secret.key)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("genesis-sentry %s secret %q is missing required key %q: init.genesisValidators entries are operator-provided and must exist before signer preflight", secret.kind, secret.name, secret.key)
 		}
 	}
 	return nil
@@ -431,12 +501,6 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 					}
 				}
 			}
-		} else if nodeSet.Status.ChainID == "" && nodeSet.GenesisSentryEstablishmentIdentity(s) != "" {
-			// A SENTRY signer whose key is registered in an init validator's genesisValidators is created
-			// (or healed) by ensureValidator during genesis bootstrap, so pre-genesis it is still pending —
-			// do not demand it before that flow runs. A non-genesis sentry key is user-supplied out-of-band
-			// and must exist even pre-genesis, so it is NOT treated as pending here.
-			keyFlowPending = true
 		}
 		if !keyFlowPending {
 			exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)

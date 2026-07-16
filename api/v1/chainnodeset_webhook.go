@@ -758,6 +758,10 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 	for _, s := range old.ResolveCosmosigners() {
 		oldSigners[s.Name] = s
 	}
+	oldGroups := make(map[string]NodeGroupSpec, len(old.Spec.Nodes))
+	for _, group := range old.Spec.Nodes {
+		oldGroups[group.Name] = group
+	}
 
 	for _, ns := range nodeSet.ResolveCosmosigners() {
 		path := nodeSet.signerFieldPath(ns)
@@ -789,6 +793,25 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 
 	if old.Status.ChainID == "" {
 		return nil
+	}
+
+	// A multi-instance validator group changes meaning when signer-targeted: without a signer every
+	// instance is an independent validator, while with one signer the instances are redundant
+	// endpoints for a single identity. That classification cannot change after the chain exists.
+	for i, group := range nodeSet.Spec.Nodes {
+		if group.Validator == nil {
+			continue
+		}
+		og, ok := oldGroups[group.Name]
+		if !ok || og.Validator == nil || (og.GetInstances() <= 1 && group.GetInstances() <= 1) {
+			continue
+		}
+		oldTargeted := old.groupCosmosigner(group.Name) != nil
+		newTargeted := nodeSet.groupCosmosigner(group.Name) != nil
+		if oldTargeted == newTargeted {
+			continue
+		}
+		return fmt.Errorf(".spec.nodes[%d]: a cosmosigner cannot be added to or removed from established multi-instance validator group %q: it would change the group between multiple on-chain validators and one signing identity", i, group.Name)
 	}
 
 	// Retargeting a validator-serving signer to different groups after establishment would leave the
