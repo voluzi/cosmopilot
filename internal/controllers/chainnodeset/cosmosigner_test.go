@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
 
@@ -314,6 +315,118 @@ func TestReconcileSignerTeardownDropsStatusWithForeignSameNameSigner(t *testing.
 	remaining := &k8sappsv1.StatefulSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: signerName}, remaining))
 	assert.True(t, metav1.IsControlledBy(remaining, foreignOwner), "foreign signer must remain owned by the other CR")
+}
+
+func TestPreflightRemovedSignerFallbacksRequiresLocalKey(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Spec.Cosmosigner = nil
+	r := newValidatorTestReconciler(t, nodeSet)
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-signer", Namespace: "default"}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), sts))
+
+	err := r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "val-priv-key")
+
+	remaining := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: sts.Name}, remaining))
+
+	keySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "val-priv-key", Namespace: "default"},
+		Data:       map[string][]byte{privKeyFilename: []byte("{}")},
+	}
+	require.NoError(t, r.Create(context.Background(), keySecret))
+	err = r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	keySecret.Data[privKeyFilename] = key
+	require.NoError(t, r.Update(context.Background(), keySecret))
+	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
+}
+
+func TestReconcilePreflightsRemovedSignerFallbackBeforeTeardown(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Spec.App = appsv1.AppSpec{Image: "image", App: "appd", Version: ptr.To("1.0.0")}
+	recordSignerRollout(t, nodeSet)
+	signerName := nodeSet.Status.Cosmosigners[0].Name
+	nodeSet.Spec.Cosmosigner = nil
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: signerName, Namespace: "default", Labels: cosmosigner.InstanceLabels(signerName),
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+	r := newValidatorTestReconciler(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}, nodeSet, sts)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: nodeSet.Name}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "val-priv-key")
+
+	remaining := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: signerName}, remaining))
+}
+
+func TestPreflightRemovedSignerFallbacksRequiresTmKMSSecrets(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	nodeSet.UID = types.UID("nodeset-uid")
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Validator.TmKMS = &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+		Hashicorp: &appsv1.TmKmsHashicorpProvider{
+			Address: "https://vault.example:8200",
+			Key:     "val-key",
+			TokenSecret: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
+				Key:                  "token",
+			},
+			CertificateSecret: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-ca"},
+				Key:                  "ca.crt",
+			},
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet)
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-signer", Namespace: "default"}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), sts))
+
+	err := r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tmKMS Vault token")
+
+	remaining := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: sts.Name}, remaining))
+
+	require.NoError(t, r.Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("vault-token")},
+	}))
+	err = r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tmKMS Vault certificate")
+
+	require.NoError(t, r.Create(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-ca", Namespace: "default"},
+		Data:       map[string][]byte{"ca.crt": []byte("certificate")},
+	}))
+	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
+}
+
+func TestPreflightRemovedSignerFallbacksRequiresSupportedTmKMSProvider(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Validator.TmKMS = &appsv1.TmKMS{}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	err := r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "supported tmKMS provider")
 }
 
 // TestSignerNameForNode verifies each node maps to the signer that must dial it: every pod of a

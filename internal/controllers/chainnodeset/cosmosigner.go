@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
@@ -146,6 +147,85 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 				return fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", s.Name, s.SoftwareKeySecret, privKeyFilename)
 			}
 		}
+	}
+	return nil
+}
+
+// preflightRemovedSignerFallbacks verifies the validator signing path that will replace each stale
+// signer before teardown makes that signer unavailable.
+func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	desired := map[string]struct{}{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		desired[s.Name] = struct{}{}
+	}
+
+	for i := range nodeSet.Status.Cosmosigners {
+		st := &nodeSet.Status.Cosmosigners[i]
+		if _, ok := desired[st.Name]; ok || st.ServingGroup == "" {
+			continue
+		}
+
+		var cfg *appsv1.NodeSetValidatorConfig
+		if st.ServingGroup == appsv1.ReservedValidatorGroupName {
+			cfg = nodeSet.Spec.Validator
+		} else {
+			for j := range nodeSet.Spec.Nodes {
+				if nodeSet.Spec.Nodes[j].Name == st.ServingGroup {
+					cfg = nodeSet.Spec.Nodes[j].Validator
+					break
+				}
+			}
+		}
+		if cfg == nil {
+			return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has no fallback signing path", st.Name, st.ServingGroup)
+		}
+
+		if cfg.TmKMS != nil {
+			hashicorp := cfg.TmKMS.Provider.Hashicorp
+			if hashicorp == nil {
+				return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has no supported tmKMS provider configured", st.Name, st.ServingGroup)
+			}
+			if err := r.requireTmKMSSecret(ctx, nodeSet.GetNamespace(), "tmKMS Vault token", hashicorp.TokenSecret); err != nil {
+				return fmt.Errorf("cosmosigner %q cannot be removed: %w", st.Name, err)
+			}
+			if hashicorp.CertificateSecret != nil {
+				if err := r.requireTmKMSSecret(ctx, nodeSet.GetNamespace(), "tmKMS Vault certificate", hashicorp.CertificateSecret); err != nil {
+					return fmt.Errorf("cosmosigner %q cannot be removed: %w", st.Name, err)
+				}
+			}
+			continue
+		}
+
+		validator := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+			Name:      validatorNodeName(nodeSet, st.ServingGroup, 0),
+			Namespace: nodeSet.GetNamespace(),
+		}}
+		secretName := cfg.GetPrivKeySecretName(validator)
+		keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), secretName, privKeyFilename)
+		if err != nil {
+			return fmt.Errorf("preflight local signing fallback for cosmosigner %q: %w", st.Name, err)
+		}
+		if len(keyMaterial) == 0 {
+			return fmt.Errorf("cosmosigner %q cannot be removed: local signing fallback secret %q is missing required key %q", st.Name, secretName, privKeyFilename)
+		}
+		key, err := cometbft.LoadPrivKey(keyMaterial)
+		if err != nil || key.Address == "" || key.PubKey.Type == "" || key.PubKey.Value == "" || key.PrivKey.Type == "" || key.PrivKey.Value == "" {
+			return fmt.Errorf("cosmosigner %q cannot be removed: local signing fallback secret %q contains an invalid %s", st.Name, secretName, privKeyFilename)
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) requireTmKMSSecret(ctx context.Context, namespace, purpose string, selector *corev1.SecretKeySelector) error {
+	if selector == nil || selector.Name == "" || selector.Key == "" {
+		return fmt.Errorf("%s secret selector must set both name and key", purpose)
+	}
+	data, err := r.secretKey(ctx, namespace, selector.Name, selector.Key)
+	if err != nil {
+		return fmt.Errorf("read %s secret %q: %w", purpose, selector.Name, err)
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("%s secret %q is missing required key %q", purpose, selector.Name, selector.Key)
 	}
 	return nil
 }
