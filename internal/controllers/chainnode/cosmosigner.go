@@ -108,7 +108,9 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, chainNode *appsv1.Ch
 }
 
 func (r *Reconciler) preflightCosmosignerFallback(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	if chainNode.Spec.Cosmosigner != nil || !ptr.Deref(chainNode.Status.CosmosignerValidatorTargeted, false) {
+	validatorTargeted := chainNode.Status.CosmosignerServingIdentity != "" ||
+		ptr.Deref(chainNode.Status.CosmosignerValidatorTargeted, false)
+	if chainNode.Spec.Cosmosigner != nil || !validatorTargeted {
 		return nil
 	}
 	if chainNode.Spec.Validator == nil {

@@ -103,6 +103,24 @@ func TestPreflightCosmosignerFallbackRequiresTmKMSSecrets(t *testing.T) {
 	require.NoError(t, r.preflightCosmosignerFallback(context.Background(), chainNode))
 }
 
+func TestPreflightCosmosignerFallbackUsesRecordedServingIdentity(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{
+			PrivateKeySecret: ptr.To("validator-key"),
+		}},
+		Status: appsv1.ChainNodeStatus{CosmosignerServingIdentity: "software\x00validator-key"},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+
+	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validator-key")
+}
+
 func TestBackfillCosmosignerLegacyStatusRecordsTargetKind(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
