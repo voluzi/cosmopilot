@@ -496,10 +496,10 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 	}
 	if old != nil {
 		rememberServiceNames(old)
-	} else if nodeSet.Status.Phase != "" {
-		// The no-webhook path has no old object. Controller-managed status proves this object has
-		// already reconciled, so its existing names receive the same update exemption.
-		rememberServiceNames(nodeSet)
+	} else if nodeSet.Status.LegacySignerServiceNamesInitialized {
+		for _, name := range nodeSet.Status.LegacySignerServiceNames {
+			legacyStandaloneSignerServices[name] = struct{}{}
+		}
 	}
 
 	// A Service named "<node>-signer" or "<node>-signer-privval" collides with the raft/discovery

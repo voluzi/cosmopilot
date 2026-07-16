@@ -156,6 +156,18 @@ type ChainNodeSetStatus struct {
 	// +listType=map
 	// +listMapKey=name
 	Cosmosigners []CosmosignerStatus `json:"cosmosigners,omitempty"`
+
+	// LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now
+	// reserved for standalone ChainNode signer Services. The controller initializes this once from
+	// Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy
+	// names without trusting the current, possibly edited spec.
+	// +optional
+	LegacySignerServiceNames []string `json:"legacySignerServiceNames,omitempty"`
+
+	// LegacySignerServiceNamesInitialized distinguishes a recorded empty legacy-name set from an old
+	// ChainNodeSet whose status predates LegacySignerServiceNames.
+	// +optional
+	LegacySignerServiceNamesInitialized bool `json:"legacySignerServiceNamesInitialized,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.

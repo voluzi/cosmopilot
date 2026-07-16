@@ -235,9 +235,17 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 	legacyGroup := base([]NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}})
 	_, err := legacyGroup.Validate(legacyGroup.DeepCopy())
 	require.NoError(t, err, "an unchanged pre-existing reserved group name must remain updateable")
-	legacyGroup.Status.Phase = PhaseChainNodeSetRunning
+	legacyGroup.Status.LegacySignerServiceNamesInitialized = true
+	legacyGroup.Status.LegacySignerServiceNames = []string{legacyGroup.Spec.Nodes[0].GetServiceName(legacyGroup)}
 	_, err = legacyGroup.Validate(nil)
 	require.NoError(t, err, "a reconciled legacy group must remain valid on the no-webhook path")
+
+	editedNoWebhookGroup := base([]NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}})
+	editedNoWebhookGroup.Status.LegacySignerServiceNamesInitialized = true
+	editedNoWebhookGroup.Status.LegacySignerServiceNames = []string{"cs-fullnodes"}
+	_, err = editedNoWebhookGroup.Validate(nil)
+	require.Error(t, err, "the current spec must not whitelist a newly introduced reserved group name")
+	assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
 
 	introducedGroup := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
 	oldWithoutReservedGroup := introducedGroup.DeepCopy()
@@ -281,9 +289,18 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 	}}
 	_, err = legacyRoute.Validate(legacyRoute.DeepCopy())
 	require.NoError(t, err, "an unchanged pre-existing reserved route name must remain updateable")
-	legacyRoute.Status.Phase = PhaseChainNodeSetRunning
+	legacyRoute.Status.LegacySignerServiceNamesInitialized = true
+	legacyRoute.Status.LegacySignerServiceNames = []string{legacyRoute.Spec.Ingresses[0].GetName(legacyRoute)}
 	_, err = legacyRoute.Validate(nil)
 	require.NoError(t, err, "a reconciled legacy route must remain valid on the no-webhook path")
+
+	editedNoWebhookRoute := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+	editedNoWebhookRoute.Spec.Ingresses = legacyRoute.Spec.Ingresses
+	editedNoWebhookRoute.Status.LegacySignerServiceNamesInitialized = true
+	editedNoWebhookRoute.Status.LegacySignerServiceNames = []string{"cs-global-rpc"}
+	_, err = editedNoWebhookRoute.Validate(nil)
+	require.Error(t, err, "the current spec must not whitelist a newly introduced reserved route name")
+	assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
 
 	// Group Service name shadowing a signer resource name: group "vg-signer"'s Service is
 	// cs-vg-signer, the raft Service of group "vg"'s signer.

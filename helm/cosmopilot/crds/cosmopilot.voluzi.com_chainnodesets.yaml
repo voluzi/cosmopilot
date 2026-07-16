@@ -16080,6 +16080,20 @@ spec:
                 description: Last height read on the nodes by cosmopilot.
                 format: int64
                 type: integer
+              legacySignerServiceNames:
+                description: |-
+                  LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now
+                  reserved for standalone ChainNode signer Services. The controller initializes this once from
+                  Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy
+                  names without trusting the current, possibly edited spec.
+                items:
+                  type: string
+                type: array
+              legacySignerServiceNamesInitialized:
+                description: |-
+                  LegacySignerServiceNamesInitialized distinguishes a recorded empty legacy-name set from an old
+                  ChainNodeSet whose status predates LegacySignerServiceNames.
+                type: boolean
               nodes:
                 description: Nodes available on this nodeset, including validator
                   nodes.

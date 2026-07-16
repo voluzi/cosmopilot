@@ -1,16 +1,65 @@
 package chainnodeset
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
+
+func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	ownedReserved := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-nodeset-fullnodes-signer", Namespace: "default",
+		Labels: map[string]string{controllers.LabelScope: scopeGroup},
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, ownedReserved, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), ownedReserved))
+	require.NoError(t, r.Create(context.Background(), &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-nodeset-rpc-signer", Namespace: "default",
+	}}))
+	require.NoError(t, r.Create(context.Background(), &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-nodeset-fullnodes", Namespace: "default",
+	}}))
+
+	initialized, err := r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, initialized)
+	assert.True(t, nodeSet.Status.LegacySignerServiceNamesInitialized)
+	assert.Equal(t, []string{ownedReserved.Name}, nodeSet.Status.LegacySignerServiceNames)
+
+	initialized, err = r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, initialized)
+}
+
+func TestEnsureServiceRefusesForeignOwner(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	desired, err := r.getServiceSpec(nodeSet, appsv1.NodeGroupSpec{Name: "fullnodes"})
+	require.NoError(t, err)
+	require.NoError(t, r.Create(context.Background(), &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: desired.Name, Namespace: desired.Namespace,
+	}}))
+
+	err = r.ensureService(context.Background(), desired)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "managed by another owner")
+}
 
 // TestValidateForReconcileHonorsExistingStatus verifies the controller's no-webhook validation
 // path validates an already-persisted ChainNodeSet against its own current status, so Validate can

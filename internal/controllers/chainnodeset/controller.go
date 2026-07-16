@@ -91,6 +91,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
+	if _, err := r.initializeLegacySignerServiceNames(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if r.opts.DisableWebhooks {
 		warnings, err := validateForReconcile(nodeSet)
 		if err != nil {
