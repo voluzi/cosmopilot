@@ -220,10 +220,42 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 
 	// These group Services collide with a same-named standalone ChainNode's signer Services even when
 	// this ChainNodeSet does not configure its own signer.
-	for _, name := range []string{"signer", "signer-privval"} {
-		_, err := base([]NodeGroupSpec{{Name: name, Instances: ptr.To(1)}}).Validate(nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "reserved")
+	for _, name := range []string{"signer", "signer-privval", "fullnodes-signer", "fullnodes-signer-privval"} {
+		t.Run("reserved group "+name, func(t *testing.T) {
+			_, err := base([]NodeGroupSpec{{Name: name, Instances: ptr.To(1)}}).Validate(nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
+		})
+	}
+
+	for _, route := range []struct {
+		name      string
+		ingresses []GlobalIngressConfig
+		gateways  []GlobalGatewayConfig
+	}{
+		{
+			name: "standalone collision from global ingress",
+			ingresses: []GlobalIngressConfig{{
+				Name: "rpc-signer", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+			}},
+		},
+		{
+			name: "standalone collision from global gateway",
+			gateways: []GlobalGatewayConfig{{
+				Name: "rpc-signer-privval", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+				Gateway: GatewayRef{Name: "gateway"},
+			}},
+		},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			nodeSet := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+			nodeSet.Spec.Ingresses = route.ingresses
+			nodeSet.Spec.GatewayRoutes = route.gateways
+
+			_, err := nodeSet.Validate(nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
+		})
 	}
 
 	// Group Service name shadowing a signer resource name: group "vg-signer"'s Service is

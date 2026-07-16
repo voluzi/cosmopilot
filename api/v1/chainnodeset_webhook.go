@@ -481,12 +481,34 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 // old is the previous revision on the update path (nil on create); it enables the same-key
 // migration waiver mirroring the ChainNode webhook.
 func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
-	// These group Services collide with the raft/discovery Services of a same-named standalone
-	// ChainNode signer, so they are reserved even when this ChainNodeSet has no signer of its own.
-	for i, g := range nodeSet.Spec.Nodes {
-		if g.Name == "signer" || g.Name == "signer-privval" {
-			return fmt.Errorf(".spec.nodes[%d].name %q is reserved because it collides with a standalone ChainNode cosmosigner Service", i, g.Name)
+	// A Service named "<node>-signer" or "<node>-signer-privval" collides with the raft/discovery
+	// Service of a standalone ChainNode named <node>, even when this ChainNodeSet has no signer.
+	checkStandaloneSignerService := func(path, serviceName string) error {
+		for _, suffix := range []string{"-signer", "-signer-privval"} {
+			if strings.HasSuffix(serviceName, suffix) {
+				return fmt.Errorf("%s derives Service name %q, which collides with a standalone ChainNode cosmosigner Service: choose a name without a reserved signer suffix", path, serviceName)
+			}
 		}
+		return nil
+	}
+	checkStandaloneSignerServices := func() error {
+		for i, g := range nodeSet.Spec.Nodes {
+			if err := checkStandaloneSignerService(fmt.Sprintf(".spec.nodes[%d].name", i), g.GetServiceName(nodeSet)); err != nil {
+				return err
+			}
+		}
+		for i := range nodeSet.Spec.Ingresses {
+			if err := checkStandaloneSignerService(fmt.Sprintf(".spec.ingresses[%d].name", i), nodeSet.Spec.Ingresses[i].GetName(nodeSet)); err != nil {
+				return err
+			}
+		}
+		for i := range nodeSet.Spec.GatewayRoutes {
+			serviceName := fmt.Sprintf("%s-global-%s", nodeSet.GetName(), nodeSet.Spec.GatewayRoutes[i].Name)
+			if err := checkStandaloneSignerService(fmt.Sprintf(".spec.gatewayRoutes[%d].name", i), serviceName); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	anySigner := nodeSet.Spec.Cosmosigner != nil
@@ -496,7 +518,7 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 		}
 	}
 	if !anySigner {
-		return nil
+		return checkStandaloneSignerServices()
 	}
 
 	// Every derived signer resource name must be unique and must not collide with a node group's own
@@ -557,6 +579,9 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 				return err
 			}
 		}
+	}
+	if err := checkStandaloneSignerServices(); err != nil {
+		return err
 	}
 
 	// Shape rules for the top-level signer (target selection over node groups) and each per-group

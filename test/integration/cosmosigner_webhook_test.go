@@ -254,15 +254,32 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(Framework().Client().Create(Framework().Context(), cs)).NotTo(Succeed())
 	})
 
-	It("rejects a node group named 'signer' when cosmosigner is configured", func() {
-		cs := newNodeSet(
-			&appsv1.Cosmosigner{Backend: vaultBackend()},
-			[]appsv1.NodeGroupSpec{{Name: "signer"}},
-			&appsv1.NodeSetValidatorConfig{},
-		)
-		err := Framework().Client().Create(Framework().Context(), cs)
+	It("rejects node group Service names reserved for standalone signers", func() {
+		for _, name := range []string{"signer", "signer-privval", "fullnodes-signer", "fullnodes-signer-privval"} {
+			cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: name}}, nil)
+			err := Framework().Client().Create(Framework().Context(), cs)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("standalone ChainNode cosmosigner Service"))
+		}
+	})
+
+	It("rejects global route Service names reserved for standalone signers", func() {
+		ingress := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: "fullnodes"}}, nil)
+		ingress.Spec.Ingresses = []appsv1.GlobalIngressConfig{{
+			Name: "rpc-signer", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+		}}
+		err := Framework().Client().Create(Framework().Context(), ingress)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("is reserved because it collides with a standalone ChainNode cosmosigner Service"))
+		Expect(err.Error()).To(ContainSubstring("standalone ChainNode cosmosigner Service"))
+
+		gateway := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: "fullnodes"}}, nil)
+		gateway.Spec.GatewayRoutes = []appsv1.GlobalGatewayConfig{{
+			Name: "rpc-signer-privval", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+			Gateway: appsv1.GatewayRef{Name: "gateway"},
+		}}
+		err = Framework().Client().Create(Framework().Context(), gateway)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("standalone ChainNode cosmosigner Service"))
 	})
 
 	It("rejects two validators using the same Vault key via tmKMS and cosmosigner", func() {
