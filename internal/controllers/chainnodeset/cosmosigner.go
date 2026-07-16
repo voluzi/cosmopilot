@@ -271,6 +271,23 @@ type blockedSignerTargets map[string]struct{}
 func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (blockedSignerTargets, bool, error) {
 	blocked := blockedSignerTargets{}
 	for _, s := range nodeSet.ResolveCosmosigners() {
+		if s.Spec.UsesSoftwareBackend() && r.signerImportSourcePending(nodeSet, s) {
+			exists, err := r.secretHasKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
+			if err != nil {
+				return nil, false, err
+			}
+			if !exists {
+				live, err := r.ownedSignerStatefulSetExists(ctx, nodeSet, s.Name)
+				if err != nil {
+					return nil, false, err
+				}
+				if live {
+					return nil, false, fmt.Errorf("cosmosigner %q has live state before its software key can be proven; refusing to switch child signing paths", s.Name)
+				}
+				blocked[s.Name] = struct{}{}
+			}
+			continue
+		}
 		if !s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) {
 			continue
 		}
@@ -394,6 +411,10 @@ func (r *Reconciler) requireGenesisSentrySecrets(ctx context.Context, nodeSet *a
 // requires it. Teardown of REMOVED signers is driven earlier by reconcileSignerTeardown so a child's
 // signing path is never switched while old signer pods can still sign.
 func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	return r.ensureCosmosignerWithBlockedTargets(ctx, nodeSet, nil)
+}
+
+func (r *Reconciler) ensureCosmosignerWithBlockedTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
 	signers := nodeSet.ResolveCosmosigners()
 	if len(signers) == 0 {
 		return nil
@@ -417,6 +438,9 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 
 	changed := false
 	for _, s := range signers {
+		if _, ok := blocked[s.Name]; ok {
+			continue
+		}
 		c, err := r.reconcileSigner(ctx, nodeSet, s)
 		if err != nil {
 			return err
@@ -427,6 +451,27 @@ func (r *Reconciler) ensureCosmosigner(ctx context.Context, nodeSet *appsv1.Chai
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
+}
+
+// prepareCosmosignerRollouts applies desired signers and waits for every non-bootstrap target to be
+// ready before child reconciliation can publish its remote-signer path.
+func (r *Reconciler) prepareCosmosignerRollouts(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) (bool, error) {
+	if err := r.ensureCosmosignerWithBlockedTargets(ctx, nodeSet, blocked); err != nil {
+		return false, err
+	}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if _, ok := blocked[s.Name]; ok {
+			continue
+		}
+		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), s.Name, s.Spec.GetReplicas())
+		if err != nil {
+			return false, err
+		}
+		if !rolledOut {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // initCosmosignerLocks persists a status entry and the raft-membership/PVC-template locks for every
@@ -800,6 +845,9 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 			return true, false, nil
 		}
 		return false, false, fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", s.Name, sourceSecret, privKeyFilename)
+	}
+	if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
+		return false, false, fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q contains an invalid %s: %w", s.Name, sourceSecret, privKeyFilename, err)
 	}
 
 	// The record fingerprints the Vault target, the resolved source secret name, AND the key material,

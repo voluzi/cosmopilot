@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -63,9 +64,11 @@ func TestReconcileKeepsLocalValidatorWhenVaultImportFails(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: namespace},
 		Data:       map[string][]byte{"token": []byte("test-token")},
 	}
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
 	validatorKey := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: namespace},
-		Data:       map[string][]byte{privKeyFilename: []byte("validator-key")},
+		Data:       map[string][]byte{privKeyFilename: key},
 	}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
 	r := newValidatorTestReconciler(t, ns, nodeSet, genesis, token, validatorKey, localValidator)
@@ -208,6 +211,37 @@ func TestPrepareCosmosignerImportsBootstrapsCreateValidatorLocally(t *testing.T)
 	assert.NotContains(t, validator.Labels, controllers.LabelCosmosignerTarget)
 }
 
+func TestPrepareCosmosignerImportsBootstrapsSoftwareKeyLocally(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Spec.Nodes[0].Validator.PrivateKeySecret = nil
+	nodeSet.Spec.Nodes[0].Validator.CreateValidator = &appsv1.CreateValidatorConfig{}
+	signer := resolveSingleSigner(t, nodeSet)
+	signerStatus := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	signerStatus.Replicas = ptr.To(signer.Spec.GetReplicas())
+	signerStatus.StateStorageSize = signer.Spec.GetStateStorageSize()
+	signerStatus.StateStorageClassName = signer.Spec.StorageClassName
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	blocked, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.Contains(t, blocked, signer.Name)
+	rolloutsReady, err := r.prepareCosmosignerRollouts(context.Background(), nodeSet, blocked)
+	require.NoError(t, err)
+	require.True(t, rolloutsReady)
+	err = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: signer.Name}, &k8sappsv1.StatefulSet{})
+	require.True(t, apierrors.IsNotFound(err), "a bootstrap-blocked signer must not be applied before its key exists")
+	require.NoError(t, r.ensureValidatorWithBlockedSignerTargets(context.Background(), nodeSet, blocked))
+
+	validator := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{
+		Namespace: "default",
+		Name:      validatorNodeName(nodeSet, "validators", 0),
+	}, validator))
+	assert.False(t, validator.Spec.RemoteSignerTarget, "the validator must generate its software key locally before signer rollout")
+}
+
 func TestPrepareCosmosignerImportsBlocksOnlyThePendingSigner(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
@@ -311,9 +345,11 @@ func TestPrepareCosmosignerImportsStopsWhileSignerScalesDown(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: "default"},
 		Data:       map[string][]byte{"token": []byte("test-token")},
 	}
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
 	source := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: "default"},
-		Data:       map[string][]byte{privKeyFilename: []byte("validator-key")},
+		Data:       map[string][]byte{privKeyFilename: key},
 	}
 	r := newValidatorTestReconciler(t, nodeSet, token, source)
 	sts := &k8sappsv1.StatefulSet{
@@ -332,6 +368,73 @@ func TestPrepareCosmosignerImportsStopsWhileSignerScalesDown(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: signer.Name}, fresh))
 	require.NotNil(t, fresh.Spec.Replicas)
 	assert.Zero(t, *fresh.Spec.Replicas, "the old signer must quiesce before the import and child retargeting proceed")
+}
+
+func TestPrepareCosmosignerImportsRejectsMalformedKeyBeforeScaleDown(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:         "https://vault.example:8200",
+		KeyName:         "val-key",
+		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		UploadGenerated: true,
+	}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.EnsureCosmosignerStatus(signer.Name).KeyImported = "stale-import"
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: "default"},
+		Data:       map[string][]byte{privKeyFilename: []byte("malformed-key")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token, source)
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: signer.Name, Namespace: "default"},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), sts))
+
+	_, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid")
+	assert.False(t, ready)
+
+	fresh := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: signer.Name}, fresh))
+	require.NotNil(t, fresh.Spec.Replicas)
+	assert.Equal(t, int32(1), *fresh.Spec.Replicas, "a malformed source key must not quiesce the working signer")
+}
+
+func TestPrepareCosmosignerRolloutsKeepsLocalValidatorUntilReady(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	nodeSet.UID = types.UID("nodeset-uid")
+	signer := resolveSingleSigner(t, nodeSet)
+	signerStatus := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	signerStatus.Replicas = ptr.To(signer.Spec.GetReplicas())
+	signerStatus.StateStorageSize = signer.Spec.GetStateStorageSize()
+	signerStatus.StateStorageClassName = signer.Spec.StorageClassName
+	signerStatus.ServingGroup = signer.ValidatorGroup
+
+	localNodeSet := nodeSet.DeepCopy()
+	localNodeSet.Spec.Cosmosigner = nil
+	localValidator, err := newValidatorTestReconciler(t).getValidatorSpec(localNodeSet, "validators", 0, localNodeSet.Spec.Nodes[0].Validator)
+	require.NoError(t, err)
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token, localValidator)
+
+	ready, err := r.prepareCosmosignerRollouts(context.Background(), nodeSet, nil)
+	require.NoError(t, err)
+	assert.False(t, ready, "a newly applied signer must block child retargeting until rollout")
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(localValidator), fresh))
+	assert.False(t, fresh.Spec.RemoteSignerTarget)
+	assert.NotContains(t, fresh.Labels, controllers.LabelCosmosignerTarget)
 }
 
 func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {

@@ -171,7 +171,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Validators that initialize a new genesis must run before ensureGenesis: they produce the
 	// genesis (and its ConfigMap) that the ChainNodeSet and every other node consume.
-	if nodeSet.ShouldInitGenesis() {
+	if nodeSet.ShouldInitGenesis() && nodeSet.Status.ChainID == "" {
 		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -203,25 +203,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Apply and roll out signers before publishing their target marker to existing children. Targets
+	// blocked for key bootstrap remain on their local path until that key has been generated/imported.
+	if ready, err := r.prepareCosmosignerRollouts(ctx, nodeSet, blockedSignerTargets); err != nil {
+		return ctrl.Result{}, err
+	} else if !ready {
+		logger.Info("waiting for cosmosigner rollout before reconciling children")
+		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+	}
+
 	// Once a genesis is available (chainID known), reconcile validators that consume an external
-	// genesis. This also runs the validator cleanup, so it must execute even when no validator is
-	// currently desired (e.g. the last validator was just removed from the spec) to delete the
-	// stale validator ChainNodes. Doing it here—rather than gating on phase Running—also ensures
-	// validator-only groups are created on the first reconcile, without depending on an owned
-	// ChainNode event to trigger the requeue.
-	if !nodeSet.ShouldInitGenesis() && nodeSet.Status.ChainID != "" {
+	// genesis or that initialized it on an earlier pass. This also runs validator cleanup, so it must
+	// execute even when no validator is currently desired (e.g. the last validator was removed).
+	if nodeSet.Status.ChainID != "" {
 		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
 	if err := r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Deploy (or tear down) the managed cosmosigner remote signer. This runs after ensureNodes so
-	// the chain ID and target group nodes exist.
-	if err := r.ensureCosmosigner(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
 	}
 
