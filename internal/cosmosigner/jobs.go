@@ -108,7 +108,6 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 				{
 					Name:            containerName,
 					Image:           j.Params.Image,
-					ImagePullPolicy: corev1.PullAlways,
 					SecurityContext: k8s.RestrictedSecurityContext(),
 					Args:            args,
 					Env:             j.Params.Backend.backendEnv(),
@@ -132,8 +131,18 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 		uid := existing.GetUID()
 		if err := j.Client.CoreV1().Pods(j.Params.Namespace).Delete(ctx, pod.GetName(), metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{UID: &uid},
-		}); err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
-			return "", err
+		}); err != nil {
+			switch {
+			case errors.IsNotFound(err):
+				// Already gone; continue to the name-delete wait below.
+			case errors.IsConflict(err):
+				// The pod at this name is no longer the UID whose owner we checked. Waiting by name
+				// would now wait on a replacement pod that may belong to another owner, so surface the
+				// collision instead of timing out against the wrong object.
+				return "", fmt.Errorf("pod %q changed while deleting the previous run; refusing to wait on an unverified replacement", pod.GetName())
+			default:
+				return "", err
+			}
 		}
 	} else if !errors.IsNotFound(err) {
 		return "", err

@@ -97,20 +97,17 @@ func TestNonTargetNodeHasNoDiscoveryLabel(t *testing.T) {
 	}
 }
 
-// TestStandaloneNodeSetLabelStripped verifies a STANDALONE node (no ChainNodeSet controller owner)
-// never inherits the nodeset label onto its resources: that label is the discovery scope of every
-// ChainNodeSet signer, so a user-set copy would let a same-named nodeset's signer select and dial
-// this node's privval endpoint.
-func TestStandaloneNodeSetLabelStripped(t *testing.T) {
+// TestStandaloneNodeSetLabelPreservedOnOrdinaryResources verifies a standalone user label named
+// "nodeset" is preserved on ordinary derived resources for backward compatibility.
+func TestStandaloneNodeSetLabelPreservedOnOrdinaryResources(t *testing.T) {
 	cn := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "solo",
 			Labels: map[string]string{controllers.LabelChainNodeSet: "victim-nodeset"},
 		},
-		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
 	}
 	final := WithChainNodeLabels(cn, map[string]string{})
-	if _, present := final[controllers.LabelChainNodeSet]; present {
-		t.Fatalf("user-set nodeset label must be stripped from standalone node resources: %+v", final)
+	if final[controllers.LabelChainNodeSet] != "victim-nodeset" {
+		t.Fatalf("user-set nodeset label must be preserved on ordinary resources: %+v", final)
 	}
 }

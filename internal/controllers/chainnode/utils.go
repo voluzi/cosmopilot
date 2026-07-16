@@ -19,15 +19,7 @@ func WithChainNodeLabels(chainNode *appsv1.ChainNode, additional ...map[string]s
 	// Exclude the cosmosigner-target discovery selector from inherited labels: it must only be set on
 	// genuinely-targeted node pods (added explicitly below), never inherited from a user label, or
 	// the signer would dial pods that are not listening for it (including its own pods).
-	exclude := []string{controllers.LabelWorkerName, controllers.LabelCosmosignerTarget}
-	// On a STANDALONE node the nodeset label can only be a user label — but it is the scope of every
-	// ChainNodeSet signer's discovery selector, so inheriting it (with a matching cosmosigner-target
-	// value from a same-named nodeset) would let that nodeset's signer dial this node. A genuine
-	// ChainNodeSet child keeps it: group/global Services select on it.
-	if !chainNode.IsControlledByChainNodeSet() {
-		exclude = append(exclude, controllers.LabelChainNodeSet)
-	}
-	labels := utils.ExcludeMapKeys(chainNode.ObjectMeta.Labels, exclude...)
+	labels := utils.ExcludeMapKeys(chainNode.ObjectMeta.Labels, controllers.LabelWorkerName, controllers.LabelCosmosignerTarget)
 	for _, m := range additional {
 		labels = utils.MergeMaps(labels, m, controllers.LabelWorkerName)
 	}

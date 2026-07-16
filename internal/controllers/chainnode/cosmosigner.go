@@ -456,17 +456,6 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 		return false, nil
 	}
 
-	// BYTE-only change after the signer already rolled out and served (digest recorded) with an import
-	// completed for this same target/source: the source Secret is stale bootstrap material by then —
-	// Vault holds the key that was verified at import time and is signing on-chain. Re-importing the
-	// edited bytes would scale the live signer to zero and, at best, fail the import (pubkey mismatch)
-	// leaving the validator not signing — so the edit is ignored instead. During bootstrap (no digest
-	// yet) a byte change still re-imports: the registered key may legitimately have been regenerated.
-	if chainNode.Status.CosmosignerSigningDigest != "" &&
-		appsv1.ImportAnnotationMatchesTarget(chainNode.Annotations[controllers.AnnotationCosmosignerKeyImported], c.Backend.Vault.ImportTargetFingerprint(sourceSecret)) {
-		return false, nil
-	}
-
 	// Quiesce any already-running signer BEFORE the synchronous re-import, so it cannot keep
 	// signing with the previously imported key while the new one lands. Scale-down is
 	// asynchronous — until every signer pod is gone the import stays pending (retried next

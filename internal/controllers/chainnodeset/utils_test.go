@@ -274,10 +274,9 @@ func TestWithChainNodeSetLabels(t *testing.T) {
 	}
 }
 
-// TestWithChainNodeSetLabelsStripsDiscoveryScopeLabels verifies both signer discovery-scope labels
-// are never inherited from ChainNodeSet metadata: cosmosigner-target (the discovery selector value)
-// and chain-node (a same-named STANDALONE signer's discovery scope — inherited onto this nodeset's
-// target pods it would let that standalone signer dial them). Ordinary labels must pass through.
+// TestWithChainNodeSetLabelsStripsDiscoveryScopeLabels verifies the signer discovery selector is never
+// inherited from ChainNodeSet metadata. The chain-node label is user metadata on non-target resources;
+// targeted child ChainNodes strip it at the point where they add cosmosigner-target.
 func TestWithChainNodeSetLabelsStripsDiscoveryScopeLabels(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -290,8 +289,8 @@ func TestWithChainNodeSetLabelsStripsDiscoveryScopeLabels(t *testing.T) {
 	}
 	result := WithChainNodeSetLabels(nodeSet)
 	assert.Equal(t, "myapp", result["app"], "ordinary labels must be inherited")
+	assert.Equal(t, "spoofed-standalone", result[controllers.LabelChainNode], "chain-node is preserved until a target child explicitly drops it")
 	assert.NotContains(t, result, controllers.LabelCosmosignerTarget, "cosmosigner-target must never be inherited")
-	assert.NotContains(t, result, controllers.LabelChainNode, "chain-node must never be inherited: it scopes a standalone signer's discovery Service")
 }
 
 func TestContainsGroup(t *testing.T) {

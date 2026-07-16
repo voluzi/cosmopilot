@@ -277,7 +277,6 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 	signer := corev1.Container{
 		Name:            containerName,
 		Image:           p.Image,
-		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: k8s.RestrictedSecurityContext(),
 		Args:            []string{"start", "--config", configMountPath + "/" + configFileName},
 		Env: []corev1.EnvVar{

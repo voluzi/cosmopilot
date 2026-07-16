@@ -116,6 +116,9 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 				return err
 			}
 		}
+		if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(obj); err != nil {
+			return err
+		}
 		return c.Create(ctx, obj)
 	}
 	if err != nil {
@@ -139,6 +142,9 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 		return nil
 	}
 
+	if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(obj); err != nil {
+		return err
+	}
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return c.Update(ctx, obj)
 }
@@ -169,8 +175,11 @@ func ScaleDown(ctx context.Context, c client.Client, owner client.Object, namesp
 		// Just requested; pods are still terminating.
 		return false, nil
 	}
-	// Already requested zero: quiesced only once the controller reports no replicas left.
-	return sts.Status.Replicas == 0, nil
+	// Already requested zero: quiesced only once the StatefulSet controller has observed the
+	// scale-down generation and reports no replicas left. A stale zero-valued status from before the
+	// controller observed this generation must not let an import proceed while old pods can still be
+	// created or terminating.
+	return sts.Status.ObservedGeneration >= sts.Generation && sts.Status.Replicas == 0, nil
 }
 
 // IsRolledOut reports whether the signer StatefulSet's CURRENT generation is fully deployed: the

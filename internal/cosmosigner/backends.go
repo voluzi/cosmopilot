@@ -203,9 +203,12 @@ func (b Backend) sidecars() []corev1.Container {
 		corev1.ResourceCPU:    resource.MustParse("100m"),
 		corev1.ResourceMemory: resource.MustParse("64Mi"),
 	}
+	// The renewer image is untagged (floating latest), so PullAlways is required to pick up new
+	// releases — IfNotPresent would pin whatever each node happens to have cached.
 	c := corev1.Container{
 		Name:            "vault-token-renewer",
 		Image:           "ghcr.io/voluzi/vault-token-renewer",
+		ImagePullPolicy: corev1.PullAlways,
 		SecurityContext: k8s.RestrictedSecurityContext(),
 		Env: []corev1.EnvVar{
 			{Name: "VAULT_ADDR", Value: b.Vault.Address},

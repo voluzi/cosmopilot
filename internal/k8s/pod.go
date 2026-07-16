@@ -95,7 +95,11 @@ func (p *PodHelper) WaitForPodDeleted(ctx context.Context, timeout time.Duration
 			return true, nil
 
 		default:
-			*p.pod = *event.Object.(*corev1.Pod)
+			// Waiting for deletion must not replace p.pod with the old object being watched: callers
+			// commonly build a fresh manifest, wait for a previous same-name pod to disappear, and then
+			// create p.pod. UntilWithSync emits Added/Modified events for that previous pod before the
+			// final Deleted event, and copying them here would clobber the fresh manifest with stale
+			// resourceVersion/spec metadata.
 			return false, nil
 		}
 	})

@@ -81,11 +81,10 @@ func WithChainNodeSetLabels(nodeSet *v1.ChainNodeSet, additional ...map[string]s
 	for k, v := range nodeSet.ObjectMeta.Labels {
 		// The cosmosigner-target label is a controller-managed discovery selector; it must only be
 		// present on genuinely-targeted nodes, never inherited from a user label on the ChainNodeSet
-		// (which would make the signer dial non-target pods). The chain-node label is the standalone
-		// signer's discovery scope: inherited onto this nodeset's target pods, it would let a
-		// same-named standalone ChainNode's discovery Service select them, so a standalone signer
-		// could dial the wrong signing endpoints.
-		if k == controllers.LabelCosmosignerTarget || k == controllers.LabelChainNode {
+		// (which would make the signer dial non-target pods). The chain-node label is also controller-
+		// managed for ChainNodeSet children and is always overwritten on pods/resources that need it,
+		// so do not scrub a user's metadata label from derived resources.
+		if k == controllers.LabelCosmosignerTarget {
 			continue
 		}
 		labels[k] = v
