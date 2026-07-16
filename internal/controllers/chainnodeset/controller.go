@@ -162,10 +162,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Complete any immediately-runnable Vault key import before child ChainNodes are reconciled.
+	// A failed import must leave an existing validator on its current signing path, and a signer
+	// scaling down for re-import must become quiescent before any child is touched.
+	blockedSignerTargets, ready, err := r.prepareCosmosignerImports(ctx, nodeSet)
+	if err != nil {
+		return ctrl.Result{}, err
+	} else if !ready {
+		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+	}
+
 	// Validators that initialize a new genesis must run before ensureGenesis: they produce the
 	// genesis (and its ConfigMap) that the ChainNodeSet and every other node consume.
 	if nodeSet.ShouldInitGenesis() {
-		if err := r.ensureValidator(ctx, nodeSet); err != nil {
+		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -203,12 +213,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// validator-only groups are created on the first reconcile, without depending on an owned
 	// ChainNode event to trigger the requeue.
 	if !nodeSet.ShouldInitGenesis() && nodeSet.Status.ChainID != "" {
-		if err := r.ensureValidator(ctx, nodeSet); err != nil {
+		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	if err := r.ensureNodes(ctx, nodeSet); err != nil {
+	if err := r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
 		return ctrl.Result{}, err
 	}
 

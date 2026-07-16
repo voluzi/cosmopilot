@@ -2,19 +2,264 @@ package chainnodeset
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
+
+type chainNodeSetRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f chainNodeSetRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestReconcileKeepsLocalValidatorWhenVaultImportFails(t *testing.T) {
+	const namespace = "default"
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:         "https://vault.example:8200",
+		KeyName:         "val-key",
+		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		UploadGenerated: true,
+	}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Status.GenesisInitGenerated = ptr.To(false)
+	signer := resolveSingleSigner(t, nodeSet)
+	signerStatus := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	signerStatus.Replicas = ptr.To(signer.Spec.GetReplicas())
+	signerStatus.StateStorageSize = signer.Spec.GetStateStorageSize()
+	signerStatus.StateStorageClassName = signer.Spec.StorageClassName
+	signerStatus.KeyImported = nodeSet.Spec.Cosmosigner.Backend.Vault.ImportFingerprint(signer.SoftwareKeySecret, []byte("previous-validator-key"))
+
+	localNodeSet := nodeSet.DeepCopy()
+	localNodeSet.Spec.Cosmosigner = nil
+	specBuilder := newValidatorTestReconciler(t)
+	localValidator, err := specBuilder.getValidatorSpec(localNodeSet, "validators", 0, localNodeSet.Spec.Nodes[0].Validator)
+	require.NoError(t, err)
+	require.False(t, localValidator.Spec.RemoteSignerTarget)
+
+	genesis := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name:      nodeSet.Spec.Genesis.GetConfigMapName(nodeSet.Status.ChainID),
+		Namespace: namespace,
+	}}
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: namespace},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+	validatorKey := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: namespace},
+		Data:       map[string][]byte{privKeyFilename: []byte("validator-key")},
+	}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+	r := newValidatorTestReconciler(t, ns, nodeSet, genesis, token, validatorKey, localValidator)
+
+	var importCreates int
+	transport := chainNodeSetRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		statusCode := http.StatusNotFound
+		body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
+		if req.Method == http.MethodPost {
+			importCreates++
+			statusCode = http.StatusInternalServerError
+			body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","message":"forced import failure","code":500}`
+		}
+		return &http.Response{
+			StatusCode: statusCode,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	restConfig := &rest.Config{Host: "https://kubernetes.invalid", Transport: transport}
+	clientSet, err := kubernetes.NewForConfig(restConfig)
+	require.NoError(t, err)
+	r.ClientSet = clientSet
+	r.RestConfig = restConfig
+
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: namespace,
+		Name:      nodeSet.Name,
+	}})
+	require.Error(t, err)
+	require.Equal(t, 1, importCreates, "the reconcile must reach the forced Vault import failure")
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(localValidator), fresh))
+	assert.False(t, fresh.Spec.RemoteSignerTarget, "a failed import must leave the validator on its local signing path")
+	assert.NotContains(t, fresh.Labels, controllers.LabelCosmosignerTarget)
+}
+
+func TestPrepareCosmosignerImportsBootstrapsCreateValidatorLocally(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:         "https://vault.example:8200",
+		KeyName:         "val-key",
+		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		UploadGenerated: true,
+	}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Spec.Nodes[0].Validator.CreateValidator = &appsv1.CreateValidatorConfig{}
+	nodeSet.Status.GenesisInitGenerated = ptr.To(false)
+	signer := resolveSingleSigner(t, nodeSet)
+	signerStatus := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	signerStatus.Replicas = ptr.To(signer.Spec.GetReplicas())
+	signerStatus.StateStorageSize = signer.Spec.GetStateStorageSize()
+	signerStatus.StateStorageClassName = signer.Spec.StorageClassName
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	blocked, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.NoError(t, r.ensureValidatorWithBlockedSignerTargets(context.Background(), nodeSet, blocked))
+
+	validator := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{
+		Namespace: "default",
+		Name:      validatorNodeName(nodeSet, "validators", 0),
+	}, validator))
+	assert.False(t, validator.Spec.RemoteSignerTarget, "the validator must generate and register its key locally before Vault import")
+	assert.NotContains(t, validator.Labels, controllers.LabelCosmosignerTarget)
+}
+
+func TestPrepareCosmosignerImportsBlocksOnlyThePendingSigner(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"validators"},
+				Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+					Address: "https://vault.example:8200", KeyName: "validator-key",
+					TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+					UploadGenerated: true,
+				}},
+			},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "validators", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{CreateValidator: &appsv1.CreateValidatorConfig{}}},
+				{Name: "sentries", Instances: ptr.To(1), Cosmosigner: &appsv1.Cosmosigner{Backend: cosmosignerVaultBackend()}},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-localnet"},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	blocked, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, ready)
+
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked)
+	require.NoError(t, err)
+	assert.False(t, validator.Spec.RemoteSignerTarget)
+
+	sentry, err := r.getNodeSpecWithBlockedSignerTargets(nodeSet, nodeSet.Spec.Nodes[1], 0, blocked)
+	require.NoError(t, err)
+	assert.True(t, sentry.Spec.RemoteSignerTarget, "a ready signer must remain active while another signer waits for bootstrap material")
+	assert.Equal(t, "test-nodeset-sentries-signer", sentry.Labels[controllers.LabelCosmosignerTarget])
+}
+
+func TestPrepareCosmosignerImportsBootstrapsGenesisValidatorLocally(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Validator: &appsv1.NodeSetValidatorConfig{
+				Init: &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1stake"}, StakeAmount: "1stake"},
+			},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+				Address: "https://vault.example:8200", KeyName: "val-key",
+				TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+				UploadGenerated: true,
+			}}},
+		},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.EnsureCosmosignerStatus(signer.Name).SigningDigest = "stale-status-without-chain-id"
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	blocked, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, ready)
+
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator, blocked)
+	require.NoError(t, err)
+	assert.False(t, validator.Spec.RemoteSignerTarget, "the init validator must generate genesis and its key locally")
+	assert.NotContains(t, validator.Labels, controllers.LabelCosmosignerTarget)
+}
+
+func TestPrepareCosmosignerImportsDoesNotLocalizeAnExistingSigner(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:         "https://vault.example:8200",
+		KeyName:         "val-key",
+		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		UploadGenerated: true,
+	}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Spec.Nodes[0].Validator.CreateValidator = &appsv1.CreateValidatorConfig{}
+	r := newValidatorTestReconciler(t, nodeSet)
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-signer", Namespace: "default"}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), sts))
+
+	blocked, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "source key is unavailable")
+	assert.False(t, ready, "an existing signer with incomplete import status must stop child reconciliation")
+	assert.Empty(t, blocked)
+
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked)
+	require.NoError(t, err)
+	assert.True(t, validator.Spec.RemoteSignerTarget, "status recovery must not switch a remote validator back to local signing")
+}
+
+func TestPrepareCosmosignerImportsStopsWhileSignerScalesDown(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address:         "https://vault.example:8200",
+		KeyName:         "val-key",
+		TokenSecret:     &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		UploadGenerated: true,
+	}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.EnsureCosmosignerStatus(signer.Name).KeyImported = "stale-import"
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("test-token")},
+	}
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: "default"},
+		Data:       map[string][]byte{privKeyFilename: []byte("validator-key")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token, source)
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: signer.Name, Namespace: "default"},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), sts))
+
+	blocked, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, ready)
+	assert.Empty(t, blocked)
+
+	fresh := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: signer.Name}, fresh))
+	require.NotNil(t, fresh.Spec.Replicas)
+	assert.Zero(t, *fresh.Spec.Replicas, "the old signer must quiesce before the import and child retargeting proceed")
+}
 
 func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{

@@ -29,6 +29,10 @@ import (
 )
 
 func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	return r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, nil)
+}
+
+func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
 	logger := log.FromContext(ctx)
 
 	if nodeSet.Status.ChainID == "" {
@@ -68,7 +72,7 @@ func (r *Reconciler) ensureNodes(ctx context.Context, nodeSet *appsv1.ChainNodeS
 
 	for _, group := range nodeSet.Spec.Nodes {
 		if group.Validator == nil {
-			if err := r.ensureNodeGroup(ctx, nodeSet, group); err != nil {
+			if err := r.ensureNodeGroupWithBlockedSignerTargets(ctx, nodeSet, group, blocked); err != nil {
 				return err
 			}
 		} else {
@@ -138,6 +142,10 @@ func (r *Reconciler) listNodeSetNodes(ctx context.Context, nodeSet *appsv1.Chain
 }
 
 func (r *Reconciler) ensureNodeGroup(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) error {
+	return r.ensureNodeGroupWithBlockedSignerTargets(ctx, nodeSet, group, nil)
+}
+
+func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec, blocked blockedSignerTargets) error {
 	logger := log.FromContext(ctx)
 
 	chainNodeList, err := r.listNodeSetNodes(ctx, nodeSet, controllers.LabelChainNodeSetGroup, group.Name)
@@ -158,7 +166,7 @@ func (r *Reconciler) ensureNodeGroup(ctx context.Context, nodeSet *appsv1.ChainN
 	}
 
 	for i := 0; i < desiredSize; i++ {
-		node, err := r.getNodeSpec(nodeSet, group, i)
+		node, err := r.getNodeSpecWithBlockedSignerTargets(nodeSet, group, i, blocked)
 		if err != nil {
 			return err
 		}
@@ -286,6 +294,10 @@ func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 }
 
 func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec, index int) (*appsv1.ChainNode, error) {
+	return r.getNodeSpecWithBlockedSignerTargets(nodeSet, group, index, nil)
+}
+
+func (r *Reconciler) getNodeSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec, index int, blocked blockedSignerTargets) (*appsv1.ChainNode, error) {
 	var genesisConfig *appsv1.GenesisConfig
 	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() || nodeSet.Spec.Genesis.HasConfigMapSource() {
 		genesisConfig = nodeSet.Spec.Genesis
@@ -331,7 +343,7 @@ func (r *Reconciler) getNodeSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.Node
 	// Mark nodes of groups targeted by a managed cosmosigner deployment as remote-signer targets, so
 	// they listen for the signer and carry its discovery-service selector label (valued with the signer
 	// name so that signer's service selects the targeted group's pods).
-	if signerName, ok := signerNameForNode(nodeSet, group.Name); ok {
+	if signerName, ok := signerNameForNodeWithBlockedTargets(nodeSet, group.Name, blocked); ok {
 		node.Spec.RemoteSignerTarget = true
 		// A targeted ChainNodeSet child must not inherit a user-set chain-node label: a same-named
 		// standalone signer's discovery Service selects chain-node + cosmosigner-target, and the

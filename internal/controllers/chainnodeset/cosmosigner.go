@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -146,6 +148,82 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		}
 	}
 	return nil
+}
+
+type blockedSignerTargets map[string]struct{}
+
+// prepareCosmosignerImports completes every uploadGenerated import whose source key already exists.
+// It runs before child reconciliation so an import failure cannot strand a validator after its local
+// signing path has been replaced. ready is false while an existing signer is still scaling down for
+// a safe re-import. Missing controller-generated source keys are left for the child bootstrap flow.
+func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (blockedSignerTargets, bool, error) {
+	blocked := blockedSignerTargets{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if !s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) {
+			continue
+		}
+		if nodeSet.Status.ChainID == "" {
+			exists, err := r.ownedSignerStatefulSetExists(ctx, nodeSet, s.Name)
+			if err != nil {
+				return nil, false, err
+			}
+			if exists {
+				return nil, false, fmt.Errorf("cosmosigner %q has live state before its generated key import can be proven; refusing to switch child signing paths", s.Name)
+			}
+			blocked[s.Name] = struct{}{}
+			continue
+		}
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		if st != nil && st.SigningDigest != "" {
+			continue
+		}
+		keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(keyMaterial) == 0 {
+			if st != nil && appsv1.ImportAnnotationMatchesTarget(st.KeyImported, s.Spec.Backend.Vault.ImportTargetFingerprint(s.SoftwareKeySecret)) {
+				continue
+			}
+			if r.signerImportSourcePending(nodeSet, s) {
+				exists, err := r.ownedSignerStatefulSetExists(ctx, nodeSet, s.Name)
+				if err != nil {
+					return nil, false, err
+				}
+				if exists {
+					return nil, false, fmt.Errorf("cosmosigner %q has live state but its generated key import is unrecorded and the source key is unavailable; refusing to switch child signing paths", s.Name)
+				}
+				blocked[s.Name] = struct{}{}
+				continue
+			}
+		} else if st != nil && st.KeyImported == s.Spec.Backend.Vault.ImportFingerprint(s.SoftwareKeySecret, keyMaterial) {
+			continue
+		}
+
+		params, err := r.cosmosignerParams(ctx, nodeSet, s)
+		if err != nil {
+			return nil, false, err
+		}
+		pending, _, err := r.maybeImportCosmosignerKey(ctx, nodeSet, s, params)
+		if err != nil {
+			return nil, false, err
+		}
+		if pending {
+			return nil, false, nil
+		}
+	}
+	return blocked, true, nil
+}
+
+func (r *Reconciler) ownedSignerStatefulSetExists(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) (bool, error) {
+	sts := &k8sappsv1.StatefulSet{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return metav1.IsControlledBy(sts, nodeSet), nil
 }
 
 func (r *Reconciler) requireGenesisSentrySecrets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) error {
@@ -655,7 +733,14 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 // returned name is stamped as the node's LabelCosmosignerTarget so the signer's discovery Service
 // selects exactly those pods.
 func signerNameForNode(nodeSet *appsv1.ChainNodeSet, group string) (string, bool) {
+	return signerNameForNodeWithBlockedTargets(nodeSet, group, nil)
+}
+
+func signerNameForNodeWithBlockedTargets(nodeSet *appsv1.ChainNodeSet, group string, blocked blockedSignerTargets) (string, bool) {
 	for _, s := range nodeSet.ResolveCosmosigners() {
+		if _, ok := blocked[s.Name]; ok {
+			continue
+		}
 		for _, t := range s.TargetGroups {
 			if t == group {
 				return s.Name, true

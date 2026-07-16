@@ -21,6 +21,10 @@ import (
 )
 
 func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	return r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, nil)
+}
+
+func (r *Reconciler) ensureValidatorWithBlockedSignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
 	logger := log.FromContext(ctx)
 
 	desiredValidators := map[string]struct{}{}
@@ -48,7 +52,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		name := fmt.Sprintf("%s-validator", nodeSet.GetName())
 		desiredValidators[name] = struct{}{}
 
-		validator, err := r.getValidatorSpec(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator)
+		validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator, blocked)
 		if err != nil {
 			return fmt.Errorf("failed to get validator spec for %s: %w", nodeSet.GetName(), err)
 		}
@@ -94,7 +98,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 			desiredValidators[name] = struct{}{}
 
 			cfg := deriveGroupValidatorConfig(nodeSet, group.Name, i, instances, group.Validator)
-			validator, err := r.getValidatorSpec(nodeSet, group.Name, i, cfg)
+			validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group.Name, i, cfg, blocked)
 			if err != nil {
 				return fmt.Errorf("failed to get validator spec for %s group %s index %d: %w", nodeSet.GetName(), group.Name, i, err)
 			}
@@ -288,6 +292,10 @@ func validatorNodeName(nodeSet *appsv1.ChainNodeSet, group string, index int) st
 }
 
 func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig) (*appsv1.ChainNode, error) {
+	return r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group, index, cfg, nil)
+}
+
+func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig, blocked blockedSignerTargets) (*appsv1.ChainNode, error) {
 	var genesisConfig *appsv1.GenesisConfig
 	switch {
 	case cfg.Init != nil:
@@ -310,7 +318,7 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string
 
 	// Stamp the specific signer's discovery-service label when a managed cosmosigner targets this
 	// validator instance, so exactly that signer selects and dials this node's pod.
-	if signerName, ok := signerNameForNode(nodeSet, group); ok {
+	if signerName, ok := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked); ok {
 		// A targeted ChainNodeSet child must not inherit a user-set chain-node label: a same-named
 		// standalone signer's discovery Service selects chain-node + cosmosigner-target, and the
 		// target label below may equal that standalone signer's name. Preserve the user label on
@@ -365,7 +373,7 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string
 
 	// A validator targeted by a managed cosmosigner deployment signs through the external signer:
 	// it listens for it and mounts no local key.
-	if _, ok := signerNameForNode(nodeSet, group); ok {
+	if _, ok := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked); ok {
 		validator.Spec.RemoteSignerTarget = true
 	}
 
