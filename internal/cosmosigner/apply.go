@@ -207,6 +207,7 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, d
 // would deadlock the IsTornDown gate waiting on them).
 func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
 	objects := []client.Object{
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: namespace}},
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
@@ -244,6 +245,15 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 // not. A claim already marked for deletion but held by a finalizer still counts as present, since a
 // fresh StatefulSet could bind it and inherit stale raft state.
 func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
+	importPod := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name + "-" + importJobSuffix}, importPod); err == nil {
+		if metav1.IsControlledBy(importPod, owner) {
+			return false, nil
+		}
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err == nil {
 		// A same-name StatefulSet exists. Only OUR StatefulSet blocks teardown completion; a foreign

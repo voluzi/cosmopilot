@@ -218,10 +218,8 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 
 	// No-webhook reconcile path (old is nil): the previous spec is unavailable, so the guards that can
 	// be judged from status alone are reconstructed here. Modifying a rolled-out signer (recorded
-	// digest differs), changing the raft replica count, and adding an unverifiable validator-targeted
-	// signer after establishment (see the at-establishment marker) are rejected. REMOVING the signer
-	// is left to the admission webhook (which has the old spec) — a software-signer removal returns
-	// the validator to the same local key and is safe, which status alone cannot establish.
+	// digest differs), changing the raft replica count, adding an unverifiable validator-targeted
+	// signer, and removing a validator signer before its serving identity is recorded are rejected.
 	if old == nil {
 		c := chainNode.Spec.Cosmosigner
 		// REMOVING a rolled-out validator-targeted signer (recorded serving identity) is admitted only
@@ -233,6 +231,10 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			serving := chainNode.Status.CosmosignerServingIdentity
 			if serving != "" && !chainNode.ValidatorResolvesSigningIdentity(serving) {
 				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): the validator would fall back to a local key different from the on-chain consensus key the signer was serving — restore the signer, or migrate the validator's own signing path to the same key first")
+			}
+			if serving == "" && chainNode.Status.CosmosignerSigningDigest == "" && chainNode.Spec.Validator != nil &&
+				(chainNode.Status.CosmosignerReplicas != nil || chainNode.Status.CosmosignerStateStorageSize != "") {
+				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed (webhooks disabled): its validator rollout identity has not been recorded yet, so the controller cannot prove the local fallback key is safe — restore the signer until rollout completes, or remove it with webhooks enabled")
 			}
 			// A digest with no serving identity is a legacy record (pre-field) whose identity can no
 			// longer be reconstructed once the spec is gone: unjudgeable, so reject conservatively.

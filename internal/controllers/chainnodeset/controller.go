@@ -130,10 +130,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// Tear down any managed signer the spec no longer desires BEFORE children are reconciled, and wait
-	// for completion: a child switching back to its local/tmKMS signing path while the old signer pods
-	// are still terminating would put two signers on the same consensus key. Deletion is asynchronous,
-	// so poll until every removed signer's StatefulSet and PVCs are gone before letting children move.
+	// Preflight every desired signer before deleting a stale one. A replacement that cannot deploy must
+	// leave the old signing path intact instead of deleting it and then failing before children retarget.
+	if err := r.preflightCosmosigners(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Tear down any managed signer the spec no longer desires before children are reconciled, and wait
+	// for completion: a child switching back to its local/tmKMS signing path while old signer pods are
+	// still terminating would put two signers on the same consensus key.
 	if tornDown, err := r.reconcileSignerTeardown(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
 	} else if !tornDown {
@@ -143,15 +148,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	chainIDKnownAtStart := nodeSet.Status.ChainID != ""
 
-	// Preflight the desired signers BEFORE anything stamps RemoteSignerTarget on child ChainNodes —
-	// INCLUDING the init-genesis ensureValidator below, which stamps the generated validator even while
-	// the chain ID is still empty. preflightCosmosigners tolerates an empty chain ID (validator
-	// key-generation and import-source states are handled as pending, not failures), so a signer that can
-	// never come up (missing key/auth/raft-TLS Secret, or a foreign signer object/PVC) fails here and
-	// children keep their existing local signing path instead of dropping the local key.
-	if err := r.preflightCosmosigners(ctx, nodeSet); err != nil {
-		return ctrl.Result{}, err
-	}
 	// Record status entries + raft/PVC locks before children are retargeted, so ensureCosmosigner deploys
 	// the signer in the SAME pass it is retargeted rather than deferring to a later reconcile (which would
 	// leave a retargeted validator without a signer). Needs the chain ID, so it is a no-op until then;
@@ -308,12 +304,8 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 //     apart from the establishing signer's own first rollout (which must be admitted — the digest is
 //     only recorded after rollout, so keying on "chainID set + empty digest" would deadlock it).
 //
-//   - REMOVING a validator-targeted signer that rolled out (recorded serving identity) is admitted
-//     only when a validator's own signing path in the resulting spec still resolves that identity —
-//     e.g. a software-backed signer that used the validator's own key secret, or tmKMS on the same
-//     Vault key. A pre-provisioned Vault/GCP signer's identity is unreachable through any local
-//     path, so its removal is rejected: the validator would fall back to a local key that is absent
-//     or different from the on-chain consensus key.
+//   - REMOVING a validator-targeted signer is fail-closed until rollout records its serving identity.
+//     Afterwards, removal is admitted only when the validator's own path still resolves that identity.
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Status.ChainID == "" {
 		return nil
@@ -324,12 +316,8 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		desired[s.Name] = s
 	}
 
-	// REMOVED signers: a validator-targeted signer that rolled out (recorded serving identity) can only
-	// be removed when the SAME validator it served (group) still resolves that identity through its
-	// OWN signing path in the resulting spec — e.g. a software-backed signer that used the
-	// validator's own key secret, or tmKMS on the same Vault key. A pre-provisioned Vault/GCP signer's
-	// identity is unreachable through any local path, so its removal is rejected: the validator would
-	// fall back to a local key that is absent or different from the on-chain consensus key.
+	// REMOVED signers: pre-rollout validator targets fail closed; rolled-out signers can only be removed
+	// when the same validator still resolves the recorded serving identity through its own path.
 	for i := range nodeSet.Status.Cosmosigners {
 		st := &nodeSet.Status.Cosmosigners[i]
 		if _, ok := desired[st.Name]; ok {
@@ -341,6 +329,14 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		}
 		if st.ServingIdentity == "" && st.SigningDigest != "" {
 			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): it served a validator but its recorded identity predates this version and cannot be verified — restore the signer so the controller can record it, or remove it with webhooks enabled", st.Name)
+		}
+		if st.ServingIdentity == "" && st.SigningDigest == "" {
+			if st.ServingGroup != "" {
+				return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): its validator rollout identity has not been recorded yet, so the controller cannot prove the resulting local signing path is safe — restore the signer until rollout completes, or perform the removal with webhooks enabled", st.Name)
+			}
+			if st.AtEstablishment == nil {
+				return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): its pre-rollout target kind predates the status marker and cannot be verified — restore the signer with webhooks enabled so the controller can record whether it serves a validator", st.Name)
+			}
 		}
 		// A SENTRY signer whose key was registered in the immutable genesis validator set at
 		// establishment (AtEstablishment holds its identity; validator-targeted signers are handled by

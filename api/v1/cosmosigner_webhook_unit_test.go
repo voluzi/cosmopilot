@@ -183,6 +183,16 @@ func TestChainNodeNoWebhookSignerLifecycle(t *testing.T) {
 		t.Fatal("removing a pre-provisioned Vault signer must be rejected: the validator would fall back to a different local key")
 	}
 
+	// A post-establishment migration whose locks exist but whose rollout identity has not been
+	// recorded yet must also fail closed: the signer may already have started serving.
+	removedPending := preProvisioned.DeepCopy()
+	removedPending.Status.CosmosignerReplicas = ptr.To(int32(1))
+	removedPending.Status.CosmosignerStateStorageSize = "1Gi"
+	removedPending.Spec.Cosmosigner = nil
+	if _, err := removedPending.Validate(nil); err == nil {
+		t.Fatal("removing a migrated signer before its serving identity is recorded must be rejected")
+	}
+
 	// Removing a software signer that used the validator's own key: the serving identity is still
 	// resolved by the validator's local path, so removal is a safe rollback.
 	softwareServed := base(CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}})

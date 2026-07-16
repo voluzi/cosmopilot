@@ -531,6 +531,21 @@ func TestValidateForReconcileSignerRemoval(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestValidateForReconcileRejectsPreRolloutMigratedSignerRemoval(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name:             "test-nodeset-signer",
+		Replicas:         ptr.To(int32(1)),
+		StateStorageSize: "1Gi",
+		ServingGroup:     "validators",
+	}}
+	nodeSet.Spec.Cosmosigner = nil
+
+	_, err := validateForReconcile(nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rollout identity has not been recorded")
+}
+
 // TestValidateForReconcileSentryRetargetToValidator verifies that a sentry-mode signer records "" in
 // its at-establishment marker (its key identity is deliberately excluded), so retargeting the SAME
 // pre-provisioned key onto a validator with webhooks disabled does not masquerade as the establishing

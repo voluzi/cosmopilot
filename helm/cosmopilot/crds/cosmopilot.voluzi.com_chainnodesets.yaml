@@ -16002,9 +16002,9 @@ spec:
                         from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key
                         listed only under a zero-instance group, which contributes nothing to genesis), which stay
                         rotatable/removable on the no-webhook path. It lets that path tell an establishing signer
-                        (admitted) apart from one introduced afterwards (rejected unless the backend provably imports the
-                        registered key), and reject a later key change/removal of a genesis-registered software sentry
-                        signer. Absent for a signer added after establishment.
+                        (admitted) apart from a validator signer introduced afterwards (nil), and reject a later
+                        key change/removal of a genesis-registered software sentry signer. A sentry added after
+                        establishment records its provable genesis identity or an empty marker.
                       type: string
                     keyImported:
                       description: |-
@@ -16026,9 +16026,9 @@ spec:
                       type: integer
                     servingGroup:
                       description: |-
-                        ServingGroup records which validator group this signer served (the reserved "validator" name for
-                        the legacy singleton). The removal guard checks that this specific validator's own path resolves
-                        ServingIdentity — a different validator referencing the same key must not satisfy it.
+                        ServingGroup records the validator group this signer targets (the reserved "validator" name for
+                        the legacy singleton). It is locked before rollout so a pre-digest removal fails closed; after
+                        rollout, the removal guard checks this group's own path against ServingIdentity.
                       type: string
                     servingIdentity:
                       description: |-

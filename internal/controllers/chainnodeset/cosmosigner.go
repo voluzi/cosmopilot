@@ -255,21 +255,15 @@ func (r *Reconciler) initCosmosignerLocks(ctx context.Context, nodeSet *appsv1.C
 	}
 	changed := false
 	for _, s := range nodeSet.ResolveCosmosigners() {
-		created := nodeSet.GetCosmosignerStatus(s.Name) == nil
 		st := nodeSet.EnsureCosmosignerStatus(s.Name)
-		if created {
+		if s.TargetsValidator() && st.SigningDigest == "" && st.ServingGroup == "" {
+			st.ServingGroup = s.ValidatorGroup
 			changed = true
-			// Backfill the genesis-sentry establishment marker for an entry first created AFTER
-			// establishment: SetEstablishedChainID runs only once, so a genesis-registered software sentry
-			// whose signer was added later would otherwise keep a nil marker and escape the no-webhook
-			// key-change/removal guards. The genesis set is immutable, so this is the identity establishment
-			// would have recorded. A validator-targeted signer keeps its nil marker — that nil is how the
-			// no-webhook ADD guard detects a post-establishment addition — so only genesis sentries backfill.
-			if st.AtEstablishment == nil {
-				if id := nodeSet.GenesisSentryEstablishmentIdentity(s); id != "" {
-					st.AtEstablishment = &id
-				}
-			}
+		}
+		if !s.TargetsValidator() && st.AtEstablishment == nil {
+			id := nodeSet.GenesisSentryEstablishmentIdentity(s)
+			st.AtEstablishment = &id
+			changed = true
 		}
 		if st.Replicas == nil || st.StateStorageSize == "" {
 			if err := r.initSignerLock(ctx, nodeSet, s, st); err != nil {

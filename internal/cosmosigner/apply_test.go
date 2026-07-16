@@ -133,6 +133,8 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 		{"nothing present → torn down", nil, true},
 		{"our statefulset present → not torn down", []client.Object{ownedSTS(me)}, false},
 		{"foreign statefulset only → torn down", []client.Object{ownedSTS(other)}, true},
+		{"our import pod present → not torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}}}, false},
+		{"foreign import pod only → torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(other)}}}}, true},
 		{"our lingering pvc → not torn down", []client.Object{pvc("me-uid")}, false},
 		{"foreign pvc only → torn down", []client.Object{pvc("other-uid")}, true},
 		{"foreign statefulset + our lingering pvc → not torn down", []client.Object{ownedSTS(other), pvc("me-uid")}, false},
@@ -149,6 +151,23 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 				t.Fatalf("IsTornDown = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestUndeployDeletesOwnedImportPod(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	me := fakeOwner("me", types.UID("me-uid"))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+
+	if err := Undeploy(context.Background(), c, me, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned import pod must be deleted, got err=%v", err)
 	}
 }
 
