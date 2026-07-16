@@ -591,6 +591,194 @@ func TestEnsureValidatorRemovesStaleValidator(t *testing.T) {
 	assert.Empty(t, nodeSet.Status.Validators, "stale validator status must be removed")
 }
 
+func TestEnsureValidatorPreservesGenesisBaselineWhileUpdatingLiveStatus(t *testing.T) {
+	initCfg := &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+		ChainID:     "test-chain",
+		Assets:      []string{"1000000stake"},
+		StakeAmount: "900000stake",
+	}}
+	name := "test-nodeset-validators-0"
+	digest := initCfg.GenesisSigningFingerprint(name + "-priv-key")
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(1),
+				Validator: &appsv1.NodeSetValidatorConfig{CreateValidator: &appsv1.CreateValidatorConfig{}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "test-chain",
+			Validators: []appsv1.ChainNodeSetValidatorStatus{{
+				Name:             name,
+				Group:            "validators",
+				Address:          "old-address",
+				Status:           appsv1.ValidatorStatusUnbonded,
+				PubKey:           "old-pubkey",
+				Init:             true,
+				SigningKeyDigest: digest,
+			}},
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	current, err := r.getValidatorSpec(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator)
+	require.NoError(t, err)
+	current.Status.ValidatorAddress = "new-address"
+	current.Status.ValidatorStatus = appsv1.ValidatorStatusBonded
+	current.Status.PubKey = "new-pubkey"
+	require.NoError(t, r.Create(context.Background(), current))
+
+	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
+
+	require.Len(t, nodeSet.Status.Validators, 1)
+	got := nodeSet.Status.Validators[0]
+	assert.Equal(t, name, got.Name)
+	assert.Equal(t, "validators", got.Group)
+	assert.True(t, got.Init)
+	assert.Equal(t, digest, got.SigningKeyDigest)
+	assert.Equal(t, "new-address", got.Address)
+	assert.Equal(t, appsv1.ValidatorStatus(appsv1.ValidatorStatusBonded), got.Status)
+	assert.Equal(t, "new-pubkey", got.PubKey)
+}
+
+func TestEnsureValidatorPreservesRemovedGenesisBaseline(t *testing.T) {
+	stale := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-nodeset-validators-0",
+			Namespace: "default",
+			Labels: map[string]string{
+				controllers.LabelChainNodeSet:          "test-nodeset",
+				controllers.LabelChainNodeSetGroup:     "validators",
+				controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
+			},
+		},
+	}
+	baseline := appsv1.ChainNodeSetValidatorStatus{
+		Name:             stale.Name,
+		Group:            "validators",
+		Init:             true,
+		SigningKeyDigest: "original-digest",
+	}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+		},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID:    "test-chain",
+			Validators: []appsv1.ChainNodeSetValidatorStatus{baseline},
+			Nodes:      []appsv1.ChainNodeSetNodeStatus{{Name: stale.Name, Group: "validators"}},
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, stale)
+
+	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
+
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: stale.Name}, &appsv1.ChainNode{})
+	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode must still be deleted")
+	assert.Equal(t, []appsv1.ChainNodeSetValidatorStatus{baseline}, nodeSet.Status.Validators)
+	assert.Empty(t, nodeSet.Status.Nodes)
+}
+
+func TestEnsureValidatorDoesNotExpandRecordedGenesisBaseline(t *testing.T) {
+	init := &appsv1.GenesisInitConfig{
+		ChainID:     "test-chain",
+		Assets:      []string{"1000000stake"},
+		StakeAmount: "900000stake",
+	}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{
+			{Name: "original", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{Init: init.DeepCopy()}},
+			{Name: "injected", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{Init: init.DeepCopy()}},
+		}},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID:              "test-chain",
+			GenesisInitGenerated: ptr.To(true),
+			Validators: []appsv1.ChainNodeSetValidatorStatus{{
+				Name:             "test-nodeset-original-0",
+				Group:            "original",
+				Init:             true,
+				SigningKeyDigest: (&appsv1.NodeSetValidatorConfig{Init: init.DeepCopy()}).GenesisSigningFingerprint("test-nodeset-original-0-priv-key"),
+			}},
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
+
+	require.Len(t, nodeSet.Status.Validators, 2)
+	assert.True(t, nodeSet.Status.Validators[0].Init)
+	assert.False(t, nodeSet.Status.Validators[1].Init)
+	assert.Empty(t, nodeSet.Status.Validators[1].SigningKeyDigest)
+}
+
+func TestEnsureValidatorRefreshesGenesisDigestOnlyForProvenWebhookMigration(t *testing.T) {
+	const vaultAddress = "https://vault.example.com:8200"
+	const vaultKey = "validator-key"
+	init := &appsv1.GenesisInitConfig{
+		ChainID:     "test-chain",
+		Assets:      []string{"1000000stake"},
+		StakeAmount: "900000stake",
+	}
+	oldCfg := &appsv1.NodeSetValidatorConfig{
+		Init: init.DeepCopy(),
+		TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+			Address: vaultAddress,
+			Key:     vaultKey,
+		}}},
+	}
+
+	for _, tc := range []struct {
+		name            string
+		disableWebhooks bool
+		wantRefresh     bool
+	}{
+		{name: "webhook admitted migration refreshes", wantRefresh: true},
+		{name: "no webhook path keeps original baseline", disableWebhooks: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			currentCfg := &appsv1.NodeSetValidatorConfig{Init: init.DeepCopy()}
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
+				Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+					Name:      "validators",
+					Instances: ptr.To(1),
+					Validator: currentCfg,
+					Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+						Vault: &appsv1.CosmosignerVaultBackend{Address: vaultAddress, KeyName: vaultKey},
+					}},
+				}}},
+				Status: appsv1.ChainNodeSetStatus{
+					ChainID: "test-chain",
+					Validators: []appsv1.ChainNodeSetValidatorStatus{{
+						Name:             "test-nodeset-validators-0",
+						Group:            "validators",
+						Init:             true,
+						SigningKeyDigest: oldCfg.GenesisSigningFingerprint("test-nodeset-validators-0-priv-key"),
+					}},
+				},
+			}
+			r := newValidatorTestReconciler(t, nodeSet)
+			r.opts.DisableWebhooks = tc.disableWebhooks
+
+			require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
+
+			require.Len(t, nodeSet.Status.Validators, 1)
+			oldDigest := oldCfg.GenesisSigningFingerprint("test-nodeset-validators-0-priv-key")
+			currentDigest := currentCfg.GenesisSigningFingerprint("test-nodeset-validators-0-priv-key")
+			require.NotEqual(t, oldDigest, currentDigest)
+			if tc.wantRefresh {
+				assert.Equal(t, currentDigest, nodeSet.Status.Validators[0].SigningKeyDigest)
+			} else {
+				assert.Equal(t, oldDigest, nodeSet.Status.Validators[0].SigningKeyDigest)
+			}
+		})
+	}
+}
+
 func TestGetNodeSpecNilGenesisUsesGeneratedConfigMap(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
@@ -640,7 +828,7 @@ func TestEnsureValidatorPropagatesChainIDBeforeCreatingNonInitValidators(t *test
 
 	// ensureValidator updates status immediately after the init validator is ensured, before
 	// deriving the non-init validators.
-	updateValidatorStatus(nodeSet, initValidator, initCfg, group.Name, true, true)
+	updateValidatorStatus(nodeSet, initValidator, initCfg, group.Name, true, true, nil, false, false)
 
 	nonInitCfg := deriveGroupValidatorConfig(nodeSet, group.Name, 1, 2, group.Validator)
 	nonInit, err := r.getValidatorSpec(nodeSet, group.Name, 1, nonInitCfg)
@@ -673,8 +861,8 @@ func TestUpdateValidatorStatusLegacyAlias(t *testing.T) {
 		},
 	}
 
-	updateValidatorStatus(nodeSet, first, nil, "validators", false, true)
-	updateValidatorStatus(nodeSet, second, nil, "validators", false, false)
+	updateValidatorStatus(nodeSet, first, nil, "validators", false, true, nil, false, false)
+	updateValidatorStatus(nodeSet, second, nil, "validators", false, false, nil, false, false)
 
 	// Legacy alias is pinned to the first validator even though it is empty, instead of
 	// latching onto the second validator's reported values.
@@ -688,7 +876,7 @@ func TestUpdateValidatorStatusLegacyAlias(t *testing.T) {
 	// Updating the first validator's status (now reporting) refreshes the alias.
 	first.Status.ValidatorAddress = "addr-first"
 	first.Status.PubKey = "pubkey-first"
-	updateValidatorStatus(nodeSet, first, nil, "validators", false, true)
+	updateValidatorStatus(nodeSet, first, nil, "validators", false, true, nil, false, false)
 	assert.Equal(t, "addr-first", nodeSet.Status.ValidatorAddress)
 	assert.Equal(t, "pubkey-first", nodeSet.Status.PubKey)
 }
@@ -942,7 +1130,7 @@ func TestUpdateValidatorStatusPublicAddress(t *testing.T) {
 			PublicAddress: "nodeid@1.2.3.4:26656",
 		},
 	}
-	updateValidatorStatus(nodeSet, exposed, nil, "validators", false, false)
+	updateValidatorStatus(nodeSet, exposed, nil, "validators", false, false, nil, false, false)
 
 	require.Len(t, nodeSet.Status.Nodes, 1)
 	got := nodeSet.Status.Nodes[0]
@@ -952,7 +1140,7 @@ func TestUpdateValidatorStatusPublicAddress(t *testing.T) {
 
 	// A validator with no public address is recorded as not public.
 	internal := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-1"}}
-	updateValidatorStatus(nodeSet, internal, nil, "validators", false, false)
+	updateValidatorStatus(nodeSet, internal, nil, "validators", false, false, nil, false, false)
 
 	require.Len(t, nodeSet.Status.Nodes, 2)
 	got2 := nodeSet.Status.Nodes[1]

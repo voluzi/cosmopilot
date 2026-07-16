@@ -1552,6 +1552,16 @@ func (nodeSet *ChainNodeSet) nodeSetEffectiveGenesisFingerprint(group string, cf
 		cfg.Init, cfg.Info, cfg.GetAccountPrefix(), cfg.GetValPrefix(), cfg.GetAccountHDPath())
 }
 
+// GenesisSigningDigestAllowsRefresh proves that a recorded raw genesis fingerprint differs from the
+// current config only because an admitted signing-path migration kept the same effective key.
+func (nodeSet *ChainNodeSet) GenesisSigningDigestAllowsRefresh(group string, cfg *NodeSetValidatorConfig, recorded string) bool {
+	if cfg == nil || recorded == "" || recorded == GenesisDigestExternal {
+		return false
+	}
+	configuration := genesisConfigurationFingerprint(cfg.Init, cfg.Info, cfg.GetAccountPrefix(), cfg.GetValPrefix(), cfg.GetAccountHDPath())
+	return genesisSigningDigestAllowsRefresh(recorded, configuration, nodeSet.nodeSetValidatorEffectiveIdentity(group, cfg))
+}
+
 // normalizedVaultIdentity returns a backend-agnostic identifier for a Vault Transit key, so the
 // same key referenced through tmKMS and through cosmosigner compares equal. tmKMS uses the default
 // "transit" mount and the root namespace implicitly. The Vault namespace is included so keys in

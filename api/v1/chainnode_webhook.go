@@ -378,6 +378,10 @@ func (chainNode *ChainNode) GenesisSigningDigestAllowsRefresh(recorded string) b
 	}
 	v := chainNode.Spec.Validator
 	configuration := genesisConfigurationFingerprint(v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath())
+	return genesisSigningDigestAllowsRefresh(recorded, configuration, chainNode.EffectiveSigningIdentity())
+}
+
+func genesisSigningDigestAllowsRefresh(recorded, configuration, effectiveIdentity string) bool {
 	suffix := "\x00" + configuration
 	if !strings.HasSuffix(recorded, suffix) {
 		return false
@@ -398,7 +402,7 @@ func (chainNode *ChainNode) GenesisSigningDigestAllowsRefresh(recorded string) b
 		}
 		recordedIdentity = normalizedVaultIdentity(parts[1], "", DefaultCosmosignerVaultMount, parts[2])
 	}
-	return recordedIdentity == chainNode.EffectiveSigningIdentity()
+	return recordedIdentity == effectiveIdentity
 }
 
 // GenesisSigningFingerprint mirrors NodeSetValidatorConfig.GenesisSigningFingerprint for a standalone

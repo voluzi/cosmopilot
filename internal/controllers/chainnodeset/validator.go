@@ -25,6 +25,15 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 
 	desiredValidators := map[string]struct{}{}
 	nodeSetCopy := nodeSet.DeepCopy()
+	previousValidatorStatuses := make(map[string]appsv1.ChainNodeSetValidatorStatus, len(nodeSetCopy.Status.Validators))
+	genesisBaselineRecorded := nodeSetCopy.Status.GenesisInitGenerated != nil
+	for _, status := range nodeSetCopy.Status.Validators {
+		previousValidatorStatuses[status.Name] = status
+		if status.Init || status.SigningKeyDigest != "" {
+			genesisBaselineRecorded = true
+		}
+	}
+	allowGenesisDigestRefresh := r.opts != nil && !r.opts.DisableWebhooks
 	nodeSet.Status.Validators = nil
 	nodeSet.Status.ValidatorAddress = ""
 	nodeSet.Status.ValidatorStatus = ""
@@ -47,7 +56,8 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, nodeSet.Spec.Validator, 1, validatorGroupName)); err != nil {
 			return fmt.Errorf("failed to ensure validator node for %s: %w", nodeSet.GetName(), err)
 		}
-		updateValidatorStatus(nodeSet, validator, nodeSet.Spec.Validator, validatorGroupName, nodeSet.Spec.Validator.Init != nil, !legacyAliasSet)
+		updateValidatorStatus(nodeSet, validator, nodeSet.Spec.Validator, validatorGroupName, nodeSet.Spec.Validator.Init != nil, !legacyAliasSet,
+			previousValidatorStatuses, genesisBaselineRecorded, allowGenesisDigestRefresh)
 		legacyAliasSet = true
 	}
 
@@ -130,7 +140,8 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 			if nodeSet.IsCosmosignerTargetGroup(group.Name) {
 				isInit = cfg.Init != nil
 			}
-			updateValidatorStatus(nodeSet, validator, cfg, group.Name, isInit, !legacyAliasSet)
+			updateValidatorStatus(nodeSet, validator, cfg, group.Name, isInit, !legacyAliasSet,
+				previousValidatorStatuses, genesisBaselineRecorded, allowGenesisDigestRefresh)
 			legacyAliasSet = true
 		}
 	}
@@ -166,6 +177,15 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		}
 		DeleteValidatorStatus(nodeSet, node.Name)
 	}
+	for _, status := range nodeSetCopy.Status.Validators {
+		if !status.Init {
+			continue
+		}
+		if _, desired := desiredValidators[status.Name]; desired {
+			continue
+		}
+		AddOrUpdateValidatorStatus(nodeSet, status)
+	}
 
 	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {
 		logger.Info("updating validator status fields",
@@ -179,7 +199,15 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 	return nil
 }
 
-func updateValidatorStatus(nodeSet *appsv1.ChainNodeSet, validator *appsv1.ChainNode, cfg *appsv1.NodeSetValidatorConfig, group string, isGenesisInit, setLegacyAlias bool) {
+func updateValidatorStatus(
+	nodeSet *appsv1.ChainNodeSet,
+	validator *appsv1.ChainNode,
+	cfg *appsv1.NodeSetValidatorConfig,
+	group string,
+	isGenesisInit, setLegacyAlias bool,
+	previousStatuses map[string]appsv1.ChainNodeSetValidatorStatus,
+	genesisBaselineRecorded, allowGenesisDigestRefresh bool,
+) {
 	if nodeSet.Status.ChainID == "" {
 		nodeSet.SetEstablishedChainID(validator.Status.ChainID)
 	}
@@ -208,7 +236,7 @@ func updateValidatorStatus(nodeSet *appsv1.ChainNodeSet, validator *appsv1.Chain
 	if isGenesisInit {
 		signingKeyDigest = cfg.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", validator.Name))
 	}
-	AddOrUpdateValidatorStatus(nodeSet, appsv1.ChainNodeSetValidatorStatus{
+	status := appsv1.ChainNodeSetValidatorStatus{
 		Name:             validator.Name,
 		Group:            group,
 		Address:          validator.Status.ValidatorAddress,
@@ -216,7 +244,29 @@ func updateValidatorStatus(nodeSet *appsv1.ChainNodeSet, validator *appsv1.Chain
 		PubKey:           validator.Status.PubKey,
 		Init:             isGenesisInit,
 		SigningKeyDigest: signingKeyDigest,
-	})
+	}
+	if previous, ok := previousStatuses[validator.Name]; ok && genesisBaselineRecorded {
+		status.Init = previous.Init
+		if previous.Group != "" {
+			status.Group = previous.Group
+		}
+		if previous.Init {
+			switch {
+			case previous.SigningKeyDigest == "":
+			case previous.SigningKeyDigest == signingKeyDigest:
+			case allowGenesisDigestRefresh && isGenesisInit &&
+				nodeSet.GenesisSigningDigestAllowsRefresh(group, cfg, previous.SigningKeyDigest):
+			default:
+				status.SigningKeyDigest = previous.SigningKeyDigest
+			}
+		} else {
+			status.SigningKeyDigest = ""
+		}
+	} else if genesisBaselineRecorded {
+		status.Init = false
+		status.SigningKeyDigest = ""
+	}
+	AddOrUpdateValidatorStatus(nodeSet, status)
 
 	// Preserve legacy singleton status fields as an alias for the first validator in spec
 	// order. Pinning to the first validator (even before it reports status) keeps the alias
