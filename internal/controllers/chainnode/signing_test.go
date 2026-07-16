@@ -216,7 +216,11 @@ func TestReconcileSigningConfigsWaitsForCosmosignerRollout(t *testing.T) {
 			CosmosignerValidatorTargeted: ptr.To(false),
 		},
 	}
+	var deleteRequests atomic.Int32
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodDelete {
+			deleteRequests.Add(1)
+		}
 		return &http.Response{
 			StatusCode: http.StatusNotFound,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -243,6 +247,9 @@ func TestReconcileSigningConfigsWaitsForCosmosignerRollout(t *testing.T) {
 	if !pending {
 		t.Fatal("a newly applied cosmosigner must keep the node on its existing signing path until rollout")
 	}
+	if got := deleteRequests.Load(); got != 0 {
+		t.Fatalf("pending cosmosigner rollout issued %d tmKMS delete requests, want 0", got)
+	}
 
 	sts := &k8sappsv1.StatefulSet{}
 	if err := r.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: cosmosignerName(chainNode)}, sts); err != nil {
@@ -261,5 +268,76 @@ func TestReconcileSigningConfigsWaitsForCosmosignerRollout(t *testing.T) {
 	}
 	if pending {
 		t.Fatal("a fully rolled-out cosmosigner must allow the node signing-config transition")
+	}
+	if got := deleteRequests.Load(); got != 0 {
+		t.Fatalf("signing preparation issued %d tmKMS delete requests before the node pod transition, want 0", got)
+	}
+}
+
+func TestCanCleanupTmKMSConfig(t *testing.T) {
+	const namespace, name = "default", "validator"
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	chainNode := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+	tmKMSName := name + "-tmkms"
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{name: "no replacement pod", want: false},
+		{
+			name: "old pod still references tmKMS",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: corev1.PodSpec{Volumes: []corev1.Volume{
+					{Name: "tmkms-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: tmKMSName},
+					}}},
+				}},
+			},
+			want: false,
+		},
+		{
+			name: "old pod still references tmKMS identity",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: corev1.PodSpec{Volumes: []corev1.Volume{
+					{Name: "tmkms-identity", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+						SecretName: tmKMSName,
+					}}},
+				}},
+			},
+			want: false,
+		},
+		{
+			name: "replacement pod uses cosmosigner",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec:       corev1.PodSpec{Volumes: []corev1.Volume{{Name: "config"}}},
+			},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			if tc.pod != nil {
+				builder = builder.WithObjects(tc.pod)
+			}
+			r := &Reconciler{Client: builder.Build()}
+
+			got, err := r.canCleanupTmKMSConfig(context.Background(), chainNode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("canCleanupTmKMSConfig() = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }

@@ -2,12 +2,13 @@ package tmkms
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,17 +59,16 @@ func (kms *KMS) DeployConfig(ctx context.Context) error {
 }
 
 func (kms *KMS) UndeployConfig(ctx context.Context) error {
-	// Delete config map
-	if err := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Delete(ctx, kms.Name, metav1.DeleteOptions{}); err != nil {
-		return err
+	var configMapErr error
+	if err := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Delete(ctx, kms.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		configMapErr = fmt.Errorf("delete tmKMS ConfigMap %q: %w", kms.Name, err)
 	}
 
-	// Delete Secret
-	if err := kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace()).Delete(ctx, kms.Name, metav1.DeleteOptions{}); err != nil {
-		return err
+	var secretErr error
+	if err := kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace()).Delete(ctx, kms.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		secretErr = fmt.Errorf("delete tmKMS Secret %q: %w", kms.Name, err)
 	}
-
-	return nil
+	return errors.Join(configMapErr, secretErr)
 }
 
 func (kms *KMS) getConfigToml() (string, error) {
@@ -82,7 +82,7 @@ func (kms *KMS) getConfigHash() string {
 
 func (kms *KMS) ensureIdentityKey(ctx context.Context) error {
 	_, err := kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace()).Get(ctx, kms.Name, metav1.GetOptions{})
-	if err != nil && errors.IsNotFound(err) {
+	if err != nil && apierrors.IsNotFound(err) {
 		var key string
 		key, err = kms.generateKmsIdentityKey(ctx)
 		if err != nil {
@@ -196,7 +196,7 @@ func (kms *KMS) ensureConfigMap(ctx context.Context) error {
 
 	cm, err := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Get(ctx, kms.Name, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			_, err = kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Create(ctx, spec, metav1.CreateOptions{})
 		}
 		return err
@@ -235,7 +235,7 @@ func (kms *KMS) ensurePVC(ctx context.Context) error {
 
 	_, err = kms.Client.CoreV1().PersistentVolumeClaims(kms.Owner.GetNamespace()).Get(ctx, kms.Name, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			_, err = kms.Client.CoreV1().PersistentVolumeClaims(kms.Owner.GetNamespace()).Create(ctx, spec, metav1.CreateOptions{})
 		}
 		return err

@@ -320,11 +320,14 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 }
 
 func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if chainNode.Spec.Cosmosigner == nil || chainNode.Status.ChainID == "" {
+	if chainNode.Spec.Cosmosigner == nil {
 		if err := r.ensureTmKMSConfig(ctx, chainNode); err != nil {
 			return false, err
 		}
 		return r.ensureCosmosigner(ctx, chainNode)
+	}
+	if chainNode.Status.ChainID == "" {
+		return false, nil
 	}
 	params, err := r.preflightCosmosigner(ctx, chainNode)
 	if err != nil {
@@ -335,9 +338,6 @@ func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *app
 	}
 	if importPending, err := r.maybeImportCosmosignerKey(ctx, chainNode, params); err != nil || importPending {
 		return importPending, err
-	}
-	if err := r.ensureTmKMSConfig(ctx, chainNode); err != nil {
-		return false, err
 	}
 	wait, err := r.ensureCosmosignerWithParams(ctx, chainNode, params)
 	if err != nil || wait {
