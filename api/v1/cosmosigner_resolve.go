@@ -14,7 +14,22 @@ import (
 func (nodeSet *ChainNodeSet) HasLegacyPerInstanceCosmosignerStatus(group string) bool {
 	prefix := fmt.Sprintf("%s-%s-", nodeSet.GetName(), group)
 	const suffix = "-signer"
+	modernSentries := map[string]struct{}{}
+	for _, signer := range nodeSet.ResolveCosmosigners() {
+		st := nodeSet.GetCosmosignerStatus(signer.Name)
+		if !signer.TargetsValidator() && st != nil && st.ServingGroup == "" && st.AtEstablishment != nil {
+			modernSentries[signer.Name] = struct{}{}
+		}
+	}
 	for _, st := range nodeSet.Status.Cosmosigners {
+		// A modern signer for group foo-1 looks like legacy instance 1 of foo. Validator signers persist
+		// their exact group; sentries persist the at-establishment marker before they can reach teardown.
+		if st.ServingGroup != "" && st.ServingGroup != group {
+			continue
+		}
+		if _, current := modernSentries[st.Name]; current {
+			continue
+		}
 		if !strings.HasPrefix(st.Name, prefix) || !strings.HasSuffix(st.Name, suffix) {
 			continue
 		}

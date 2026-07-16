@@ -70,10 +70,9 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 // .spec.validator.init without a previous spec to diff against. It also backfills nodes upgraded from
 // a version that predates the digest. Returns whether it performed a status update.
 //
-// Once recorded, the digest is never refreshed from the current spec. It is tamper evidence for the
-// no-webhook guard: if admission was temporarily bypassed (for example a fail-open webhook),
-// overwriting the old value would permanently bless a post-genesis change to the immutable validator
-// identity.
+// With admission webhooks enabled, an old/new-validated signer migration may legitimately change the
+// fingerprint, so the recorded baseline follows the admitted spec. With webhooks disabled the digest
+// is the reconcile-time immutability guard and is never refreshed.
 //
 // A LEGACY backfill (digest empty, chainID already set — the node predates this field) cannot blindly
 // trust the current spec's init-ness: an external-genesis node converted to .validator.init before
@@ -103,7 +102,10 @@ func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode
 			}
 		}
 	}
-	if chainNode.Status.GenesisSigningDigest != "" {
+	if chainNode.Status.GenesisSigningDigest == current {
+		return false, nil
+	}
+	if chainNode.Status.GenesisSigningDigest != "" && r.opts != nil && r.opts.DisableWebhooks {
 		return false, nil
 	}
 	chainNode.Status.GenesisSigningDigest = current

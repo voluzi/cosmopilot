@@ -70,12 +70,19 @@ func TestChainNodeSetTargetPodKeepsDiscoveryLabel(t *testing.T) {
 // TestStandaloneTargetPodLabel verifies a standalone cosmosigner node still gets its own label.
 func TestStandaloneTargetPodLabel(t *testing.T) {
 	cn := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "solo"},
-		Spec:       appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "solo",
+			Labels: map[string]string{controllers.LabelChainNodeSet: "victim-nodeset"},
+		},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
 	}
 	v, ok := cosmosignerTargetLabelValue(cn)
 	if !ok || v != "solo-signer" {
 		t.Fatalf("standalone target label = %q, %v; want solo-signer, true", v, ok)
+	}
+	final := WithChainNodeLabels(cn, map[string]string{controllers.LabelCosmosignerTarget: v})
+	if _, present := final[controllers.LabelChainNodeSet]; present {
+		t.Fatalf("standalone signer target pod must not join a ChainNodeSet discovery scope: %+v", final)
 	}
 }
 

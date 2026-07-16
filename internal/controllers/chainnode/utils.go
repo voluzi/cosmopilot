@@ -23,6 +23,11 @@ func WithChainNodeLabels(chainNode *appsv1.ChainNode, additional ...map[string]s
 	for _, m := range additional {
 		labels = utils.MergeMaps(labels, m, controllers.LabelWorkerName)
 	}
+	// A standalone signer-target pod must not inherit a user-supplied ChainNodeSet discovery scope.
+	// Genuine ChainNodeSet children retain the label required by their signer's two-label selector.
+	if !chainNode.IsControlledByChainNodeSet() && labels[controllers.LabelCosmosignerTarget] != "" {
+		delete(labels, controllers.LabelChainNodeSet)
+	}
 	return labels
 }
 

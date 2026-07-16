@@ -90,6 +90,32 @@ func TestResolveCosmosignersPerGroup(t *testing.T) {
 	assert.Equal(t, "sentry-key", signers[0].SoftwareKeySecret)
 }
 
+func TestHasLegacyPerInstanceCosmosignerStatusIgnoresModernNumericGroup(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Validator: &NodeSetValidatorConfig{}, Cosmosigner: &Cosmosigner{}},
+			{Name: "foo-1", Validator: &NodeSetValidatorConfig{}, Cosmosigner: &Cosmosigner{}},
+		}},
+		Status: ChainNodeSetStatus{Cosmosigners: []CosmosignerStatus{
+			{Name: "cs-foo-signer", ServingGroup: "foo"},
+			{Name: "cs-foo-1-signer", ServingGroup: "foo-1"},
+		}},
+	}
+
+	assert.False(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Status.Cosmosigners[1].ServingGroup = "foo"
+	assert.True(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Spec.Nodes[1].Validator = nil
+	nodeSet.Status.Cosmosigners[1] = CosmosignerStatus{Name: "cs-foo-1-signer", AtEstablishment: ptr.To("")}
+	assert.False(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Status.Cosmosigners[1].AtEstablishment = nil
+	assert.True(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+}
+
 // TestResolveCosmosignersMultiInstanceValidatorGroup verifies a multi-instance validator group with
 // a cosmosigner is ONE validator: the webhook accepts it, it resolves to a single signer targeting
 // the whole group (one consensus identity, N redundant signing endpoints), and an explicit
