@@ -264,14 +264,34 @@ func TestPrepareCosmosignerImportsStopsWhileSignerScalesDown(t *testing.T) {
 func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes:         []appsv1.NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}},
+			Ingresses:     []appsv1.GlobalIngressConfig{{Name: "rpc-signer"}},
+			GatewayRoutes: []appsv1.GlobalGatewayConfig{{Name: "grpc-signer-privval"}},
+		},
 	}
 	r := newValidatorTestReconciler(t, nodeSet)
-	ownedReserved := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
-		Name: "test-nodeset-fullnodes-signer", Namespace: "default",
-		Labels: map[string]string{controllers.LabelScope: scopeGroup},
-	}}
-	require.NoError(t, controllerutil.SetControllerReference(nodeSet, ownedReserved, r.Scheme))
-	require.NoError(t, r.Create(context.Background(), ownedReserved))
+	ownedService := func(name, scope string) *corev1.Service {
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default", Labels: map[string]string{controllers.LabelScope: scope},
+		}}
+		require.NoError(t, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme))
+		return svc
+	}
+	legacyNames := []string{
+		"test-nodeset-fullnodes-signer",
+		"test-nodeset-global-grpc-signer-privval",
+		"test-nodeset-global-rpc-signer",
+	}
+	for i, name := range legacyNames {
+		scope := scopeGlobal
+		if i == 0 {
+			scope = scopeGroup
+		}
+		require.NoError(t, r.Create(context.Background(), ownedService(name, scope)))
+	}
+	// Owned and correctly scoped is insufficient: this stale name is not derived by the current spec.
+	require.NoError(t, r.Create(context.Background(), ownedService("test-nodeset-unused-signer", scopeGroup)))
 	require.NoError(t, r.Create(context.Background(), &corev1.Service{ObjectMeta: metav1.ObjectMeta{
 		Name: "test-nodeset-rpc-signer", Namespace: "default",
 	}}))
@@ -283,7 +303,7 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, initialized)
 	assert.True(t, nodeSet.Status.LegacySignerServiceNamesInitialized)
-	assert.Equal(t, []string{ownedReserved.Name}, nodeSet.Status.LegacySignerServiceNames)
+	assert.Equal(t, legacyNames, nodeSet.Status.LegacySignerServiceNames)
 
 	initialized, err = r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
 	require.NoError(t, err)

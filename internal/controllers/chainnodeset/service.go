@@ -27,6 +27,17 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 		return false, nil
 	}
 
+	expected := map[string]string{}
+	for i := range nodeSet.Spec.Nodes {
+		expected[nodeSet.Spec.Nodes[i].GetServiceName(nodeSet)] = scopeGroup
+	}
+	for i := range nodeSet.Spec.Ingresses {
+		expected[nodeSet.Spec.Ingresses[i].GetName(nodeSet)] = scopeGlobal
+	}
+	for i := range nodeSet.Spec.GatewayRoutes {
+		expected[fmt.Sprintf("%s-global-%s", nodeSet.GetName(), nodeSet.Spec.GatewayRoutes[i].Name)] = scopeGlobal
+	}
+
 	services := &corev1.ServiceList{}
 	if err := r.List(ctx, services, client.InNamespace(nodeSet.GetNamespace())); err != nil {
 		return false, err
@@ -37,8 +48,8 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 		if !metav1.IsControlledBy(svc, nodeSet) {
 			continue
 		}
-		scope := svc.GetLabels()[controllers.LabelScope]
-		if scope != scopeGroup && scope != scopeGlobal {
+		scope, derived := expected[svc.GetName()]
+		if !derived || svc.GetLabels()[controllers.LabelScope] != scope {
 			continue
 		}
 		if strings.HasSuffix(svc.GetName(), "-signer") || strings.HasSuffix(svc.GetName(), "-signer-privval") {
