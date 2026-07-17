@@ -1,5 +1,11 @@
 # Using TmKMS
 
+:::danger[Deprecated]
+TmKMS support is deprecated and will be removed in a future version of Cosmopilot. Existing
+configurations remain supported during the deprecation period, but new deployments should use
+[`Cosmosigner`](./cosmosigner.md), and existing validators should plan a migration.
+:::
+
 `TmKMS` (Tendermint Key Management System) allows you to secure your consensus private key by keeping it off-chain and using an external signing mechanism. `Cosmopilot` integrates with `TmKMS` to ensure your validator’s private key is securely managed.
 
 Currently, `Cosmopilot` supports the **HashiCorp Vault** provider for secure key storage and signing.

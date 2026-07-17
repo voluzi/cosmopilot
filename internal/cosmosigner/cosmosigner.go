@@ -2,7 +2,10 @@ package cosmosigner
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
+	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -32,6 +35,7 @@ const (
 
 	// containerName is the name of the signer container.
 	containerName = "cosmosigner"
+	configHashEnv = "ROLLME"
 
 	// discoveryServiceSuffix names the headless service the signer uses to discover target nodes.
 	discoveryServiceSuffix = "-privval"
@@ -173,16 +177,62 @@ func (p Params) ConfigYAML() (string, error) {
 	return p.BuildConfig().Render()
 }
 
-// ConfigMap builds the ConfigMap holding the rendered config.yaml.
-func (p Params) ConfigMap(configYAML string) *corev1.ConfigMap {
+func (p Params) configData(configYAML string) (map[string]string, error) {
+	data := map[string]string{configFileName: configYAML}
+	if p.Replicas <= 1 {
+		return data, nil
+	}
+
+	data[p.Name+"-0.yaml"] = configYAML
+	followerConfig := &Config{}
+	if err := yaml.Unmarshal([]byte(configYAML), followerConfig); err != nil {
+		return nil, fmt.Errorf("parsing rendered cosmosigner config: %w", err)
+	}
+	followerConfig.Raft.Bootstrap = false
+	followerYAML, err := followerConfig.Render()
+	if err != nil {
+		return nil, err
+	}
+	for i := int32(1); i < p.Replicas; i++ {
+		data[fmt.Sprintf("%s-%d.yaml", p.Name, i)] = followerYAML
+	}
+	return data, nil
+}
+
+func configDataHash(data map[string]string) string {
+	if len(data) == 1 {
+		if configYAML, ok := data[configFileName]; ok {
+			return utils.Sha256(configYAML)
+		}
+	}
+
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var payload strings.Builder
+	for _, key := range keys {
+		fmt.Fprintf(&payload, "%d:%s%d:%s", len(key), key, len(data[key]), data[key])
+	}
+	return utils.Sha256(payload.String())
+}
+
+// ConfigMap builds the ConfigMap holding the canonical config.yaml and, for an HA signer, the
+// per-pod copies that differ only in which ordinal bootstraps raft.
+func (p Params) ConfigMap(configYAML string) (*corev1.ConfigMap, error) {
+	data, err := p.configData(configYAML)
+	if err != nil {
+		return nil, err
+	}
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.Name,
 			Namespace: p.Namespace,
 			Labels:    p.Labels,
 		},
-		Data: map[string]string{configFileName: configYAML},
-	}
+		Data: data,
+	}, nil
 }
 
 // RaftService builds the headless governing service that provides stable per-replica DNS for the
@@ -243,6 +293,10 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad cosmosigner stateStorageSize: %w", err)
 	}
+	configData, err := p.configData(configYAML)
+	if err != nil {
+		return nil, err
+	}
 
 	volumes := []corev1.Volume{
 		{
@@ -259,6 +313,14 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 	volumeMounts := []corev1.VolumeMount{
 		{Name: dataVolumeName, MountPath: dataMountPath},
 		{Name: "config", MountPath: configMountPath},
+	}
+	if p.Replicas > 1 {
+		volumeMounts[1] = corev1.VolumeMount{
+			Name:        "config",
+			MountPath:   configMountPath + "/" + configFileName,
+			SubPathExpr: "$(POD_NAME).yaml",
+			ReadOnly:    true,
+		}
 	}
 	volumeMounts = append(volumeMounts, p.Backend.volumeMounts()...)
 
@@ -291,7 +353,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 			{Name: "COSMOSIGNER_RAFT_NODE_ID", Value: "$(POD_NAME)"},
 			{Name: "COSMOSIGNER_RAFT_ADVERTISE", Value: fmt.Sprintf("$(POD_NAME).%s:%d", p.raftServiceDNS(), raftPort)},
 			// Force a rollout when the rendered config changes.
-			{Name: "ROLLME", Value: utils.Sha256(configYAML)},
+			{Name: configHashEnv, Value: configDataHash(configData)},
 		},
 		Ports: []corev1.ContainerPort{
 			{Name: raftPortName, ContainerPort: raftPort, Protocol: corev1.ProtocolTCP},
@@ -328,10 +390,8 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas: ptr.To(p.Replicas),
-			// Delete the per-pod state PVCs when the StatefulSet is deleted (including via owner
-			// garbage collection when the ChainNode/ChainNodeSet is deleted), so a recreated signer
-			// never reuses stale raft state. Retained on scale-down, which cannot happen anyway —
-			// replicas are webhook-immutable.
+			// Normal deletion removes per-pod state, including owner garbage collection. A controlled
+			// same-key migration temporarily flips WhenDeleted to Retain before deleting the StatefulSet.
 			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
 				WhenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
 				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,

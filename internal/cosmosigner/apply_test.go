@@ -4,14 +4,17 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -86,6 +89,251 @@ func TestIsRolledOutPropagatesErrors(t *testing.T) {
 	}
 }
 
+func TestScaleDownWaitsForAllSignerPodsGone(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, UID: types.UID("signer-sts-uid"), Generation: 2,
+			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &zero,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+		},
+		Status: appsv1.StatefulSetStatus{
+			ObservedGeneration: 2,
+			Replicas:           0,
+		},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: ns,
+		DeletionTimestamp: &metav1.Time{Time: time.Now()},
+		Finalizers:        []string{"cosmopilot.voluzi.com/test-hold"},
+		OwnerReferences:   []metav1.OwnerReference{ownerRef(sts)},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts, pod).Build()
+
+	quiesced, err := ScaleDown(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quiesced {
+		t.Fatal("a terminating signer pod must block quiescence even when StatefulSet status reports zero replicas")
+	}
+}
+
+func TestScaleDownWaitsForSignerPodAfterStatefulSetIsGone(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: ns,
+		DeletionTimestamp: &metav1.Time{Time: time.Now()},
+		Finalizers:        []string{"cosmopilot.voluzi.com/test-hold"},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+
+	quiesced, err := ScaleDown(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quiesced {
+		t.Fatal("a terminating signer pod must block quiescence after the StatefulSet is gone")
+	}
+}
+
+func TestDeleteStatefulSetWaitsForAllSignerPodsGone(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, UID: types.UID("signer-sts-uid"), Generation: 2,
+			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &zero,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+		},
+		Status: appsv1.StatefulSetStatus{
+			ObservedGeneration: 2,
+			Replicas:           0,
+		},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: ns,
+		DeletionTimestamp: &metav1.Time{Time: time.Now()},
+		Finalizers:        []string{"cosmopilot.voluzi.com/test-hold"},
+		OwnerReferences:   []metav1.OwnerReference{ownerRef(sts)},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts, pod).Build()
+
+	deleted, err := DeleteStatefulSet(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("StatefulSet deletion must remain pending while a terminating signer pod exists")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); err != nil {
+		t.Fatalf("StatefulSet must not be deleted before every signer pod is gone: %v", err)
+	}
+}
+
+func TestDeleteStatefulSetEnablesPVCRetentionBeforeDeleting(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Generation: 1,
+			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &zero,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+		},
+		Status: appsv1.StatefulSetStatus{ObservedGeneration: 1},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts).Build()
+
+	deleted, err := DeleteStatefulSet(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("StatefulSet must not be deleted in the same step that enables PVC retention")
+	}
+	retained := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), clientKey(ns, name), retained); err != nil {
+		t.Fatal(err)
+	}
+	if retained.Spec.PersistentVolumeClaimRetentionPolicy == nil ||
+		retained.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		t.Fatalf("migration deletion did not enable PVC retention: %#v", retained.Spec.PersistentVolumeClaimRetentionPolicy)
+	}
+}
+
+func TestDeleteStatefulSetEnablesScaleRetentionBeforeScaling(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	one := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Generation: 1,
+			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &one,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.DeletePersistentVolumeClaimRetentionPolicyType,
+			},
+		},
+		Status: appsv1.StatefulSetStatus{ObservedGeneration: 1, Replicas: 1},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts).Build()
+
+	deleted, err := DeleteStatefulSet(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("StatefulSet must not be deleted while PVC retention is being enabled")
+	}
+	retained := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), clientKey(ns, name), retained); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(retained.Spec.Replicas, 0) != 1 {
+		t.Fatalf("StatefulSet scaled before WhenScaled retention was enabled: replicas=%d", ptr.Deref(retained.Spec.Replicas, 0))
+	}
+	if retained.Spec.PersistentVolumeClaimRetentionPolicy == nil ||
+		retained.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted != appsv1.RetainPersistentVolumeClaimRetentionPolicyType ||
+		retained.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		t.Fatalf("migration deletion did not enable both PVC retention policies: %#v", retained.Spec.PersistentVolumeClaimRetentionPolicy)
+	}
+}
+
+func TestDeleteStatefulSetWaitsForRetentionGenerationBeforeScaling(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	one := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns, Generation: 2,
+			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &one,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+		},
+		Status: appsv1.StatefulSetStatus{ObservedGeneration: 1, Replicas: 1},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts).Build()
+
+	deleted, err := DeleteStatefulSet(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("StatefulSet must not be deleted before the retention generation is observed")
+	}
+	remaining := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), clientKey(ns, name), remaining); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(remaining.Spec.Replicas, 0) != 1 {
+		t.Fatalf("StatefulSet scaled before the retention generation was observed: replicas=%d", ptr.Deref(remaining.Spec.Replicas, 0))
+	}
+}
+
+func TestDiscoveryEndpointsGoneWaitsForEndpointSlices(t *testing.T) {
+	const ns, name = "default", "mychain-signer"
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-privval-stale", Namespace: ns,
+		Labels: map[string]string{discoveryv1.LabelServiceName: name + discoveryServiceSuffix},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(slice).Build()
+
+	gone, err := DiscoveryEndpointsGone(context.Background(), c, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gone {
+		t.Fatal("a stale discovery EndpointSlice must block signer recreation")
+	}
+	if err := c.Delete(context.Background(), slice); err != nil {
+		t.Fatal(err)
+	}
+	gone, err = DiscoveryEndpointsGone(context.Background(), c, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gone {
+		t.Fatal("discovery endpoints should be gone after the stale EndpointSlice is deleted")
+	}
+}
+
 // fakeOwner builds a minimal client.Object carrying a name/UID, usable both as an owner argument and
 // as a target of metav1.IsControlledBy. PartialObjectMetadata implements client.Object.
 func fakeOwner(name string, uid types.UID) *metav1.PartialObjectMetadata {
@@ -135,6 +383,7 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 		{"foreign statefulset only → torn down", []client.Object{ownedSTS(other)}, true},
 		{"our import pod present → not torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}}}, false},
 		{"foreign import pod only → torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(other)}}}}, true},
+		{"signer replica pod present → not torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns}}}, false},
 		{"our lingering pvc → not torn down", []client.Object{pvc("me-uid")}, false},
 		{"foreign pvc only → torn down", []client.Object{pvc("other-uid")}, true},
 		{"foreign statefulset + our lingering pvc → not torn down", []client.Object{ownedSTS(other), pvc("me-uid")}, false},
@@ -397,7 +646,7 @@ func TestApplyOwnedRechecksDataPVCsBeforeUpdatingStatefulSet(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	requireNoError(PreflightDeployable(context.Background(), c, owner, ns, name, 1, false))
+	requireNoError(PreflightDeployable(context.Background(), c, owner, ns, name, 1, false, false))
 	requireNoError(c.Create(context.Background(), &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
 	}}))
@@ -437,7 +686,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	for _, tc := range cases {
 		c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(tc.obj).Build()
 		// usesImportPod=true so the import-pod name is included in the collision checks.
-		err := PreflightDeployable(context.Background(), c, me, ns, name, 1, true)
+		err := PreflightDeployable(context.Background(), c, me, ns, name, 1, true, false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("foreign %s must block preflight; got err=%v", tc.want, err)
 		}
@@ -447,13 +696,21 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	// / pre-provisioned Vault): usesImportPod=false skips that name so an unrelated pod cannot wedge it.
 	foreignImportPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: foreign}}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignImportPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
 		t.Fatalf("a non-uploadGenerated signer must ignore a foreign import pod, got %v", err)
+	}
+	foreignPubkeyPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + pubkeyJobSuffix, Namespace: ns, OwnerReferences: foreign}}
+	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignPubkeyPod).Build()
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, true); err == nil || !strings.Contains(err.Error(), "pubkey pod") {
+		t.Fatalf("an external backend must reserve its pubkey preflight pod, got %v", err)
+	}
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
+		t.Fatalf("a Secret-resolved public key must ignore an unused foreign pubkey pod, got %v", err)
 	}
 
 	foreignReplicaPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns, OwnerReferences: foreign}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignReplicaPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
 		t.Fatalf("a foreign signer replica pod must block preflight, got %v", err)
 	}
 
@@ -461,7 +718,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: name, Namespace: ns, UID: "signer-sts-uid", OwnerReferences: []metav1.OwnerReference{ownerRef(me)},
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, foreignReplicaPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
 		t.Fatalf("a foreign replica pod must block re-scaling an owned StatefulSet, got %v", err)
 	}
 
@@ -469,7 +726,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: name + "-0", Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(ownedSTS)},
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, ownedReplicaPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
 		t.Fatalf("a replica pod controlled by the owned StatefulSet must remain deployable, got %v", err)
 	}
 
@@ -477,7 +734,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, foreignDataPVC).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
 		t.Fatalf("a foreign retained data PVC must block re-scaling an owned StatefulSet, got %v", err)
 	}
 
@@ -485,13 +742,13 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "me-uid"),
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, ownDataPVC).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
 		t.Fatalf("an owned retained data PVC must remain deployable, got %v", err)
 	}
 
 	// Nothing present (true first rollout): allowed.
 	empty := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
-	if err := PreflightDeployable(context.Background(), empty, me, ns, name, 1, true); err != nil {
+	if err := PreflightDeployable(context.Background(), empty, me, ns, name, 1, true, false); err != nil {
 		t.Fatalf("empty namespace must be deployable, got %v", err)
 	}
 
@@ -503,7 +760,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 			Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
 		},
 	).Build()
-	if err := PreflightDeployable(context.Background(), mine, me, ns, name, 1, true); err != nil {
+	if err := PreflightDeployable(context.Background(), mine, me, ns, name, 1, true, false); err != nil {
 		t.Fatalf("own objects must be deployable, got %v", err)
 	}
 }
@@ -517,21 +774,21 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessRaftService(t *testing.T) {
 	}
 	client := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(normal).Build()
 
-	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false)
+	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false)
 	if err == nil || !strings.Contains(err.Error(), "not headless") {
 		t.Fatalf("owned non-headless raft Service must block preflight, got %v", err)
 	}
 	externalName := normal.DeepCopy()
 	externalName.Spec = corev1.ServiceSpec{Type: corev1.ServiceTypeExternalName, ExternalName: "example.com"}
 	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(externalName).Build()
-	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false); err == nil || !strings.Contains(err.Error(), "not headless") {
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "not headless") {
 		t.Fatalf("owned ExternalName raft Service must block preflight, got %v", err)
 	}
 
 	headless := normal.DeepCopy()
 	headless.Spec.ClusterIP = corev1.ClusterIPNone
 	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(headless).Build()
-	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false); err != nil {
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false); err != nil {
 		t.Fatalf("owned headless raft Service must remain deployable, got %v", err)
 	}
 }
@@ -545,7 +802,7 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessDiscoveryService(t *testing.T
 	}
 	client := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(normal).Build()
 
-	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false)
+	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false)
 	if err == nil || !strings.Contains(err.Error(), "discovery Service") || !strings.Contains(err.Error(), "not headless") {
 		t.Fatalf("owned non-headless discovery Service must block preflight, got %v", err)
 	}
@@ -553,7 +810,7 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessDiscoveryService(t *testing.T
 	headless := normal.DeepCopy()
 	headless.Spec.ClusterIP = corev1.ClusterIPNone
 	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(headless).Build()
-	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false); err != nil {
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false); err != nil {
 		t.Fatalf("owned headless discovery Service must remain deployable, got %v", err)
 	}
 }

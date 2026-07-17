@@ -67,6 +67,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [Cosmosigner](#cosmosigner)
 * [CosmosignerBackend](#cosmosignerbackend)
 * [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
+* [CosmosignerMigrationStatus](#cosmosignermigrationstatus)
 * [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
 * [CosmosignerStatus](#cosmosignerstatus)
 * [CosmosignerVaultBackend](#cosmosignervaultbackend)
@@ -148,12 +149,17 @@ ChainNodeStatus defines the observed state of ChainNode
 | upgrades | All scheduled/completed upgrades performed by cosmopilot on this ChainNode. | [][Upgrade](#upgrade) | false |
 | pubKey | Public key of the validator. | string | false |
 | validatorStatus | Indicates the current status of validator if this node is one. | ValidatorStatus | false |
-| cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity, captured once the chain is established, so the no-webhook reconcile path can reject a later change or removal of the signing configuration. Not meant to be set by hand. | string | false |
+| cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity, captured once a validator signer rolls out. The applied digest and public key below are the lifecycle baseline used for managed migrations. Not meant to be set by hand. | string | false |
+| cosmosignerAppliedDigest | CosmosignerAppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. It is recorded for both validator and sentry signers. | string | false |
+| cosmosignerPublicKey | CosmosignerPublicKey is the canonical base64 consensus public key of the applied signer. | string | false |
+| cosmosignerMigration | CosmosignerMigration records an in-progress break-before-make signer migration. | *[CosmosignerMigrationStatus](#cosmosignermigrationstatus) | false |
+| cosmosignerKeyImported | CosmosignerKeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change without trusting user-editable metadata. Not meant to be set by hand. | string | false |
 | cosmosignerReplicas | CosmosignerReplicas records the raft replica count the managed signer was rolled out with, captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. Not meant to be set by hand. | *int32 | false |
+| cosmosignerValidatorTargeted | CosmosignerValidatorTargeted records whether the managed signer targeted this node as a validator when its deployment locks were initialized. The nullable marker lets the no-webhook path distinguish a pending validator rollout from a sentry after the current spec has already removed both .spec.cosmosigner and .spec.validator. Not meant to be set by hand. | *bool | false |
 | cosmosignerStateStorageSize | CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. Not meant to be set by hand. | string | false |
 | cosmosignerStateStorageClassName | CosmosignerStateStorageClassName records the storage class of the managed signer's raft-state PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default class was selected, while an explicit \"\" means no class was requested. See CosmosignerStateStorageSize. Not meant to be set by hand. | *string | false |
-| cosmosignerAtEstablishment | CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at the moment the chain ID was first recorded. Empty string when no signer targeted a validator at chain establishment — including sentry-mode signers, whose key identity is deliberately excluded so that later retargeting the same key onto a validator does not masquerade as the establishing configuration. It lets the no-webhook reconcile path tell an establishing validator signer (admitted) apart from one introduced afterwards (rejected unless the backend provably imports the registered key). Not meant to be set by hand. | *string | false |
-| cosmosignerServingIdentity | CosmosignerServingIdentity records the effective signing identity of the rolled-out validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on teardown. It lets the no-webhook reconcile path judge a signer REMOVAL from status alone: removal is only admitted when the validator's own signing path still resolves to this same identity (e.g. a software-backed signer that used the validator's own key secret), so the on-chain key keeps signing. Not meant to be set by hand. | string | false |
+| cosmosignerAtEstablishment | CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at the moment the chain ID was first recorded. Empty string when no signer targeted a validator at chain establishment — including sentry-mode signers, whose key identity is deliberately excluded. It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand. | *string | false |
+| cosmosignerServingIdentity | CosmosignerServingIdentity records the effective signing identity of the rolled-out validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on teardown. It records that this signer protected the node's validator role across removal and migration recovery. Not meant to be set by hand. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -166,7 +172,7 @@ ValidatorConfig contains the configuration for running a node as validator.
 | privateKeySecret | Indicates the secret containing the private key to be used by this validator. Defaults to `<chainnode>-priv-key`. Will be created if it does not exist. | *string | false |
 | info | Contains information details about this validator. | *[ValidatorInfo](#validatorinfo) | false |
 | init | Specifies configs and initialization commands for creating a new genesis. | *[GenesisInitConfig](#genesisinitconfig) | false |
-| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node. | *[TmKMS](#tmkms) | false |
+| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.\n\nDeprecated: use .spec.cosmosigner instead. TmKMS will be removed in a future version. | *[TmKMS](#tmkms) | false |
 | createValidator | Indicates that cosmopilot should run create-validator tx to make this node a validator. | *[CreateValidatorConfig](#createvalidatorconfig) | false |
 | accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
 | accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
@@ -252,6 +258,8 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
 | seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
 | cosmosigners | Cosmosigners records controller-managed state for each managed cosmosigner deployment (the top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner). Keyed by the signer's resource name. Not meant to be set by hand. | [][CosmosignerStatus](#cosmosignerstatus) | false |
+| legacySignerServiceNames | LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now reserved for standalone ChainNode signer Services. The controller initializes this once from Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy names without trusting the current, possibly edited spec. | []string | false |
+| legacySignerServiceNamesInitialized | LegacySignerServiceNamesInitialized distinguishes a recorded empty legacy-name set from an old ChainNodeSet whose status predates LegacySignerServiceNames. | bool | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -470,7 +478,7 @@ NodeSetValidatorConfig contains validator configurations.
 | resources | Compute Resources required by the app container. | corev1.ResourceRequirements | false |
 | nodeSelector | Selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. | map[string]string | false |
 | affinity | If specified, the pod's scheduling constraints. | *corev1.Affinity | false |
-| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node. | *[TmKMS](#tmkms) | false |
+| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.\n\nDeprecated: use the corresponding Cosmosigner field instead. TmKMS will be removed in a future version. | *[TmKMS](#tmkms) | false |
 | stateSyncRestore | Configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
 | stateSyncResources | Compute Resources to be used while the node is state-syncing. | corev1.ResourceRequirements | false |
 | createValidator | Indicates cosmopilot should run create-validator tx to make this node a validator. | *[CreateValidatorConfig](#createvalidatorconfig) | false |
@@ -1062,6 +1070,19 @@ CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend.
 
 [Back to Custom Resources](#custom-resources)
 
+#### CosmosignerMigrationStatus
+
+CosmosignerMigrationStatus records enough progress to resume a migration after a controller restart without ever recreating a signer before the previous pods are confirmed gone.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| desiredDigest | DesiredDigest is the desired signer's lifecycle fingerprint. | string | true |
+| desiredPublicKey | DesiredPublicKey is the canonical base64 consensus public key resolved during preflight. | string | true |
+| phase | Phase is the current break-before-make migration stage. | CosmosignerMigrationPhase | true |
+| resetState | ResetState is true when the desired public key differs from the applied key, requiring the old raft-state PVCs to be deleted before recreation. | bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
 #### CosmosignerSoftwareBackend
 
 CosmosignerSoftwareBackend configures the local software signing backend.
@@ -1079,13 +1100,18 @@ CosmosignerStatus is the controller-recorded state of one managed cosmosigner de
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | name | Name is the signer's resource name (<nodeset>-signer \| <nodeset>-<group>-signer \| <nodeset>-<group>-<index>-signer) and the key of this entry. | string | true |
+| resourceName | ResourceName is the stable Kubernetes resource base name used by this signer. It differs from Name only after moving a signer between manifest placements, allowing the new configuration to reuse the old StatefulSet PVCs without renaming them. | string | false |
+| appliedDigest | AppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. Unlike SigningDigest, it is recorded for sentry and validator signers. | string | false |
+| publicKey | PublicKey is the canonical base64 consensus public key of the applied signer backend. | string | false |
+| targetGroups | TargetGroups records the applied target-group set so a signer moved between manifest placements can inherit the stable resource name even when it is not validator-targeted. | []string | false |
+| migration | Migration records an in-progress break-before-make configuration migration. | *[CosmosignerMigrationStatus](#cosmosignermigrationstatus) | false |
 | replicas | Replicas records the raft replica count this signer was rolled out with, so the no-webhook reconcile path can reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. | *int32 | false |
 | stateStorageSize | StateStorageSize records the per-replica raft-state PVC size this signer was rolled out with. Together with StateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. | string | false |
 | stateStorageClassName | StateStorageClassName records the storage class of this signer's raft-state PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default class was selected, while an explicit \"\" means no class was requested. See StateStorageSize. | *string | false |
-| signingDigest | SigningDigest is a fingerprint of this signer's effective signing identity, replica count and target-group set, captured once it has rolled out. It lets the no-webhook reconcile path reject a later change to the signing configuration that would make the validator sign with a key not in the on-chain validator set. | string | false |
-| atEstablishment | AtEstablishment is a write-once record of the on-chain consensus identity this signer was responsible for at the moment the chain ID was first recorded: its validator-targeted identity, or — for a SOFTWARE sentry signer whose privateKeySecret is listed in an ACTIVE (non-zero-instance) validator's spec.validator.init.genesisValidators or spec.nodes[].validator.init.genesisValidators — that sentry key's identity. It is the empty string when the signer was responsible for no such provable on-chain key then; this includes sentries the controller cannot tie to a genesis entry from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key listed only under a zero-instance group, which contributes nothing to genesis), which stay rotatable/removable on the no-webhook path. It lets that path tell an establishing signer (admitted) apart from a validator signer introduced afterwards (nil), and reject a later key change/removal of a genesis-registered software sentry signer. A sentry added after establishment records its provable genesis identity or an empty marker. | *string | false |
-| servingIdentity | ServingIdentity records the effective signing identity this validator-targeted signer served, captured with SigningDigest and cleared on teardown. It lets the no-webhook path judge a REMOVAL: removal is only admitted when the served validator still resolves this identity through its own signing path (e.g. a software-backed signer using the validator's own key). | string | false |
-| servingGroup | ServingGroup records the validator group this signer targets (the reserved \"validator\" name for the legacy singleton). It is locked before rollout so a pre-digest removal fails closed; after rollout, the removal guard checks this group's own path against ServingIdentity. | string | false |
+| signingDigest | SigningDigest is a fingerprint of this signer's effective signing identity, replica count and target-group set, captured once a validator-targeted signer has rolled out. AppliedDigest is the lifecycle baseline used for managed migrations; this field retains validator-serving history. | string | false |
+| atEstablishment | AtEstablishment is a write-once record of the on-chain consensus identity this signer was responsible for at the moment the chain ID was first recorded: its validator-targeted identity, or — for a SOFTWARE sentry signer whose privateKeySecret is listed in an ACTIVE (non-zero-instance) validator's spec.validator.init.genesisValidators or spec.nodes[].validator.init.genesisValidators — that sentry key's identity. It is the empty string when the signer was responsible for no such provable on-chain key then; this includes sentries the controller cannot tie to a genesis entry from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key listed only under a zero-instance group, which contributes nothing to genesis). It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use AppliedDigest and PublicKey. | *string | false |
+| servingIdentity | ServingIdentity records the effective signing identity this validator-targeted signer served, captured with SigningDigest and cleared on teardown. Together with ServingGroup it identifies the validator protected by a stale status entry during removal or manifest-placement migration. | string | false |
+| servingGroup | ServingGroup records the validator group this signer targets (the reserved \"validator\" name for the legacy singleton). It identifies the protected validator during removal and replacement. | string | false |
 | keyImported | KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change. | string | false |
 
 [Back to Custom Resources](#custom-resources)

@@ -201,13 +201,43 @@ func (s ResolvedSigner) TargetsValidator() bool {
 	return s.ValidatorGroup != ""
 }
 
-// Digest fingerprints this signer for status persistence: identity, replica count and target-group
-// set. The NUL-separated, length-prefixed preimage stays unambiguous regardless of group names.
+// SignerUsesLocalValidatorKey reports whether the desired signer path consumes the targeted
+// validator's local priv-key secret, either directly through software signing or by importing it
+// into Vault. It is false for sentries and pre-provisioned Vault/GCP validator signers.
+func (nodeSet *ChainNodeSet) SignerUsesLocalValidatorKey(s ResolvedSigner) bool {
+	if !s.TargetsValidator() || s.Spec == nil {
+		return false
+	}
+	if s.Spec.UsesSoftwareBackend() {
+		return true
+	}
+	if !s.Spec.UsesVaultBackend() {
+		return false
+	}
+
+	initializesGenesis := false
+	if s.ValidatorGroup == ReservedValidatorGroupName {
+		initializesGenesis = nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil
+	} else {
+		for i := range nodeSet.Spec.Nodes {
+			group := &nodeSet.Spec.Nodes[i]
+			if group.Name == s.ValidatorGroup && group.Validator != nil {
+				initializesGenesis = group.Validator.Init != nil
+				break
+			}
+		}
+	}
+	return s.Spec.VaultUploadsGenerated(initializesGenesis)
+}
+
+// Digest fingerprints this signer for lifecycle status: identity, replica count, target-group set,
+// and the validator group it serves. Including ValidatorGroup makes moving validator status between
+// already-targeted groups a migration even when the target-name set itself is unchanged.
 func (s ResolvedSigner) Digest() string {
 	groups := append([]string(nil), s.TargetGroups...)
 	sort.Strings(groups)
-	preimage := fmt.Sprintf("%s\x00%d\x00%d\x00%s",
-		s.Identity(), s.Spec.GetReplicas(), len(groups), strings.Join(groups, "\x00"))
+	preimage := fmt.Sprintf("%s\x00%d\x00%d\x00%s\x00%s",
+		s.Identity(), s.Spec.GetReplicas(), len(groups), strings.Join(groups, "\x00"), s.ValidatorGroup)
 	return utils.Sha256(preimage)
 }
 
@@ -274,6 +304,25 @@ func (nodeSet *ChainNodeSet) RemoveCosmosignerStatus(name string) {
 	nodeSet.Status.Cosmosigners = out
 }
 
+// CosmosignerResourceName returns the stable Kubernetes resource name for a resolved signer.
+func (nodeSet *ChainNodeSet) CosmosignerResourceName(s ResolvedSigner) string {
+	if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.ResourceName != "" {
+		return st.ResourceName
+	}
+	return s.Name
+}
+
+// CosmosignerStatusResourceName returns the stable Kubernetes resource name recorded in status.
+func CosmosignerStatusResourceName(st *CosmosignerStatus) string {
+	if st != nil && st.ResourceName != "" {
+		return st.ResourceName
+	}
+	if st == nil {
+		return ""
+	}
+	return st.Name
+}
+
 // validatorConfigForGroup returns the validator config of a group (the legacy singleton via
 // ReservedValidatorGroupName, or a named group), or nil when the group has no validator.
 func (nodeSet *ChainNodeSet) validatorConfigForGroup(group string) *NodeSetValidatorConfig {
@@ -287,53 +336,6 @@ func (nodeSet *ChainNodeSet) validatorConfigForGroup(group string) *NodeSetValid
 		}
 	}
 	return nil
-}
-
-// validatorEffectiveIdentity returns the effective consensus-key fingerprint of a validator group's
-// single signing identity: the identity of whatever managed signer serves it, or — when none does —
-// the validator's own local/tmKMS path (its representative instance 0). Empty when the group has no
-// validator, has zero instances, or no longer exists.
-func (nodeSet *ChainNodeSet) validatorEffectiveIdentity(group string) string {
-	if group == "" {
-		return ""
-	}
-	if id, ok := nodeSet.groupSignerIdentity(group); ok {
-		return id
-	}
-	cfg := nodeSet.validatorConfigForGroup(group)
-	if cfg == nil {
-		return ""
-	}
-	if group != ReservedValidatorGroupName {
-		for i := range nodeSet.Spec.Nodes {
-			if nodeSet.Spec.Nodes[i].Name == group && nodeSet.Spec.Nodes[i].GetInstances() == 0 {
-				return ""
-			}
-		}
-	}
-	return nodeSet.validatorGroupSigningIdentity(group, cfg)
-}
-
-// signerSameKeyMigration reports whether, on an established chain, the validator this signer serves
-// already resolves the signer's key through its previous (old-revision) signing path — e.g. a
-// tmKMS→cosmosigner migration on the same Vault key. Equivalent keys compare equal via the
-// normalized signing identity, so such a migration is not misread as a key change. Only meaningful
-// for a validator-targeted signer.
-func (nodeSet *ChainNodeSet) signerSameKeyMigration(old *ChainNodeSet, s ResolvedSigner) bool {
-	if old == nil || old.Status.ChainID == "" || s.ValidatorGroup == "" {
-		return false
-	}
-	oldIdentity := old.validatorEffectiveIdentity(s.ValidatorGroup)
-	return oldIdentity != "" && oldIdentity == s.Identity()
-}
-
-// signerDigestRecordedMatches reports whether the status already records this exact signer's digest,
-// proving the current identity was rolled out and served. Used on the no-webhook path (old == nil) as
-// the same-key waiver: a newly added signer (no entry, or a different digest) stays subject to the
-// registers-genesis rule.
-func (nodeSet *ChainNodeSet) signerDigestRecordedMatches(s ResolvedSigner) bool {
-	st := nodeSet.GetCosmosignerStatus(s.Name)
-	return st != nil && st.SigningDigest != "" && st.SigningDigest == s.Digest()
 }
 
 // ServedValidatorResolvesIdentity reports whether the specific validator a removed signer served

@@ -10,6 +10,43 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestChainNodeSetValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
+	tmkms := func(key string) *TmKMS {
+		return &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
+			Address: "https://vault:8200",
+			Key:     key,
+		}}}
+	}
+
+	t.Run("legacy validator", func(t *testing.T) {
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
+			Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Validator: &NodeSetValidatorConfig{TmKMS: tmkms("legacy-key")},
+		}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
+		}, []string(warnings))
+	})
+
+	t.Run("validator group", func(t *testing.T) {
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(1),
+				Validator: &NodeSetValidatorConfig{TmKMS: tmkms("group-key")},
+			}},
+		}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			".spec.nodes[0].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[0].cosmosigner",
+		}, []string(warnings))
+	})
+}
+
 func TestChainNodeSetValidateGenesis(t *testing.T) {
 	initConfig := &GenesisInitConfig{
 		ChainID:     "test-localnet",
@@ -635,6 +672,100 @@ func TestChainNodeSetValidateTmKMSSkipsDefaultPrivKey(t *testing.T) {
 		err := nodeSet.validateUniqueSigningKeys()
 		require.Error(t, err, "uploadGenerated TmKMS create-validator must reserve its default priv-key")
 		assert.Contains(t, err.Error(), "ns-a-0-priv-key")
+	})
+}
+
+func TestChainNodeSetValidateReservesMigratedLocalKeySecret(t *testing.T) {
+	base := func() *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
+			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+				{
+					Name:        "primary",
+					Instances:   ptr.To(1),
+					Validator:   &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("shared")},
+					Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Vault: &CosmosignerVaultBackend{Address: "https://vault.example.com:8200", KeyName: "primary", TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"}}}},
+				},
+				{Name: "secondary", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("shared")}},
+			}},
+		}
+	}
+
+	t.Run("post-establishment migration keeps the former local key reserved", func(t *testing.T) {
+		nodeSet := base()
+		nodeSet.Status.ChainID = "chain-1"
+		err := nodeSet.validateUniqueSigningKeys()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "privateKeySecret")
+	})
+
+	t.Run("pre-establishment external signer leaves the local key unused", func(t *testing.T) {
+		assert.NoError(t, base().validateUniqueSigningKeys())
+	})
+
+	t.Run("at-establishment signer proves the local key was unused", func(t *testing.T) {
+		nodeSet := base()
+		nodeSet.Status.ChainID = "chain-1"
+		signer := nodeSet.ResolveCosmosigners()[0]
+		identity := signer.ValidatorTargetedIdentity()
+		nodeSet.Status.Cosmosigners = []CosmosignerStatus{{
+			Name: signer.Name, ServingGroup: signer.ValidatorGroup, AtEstablishment: &identity,
+			LocalKeyEverServed: ptr.To(false),
+		}}
+		assert.NoError(t, nodeSet.validateUniqueSigningKeys())
+	})
+
+	t.Run("round trip through the local key keeps it reserved", func(t *testing.T) {
+		nodeSet := base()
+		nodeSet.Status.ChainID = "chain-1"
+		signer := nodeSet.ResolveCosmosigners()[0]
+		identity := signer.ValidatorTargetedIdentity()
+		nodeSet.Status.Cosmosigners = []CosmosignerStatus{{
+			Name: signer.Name, ServingGroup: signer.ValidatorGroup, AtEstablishment: &identity,
+			LocalKeyEverServed: ptr.To(true),
+		}}
+		err := nodeSet.validateUniqueSigningKeys()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "privateKeySecret")
+	})
+
+	t.Run("manifest placement move retains the unused-local-key proof", func(t *testing.T) {
+		nodeSet := base()
+		nodeSet.Status.ChainID = "chain-1"
+		oldSigner := nodeSet.ResolveCosmosigners()[0]
+		identity := oldSigner.ValidatorTargetedIdentity()
+		nodeSet.Status.Cosmosigners = []CosmosignerStatus{{
+			Name: oldSigner.Name, ServingGroup: oldSigner.ValidatorGroup, ServingIdentity: identity,
+			AtEstablishment: &identity, LocalKeyEverServed: ptr.To(false),
+		}}
+		nodeSet.Spec.Cosmosigner = nodeSet.Spec.Nodes[0].Cosmosigner
+		nodeSet.Spec.Cosmosigner.NodeGroups = []string{"primary"}
+		nodeSet.Spec.Nodes[0].Cosmosigner = nil
+
+		assert.NoError(t, nodeSet.validateUniqueSigningKeys())
+	})
+
+	t.Run("current local-key history overrides a stale placement proof", func(t *testing.T) {
+		nodeSet := base()
+		nodeSet.Status.ChainID = "chain-1"
+		oldSigner := nodeSet.ResolveCosmosigners()[0]
+		identity := oldSigner.ValidatorTargetedIdentity()
+		nodeSet.Status.Cosmosigners = []CosmosignerStatus{{
+			Name: oldSigner.Name, ServingGroup: oldSigner.ValidatorGroup, ServingIdentity: identity,
+			AtEstablishment: &identity, LocalKeyEverServed: ptr.To(false),
+		}}
+		nodeSet.Spec.Cosmosigner = nodeSet.Spec.Nodes[0].Cosmosigner
+		nodeSet.Spec.Cosmosigner.NodeGroups = []string{"primary"}
+		nodeSet.Spec.Nodes[0].Cosmosigner = nil
+		currentSigner := nodeSet.ResolveCosmosigners()[0]
+		nodeSet.Status.Cosmosigners = append(nodeSet.Status.Cosmosigners, CosmosignerStatus{
+			Name: currentSigner.Name, ServingGroup: currentSigner.ValidatorGroup, ServingIdentity: identity,
+			AtEstablishment: &identity, LocalKeyEverServed: ptr.To(true),
+		})
+
+		err := nodeSet.validateUniqueSigningKeys()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "privateKeySecret")
 	})
 }
 

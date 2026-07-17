@@ -16,7 +16,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
-func TestRecordGenesisDigestRefreshesOnlyWithWebhooksEnabled(t *testing.T) {
+func TestRecordGenesisDigestRefreshesForManagedSignerMigration(t *testing.T) {
 	tokenSecret := &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
 		Key:                  "token",
@@ -34,14 +34,15 @@ func TestRecordGenesisDigestRefreshesOnlyWithWebhooksEnabled(t *testing.T) {
 	original.Status.GenesisSigningDigest = original.Spec.Validator.GenesisSigningFingerprint("validator-priv-key")
 
 	for _, tc := range []struct {
-		name            string
-		disableWebhooks bool
-		mutateInit      bool
-		wantUpdated     bool
+		name                string
+		disableWebhooks     bool
+		mutateInit          bool
+		wantUpdated         bool
+		wantValidationError bool
 	}{
 		{name: "enabled", wantUpdated: true},
-		{name: "disabled", disableWebhooks: true},
-		{name: "enabled with unrelated init mutation", mutateInit: true},
+		{name: "disabled", disableWebhooks: true, wantUpdated: true},
+		{name: "enabled with unrelated init mutation", mutateInit: true, wantValidationError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			chainNode := original.DeepCopy()
@@ -57,8 +58,12 @@ func TestRecordGenesisDigestRefreshesOnlyWithWebhooksEnabled(t *testing.T) {
 			}
 			require.NotEqual(t, chainNode.Spec.Validator.GenesisSigningFingerprint("validator-priv-key"), chainNode.Status.GenesisSigningDigest)
 			_, err := chainNode.Validate(nil)
-			require.Error(t, err)
-			require.Contains(t, err.Error(), ".spec.validator.init")
+			if tc.wantValidationError {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), ".spec.validator.init")
+			} else {
+				require.NoError(t, err)
+			}
 
 			scheme := runtime.NewScheme()
 			require.NoError(t, appsv1.AddToScheme(scheme))

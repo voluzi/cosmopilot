@@ -170,12 +170,66 @@ type CosmosignerGcpKmsBackend struct {
 	CredentialsSecret *corev1.SecretKeySelector `json:"credentialsSecret,omitempty"`
 }
 
+// CosmosignerMigrationPhase is the persisted stage of a break-before-make signer migration.
+type CosmosignerMigrationPhase string
+
+const (
+	CosmosignerMigrationQuiescing      CosmosignerMigrationPhase = "Quiescing"
+	CosmosignerMigrationDeleting       CosmosignerMigrationPhase = "DeletingStatefulSet"
+	CosmosignerMigrationResettingState CosmosignerMigrationPhase = "ResettingState"
+	CosmosignerMigrationRetargeting    CosmosignerMigrationPhase = "RetargetingTargets"
+	CosmosignerMigrationRecreating     CosmosignerMigrationPhase = "Recreating"
+	CosmosignerMigrationRollingOut     CosmosignerMigrationPhase = "RollingOut"
+)
+
+// CosmosignerMigrationStatus records enough progress to resume a migration after a controller
+// restart without ever recreating a signer before the previous pods are confirmed gone.
+type CosmosignerMigrationStatus struct {
+	// DesiredDigest is the desired signer's lifecycle fingerprint.
+	DesiredDigest string `json:"desiredDigest"`
+
+	// DesiredPublicKey is the canonical base64 consensus public key resolved during preflight.
+	DesiredPublicKey string `json:"desiredPublicKey"`
+
+	// Phase is the current break-before-make migration stage.
+	Phase CosmosignerMigrationPhase `json:"phase"`
+
+	// ResetState is true when the desired public key differs from the applied key, requiring the
+	// old raft-state PVCs to be deleted before recreation.
+	ResetState bool `json:"resetState,omitempty"`
+}
+
 // CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All
 // fields are controller-managed and not meant to be set by hand.
 type CosmosignerStatus struct {
 	// Name is the signer's resource name (<nodeset>-signer | <nodeset>-<group>-signer |
 	// <nodeset>-<group>-<index>-signer) and the key of this entry.
 	Name string `json:"name"`
+
+	// ResourceName is the stable Kubernetes resource base name used by this signer. It differs from
+	// Name only after moving a signer between manifest placements, allowing the new configuration to
+	// reuse the old StatefulSet PVCs without renaming them.
+	// +optional
+	ResourceName string `json:"resourceName,omitempty"`
+
+	// AppliedDigest is the lifecycle fingerprint of the configuration currently represented by the
+	// signer StatefulSet. Unlike SigningDigest, it is recorded for sentry and validator signers.
+	// +optional
+	AppliedDigest string `json:"appliedDigest,omitempty"`
+
+	// PublicKey is the canonical base64 consensus public key of the applied signer backend.
+	// +optional
+	PublicKey string `json:"publicKey,omitempty"`
+
+	// TargetGroups records the applied target-group set so a signer moved between manifest
+	// placements can inherit the stable resource name even when it is not validator-targeted.
+	// +optional
+	// +listType=set
+	TargetGroups []string `json:"targetGroups,omitempty"`
+
+	// Migration records an in-progress break-before-make configuration migration.
+	// +optional
+	Migration *CosmosignerMigrationStatus `json:"migration,omitempty"`
 
 	// Replicas records the raft replica count this signer was rolled out with, so the no-webhook
 	// reconcile path can reject a later replica change: scaling the embedded raft cluster is not a
@@ -198,9 +252,8 @@ type CosmosignerStatus struct {
 	StateStorageClassName *string `json:"stateStorageClassName,omitempty"`
 
 	// SigningDigest is a fingerprint of this signer's effective signing identity, replica count and
-	// target-group set, captured once it has rolled out. It lets the no-webhook reconcile path reject
-	// a later change to the signing configuration that would make the validator sign with a key not in
-	// the on-chain validator set.
+	// target-group set, captured once a validator-targeted signer has rolled out. AppliedDigest is the
+	// lifecycle baseline used for managed migrations; this field retains validator-serving history.
 	// +optional
 	SigningDigest string `json:"signingDigest,omitempty"`
 
@@ -211,26 +264,28 @@ type CosmosignerStatus struct {
 	// — that sentry key's identity. It is the empty string when the signer was responsible for no such
 	// provable on-chain key then; this includes sentries the controller cannot tie to a genesis entry
 	// from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key
-	// listed only under a zero-instance group, which contributes nothing to genesis), which stay
-	// rotatable/removable on the no-webhook path. It lets that path tell an establishing signer
-	// (admitted) apart from a validator signer introduced afterwards (nil), and reject a later
-	// key change/removal of a genesis-registered software sentry signer. A sentry added after
-	// establishment records its provable genesis identity or an empty marker.
+	// listed only under a zero-instance group, which contributes nothing to genesis). It protects
+	// incomplete first rollouts and supports recovery of legacy status; managed migrations use
+	// AppliedDigest and PublicKey.
 	// +optional
 	AtEstablishment *string `json:"atEstablishment,omitempty"`
 
 	// ServingIdentity records the effective signing identity this validator-targeted signer served,
-	// captured with SigningDigest and cleared on teardown. It lets the no-webhook path judge a REMOVAL:
-	// removal is only admitted when the served validator still resolves this identity through its own
-	// signing path (e.g. a software-backed signer using the validator's own key).
+	// captured with SigningDigest and cleared on teardown. Together with ServingGroup it identifies
+	// the validator protected by a stale status entry during removal or manifest-placement migration.
 	// +optional
 	ServingIdentity string `json:"servingIdentity,omitempty"`
 
 	// ServingGroup records the validator group this signer targets (the reserved "validator" name for
-	// the legacy singleton). It is locked before rollout so a pre-digest removal fails closed; after
-	// rollout, the removal guard checks this group's own path against ServingIdentity.
+	// the legacy singleton). It identifies the protected validator during removal and replacement.
 	// +optional
 	ServingGroup string `json:"servingGroup,omitempty"`
+
+	// LocalKeyEverServed is a monotonic record of whether this validator signer may ever have served
+	// through the validator's local key secret. False is recorded only when the controller observes a
+	// pre-provisioned external signer at chain establishment; nil means the history is unknown.
+	// +optional
+	LocalKeyEverServed *bool `json:"localKeyEverServed,omitempty"`
 
 	// KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret +
 	// key material). It lets the controller skip a repeated import and detect a source/target change.

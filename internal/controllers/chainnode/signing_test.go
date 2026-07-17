@@ -233,7 +233,9 @@ func TestReconcileSigningConfigsWaitsForCosmosignerRollout(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &Reconciler{
-		Client:    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&k8sappsv1.StatefulSet{}).WithObjects(keySecret).Build(),
+		Client: fake.NewClientBuilder().WithScheme(scheme).
+			WithStatusSubresource(&appsv1.ChainNode{}, &k8sappsv1.StatefulSet{}).
+			WithObjects(chainNode, keySecret).Build(),
 		ClientSet: clientSet,
 		Scheme:    scheme,
 		recorder:  record.NewFakeRecorder(10),
@@ -271,6 +273,67 @@ func TestReconcileSigningConfigsWaitsForCosmosignerRollout(t *testing.T) {
 	}
 	if got := deleteRequests.Load(); got != 0 {
 		t.Fatalf("signing preparation issued %d tmKMS delete requests before the node pod transition, want 0", got)
+	}
+}
+
+func TestReconcileSigningConfigsKeepsTmKMSForChainNodeSetSignerTarget(t *testing.T) {
+	const namespace, name = "default", "validator"
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sappsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    map[string]string{controllers.LabelCosmosignerTarget: "nodeset-signer"},
+		},
+		Spec: appsv1.ChainNodeSpec{
+			Validator:          &appsv1.ValidatorConfig{},
+			RemoteSignerTarget: true,
+		},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain-1"},
+	}
+
+	var deleteRequests atomic.Int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodDelete {
+			deleteRequests.Add(1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","reason":"NotFound","code":404}`)),
+			Request:    req,
+		}, nil
+	})
+	clientSet, err := kubernetes.NewForConfig(&rest.Config{Host: "https://kubernetes.invalid", Transport: transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Reconciler{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		ClientSet: clientSet,
+		Scheme:    scheme,
+		opts:      &controllers.ControllerRunOptions{},
+	}
+
+	pending, err := r.reconcileSigningConfigs(context.Background(), chainNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending {
+		t.Fatal("a ChainNodeSet-managed target has no standalone signer transition to wait for")
+	}
+	if got := deleteRequests.Load(); got != 0 {
+		t.Fatalf("remote-signer child issued %d tmKMS delete requests before its pod transition, want 0", got)
 	}
 }
 

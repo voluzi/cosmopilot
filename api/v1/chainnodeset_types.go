@@ -277,6 +277,8 @@ type NodeSetValidatorConfig struct {
 
 	// TmKMS configuration for signing commits for this validator.
 	// When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.
+	//
+	// Deprecated: use the corresponding Cosmosigner field instead. TmKMS will be removed in a future version.
 	// +optional
 	TmKMS *TmKMS `json:"tmKMS,omitempty"`
 

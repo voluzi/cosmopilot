@@ -46,6 +46,19 @@ func (nodeSet *ChainNodeSet) ValidateDelete(_ context.Context, obj *ChainNodeSet
 	return nil, nil
 }
 
+func (nodeSet *ChainNodeSet) tmKMSDeprecationWarnings() admission.Warnings {
+	warnings := admission.Warnings{}
+	if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.TmKMS != nil {
+		warnings = append(warnings, ".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner")
+	}
+	for i, group := range nodeSet.Spec.Nodes {
+		if group.Validator != nil && group.Validator.TmKMS != nil {
+			warnings = append(warnings, fmt.Sprintf(".spec.nodes[%d].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[%d].cosmosigner", i, i))
+		}
+	}
+	return warnings
+}
+
 func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, error) {
 	// Count validators and how many of them initialize a new genesis.
 	initValidators := 0
@@ -351,13 +364,12 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if old.Spec.Validator != nil && old.Spec.Validator.Init != nil &&
 			nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
 			defaultPrivKeySecret := fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName())
-			// When a cosmosigner serves this validator on either side, compare through the effective
-			// signing identity (same-key signer migrations compare equal); otherwise keep the raw
-			// fingerprint.
+			// A managed signer migration may intentionally change signing keys. Keep the non-signing
+			// genesis configuration immutable while leaving the on-chain key choice to the user.
 			changed := genesisSigningMaterialChanged(old.Spec.Validator, nodeSet.Spec.Validator, defaultPrivKeySecret)
 			if old.groupCosmosigner(ReservedValidatorGroupName) != nil || nodeSet.groupCosmosigner(ReservedValidatorGroupName) != nil {
-				changed = old.nodeSetEffectiveGenesisFingerprint(ReservedValidatorGroupName, old.Spec.Validator) !=
-					nodeSet.nodeSetEffectiveGenesisFingerprint(ReservedValidatorGroupName, nodeSet.Spec.Validator)
+				changed = genesisConfigurationFingerprint(old.Spec.Validator.Init, old.Spec.Validator.Info, old.Spec.Validator.GetAccountPrefix(), old.Spec.Validator.GetValPrefix(), old.Spec.Validator.GetAccountHDPath()) !=
+					genesisConfigurationFingerprint(nodeSet.Spec.Validator.Init, nodeSet.Spec.Validator.Info, nodeSet.Spec.Validator.GetAccountPrefix(), nodeSet.Spec.Validator.GetValPrefix(), nodeSet.Spec.Validator.GetAccountHDPath())
 			}
 			if changed {
 				return nil, fmt.Errorf(".spec.validator signing material or genesis parameters cannot be changed after genesis has been created: they are part of the immutable genesis validator set")
@@ -407,10 +419,8 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			defaultPrivKeySecret := fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group.Name)
 			changed := genesisSigningMaterialChanged(og.Validator, group.Validator, defaultPrivKeySecret)
 			if old.groupCosmosigner(group.Name) != nil || nodeSet.groupCosmosigner(group.Name) != nil {
-				// A cosmosigner (top-level or per-group) serves this group on either side:
-				// identity-normalized comparison so a same-key signer migration passes.
-				changed = old.nodeSetEffectiveGenesisFingerprint(group.Name, og.Validator) !=
-					nodeSet.nodeSetEffectiveGenesisFingerprint(group.Name, group.Validator)
+				changed = genesisConfigurationFingerprint(og.Validator.Init, og.Validator.Info, og.Validator.GetAccountPrefix(), og.Validator.GetValPrefix(), og.Validator.GetAccountHDPath()) !=
+					genesisConfigurationFingerprint(group.Validator.Init, group.Validator.Info, group.Validator.GetAccountPrefix(), group.Validator.GetValPrefix(), group.Validator.GetAccountHDPath())
 			}
 			if changed {
 				return nil, fmt.Errorf(".spec.nodes[%d] genesis-initializing validator group %q signing material or genesis parameters cannot be changed after creation: they are part of the immutable genesis validator set", i, group.Name)
@@ -468,7 +478,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		}
 	}
 
-	return nil, nil
+	return nodeSet.tmKMSDeprecationWarnings(), nil
 }
 
 // validateCosmosigner validates every managed cosmosigner a ChainNodeSet runs: the top-level
@@ -478,8 +488,8 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 // validator with N redundant signing endpoints (multiple validators require multiple groups, each
 // with its own signer and key).
 //
-// old is the previous revision on the update path (nil on create); it enables the same-key
-// migration waiver mirroring the ChainNode webhook.
+// old is the previous revision on the update path (nil on create); it enables lifecycle-diff and
+// migration-readiness checks against the controller-recorded applied public key.
 func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 	legacyStandaloneSignerServices := map[string]struct{}{}
 	rememberServiceNames := func(source *ChainNodeSet) {
@@ -728,7 +738,7 @@ func (nodeSet *ChainNodeSet) validateGroupCosmosigner(i int, g *NodeGroupSpec) e
 // validateResolvedSigner applies the backend/target consistency rules to one resolved signer,
 // regardless of whether it came from the top-level or a per-group block. A sentry signer (no
 // validator target) must carry its own key; a validator-targeted signer must reuse that validator's
-// registered consensus key.
+// selected consensus key.
 func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s ResolvedSigner) error {
 	c := s.Spec
 	path := nodeSet.signerFieldPath(s)
@@ -757,14 +767,26 @@ func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s Resolve
 	// or create-validator), Cosmopilot registers the validator's local key. The signer must therefore
 	// use that same key: only the software backend (which references it) or Vault with uploadGenerated
 	// (which imports it — implicitly auto-defaulted for genesis-init targets). A pre-provisioned
-	// Vault/GCP key would register a different pubkey than the signer holds. Waived for a same-key
-	// migration on an established chain (the previous signing path already put this exact key on-chain,
-	// e.g. tmKMS→cosmosigner on the same Vault key). On the no-webhook path (old == nil) the waiver
-	// requires the status-recorded signing digest of THIS signer to match the current spec.
+	// Vault/GCP key may differ from the locally registered pubkey. On an established chain this is an
+	// explicit operator migration: Cosmopilot handles break-before-make and state reset, while the user
+	// remains responsible for the on-chain validator key. Creating a new validator is not a migration:
+	// its locally registered key must still match the signer.
 	registers := targetValidator.Init != nil || targetValidator.CreateValidator != nil
-	sameKeyWaiver := nodeSet.signerSameKeyMigration(old, s) ||
-		(old == nil && nodeSet.signerDigestRecordedMatches(s))
-	if registers && !sameKeyWaiver {
+	registrationRecorded := func(candidate *ChainNodeSet) bool {
+		for _, validator := range candidate.Status.Validators {
+			if validator.Group == s.ValidatorGroup && validator.Address != "" {
+				return true
+			}
+		}
+		return false
+	}
+	migrationWaiver := false
+	if old != nil && old.Status.ChainID != "" {
+		migrationWaiver = registrationRecorded(old)
+	} else if old == nil && nodeSet.Status.ChainID != "" {
+		migrationWaiver = registrationRecorded(nodeSet)
+	}
+	if registers && !migrationWaiver {
 		matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(targetValidator.Init != nil)
 		if !matches {
 			return fmt.Errorf("%s targeting a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer", path)
@@ -861,6 +883,12 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			if err := validateCosmosignerStateStorageImmutable(path, os.Spec, ns.Spec); err != nil {
 				return err
 			}
+			if old.Status.ChainID != "" && os.Digest() != ns.Digest() {
+				st := old.GetCosmosignerStatus(os.Name)
+				if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
+					return fmt.Errorf("%s cannot be migrated until the controller records its applied public key; restore the previous configuration and wait for one reconcile", path)
+				}
+			}
 		} else if st := old.GetCosmosignerStatus(ns.Name); st != nil {
 			// Re-added while a previous incarnation's teardown is still in flight: its raft PVCs may
 			// still exist, so the replica count AND the PVC template must match until teardown clears
@@ -880,6 +908,28 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 		return nil
 	}
 
+	desiredNames := make(map[string]struct{}, len(nodeSet.ResolveCosmosigners()))
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		desiredNames[s.Name] = struct{}{}
+	}
+	addedSigner := false
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if _, existed := oldSigners[s.Name]; !existed {
+			addedSigner = true
+		}
+	}
+	if addedSigner {
+		for _, s := range old.ResolveCosmosigners() {
+			if _, kept := desiredNames[s.Name]; kept {
+				continue
+			}
+			st := old.GetCosmosignerStatus(s.Name)
+			if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
+				return fmt.Errorf("cosmosigner %q cannot be moved to a new manifest placement until the controller records its applied public key; restore the previous configuration and wait for one reconcile", s.Name)
+			}
+		}
+	}
+
 	// A multi-instance validator group changes meaning when signer-targeted: without a signer every
 	// instance is an independent validator, while with one signer the instances are redundant
 	// endpoints for a single identity. That classification cannot change after the chain exists.
@@ -897,89 +947,6 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			continue
 		}
 		return fmt.Errorf(".spec.nodes[%d]: a cosmosigner cannot be added to or removed from established multi-instance validator group %q: it would change the group between multiple on-chain validators and one signing identity", i, group.Name)
-	}
-
-	// Retargeting a validator-serving signer to different groups after establishment would leave the
-	// previously targeted validator signing with a different key. The target set is therefore
-	// immutable when a validator is (or was) targeted; a sentry-only signer over regular groups
-	// protects no in-cluster validator identity, so moving it between fullnode groups stays allowed.
-	for _, ns := range nodeSet.ResolveCosmosigners() {
-		os, ok := oldSigners[ns.Name]
-		if !ok {
-			continue
-		}
-		if (os.ValidatorTargetedIdentity() != "" || ns.ValidatorTargetedIdentity() != "") &&
-			!equalGroupSet(os.TargetGroups, ns.TargetGroups) {
-			// Only the top-level signer selects groups (a per-group signer's target is structurally
-			// fixed), so this always refers to .spec.cosmosigner.nodeGroups.
-			return fmt.Errorf("%s.nodeGroups is immutable after the chain is established: retargeting the signer would change which validator signs", nodeSet.signerFieldPath(ns))
-		}
-	}
-
-	// Each validator touched by a signer — served by an OLD signer (signer changed/removed) or newly
-	// served by a NEW one (signer added) — has a consensus pubkey fixed on-chain. Its effective
-	// signing identity must therefore be unchanged across the update: through its (retarget-locked)
-	// signer, or its own local/tmKMS path when the signer was dropped. This also covers ADDING a
-	// signer to an established validator that previously signed through its own path: the new
-	// signer's key must equal that path's key (a same-key migration), otherwise the validator would
-	// stop mounting the on-chain local key and sign with a different one. Dropping the identity to
-	// nothing (removing both the signer and the validator's own signing path) is rejected too.
-	served := map[string]struct{}{}
-	for _, s := range old.ResolveCosmosigners() {
-		if s.ValidatorGroup != "" {
-			served[s.ValidatorGroup] = struct{}{}
-		}
-	}
-	for _, s := range nodeSet.ResolveCosmosigners() {
-		if s.ValidatorGroup != "" {
-			served[s.ValidatorGroup] = struct{}{}
-		}
-	}
-	for group := range served {
-		oldIdentity := old.validatorEffectiveIdentity(group)
-		if oldIdentity == "" {
-			// The validator did not exist (or resolved no identity) on the old revision — e.g. a
-			// createValidator group added together with its signer; the registers rule in
-			// validateResolvedSigner already constrains its key provenance.
-			continue
-		}
-		if newIdentity := nodeSet.validatorEffectiveIdentity(group); newIdentity == "" || newIdentity != oldIdentity {
-			label := group
-			if label == ReservedValidatorGroupName {
-				label = ".spec.validator"
-			}
-			return fmt.Errorf("the consensus signing key of the cosmosigner-targeted validator %q is immutable after the chain is established: changing, adding or removing the cosmosigner/signing configuration would leave it signing with a key not in the on-chain validator set (or not signing at all)", label)
-		}
-	}
-
-	// A SENTRY software signer whose key is registered in genesis (init.genesisValidators) holds a
-	// consensus identity that IS part of the immutable genesis validator set — the guards above skip it
-	// because ValidatorTargetedIdentity() is empty for a sentry. Changing that key after establishment
-	// would roll the signer to a key that was never in the set, so it is immutable. (A sentry key NOT
-	// registered in genesis stays freely rotatable: it protects no in-cluster identity.)
-	// The invariant is keyed on the genesis-registered KEY, not the signer name, so it also holds
-	// across a remove-and-re-add (a new signer name serving a different key) and an outright removal
-	// (no signer left for the key). For every genesis-registered secret a sentry signer served on the
-	// OLD revision, the NEW revision must still have a sentry signer holding that exact key — otherwise
-	// the genesis validator loses its only signing path or its key changed. The genesis validator set
-	// is immutable (enforced separately), so the old genesis-secret set still describes the new one.
-	oldGenesisSecrets := old.genesisValidatorPrivKeySecrets()
-	newSentryKeys := map[string]struct{}{}
-	for _, ns := range nodeSet.ResolveCosmosigners() {
-		if ns.ValidatorGroup == "" && ns.SoftwareKeySecret != "" {
-			newSentryKeys[ns.SoftwareKeySecret] = struct{}{}
-		}
-	}
-	for _, os := range old.ResolveCosmosigners() {
-		if os.ValidatorGroup != "" || os.SoftwareKeySecret == "" {
-			continue
-		}
-		if _, genesis := oldGenesisSecrets[os.SoftwareKeySecret]; !genesis {
-			continue // a sentry key not in genesis stays freely rotatable/removable
-		}
-		if _, kept := newSentryKeys[os.SoftwareKeySecret]; !kept {
-			return fmt.Errorf(".spec.cosmosigner sentry signer key %q is immutable after the chain is established: it is registered in the immutable genesis validator set (init.genesisValidators), so its signer cannot be removed or switched to a different consensus key", os.SoftwareKeySecret)
-		}
 	}
 
 	return nil
@@ -1100,13 +1067,11 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	}
 
 	// cosmosignerLeavesLocalKeyUnused reports whether the group's validator is targeted by a
-	// pre-provisioned external cosmosigner backend (Vault without uploadGenerated, or GCP) AND its
-	// local secret provably never held the live consensus key. Only then may the secret be reused
-	// by another validator. Software and vault.uploadGenerated backends consume the local key, so
-	// it stays reserved for them — and so does any Init/CreateValidator target: its generated
-	// secret registered (or was imported as) the on-chain consensus key, e.g. after a same-key
-	// tmKMS→cosmosigner migration where the previously-uploaded key still lives in that secret;
-	// freeing it would let a second validator sign with the same identity.
+	// pre-provisioned external cosmosigner backend (Vault without uploadGenerated, or GCP) and its
+	// local secret provably never held the live consensus key. Before establishment there is no live
+	// key yet; afterward, only the write-once at-establishment signer record proves the external
+	// backend served from the start. A signer added later must keep the former local secret reserved.
+	// Software, vault.uploadGenerated, Init, and CreateValidator targets always consume the local key.
 	cosmosignerLeavesLocalKeyUnused := func(group string, v *NodeSetValidatorConfig) bool {
 		c := nodeSet.groupCosmosigner(group)
 		if c == nil {
@@ -1121,7 +1086,34 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
 			return false
 		}
-		return true
+		if nodeSet.Status.ChainID == "" {
+			return true
+		}
+		for _, signer := range nodeSet.ResolveCosmosigners() {
+			if signer.ValidatorGroup != group {
+				continue
+			}
+			matchesHistory := func(status *CosmosignerStatus) bool {
+				return status != nil && status.ServingGroup == group && status.AtEstablishment != nil &&
+					*status.AtEstablishment == signer.ValidatorTargetedIdentity()
+			}
+			if current := nodeSet.GetCosmosignerStatus(signer.Name); current != nil {
+				return matchesHistory(current) && current.LocalKeyEverServed != nil && !*current.LocalKeyEverServed
+			}
+			foundHistory := false
+			for i := range nodeSet.Status.Cosmosigners {
+				status := &nodeSet.Status.Cosmosigners[i]
+				if !matchesHistory(status) {
+					continue
+				}
+				foundHistory = true
+				if status.LocalKeyEverServed == nil || *status.LocalKeyEverServed {
+					return false
+				}
+			}
+			return foundHistory
+		}
+		return false
 	}
 
 	// Legacy singleton validator: its ChainNode is named <nodeset>-validator, so without an
@@ -1518,48 +1510,27 @@ func genesisConfigurationFingerprint(init *GenesisInitConfig, info *ValidatorInf
 	return strings.Join([]string{accountPrefix, valPrefix, accountHDPath, string(infoJSON), string(initJSON)}, "\x00")
 }
 
-// genesisSigningFingerprintWithIdentity is like genesisSigningFingerprint but takes a precomputed
-// effective signing identity in place of the raw private-key-secret + tmKMS material, so equivalent
-// keys (e.g. the same Vault key via tmKMS or cosmosigner) yield the same fingerprint. The init,
-// account-derivation and info fields are compared identically, so genuine genesis changes are still
-// detected.
-func genesisSigningFingerprintWithIdentity(signingIdentity string, init *GenesisInitConfig, info *ValidatorInfo, accountPrefix, valPrefix, accountHDPath string) string {
-	return strings.Join([]string{signingIdentity, genesisConfigurationFingerprint(init, info, accountPrefix, valPrefix, accountHDPath)}, "\x00")
-}
-
-// nodeSetValidatorEffectiveIdentity returns the normalized signing identity of a nodeset validator
-// (legacy singleton via ReservedValidatorGroupName, or a validator group): the identity of the signer
-// serving that group's representative instance when one exists, otherwise its own local/tmKMS
-// identity. Used for genesis-initializing validators, which are single-instance or represented by
-// instance 0.
-func (nodeSet *ChainNodeSet) nodeSetValidatorEffectiveIdentity(group string, cfg *NodeSetValidatorConfig) string {
-	if id, ok := nodeSet.groupSignerIdentity(group); ok {
-		return id
-	}
-	return nodeSet.validatorGroupSigningIdentity(group, cfg)
-}
-
-// nodeSetEffectiveGenesisFingerprint mirrors the ChainNode effectiveGenesisFingerprint for a nodeset
-// genesis-initializing validator: the genesis identity compared through the normalized signing
-// identity, so a same-key signer migration (e.g. tmKMS→cosmosigner on the same Vault key) is not
-// misread as a genesis change while genuine init/account changes still are.
-func (nodeSet *ChainNodeSet) nodeSetEffectiveGenesisFingerprint(group string, cfg *NodeSetValidatorConfig) string {
-	if cfg == nil {
-		return genesisSigningFingerprintWithIdentity("", nil, nil, "", "", "")
-	}
-	return genesisSigningFingerprintWithIdentity(
-		nodeSet.nodeSetValidatorEffectiveIdentity(group, cfg),
-		cfg.Init, cfg.Info, cfg.GetAccountPrefix(), cfg.GetValPrefix(), cfg.GetAccountHDPath())
-}
-
 // GenesisSigningDigestAllowsRefresh proves that a recorded raw genesis fingerprint differs from the
-// current config only because an admitted signing-path migration kept the same effective key.
+// current config only because an admitted signing-path migration changed signing material.
 func (nodeSet *ChainNodeSet) GenesisSigningDigestAllowsRefresh(group string, cfg *NodeSetValidatorConfig, recorded string) bool {
 	if cfg == nil || recorded == "" || recorded == GenesisDigestExternal {
 		return false
 	}
+	managed := nodeSet.groupCosmosigner(group) != nil
+	if !managed {
+		for i := range nodeSet.Status.Cosmosigners {
+			st := &nodeSet.Status.Cosmosigners[i]
+			if st.ServingGroup == group && st.AppliedDigest != "" && st.PublicKey != "" {
+				managed = true
+				break
+			}
+		}
+	}
+	if !managed {
+		return false
+	}
 	configuration := genesisConfigurationFingerprint(cfg.Init, cfg.Info, cfg.GetAccountPrefix(), cfg.GetValPrefix(), cfg.GetAccountHDPath())
-	return genesisSigningDigestAllowsRefresh(recorded, configuration, nodeSet.nodeSetValidatorEffectiveIdentity(group, cfg))
+	return strings.HasSuffix(recorded, "\x00"+configuration)
 }
 
 // normalizedVaultIdentity returns a backend-agnostic identifier for a Vault Transit key, so the

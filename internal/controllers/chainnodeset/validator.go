@@ -31,13 +31,18 @@ func (r *Reconciler) ensureValidatorWithBlockedSignerTargets(ctx context.Context
 	nodeSetCopy := nodeSet.DeepCopy()
 	previousValidatorStatuses := make(map[string]appsv1.ChainNodeSetValidatorStatus, len(nodeSetCopy.Status.Validators))
 	genesisBaselineRecorded := nodeSetCopy.Status.GenesisInitGenerated != nil
+	if ptr.Deref(nodeSetCopy.Status.GenesisInitGenerated, false) && len(nodeSetCopy.Status.Validators) == 0 {
+		genesisBaselineRecorded = false
+	}
 	for _, status := range nodeSetCopy.Status.Validators {
 		previousValidatorStatuses[status.Name] = status
 		if status.Init || status.SigningKeyDigest != "" {
 			genesisBaselineRecorded = true
 		}
 	}
-	allowGenesisDigestRefresh := r.opts != nil && !r.opts.DisableWebhooks
+	// Managed signer migrations may refresh only the signing-material portion of an init validator's
+	// baseline; GenesisSigningDigestAllowsRefresh still requires the non-signing config to match.
+	allowGenesisDigestRefresh := true
 	nodeSet.Status.Validators = nil
 	nodeSet.Status.ValidatorAddress = ""
 	nodeSet.Status.ValidatorStatus = ""
@@ -316,9 +321,16 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 		controllers.LabelChainNodeSetValidator: strconv.FormatBool(true),
 	})
 
+	// Only instance 0 may use a local key while a signer waits for bootstrap material. Secondary
+	// validator endpoints keep their remote target so they cannot mount the shared consensus key.
+	signerName, signerTargeted := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked)
+	if !signerTargeted && index > 0 {
+		signerName, signerTargeted = signerNameForNode(nodeSet, group)
+	}
+
 	// Stamp the specific signer's discovery-service label when a managed cosmosigner targets this
 	// validator instance, so exactly that signer selects and dials this node's pod.
-	if signerName, ok := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked); ok {
+	if signerTargeted {
 		// A targeted ChainNodeSet child must not inherit a user-set chain-node label: a same-named
 		// standalone signer's discovery Service selects chain-node + cosmosigner-target, and the
 		// target label below may equal that standalone signer's name. Preserve the user label on
@@ -373,7 +385,7 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 
 	// A validator targeted by a managed cosmosigner deployment signs through the external signer:
 	// it listens for it and mounts no local key.
-	if _, ok := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked); ok {
+	if signerTargeted {
 		validator.Spec.RemoteSignerTarget = true
 	}
 

@@ -2,7 +2,9 @@ package cosmosigner
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,8 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
 
@@ -33,6 +37,8 @@ const (
 
 	// importJobSuffix names the one-shot `cosmosigner import` pod: <signer>-import.
 	importJobSuffix = "import"
+	// pubkeyJobSuffix names the one-shot `cosmosigner pubkey` pod: <signer>-pubkey.
+	pubkeyJobSuffix = "pubkey"
 )
 
 // JobRunner runs the one-shot cosmosigner key-management pods (pubkey, import). It needs the
@@ -68,6 +74,9 @@ func (b Backend) backendEnv() []corev1.EnvVar {
 		}
 		if b.Vault.CertificateSecret != nil {
 			env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_VAULT_CA_CERT", Value: vaultCaFile})
+		}
+		if b.Vault.SkipCertificateVerify {
+			env = append(env, corev1.EnvVar{Name: "VAULT_SKIP_VERIFY", Value: "true"})
 		}
 		return env
 	case b.GCP != nil:
@@ -184,4 +193,53 @@ func (j JobRunner) ImportKey(ctx context.Context, sourceSecret string) error {
 	}
 	_, err := j.runJob(ctx, importJobSuffix, []string{"import", "--from", importSourceFile}, volumes, mounts)
 	return err
+}
+
+// PublicKey runs `cosmosigner pubkey` against the configured backend and returns the canonical
+// base64 Ed25519 public key. Controllers use it to decide whether a migration may retain raft state.
+func (j JobRunner) PublicKey(ctx context.Context) (string, error) {
+	out, err := j.runJob(ctx, pubkeyJobSuffix, []string{"pubkey"}, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	return ParsePublicKeyOutput(out)
+}
+
+// ParsePublicKeyOutput extracts and validates the stable public-key line emitted by cosmosigner.
+func ParsePublicKeyOutput(out string) (string, error) {
+	const prefix = "pubkey (base64):"
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		encoded := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", fmt.Errorf("decode cosmosigner public key: %w", err)
+		}
+		if len(raw) != 32 {
+			return "", fmt.Errorf("cosmosigner public key is %d bytes, want 32", len(raw))
+		}
+		return base64.StdEncoding.EncodeToString(raw), nil
+	}
+	return "", fmt.Errorf("cosmosigner pubkey output did not contain %q", prefix)
+}
+
+// PublicKeyFromSecret reads and validates a CometBFT priv_validator_key.json Secret and returns its
+// canonical base64 consensus public key.
+func PublicKeyFromSecret(ctx context.Context, c client.Client, namespace, name string) (string, error) {
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, secret); err != nil {
+		return "", err
+	}
+	key, err := cometbft.LoadPrivKey(secret.Data["priv_validator_key.json"])
+	if err != nil {
+		return "", fmt.Errorf("read cosmosigner public key from Secret %q: %w", name, err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(key.PubKey.Value)
+	if err != nil || len(raw) != 32 {
+		return "", fmt.Errorf("read cosmosigner public key from Secret %q: invalid Ed25519 public key", name)
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -358,9 +359,9 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 	}
 }
 
-// TestValidateCosmosignerSignerAdditionToEstablishedValidator verifies that adding a pre-provisioned
-// signer to an ESTABLISHED validator that previously signed with its own local key is rejected (the
-// validator would stop mounting the on-chain key), while a same-key software signer is accepted.
+// TestValidateCosmosignerSignerAdditionToEstablishedValidator verifies that both pre-provisioned and
+// software signers can be added to an established validator. Cosmopilot controls the handoff; the
+// user remains responsible for the selected on-chain key.
 func TestValidateCosmosignerSignerAdditionToEstablishedValidator(t *testing.T) {
 	base := func(c *Cosmosigner) *ChainNodeSet {
 		return &ChainNodeSet{
@@ -375,21 +376,110 @@ func TestValidateCosmosignerSignerAdditionToEstablishedValidator(t *testing.T) {
 					Cosmosigner: c,
 				}},
 			},
-			Status: ChainNodeSetStatus{ChainID: "test-1"},
+			Status: ChainNodeSetStatus{
+				ChainID: "test-1",
+				Validators: []ChainNodeSetValidatorStatus{{
+					Name: "cs-vg-0", Group: "vg", PubKey: "registered-pubkey", Address: "cosmosvaloper1registered",
+				}},
+			},
 		}
 	}
 	old := base(nil) // established, signing through its own local key
 
-	// Adding a pre-provisioned Vault signer: different effective identity -> rejected.
+	// Adding a pre-provisioned Vault signer is admitted for a controlled migration.
 	vaultAdded := base(&Cosmosigner{Backend: vaultBackendFor("prekey")})
 	_, err := vaultAdded.Validate(old)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "immutable after the chain is established")
+	require.NoError(t, err)
 
 	// Adding a software signer that uses the validator's own key: same identity -> accepted.
 	softwareAdded := base(&Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}}})
 	_, err = softwareAdded.Validate(old)
 	require.NoError(t, err)
+}
+
+func TestValidateCosmosignerRejectsPromotingSentrySignerToCreateValidator(t *testing.T) {
+	old := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:        "workers",
+				Instances:   ptr.To(1),
+				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("preprovisioned-key")},
+			}},
+		},
+	}
+	old.SetEstablishedChainID("test-1")
+	oldSigner := old.ResolveCosmosigners()[0]
+	oldStatus := old.EnsureCosmosignerStatus(oldSigner.Name)
+	oldStatus.AppliedDigest = oldSigner.Digest()
+	oldStatus.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	updated := old.DeepCopy()
+	updated.Spec.Nodes[0].Validator = &NodeSetValidatorConfig{CreateValidator: &CreateValidatorConfig{}}
+
+	_, err := updated.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "software backend or vault.uploadGenerated")
+}
+
+func TestValidateCosmosignerRequiresCompletedRegistrationForMigrationWaiver(t *testing.T) {
+	old := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(1),
+				Validator: &NodeSetValidatorConfig{CreateValidator: &CreateValidatorConfig{}},
+				Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+					Software: &CosmosignerSoftwareBackend{},
+				}},
+			}},
+		},
+		Status: ChainNodeSetStatus{
+			ChainID: "test-1",
+			Validators: []ChainNodeSetValidatorStatus{{
+				Name: "cs-validators-0", Group: "validators", PubKey: "generated-but-not-registered",
+			}},
+		},
+	}
+	oldSigner := old.ResolveCosmosigners()[0]
+	oldStatus := old.EnsureCosmosignerStatus(oldSigner.Name)
+	oldStatus.AppliedDigest = oldSigner.Digest()
+	oldStatus.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	updated := old.DeepCopy()
+	updated.Spec.Nodes[0].Cosmosigner.Backend = vaultBackendFor("preprovisioned-key")
+
+	_, err := updated.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "software backend or vault.uploadGenerated")
+}
+
+func TestResolvedSignerDigestSeparatesRollingUpdatesFromMigrations(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Cosmosigner: &Cosmosigner{
+				NodeGroups: []string{"sentries"},
+				Backend:    vaultBackendFor("validator-key"),
+			},
+			Nodes: []NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+	}
+	original := nodeSet.ResolveCosmosigners()[0].Digest()
+
+	rolling := nodeSet.DeepCopy()
+	rolling.Spec.Cosmosigner.Image = ptr.To("ghcr.io/voluzi/cosmosigner:0.2.0")
+	rolling.Spec.Cosmosigner.LogLevel = ptr.To("debug")
+	rolling.Spec.Cosmosigner.Resources = &corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")}}
+	rolling.Spec.Cosmosigner.Backend.Vault.TokenSecret.Name = "rotated-token"
+	require.Equal(t, original, rolling.ResolveCosmosigners()[0].Digest(), "rolling-only fields must not trigger StatefulSet replacement")
+
+	migration := nodeSet.DeepCopy()
+	migration.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
+	require.NotEqual(t, original, migration.ResolveCosmosigners()[0].Digest(), "backend/key changes must trigger migration")
 }
 
 // TestValidateCosmosignerNameLengthRejected verifies the derived discovery Service name is bounded to
@@ -432,10 +522,9 @@ func TestCosmosignerStateStorageEqual(t *testing.T) {
 	assert.False(t, CosmosignerStateStorageEqual("bogus", nil, "other", nil))
 }
 
-// TestValidateCosmosignerGenesisSentryKeyImmutable verifies a sentry software signer whose key is
-// registered in init.genesisValidators cannot switch to a different key after establishment (that key
-// is part of the immutable genesis validator set), while a sentry key NOT in genesis stays rotatable.
-func TestValidateCosmosignerGenesisSentryKeyImmutable(t *testing.T) {
+// TestValidateCosmosignerGenesisSentryKeyMigration verifies a recorded sentry signer may change or
+// remove its key through the controlled break-before-make path.
+func TestValidateCosmosignerGenesisSentryKeyMigration(t *testing.T) {
 	base := func(sentryKey string) *ChainNodeSet {
 		return &ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
@@ -465,27 +554,33 @@ func TestValidateCosmosignerGenesisSentryKeyImmutable(t *testing.T) {
 
 	// Established with the sentry signer using the genesis-registered key.
 	old := base("genesis-sentry-key")
+	oldSigner := old.ResolveCosmosigners()[0]
+	old.Status.Cosmosigners = []CosmosignerStatus{{
+		Name: oldSigner.Name, AppliedDigest: oldSigner.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}}
 
-	// Rotating that key to a different one after establishment is rejected.
+	// Rotating that key to a different one is admitted and will reset signer state.
 	rotated := base("some-other-key")
 	_, err := rotated.Validate(old)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "registered in the immutable genesis validator set")
+	require.NoError(t, err)
 
 	// Unchanged: accepted.
 	_, err = base("genesis-sentry-key").Validate(old)
 	require.NoError(t, err)
 
-	// REMOVING the signer entirely (the genesis key loses its only signing path) is rejected too.
+	// Removing the signer is also admitted for controlled fallback.
 	removed := base("genesis-sentry-key")
 	removed.Spec.Nodes[0].Cosmosigner = nil
 	_, err = removed.Validate(old)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "registered in the immutable genesis validator set")
+	require.NoError(t, err)
 
 	// A sentry signer whose key is NOT a genesis key stays rotatable.
 	oldFree := base("free-key")
 	oldFree.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key")
+	oldFreeSigner := oldFree.ResolveCosmosigners()[0]
+	oldFree.Status.Cosmosigners = []CosmosignerStatus{{
+		Name: oldFreeSigner.Name, AppliedDigest: oldFreeSigner.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}}
 	freeRotated := base("free-key-2")
 	freeRotated.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key-2")
 	_, err = freeRotated.Validate(oldFree)
@@ -519,7 +614,7 @@ func TestGenesisValidatorPrivKeySecretsExcludesZeroInstance(t *testing.T) {
 // TestGenesisSentryEstablishmentIdentity verifies the marker helper returns an identity only for a
 // SOFTWARE sentry whose key is registered in init.genesisValidators (the case the controller can prove
 // from spec), and "" for validator-targeted signers, non-genesis sentries, and non-software sentries.
-// This is what SetEstablishedChainID records and what ensureCosmosigner backfills for a genesis-sentry
+// This is what SetEstablishedChainID records and what initCosmosignerLocks backfills for a genesis-sentry
 // signer whose status entry is first created after establishment.
 func TestGenesisSentryEstablishmentIdentity(t *testing.T) {
 	nodeSet := &ChainNodeSet{

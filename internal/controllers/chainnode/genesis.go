@@ -107,8 +107,7 @@ func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode
 		return false, nil
 	}
 	if chainNode.Status.GenesisSigningDigest != "" {
-		if r.opts == nil || r.opts.DisableWebhooks ||
-			!chainNode.GenesisSigningDigestAllowsRefresh(chainNode.Status.GenesisSigningDigest) {
+		if !chainNode.GenesisSigningDigestAllowsRefresh(chainNode.Status.GenesisSigningDigest) {
 			return false, nil
 		}
 	}

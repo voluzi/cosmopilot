@@ -2,15 +2,22 @@ package chainnodeset
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -19,6 +26,203 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
+
+func TestReconcileCosmosignerMigrationsWaitsForTerminatingPod(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{Cosmosigner: &appsv1.Cosmosigner{
+			NodeGroups: []string{"sentries"},
+			Replicas:   ptr.To(int32(1)),
+			Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+				PrivateKeySecret: ptr.To("sentry-key"),
+			}},
+		}, Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	resourceName := "stable-signer"
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name:          signer.Name,
+		ResourceName:  resourceName,
+		AppliedDigest: "old-digest",
+		PublicKey:     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		Migration: &appsv1.CosmosignerMigrationStatus{
+			DesiredDigest:    signer.Digest(),
+			DesiredPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			Phase:            appsv1.CosmosignerMigrationQuiescing,
+		},
+	}}
+	zero := int32(0)
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: nodeSet.Namespace, UID: "signer-uid", Generation: 2},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: &zero},
+		Status:     k8sappsv1.StatefulSetStatus{ObservedGeneration: 2},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: resourceName + "-0", Namespace: nodeSet.Namespace,
+		DeletionTimestamp: &metav1.Time{Time: time.Now()},
+		Finalizers:        []string{"cosmopilot.voluzi.com/test-hold"},
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(sts, pod, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, sts, pod)
+
+	pending, err := r.reconcileCosmosignerMigrations(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, appsv1.CosmosignerMigrationQuiescing, nodeSet.Status.Cosmosigners[0].Migration.Phase)
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: resourceName}, &k8sappsv1.StatefulSet{}))
+}
+
+func TestReconcileCosmosignerMigrationsRetargetsBeforeRecreation(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"sentries"},
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+					PrivateKeySecret: ptr.To("sentry-key"),
+				}},
+			},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name: signer.Name, AppliedDigest: "old-digest", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		Migration: &appsv1.CosmosignerMigrationStatus{
+			DesiredDigest: signer.Digest(), DesiredPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			Phase: appsv1.CosmosignerMigrationResettingState,
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	pending, err := r.reconcileCosmosignerMigrations(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, appsv1.CosmosignerMigrationRetargeting, nodeSet.Status.Cosmosigners[0].Migration.Phase)
+}
+
+func TestReconcileCosmosignerMigrationsRollingOutPreservesNewStatefulSet(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"sentries"},
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+					PrivateKeySecret: ptr.To("sentry-key"),
+				}},
+			},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name: signer.Name, AppliedDigest: "old-digest", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		Migration: &appsv1.CosmosignerMigrationStatus{
+			DesiredDigest: signer.Digest(), DesiredPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			Phase: appsv1.CosmosignerMigrationRollingOut,
+		},
+	}}
+	one := int32(1)
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: signer.Name, Namespace: nodeSet.Namespace}, Spec: k8sappsv1.StatefulSetSpec{Replicas: &one}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, sts)
+
+	pending, err := r.reconcileCosmosignerMigrations(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: sts.Namespace, Name: sts.Name}, &k8sappsv1.StatefulSet{}))
+}
+
+func TestReconcileCosmosignerMigrationsAdvancesRecreationToRollout(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"sentries"},
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+					PrivateKeySecret: ptr.To("sentry-key"),
+				}},
+			},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name: signer.Name, AppliedDigest: "old-digest", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		Migration: &appsv1.CosmosignerMigrationStatus{
+			DesiredDigest: signer.Digest(), DesiredPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			Phase: appsv1.CosmosignerMigrationRecreating,
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	pending, err := r.reconcileCosmosignerMigrations(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, appsv1.CosmosignerMigrationRollingOut, nodeSet.Status.Cosmosigners[0].Migration.Phase)
+}
+
+func TestReconcileCosmosignerRetargetingSkipsOnlyBlockedSigner(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			App:     appsv1.AppSpec{Image: "image", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{
+				{
+					Name: "moving", Instances: ptr.To(1),
+					Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+						Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("moving-key")},
+					}},
+				},
+				{
+					Name: "blocked", Instances: ptr.To(1),
+					Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+						Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("blocked-key")},
+					}},
+				},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	var moving, blocked appsv1.ResolvedSigner
+	for _, signer := range nodeSet.ResolveCosmosigners() {
+		switch signer.TargetGroups[0] {
+		case "moving":
+			moving = signer
+		case "blocked":
+			blocked = signer
+		}
+	}
+	require.NotEmpty(t, moving.Name)
+	require.NotEmpty(t, blocked.Name)
+	nodeSet.EnsureCosmosignerStatus(moving.Name).Migration = &appsv1.CosmosignerMigrationStatus{
+		DesiredDigest: moving.Digest(), Phase: appsv1.CosmosignerMigrationRetargeting,
+	}
+	discovery := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: nodeSet.CosmosignerResourceName(moving) + "-privval", Namespace: nodeSet.Namespace,
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, discovery, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, discovery)
+
+	ready, err := r.reconcileCosmosignerRetargeting(context.Background(), nodeSet, blockedSignerTargets{blocked.Name: {}})
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Equal(t, appsv1.CosmosignerMigrationRecreating, nodeSet.GetCosmosignerStatus(moving.Name).Migration.Phase)
+	require.Error(t, r.Get(context.Background(), types.NamespacedName{Namespace: discovery.Namespace, Name: discovery.Name}, &corev1.Service{}))
+
+	movingNode := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-moving-0"}, movingNode))
+	require.True(t, movingNode.Spec.RemoteSignerTarget)
+	blockedNode := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-blocked-0"}, blockedNode))
+	require.False(t, blockedNode.Spec.RemoteSignerTarget)
+}
 
 // resolveSingleSigner returns the sole resolved signer of a ChainNodeSet, failing if there is not
 // exactly one.
@@ -56,6 +260,66 @@ func TestReconcileSignerTeardownDropsStatusEntry(t *testing.T) {
 	assert.Empty(t, fresh.Status.Cosmosigners, "the removed signer's status entry must be dropped on teardown")
 }
 
+func TestReconcileSignerTeardownWaitsForBreakBeforeMakeMigration(t *testing.T) {
+	const oldSignerName = "test-nodeset-signer"
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(1),
+			Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &appsv1.Cosmosigner{
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}},
+			},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	replacement := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{
+		{
+			Name:             oldSignerName,
+			ServingGroup:     replacement.ValidatorGroup,
+			ServingIdentity:  replacement.ValidatorTargetedIdentity(),
+			Replicas:         ptr.To(int32(1)),
+			StateStorageSize: "1Gi",
+		},
+		{
+			Name:             replacement.Name,
+			ResourceName:     oldSignerName,
+			ServingGroup:     replacement.ValidatorGroup,
+			Replicas:         ptr.To(int32(1)),
+			StateStorageSize: "1Gi",
+			Migration: &appsv1.CosmosignerMigrationStatus{
+				DesiredDigest:    replacement.Digest(),
+				DesiredPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+				Phase:            appsv1.CosmosignerMigrationQuiescing,
+			},
+		},
+	}
+	oldSigner := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: oldSignerName, Namespace: nodeSet.Namespace}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, oldSigner, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, oldSigner)
+
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.False(t, done, "replacement rollout must stay blocked until old signer teardown is verified")
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: oldSignerName}, &k8sappsv1.StatefulSet{}))
+	require.Error(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: replacement.Name}, &k8sappsv1.StatefulSet{}),
+		"replacement StatefulSet must not exist before the old signer is gone")
+
+	require.NoError(t, r.Delete(context.Background(), oldSigner))
+	nodeSet.GetCosmosignerStatus(replacement.Name).Migration.Phase = appsv1.CosmosignerMigrationRecreating
+
+	done, err = r.reconcileSignerTeardown(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, done)
+	require.Error(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: oldSignerName}, &k8sappsv1.StatefulSet{}))
+	fresh := &appsv1.ChainNodeSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: nodeSet.Name}, fresh))
+	require.Nil(t, fresh.GetCosmosignerStatus(oldSignerName))
+	require.NotNil(t, fresh.GetCosmosignerStatus(replacement.Name))
+}
+
 func TestReconcileSignerTeardownPreservesLegacyPerInstanceSigners(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
@@ -85,6 +349,185 @@ func TestReconcileSignerTeardownPreservesLegacyPerInstanceSigners(t *testing.T) 
 	fresh := &appsv1.ChainNodeSet{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
 	require.Len(t, fresh.Status.Cosmosigners, 2)
+}
+
+func TestReconcileSignerTeardownDetectsLegacyPerInstanceSignersAfterSpecRemoval(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "validators", Instances: ptr.To(2), Validator: &appsv1.NodeSetValidatorConfig{},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "test-1",
+			Cosmosigners: []appsv1.CosmosignerStatus{
+				{Name: "test-nodeset-validators-0-signer"},
+				{Name: "test-nodeset-validators-1-signer"},
+			},
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.False(t, done)
+	require.Contains(t, err.Error(), "legacy per-instance cosmosigners")
+
+	fresh := &appsv1.ChainNodeSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: nodeSet.Name}, fresh))
+	require.Len(t, fresh.Status.Cosmosigners, 2)
+}
+
+func TestPreflightCosmosignersRejectsRecoveredIdentityMismatch(t *testing.T) {
+	requireRecoveredNodeSetIdentityMismatchRejected(t, false)
+}
+
+func TestPreflightCosmosignersRejectsRecoveredIdentityMismatchAfterValidatorDemotion(t *testing.T) {
+	requireRecoveredNodeSetIdentityMismatchRejected(t, true)
+}
+
+func TestPreflightCosmosignersRejectsRecoveredGenesisSentryIdentityMismatch(t *testing.T) {
+	const (
+		genesisKey = "genesis-sentry-key"
+		desiredKey = "rotated-sentry-key"
+	)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+				GenesisValidators: []appsv1.GenesisValidator{{PrivKeySecret: genesisKey}},
+			}},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "sentries",
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(desiredKey)},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	desiredSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: desiredKey, Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: key},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, desiredSecret)
+	desiredParams, err := r.cosmosignerParams(context.Background(), nodeSet, signer)
+	require.NoError(t, err)
+	liveParams := desiredParams
+	liveParams.Backend.Software = &cosmosigner.SoftwareBackend{SecretName: genesisKey}
+	liveConfig, err := liveParams.ConfigYAML()
+	require.NoError(t, err)
+	liveConfigMap, err := liveParams.ConfigMap(liveConfig)
+	require.NoError(t, err)
+	liveStatefulSet, err := liveParams.StatefulSet(liveConfig)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveConfigMap, r.Scheme))
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveStatefulSet, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), liveConfigMap))
+	require.NoError(t, r.Create(context.Background(), liveStatefulSet))
+	recorded, err := r.initCosmosignerLocks(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, recorded)
+	status := nodeSet.GetCosmosignerStatus(signer.Name)
+	require.NotNil(t, status)
+	require.NotNil(t, status.AtEstablishment)
+	require.Empty(t, *status.AtEstablishment, "the rotated desired key cannot be backfilled as the genesis identity")
+
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "live signing identity")
+}
+
+func TestPreflightCosmosignersRejectsRecoveredSentryIdentityMismatch(t *testing.T) {
+	backend := cosmosignerVaultBackend()
+	backend.Vault.KeyName = "desired-key"
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"sentries"}, Backend: backend},
+			Nodes:       []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	status.AtEstablishment = ptr.To("")
+	status.Replicas = ptr.To(signer.Spec.GetReplicas())
+	status.StateStorageSize = signer.Spec.GetStateStorageSize()
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: backend.Vault.TokenSecret.Name, Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{backend.Vault.TokenSecret.Key: []byte("token")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token)
+	desiredParams, err := r.cosmosignerParams(context.Background(), nodeSet, signer)
+	require.NoError(t, err)
+	liveParams := desiredParams
+	liveVault := *desiredParams.Backend.Vault
+	liveVault.KeyName = "live-key"
+	liveParams.Backend.Vault = &liveVault
+	liveConfig, err := liveParams.ConfigYAML()
+	require.NoError(t, err)
+	liveConfigMap, err := liveParams.ConfigMap(liveConfig)
+	require.NoError(t, err)
+	liveStatefulSet, err := liveParams.StatefulSet(liveConfig)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveConfigMap, r.Scheme))
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveStatefulSet, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), liveConfigMap))
+	require.NoError(t, r.Create(context.Background(), liveStatefulSet))
+
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "live signing identity")
+}
+
+func requireRecoveredNodeSetIdentityMismatchRejected(t *testing.T, demoted bool) {
+	t.Helper()
+	backend := cosmosignerVaultBackend()
+	backend.Vault.KeyName = "desired-key"
+	nodeSet := cosmosignerValidatorNodeSet(backend)
+	nodeSet.UID = types.UID("nodeset-uid")
+	establishedSigner := resolveSingleSigner(t, nodeSet)
+	status := nodeSet.EnsureCosmosignerStatus(establishedSigner.Name)
+	status.Replicas = ptr.To(establishedSigner.Spec.GetReplicas())
+	status.StateStorageSize = establishedSigner.Spec.GetStateStorageSize()
+	if demoted {
+		status.ServingGroup = establishedSigner.ValidatorGroup
+		nodeSet.Spec.Nodes[0].Validator = nil
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: backend.Vault.TokenSecret.Name, Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{backend.Vault.TokenSecret.Key: []byte("token")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token)
+	desiredParams, err := r.cosmosignerParams(context.Background(), nodeSet, signer)
+	require.NoError(t, err)
+	liveParams := desiredParams
+	liveVault := *desiredParams.Backend.Vault
+	liveVault.KeyName = "live-key"
+	liveParams.Backend.Vault = &liveVault
+	liveConfig, err := liveParams.ConfigYAML()
+	require.NoError(t, err)
+	liveConfigMap, err := liveParams.ConfigMap(liveConfig)
+	require.NoError(t, err)
+	liveStatefulSet, err := liveParams.StatefulSet(liveConfig)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveConfigMap, r.Scheme))
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveStatefulSet, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), liveConfigMap))
+	require.NoError(t, r.Create(context.Background(), liveStatefulSet))
+
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "live signing identity")
+
+	fresh := &corev1.ConfigMap{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: signer.Name}, fresh))
+	require.Equal(t, liveConfig, fresh.Data["config.yaml"])
 }
 
 func TestReconcilePreflightsReplacementBeforeSignerTeardown(t *testing.T) {
@@ -149,6 +592,25 @@ func TestInitCosmosignerLocksRecordsPreRolloutTargetKind(t *testing.T) {
 		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
 		require.Len(t, fresh.Status.Cosmosigners, 1)
 		assert.Equal(t, "validators", fresh.Status.Cosmosigners[0].ServingGroup)
+		require.NotNil(t, fresh.Status.Cosmosigners[0].LocalKeyEverServed)
+		assert.True(t, *fresh.Status.Cosmosigners[0].LocalKeyEverServed)
+	})
+
+	t.Run("migration to a local key records monotonic history before rollout", func(t *testing.T) {
+		nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+		require.NotNil(t, nodeSet.Status.Cosmosigners[0].LocalKeyEverServed)
+		require.False(t, *nodeSet.Status.Cosmosigners[0].LocalKeyEverServed)
+		nodeSet.Spec.Cosmosigner.Backend = appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}}
+
+		r := newValidatorTestReconciler(t, nodeSet)
+		changed, err := r.initCosmosignerLocks(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.True(t, changed)
+
+		fresh := &appsv1.ChainNodeSet{}
+		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
+		require.NotNil(t, fresh.Status.Cosmosigners[0].LocalKeyEverServed)
+		assert.True(t, *fresh.Status.Cosmosigners[0].LocalKeyEverServed)
 	})
 
 	t.Run("sentry target", func(t *testing.T) {
@@ -364,6 +826,9 @@ func TestPreflightRemovedSignerFallbacksRequiresLocalKey(t *testing.T) {
 
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+	nodeSet.Status.Cosmosigners[0].PublicKey = parsed.PubKey.Value
 	keySecret.Data[privKeyFilename] = key
 	require.NoError(t, r.Update(context.Background(), keySecret))
 	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
@@ -379,6 +844,159 @@ func TestPreflightRemovedSignerFallbacksUsesDesiredReplacement(t *testing.T) {
 	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
 }
 
+func TestDesiredReplacementSignerMatchesGenesisSentryIdentity(t *testing.T) {
+	const keySecret = "genesis-sentry-key"
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+				GenesisValidators: []appsv1.GenesisValidator{{PrivKeySecret: keySecret}},
+			}},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "replacement-sentries",
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(keySecret)},
+				}},
+			}},
+		},
+	}
+	desired := nodeSet.ResolveCosmosigners()
+	require.Len(t, desired, 1)
+	status := &appsv1.CosmosignerStatus{
+		Name:            "test-nodeset-old-sentries-signer",
+		AtEstablishment: ptr.To(desired[0].Identity()),
+	}
+
+	replacement, ok := desiredReplacementSigner(nodeSet, desired, status)
+	require.True(t, ok)
+	require.Equal(t, desired[0].Name, replacement.Name)
+
+	nodeSet.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("different-key")
+	desired = nodeSet.ResolveCosmosigners()
+	_, ok = desiredReplacementSigner(nodeSet, desired, status)
+	require.False(t, ok, "a different sentry key must not be treated as a replacement")
+}
+
+func TestDesiredReplacementSignerMatchesSentryTargetGroups(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "sentries",
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}},
+			}},
+		},
+	}
+	desired := nodeSet.ResolveCosmosigners()
+	require.Len(t, desired, 1)
+	status := &appsv1.CosmosignerStatus{
+		Name:         "test-nodeset-signer",
+		TargetGroups: []string{"sentries"},
+	}
+
+	replacement, ok := desiredReplacementSigner(nodeSet, desired, status)
+	require.True(t, ok)
+	require.Equal(t, desired[0].Name, replacement.Name)
+
+	status.TargetGroups = []string{"archive"}
+	_, ok = desiredReplacementSigner(nodeSet, desired, status)
+	require.False(t, ok, "a signer targeting a different group must not inherit the old resource identity")
+}
+
+func TestInitCosmosignerReplacementNamesCarriesSentryLifecycleState(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "sentries",
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{Cosmosigners: []appsv1.CosmosignerStatus{{
+			Name:             "test-nodeset-signer",
+			AppliedDigest:    "old-digest",
+			PublicKey:        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			TargetGroups:     []string{"sentries"},
+			Replicas:         ptr.To(int32(1)),
+			StateStorageSize: "1Gi",
+		}}},
+	}
+	desired := nodeSet.ResolveCosmosigners()
+	require.Len(t, desired, 1)
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	recorded, err := r.initCosmosignerReplacementNames(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, recorded)
+
+	status := nodeSet.GetCosmosignerStatus(desired[0].Name)
+	require.NotNil(t, status)
+	require.Equal(t, "test-nodeset-signer", status.ResourceName)
+	require.Equal(t, "old-digest", status.AppliedDigest)
+	require.Equal(t, []string{"sentries"}, status.TargetGroups)
+}
+
+func TestInitCosmosignerReplacementNamesStartsSameDigestPlacementMigration(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "sentries",
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}},
+			}},
+		},
+	}
+	replacement := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name:             "test-nodeset-signer",
+		AppliedDigest:    replacement.Digest(),
+		PublicKey:        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		TargetGroups:     []string{"sentries"},
+		Replicas:         ptr.To(int32(1)),
+		StateStorageSize: "1Gi",
+	}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	recorded, err := r.initCosmosignerReplacementNames(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, recorded)
+
+	status := nodeSet.GetCosmosignerStatus(replacement.Name)
+	require.NotNil(t, status)
+	require.NotNil(t, status.Migration)
+	require.Equal(t, replacement.Digest(), status.Migration.DesiredDigest)
+	require.Equal(t, appsv1.CosmosignerMigrationQuiescing, status.Migration.Phase)
+}
+
+func TestInitCosmosignerReplacementNamesCarriesValidatorKeyHistory(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recordSignerRollout(t, nodeSet)
+	oldStatus := nodeSet.Status.Cosmosigners[0].DeepCopy()
+	backend := nodeSet.Spec.Cosmosigner.Backend
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Cosmosigner = &appsv1.Cosmosigner{Backend: backend}
+	replacement := resolveSingleSigner(t, nodeSet)
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	recorded, err := r.initCosmosignerReplacementNames(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, recorded)
+
+	status := nodeSet.GetCosmosignerStatus(replacement.Name)
+	require.NotNil(t, status)
+	require.NotNil(t, status.LocalKeyEverServed)
+	assert.False(t, *status.LocalKeyEverServed)
+	assert.Equal(t, oldStatus.AtEstablishment, status.AtEstablishment)
+	assert.Equal(t, oldStatus.ServingGroup, status.ServingGroup)
+	assert.Equal(t, oldStatus.ServingIdentity, status.ServingIdentity)
+}
+
 func TestPreflightRemovedSignerFallbacksSkipsUncreatedSigner(t *testing.T) {
 	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
 	signer := resolveSingleSigner(t, nodeSet)
@@ -389,6 +1007,125 @@ func TestPreflightRemovedSignerFallbacksSkipsUncreatedSigner(t *testing.T) {
 	r := newValidatorTestReconciler(t, nodeSet)
 
 	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
+}
+
+func TestPreflightRemovedSignerFallbacksRejectsLegacyDigestWithoutServingGroup(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "validators", Validator: &appsv1.NodeSetValidatorConfig{},
+		}},
+		},
+		Status: appsv1.ChainNodeSetStatus{Cosmosigners: []appsv1.CosmosignerStatus{{
+			Name: "test-nodeset-signer", SigningDigest: "legacy-served-digest",
+		}}},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	err := r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "served validator group")
+}
+
+func TestPreflightRemovedSignerFallbacksRequiresMatchingLocalPublicKey(t *testing.T) {
+	servedKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	served, err := cometbft.LoadPrivKey(servedKey)
+	require.NoError(t, err)
+	fallbackKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Status.Cosmosigners[0].PublicKey = served.PubKey.Value
+	nodeSet.Spec.Cosmosigner = nil
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "val-priv-key", Namespace: "default"},
+		Data:       map[string][]byte{privKeyFilename: fallbackKey},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, secret)
+
+	err = r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not match")
+
+	secret.Data[privKeyFilename] = servedKey
+	require.NoError(t, r.Update(context.Background(), secret))
+	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
+}
+
+func TestPreflightRemovedSignerFallbacksDoesNotTrustDifferentTmKMSTarget(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Config = &appsv1.Config{ServiceAccountName: ptr.To("group-service-account")}
+	nodeSet.Spec.Nodes[0].Validator.Config = &appsv1.Config{ServiceAccountName: ptr.To("validator-service-account")}
+	nodeSet.Spec.Nodes[0].Validator.TmKMS = &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+		Hashicorp: &appsv1.TmKmsHashicorpProvider{
+			Address: "https://vault.example:8200",
+			Key:     "different-key",
+			TokenSecret: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
+				Key:                  "token",
+			},
+		},
+	}}
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("vault-token")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token)
+	var createdPod string
+	transport := chainNodeSetRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		statusCode := http.StatusNotFound
+		body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
+		if req.Method == http.MethodPost {
+			data, readErr := io.ReadAll(req.Body)
+			require.NoError(t, readErr)
+			createdPod = string(data)
+			statusCode = http.StatusInternalServerError
+			body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","message":"forced pubkey failure","code":500}`
+		}
+		return &http.Response{
+			StatusCode: statusCode,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	clientSet, err := kubernetes.NewForConfig(&rest.Config{Host: "https://kubernetes.invalid", Transport: transport})
+	require.NoError(t, err)
+	r.ClientSet = clientSet
+
+	err = r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, createdPod, "validator-service-account")
+	require.NotContains(t, createdPod, "group-service-account")
+}
+
+func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {
+	vault := &appsv1.CosmosignerVaultBackend{
+		Address: "https://vault.example:8200", KeyName: "validator-key", UploadGenerated: true,
+		TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+	}
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Vault: vault})
+	signer := resolveSingleSigner(t, nodeSet)
+	status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	status.KeyImported = vault.ImportFingerprint(signer.SoftwareKeySecret, []byte("imported-key"))
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: "default"},
+		Data:       map[string][]byte{"token": []byte("vault-token")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token)
+
+	_, err := r.cosmosignerPublicKey(context.Background(), nodeSet, signer)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Kubernetes clientset")
+
+	status.KeyImported = ""
+	_, err = r.cosmosignerPublicKey(context.Background(), nodeSet, signer)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), signer.SoftwareKeySecret)
 }
 
 func TestReconcilePreflightsRemovedSignerFallbackBeforeTeardown(t *testing.T) {
@@ -537,6 +1274,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	return scheme
 }

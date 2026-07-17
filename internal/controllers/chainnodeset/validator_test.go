@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,6 +28,7 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 
 	cl := fake.NewClientBuilder().
@@ -643,6 +645,35 @@ func TestEnsureValidatorPreservesGenesisBaselineWhileUpdatingLiveStatus(t *testi
 	assert.Equal(t, "new-pubkey", got.PubKey)
 }
 
+func TestEnsureValidatorBackfillsEmptyInitGeneratedBaseline(t *testing.T) {
+	initCfg := &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+		ChainID:     "test-chain",
+		Assets:      []string{"1000000stake"},
+		StakeAmount: "900000stake",
+	}}
+	name := "test-nodeset-validators-0"
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(1),
+			Validator: initCfg,
+		}}},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID:              "test-chain",
+			GenesisInitGenerated: ptr.To(true),
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
+
+	require.Len(t, nodeSet.Status.Validators, 1)
+	require.Equal(t, name, nodeSet.Status.Validators[0].Name)
+	require.True(t, nodeSet.Status.Validators[0].Init)
+	require.Equal(t, initCfg.GenesisSigningFingerprint(name+"-priv-key"), nodeSet.Status.Validators[0].SigningKeyDigest)
+}
+
 func TestEnsureValidatorPreservesRemovedGenesisBaseline(t *testing.T) {
 	stale := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -715,7 +746,7 @@ func TestEnsureValidatorDoesNotExpandRecordedGenesisBaseline(t *testing.T) {
 	assert.Empty(t, nodeSet.Status.Validators[1].SigningKeyDigest)
 }
 
-func TestEnsureValidatorRefreshesGenesisDigestOnlyForProvenWebhookMigration(t *testing.T) {
+func TestEnsureValidatorRefreshesGenesisDigestForManagedMigration(t *testing.T) {
 	const vaultAddress = "https://vault.example.com:8200"
 	const vaultKey = "validator-key"
 	init := &appsv1.GenesisInitConfig{
@@ -737,7 +768,7 @@ func TestEnsureValidatorRefreshesGenesisDigestOnlyForProvenWebhookMigration(t *t
 		wantRefresh     bool
 	}{
 		{name: "webhook admitted migration refreshes", wantRefresh: true},
-		{name: "no webhook path keeps original baseline", disableWebhooks: true},
+		{name: "no webhook migration refreshes", disableWebhooks: true, wantRefresh: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			currentCfg := &appsv1.NodeSetValidatorConfig{Init: init.DeepCopy()}

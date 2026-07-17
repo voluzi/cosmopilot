@@ -10,6 +10,22 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestChainNodeValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
+	chainNode := &ChainNode{Spec: ChainNodeSpec{
+		Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+		Validator: &ValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
+			Address: "https://vault:8200",
+			Key:     "validator-key",
+		}}}},
+	}}
+
+	warnings, err := chainNode.Validate(nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
+	}, []string(warnings))
+}
+
 // TestChainNodeValidateGenesisValidators verifies that a standalone ChainNode rejects duplicate
 // signing keys or account mnemonics among .spec.validator.init.genesisValidators — both between two
 // entries and against the init validator's own resolved priv-key/account secret — which would

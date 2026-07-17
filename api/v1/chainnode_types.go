@@ -264,11 +264,30 @@ type ChainNodeStatus struct {
 	ValidatorStatus ValidatorStatus `json:"validatorStatus,omitempty"`
 
 	// CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's
-	// effective signing identity, captured once the chain is established, so the no-webhook reconcile
-	// path can reject a later change or removal of the signing configuration. Not meant to be set by
+	// effective signing identity, captured once a validator signer rolls out. The applied digest and
+	// public key below are the lifecycle baseline used for managed migrations. Not meant to be set by
 	// hand.
 	// +optional
 	CosmosignerSigningDigest string `json:"cosmosignerSigningDigest,omitempty"`
+
+	// CosmosignerAppliedDigest is the lifecycle fingerprint of the configuration currently
+	// represented by the signer StatefulSet. It is recorded for both validator and sentry signers.
+	// +optional
+	CosmosignerAppliedDigest string `json:"cosmosignerAppliedDigest,omitempty"`
+
+	// CosmosignerPublicKey is the canonical base64 consensus public key of the applied signer.
+	// +optional
+	CosmosignerPublicKey string `json:"cosmosignerPublicKey,omitempty"`
+
+	// CosmosignerMigration records an in-progress break-before-make signer migration.
+	// +optional
+	CosmosignerMigration *CosmosignerMigrationStatus `json:"cosmosignerMigration,omitempty"`
+
+	// CosmosignerKeyImported is the fingerprint of a completed Vault key import (Vault target + source
+	// secret + key material). It lets the controller skip a repeated import and detect a source/target
+	// change without trusting user-editable metadata. Not meant to be set by hand.
+	// +optional
+	CosmosignerKeyImported string `json:"cosmosignerKeyImported,omitempty"`
 
 	// CosmosignerReplicas records the raft replica count the managed signer was rolled out with,
 	// captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path
@@ -303,19 +322,15 @@ type ChainNodeStatus struct {
 	// CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at
 	// the moment the chain ID was first recorded. Empty string when no signer targeted a validator at
 	// chain establishment — including sentry-mode signers, whose key identity is deliberately
-	// excluded so that later retargeting the same key onto a validator does not masquerade as the
-	// establishing configuration. It lets the no-webhook reconcile path tell an establishing
-	// validator signer (admitted) apart from one introduced afterwards (rejected unless the backend
-	// provably imports the registered key). Not meant to be set by hand.
+	// excluded. It protects incomplete first rollouts and supports recovery of legacy status; managed
+	// migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand.
 	// +optional
 	CosmosignerAtEstablishment *string `json:"cosmosignerAtEstablishment,omitempty"`
 
 	// CosmosignerServingIdentity records the effective signing identity of the rolled-out
 	// validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on
-	// teardown. It lets the no-webhook reconcile path judge a signer REMOVAL from status alone:
-	// removal is only admitted when the validator's own signing path still resolves to this same
-	// identity (e.g. a software-backed signer that used the validator's own key secret), so the
-	// on-chain key keeps signing. Not meant to be set by hand.
+	// teardown. It records that this signer protected the node's validator role across removal and
+	// migration recovery. Not meant to be set by hand.
 	// +optional
 	CosmosignerServingIdentity string `json:"cosmosignerServingIdentity,omitempty"`
 }
@@ -337,6 +352,8 @@ type ValidatorConfig struct {
 
 	// TmKMS configuration for signing commits for this validator.
 	// When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.
+	//
+	// Deprecated: use .spec.cosmosigner instead. TmKMS will be removed in a future version.
 	// +optional
 	TmKMS *TmKMS `json:"tmKMS,omitempty"`
 

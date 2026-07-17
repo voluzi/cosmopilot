@@ -26,8 +26,8 @@ func TestValidateCosmosignerReservedNameRejectsStatefulSetChildren(t *testing.T)
 
 // TestNodeSetInitValidatorSameKeyMigration exercises Validate directly (no controller): an
 // established genesis-init ChainNodeSet migrating from Vault tmKMS to a cosmosigner Vault backend
-// on the SAME transit key must be accepted (both the cosmosigner validation and the genesis
-// immutability fingerprint), while migrating to a DIFFERENT key must be rejected.
+// on the SAME transit key must be accepted. A different key is also admitted: Cosmopilot resets
+// signer state, while the user remains responsible for the on-chain validator key.
 func TestNodeSetInitValidatorSameKeyMigration(t *testing.T) {
 	tokenSecret := &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
@@ -69,10 +69,37 @@ func TestNodeSetInitValidatorSameKeyMigration(t *testing.T) {
 		t.Fatalf("same-key tmKMS→cosmosigner migration must be allowed, got: %v", err)
 	}
 
-	// Different key: rejected — by the registers rule (a non-matching pre-provisioned key needs
-	// software/uploadGenerated) since the same-key waiver doesn't apply.
-	if _, err := migrated("other-key").Validate(base()); err == nil {
-		t.Fatal("different-key migration must be rejected")
+	if _, err := migrated("other-key").Validate(base()); err != nil {
+		t.Fatalf("different-key migration must be admitted for controlled state reset, got: %v", err)
+	}
+}
+
+func TestChainNodeCreateValidatorWaiverRequiresOldValidator(t *testing.T) {
+	tokenSecret := &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
+		Key:                  "token",
+	}
+	old := &ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "mynode"},
+		Spec: ChainNodeSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Vault: &CosmosignerVaultBackend{
+				Address: "https://vault:8200", KeyName: "sentry-key", TokenSecret: tokenSecret,
+			}}},
+		},
+		Status: ChainNodeStatus{ChainID: "test-1"},
+	}
+	createdValidator := old.DeepCopy()
+	createdValidator.Spec.Validator = &ValidatorConfig{CreateValidator: &CreateValidatorConfig{}}
+
+	_, err := createdValidator.Validate(old)
+	if err == nil {
+		t.Fatal("promoting a non-validator with a pre-provisioned signer to create-validator must be rejected")
+	}
+	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer"
+	if err.Error() != want {
+		t.Fatalf("expected create-validator signer mismatch error %q, got %q", want, err)
 	}
 }
 
@@ -173,13 +200,16 @@ func TestChainNodeNoWebhookSignerLifecycle(t *testing.T) {
 		t.Fatalf("first rollout of a pre-provisioned validator signer must be admitted, got: %v", err)
 	}
 
-	// Once its digest is recorded, changing the live signer's Vault key is rejected.
+	// Once its lifecycle state and public key are recorded, changing the live signer's Vault key is
+	// admitted for break-before-make migration.
 	recorded := preProvisioned.DeepCopy()
 	recorded.Status.CosmosignerSigningDigest = recorded.CosmosignerSigningDigest()
+	recorded.Status.CosmosignerAppliedDigest = recorded.CosmosignerSigningDigest()
+	recorded.Status.CosmosignerPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	changed := recorded.DeepCopy()
 	changed.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
-	if _, err := changed.Validate(nil); err == nil {
-		t.Fatal("changing a recorded signer's key with webhooks disabled must be rejected")
+	if _, err := changed.Validate(nil); err != nil {
+		t.Fatalf("changing a recorded signer's key with webhooks disabled must be admitted for migration, got: %v", err)
 	}
 
 	// Removing a signer whose digest predates the serving-identity field (identity unverifiable):
@@ -190,13 +220,13 @@ func TestChainNodeNoWebhookSignerLifecycle(t *testing.T) {
 		t.Fatal("removing a legacy-digest signer with no recorded serving identity must be rejected")
 	}
 
-	// Removing a Vault signer whose serving identity is recorded but unreachable through the
-	// validator's own path: rejected.
+	// Removing a Vault signer keeps the validator role and is admitted; the controller stops the
+	// signer before publishing the local fallback path.
 	removedVault := recorded.DeepCopy()
 	removedVault.Status.CosmosignerServingIdentity = recorded.CosmosignerSigningIdentity()
 	removedVault.Spec.Cosmosigner = nil
-	if _, err := removedVault.Validate(nil); err == nil {
-		t.Fatal("removing a pre-provisioned Vault signer must be rejected: the validator would fall back to a different local key")
+	if _, err := removedVault.Validate(nil); err != nil {
+		t.Fatalf("removing a pre-provisioned Vault signer must be admitted for controlled fallback, got: %v", err)
 	}
 
 	// A post-establishment migration whose locks exist but whose rollout identity has not been

@@ -310,7 +310,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	// Keep tmKMS assets while the live pod still references them; disruption protection may defer
 	// replacement even when ensurePod returns successfully.
-	if chainNode.Spec.Cosmosigner != nil {
+	if chainNode.IsSignerTarget() {
 		cleanupSafe, err := r.canCleanupTmKMSConfig(ctx, chainNode)
 		if err != nil {
 			return ctrl.Result{}, err

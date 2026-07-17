@@ -8,6 +8,7 @@ import (
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,9 +33,11 @@ import (
 // Vault uploadGenerated signer). Software, GCP KMS and pre-provisioned Vault signers never create it, so
 // checking that name for them would let an unrelated foreign pod block an otherwise-deployable signer on
 // every reconcile.
+// usesPubkeyPod must be true when public-key preflight runs the one-shot `<name>-pubkey` pod. Software
+// and uploadGenerated signers resolve that key directly from their source Secret.
 // replicas is the desired StatefulSet replica count; fresh deployment also reserves each deterministic
 // `<name>-<ordinal>` pod name before validators are retargeted.
-func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, replicas int32, usesImportPod bool) error {
+func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, replicas int32, usesImportPod, usesPubkeyPod bool) error {
 	// Objects that need only the same-owner check. Services are handled separately because their
 	// headless shape is immutable and must also match before deployment.
 	named := []struct {
@@ -42,6 +45,12 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		obj  client.Object
 	}{
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
+	}
+	if usesPubkeyPod {
+		named = append(named, struct {
+			kind string
+			obj  client.Object
+		}{"pubkey pod", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name + "-" + pubkeyJobSuffix}}})
 	}
 	if usesImportPod {
 		named = append(named, struct {
@@ -209,7 +218,7 @@ func ScaleDown(ctx context.Context, c client.Client, owner client.Object, namesp
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
 		if errors.IsNotFound(err) {
-			return true, nil
+			return SignerPodsGone(ctx, c, namespace, name)
 		}
 		return false, err
 	}
@@ -225,11 +234,151 @@ func ScaleDown(ctx context.Context, c client.Client, owner client.Object, namesp
 		// Just requested; pods are still terminating.
 		return false, nil
 	}
-	// Already requested zero: quiesced only once the StatefulSet controller has observed the
-	// scale-down generation and reports no replicas left. A stale zero-valued status from before the
-	// controller observed this generation must not let an import proceed while old pods can still be
-	// created or terminating.
-	return sts.Status.ObservedGeneration >= sts.Generation && sts.Status.Replicas == 0, nil
+	// Already requested zero: first require the StatefulSet controller to have observed the
+	// scale-down generation and report no replicas. That status is necessary but not sufficient:
+	// terminating pods may still exist after the count reaches zero, and starting another signer in
+	// that window can double-sign. The direct pod list below includes terminating pods.
+	if sts.Status.ObservedGeneration < sts.Generation || sts.Status.Replicas != 0 {
+		return false, nil
+	}
+	return SignerPodsGone(ctx, c, namespace, name)
+}
+
+// SignerPodsGone directly lists pods and reports whether no signer replica remains. It deliberately
+// checks both immutable signer labels and deterministic StatefulSet replica names, so a terminating
+// pod still blocks even if its labels were edited. Pods from any owner block reuse of the signer
+// name; ownership does not make concurrent signing or a pod-name collision safe.
+func SignerPodsGone(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.GetLabels()[labelAppName] == appNameCosmosigner && pod.GetLabels()[labelInstance] == name {
+			return false, nil
+		}
+		if isStatefulSetReplicaPodName(pod.GetName(), name) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// retainStatefulSetPVCs enables and observes PVC retention before a migration can scale or delete the
+// signer StatefulSet. A missing StatefulSet is ready; pod absence is checked by the calling phase.
+func retainStatefulSetPVCs(ctx context.Context, c client.Client, owner client.Object, namespace, name string) (bool, error) {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	if !metav1.IsControlledBy(sts, owner) {
+		return false, foreignObjectErr("StatefulSet", name)
+	}
+
+	retention := sts.Spec.PersistentVolumeClaimRetentionPolicy
+	if retention == nil ||
+		retention.WhenDeleted != appsv1.RetainPersistentVolumeClaimRetentionPolicyType ||
+		retention.WhenScaled != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		sts.Spec.PersistentVolumeClaimRetentionPolicy = &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+			WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		}
+		if err := c.Update(ctx, sts); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return sts.Status.ObservedGeneration >= sts.Generation, nil
+}
+
+// DeleteStatefulSet removes only the signer StatefulSet, retaining its PVCs for a same-key
+// migration. It first enables and observes PVC retention for both scale-down and deletion, then
+// drives the StatefulSet to zero and directly confirms that every signer pod is gone. Completion is
+// reported only after the StatefulSet is absent and a second pod listing is empty, so callers cannot
+// recreate the signer in the asynchronous deletion window.
+func DeleteStatefulSet(ctx context.Context, c client.Client, owner client.Object, namespace, name string) (deleted bool, err error) {
+	retained, err := retainStatefulSetPVCs(ctx, c, owner, namespace, name)
+	if err != nil || !retained {
+		return false, err
+	}
+
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return SignerPodsGone(ctx, c, namespace, name)
+		}
+		return false, err
+	}
+	if !metav1.IsControlledBy(sts, owner) {
+		return false, foreignObjectErr("StatefulSet", name)
+	}
+
+	quiesced, err := ScaleDown(ctx, c, owner, namespace, name)
+	if err != nil || !quiesced {
+		return false, err
+	}
+	if err := c.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
+		return false, err
+	}
+
+	remaining := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, remaining); err == nil {
+		return false, nil
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+	return SignerPodsGone(ctx, c, namespace, name)
+}
+
+// DeleteDiscoveryService removes the owned target-discovery Service and confirms it is absent. A
+// ChainNodeSet migration uses this while the signer is down so stale endpoints cannot reconnect the
+// recreated signer to the previous target group.
+func DeleteDiscoveryService(ctx context.Context, c client.Client, owner client.Object, namespace, name string) (bool, error) {
+	service := &corev1.Service{}
+	key := client.ObjectKey{Namespace: namespace, Name: name + discoveryServiceSuffix}
+	if err := c.Get(ctx, key, service); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	if !metav1.IsControlledBy(service, owner) {
+		return false, foreignObjectErr("discovery Service", service.Name)
+	}
+	if err := c.Delete(ctx, service); err != nil && !errors.IsNotFound(err) {
+		return false, err
+	}
+	remaining := &corev1.Service{}
+	if err := c.Get(ctx, key, remaining); err == nil {
+		return false, nil
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+	return true, nil
+}
+
+// DiscoveryEndpointsGone reports whether the deleted discovery Service has no legacy Endpoints or
+// EndpointSlices left. Waiting for both prevents a recreated same-name Service from briefly exposing
+// stale target IPs to the new signer.
+func DiscoveryEndpointsGone(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
+	serviceName := name + discoveryServiceSuffix
+	endpoints := &corev1.Endpoints{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: serviceName}, endpoints); err == nil {
+		return false, nil
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+	slices := &discoveryv1.EndpointSliceList{}
+	if err := c.List(ctx, slices, client.InNamespace(namespace), client.MatchingLabels{
+		discoveryv1.LabelServiceName: serviceName,
+	}); err != nil {
+		return false, err
+	}
+	return len(slices.Items) == 0, nil
 }
 
 // IsRolledOut reports whether the signer StatefulSet's CURRENT generation is fully deployed: the
@@ -258,6 +407,7 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, d
 func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
 	objects := []client.Object{
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: namespace}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + pubkeyJobSuffix, Namespace: namespace}},
 		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
@@ -292,16 +442,19 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 // collision) is not ours to wait on — Undeploy skips it too — so it does not block. The per-pod PVCs
 // are matched by the owner-UID label, so OUR lingering raft-state claims still gate the clear (even
 // when a foreign same-name StatefulSet exists), while the foreign CR's identically-named claims do
-// not. A claim already marked for deletion but held by a finalizer still counts as present, since a
-// fresh StatefulSet could bind it and inherit stale raft state.
+// not. Any deterministic same-name signer pod blocks regardless of owner, because concurrent signing
+// and pod-name reuse are unsafe. A claim already marked for deletion but held by a finalizer still
+// counts as present, since a fresh StatefulSet could bind it and inherit stale raft state.
 func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
-	importPod := &corev1.Pod{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name + "-" + importJobSuffix}, importPod); err == nil {
-		if metav1.IsControlledBy(importPod, owner) {
-			return false, nil
+	for _, suffix := range []string{importJobSuffix, pubkeyJobSuffix} {
+		jobPod := &corev1.Pod{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name + "-" + suffix}, jobPod); err == nil {
+			if metav1.IsControlledBy(jobPod, owner) {
+				return false, nil
+			}
+		} else if !errors.IsNotFound(err) {
+			return false, err
 		}
-	} else if !errors.IsNotFound(err) {
-		return false, err
 	}
 
 	sts := &appsv1.StatefulSet{}
@@ -312,6 +465,10 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 			return false, nil
 		}
 	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+	podsGone, err := SignerPodsGone(ctx, c, namespace, name)
+	if err != nil || !podsGone {
 		return false, err
 	}
 

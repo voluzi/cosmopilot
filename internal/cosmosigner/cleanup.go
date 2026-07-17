@@ -33,6 +33,21 @@ func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, names
 	return nil
 }
 
+// OwnedPVCsGone reports whether all raft-state claims attributable to owner are absent. Claims
+// still terminating under a finalizer remain present and keep a different-key migration blocked.
+func OwnedPVCsGone(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range pvcs.Items {
+		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // isOwnedStatefulSetDataPVC reports whether pvc is a per-pod raft-state claim of the signer named
 // `name` attributable to owner: its name matches the StatefulSet per-pod pattern and its owner-UID
 // label equals owner's UID. Matching is STRICT — a claim without a matching label is never deleted,
@@ -113,4 +128,14 @@ func statefulSetDataPVCOrdinal(pvcName, stsName string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+func isStatefulSetReplicaPodName(podName, stsName string) bool {
+	prefix := stsName + "-"
+	if !strings.HasPrefix(podName, prefix) {
+		return false
+	}
+	ordinal := strings.TrimPrefix(podName, prefix)
+	n, err := strconv.Atoi(ordinal)
+	return err == nil && n >= 0 && strconv.Itoa(n) == ordinal
 }

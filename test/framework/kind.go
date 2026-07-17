@@ -302,9 +302,6 @@ func (f *KindFramework) DeployController() error {
 		"--set", fmt.Sprintf("nodeUtilsImage=%s", f.cfg.NodeUtilsImage),
 		"--set", fmt.Sprintf("workerCount=%d", f.cfg.WorkerCount),
 		"--set", "debugMode=true",
-		// The chart default pins the first cosmosigner release (0.1.0), which is not published yet;
-		// e2e runs against latest until it is. TODO: drop once ghcr.io/voluzi/cosmosigner:0.1.0 exists.
-		"--set", "cosmosignerImage=ghcr.io/voluzi/cosmosigner:latest",
 		"--wait",
 		"--timeout", "5m",
 	}

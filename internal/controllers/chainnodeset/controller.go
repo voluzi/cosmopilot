@@ -51,6 +51,8 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/finalizers,verbs=update
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+//+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -134,6 +136,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// A manifest-placement change may give an existing signer a new logical status name. Persist the
+	// old Kubernetes resource name first so preflight and migration reuse its StatefulSet/PVC names.
+	if recorded, err := r.initCosmosignerReplacementNames(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	} else if recorded {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Preflight every desired signer before deleting a stale one. A replacement that cannot deploy must
 	// leave the old signing path intact instead of deleting it and then failing before children retarget.
 	if err := r.preflightCosmosigners(ctx, nodeSet); err != nil {
@@ -149,8 +159,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// existing signing path is still intact. A failed replacement import must not delete the old signer.
 	if recorded, err := r.initCosmosignerLocks(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
+	} else if err := validateRecordedCosmosignerLocks(nodeSet); err != nil {
+		return ctrl.Result{}, err
 	} else if recorded {
 		return ctrl.Result{Requeue: true}, nil
+	}
+	if pending, err := r.reconcileCosmosignerMigrations(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	} else if pending {
+		logger.Info("waiting for break-before-make cosmosigner migration")
+		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 	}
 	blockedSignerTargets, ready, err := r.prepareCosmosignerImports(ctx, nodeSet)
 	if err != nil {
@@ -201,6 +219,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// ID was empty) BEFORE ensureValidator/ensureNodes retarget child validators to the signer.
 	if !chainIDKnownAtStart && nodeSet.Status.ChainID != "" && len(nodeSet.ResolveCosmosigners()) > 0 {
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	if hasRetargetingCosmosignerMigration(nodeSet) {
+		ready, err := r.reconcileCosmosignerRetargeting(ctx, nodeSet, blockedSignerTargets)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			logger.Info("waiting for cosmosigner targets to converge while signer is stopped")
+			return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+		}
 	}
 
 	// Apply and roll out signers before publishing their target marker to existing children. Targets
@@ -273,9 +302,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // unavailable here. To keep no-webhook clusters safe after genesis, this path adds conservative
 // status-gated checks for the immutable genesis validator set: once a ChainNodeSet has a chainID,
 // the genesis-initializing validators recorded in status (flagged Init, with a fingerprint of their
-// signing material) must still be desired in the same groups with unchanged signing material, and no
-// new genesis-initializing validator may appear — so removals, conversions, signing-material changes
-// and additions are all rejected without a previous spec to diff against.
+// genesis configuration) must still be desired in the same groups, and no new genesis-initializing
+// validator may appear. Managed signer migrations may refresh only the signing-material portion.
 // The status-gated waiver in Validate stays conservative without an old spec — it only drops the
 // .spec.genesis requirement when the current spec still describes an active genesis-initializing
 // validator, so a running configuration with no derivable genesis is rejected rather than accepted.
@@ -301,29 +329,26 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 // from status alone. Reconcile only ever sees the current persisted object, never the previous spec,
 // so it enforces exactly the invariants that do NOT need an old/new diff:
 //
-//   - Modifying a still-present signer that already rolled out (recorded digest, but the current
-//     digest differs) is rejected — changing the Vault key, replicas, or target set of a live signer
-//     would make the validator sign with a key not in the on-chain set. A same-key config keeps the
-//     digest identical and is allowed.
+//   - A signer lifecycle change requires a controller-recorded applied digest and public key so the
+//     break-before-make migration can decide whether to retain or reset raft state.
 //
 //   - The raft replica count is immutable once the cluster formed with it (re-rendering a bootstrap
 //     list does not migrate the recorded membership). Enforced from the persisted replica count so it
 //     also covers sentry signers, which record no signing digest.
 //
-//   - ADDING a validator-targeted signer with an unverifiable (pre-provisioned Vault/GCP) key AFTER
-//     establishment is rejected, using the write-once at-establishment identity marker to tell it
-//     apart from the establishing signer's own first rollout (which must be admitted — the digest is
-//     only recorded after rollout, so keying on "chainID set + empty digest" would deadlock it).
-//
-//   - REMOVING a validator-targeted signer is fail-closed until rollout records its serving identity.
-//     Afterwards, removal is admitted only when the validator's own path still resolves that identity.
+//   - Removing a validator-targeted signer is fail-closed until rollout records its target kind;
+//     multi-instance validator groups remain protected from changing one identity into many.
 func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	if nodeSet.Status.ChainID == "" {
 		return nil
 	}
+	if err := validateRecordedCosmosignerLocks(nodeSet); err != nil {
+		return err
+	}
 
+	desiredSigners := nodeSet.ResolveCosmosigners()
 	desired := map[string]appsv1.ResolvedSigner{}
-	for _, s := range nodeSet.ResolveCosmosigners() {
+	for _, s := range desiredSigners {
 		desired[s.Name] = s
 	}
 
@@ -334,15 +359,22 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 		if _, ok := desired[st.Name]; ok {
 			continue
 		}
+		if _, replacement := desiredReplacementSigner(nodeSet, desiredSigners, st); replacement {
+			if st.AppliedDigest == "" || st.PublicKey == "" {
+				return fmt.Errorf("cosmosigner %q cannot be moved to a new manifest placement with webhooks disabled until the controller records its applied public key", st.Name)
+			}
+			continue
+		}
 		if st.ServingIdentity != "" && nodeSet.ServedValidatorHasMultipleInstances(st.ServingGroup) {
 			return fmt.Errorf("cosmosigner %q cannot be removed from multi-instance validator group %q (webhooks disabled): the group currently represents one signer-held validator identity, but removing the signer would restore per-instance validator identities", st.Name, st.ServingGroup)
 		}
-		if st.ServingIdentity != "" &&
-			!nodeSet.ServedValidatorResolvesIdentity(st.ServingGroup, st.ServingIdentity) {
-			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): the validator it served would fall back to a local key different from the on-chain consensus key — restore the signer, or migrate the validator's own signing path to the same key first", st.Name)
+		if st.ServingIdentity != "" && !hasActiveValidatorGroup(nodeSet, st.ServingGroup) {
+			return fmt.Errorf("cosmosigner %q cannot be removed together with validator group %q (webhooks disabled): the validator would have no signing path", st.Name, st.ServingGroup)
 		}
 		if st.ServingIdentity == "" && st.SigningDigest != "" {
-			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): it served a validator but its recorded identity predates this version and cannot be verified — restore the signer so the controller can record it, or remove it with webhooks enabled", st.Name)
+			if st.AppliedDigest == "" || st.PublicKey == "" {
+				return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): its applied public key predates this version and cannot be verified — restore the signer so the controller can record it", st.Name)
+			}
 		}
 		if st.ServingIdentity == "" && st.SigningDigest == "" {
 			if st.ServingGroup != "" {
@@ -352,31 +384,23 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 				return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): its pre-rollout target kind predates the status marker and cannot be verified — restore the signer with webhooks enabled so the controller can record whether it serves a validator", st.Name)
 			}
 		}
-		// A SENTRY signer whose key was registered in the immutable genesis validator set at
-		// establishment (AtEstablishment holds its identity; validator-targeted signers are handled by
-		// the ServingIdentity check above) cannot be removed: the genesis validator would be left with no
-		// signing path. A non-genesis sentry records an empty marker and is freely removable.
-		if st.ServingIdentity == "" && st.AtEstablishment != nil && *st.AtEstablishment != "" {
-			return fmt.Errorf("cosmosigner %q cannot be removed (webhooks disabled): its key is registered in the immutable genesis validator set, so removing it would leave that genesis validator without a signer — remove it with webhooks enabled, or keep the signer", st.Name)
-		}
 	}
 
 	// PRESENT signers: modification and post-establishment-addition guards.
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		st := nodeSet.GetCosmosignerStatus(s.Name)
+		servedMultiInstanceGroup := st != nil && st.ServingGroup == s.ValidatorGroup &&
+			(st.ServingIdentity != "" || (st.AtEstablishment != nil && *st.AtEstablishment != ""))
+		if s.TargetsValidator() && nodeSet.ServedValidatorHasMultipleInstances(s.ValidatorGroup) && !servedMultiInstanceGroup {
+			return fmt.Errorf("cosmosigner %q cannot be added to established multi-instance validator group %q with webhooks disabled: the group already has per-instance validator identities", s.Name, s.ValidatorGroup)
+		}
 
 		if st != nil {
-			// The raft replica count is immutable once the cluster formed with it (re-rendering a
-			// bootstrap list does not migrate the recorded membership). Enforced from the persisted count
-			// so it also covers sentry signers, which record no signing digest.
-			if st.Replicas != nil && *st.Replicas != s.Spec.GetReplicas() {
-				return fmt.Errorf("cosmosigner %q replicas are immutable after deployment (webhooks disabled): changing them does not migrate the raft membership and can break quorum", s.Name)
-			}
-			// The PVC template is immutable too: StatefulSet volumeClaimTemplates cannot be updated and
-			// existing claims stay at their old size/class, so a change would be silently ignored.
-			if st.StateStorageSize != "" &&
-				!appsv1.CosmosignerStateStorageEqual(st.StateStorageSize, st.StateStorageClassName, s.Spec.GetStateStorageSize(), s.Spec.StorageClassName) {
-				return fmt.Errorf("cosmosigner %q state storage (size/class) is immutable after deployment (webhooks disabled): its raft state PVCs cannot be resized or moved — remove the signer and re-add it", s.Name)
+			if st.AppliedDigest != "" && s.Digest() != st.AppliedDigest {
+				if st.PublicKey == "" {
+					return fmt.Errorf("cosmosigner %q cannot be migrated with webhooks disabled until the controller records its applied public key", s.Name)
+				}
+				continue
 			}
 			// A signer that was responsible for an on-chain consensus key at establishment (non-empty
 			// AtEstablishment) but has NOT yet rolled out (no SigningDigest) must keep serving that exact
@@ -411,12 +435,8 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 				}
 			}
 			if st.SigningDigest != "" {
-				// Modifying a still-present signer that already rolled out (recorded digest, current digest
-				// differs) is rejected — changing the Vault key, replicas, or target set of a live signer
-				// would make the validator sign with a key not in the on-chain set. A same-key config keeps
-				// the digest identical and is allowed.
 				if s.Digest() != st.SigningDigest {
-					return fmt.Errorf("cosmosigner %q signing configuration is immutable after the chain is established (webhooks disabled): the targeted validator's key is fixed on-chain", s.Name)
+					return fmt.Errorf("cosmosigner %q cannot be migrated with webhooks disabled until the controller records its applied public key; restore the previous configuration and wait for one reconcile", s.Name)
 				}
 				// The digest hashes the backend identity, replicas and target-group NAMES — not whether the
 				// served group still contains the validator. Converting the served group into a regular node
@@ -454,32 +474,41 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			}
 		}
 
-		// ADDING a validator-targeted signer AFTER establishment is rejected unless its key source is
-		// provably the registered one. A signer present at establishment has a status entry whose
-		// write-once AtEstablishment marker equals its identity (recorded atomically with the chain
-		// ID); a post-establishment addition has no entry (never reconciled), an entry with a NIL
-		// marker (its first reconcile ran after establishment — SetEstablishedChainID never runs
-		// again, so the marker stays nil), or an entry whose marker differs. The waiver requires the
-		// backend to reference/import the validator's own key (software or vault.uploadGenerated)
-		// AND that key's secret to be status-pinned — only true for a genesis-init target, whose
-		// recorded genesis fingerprint includes privateKeySecret. An external-genesis or
-		// create-validator target has no such pin, so the same no-webhook edit could swap
-		// privateKeySecret alongside the signer, deploying a key not in the validator set.
-		if s.TargetsValidator() {
-			addedAfterEstablishment := st == nil ||
-				st.AtEstablishment == nil ||
-				s.ValidatorTargetedIdentity() != *st.AtEstablishment
-			if addedAfterEstablishment {
-				c := s.Spec
-				importsRegisteredKey := signerTargetInitializesGenesis(nodeSet, s) &&
-					(c.UsesSoftwareBackend() || (c.UsesVaultBackend() && c.VaultUploadsGenerated(true)))
-				if !importsRegisteredKey {
-					return fmt.Errorf("cosmosigner %q: a validator-targeted signer cannot be added to an established chain with webhooks disabled — its key cannot be verified against the on-chain validator key from status alone; perform the migration with webhooks enabled", s.Name)
-				}
-			}
-		}
 	}
 
+	return nil
+}
+
+func hasActiveValidatorGroup(nodeSet *appsv1.ChainNodeSet, group string) bool {
+	if group == appsv1.ReservedValidatorGroupName {
+		return nodeSet.Spec.Validator != nil
+	}
+	for i := range nodeSet.Spec.Nodes {
+		candidate := &nodeSet.Spec.Nodes[i]
+		if candidate.Name == group {
+			return candidate.Validator != nil && candidate.GetInstances() > 0
+		}
+	}
+	return false
+}
+
+// validateRecordedCosmosignerLocks enforces the controller-recorded raft membership and PVC template
+// for every desired signer. Admission normally rejects these changes, but recovered live state may
+// populate the locks after admission has already accepted the current spec.
+func validateRecordedCosmosignerLocks(nodeSet *appsv1.ChainNodeSet) error {
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		if st == nil {
+			continue
+		}
+		if st.Replicas != nil && *st.Replicas != s.Spec.GetReplicas() {
+			return fmt.Errorf("cosmosigner %q replicas are immutable after deployment: changing them does not migrate the raft membership and can break quorum", s.Name)
+		}
+		if st.StateStorageSize != "" &&
+			!appsv1.CosmosignerStateStorageEqual(st.StateStorageSize, st.StateStorageClassName, s.Spec.GetStateStorageSize(), s.Spec.StorageClassName) {
+			return fmt.Errorf("cosmosigner %q state storage (size/class) is immutable after deployment: its raft state PVCs cannot be resized or moved — remove the signer and re-add it", s.Name)
+		}
+	}
 	return nil
 }
 
@@ -487,6 +516,7 @@ func validateNoWebhookGenesisInitState(nodeSet *appsv1.ChainNodeSet) error {
 	type desiredInit struct {
 		group  string
 		digest string
+		config *appsv1.NodeSetValidatorConfig
 	}
 	desired := map[string]desiredInit{}
 
@@ -495,6 +525,7 @@ func validateNoWebhookGenesisInitState(nodeSet *appsv1.ChainNodeSet) error {
 		desired[name] = desiredInit{
 			group:  appsv1.ReservedValidatorGroupName,
 			digest: nodeSet.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", name)),
+			config: nodeSet.Spec.Validator,
 		}
 	}
 	for _, group := range nodeSet.Spec.Nodes {
@@ -514,6 +545,7 @@ func validateNoWebhookGenesisInitState(nodeSet *appsv1.ChainNodeSet) error {
 			desired[name] = desiredInit{
 				group:  group.Name,
 				digest: cfg.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", name)),
+				config: cfg,
 			}
 		}
 	}
@@ -549,7 +581,8 @@ func validateNoWebhookGenesisInitState(nodeSet *appsv1.ChainNodeSet) error {
 		if validator.Group != want.group {
 			return fmt.Errorf("genesis-initializing validator %q is recorded in group %q but the spec now places it in group %q", validator.Name, validator.Group, want.group)
 		}
-		if validator.SigningKeyDigest != "" && validator.SigningKeyDigest != want.digest {
+		if validator.SigningKeyDigest != "" && validator.SigningKeyDigest != want.digest &&
+			!nodeSet.GenesisSigningDigestAllowsRefresh(want.group, want.config, validator.SigningKeyDigest) {
 			return fmt.Errorf("signing material or genesis parameters of genesis-initializing validator %q cannot be changed with webhooks disabled after genesis has been created: they are part of the immutable genesis validator set", validator.Name)
 		}
 		seen[validator.Name] = struct{}{}

@@ -474,7 +474,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("tokenSecret.name and .key are required"))
 	})
 
-	It("rejects changing the cosmosigner signing key after the chain is established", func() {
+	It("allows a recorded cosmosigner key migration and rejects validator removal", func() {
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
 			Spec: appsv1.ChainNodeSpec{
@@ -488,22 +488,21 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}
 		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
 
-		// Mark the chain as established.
+		// Mark the chain as established and record the applied signer identity/public key.
 		cn.Status.ChainID = "test-chain-1"
+		cn.Status.CosmosignerAppliedDigest = cn.CosmosignerSigningDigest()
+		cn.Status.CosmosignerPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 		Expect(Framework().Client().Status().Update(Framework().Context(), cn)).To(Succeed())
 
-		// Changing the Vault key is now rejected.
-		Eventually(func() string {
+		// Changing the Vault key is admitted for break-before-make migration.
+		Eventually(func() error {
 			fresh := &appsv1.ChainNode{}
 			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
-				return err.Error()
+				return err
 			}
 			fresh.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
-			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
-				return err.Error()
-			}
-			return ""
-		}).Should(ContainSubstring("immutable after the chain is established"))
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
 
 		// Dropping both the signer and the validator block (emptying the signing identity) is
 		// rejected too — the on-chain validator would be left with no signing path.
@@ -518,7 +517,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 				return err.Error()
 			}
 			return ""
-		}).Should(ContainSubstring("immutable after the chain is established"))
+		}).Should(ContainSubstring("validator cannot be removed"))
 	})
 
 	It("allows a same-key migration from tmKMS to cosmosigner after the chain is established", func() {
@@ -579,7 +578,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err.Error()).To(ContainSubstring("raftTLSSecret must not be empty"))
 	})
 
-	It("rejects retargeting a validator-targeted signer, allows retargeting a sentry-only signer", func() {
+	It("allows recorded signer retargeting", func() {
 		// Sentry-only signer over regular groups: retargeting between fullnode groups stays
 		// allowed after establishment (no in-cluster validator identity is protected).
 		sentry := &appsv1.ChainNodeSet{
@@ -598,6 +597,10 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 				return err
 			}
 			fresh.Status.ChainID = "test-chain-1"
+			signer := fresh.ResolveCosmosigners()[0]
+			fresh.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+				Name: signer.Name, AppliedDigest: signer.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			}}
 			return Framework().Client().Status().Update(Framework().Context(), fresh)
 		}).Should(Succeed())
 		Eventually(func() error {
@@ -609,7 +612,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 			return Framework().Client().Update(Framework().Context(), fresh)
 		}).Should(Succeed())
 
-		// Validator-targeted signer: retargeting away from the validator is rejected.
+		// Validator-targeted signer: retargeting away from the validator is also a migration.
 		valTarget := &appsv1.ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
 			Spec: appsv1.ChainNodeSetSpec{
@@ -628,19 +631,20 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 				return err
 			}
 			fresh.Status.ChainID = "test-chain-2"
+			signer := fresh.ResolveCosmosigners()[0]
+			fresh.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+				Name: signer.Name, AppliedDigest: signer.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			}}
 			return Framework().Client().Status().Update(Framework().Context(), fresh)
 		}).Should(Succeed())
-		Eventually(func() string {
+		Eventually(func() error {
 			fresh := &appsv1.ChainNodeSet{}
 			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(valTarget), fresh); err != nil {
-				return err.Error()
+				return err
 			}
 			fresh.Spec.Cosmosigner.NodeGroups = []string{"a"} // retarget validator -> sentry group
-			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
-				return err.Error()
-			}
-			return ""
-		}).Should(ContainSubstring("nodeGroups is immutable"))
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
 	})
 
 	It("allows an init validator to migrate tmKMS to cosmosigner on the same key", func() {

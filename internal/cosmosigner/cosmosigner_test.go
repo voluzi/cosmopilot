@@ -1,6 +1,7 @@
 package cosmosigner
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ func testParams() Params {
 		Name:             "mychain-signer",
 		Namespace:        "default",
 		ChainID:          "test-1",
-		Image:            "ghcr.io/voluzi/cosmosigner:latest",
+		Image:            "ghcr.io/voluzi/cosmosigner:0.1.0",
 		Replicas:         3,
 		LogLevel:         "info",
 		StateStorageSize: "1Gi",
@@ -68,6 +69,44 @@ func TestBuildConfigSingleReplicaNoMembers(t *testing.T) {
 	}
 }
 
+func TestMultiReplicaConfigBootstrapsOnlyPodZero(t *testing.T) {
+	p := testParams()
+	configYAML, err := p.ConfigYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configMap, err := p.ConfigMap(configYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := int32(0); i < p.Replicas; i++ {
+		key := fmt.Sprintf("%s-%d.yaml", p.Name, i)
+		config, ok := configMap.Data[key]
+		if !ok {
+			t.Fatalf("ConfigMap missing per-pod config %q", key)
+		}
+		if got, want := strings.Contains(config, "bootstrap: true"), i == 0; got != want {
+			t.Fatalf("pod %d bootstrap = %v, want %v", i, got, want)
+		}
+	}
+
+	sts, err := p.StatefulSet(configYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configMount corev1.VolumeMount
+	for _, mount := range sts.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == "config" {
+			configMount = mount
+			break
+		}
+	}
+	if configMount.SubPathExpr != "$(POD_NAME).yaml" {
+		t.Fatalf("config subPathExpr = %q, want per-pod config", configMount.SubPathExpr)
+	}
+}
+
 func TestRenderYAMLUsesSnakeCase(t *testing.T) {
 	out, err := testParams().ConfigYAML()
 	if err != nil {
@@ -86,6 +125,11 @@ func TestRenderYAMLUsesSnakeCase(t *testing.T) {
 
 func TestStatefulSetShape(t *testing.T) {
 	sts := mustStatefulSet(t, testParams())
+	if sts.Spec.PersistentVolumeClaimRetentionPolicy == nil ||
+		sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted != appsv1.DeletePersistentVolumeClaimRetentionPolicyType ||
+		sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled != appsv1.RetainPersistentVolumeClaimRetentionPolicyType {
+		t.Fatalf("StatefulSet must delete PVCs on ordinary deletion and retain them on scale-down, got %#v", sts.Spec.PersistentVolumeClaimRetentionPolicy)
+	}
 	if sts.Spec.PodManagementPolicy != "Parallel" {
 		t.Fatalf("expected Parallel pod management, got %q", sts.Spec.PodManagementPolicy)
 	}

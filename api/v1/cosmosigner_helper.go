@@ -127,17 +127,6 @@ func (nodeSet *ChainNodeSet) groupCosmosigner(group string) *Cosmosigner {
 	return nil
 }
 
-// groupSignerIdentity returns the effective signing identity of the signer serving a validator
-// group, and whether such a signer exists.
-func (nodeSet *ChainNodeSet) groupSignerIdentity(group string) (string, bool) {
-	for _, s := range nodeSet.ResolveCosmosigners() {
-		if s.ValidatorGroup == group {
-			return s.Identity(), true
-		}
-	}
-	return "", false
-}
-
 // RequiresLocalPrivKey reports whether the backend needs a local priv_validator_key.json
 // secret to be present: the software backend mounts it directly, and the Vault backend with
 // uploadGenerated imports it. GCP and pre-provisioned Vault backends do not.
@@ -181,18 +170,18 @@ func (b *CosmosignerVaultBackend) ImportTargetFingerprint(sourceSecret string) s
 // key BYTES (an in-place Secret update) produces a different value and so triggers a fresh import —
 // preventing Vault from silently holding a stale key while genesis/signing flows consume new bytes.
 // The two-part form lets the absent-source fast-path match on the target half alone (see
-// ImportTargetFingerprint). Both controllers stamp this value into the key-imported annotation;
+// ImportTargetFingerprint). Both controllers stamp this value into controller-owned status;
 // sharing one implementation keeps their import protocols in lockstep.
 func (b *CosmosignerVaultBackend) ImportFingerprint(sourceSecret string, keyMaterial []byte) string {
 	return b.ImportTargetFingerprint(sourceSecret) + "." + utils.Sha256(string(keyMaterial))
 }
 
-// ImportAnnotationMatchesTarget reports whether a recorded key-imported annotation belongs to the
-// given import target (see ImportTargetFingerprint) regardless of which key bytes were imported. Used
-// by the absent-source fast-path: only an import completed for the CURRENT target/source proves the
-// spec's Vault key holds the registered material.
-func ImportAnnotationMatchesTarget(annotation, targetFingerprint string) bool {
-	return strings.HasPrefix(annotation, targetFingerprint+".")
+// ImportRecordMatchesTarget reports whether a recorded key import belongs to the given import target
+// (see ImportTargetFingerprint) regardless of which key bytes were imported. Used by the absent-source
+// fast-path: only an import completed for the CURRENT target/source proves the spec's Vault key holds
+// the registered material.
+func ImportRecordMatchesTarget(record, targetFingerprint string) bool {
+	return strings.HasPrefix(record, targetFingerprint+".")
 }
 
 // CosmosignerValidatorTargetedIdentity returns the signer's effective signing identity ONLY when it
@@ -232,6 +221,7 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 	if chainID == "" {
 		return
 	}
+	establishing := nodeSet.Status.ChainID == ""
 	nodeSet.Status.ChainID = chainID
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		st := nodeSet.EnsureCosmosignerStatus(s.Name)
@@ -251,6 +241,9 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 				st.ServingGroup = s.ValidatorGroup
 			}
 		}
+		if establishing && s.TargetsValidator() && st.LocalKeyEverServed == nil {
+			st.LocalKeyEverServed = ptr.To(nodeSet.SignerUsesLocalValidatorKey(s))
+		}
 	}
 }
 
@@ -261,7 +254,7 @@ func (nodeSet *ChainNodeSet) SetEstablishedChainID(chainID string) {
 // genesis-registered sentry case the controller can prove from spec; every other sentry (Vault/GCP, or
 // software but not genesis-registered) records "" and stays freely rotatable/removable on the no-webhook
 // path. Because the genesis set is immutable, this is stable whether evaluated at establishment or when
-// a genesis-sentry signer's status entry is first created later (see ensureCosmosigner's backfill).
+// a genesis-sentry signer's status entry is first created later (see initCosmosignerLocks).
 func (nodeSet *ChainNodeSet) genesisSentryEstablishmentIdentity(s ResolvedSigner) string {
 	if s.ValidatorGroup != "" || s.SoftwareKeySecret == "" {
 		return ""
@@ -423,12 +416,13 @@ func localKeySigningIdentity(secret string) string {
 }
 
 // CosmosignerSigningDigest fingerprints a standalone ChainNode's managed signer for status
-// persistence (effective signing identity plus replica count). Empty when no cosmosigner is set.
+// persistence (effective signing identity, replica count, and validator targeting). Empty when no
+// cosmosigner is set.
 func (chainNode *ChainNode) CosmosignerSigningDigest() string {
 	if chainNode.Spec.Cosmosigner == nil {
 		return ""
 	}
-	preimage := fmt.Sprintf("%s\x00%d", chainNode.CosmosignerSigningIdentity(), chainNode.Spec.Cosmosigner.GetReplicas())
+	preimage := fmt.Sprintf("%s\x00%d\x00%t", chainNode.CosmosignerSigningIdentity(), chainNode.Spec.Cosmosigner.GetReplicas(), chainNode.IsValidator())
 	return utils.Sha256(preimage)
 }
 
@@ -483,6 +477,13 @@ func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *No
 		return "tmkms\x00unconfigured"
 	}
 	return localKeySigningIdentity(nodeSet.validatorKeySecret(group))
+}
+
+// ValidatorGroupResolvesSigningIdentity reports whether a validator group's own local/tmKMS path
+// points at the recorded signer identity. Controllers use this as the cheap same-backend proof before
+// querying an external fallback key's public key during signer removal.
+func (nodeSet *ChainNodeSet) ValidatorGroupResolvesSigningIdentity(group string, cfg *NodeSetValidatorConfig, identity string) bool {
+	return identity != "" && nodeSet.validatorGroupSigningIdentity(group, cfg) == identity
 }
 
 // ValidateCosmosignerReservedNameNoWebhook applies the reserved-name rule on the no-webhook

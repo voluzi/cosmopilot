@@ -22,13 +22,14 @@ type SoftwareBackend struct {
 
 // VaultBackend holds the Vault Transit backend configuration.
 type VaultBackend struct {
-	Address           string
-	KeyName           string
-	Mount             string
-	Namespace         string
-	TokenSecret       *corev1.SecretKeySelector
-	CertificateSecret *corev1.SecretKeySelector
-	AutoRenewToken    bool
+	Address               string
+	KeyName               string
+	Mount                 string
+	Namespace             string
+	TokenSecret           *corev1.SecretKeySelector
+	CertificateSecret     *corev1.SecretKeySelector
+	AutoRenewToken        bool
+	SkipCertificateVerify bool
 }
 
 // GcpBackend holds the GCP KMS backend configuration.

@@ -257,9 +257,25 @@ with `backend.vault.keyName` set to the same key. No key material is moved. `Cos
 `TmKMS` sidecars and deploys the signer `StatefulSet`; the node keeps listening on the same privval
 address.
 
-:::warning[Switching signers]
-As with any signer change, ensure the previous signing path is fully stopped before the new signer
-connects, to avoid a brief window where two signers could sign. CometBFT's privval handshake allows
-only one signer connection per node at a time. A freshly deployed signer starts with empty
-double-sign-protection state, so protection ramps up from the first signed block.
+## Updating and migrating a signer
+
+Image, resources, log-level, and credential changes use an ordinary StatefulSet rolling
+update. Changes to the backend/key, target groups, software-key Secret, or manifest placement use a
+managed break-before-make migration:
+
+1. Cosmopilot preflights the destination key and configuration while the current signer remains up.
+2. It scales the signer StatefulSet to zero and waits for the StatefulSet controller to observe zero.
+3. It directly lists signer pods and waits until every pod is gone, including terminating pods.
+4. It deletes the StatefulSet, confirms it is absent, and lists pods again before recreation.
+5. If the destination reports the same public key, the existing raft-state PVCs are retained. If the
+   public key differs, the PVCs are deleted so the new signer starts with clean state.
+6. Only then are the new signer configuration and targets applied and the StatefulSet recreated.
+
+Replica-count and state-storage changes remain unsupported because they require an explicit raft
+membership or PVC migration.
+
+:::warning[Cosmos does not rotate the validator key]
+Cosmopilot can safely stop one signer and start another, but it does not submit an on-chain consensus
+key rotation. When selecting a different public key, you are responsible for ensuring that key is the
+one the chain expects. Cosmopilot resets local signer state and proceeds with the requested key.
 :::
