@@ -955,6 +955,16 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
 				return fmt.Errorf("cosmosigner %q cannot be moved to a new manifest placement until the controller records its applied public key; restore the previous configuration and wait for one reconcile", s.Name)
 			}
+			if replacement, ok := nodeSet.DesiredReplacementSigner(desiredSigners, st); ok {
+				path := nodeSet.signerFieldPath(replacement)
+				if st.Replicas != nil && *st.Replicas != replacement.Spec.GetReplicas() {
+					return fmt.Errorf("%s.replicas must stay %d during a manifest placement move: changing it does not migrate the existing raft membership", path, *st.Replicas)
+				}
+				if st.StateStorageSize != "" &&
+					!CosmosignerStateStorageEqual(st.StateStorageSize, st.StateStorageClassName, replacement.Spec.GetStateStorageSize(), replacement.Spec.StorageClassName) {
+					return fmt.Errorf("%s.stateStorageSize/.storageClassName must stay unchanged during a manifest placement move: the replacement reuses the existing raft-state PVCs", path)
+				}
+			}
 		}
 	}
 
@@ -1236,7 +1246,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				if v.Namespace != nil {
 					ns = *v.Namespace
 				}
-				if err := registerVault(path, normalizedVaultIdentity(v.Address, ns, v.GetVaultMount(), v.KeyName)); err != nil {
+				if err := registerVault(path, normalizedVaultIdentity(v.Address, ns, v.GetVaultMount(), v.KeyName, v.GetKeyVersion())); err != nil {
 					return err
 				}
 			}
@@ -1561,13 +1571,10 @@ func (nodeSet *ChainNodeSet) GenesisSigningDigestAllowsRefresh(group string, cfg
 	return strings.HasSuffix(recorded, "\x00"+configuration)
 }
 
-// normalizedVaultIdentity returns a backend-agnostic identifier for a Vault Transit key, so the
-// same key referenced through tmKMS and through cosmosigner compares equal. tmKMS uses the default
-// "transit" mount and the root namespace implicitly. The Vault namespace is included so keys in
-// distinct Vault Enterprise namespaces are not conflated. The null-byte separators keep the fields
-// unambiguous.
-func normalizedVaultIdentity(address, namespace, mount, key string) string {
-	return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s", address, namespace, mount, key)
+// normalizedVaultIdentity identifies one pinned Vault Transit key version across managed backends.
+// The namespace and null-byte separators prevent distinct Vault keys from being conflated.
+func normalizedVaultIdentity(address, namespace, mount, key string, version int) string {
+	return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s\x00%d", address, namespace, mount, key, version)
 }
 
 // tmkmsNormalizedVaultKey returns the backend-agnostic Vault identity a tmKMS config points at, and
@@ -1580,7 +1587,7 @@ func tmkmsNormalizedVaultKey(t *TmKMS) (string, bool) {
 	if h.Address == "" || h.Key == "" {
 		return "", false
 	}
-	return normalizedVaultIdentity(h.Address, "", DefaultCosmosignerVaultMount, h.Key), true
+	return normalizedVaultIdentity(h.Address, "", DefaultCosmosignerVaultMount, h.Key, 1), true
 }
 
 // tmKMSSigningKeyIdentity returns a stable identifier for the concrete signing key a tmKMS config

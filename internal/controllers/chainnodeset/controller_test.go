@@ -43,17 +43,27 @@ func TestReconcileRejectsRecoveredSignerLockMismatchWithWebhooksEnabled(t *testi
 		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: nodeSet.Namespace},
 		Data:       map[string][]byte{privKeyFilename: key},
 	}
-	sts := &k8sappsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: signer.Name, Namespace: nodeSet.Namespace},
-		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(3))},
-	}
-	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
 	r := newValidatorTestReconciler(t,
 		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nodeSet.Namespace}},
 		nodeSet,
 		source,
-		sts,
 	)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+	params, err := r.cosmosignerParams(context.Background(), nodeSet, signer)
+	require.NoError(t, err)
+	params.Replicas = 3
+	params.ExpectedPublicKey = parsed.PubKey.Value
+	liveConfig, err := params.ConfigYAML()
+	require.NoError(t, err)
+	configMap, err := params.ConfigMap(liveConfig)
+	require.NoError(t, err)
+	sts, err := params.StatefulSet(liveConfig)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, configMap, r.Scheme))
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), configMap))
+	require.NoError(t, r.Create(context.Background(), sts))
 
 	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
 		Namespace: nodeSet.Namespace,
@@ -1653,6 +1663,16 @@ func TestValidateForReconcileRejectsLegacyPreDigestValidator(t *testing.T) {
 	ns := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	ns.Status.Cosmosigners[0].ServingGroup = ""
 	_, err := validateForReconcile(ns)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain consensus key")
+
+	// Lifecycle/public-key evidence proves a signer existed, but without the served group it cannot
+	// prove which validator the signer protected. The same legacy shape must remain fail-closed.
+	recovered := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	recovered.Status.Cosmosigners[0].ServingGroup = ""
+	recovered.Status.Cosmosigners[0].AppliedDigest = "legacy-lifecycle"
+	recovered.Status.Cosmosigners[0].PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	_, err = validateForReconcile(recovered)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "on-chain consensus key")
 

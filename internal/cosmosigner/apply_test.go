@@ -367,6 +367,11 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 			Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
 		}}
 	}
+	policy := func(owner metav1.Object) client.Object {
+		obj := networkPolicyObject(ns, name)
+		obj.SetOwnerReferences([]metav1.OwnerReference{ownerRef(owner)})
+		return obj
+	}
 	pvc := func(ownerUID types.UID) *corev1.PersistentVolumeClaim {
 		return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 			Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, ownerUID),
@@ -383,6 +388,8 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 		{"foreign statefulset only → torn down", []client.Object{ownedSTS(other)}, true},
 		{"our import pod present → not torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}}}, false},
 		{"foreign import pod only → torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(other)}}}}, true},
+		{"our network policy present → not torn down", []client.Object{policy(me)}, false},
+		{"foreign network policy only → torn down", []client.Object{policy(other)}, true},
 		{"signer replica pod present → not torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns}}}, false},
 		{"our lingering pvc → not torn down", []client.Object{pvc("me-uid")}, false},
 		{"foreign pvc only → torn down", []client.Object{pvc("other-uid")}, true},

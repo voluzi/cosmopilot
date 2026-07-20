@@ -5947,6 +5947,12 @@ spec:
               seedMode:
                 description: Indicates if this node is running with seed mode enabled.
                 type: boolean
+              tmKMSReservationIdentity:
+                description: |-
+                  TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was
+                  verified against PubKey before its consensus-key reservation was created. An unchanged identity
+                  can reuse the canonical recorded public key without launching another key-discovery pod.
+                type: string
               upgrades:
                 description: All scheduled/completed upgrades performed by cosmopilot
                   on this ChainNode.

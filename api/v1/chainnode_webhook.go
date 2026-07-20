@@ -135,7 +135,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		initializesGenesis := isValidator && chainNode.Spec.Validator.Init != nil
 		hasValidatorKey := isValidator && chainNode.Spec.Validator.PrivateKeySecret != nil && *chainNode.Spec.Validator.PrivateKeySecret != ""
 		if c.UsesVaultBackend() && c.VaultUploadsGenerated(initializesGenesis) && c.Backend.Vault.GetKeyVersion() != 1 {
-			return nil, fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires keyVersion 1 because Vault imports create the initial key version")
+			return nil, fmt.Errorf(".spec.cosmosigner Vault key imports require keyVersion 1 because Vault creates imported material as the initial key version")
 		}
 
 		// The signer must use the node's own key. A validator therefore cannot point the software

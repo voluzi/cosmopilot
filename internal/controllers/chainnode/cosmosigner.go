@@ -120,6 +120,9 @@ func (r *Reconciler) preflightCosmosignerFallback(ctx context.Context, chainNode
 		return nil
 	}
 	if !validatorTargeted {
+		if targeted := chainNode.Status.CosmosignerValidatorTargeted; targeted != nil && !*targeted {
+			return nil
+		}
 		sts := &k8sappsv1.StatefulSet{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: cosmosignerName(chainNode)}, sts); err != nil {
 			if errors.IsNotFound(err) {
@@ -404,22 +407,27 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), chainNode.Spec.Cosmosigner.GetReplicas(), usesImportPod, usesPubkeyPod); err != nil {
 		return cosmosigner.Params{}, err
 	}
-	recovering := chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == "" &&
-		chainNode.Status.CosmosignerReplicas != nil && chainNode.Status.CosmosignerStateStorageSize != "" &&
-		chainNode.Status.CosmosignerValidatorTargeted != nil
+	recovering := chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == ""
+	publicKey := ""
 	if recovering {
-		if err := cosmosigner.ValidateRecoveredSigningIdentity(ctx, r.Client, chainNode, params); err != nil {
+		recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, chainNode, params)
+		if err != nil {
 			return cosmosigner.Params{}, err
 		}
+		if live {
+			publicKey = recovered
+		}
 	}
-	// Preflight the uploadGenerated import SOURCE (read-only) before locks/import: a terminally missing
-	// source key would otherwise be found only inside maybeImportCosmosignerKey, after locks are recorded.
-	if err := r.preflightCosmosignerImportSource(ctx, chainNode); err != nil {
-		return cosmosigner.Params{}, err
-	}
-	publicKey, err := r.cosmosignerPublicKey(ctx, chainNode, params)
-	if err != nil {
-		return cosmosigner.Params{}, err
+	if publicKey == "" {
+		// Preflight the uploadGenerated import SOURCE (read-only) before locks/import: a terminally
+		// missing source key would otherwise be found only inside maybeImportCosmosignerKey, after locks.
+		if err := r.preflightCosmosignerImportSource(ctx, chainNode); err != nil {
+			return cosmosigner.Params{}, err
+		}
+		publicKey, err = r.cosmosignerPublicKey(ctx, chainNode, params)
+		if err != nil {
+			return cosmosigner.Params{}, err
+		}
 	}
 	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
 		UID: chainNode.GetUID(), Kind: "ChainNode", Namespace: chainNode.GetNamespace(), Name: chainNode.GetName(), Claim: standaloneCosmosignerReservationClaim(chainNode),
@@ -444,11 +452,6 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 		}
 	}
 	params.ExpectedPublicKey = publicKey
-	if recovering {
-		if err := cosmosigner.ValidateRecoveredSigningIdentity(ctx, r.Client, chainNode, params); err != nil {
-			return cosmosigner.Params{}, err
-		}
-	}
 	return params, nil
 }
 
@@ -460,8 +463,10 @@ func standaloneCosmosignerReservationClaim(chainNode *appsv1.ChainNode) string {
 }
 
 func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if err := r.ensureValidatorConsensusKeyReservation(ctx, chainNode); err != nil {
+	if recorded, err := r.ensureValidatorConsensusKeyReservation(ctx, chainNode); err != nil {
 		return false, err
+	} else if recorded {
+		return true, nil
 	}
 	if chainNode.Spec.Cosmosigner == nil {
 		if !chainNode.Spec.RemoteSignerTarget {

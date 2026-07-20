@@ -22,11 +22,12 @@ var ErrConsensusKeyReservationConflict = errors.New("consensus key reservation c
 
 // ReservationHolder identifies the root CR and logical signer claiming a consensus key.
 type ReservationHolder struct {
-	UID       types.UID
-	Kind      string
-	Namespace string
-	Name      string
-	Claim     string
+	UID               types.UID
+	Kind              string
+	Namespace         string
+	Name              string
+	Claim             string
+	LegacyStatusNames []string
 }
 
 // ConsensusKeyReservationName returns the cluster-scoped name for a chain/public-key pair.
@@ -120,7 +121,7 @@ func ensureNoLegacyConsensusKeyOwner(ctx context.Context, c client.Client, chain
 	}
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
-		if belongsToRoot(node, holder.UID) || node.Status.ChainID != chainID {
+		if node.Status.ChainID != chainID || legacyChainNodeMatchesClaim(node, holder) {
 			continue
 		}
 		if node.Status.CosmosignerPublicKey == publicKey || canonicalSDKPublicKey(node.Status.PubKey) == publicKey {
@@ -135,23 +136,62 @@ func ensureNoLegacyConsensusKeyOwner(ctx context.Context, c client.Client, chain
 	}
 	for i := range sets.Items {
 		set := &sets.Items[i]
-		if set.UID == holder.UID || set.Status.ChainID != chainID {
+		if set.Status.ChainID != chainID {
 			continue
 		}
 		for _, signer := range set.Status.Cosmosigners {
 			if signer.PublicKey == publicKey {
+				if set.UID == holder.UID && holder.matchesLegacyStatus(signer.Name) {
+					continue
+				}
 				return fmt.Errorf("%w: consensus key on chain %q is already recorded by ChainNodeSet %s/%s",
 					ErrConsensusKeyReservationConflict, chainID, set.Namespace, set.Name)
 			}
 		}
+		if canonicalSDKPublicKey(set.Status.PubKey) == publicKey &&
+			!legacyChainNodeSetAliasMatchesClaim(set, holder, publicKey) {
+			return fmt.Errorf("%w: consensus key on chain %q is already recorded by ChainNodeSet %s/%s",
+				ErrConsensusKeyReservationConflict, chainID, set.Namespace, set.Name)
+		}
 		for _, validator := range set.Status.Validators {
 			if canonicalSDKPublicKey(validator.PubKey) == publicKey {
+				if set.UID == holder.UID && validator.Name == holder.Claim {
+					continue
+				}
 				return fmt.Errorf("%w: consensus key on chain %q is already recorded by ChainNodeSet %s/%s",
 					ErrConsensusKeyReservationConflict, chainID, set.Namespace, set.Name)
 			}
 		}
 	}
 	return nil
+}
+
+func (holder ReservationHolder) matchesLegacyStatus(name string) bool {
+	for _, allowed := range holder.LegacyStatusNames {
+		if name == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func legacyChainNodeMatchesClaim(node *appsv1.ChainNode, holder ReservationHolder) bool {
+	if node.GetUID() == holder.UID {
+		return true
+	}
+	return belongsToRoot(node, holder.UID) && node.GetName() == holder.Claim
+}
+
+func legacyChainNodeSetAliasMatchesClaim(set *appsv1.ChainNodeSet, holder ReservationHolder, publicKey string) bool {
+	if set.GetUID() != holder.UID {
+		return false
+	}
+	for _, validator := range set.Status.Validators {
+		if validator.Name == holder.Claim && canonicalSDKPublicKey(validator.PubKey) == publicKey {
+			return true
+		}
+	}
+	return len(set.Status.Validators) == 0 && holder.Claim == set.GetName()+"-validator"
 }
 
 func belongsToRoot(obj metav1.Object, uid types.UID) bool {

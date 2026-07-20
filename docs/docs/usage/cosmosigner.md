@@ -286,6 +286,39 @@ Multi-replica signers require `raftTLSSecret`, containing `tls.crt`, `tls.key`, 
 membership and state replication use mutual TLS. `unsafeAllowInsecureRaft: true` is an explicit opt-out
 for isolated test networks only and cannot be combined with `raftTLSSecret`.
 
+### Raft TLS Secret
+
+Provision the Secret in the same namespace before applying a multi-replica signer. The certificate
+must be valid for both client and server authentication and for every per-pod Raft DNS name:
+`<signer>-<ordinal>.<signer>.<namespace>.svc`. A wildcard SAN such as
+`*.<signer>.<namespace>.svc` covers every ordinal. The signer resource name is `<chainnode>-signer`
+for a standalone `ChainNode`, `<chainnodeset>-signer` for a top-level `ChainNodeSet` signer, or
+`<chainnodeset>-<group>-signer` for a group signer.
+
+For example, cert-manager can issue one shared certificate from an existing internal CA issuer:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nibiru-testnet-cosmosigner-raft
+  namespace: default
+spec:
+  secretName: nibiru-testnet-cosmosigner-raft-tls
+  dnsNames:
+    - nibiru-testnet-signer.default.svc
+    - "*.nibiru-testnet-signer.default.svc"
+  usages:
+    - server auth
+    - client auth
+  issuerRef:
+    name: internal-ca
+    kind: ClusterIssuer
+```
+
+The resulting Secret must contain `tls.crt`, `tls.key`, and `ca.crt`; use a CA-backed issuer that
+populates the CA chain. Adjust the namespace and signer name to match the managed resources.
+
 ## Migrating from TmKMS
 
 `Cosmosigner`'s Vault backend can point at the **same transit key** a `TmKMS` validator already uses.

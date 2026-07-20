@@ -9,47 +9,55 @@ This page provides a detailed reference for the available Custom Resource Defini
 
 ### Sub Resources
 
+* [AccountAssets](#accountassets)
+* [AppSpec](#appspec)
+* [ChainNodeAssets](#chainnodeassets)
 * [ChainNodeList](#chainnodelist)
-* [ChainNodeSpec](#chainnodespec)
-* [ChainNodeStatus](#chainnodestatus)
-* [ValidatorConfig](#validatorconfig)
 * [ChainNodeSetList](#chainnodesetlist)
 * [ChainNodeSetNodeStatus](#chainnodesetnodestatus)
 * [ChainNodeSetSpec](#chainnodesetspec)
 * [ChainNodeSetStatus](#chainnodesetstatus)
 * [ChainNodeSetValidatorStatus](#chainnodesetvalidatorstatus)
+* [ChainNodeSpec](#chainnodespec)
+* [ChainNodeStatus](#chainnodestatus)
+* [Config](#config)
+* [ConsensusKeyReservationList](#consensuskeyreservationlist)
+* [ConsensusKeyReservationSpec](#consensuskeyreservationspec)
+* [CosmoGuardConfig](#cosmoguardconfig)
 * [CosmoseedConfig](#cosmoseedconfig)
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
 * [CosmoseedIngressConfig](#cosmoseedingressconfig)
-* [GatewayConfig](#gatewayconfig)
-* [GatewayRef](#gatewayref)
-* [GlobalGatewayConfig](#globalgatewayconfig)
-* [GlobalIngressConfig](#globalingressconfig)
-* [IndividualIngressConfig](#individualingressconfig)
-* [IngressConfig](#ingressconfig)
-* [NodeGroupSpec](#nodegroupspec)
-* [NodeSetValidatorConfig](#nodesetvalidatorconfig)
-* [PdbConfig](#pdbconfig)
-* [SeedStatus](#seedstatus)
-* [AccountAssets](#accountassets)
-* [AppSpec](#appspec)
-* [ChainNodeAssets](#chainnodeassets)
-* [Config](#config)
-* [CosmoGuardConfig](#cosmoguardconfig)
+* [Cosmosigner](#cosmosigner)
+* [CosmosignerBackend](#cosmosignerbackend)
+* [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
+* [CosmosignerMigrationStatus](#cosmosignermigrationstatus)
+* [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
+* [CosmosignerStatus](#cosmosignerstatus)
+* [CosmosignerVaultBackend](#cosmosignervaultbackend)
 * [CreateValidatorConfig](#createvalidatorconfig)
 * [ExportTarballConfig](#exporttarballconfig)
 * [ExposeConfig](#exposeconfig)
 * [ExposeGatewayConfig](#exposegatewayconfig)
 * [FromNodeRPCConfig](#fromnoderpcconfig)
+* [GatewayConfig](#gatewayconfig)
+* [GatewayRef](#gatewayref)
 * [GcsExportConfig](#gcsexportconfig)
 * [GenesisConfig](#genesisconfig)
 * [GenesisInitConfig](#genesisinitconfig)
 * [GenesisValidator](#genesisvalidator)
+* [GlobalGatewayConfig](#globalgatewayconfig)
+* [GlobalIngressConfig](#globalingressconfig)
+* [IndividualIngressConfig](#individualingressconfig)
+* [IngressConfig](#ingressconfig)
 * [InitCommand](#initcommand)
+* [NodeGroupSpec](#nodegroupspec)
+* [NodeSetValidatorConfig](#nodesetvalidatorconfig)
+* [PdbConfig](#pdbconfig)
 * [Peer](#peer)
 * [Persistence](#persistence)
 * [PvcSnapshot](#pvcsnapshot)
 * [SdkOptions](#sdkoptions)
+* [SeedStatus](#seedstatus)
 * [SidecarSpec](#sidecarspec)
 * [StateSyncConfig](#statesyncconfig)
 * [SubdomainsConfig](#subdomainsconfig)
@@ -59,21 +67,13 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [TmKmsProvider](#tmkmsprovider)
 * [Upgrade](#upgrade)
 * [UpgradeSpec](#upgradespec)
+* [ValidatorConfig](#validatorconfig)
 * [ValidatorInfo](#validatorinfo)
 * [VerticalAutoscalingConfig](#verticalautoscalingconfig)
 * [VerticalAutoscalingMetricConfig](#verticalautoscalingmetricconfig)
 * [VerticalAutoscalingRule](#verticalautoscalingrule)
 * [VolumeSnapshotsConfig](#volumesnapshotsconfig)
 * [VolumeSpec](#volumespec)
-* [Cosmosigner](#cosmosigner)
-* [CosmosignerBackend](#cosmosignerbackend)
-* [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
-* [CosmosignerMigrationStatus](#cosmosignermigrationstatus)
-* [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
-* [CosmosignerStatus](#cosmosignerstatus)
-* [CosmosignerVaultBackend](#cosmosignervaultbackend)
-* [ConsensusKeyReservationList](#consensuskeyreservationlist)
-* [ConsensusKeyReservationSpec](#consensuskeyreservationspec)
 
 #### ChainNode
 
@@ -151,6 +151,7 @@ ChainNodeStatus defines the observed state of ChainNode
 | seedMode | Indicates if this node is running with seed mode enabled. | bool | false |
 | upgrades | All scheduled/completed upgrades performed by cosmopilot on this ChainNode. | [][Upgrade](#upgrade) | false |
 | pubKey | Public key of the validator. | string | false |
+| tmKMSReservationIdentity | TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was verified against PubKey before its consensus-key reservation was created. An unchanged identity can reuse the canonical recorded public key without launching another key-discovery pod. | string | false |
 | validatorStatus | Indicates the current status of validator if this node is one. | ValidatorStatus | false |
 | cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity, captured once a validator signer rolls out. The applied digest and public key below are the lifecycle baseline used for managed migrations. Not meant to be set by hand. | string | false |
 | cosmosignerAppliedDigest | CosmosignerAppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. It is recorded for both validator and sentry signers. | string | false |
@@ -514,6 +515,44 @@ SeedStatus contains status information about a cosmoseed node.
 | name |  | string | true |
 | id |  | string | true |
 | publicAddress |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservation
+
+ConsensusKeyReservation atomically prevents independent roots or claims from managing separate double-sign state for the same chain and consensus public key.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ObjectMeta | false |
+| spec |  | [ConsensusKeyReservationSpec](#consensuskeyreservationspec) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationList
+
+ConsensusKeyReservationList contains consensus-key reservations.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ListMeta | false |
+| items |  | [][ConsensusKeyReservation](#consensuskeyreservation) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationSpec
+
+ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one consensus public key on one chain. Reservations are intentionally not garbage-collected automatically: an operator must verify every old signing path is gone before deleting a stale one.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| chainID |  | string | true |
+| publicKey |  | string | true |
+| ownerUID | OwnerUID identifies the controller root that owns this reservation for conflict detection. | types.UID | true |
+| ownerKind |  | string | true |
+| namespace |  | string | true |
+| ownerName |  | string | true |
+| claim |  | string | true |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -1135,43 +1174,5 @@ CosmosignerVaultBackend configures the HashiCorp Vault Transit signing backend.
 | certificateSecret | CertificateSecret references the secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
 | namespace | Namespace is the Vault namespace (Vault Enterprise), when applicable. | *string | false |
 | uploadGenerated | UploadGenerated indicates that the controller should generate a consensus key locally and import it into Vault. Defaults to `false`. It is set to `true` automatically when this validator initializes a new genesis. This should not be used in production. | bool | false |
-
-[Back to Custom Resources](#custom-resources)
-
-#### ConsensusKeyReservation
-
-ConsensusKeyReservation atomically prevents independent roots or claims from managing separate double-sign state for the same chain and consensus public key.
-
-| Field | Description | Scheme | Required |
-| ----- | ----------- | ------ | -------- |
-| metadata |  | metav1.ObjectMeta | false |
-| spec |  | [ConsensusKeyReservationSpec](#consensuskeyreservationspec) | true |
-
-[Back to Custom Resources](#custom-resources)
-
-#### ConsensusKeyReservationList
-
-ConsensusKeyReservationList contains consensus-key reservations.
-
-| Field | Description | Scheme | Required |
-| ----- | ----------- | ------ | -------- |
-| metadata |  | metav1.ListMeta | false |
-| items |  | [][ConsensusKeyReservation](#consensuskeyreservation) | true |
-
-[Back to Custom Resources](#custom-resources)
-
-#### ConsensusKeyReservationSpec
-
-ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one consensus public key on one chain. Reservations are intentionally not garbage-collected automatically: an operator must verify every old signing path is gone before deleting a stale one.
-
-| Field | Description | Scheme | Required |
-| ----- | ----------- | ------ | -------- |
-| chainID |  | string | true |
-| publicKey |  | string | true |
-| ownerUID |  | types.UID | true |
-| ownerKind |  | string | true |
-| namespace |  | string | true |
-| ownerName |  | string | true |
-| claim |  | string | true |
 
 [Back to Custom Resources](#custom-resources)

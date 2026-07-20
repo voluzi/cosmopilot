@@ -23,33 +23,40 @@ import (
 // ensureValidatorConsensusKeyReservation claims the active local or TmKMS consensus key before
 // any signing configuration or validator pod is reconciled. ChainNodeSet signer targets are claimed
 // by their parent signer preflight and must not create a second child-owned claim.
-func (r *Reconciler) ensureValidatorConsensusKeyReservation(ctx context.Context, chainNode *appsv1.ChainNode) error {
+func (r *Reconciler) ensureValidatorConsensusKeyReservation(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
 	if !chainNode.IsValidator() || chainNode.Status.ChainID == "" || chainNode.Spec.Cosmosigner != nil || chainNode.Spec.RemoteSignerTarget {
-		return nil
+		return false, nil
 	}
 
-	publicKey, err := r.validatorConsensusPublicKey(ctx, chainNode)
+	publicKey, verifiedIdentity, err := r.validatorConsensusPublicKey(ctx, chainNode)
 	if err != nil {
-		return err
+		return false, err
 	}
 	holder := validatorReservationHolder(chainNode)
 	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, holder); err != nil {
 		if errors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
-			return r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
+			return false, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
 		}
-		return err
+		return false, err
 	}
 	if recorded := chainNode.Status.PubKey; recorded != "" {
 		onChain := cosmosigner.CanonicalSDKPublicKey(recorded)
 		if onChain == "" {
-			return fmt.Errorf("cannot verify the on-chain validator public key recorded in status")
+			return false, fmt.Errorf("cannot verify the on-chain validator public key recorded in status")
 		}
 		if publicKey != onChain {
 			conflict := fmt.Errorf("validator signing public key does not match the on-chain public key recorded in status; Cosmopilot does not rotate validator consensus keys")
-			return r.quiesceValidatorOnReservationConflict(ctx, chainNode, conflict)
+			return false, r.quiesceValidatorOnReservationConflict(ctx, chainNode, conflict)
 		}
 	}
-	return nil
+	if verifiedIdentity != "" && chainNode.Status.TmKMSReservationIdentity != verifiedIdentity {
+		chainNode.Status.TmKMSReservationIdentity = verifiedIdentity
+		if err := r.Status().Update(ctx, chainNode); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func validatorReservationHolder(chainNode *appsv1.ChainNode) cosmosigner.ReservationHolder {
@@ -65,34 +72,43 @@ func validatorReservationHolder(chainNode *appsv1.ChainNode) cosmosigner.Reserva
 	return holder
 }
 
-func (r *Reconciler) validatorConsensusPublicKey(ctx context.Context, chainNode *appsv1.ChainNode) (string, error) {
+func (r *Reconciler) validatorConsensusPublicKey(ctx context.Context, chainNode *appsv1.ChainNode) (string, string, error) {
 	if !chainNode.UsesTmKms() {
-		return cosmosigner.PublicKeyFromSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
+		publicKey, err := cosmosigner.PublicKeyFromSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
+		return publicKey, "", err
 	}
 
 	hashicorp := chainNode.Spec.Validator.TmKMS.Provider.Hashicorp
 	if hashicorp == nil {
-		return "", fmt.Errorf("validator has no supported tmKMS provider configured")
+		return "", "", fmt.Errorf("validator has no supported tmKMS provider configured")
 	}
 	if strings.TrimSpace(hashicorp.Address) == "" || strings.TrimSpace(hashicorp.Key) == "" {
-		return "", fmt.Errorf("tmKMS Hashicorp address and key are required")
+		return "", "", fmt.Errorf("tmKMS Hashicorp address and key are required")
 	}
+	identity := chainNode.EffectiveSigningIdentity()
 
 	// Before an uploadGenerated key reaches Vault, the local source Secret is the authoritative key
 	// that the TmKMS sidecar will use. Reserving it first closes the create/upload race.
 	uploaded := chainNode.Annotations[controllers.AnnotationVaultKeyUploaded] == strconv.FormatBool(true)
 	if chainNode.ShouldUploadVaultKey() && !uploaded {
-		return cosmosigner.PublicKeyFromSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
+		publicKey, err := cosmosigner.PublicKeyFromSecret(ctx, r.Client, chainNode.GetNamespace(), chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
+		return publicKey, "", err
 	}
 	if err := requireTmKMSSecret(ctx, r.Client, chainNode.GetNamespace(), "Vault token", hashicorp.TokenSecret); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if hashicorp.CertificateSecret != nil {
 		if err := requireTmKMSSecret(ctx, r.Client, chainNode.GetNamespace(), "Vault certificate", hashicorp.CertificateSecret); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
-	return r.fallbackTmKMSPublicKey(ctx, chainNode, hashicorp)
+	if chainNode.Status.TmKMSReservationIdentity == identity {
+		if publicKey := cosmosigner.CanonicalSDKPublicKey(chainNode.Status.PubKey); publicKey != "" {
+			return publicKey, "", nil
+		}
+	}
+	publicKey, err := r.fallbackTmKMSPublicKey(ctx, chainNode, hashicorp)
+	return publicKey, identity, err
 }
 
 func requireTmKMSSecret(ctx context.Context, c client.Client, namespace, purpose string, selector *corev1.SecretKeySelector) error {

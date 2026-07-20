@@ -78,7 +78,7 @@ func TestEnsureValidatorConsensusKeyReservationStopsConflictingLocalSigner(t *te
 	}}
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(keySecret, reservation, pod).Build()}
 
-	err = r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode)
+	_, err = r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode)
 	if err == nil {
 		t.Fatal("a local validator must not sign a key reserved by another controller root")
 	}
@@ -131,7 +131,7 @@ func TestEnsureValidatorConsensusKeyReservationUsesChainNodeSetRoot(t *testing.T
 	}
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(keySecret, reservation).Build()}
 
-	if err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode); err != nil {
+	if _, err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode); err != nil {
 		t.Fatalf("a ChainNodeSet child must share its parent root reservation: %v", err)
 	}
 }
@@ -154,7 +154,7 @@ func TestEnsureValidatorConsensusKeyReservationSkipsRemoteSignerTarget(t *testin
 	}
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
 
-	if err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode); err != nil {
+	if _, err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode); err != nil {
 		t.Fatalf("a remote signer target must rely on its parent reservation: %v", err)
 	}
 }
@@ -192,7 +192,7 @@ func TestEnsureValidatorConsensusKeyReservationUsesPendingTmKMSUploadKey(t *test
 	}
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(keySecret).Build()}
 
-	if err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode); err != nil {
+	if _, err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode); err != nil {
 		t.Fatal(err)
 	}
 	reservation := &appsv1.ConsensusKeyReservation{}
@@ -201,6 +201,56 @@ func TestEnsureValidatorConsensusKeyReservationUsesPendingTmKMSUploadKey(t *test
 	}
 	if reservation.Spec.OwnerUID != chainNode.UID || reservation.Spec.Claim != name {
 		t.Fatalf("unexpected reservation owner: %#v", reservation.Spec)
+	}
+}
+
+func TestEnsureValidatorConsensusKeyReservationReusesVerifiedTmKMSIdentity(t *testing.T) {
+	const (
+		namespace = "default"
+		name      = "validator"
+		publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	)
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: "validator-uid"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+			Hashicorp: &appsv1.TmKmsHashicorpProvider{
+				Address: "https://vault:8200",
+				Key:     "validator",
+				TokenSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
+					Key:                  "token",
+				},
+			},
+		}}}},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: "chain-1",
+			PubKey:  `{"key":"` + publicKey + `"}`,
+		},
+	}
+	chainNode.Status.TmKMSReservationIdentity = chainNode.EffectiveSigningIdentity()
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: namespace},
+		Data:       map[string][]byte{"token": []byte("token")},
+	}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(token).Build()}
+
+	recorded, err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode)
+	if err != nil {
+		t.Fatalf("verified tmKMS identity must not require another Cosmosigner pubkey pod: %v", err)
+	}
+	if recorded {
+		t.Fatal("an unchanged verified tmKMS identity must not rewrite status")
+	}
+	reservation := &appsv1.ConsensusKeyReservation{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: cosmosigner.ConsensusKeyReservationName("chain-1", publicKey)}, reservation); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -232,7 +282,7 @@ func TestEnsureValidatorConsensusKeyReservationClaimsActualKeyBeforeRejectingMal
 	}
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(keySecret).Build()}
 
-	err = r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode)
+	_, err = r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode)
 	if err == nil {
 		t.Fatal("malformed recorded validator status must fail closed")
 	}

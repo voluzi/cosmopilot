@@ -501,6 +501,14 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 			return false, err
 		}
 	}
+	policy := networkPolicyObject(namespace, name)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(policy), policy); err == nil {
+		if metav1.IsControlledBy(policy, owner) {
+			return false, nil
+		}
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
 
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err == nil {

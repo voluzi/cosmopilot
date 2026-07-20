@@ -259,6 +259,12 @@ type ChainNodeStatus struct {
 	// +optional
 	PubKey string `json:"pubKey,omitempty"`
 
+	// TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was
+	// verified against PubKey before its consensus-key reservation was created. An unchanged identity
+	// can reuse the canonical recorded public key without launching another key-discovery pod.
+	// +optional
+	TmKMSReservationIdentity string `json:"tmKMSReservationIdentity,omitempty"`
+
 	// Indicates the current status of validator if this node is one.
 	// +optional
 	ValidatorStatus ValidatorStatus `json:"validatorStatus,omitempty"`

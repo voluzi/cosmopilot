@@ -257,6 +257,38 @@ func (nodeSet *ChainNodeSet) signerFieldPath(s ResolvedSigner) string {
 	return ".spec.cosmosigner"
 }
 
+// DesiredReplacementSigner identifies the desired signer that preserves a recorded signer's
+// validator identity or sentry target set across a manifest placement move.
+func (nodeSet *ChainNodeSet) DesiredReplacementSigner(desired []ResolvedSigner, st *CosmosignerStatus) (ResolvedSigner, bool) {
+	if st == nil {
+		return ResolvedSigner{}, false
+	}
+	for _, s := range desired {
+		if st.ServingGroup == "" {
+			if st.AtEstablishment != nil && *st.AtEstablishment != "" {
+				if nodeSet.GenesisSentryEstablishmentIdentity(s) == *st.AtEstablishment {
+					return s, true
+				}
+				continue
+			}
+			if equalGroupSet(st.TargetGroups, s.TargetGroups) {
+				return s, true
+			}
+			continue
+		}
+		if s.ValidatorGroup != st.ServingGroup {
+			continue
+		}
+		switch {
+		case st.ServingIdentity != "" && s.ValidatorTargetedIdentity() == st.ServingIdentity:
+			return s, true
+		case st.ServingIdentity == "" && st.SigningDigest == "":
+			return s, true
+		}
+	}
+	return ResolvedSigner{}, false
+}
+
 // equalGroupSet reports whether two target-group slices contain the same set of names.
 func equalGroupSet(a, b []string) bool {
 	if len(a) != len(b) {

@@ -106,26 +106,8 @@ func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv
 	// validator's only signing path with no fallback preflight, while ignoring it would let the old
 	// signer keep holding privval connections once children move to their fallback/replacement path.
 	// Fail closed so the operator restores the status or removes the signer deliberately.
-	knownResources := map[string]struct{}{}
-	for _, s := range desiredSigners {
-		knownResources[nodeSet.CosmosignerResourceName(s)] = struct{}{}
-	}
-	for i := range nodeSet.Status.Cosmosigners {
-		knownResources[appsv1.CosmosignerStatusResourceName(&nodeSet.Status.Cosmosigners[i])] = struct{}{}
-	}
-	statefulSets := &k8sappsv1.StatefulSetList{}
-	if err := r.List(ctx, statefulSets, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+	if err := r.validateTrackedSignerStatefulSets(ctx, nodeSet, desiredSigners); err != nil {
 		return false, err
-	}
-	for i := range statefulSets.Items {
-		sts := &statefulSets.Items[i]
-		if !cosmosigner.IsOwnedSignerStatefulSet(sts, nodeSet) {
-			continue
-		}
-		if _, ok := knownResources[sts.GetName()]; ok {
-			continue
-		}
-		return false, fmt.Errorf("cosmosigner StatefulSet %q is owned by this ChainNodeSet but has no status entry (status lost or restored incomplete): cannot verify the signing identity it serves — restore .status.cosmosigners or delete the signer before reconciling", sts.GetName())
 	}
 
 	// Snapshot the recorded signer names: RemoveCosmosignerStatus mutates the slice we would iterate.
@@ -225,8 +207,12 @@ func legacyPerInstanceCosmosignerGroup(nodeSet *appsv1.ChainNodeSet) (string, bo
 // existing local signing path instead of dropping the local key. Genuinely-pending states (a
 // validator key-generation flow that has not run yet) are NOT failures.
 func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	desired := nodeSet.ResolveCosmosigners()
+	if err := r.validateTrackedSignerStatefulSets(ctx, nodeSet, desired); err != nil {
+		return err
+	}
 	resourceNames := map[string]string{}
-	for _, s := range nodeSet.ResolveCosmosigners() {
+	for _, s := range desired {
 		resourceName := nodeSet.CosmosignerResourceName(s)
 		if previous, duplicate := resourceNames[resourceName]; duplicate {
 			return fmt.Errorf("cosmosigners %q and %q resolve to the same stable resource name %q; complete or revert the previous placement migration", previous, s.Name, resourceName)
@@ -252,12 +238,16 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			return err
 		}
 		st := nodeSet.GetCosmosignerStatus(s.Name)
-		if st != nil && st.AppliedDigest == "" && st.SigningDigest == "" && st.Replicas != nil && st.StateStorageSize != "" {
-			if err := cosmosigner.ValidateRecoveredSigningIdentity(ctx, r.Client, nodeSet, params); err != nil {
+		if signerStatusNeedsRecovery(st) {
+			_, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
+			if err != nil {
 				return err
 			}
-			if err := r.validateRecoveredSignerTargets(ctx, nodeSet, s, resourceName); err != nil {
-				return err
+			recordedRecovery := st != nil && st.Replicas != nil && st.StateStorageSize != ""
+			if live || recordedRecovery {
+				if err := r.validateRecoveredSignerTargets(ctx, nodeSet, s, resourceName); err != nil {
+					return err
+				}
 			}
 		}
 		// The raft mTLS Secret (when set) is mounted at startup; a missing/incomplete one keeps every
@@ -304,7 +294,8 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (map[string]cosmosigner.Params, error) {
 	prepared := make(map[string]cosmosigner.Params)
 	publicKeyOwners := make(map[string]string)
-	for _, s := range nodeSet.ResolveCosmosigners() {
+	desired := nodeSet.ResolveCosmosigners()
+	for _, s := range desired {
 		if r.signerImportSourcePending(nodeSet, s) &&
 			(s.Spec.UsesSoftwareBackend() || s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s))) {
 			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
@@ -320,16 +311,31 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		if err != nil {
 			return nil, err
 		}
-		publicKey, err := r.cosmosignerPublicKeyWithParams(ctx, nodeSet, s, params)
-		if err != nil {
-			return nil, err
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		publicKey := ""
+		if signerStatusNeedsRecovery(st) {
+			recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
+			if err != nil {
+				return nil, err
+			}
+			if live {
+				publicKey = recovered
+			}
+		}
+		if publicKey == "" {
+			publicKey, err = r.cosmosignerPublicKeyWithParams(ctx, nodeSet, s, params)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if previous, duplicate := publicKeyOwners[publicKey]; duplicate {
 			return nil, fmt.Errorf("cosmosigners %q and %q resolve to the same consensus public key on chain %q; one ChainNodeSet cannot run independent double-sign state for the same validator key", previous, s.Name, nodeSet.Status.ChainID)
 		}
 		publicKeyOwners[publicKey] = s.Name
 		if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, nodeSet.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
-			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(), Claim: nodeSetCosmosignerReservationClaim(nodeSet, s),
+			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(),
+			Claim:             nodeSetCosmosignerReservationClaim(nodeSet, s),
+			LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, desired, s),
 		}); err != nil {
 			return nil, err
 		}
@@ -352,15 +358,52 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		}
 		params.ExpectedPublicKey = publicKey
 
-		st := nodeSet.GetCosmosignerStatus(s.Name)
-		if st != nil && st.AppliedDigest == "" && st.SigningDigest == "" && st.Replicas != nil && st.StateStorageSize != "" {
-			if err := cosmosigner.ValidateRecoveredSigningIdentity(ctx, r.Client, nodeSet, params); err != nil {
-				return nil, err
-			}
-		}
 		prepared[s.Name] = params
 	}
 	return prepared, nil
+}
+
+func nodeSetCosmosignerLegacyStatusNames(nodeSet *appsv1.ChainNodeSet, desired []appsv1.ResolvedSigner, signer appsv1.ResolvedSigner) []string {
+	names := []string{signer.Name}
+	for i := range nodeSet.Status.Cosmosigners {
+		st := &nodeSet.Status.Cosmosigners[i]
+		if st.Name == signer.Name {
+			continue
+		}
+		if replacement, ok := desiredReplacementSigner(nodeSet, desired, st); ok && replacement.Name == signer.Name {
+			names = append(names, st.Name)
+		}
+	}
+	return names
+}
+
+func signerStatusNeedsRecovery(st *appsv1.CosmosignerStatus) bool {
+	return st == nil || (st.AppliedDigest == "" && st.SigningDigest == "")
+}
+
+func (r *Reconciler) validateTrackedSignerStatefulSets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, desired []appsv1.ResolvedSigner) error {
+	knownResources := map[string]struct{}{}
+	for _, s := range desired {
+		knownResources[nodeSet.CosmosignerResourceName(s)] = struct{}{}
+	}
+	for i := range nodeSet.Status.Cosmosigners {
+		knownResources[appsv1.CosmosignerStatusResourceName(&nodeSet.Status.Cosmosigners[i])] = struct{}{}
+	}
+	statefulSets := &k8sappsv1.StatefulSetList{}
+	if err := r.List(ctx, statefulSets, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return err
+	}
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if !cosmosigner.IsOwnedSignerStatefulSet(sts, nodeSet) {
+			continue
+		}
+		if _, ok := knownResources[sts.GetName()]; ok {
+			continue
+		}
+		return fmt.Errorf("cosmosigner StatefulSet %q is owned by this ChainNodeSet but has no status entry (status lost or restored incomplete): cannot verify the signing identity it serves — restore .status.cosmosigners or delete the signer before reconciling", sts.GetName())
+	}
+	return nil
 }
 
 func nodeSetCosmosignerReservationClaim(nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) string {
@@ -756,49 +799,7 @@ func requireMatchingRemovedSignerPublicKey(st *appsv1.CosmosignerStatus, fallbac
 }
 
 func desiredReplacementSigner(nodeSet *appsv1.ChainNodeSet, desired []appsv1.ResolvedSigner, st *appsv1.CosmosignerStatus) (appsv1.ResolvedSigner, bool) {
-	if st == nil {
-		return appsv1.ResolvedSigner{}, false
-	}
-	for _, s := range desired {
-		if st.ServingGroup == "" {
-			if st.AtEstablishment != nil && *st.AtEstablishment != "" {
-				if nodeSet.GenesisSentryEstablishmentIdentity(s) == *st.AtEstablishment {
-					return s, true
-				}
-				continue
-			}
-			if equalStringSet(st.TargetGroups, s.TargetGroups) {
-				return s, true
-			}
-			continue
-		}
-		if s.ValidatorGroup != st.ServingGroup {
-			continue
-		}
-		switch {
-		case st.ServingIdentity != "" && s.ValidatorTargetedIdentity() == st.ServingIdentity:
-			return s, true
-		case st.ServingIdentity == "" && st.SigningDigest == "":
-			return s, true
-		}
-	}
-	return appsv1.ResolvedSigner{}, false
-}
-
-func equalStringSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	a = append([]string(nil), a...)
-	b = append([]string(nil), b...)
-	sort.Strings(a)
-	sort.Strings(b)
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return nodeSet.DesiredReplacementSigner(desired, st)
 }
 
 func sortedTargetGroups(s appsv1.ResolvedSigner) []string {

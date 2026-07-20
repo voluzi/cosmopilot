@@ -413,9 +413,11 @@ func (t TestApp) BuildChainNodeSetWithCosmosigner(namespace string, cfg Cosmosig
 		}
 	}
 
+	// The e2e fixture runs in a disposable Kind network; production HA must use raftTLSSecret.
 	cns.Spec.Cosmosigner = &appsv1.Cosmosigner{
-		Replicas: ptr.To(replicas),
-		Backend:  backend,
+		Replicas:                ptr.To(replicas),
+		Backend:                 backend,
+		UnsafeAllowInsecureRaft: replicas > 1,
 	}
 	return cns
 }

@@ -538,18 +538,22 @@ func TestEnsureCosmosignerRejectsRecoveredLockMismatch(t *testing.T) {
 }
 
 func TestPreflightCosmosignerRejectsRecoveredIdentityMismatch(t *testing.T) {
-	requireRecoveredStandaloneIdentityMismatchRejected(t, true, true)
+	requireRecoveredStandaloneIdentityMismatchRejected(t, true, true, true)
+}
+
+func TestPreflightCosmosignerRejectsLiveIdentityMismatchWithLostStatus(t *testing.T) {
+	requireRecoveredStandaloneIdentityMismatchRejected(t, true, true, false)
 }
 
 func TestPreflightCosmosignerRejectsRecoveredIdentityMismatchAfterValidatorDemotion(t *testing.T) {
-	requireRecoveredStandaloneIdentityMismatchRejected(t, false, true)
+	requireRecoveredStandaloneIdentityMismatchRejected(t, false, true, true)
 }
 
 func TestPreflightCosmosignerRejectsRecoveredSentryIdentityMismatch(t *testing.T) {
-	requireRecoveredStandaloneIdentityMismatchRejected(t, false, false)
+	requireRecoveredStandaloneIdentityMismatchRejected(t, false, false, true)
 }
 
-func requireRecoveredStandaloneIdentityMismatchRejected(t *testing.T, currentValidator, recordedValidator bool) {
+func requireRecoveredStandaloneIdentityMismatchRejected(t *testing.T, currentValidator, recordedValidator, recordedLocks bool) {
 	t.Helper()
 	tokenSelector := &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
@@ -563,11 +567,13 @@ func requireRecoveredStandaloneIdentityMismatchRejected(t *testing.T, currentVal
 			}}},
 		},
 		Status: appsv1.ChainNodeStatus{
-			ChainID:                      "test-1",
-			CosmosignerReplicas:          ptr.To(int32(1)),
-			CosmosignerStateStorageSize:  appsv1.DefaultCosmosignerStateStorageSize,
-			CosmosignerValidatorTargeted: ptr.To(recordedValidator),
+			ChainID: "test-1",
 		},
+	}
+	if recordedLocks {
+		chainNode.Status.CosmosignerReplicas = ptr.To(int32(1))
+		chainNode.Status.CosmosignerStateStorageSize = appsv1.DefaultCosmosignerStateStorageSize
+		chainNode.Status.CosmosignerValidatorTargeted = ptr.To(recordedValidator)
 	}
 	if currentValidator {
 		chainNode.Spec.Validator = &appsv1.ValidatorConfig{}
@@ -759,6 +765,27 @@ func TestPreflightCosmosignerFallbackRejectsOwnedSignerWithLostStatus(t *testing
 	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status")
+}
+
+func TestPreflightCosmosignerFallbackAllowsRecordedSentryTeardown(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+		Status: appsv1.ChainNodeStatus{
+			ChainID:                      "chain-1",
+			CosmosignerValidatorTargeted: ptr.To(false),
+		},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace}}
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	r := &Reconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts).Build(),
+		Scheme: scheme,
+	}
+
+	require.NoError(t, r.preflightCosmosignerFallback(context.Background(), chainNode))
 }
 
 func TestPreflightCosmosignerFallbackRequiresMatchingLocalPublicKey(t *testing.T) {

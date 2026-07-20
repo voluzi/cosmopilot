@@ -654,6 +654,86 @@ func TestPreflightCosmosignersRejectsRecoveredSentryIdentityMismatch(t *testing.
 	require.Contains(t, err.Error(), "live signing identity")
 }
 
+func TestPreflightCosmosignersRejectsLiveIdentityMismatchWithLostStatus(t *testing.T) {
+	backend := cosmosignerVaultBackend()
+	backend.Vault.KeyName = "desired-key"
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"sentries"}, Backend: backend},
+			Nodes:       []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: backend.Vault.TokenSecret.Name, Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{backend.Vault.TokenSecret.Key: []byte("token")},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, token)
+	desiredParams, err := r.cosmosignerParams(context.Background(), nodeSet, signer)
+	require.NoError(t, err)
+	liveParams := desiredParams
+	liveParams.ExpectedPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	liveVault := *desiredParams.Backend.Vault
+	liveVault.KeyName = "live-key"
+	liveParams.Backend.Vault = &liveVault
+	liveConfig, err := liveParams.ConfigYAML()
+	require.NoError(t, err)
+	liveConfigMap, err := liveParams.ConfigMap(liveConfig)
+	require.NoError(t, err)
+	liveStatefulSet, err := liveParams.StatefulSet(liveConfig)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveConfigMap, r.Scheme))
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, liveStatefulSet, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), liveConfigMap))
+	require.NoError(t, r.Create(context.Background(), liveStatefulSet))
+
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "live signing identity")
+}
+
+func TestPreflightCosmosignersRejectsUntrackedLiveSigner(t *testing.T) {
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"sentries"},
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+					PrivateKeySecret: ptr.To("desired-key"),
+				}},
+			},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "desired-key", Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: key},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, secret)
+	staleParams := cosmosigner.Params{
+		Name: "lost-signer", Namespace: nodeSet.Namespace, Replicas: 1,
+		ExpectedPublicKey: parsed.PubKey.Value, StateStorageSize: "1Gi",
+		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secret.Name}},
+	}
+	staleConfig, err := staleParams.ConfigYAML()
+	require.NoError(t, err)
+	stale, err := staleParams.StatefulSet(staleConfig)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, stale, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), stale))
+
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no status entry")
+}
+
 func requireRecoveredNodeSetIdentityMismatchRejected(t *testing.T, demoted bool) {
 	t.Helper()
 	backend := cosmosignerVaultBackend()
@@ -1374,9 +1454,8 @@ func TestPreflightRemovedSignerFallbacksRequiresTmKMSSecrets(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-ca", Namespace: "default"},
 		Data:       map[string][]byte{"ca.crt": []byte("certificate")},
 	}))
-	err = r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Kubernetes clientset")
+	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet),
+		"the same normalized Vault key needs no pubkey lookup after its Secrets are present")
 }
 
 func TestPreflightRemovedSignerFallbacksRequiresSupportedTmKMSProvider(t *testing.T) {

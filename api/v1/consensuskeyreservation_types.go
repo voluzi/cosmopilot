@@ -14,8 +14,9 @@ func init() {
 // automatically: an operator must verify every old signing path is gone before deleting a stale one.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="consensus key reservations are immutable; delete only after proving every old signing path is stopped"
 type ConsensusKeyReservationSpec struct {
-	ChainID   string    `json:"chainID"`
-	PublicKey string    `json:"publicKey"`
+	ChainID   string `json:"chainID"`
+	PublicKey string `json:"publicKey"`
+	// OwnerUID identifies the controller root that owns this reservation for conflict detection.
 	OwnerUID  types.UID `json:"ownerUID"`
 	OwnerKind string    `json:"ownerKind"`
 	Namespace string    `json:"namespace"`

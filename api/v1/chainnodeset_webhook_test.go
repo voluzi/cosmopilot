@@ -1595,6 +1595,61 @@ func TestValidateCosmosignerUpdateRejectsAddingSignerToEstablishedMultiInstanceG
 	assert.Contains(t, err.Error(), "multi-instance validator group")
 }
 
+func TestValidateCosmosignerUpdateRejectsReplicaChangeDuringPlacementMove(t *testing.T) {
+	old := placementMoveNodeSet()
+	updated := moveSignerToTopLevel(old)
+	updated.Spec.Cosmosigner.Replicas = ptr.To(int32(1))
+
+	err := updated.validateCosmosignerUpdate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replicas")
+}
+
+func TestValidateCosmosignerUpdateRejectsStorageChangeDuringPlacementMove(t *testing.T) {
+	old := placementMoveNodeSet()
+	updated := moveSignerToTopLevel(old)
+	updated.Spec.Cosmosigner.StateStorageSize = ptr.To("2Gi")
+
+	err := updated.validateCosmosignerUpdate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stateStorageSize")
+}
+
+func placementMoveNodeSet() *ChainNodeSet {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "ns"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(1),
+			Validator: &NodeSetValidatorConfig{},
+			Cosmosigner: &Cosmosigner{
+				Replicas: ptr.To(int32(3)),
+				Backend:  CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}},
+			},
+		}}},
+		Status: ChainNodeSetStatus{ChainID: "chain-1"},
+	}
+	signer := nodeSet.ResolveCosmosigners()[0]
+	nodeSet.Status.Cosmosigners = []CosmosignerStatus{{
+		Name:             signer.Name,
+		AppliedDigest:    "applied",
+		PublicKey:        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		Replicas:         ptr.To(int32(3)),
+		StateStorageSize: DefaultCosmosignerStateStorageSize,
+		ServingGroup:     signer.ValidatorGroup,
+		ServingIdentity:  signer.ValidatorTargetedIdentity(),
+	}}
+	return nodeSet
+}
+
+func moveSignerToTopLevel(old *ChainNodeSet) *ChainNodeSet {
+	updated := old.DeepCopy()
+	updated.Spec.Cosmosigner = updated.Spec.Nodes[0].Cosmosigner
+	updated.Spec.Cosmosigner.NodeGroups = []string{"validators"}
+	updated.Spec.Nodes[0].Cosmosigner = nil
+	return updated
+}
+
 // TestChainNodeSetValidateRejectsAccountSettingsChangeAfterCreation verifies that changing the
 // validator-level account derivation settings (accountPrefix/valPrefix/accountHDPath) after genesis is
 // rejected — they live on the validator config (outside .init) yet determine the operator/account

@@ -62,6 +62,71 @@ func TestEnsureConsensusKeyReservationBlocksLegacyStatusOwner(t *testing.T) {
 	}
 }
 
+func TestEnsureConsensusKeyReservationRejectsSiblingClaimLegacyChild(t *testing.T) {
+	scheme := reservationScheme(t)
+	legacy := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "nodes-validator-a", Namespace: "default", UID: "child-a",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "nodes",
+				UID: "nodeset-uid", Controller: reservationBoolPtr(true),
+			}},
+		},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: "chain-1", PubKey: `{"key":"` + reservationTestPublicKey + `"}`,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacy).Build()
+	holder := ReservationHolder{
+		UID: "nodeset-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "nodes-validator-b",
+	}
+
+	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder)
+	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
+		t.Fatalf("a sibling claim must not reuse a same-root child validator key, got %v", err)
+	}
+}
+
+func TestEnsureConsensusKeyReservationAllowsExactPlacementReplacementStatuses(t *testing.T) {
+	scheme := reservationScheme(t)
+	legacy := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodeset-uid"},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "chain-1",
+			Cosmosigners: []appsv1.CosmosignerStatus{
+				{Name: "nodes-validators-signer", PublicKey: reservationTestPublicKey},
+				{Name: "nodes-signer", PublicKey: reservationTestPublicKey, ResourceName: "nodes-validators-signer"},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacy).Build()
+	holder := ReservationHolder{
+		UID: "nodeset-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "nodes-validators-0",
+		LegacyStatusNames: []string{"nodes-signer", "nodes-validators-signer"},
+	}
+
+	if err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder); err != nil {
+		t.Fatalf("one logical signer placement replacement must share its reservation: %v", err)
+	}
+}
+
+func TestEnsureConsensusKeyReservationBlocksLegacySingletonAlias(t *testing.T) {
+	scheme := reservationScheme(t)
+	legacy := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: "legacy", UID: "legacy-uid"},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "chain-1", PubKey: `{"key":"` + reservationTestPublicKey + `"}`,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacy).Build()
+	holder := ReservationHolder{UID: "new-owner", Kind: "ChainNode", Namespace: "new", Name: "new", Claim: "new"}
+
+	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder)
+	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
+		t.Fatalf("a legacy singleton alias must block another root from reserving its live key, got %v", err)
+	}
+}
+
 func TestEnsureConsensusKeyReservationAllowsSameRootOwner(t *testing.T) {
 	scheme := reservationScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -140,3 +205,5 @@ func containsAll(value string, values ...string) bool {
 	}
 	return true
 }
+
+func reservationBoolPtr(value bool) *bool { return &value }

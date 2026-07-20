@@ -25,6 +25,8 @@ spec:
     # consensus identity held in Vault.
     nodeGroups: [fullnodes]
     replicas: 3
+    # Provision this Secret before applying. It needs tls.crt, tls.key, and ca.crt; the certificate
+    # SANs must cover *.nibiru-testnet-signer.<namespace>.svc. See usage/cosmosigner#raft-tls-secret.
     raftTLSSecret: nibiru-testnet-cosmosigner-raft-tls
     backend:
       vault:

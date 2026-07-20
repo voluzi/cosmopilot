@@ -437,7 +437,7 @@ func (c *Cosmosigner) effectiveSigningIdentity(softwareKeySecret string) string 
 		if v.Namespace != nil {
 			ns = *v.Namespace
 		}
-		return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s\x00%d", v.Address, ns, v.GetVaultMount(), v.KeyName, v.GetKeyVersion())
+		return normalizedVaultIdentity(v.Address, ns, v.GetVaultMount(), v.KeyName, v.GetKeyVersion())
 	case c.UsesGcpKmsBackend():
 		return "gcpkms\x00" + c.Backend.GcpKMS.KeyVersion
 	case c.UsesSoftwareBackend():
