@@ -298,10 +298,74 @@ func TestPrepareCosmosignerImportsKeepsBlockedSecondaryValidatorsRemote(t *testi
 	require.Contains(t, blocked, signer.Name)
 
 	cfg := deriveGroupValidatorConfig(nodeSet, "validators", 1, 2, nodeSet.Spec.Nodes[0].Validator)
-	secondary, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 1, cfg, blocked)
+
+	// While instance 0 has not handed over (secondariesDiscoverable=false), a secondary stays a remote
+	// target — so it never mounts the shared consensus key — but is withheld from the signer's
+	// discovery Service, so the signer cannot sign through it while instance 0 still signs locally.
+	blockedSecondary, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 1, cfg, blocked, false)
 	require.NoError(t, err)
-	require.True(t, secondary.Spec.RemoteSignerTarget)
-	require.Equal(t, signer.Name, secondary.Labels[controllers.LabelCosmosignerTarget])
+	require.True(t, blockedSecondary.Spec.RemoteSignerTarget)
+	require.NotContains(t, blockedSecondary.Labels, controllers.LabelCosmosignerTarget)
+
+	// Once instance 0 has handed over, the secondary joins the discovery Service.
+	discoverableSecondary, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 1, cfg, blocked, true)
+	require.NoError(t, err)
+	require.True(t, discoverableSecondary.Spec.RemoteSignerTarget)
+	require.Equal(t, signer.Name, discoverableSecondary.Labels[controllers.LabelCosmosignerTarget])
+
+	// Even once the signer is no longer blocked (empty blocked set, so instance 0 has flipped this
+	// pass), a secondary is STILL withheld from the discovery Service until instance 0's handover is
+	// confirmed complete (secondariesDiscoverable=false) — this is the residual in-place-patch window.
+	unblockedSecondary, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 1, cfg, nil, false)
+	require.NoError(t, err)
+	require.True(t, unblockedSecondary.Spec.RemoteSignerTarget)
+	require.NotContains(t, unblockedSecondary.Labels, controllers.LabelCosmosignerTarget)
+}
+
+// TestCosmosignerSecondariesDiscoverableGatesOnInstanceZeroHandover verifies the handover gate that
+// closes the multi-instance bootstrap double-sign window: secondaries join the signer's discovery
+// Service only once instance 0's live pod carries the discovery label — proof its local-key pod was
+// recreated away — and stay eligible thereafter (latch) even if instance 0's pod later restarts.
+func TestCosmosignerSecondariesDiscoverableGatesOnInstanceZeroHandover(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Spec.Nodes[0].Instances = ptr.To(3)
+	signerName, targeted := signerNameForNode(nodeSet, "validators")
+	require.True(t, targeted)
+	instanceZero := validatorNodeName(nodeSet, "validators", 0)
+
+	// Instance 0 has no pod yet (still bootstrapping): secondaries are not discoverable.
+	r := newValidatorTestReconciler(t, nodeSet)
+	discoverable, err := r.cosmosignerSecondariesDiscoverable(context.Background(), nodeSet, "validators", signerName, 3)
+	require.NoError(t, err)
+	require.False(t, discoverable)
+
+	// Instance 0's pod exists but carries no discovery label (its local key is still live): still not
+	// discoverable — this is the window the gate closes.
+	localPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: instanceZero, Namespace: nodeSet.Namespace}}
+	r = newValidatorTestReconciler(t, nodeSet, localPod)
+	discoverable, err = r.cosmosignerSecondariesDiscoverable(context.Background(), nodeSet, "validators", signerName, 3)
+	require.NoError(t, err)
+	require.False(t, discoverable)
+
+	// Instance 0's live pod carries the discovery label (its local-key pod was recreated away):
+	// handover complete, secondaries may join.
+	remotePod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: instanceZero, Namespace: nodeSet.Namespace,
+		Labels: map[string]string{controllers.LabelCosmosignerTarget: signerName}}}
+	r = newValidatorTestReconciler(t, nodeSet, remotePod)
+	discoverable, err = r.cosmosignerSecondariesDiscoverable(context.Background(), nodeSet, "validators", signerName, 3)
+	require.NoError(t, err)
+	require.True(t, discoverable)
+
+	// Latch: instance 0's pod is momentarily absent (restarting post-handover) but a secondary already
+	// joined the discovery Service — the group stays discoverable so the signer keeps those endpoints.
+	labeledSecondary := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: validatorNodeName(nodeSet, "validators", 1), Namespace: nodeSet.Namespace,
+		Labels: map[string]string{controllers.LabelCosmosignerTarget: signerName}}}
+	r = newValidatorTestReconciler(t, nodeSet, labeledSecondary)
+	discoverable, err = r.cosmosignerSecondariesDiscoverable(context.Background(), nodeSet, "validators", signerName, 3)
+	require.NoError(t, err)
+	require.True(t, discoverable)
 }
 
 func TestPrepareCosmosignerImportsKeepsExistingSoftwareKeyLocalUntilPubKeyRecorded(t *testing.T) {
@@ -323,7 +387,7 @@ func TestPrepareCosmosignerImportsKeepsExistingSoftwareKeyLocalUntilPubKeyRecord
 	require.True(t, ready)
 	require.Contains(t, blocked, signer.Name)
 
-	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked)
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked, true)
 	require.NoError(t, err)
 	require.False(t, validator.Spec.RemoteSignerTarget)
 }
@@ -354,7 +418,7 @@ func TestPrepareCosmosignerImportsBlocksOnlyThePendingSigner(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ready)
 
-	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked)
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked, true)
 	require.NoError(t, err)
 	assert.False(t, validator.Spec.RemoteSignerTarget)
 
@@ -386,7 +450,7 @@ func TestPrepareCosmosignerImportsBootstrapsGenesisValidatorLocally(t *testing.T
 	require.NoError(t, err)
 	require.True(t, ready)
 
-	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator, blocked)
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator, blocked, true)
 	require.NoError(t, err)
 	assert.False(t, validator.Spec.RemoteSignerTarget, "the init validator must generate genesis and its key locally")
 	assert.NotContains(t, validator.Labels, controllers.LabelCosmosignerTarget)
@@ -412,7 +476,7 @@ func TestPrepareCosmosignerImportsDoesNotLocalizeAnExistingSigner(t *testing.T) 
 	assert.False(t, ready, "an existing signer with incomplete import status must stop child reconciliation")
 	assert.Empty(t, blocked)
 
-	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked)
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked, true)
 	require.NoError(t, err)
 	assert.True(t, validator.Spec.RemoteSignerTarget, "status recovery must not switch a remote validator back to local signing")
 }

@@ -57,7 +57,7 @@ func (r *Reconciler) ensureValidatorWithBlockedSignerTargets(ctx context.Context
 		name := fmt.Sprintf("%s-validator", nodeSet.GetName())
 		desiredValidators[name] = struct{}{}
 
-		validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator, blocked)
+		validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator, blocked, true)
 		if err != nil {
 			return fmt.Errorf("failed to get validator spec for %s: %w", nodeSet.GetName(), err)
 		}
@@ -75,6 +75,21 @@ func (r *Reconciler) ensureValidatorWithBlockedSignerTargets(ctx context.Context
 			continue
 		}
 		instances := group.GetInstances()
+
+		// A multi-instance group targeted by a managed signer must not add its secondary instances to
+		// the signer's discovery Service until instance 0 has completed its local→remote handover (its
+		// local-key pod is gone). Otherwise the signer, once ready, could sign through a secondary while
+		// instance 0 still signs locally — two signers, one consensus key.
+		secondariesDiscoverable := true
+		if instances > 1 {
+			if signerName, targeted := signerNameForNode(nodeSet, group.Name); targeted {
+				discoverable, err := r.cosmosignerSecondariesDiscoverable(ctx, nodeSet, group.Name, signerName, instances)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate cosmosigner handover for %s group %s: %w", nodeSet.GetName(), group.Name, err)
+				}
+				secondariesDiscoverable = discoverable
+			}
+		}
 
 		// When a group validator initializes genesis with more than one instance, only
 		// instance 0 initializes genesis; the others are part of that same genesis. Their
@@ -103,7 +118,7 @@ func (r *Reconciler) ensureValidatorWithBlockedSignerTargets(ctx context.Context
 			desiredValidators[name] = struct{}{}
 
 			cfg := deriveGroupValidatorConfig(nodeSet, group.Name, i, instances, group.Validator)
-			validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group.Name, i, cfg, blocked)
+			validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group.Name, i, cfg, blocked, secondariesDiscoverable)
 			if err != nil {
 				return fmt.Errorf("failed to get validator spec for %s group %s index %d: %w", nodeSet.GetName(), group.Name, i, err)
 			}
@@ -297,10 +312,57 @@ func validatorNodeName(nodeSet *appsv1.ChainNodeSet, group string, index int) st
 }
 
 func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig) (*appsv1.ChainNode, error) {
-	return r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group, index, cfg, nil)
+	return r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group, index, cfg, nil, true)
 }
 
-func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig, blocked blockedSignerTargets) (*appsv1.ChainNode, error) {
+// cosmosignerSecondariesDiscoverable reports whether the secondary instances (index > 0) of a
+// signer-targeted multi-instance validator group may carry the signer's discovery-service label. It
+// is true once instance 0 has completed its local→remote handover, so the signer can safely dial the
+// secondaries without any local key being live for the same identity. It also latches: a secondary
+// that already joined the discovery Service stays eligible, so a later instance-0 pod restart does
+// not transiently eject the whole group from the signer.
+func (r *Reconciler) cosmosignerSecondariesDiscoverable(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group, signerName string, instances int) (bool, error) {
+	handedOver, err := r.validatorZeroHandedOver(ctx, nodeSet, group, signerName)
+	if err != nil {
+		return false, err
+	}
+	if handedOver {
+		return true, nil
+	}
+	for i := 1; i < instances; i++ {
+		node := &appsv1.ChainNode{}
+		key := types.NamespacedName{Namespace: nodeSet.GetNamespace(), Name: validatorNodeName(nodeSet, group, i)}
+		if err := r.Get(ctx, key, node); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return false, err
+		}
+		if node.Labels[controllers.LabelCosmosignerTarget] == signerName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// validatorZeroHandedOver reports whether instance 0 of a signer-targeted group is signing through
+// the remote signer rather than a local key. Instance 0's local→remote flip changes its pod spec, so
+// the ChainNode controller recreates the pod — deleting the local-key pod and waiting for its removal
+// before creating the labelled remote pod. The discovery-service label on instance 0's live pod is
+// therefore a race-free proof that no local key is live for this validator's identity.
+func (r *Reconciler) validatorZeroHandedOver(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group, signerName string) (bool, error) {
+	pod := &corev1.Pod{}
+	key := types.NamespacedName{Namespace: nodeSet.GetNamespace(), Name: validatorNodeName(nodeSet, group, 0)}
+	if err := r.Get(ctx, key, pod); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return pod.Labels[controllers.LabelCosmosignerTarget] == signerName, nil
+}
+
+func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig, blocked blockedSignerTargets, secondariesDiscoverable bool) (*appsv1.ChainNode, error) {
 	var genesisConfig *appsv1.GenesisConfig
 	switch {
 	case cfg.Init != nil:
@@ -321,16 +383,32 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 		controllers.LabelChainNodeSetValidator: strconv.FormatBool(true),
 	})
 
-	// Only instance 0 may use a local key while a signer waits for bootstrap material. Secondary
-	// validator endpoints keep their remote target so they cannot mount the shared consensus key.
+	// A validator targeted by a managed cosmosigner signs through it and mounts no local key.
+	//
+	// Instance 0 (and the whole group in steady state) is driven by the blocked-aware resolution: while
+	// the signer waits for instance-0 bootstrap material (blocked) instance 0 keeps its local key and no
+	// signer label; otherwise it flips to a remote target. Its local→remote flip changes the pod spec,
+	// so the ChainNode controller RECREATES the pod — the discovery label lands only on the recreated
+	// remote pod, after the local-key pod is deleted, so there is no window.
+	//
+	// A secondary instance (index > 0) is ALWAYS a remote target when a signer targets the group — even
+	// while the signer is blocked — so it never mounts the shared consensus key. But adding its
+	// discovery label is an in-place pod patch that takes effect at once, so it joins the signer's dial
+	// set only once instance 0 has completed its handover (secondariesDiscoverable). Otherwise the
+	// signer, once ready, could sign through a secondary while instance 0 still signs locally — two
+	// signers on one consensus key would risk equivocation.
 	signerName, signerTargeted := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked)
-	if !signerTargeted && index > 0 {
-		signerName, signerTargeted = signerNameForNode(nodeSet, group)
+	remoteSignerTarget := signerTargeted
+	discoveryLabeled := signerTargeted
+	if index > 0 {
+		if name, targeted := signerNameForNode(nodeSet, group); targeted {
+			signerName = name
+			remoteSignerTarget = true
+			discoveryLabeled = secondariesDiscoverable
+		}
 	}
 
-	// Stamp the specific signer's discovery-service label when a managed cosmosigner targets this
-	// validator instance, so exactly that signer selects and dials this node's pod.
-	if signerTargeted {
+	if discoveryLabeled {
 		// A targeted ChainNodeSet child must not inherit a user-set chain-node label: a same-named
 		// standalone signer's discovery Service selects chain-node + cosmosigner-target, and the
 		// target label below may equal that standalone signer's name. Preserve the user label on
@@ -384,8 +462,9 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 	}
 
 	// A validator targeted by a managed cosmosigner deployment signs through the external signer:
-	// it listens for it and mounts no local key.
-	if signerTargeted {
+	// it listens for it and mounts no local key. Secondary instances stay remote targets even before
+	// they join the discovery Service, so they never mount the shared consensus key.
+	if remoteSignerTarget {
 		validator.Spec.RemoteSignerTarget = true
 	}
 
