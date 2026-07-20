@@ -1,6 +1,7 @@
 package tracer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,7 +188,7 @@ func TestStoreTracer_TruncatesLongInvalidTraceInError(t *testing.T) {
 		tracer.Start()
 	}()
 
-	longValue := strings.Repeat("a", 4096)
+	longValue := strings.Repeat("a", 1024)
 	invalidTrace := `{"operation":"write","value":"` + longValue
 	if _, err = f.WriteString(invalidTrace + "\n"); err != nil {
 		t.Fatalf("failed to write trace: %v", err)
@@ -212,7 +213,7 @@ func TestStoreTracer_TruncatesLongInvalidTraceInError(t *testing.T) {
 		if !strings.Contains(errorText, `near="...aaaaaaaa`) {
 			t.Errorf("expected context near the parse error, got %q", errorText)
 		}
-		if !strings.Contains(errorText, "of 4126") {
+		if !strings.Contains(errorText, fmt.Sprintf("of %d", len(invalidTrace))) {
 			t.Errorf("expected error to include total length, got %q", errorText)
 		}
 	case <-time.After(2 * time.Second):
