@@ -3,6 +3,7 @@ package tracer
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,9 +154,70 @@ func TestStoreTracer_ParseInvalidJSON(t *testing.T) {
 	case trace := <-tracesReceived:
 		if trace.Err == nil {
 			t.Error("expected error for invalid JSON, got nil")
+		} else if !strings.Contains(trace.Err.Error(), "not valid json") {
+			t.Errorf("expected error to include invalid trace input, got %q", trace.Err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for trace")
+	}
+
+	f.Close()
+	_ = tracer.Stop()
+	<-done
+}
+
+func TestStoreTracer_ParseMultipleTracesOnOneLine(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "trace.log")
+
+	f, err := os.Create(tracePath)
+	if err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tracer, err := NewStoreTracer(tracePath, false)
+	if err != nil {
+		f.Close()
+		t.Fatalf("NewStoreTracer() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tracer.Start()
+	}()
+
+	tracesReceived := make(chan *Trace, 2)
+	go func() {
+		for trace := range tracer.Traces {
+			tracesReceived <- trace
+		}
+	}()
+
+	traceJSON := `{"operation":"write","key":"first"}{"operation":"read","key":"second"}`
+	if _, err = f.WriteString(traceJSON + "\n"); err != nil {
+		t.Fatalf("failed to write traces: %v", err)
+	}
+	_ = f.Sync()
+
+	for i, expected := range []struct {
+		operation string
+		key       string
+	}{
+		{operation: "write", key: "first"},
+		{operation: "read", key: "second"},
+	} {
+		select {
+		case trace := <-tracesReceived:
+			if trace.Err != nil {
+				t.Fatalf("trace %d returned unexpected error: %v", i, trace.Err)
+			}
+			if trace.Operation != expected.operation || trace.Key != expected.key {
+				t.Errorf("trace %d = operation %q, key %q; want operation %q, key %q", i, trace.Operation, trace.Key, expected.operation, expected.key)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for trace %d", i)
+		}
 	}
 
 	f.Close()

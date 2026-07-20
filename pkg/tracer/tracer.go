@@ -4,6 +4,8 @@ package tracer
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"strings"
 	"syscall"
 
@@ -80,13 +82,21 @@ func (t *StoreTracer) Start() {
 			continue
 		}
 
-		if strings.TrimSpace(line.Text) != "" {
+		text := strings.TrimSpace(line.Text)
+		if text == "" {
+			continue
+		}
+
+		decoder := json.NewDecoder(strings.NewReader(text))
+		for {
 			trace := Trace{}
-			if err := json.Unmarshal([]byte(line.Text), &trace); err != nil {
-				t.Traces <- &Trace{Err: err}
-			} else {
-				t.Traces <- &trace
+			if err := decoder.Decode(&trace); err != nil {
+				if err != io.EOF {
+					t.Traces <- &Trace{Err: fmt.Errorf("failed to parse trace %q: %w", text, err)}
+				}
+				break
 			}
+			t.Traces <- &trace
 		}
 	}
 }
