@@ -271,7 +271,7 @@ func (nodeSet *ChainNodeSet) DesiredReplacementSigner(desired []ResolvedSigner, 
 				}
 				continue
 			}
-			if equalGroupSet(st.TargetGroups, s.TargetGroups) {
+			if equalGroupMultiset(st.TargetGroups, s.TargetGroups) {
 				return s, true
 			}
 			continue
@@ -289,19 +289,21 @@ func (nodeSet *ChainNodeSet) DesiredReplacementSigner(desired []ResolvedSigner, 
 	return ResolvedSigner{}, false
 }
 
-// equalGroupSet reports whether two target-group slices contain the same set of names.
-func equalGroupSet(a, b []string) bool {
+// equalGroupMultiset reports whether two target-group slices contain the same names with the same
+// multiplicity, independent of order.
+func equalGroupMultiset(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	set := make(map[string]struct{}, len(a))
+	counts := make(map[string]int, len(a))
 	for _, g := range a {
-		set[g] = struct{}{}
+		counts[g]++
 	}
 	for _, g := range b {
-		if _, ok := set[g]; !ok {
+		if counts[g] == 0 {
 			return false
 		}
+		counts[g]--
 	}
 	return true
 }

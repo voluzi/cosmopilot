@@ -294,6 +294,51 @@ func TestPrepareCosmosignerParamsRejectsDifferentRecordedValidatorPublicKey(t *t
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation))
 }
 
+func TestPrepareCosmosignerParamsAllowsMultiInstanceValidatorEndpointsWithSharedKey(t *testing.T) {
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "validators", Instances: ptr.To(2),
+				Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: key},
+	}
+	children := make([]client.Object, 0, 2)
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		children = append(children, &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: validatorNodeName(nodeSet, "validators", ordinal), Namespace: nodeSet.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: nodeSet.Name,
+					UID: nodeSet.UID, Controller: ptr.To(true),
+				}},
+			},
+			Status: appsv1.ChainNodeStatus{
+				ChainID: "test-1",
+				PubKey:  `{"key":"` + parsed.PubKey.Value + `"}`,
+			},
+		})
+	}
+	r := newValidatorTestReconciler(t, append([]client.Object{nodeSet, secret}, children...)...)
+
+	_, err = r.prepareCosmosignerParams(context.Background(), nodeSet)
+	require.NoError(t, err, "redundant endpoints served by one signer must share its reservation")
+}
+
 func TestPrepareCosmosignerParamsRejectsDuplicateAndReservedKeys(t *testing.T) {
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)

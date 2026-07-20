@@ -28,6 +28,7 @@ type ReservationHolder struct {
 	Name              string
 	Claim             string
 	LegacyStatusNames []string
+	LegacyNodeNames   []string
 }
 
 // ConsensusKeyReservationName returns the cluster-scoped name for a chain/public-key pair.
@@ -175,11 +176,21 @@ func (holder ReservationHolder) matchesLegacyStatus(name string) bool {
 	return false
 }
 
+func (holder ReservationHolder) matchesLegacyNode(name string) bool {
+	for _, allowed := range holder.LegacyNodeNames {
+		if name == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 func legacyChainNodeMatchesClaim(node *appsv1.ChainNode, holder ReservationHolder) bool {
 	if node.GetUID() == holder.UID {
 		return true
 	}
-	return belongsToRoot(node, holder.UID) && node.GetName() == holder.Claim
+	return belongsToRoot(node, holder.UID) &&
+		(node.GetName() == holder.Claim || holder.matchesLegacyNode(node.GetName()))
 }
 
 func legacyChainNodeSetAliasMatchesClaim(set *appsv1.ChainNodeSet, holder ReservationHolder, publicKey string) bool {

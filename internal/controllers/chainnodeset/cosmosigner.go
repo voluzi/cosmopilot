@@ -336,6 +336,7 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(),
 			Claim:             nodeSetCosmosignerReservationClaim(nodeSet, s),
 			LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, desired, s),
+			LegacyNodeNames:   nodeSetCosmosignerLegacyNodeNames(nodeSet, s),
 		}); err != nil {
 			return nil, err
 		}
@@ -373,6 +374,27 @@ func nodeSetCosmosignerLegacyStatusNames(nodeSet *appsv1.ChainNodeSet, desired [
 		if replacement, ok := desiredReplacementSigner(nodeSet, desired, st); ok && replacement.Name == signer.Name {
 			names = append(names, st.Name)
 		}
+	}
+	return names
+}
+
+func nodeSetCosmosignerLegacyNodeNames(nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) []string {
+	if !signer.TargetsValidator() {
+		return nil
+	}
+	instances := 1
+	if signer.ValidatorGroup != appsv1.ReservedValidatorGroupName {
+		instances = 0
+		for i := range nodeSet.Spec.Nodes {
+			if nodeSet.Spec.Nodes[i].Name == signer.ValidatorGroup {
+				instances = nodeSet.Spec.Nodes[i].GetInstances()
+				break
+			}
+		}
+	}
+	names := make([]string, 0, instances)
+	for ordinal := 0; ordinal < instances; ordinal++ {
+		names = append(names, validatorNodeName(nodeSet, signer.ValidatorGroup, ordinal))
 	}
 	return names
 }

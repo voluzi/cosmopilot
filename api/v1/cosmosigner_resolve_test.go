@@ -189,6 +189,15 @@ func TestResolveCosmosignersMultiInstanceValidatorGroup(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDesiredReplacementSignerPreservesTargetMultiplicity(t *testing.T) {
+	nodeSet := &ChainNodeSet{}
+	desired := []ResolvedSigner{{Name: "replacement", TargetGroups: []string{"a", "a"}}}
+	status := &CosmosignerStatus{TargetGroups: []string{"a", "b"}}
+
+	_, ok := nodeSet.DesiredReplacementSigner(desired, status)
+	require.False(t, ok, "duplicating one target must not replace a different target group")
+}
+
 // TestResolveCosmosignersTopLevelPlusPerGroup verifies the two sources compose into independent signers.
 func TestResolveCosmosignersTopLevelPlusPerGroup(t *testing.T) {
 	nodeSet := &ChainNodeSet{
