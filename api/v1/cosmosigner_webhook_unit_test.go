@@ -103,6 +103,66 @@ func TestChainNodeCreateValidatorWaiverRequiresOldValidator(t *testing.T) {
 	}
 }
 
+// TestChainNodeCreateValidatorWaiverRequiresCompletedRegistration verifies that the migration
+// waiver (which lets an established validator adopt a pre-provisioned Vault/GCP signer whose key
+// may differ from the local one) only applies once the controller recorded status.validatorAddress
+// — proof the node's key is in the on-chain validator set. An established external-genesis node
+// with a validator block but no completed registration keeps the key-matching rule: create-validator
+// would register the locally generated key while the pod signs through the external signer.
+func TestChainNodeCreateValidatorWaiverRequiresCompletedRegistration(t *testing.T) {
+	tokenSecret := &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
+		Key:                  "token",
+	}
+	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer"
+
+	base := func() *ChainNode {
+		return &ChainNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "mynode"},
+			Spec: ChainNodeSpec{
+				App:       AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Validator: &ValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
+			},
+			Status: ChainNodeStatus{ChainID: "test-1"},
+		}
+	}
+	promoted := func(old *ChainNode) *ChainNode {
+		n := old.DeepCopy()
+		n.Spec.Validator.CreateValidator = &CreateValidatorConfig{}
+		n.Spec.Cosmosigner = &Cosmosigner{Backend: CosmosignerBackend{Vault: &CosmosignerVaultBackend{
+			Address: "https://vault:8200", KeyName: "pre-provisioned", TokenSecret: tokenSecret,
+		}}}
+		return n
+	}
+
+	// Webhook path: validator block + chain ID but no completed registration — rejected.
+	unregistered := base()
+	if _, err := promoted(unregistered).Validate(unregistered); err == nil || err.Error() != want {
+		t.Fatalf("adding create-validator with a pre-provisioned signer before registration must be rejected with %q, got: %v", want, err)
+	}
+
+	// Webhook path: a recorded validatorAddress proves registration — admitted as a migration.
+	registered := base()
+	registered.Status.ValidatorAddress = "cosmosvaloper1registered"
+	if _, err := promoted(registered).Validate(registered); err != nil {
+		t.Fatalf("adding create-validator with a pre-provisioned signer after registration must be admitted, got: %v", err)
+	}
+
+	// No-webhook path: chain ID alone does not waive the rule.
+	noWebhookUnregistered := promoted(base())
+	if _, err := noWebhookUnregistered.Validate(nil); err == nil || err.Error() != want {
+		t.Fatalf("no-webhook promotion before registration must be rejected with %q, got: %v", want, err)
+	}
+
+	// No-webhook path: recorded registration admits the migration.
+	noWebhookRegistered := promoted(base())
+	noWebhookRegistered.Status.ValidatorAddress = "cosmosvaloper1registered"
+	if _, err := noWebhookRegistered.Validate(nil); err != nil {
+		t.Fatalf("no-webhook promotion after registration must be admitted, got: %v", err)
+	}
+}
+
 // TestInitVaultSignerUploadGeneratedAutoDefault verifies the documented auto-default: a
 // genesis-initializing validator with a Vault cosmosigner backend is accepted even when
 // uploadGenerated is omitted (the controller imports the generated key implicitly), on both CRDs.

@@ -168,7 +168,10 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// so the backend must be software (which references it) or Vault uploadGenerated (which
 		// imports it — auto-defaulted for genesis-init validators, matching the documented tmKMS
 		// parity) — not a pre-provisioned Vault/GCP key with a different pubkey. Waived for a
-		// migration on an established validator: Cosmopilot performs a break-before-make signer
+		// migration on an established validator whose registration COMPLETED — the controller records
+		// status.validatorAddress only once the node's key is found in the on-chain validator set, so
+		// a validator block or chain ID alone does not qualify (an external-genesis node can run with
+		// a validator block without ever registering): Cosmopilot performs a break-before-make signer
 		// transition, while the user remains responsible for ensuring the selected key is appropriate
 		// for the on-chain validator. On the no-webhook path
 		// (old == nil) the waiver requires the status-recorded signing digest to MATCH the current
@@ -177,8 +180,8 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// a NEWLY added signer (no digest, or digest from a different identity) stays subject to the
 		// rule, since "registration completed" alone says nothing about the new backend's key.
 		hasInit := chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
-		migrationWaiver := (old != nil && old.Status.ChainID != "" && old.Spec.Validator != nil) ||
-			(old == nil && chainNode.Status.ChainID != "")
+		migrationWaiver := (old != nil && old.Status.ChainID != "" && old.Spec.Validator != nil && old.Status.ValidatorAddress != "") ||
+			(old == nil && chainNode.Status.ChainID != "" && chainNode.Status.ValidatorAddress != "")
 		if registers && !migrationWaiver {
 			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(hasInit)
 			if !matches {
