@@ -166,6 +166,111 @@ func TestStoreTracer_ParseInvalidJSON(t *testing.T) {
 	<-done
 }
 
+func TestStoreTracer_TruncatesLongInvalidTraceInError(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "trace.log")
+
+	f, err := os.Create(tracePath)
+	if err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tracer, err := NewStoreTracer(tracePath, false)
+	if err != nil {
+		f.Close()
+		t.Fatalf("NewStoreTracer() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tracer.Start()
+	}()
+
+	longValue := strings.Repeat("a", 4096)
+	invalidTrace := `{"operation":"write","value":"` + longValue
+	if _, err = f.WriteString(invalidTrace + "\n"); err != nil {
+		t.Fatalf("failed to write trace: %v", err)
+	}
+	_ = f.Sync()
+
+	select {
+	case trace := <-tracer.Traces:
+		if trace.Err == nil {
+			t.Fatal("expected error for invalid JSON, got nil")
+		}
+		errorText := trace.Err.Error()
+		if len(errorText) > 512 {
+			t.Errorf("expected bounded error, got %d characters", len(errorText))
+		}
+		if !strings.Contains(errorText, "...") {
+			t.Errorf("expected truncated error to contain ellipsis, got %q", errorText)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for trace")
+	}
+
+	f.Close()
+	_ = tracer.Stop()
+	<-done
+}
+
+func TestStoreTracer_EmitsValidTraceBeforeMalformedSuffix(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "trace.log")
+
+	f, err := os.Create(tracePath)
+	if err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tracer, err := NewStoreTracer(tracePath, false)
+	if err != nil {
+		f.Close()
+		t.Fatalf("NewStoreTracer() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tracer.Start()
+	}()
+
+	traceLine := `{"operation":"write","key":"valid"}{invalid}`
+	if _, err = f.WriteString(traceLine + "\n"); err != nil {
+		t.Fatalf("failed to write traces: %v", err)
+	}
+	_ = f.Sync()
+
+	select {
+	case trace := <-tracer.Traces:
+		if trace.Err != nil {
+			t.Fatalf("valid trace returned unexpected error: %v", trace.Err)
+		}
+		if trace.Key != "valid" {
+			t.Errorf("expected valid trace key, got %q", trace.Key)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for valid trace")
+	}
+
+	select {
+	case trace := <-tracer.Traces:
+		if trace.Err == nil {
+			t.Fatal("expected error for malformed suffix, got nil")
+		}
+		if !strings.Contains(trace.Err.Error(), "{invalid}") {
+			t.Errorf("expected error context near malformed suffix, got %q", trace.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for malformed suffix error")
+	}
+
+	f.Close()
+	_ = tracer.Stop()
+	<-done
+}
+
 func TestStoreTracer_ParseMultipleTracesOnOneLine(t *testing.T) {
 	tmpDir := t.TempDir()
 	tracePath := filepath.Join(tmpDir, "trace.log")

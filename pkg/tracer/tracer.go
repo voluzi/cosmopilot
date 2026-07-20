@@ -15,6 +15,8 @@ import (
 	"github.com/nxadm/tail"
 )
 
+const traceErrorExcerptLength = 96
+
 // StoreTracer reads and parses store operation traces from a file or FIFO pipe.
 type StoreTracer struct {
 	tail   *tail.Tail
@@ -92,11 +94,44 @@ func (t *StoreTracer) Start() {
 			trace := Trace{}
 			if err := decoder.Decode(&trace); err != nil {
 				if err != io.EOF {
-					t.Traces <- &Trace{Err: fmt.Errorf("failed to parse trace %q: %w", text, err)}
+					offset := decoder.InputOffset()
+					t.Traces <- &Trace{Err: fmt.Errorf("failed to parse trace near byte %d (%q): %w", offset, traceErrorExcerpt(text, offset), err)}
 				}
 				break
 			}
 			t.Traces <- &trace
 		}
 	}
+}
+
+func traceErrorExcerpt(text string, offset int64) string {
+	if len(text) <= traceErrorExcerptLength {
+		return text
+	}
+
+	center := int(offset)
+	if center < 0 {
+		center = 0
+	} else if center > len(text) {
+		center = len(text)
+	}
+
+	start := center - traceErrorExcerptLength/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + traceErrorExcerptLength
+	if end > len(text) {
+		end = len(text)
+		start = end - traceErrorExcerptLength
+	}
+
+	excerpt := text[start:end]
+	if start > 0 {
+		excerpt = "..." + excerpt
+	}
+	if end < len(text) {
+		excerpt += "..."
+	}
+	return excerpt
 }
