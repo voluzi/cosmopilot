@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +22,113 @@ func TestValidateCosmosignerReservedNameRejectsStatefulSetChildren(t *testing.T)
 	}
 	if err := ValidateCosmosignerReservedName("foo-signer-0", true); err != nil {
 		t.Fatalf("the shared ChainNodeSet name rule must not reserve raw StatefulSet child names, got %v", err)
+	}
+}
+
+func TestCosmosignerVaultRequiresPinnedKeyVersion(t *testing.T) {
+	c := &Cosmosigner{Backend: CosmosignerBackend{Vault: &CosmosignerVaultBackend{
+		Address: "https://vault:8200", KeyName: "validator",
+		KeyVersion:  ptr.To(0),
+		TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+	}}}
+
+	if err := c.Validate(".spec.cosmosigner", true); err == nil || !strings.Contains(err.Error(), "keyVersion") {
+		t.Fatalf("missing Vault key version must fail closed, got %v", err)
+	}
+	c.Backend.Vault.KeyVersion = ptr.To(1)
+	if err := c.Validate(".spec.cosmosigner", true); err != nil {
+		t.Fatalf("explicit Vault key version must pass: %v", err)
+	}
+
+	c.Backend.Vault.UploadGenerated = true
+	c.Backend.Vault.KeyVersion = ptr.To(2)
+	if err := c.Validate(".spec.cosmosigner", true); err == nil || !strings.Contains(err.Error(), "uploadGenerated") {
+		t.Fatalf("uploadGenerated must reject a key version it cannot create, got %v", err)
+	}
+}
+
+func TestVaultImportFingerprintAcceptsLegacyFormatOnlyForVersionOne(t *testing.T) {
+	namespace := "team-a"
+	mount := "validator-transit"
+	vault := &CosmosignerVaultBackend{
+		Address: "https://vault.example:8200", Namespace: &namespace, Mount: &mount, KeyName: "validator",
+	}
+	const sourceSecret = "validator-key"
+	keyMaterial := []byte("key-material")
+	legacyTarget := vault.LegacyImportTargetFingerprint(sourceSecret)
+	legacyRecord := vault.LegacyImportFingerprint(sourceSecret, keyMaterial)
+
+	if legacyTarget == vault.ImportTargetFingerprint(sourceSecret) {
+		t.Fatal("the legacy target fingerprint must remain distinct from the key-version-pinned format")
+	}
+	if !vault.ImportRecordMatchesTarget(legacyRecord, sourceSecret) {
+		t.Fatal("version 1 must accept a pre-key-version target fingerprint during upgrade")
+	}
+	if !vault.ImportRecordMatches(legacyRecord, sourceSecret, keyMaterial) {
+		t.Fatal("version 1 must accept a pre-key-version full fingerprint for the same source bytes")
+	}
+
+	vault.KeyVersion = ptr.To(2)
+	if vault.ImportRecordMatchesTarget(legacyRecord, sourceSecret) {
+		t.Fatal("versions after 1 must not inherit an ambiguous legacy import proof")
+	}
+	if vault.ImportRecordMatches(legacyRecord, sourceSecret, keyMaterial) {
+		t.Fatal("versions after 1 must not accept a legacy full fingerprint")
+	}
+	if !vault.ImportRecordMatches(vault.ImportFingerprint(sourceSecret, keyMaterial), sourceSecret, keyMaterial) {
+		t.Fatal("the current fingerprint format must match every pinned key version")
+	}
+}
+
+func TestImplicitVaultImportRequiresInitialKeyVersion(t *testing.T) {
+	tokenSecret := &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token",
+	}
+	vault := func() *CosmosignerVaultBackend {
+		return &CosmosignerVaultBackend{
+			Address: "https://vault:8200", KeyName: "validator", KeyVersion: ptr.To(2), TokenSecret: tokenSecret,
+		}
+	}
+
+	chainNode := &ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator"},
+		Spec: ChainNodeSpec{
+			Validator:   &ValidatorConfig{Init: &GenesisInitConfig{ChainID: "test-1", Assets: []string{"100stake"}, StakeAmount: "1stake"}},
+			Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Vault: vault()}},
+		},
+	}
+	if _, err := chainNode.Validate(nil); err == nil || !strings.Contains(err.Error(), "keyVersion 1") {
+		t.Fatalf("standalone genesis import must reject a version after 1, got %v", err)
+	}
+
+	nodeSet := &ChainNodeSet{
+		Spec: ChainNodeSetSpec{
+			Validator:   &NodeSetValidatorConfig{Init: &GenesisInitConfig{ChainID: "test-1", Assets: []string{"100stake"}, StakeAmount: "1stake"}},
+			Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Vault: vault()}},
+		},
+	}
+	signer := nodeSet.ResolveCosmosigners()[0]
+	if err := nodeSet.validateResolvedSigner(nil, signer); err == nil || !strings.Contains(err.Error(), "keyVersion 1") {
+		t.Fatalf("ChainNodeSet genesis import must reject a version after 1, got %v", err)
+	}
+}
+
+func TestCosmosignerHARequiresRaftTLSOrExplicitOptOut(t *testing.T) {
+	c := &Cosmosigner{
+		Replicas: ptr.To(int32(3)),
+		Backend:  CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("key")}},
+	}
+	if err := c.Validate(".spec.cosmosigner", true); err == nil || !strings.Contains(err.Error(), "raftTLSSecret") {
+		t.Fatalf("HA without mTLS must fail closed, got %v", err)
+	}
+	c.UnsafeAllowInsecureRaft = true
+	if err := c.Validate(".spec.cosmosigner", true); err != nil {
+		t.Fatalf("explicit insecure opt-out must pass: %v", err)
+	}
+	tlsSecret := "raft-tls"
+	c.RaftTLSSecret = &tlsSecret
+	if err := c.Validate(".spec.cosmosigner", true); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("TLS plus insecure opt-out must be rejected, got %v", err)
 	}
 }
 
@@ -238,8 +346,9 @@ func TestChainNodeNoWebhookSentryReplicaImmutable(t *testing.T) {
 				App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
 				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
 				Cosmosigner: &Cosmosigner{
-					Replicas: ptr.To(replicas),
-					Backend:  CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-priv-key")}},
+					Replicas:                ptr.To(replicas),
+					UnsafeAllowInsecureRaft: true,
+					Backend:                 CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-priv-key")}},
 				},
 			},
 			Status: ChainNodeStatus{ChainID: "test-1", CosmosignerReplicas: ptr.To(int32(3))},

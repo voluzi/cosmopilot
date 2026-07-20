@@ -34,10 +34,12 @@ spec:
       validator: {}
       cosmosigner:
         replicas: 3
+        raftTLSSecret: nibiru-testnet-validator-a-cosmosigner-raft-tls
         backend:
           vault:
             address: https://vault.vault-system.svc.cluster.local:8200
             keyName: nibiru-testnet-validator-a
+            keyVersion: 1
             tokenSecret:
               name: vault-cosmosigner-token
               key: token
@@ -53,10 +55,12 @@ spec:
       validator: {}
       cosmosigner:
         replicas: 3
+        raftTLSSecret: nibiru-testnet-validator-b-cosmosigner-raft-tls
         backend:
           vault:
             address: https://vault.vault-system.svc.cluster.local:8200
             keyName: nibiru-testnet-validator-b
+            keyVersion: 1
             tokenSecret:
               name: vault-cosmosigner-token
               key: token
@@ -78,10 +82,12 @@ spec:
               minimum-gas-prices: 0.025unibi
       cosmosigner:
         replicas: 3
+        raftTLSSecret: nibiru-testnet-validator-c-cosmosigner-raft-tls
         backend:
           vault:
             address: https://vault.vault-system.svc.cluster.local:8200
             keyName: nibiru-testnet-validator-c
+            keyVersion: 1
             tokenSecret:
               name: vault-cosmosigner-token
               key: token

@@ -111,6 +111,15 @@ rules:
   - patch
   - update
 - apiGroups:
+  - cosmopilot.voluzi.com
+  resources:
+  - consensuskeyreservations
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
   - discovery.k8s.io
   resources:
   - endpointslices
@@ -156,6 +165,7 @@ rules:
   - networking.k8s.io
   resources:
   - ingresses
+  - networkpolicies
   verbs:
   - create
   - delete

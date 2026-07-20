@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -41,7 +42,13 @@ func TestReconcileCosmosignerMigrationWaitsForTerminatingPod(t *testing.T) {
 			}},
 		}},
 	}
-	desiredDigest := chainNode.CosmosignerSigningDigest()
+	params := cosmosigner.Params{
+		Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "image", Replicas: 1,
+		ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", StateStorageSize: "1Gi",
+		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "validator-key"}},
+	}
+	desiredDigest, err := params.LifecycleDigest(chainNode.CosmosignerSigningDigest())
+	require.NoError(t, err)
 	chainNode.Status.CosmosignerAppliedDigest = "old-digest"
 	chainNode.Status.CosmosignerPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	chainNode.Status.CosmosignerMigration = &appsv1.CosmosignerMigrationStatus{
@@ -64,7 +71,7 @@ func TestReconcileCosmosignerMigrationWaitsForTerminatingPod(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(sts, pod, scheme))
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(chainNode, sts, pod).Build(), Scheme: scheme}
 
-	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, cosmosigner.Params{Name: sts.Name, Replicas: 1})
+	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
 	require.NoError(t, err)
 	require.True(t, pending)
 	require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
@@ -108,8 +115,14 @@ func TestReconcileCosmosignerMigrationComparesActualPublicKeys(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode, secret).Build()
 			r := &Reconciler{Client: client, Scheme: scheme}
 			params := cosmosigner.Params{
-				Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace,
-				Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secret.Name}},
+				Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "image", Replicas: 1,
+				ExpectedPublicKey: func() string {
+					parsed, parseErr := cometbft.LoadPrivKey(tc.desiredKey)
+					require.NoError(t, parseErr)
+					return parsed.PubKey.Value
+				}(),
+				StateStorageSize: "1Gi",
+				Backend:          cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: secret.Name}},
 			}
 
 			pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
@@ -120,6 +133,119 @@ func TestReconcileCosmosignerMigrationComparesActualPublicKeys(t *testing.T) {
 			require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
 		})
 	}
+}
+
+func TestReconcileCosmosignerMigrationQuiescesRuntimeOnlyChange(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+		}}},
+	}
+	const publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	params := cosmosigner.Params{
+		Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "new-image", Replicas: 1,
+		ExpectedPublicKey: publicKey, StateStorageSize: "1Gi",
+		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
+	}
+	oldParams := params
+	oldParams.Image = "old-image"
+	oldDigest, err := oldParams.LifecycleDigest(chainNode.CosmosignerSigningDigest())
+	require.NoError(t, err)
+	chainNode.Status.CosmosignerAppliedDigest = oldDigest
+	chainNode.Status.CosmosignerPublicKey = publicKey
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build(), Scheme: scheme}
+
+	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.NotNil(t, chainNode.Status.CosmosignerMigration)
+	require.False(t, chainNode.Status.CosmosignerMigration.ResetState)
+	require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
+}
+
+func TestPreflightCosmosignerRejectsDifferentRecordedValidatorPublicKey(t *testing.T) {
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
+		Spec: appsv1.ChainNodeSpec{
+			Validator:   &appsv1.ValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}}},
+		},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: "test-1",
+			PubKey:  `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`,
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{PrivKeyFilename: key},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	r := &Reconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+		Scheme: scheme, opts: &controllers.ControllerRunOptions{},
+	}
+
+	_, err = r.preflightCosmosigner(context.Background(), chainNode)
+	require.ErrorContains(t, err, "on-chain validator public key")
+	require.NotEqual(t, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", parsed.PubKey.Value)
+	reservation := &appsv1.ConsensusKeyReservation{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation))
+}
+
+func TestReconcileCosmosignerMigrationRequeuesAfterRecoveringLiveLifecycle(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+		}}},
+	}
+	params := cosmosigner.Params{
+		Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "new-image", Replicas: 1,
+		ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", StateStorageSize: "1Gi",
+		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
+	}
+	oldParams := params
+	oldParams.Image = "old-image"
+	oldDigest, err := oldParams.LifecycleDigest(chainNode.CosmosignerSigningDigest())
+	require.NoError(t, err)
+
+	one := int32(1)
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, Generation: 1,
+			Annotations: map[string]string{cosmosigner.LifecycleDigestAnnotation: oldDigest},
+		},
+		Spec: k8sappsv1.StatefulSetSpec{Replicas: &one},
+		Status: k8sappsv1.StatefulSetStatus{
+			ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1,
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	r := &Reconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode, sts).Build(),
+		Scheme: scheme,
+	}
+
+	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
+	require.NoError(t, err)
+	require.True(t, pending, "recovery must stop this reconcile before desired services or StatefulSet fields are applied")
+	require.Equal(t, oldDigest, chainNode.Status.CosmosignerAppliedDigest)
 }
 
 func TestReconcileCosmosignerMigrationRollingOutPreservesNewStatefulSet(t *testing.T) {
@@ -133,7 +259,13 @@ func TestReconcileCosmosignerMigrationRollingOutPreservesNewStatefulSet(t *testi
 			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
 		}}},
 	}
-	desiredDigest := chainNode.CosmosignerSigningDigest()
+	params := cosmosigner.Params{
+		Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "image", Replicas: 1,
+		ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", StateStorageSize: "1Gi",
+		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
+	}
+	desiredDigest, err := params.LifecycleDigest(chainNode.CosmosignerSigningDigest())
+	require.NoError(t, err)
 	chainNode.Status.CosmosignerAppliedDigest = "old-digest"
 	chainNode.Status.CosmosignerPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	chainNode.Status.CosmosignerMigration = &appsv1.CosmosignerMigrationStatus{
@@ -145,7 +277,7 @@ func TestReconcileCosmosignerMigrationRollingOutPreservesNewStatefulSet(t *testi
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(chainNode, sts).Build(), Scheme: scheme}
 
-	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, cosmosigner.Params{Name: sts.Name, Replicas: 1})
+	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
 	require.NoError(t, err)
 	require.False(t, pending)
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: sts.Namespace, Name: sts.Name}, &k8sappsv1.StatefulSet{}))
@@ -185,6 +317,87 @@ func TestMaybeImportCosmosignerKeyRejectsMalformedSourceBeforeScaleDown(t *testi
 	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Namespace: sts.Namespace, Name: sts.Name}, fresh))
 	require.NotNil(t, fresh.Spec.Replicas)
 	require.Equal(t, int32(1), *fresh.Spec.Replicas)
+}
+
+func TestMaybeImportCosmosignerKeyUpgradesLegacyFingerprintWithoutScaleDown(t *testing.T) {
+	vault := &appsv1.CosmosignerVaultBackend{
+		Address: "https://vault:8200", KeyName: "validator-key", UploadGenerated: true,
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
+		Spec: appsv1.ChainNodeSpec{
+			Validator:   &appsv1.ValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: vault}},
+		},
+	}
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	chainNode.Status.CosmosignerKeyImported = vault.LegacyImportFingerprint("validator-key", key)
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{PrivKeyFilename: key},
+	}
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode, source, sts).Build()
+	r := &Reconciler{Client: fakeClient, Scheme: scheme}
+
+	pending, err := r.maybeImportCosmosignerKey(context.Background(), chainNode, cosmosigner.Params{Name: sts.Name})
+	require.NoError(t, err)
+	require.False(t, pending)
+	require.Equal(t, vault.ImportFingerprint("validator-key", key), chainNode.Status.CosmosignerKeyImported)
+
+	fresh := &k8sappsv1.StatefulSet{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(sts), fresh))
+	require.Equal(t, int32(1), ptr.Deref(fresh.Spec.Replicas, 0), "format-only status upgrade must not quiesce the live signer")
+}
+
+func TestMaybeImportCosmosignerKeyRejectsInPlaceSourceRotationBeforeScaleDown(t *testing.T) {
+	vault := &appsv1.CosmosignerVaultBackend{
+		Address: "https://vault:8200", KeyName: "validator-key", UploadGenerated: true,
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
+		Spec: appsv1.ChainNodeSpec{
+			Validator:   &appsv1.ValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: vault}},
+		},
+	}
+	oldKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	newKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	chainNode.Status.CosmosignerKeyImported = vault.ImportFingerprint("validator-key", oldKey)
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{PrivKeyFilename: newKey},
+	}
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(source, sts).Build()
+	r := &Reconciler{Client: fakeClient, Scheme: scheme}
+
+	pending, err := r.maybeImportCosmosignerKey(context.Background(), chainNode, cosmosigner.Params{Name: sts.Name})
+	require.ErrorContains(t, err, "new Vault keyName")
+	require.False(t, pending)
+
+	fresh := &k8sappsv1.StatefulSet{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(sts), fresh))
+	require.Equal(t, int32(1), ptr.Deref(fresh.Spec.Replicas, 0), "an unsupported in-place rekey must leave the serving signer intact")
 }
 
 func TestMaybeImportCosmosignerKeyReimportsForVaultTargetMigration(t *testing.T) {
@@ -360,12 +573,13 @@ func requireRecoveredStandaloneIdentityMismatchRejected(t *testing.T, currentVal
 		chainNode.Spec.Validator = &appsv1.ValidatorConfig{}
 	}
 	liveParams := cosmosigner.Params{
-		Name:             cosmosignerName(chainNode),
-		Namespace:        chainNode.Namespace,
-		OwnerUID:         chainNode.UID,
-		ChainID:          chainNode.Status.ChainID,
-		Replicas:         1,
-		StateStorageSize: appsv1.DefaultCosmosignerStateStorageSize,
+		Name:              cosmosignerName(chainNode),
+		Namespace:         chainNode.Namespace,
+		OwnerUID:          chainNode.UID,
+		ChainID:           chainNode.Status.ChainID,
+		Replicas:          1,
+		ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		StateStorageSize:  appsv1.DefaultCosmosignerStateStorageSize,
 		Backend: cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
 			Address: "https://vault.example:8200", KeyName: "live-key", Mount: appsv1.DefaultCosmosignerVaultMount, TokenSecret: tokenSelector,
 		}},
@@ -522,6 +736,29 @@ func TestPreflightCosmosignerFallbackTreatsLegacySigningDigestAsValidator(t *tes
 	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validator-key")
+}
+
+func TestPreflightCosmosignerFallbackRejectsOwnedSignerWithLostStatus(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{
+			PrivateKeySecret: ptr.To("validator-key"),
+		}},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain-1"},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace}}
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	r := &Reconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts).Build(),
+		Scheme: scheme,
+	}
+
+	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status")
 }
 
 func TestPreflightCosmosignerFallbackRequiresMatchingLocalPublicKey(t *testing.T) {

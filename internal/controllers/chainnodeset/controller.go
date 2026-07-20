@@ -20,6 +20,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
 
 // Reconciler reconciles a ChainNode object
@@ -50,11 +51,14 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/finalizers,verbs=update
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
 //+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
@@ -152,6 +156,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.preflightRemovedSignerFallbacks(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
 	}
+	preparedCosmosigners := map[string]cosmosigner.Params{}
+	if nodeSet.Status.ChainID != "" {
+		var err error
+		preparedCosmosigners, err = r.prepareCosmosignerParams(ctx, nodeSet)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	chainIDKnownAtStart := nodeSet.Status.ChainID != ""
 
@@ -164,13 +176,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	} else if recorded {
 		return ctrl.Result{Requeue: true}, nil
 	}
-	if pending, err := r.reconcileCosmosignerMigrations(ctx, nodeSet); err != nil {
+	if pending, err := r.reconcileCosmosignerMigrations(ctx, nodeSet, preparedCosmosigners); err != nil {
 		return ctrl.Result{}, err
 	} else if pending {
 		logger.Info("waiting for break-before-make cosmosigner migration")
 		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 	}
-	blockedSignerTargets, ready, err := r.prepareCosmosignerImports(ctx, nodeSet)
+	blockedSignerTargets, ready, err := r.prepareCosmosignerImports(ctx, nodeSet, preparedCosmosigners)
 	if err != nil {
 		return ctrl.Result{}, err
 	} else if !ready {
@@ -234,7 +246,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Apply and roll out signers before publishing their target marker to existing children. Targets
 	// blocked for key bootstrap remain on their local path until that key has been generated/imported.
-	if ready, err := r.prepareCosmosignerRollouts(ctx, nodeSet, blockedSignerTargets); err != nil {
+	if ready, err := r.prepareCosmosignerRollouts(ctx, nodeSet, blockedSignerTargets, preparedCosmosigners); err != nil {
 		return ctrl.Result{}, err
 	} else if !ready {
 		logger.Info("waiting for cosmosigner rollout before reconciling children")
@@ -351,6 +363,22 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	for _, s := range desiredSigners {
 		desired[s.Name] = s
 	}
+	for i := range nodeSet.Status.Cosmosigners {
+		st := &nodeSet.Status.Cosmosigners[i]
+		if st.ServingGroup != "" || st.AtEstablishment == nil || *st.AtEstablishment == "" {
+			continue
+		}
+		preserved := false
+		for _, s := range desiredSigners {
+			if nodeSet.GenesisSentryEstablishmentIdentity(s) == *st.AtEstablishment {
+				preserved = true
+				break
+			}
+		}
+		if !preserved {
+			return fmt.Errorf("cosmosigner %q protects an on-chain consensus key recorded at establishment and cannot be removed or changed with webhooks disabled unless an equivalent signer keeps serving the same key", st.Name)
+		}
+	}
 
 	// REMOVED signers: pre-rollout validator targets fail closed; rolled-out signers can only be removed
 	// when the same validator still resolves the recorded serving identity through its own path.
@@ -389,16 +417,30 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 	// PRESENT signers: modification and post-establishment-addition guards.
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		st := nodeSet.GetCosmosignerStatus(s.Name)
-		servedMultiInstanceGroup := st != nil && st.ServingGroup == s.ValidatorGroup &&
-			(st.ServingIdentity != "" || (st.AtEstablishment != nil && *st.AtEstablishment != ""))
+		history := st
+		if history == nil {
+			for i := range nodeSet.Status.Cosmosigners {
+				candidate := &nodeSet.Status.Cosmosigners[i]
+				replacement, ok := desiredReplacementSigner(nodeSet, desiredSigners, candidate)
+				if ok && replacement.Name == s.Name {
+					history = candidate
+					break
+				}
+			}
+		}
+		servedMultiInstanceGroup := history != nil && history.ServingGroup == s.ValidatorGroup &&
+			(history.ServingIdentity != "" || (history.AtEstablishment != nil && *history.AtEstablishment != ""))
 		if s.TargetsValidator() && nodeSet.ServedValidatorHasMultipleInstances(s.ValidatorGroup) && !servedMultiInstanceGroup {
 			return fmt.Errorf("cosmosigner %q cannot be added to established multi-instance validator group %q with webhooks disabled: the group already has per-instance validator identities", s.Name, s.ValidatorGroup)
 		}
 
 		if st != nil {
-			if st.AppliedDigest != "" && s.Digest() != st.AppliedDigest {
+			if st.SigningDigest != "" && s.Digest() != st.SigningDigest {
 				if st.PublicKey == "" {
 					return fmt.Errorf("cosmosigner %q cannot be migrated with webhooks disabled until the controller records its applied public key", s.Name)
+				}
+				if st.AppliedDigest == "" {
+					return fmt.Errorf("cosmosigner %q cannot be migrated with webhooks disabled until the controller records its applied lifecycle", s.Name)
 				}
 				continue
 			}
@@ -415,6 +457,10 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 			// init.genesisValidators). A non-genesis sentry records "" and is unaffected; a post-establishment
 			// validator addition keeps a nil marker and is judged by the addition guard below instead.
 			if st.SigningDigest == "" && st.AtEstablishment != nil && *st.AtEstablishment != "" {
+				if st.ServingGroup == "" && st.AppliedDigest != "" && st.PublicKey != "" &&
+					nodeSet.GenesisSentryEstablishmentIdentity(s) != *st.AtEstablishment {
+					continue
+				}
 				// The signer must still serve the recorded identity through the SAME group it was
 				// pinned to at establishment. The served group MUST have been recorded (ServingGroup
 				// non-empty): a signer targeting multiple groups could otherwise move validator-ness to a
@@ -435,9 +481,6 @@ func validateNoWebhookCosmosignerState(nodeSet *appsv1.ChainNodeSet) error {
 				}
 			}
 			if st.SigningDigest != "" {
-				if s.Digest() != st.SigningDigest {
-					return fmt.Errorf("cosmosigner %q cannot be migrated with webhooks disabled until the controller records its applied public key; restore the previous configuration and wait for one reconcile", s.Name)
-				}
 				// The digest hashes the backend identity, replicas and target-group NAMES — not whether the
 				// served group still contains the validator. Converting the served group into a regular node
 				// group keeps a Vault/GCP digest identical while removing the validator, so additionally

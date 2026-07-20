@@ -9,14 +9,40 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
+
+const LifecycleDigestAnnotation = "cosmopilot.voluzi.com/cosmosigner-lifecycle-digest"
+
+// SetLifecycleDigest stamps the rendered lifecycle fingerprint onto a signer StatefulSet.
+func SetLifecycleDigest(sts *appsv1.StatefulSet, digest string) {
+	if sts.Annotations == nil {
+		sts.Annotations = map[string]string{}
+	}
+	sts.Annotations[LifecycleDigestAnnotation] = digest
+}
+
+// ReadLifecycleDigest returns the lifecycle fingerprint stamped on a live signer StatefulSet.
+func ReadLifecycleDigest(ctx context.Context, c client.Client, namespace, name string) (string, bool, error) {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	digest := sts.Annotations[LifecycleDigestAnnotation]
+	return digest, digest != "", nil
+}
 
 // PreflightDeployable reports (as an error) whether the signer named `name` can be deployed by owner,
 // running the SAME blocking checks its deployment performs — a name-collision refusal on EVERY object
@@ -45,6 +71,7 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		obj  client.Object
 	}{
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
+		{"NetworkPolicy", networkPolicyObject(namespace, name)},
 	}
 	if usesPubkeyPod {
 		named = append(named, struct {
@@ -149,6 +176,15 @@ func foreignObjectErr(kind, name string) error {
 // StatefulSet fields Kubernetes forbids updating, and skips the write entirely when nothing
 // changed (patch-equality), so steady-state reconciles do not churn resourceVersions.
 func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, obj client.Object) error {
+	if policy, ok := obj.(*networkingv1.NetworkPolicy); ok {
+		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(policy)
+		if err != nil {
+			return fmt.Errorf("converting NetworkPolicy %q: %w", policy.GetName(), err)
+		}
+		converted := &unstructured.Unstructured{Object: raw}
+		converted.SetGroupVersionKind(schema.GroupVersionKind{Group: networkingv1.GroupName, Version: "v1", Kind: "NetworkPolicy"})
+		obj = converted
+	}
 	if err := controllerutil.SetControllerReference(owner, obj, scheme); err != nil {
 		return err
 	}
@@ -412,6 +448,7 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: namespace}},
+		networkPolicyObject(namespace, name),
 	}
 	for _, obj := range objects {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
@@ -432,6 +469,14 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 	// owner-UID label, so only this owner's claims are removed even when a foreign same-name signer
 	// exists.
 	return DeletePVCs(ctx, c, owner, namespace, name)
+}
+
+func networkPolicyObject(namespace, name string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(schema.GroupVersionKind{Group: networkingv1.GroupName, Version: "v1", Kind: "NetworkPolicy"})
+	obj.SetNamespace(namespace)
+	obj.SetName(name)
+	return obj
 }
 
 // IsTornDown reports whether the signer resources owned by owner are fully gone. Deletion is

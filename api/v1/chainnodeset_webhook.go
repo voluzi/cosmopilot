@@ -756,6 +756,9 @@ func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s Resolve
 	}
 
 	targetValidator := nodeSet.validatorConfigForGroup(s.ValidatorGroup)
+	if c.UsesVaultBackend() && c.VaultUploadsGenerated(targetValidator.Init != nil) && c.Backend.Vault.GetKeyVersion() != 1 {
+		return fmt.Errorf("%s.backend.vault.uploadGenerated requires keyVersion 1 because Vault imports create the initial key version", path)
+	}
 
 	// With a validator target the signer uses that validator's own key, so an explicit software secret
 	// (which could point elsewhere) is not allowed.
@@ -914,12 +917,31 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 		return nil
 	}
 
-	desiredNames := make(map[string]struct{}, len(nodeSet.ResolveCosmosigners()))
-	for _, s := range nodeSet.ResolveCosmosigners() {
+	desiredSigners := nodeSet.ResolveCosmosigners()
+	for _, os := range old.ResolveCosmosigners() {
+		st := old.GetCosmosignerStatus(os.Name)
+		if st == nil || st.AtEstablishment == nil || *st.AtEstablishment == "" ||
+			old.GenesisSentryEstablishmentIdentity(os) != *st.AtEstablishment {
+			continue
+		}
+		preserved := false
+		for _, ns := range desiredSigners {
+			if nodeSet.GenesisSentryEstablishmentIdentity(ns) == *st.AtEstablishment {
+				preserved = true
+				break
+			}
+		}
+		if !preserved {
+			return fmt.Errorf("cosmosigner %q protects an immutable genesis validator key and cannot be removed or changed unless an equivalent signer keeps serving the same key", os.Name)
+		}
+	}
+
+	desiredNames := make(map[string]struct{}, len(desiredSigners))
+	for _, s := range desiredSigners {
 		desiredNames[s.Name] = struct{}{}
 	}
 	addedSigner := false
-	for _, s := range nodeSet.ResolveCosmosigners() {
+	for _, s := range desiredSigners {
 		if _, existed := oldSigners[s.Name]; !existed {
 			addedSigner = true
 		}

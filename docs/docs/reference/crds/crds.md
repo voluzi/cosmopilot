@@ -5,6 +5,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 
 * [ChainNode](#chainnode)
 * [ChainNodeSet](#chainnodeset)
+* [ConsensusKeyReservation](#consensuskeyreservation)
 
 ### Sub Resources
 
@@ -71,6 +72,8 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
 * [CosmosignerStatus](#cosmosignerstatus)
 * [CosmosignerVaultBackend](#cosmosignervaultbackend)
+* [ConsensusKeyReservationList](#consensuskeyreservationlist)
+* [ConsensusKeyReservationSpec](#consensuskeyreservationspec)
 
 #### ChainNode
 
@@ -1036,12 +1039,13 @@ Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
 | ----- | ----------- | ------ | -------- |
 | nodeGroups | NodeGroups is the list of node group names (.spec.nodes[].name) the signer will connect to and sign for. Only valid on a ChainNodeSet. When empty, the configured validator group is targeted by default. Every targeted node listens for the signer and shares the single consensus identity held by the configured backend. | []string | false |
 | replicas | Replicas is the number of signer instances to run. Must be an odd number so the embedded raft cluster can form a quorum. Defaults to `1` (a single-instance signer with no HA). | *int32 | false |
-| image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:0.1.0`). Set this to pin or override the image for this specific signer only. | *string | false |
+| image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:0.2.0`). Set this to pin or override the image for this specific signer only. | *string | false |
 | backend | Backend selects and configures where the consensus key material lives and how signing is performed. Exactly one backend must be configured. | [CosmosignerBackend](#cosmosignerbackend) | true |
 | stateStorageSize | StateStorageSize is the size of the per-replica PVC used for the raft double-sign protection state and the persisted connection key. Defaults to `1Gi`. | *string | false |
 | storageClassName | StorageClassName is the storage class for the per-replica state PVC. Defaults to the cluster default storage class when unset. | *string | false |
 | resources | Resources are the compute resources for the signer container. | *corev1.ResourceRequirements | false |
-| raftTLSSecret | RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to secure the inter-replica raft transport with mutual TLS. When unset, the raft transport is plain TCP (only safe on a trusted network). | *string | false |
+| raftTLSSecret | RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to secure the inter-replica raft transport with mutual TLS. It is required when replicas is greater than one unless unsafeAllowInsecureRaft explicitly opts into plain TCP. | *string | false |
+| unsafeAllowInsecureRaft | UnsafeAllowInsecureRaft permits a multi-replica signer to use plain TCP for Raft. This is an explicit security opt-out for isolated test networks; production HA signers should set raftTLSSecret instead. | bool | false |
 | logLevel | LogLevel is the log level for the signer. Defaults to `info`. | *string | false |
 | serviceAccountName | ServiceAccountName is the Kubernetes service account the signer pods run as. Required in practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google service account to a specific Kubernetes service account). Defaults to the namespace default. | *string | false |
 
@@ -1112,6 +1116,7 @@ CosmosignerStatus is the controller-recorded state of one managed cosmosigner de
 | atEstablishment | AtEstablishment is a write-once record of the on-chain consensus identity this signer was responsible for at the moment the chain ID was first recorded: its validator-targeted identity, or — for a SOFTWARE sentry signer whose privateKeySecret is listed in an ACTIVE (non-zero-instance) validator's spec.validator.init.genesisValidators or spec.nodes[].validator.init.genesisValidators — that sentry key's identity. It is the empty string when the signer was responsible for no such provable on-chain key then; this includes sentries the controller cannot tie to a genesis entry from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key listed only under a zero-instance group, which contributes nothing to genesis). It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use AppliedDigest and PublicKey. | *string | false |
 | servingIdentity | ServingIdentity records the effective signing identity this validator-targeted signer served, captured with SigningDigest and cleared on teardown. Together with ServingGroup it identifies the validator protected by a stale status entry during removal or manifest-placement migration. | string | false |
 | servingGroup | ServingGroup records the validator group this signer targets (the reserved \"validator\" name for the legacy singleton). It identifies the protected validator during removal and replacement. | string | false |
+| localKeyEverServed | LocalKeyEverServed is a monotonic record of whether this validator signer may ever have served through the validator's local key secret. False is recorded only when the controller observes a pre-provisioned external signer at chain establishment; nil means the history is unknown. | *bool | false |
 | keyImported | KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change. | string | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -1124,11 +1129,49 @@ CosmosignerVaultBackend configures the HashiCorp Vault Transit signing backend.
 | ----- | ----------- | ------ | -------- |
 | address | Address is the full address of the Vault cluster (e.g. `https://vault:8200`). | string | true |
 | keyName | KeyName is the name of the Vault transit key used for signing. | string | true |
+| keyVersion | KeyVersion is the immutable Vault Transit key version used for public-key resolution and every signing request. Pinning the version prevents a Transit rotation from changing validator identity across signer restarts. Defaults to `1`. uploadGenerated requires version 1 because a new Vault import creates the initial key version. | *int | false |
 | mount | Mount is the Vault transit mount path. Defaults to `transit`. | *string | false |
 | tokenSecret | TokenSecret references the secret containing the Vault token used to authenticate. | *corev1.SecretKeySelector | true |
 | certificateSecret | CertificateSecret references the secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
 | namespace | Namespace is the Vault namespace (Vault Enterprise), when applicable. | *string | false |
 | uploadGenerated | UploadGenerated indicates that the controller should generate a consensus key locally and import it into Vault. Defaults to `false`. It is set to `true` automatically when this validator initializes a new genesis. This should not be used in production. | bool | false |
-| autoRenewToken | AutoRenewToken indicates whether to run a sidecar that automatically renews the Vault token. Defaults to `false`. | bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservation
+
+ConsensusKeyReservation atomically prevents independent roots or claims from managing separate double-sign state for the same chain and consensus public key.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ObjectMeta | false |
+| spec |  | [ConsensusKeyReservationSpec](#consensuskeyreservationspec) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationList
+
+ConsensusKeyReservationList contains consensus-key reservations.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ListMeta | false |
+| items |  | [][ConsensusKeyReservation](#consensuskeyreservation) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationSpec
+
+ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one consensus public key on one chain. Reservations are intentionally not garbage-collected automatically: an operator must verify every old signing path is gone before deleting a stale one.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| chainID |  | string | true |
+| publicKey |  | string | true |
+| ownerUID |  | types.UID | true |
+| ownerKind |  | string | true |
+| namespace |  | string | true |
+| ownerName |  | string | true |
+| claim |  | string | true |
 
 [Back to Custom Resources](#custom-resources)

@@ -1,6 +1,7 @@
 package cosmosigner
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -58,10 +60,11 @@ type Params struct {
 	// a same-name signer owned by a different CR. Empty in unit tests that don't exercise teardown.
 	OwnerUID types.UID
 
-	ChainID  string
-	Image    string
-	Replicas int32
-	LogLevel string
+	ChainID           string
+	Image             string
+	Replicas          int32
+	LogLevel          string
+	ExpectedPublicKey string
 
 	StateStorageSize   string
 	StorageClassName   *string
@@ -134,12 +137,13 @@ func (p Params) podLabels() map[string]string {
 // BuildConfig assembles the cosmosigner config for the given replica count.
 func (p Params) BuildConfig() *Config {
 	cfg := &Config{
-		ChainID:     p.ChainID,
-		NodeService: p.nodeServiceEndpoint(),
-		ConnKey:     connKeyPath,
-		StateDir:    dataMountPath,
-		LogLevel:    p.LogLevel,
-		Backend:     p.Backend.backendConfig(),
+		ChainID:           p.ChainID,
+		ExpectedPublicKey: p.ExpectedPublicKey,
+		NodeService:       p.nodeServiceEndpoint(),
+		ConnKey:           connKeyPath,
+		StateDir:          dataMountPath,
+		LogLevel:          p.LogLevel,
+		Backend:           p.Backend.backendConfig(),
 		Raft: RaftConfig{
 			BindAddr:  raftBindAddr,
 			DataDir:   raftDataDir,
@@ -175,6 +179,29 @@ func (p Params) BuildConfig() *Config {
 // always come from the same render.
 func (p Params) ConfigYAML() (string, error) {
 	return p.BuildConfig().Render()
+}
+
+// LifecycleDigest fingerprints every field that can alter the signer pod template or runtime
+// behavior. Controllers use it to force all such changes through break-before-make migration.
+func (p Params) LifecycleDigest(signingDigest string) (string, error) {
+	configYAML, err := p.ConfigYAML()
+	if err != nil {
+		return "", err
+	}
+	statefulSet, err := p.StatefulSet(configYAML)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(struct {
+		SigningDigest   string
+		StatefulSetSpec appsv1.StatefulSetSpec
+	}{
+		SigningDigest: signingDigest, StatefulSetSpec: statefulSet.Spec,
+	})
+	if err != nil {
+		return "", fmt.Errorf("rendering cosmosigner lifecycle digest: %w", err)
+	}
+	return utils.Sha256(string(payload)), nil
 }
 
 func (p Params) configData(configYAML string) (map[string]string, error) {
@@ -286,9 +313,28 @@ func (p Params) DiscoveryService() *corev1.Service {
 	}
 }
 
+// NetworkPolicy limits the Raft listener to pods belonging to the same signer cluster.
+func (p Params) NetworkPolicy() *networkingv1.NetworkPolicy {
+	protocol := corev1.ProtocolTCP
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: p.Name, Namespace: p.Namespace, Labels: p.Labels},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: p.selectorLabels()},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: p.selectorLabels()}}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &protocol, Port: ptr.To(intstr.FromInt32(raftPort))}},
+			}},
+		},
+	}
+}
+
 // StatefulSet builds the signer StatefulSet. configYAML is the rendered config (from ConfigYAML),
 // hashed into the pod template so a config change rolls the signer.
 func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
+	if p.ExpectedPublicKey == "" {
+		return nil, fmt.Errorf("cosmosigner expected public key is required")
+	}
 	storageQty, err := resource.ParseQuantity(p.StateStorageSize)
 	if err != nil {
 		return nil, fmt.Errorf("bad cosmosigner stateStorageSize: %w", err)
@@ -340,7 +386,10 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		Name:            containerName,
 		Image:           p.Image,
 		SecurityContext: k8s.RestrictedSecurityContext(),
-		Args:            []string{"start", "--config", configMountPath + "/" + configFileName},
+		Args: []string{
+			"start", "--config", configMountPath + "/" + configFileName,
+			"--expected-public-key", p.ExpectedPublicKey,
+		},
 		Env: []corev1.EnvVar{
 			{
 				Name: "POD_NAME",
@@ -380,8 +429,6 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 	}
 
-	containers := append([]corev1.Container{signer}, p.Backend.sidecars()...)
-
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.Name,
@@ -389,7 +436,8 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 			Labels:    p.Labels,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas: ptr.To(p.Replicas),
+			Replicas:       ptr.To(p.Replicas),
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType},
 			// Normal deletion removes per-pod state, including owner garbage collection. A controlled
 			// same-key migration temporarily flips WhenDeleted to Retain before deleting the StatefulSet.
 			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
@@ -409,7 +457,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 				Spec: corev1.PodSpec{
 					ServiceAccountName: p.ServiceAccountName,
 					SecurityContext:    k8s.RestrictedPodSecurityContext(),
-					Containers:         containers,
+					Containers:         []corev1.Container{signer},
 					Volumes:            volumes,
 				},
 			},

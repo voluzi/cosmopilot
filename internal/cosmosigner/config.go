@@ -49,13 +49,14 @@ const (
 // a config.yaml ConfigMap. Per-pod fields (node_id, advertise) are intentionally omitted here and
 // supplied via environment variables, which take precedence over the file.
 type Config struct {
-	ChainID     string        `yaml:"chain_id"`
-	NodeService string        `yaml:"node_service,omitempty"`
-	ConnKey     string        `yaml:"conn_key"`
-	StateDir    string        `yaml:"state_dir"`
-	LogLevel    string        `yaml:"log_level"`
-	Backend     BackendConfig `yaml:"backend"`
-	Raft        RaftConfig    `yaml:"raft"`
+	ChainID           string        `yaml:"chain_id"`
+	ExpectedPublicKey string        `yaml:"expected_public_key"`
+	NodeService       string        `yaml:"node_service,omitempty"`
+	ConnKey           string        `yaml:"conn_key"`
+	StateDir          string        `yaml:"state_dir"`
+	LogLevel          string        `yaml:"log_level"`
+	Backend           BackendConfig `yaml:"backend"`
+	Raft              RaftConfig    `yaml:"raft"`
 }
 
 // BackendConfig mirrors cosmosigner's backend.Config.
@@ -68,12 +69,13 @@ type BackendConfig struct {
 
 // VaultConfig mirrors cosmosigner's backend.VaultConfig.
 type VaultConfig struct {
-	Address   string `yaml:"address"`
-	TokenFile string `yaml:"token_file"`
-	Mount     string `yaml:"mount,omitempty"`
-	KeyName   string `yaml:"key_name"`
-	Namespace string `yaml:"namespace,omitempty"`
-	TLSCACert string `yaml:"tls_ca_cert,omitempty"`
+	Address    string `yaml:"address"`
+	TokenFile  string `yaml:"token_file"`
+	Mount      string `yaml:"mount,omitempty"`
+	KeyName    string `yaml:"key_name"`
+	KeyVersion int    `yaml:"key_version"`
+	Namespace  string `yaml:"namespace,omitempty"`
+	TLSCACert  string `yaml:"tls_ca_cert,omitempty"`
 }
 
 // GCPConfig mirrors cosmosigner's backend.GCPKMSConfig.

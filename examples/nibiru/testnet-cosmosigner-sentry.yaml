@@ -22,10 +22,12 @@ spec:
     # consensus identity held in Vault.
     nodeGroups: [fullnodes]
     replicas: 3
+    raftTLSSecret: nibiru-testnet-cosmosigner-raft-tls
     backend:
       vault:
         address: https://vault.vault-system.svc.cluster.local:8200
         keyName: nibiru-testnet-validator
+        keyVersion: 1
         tokenSecret:
           name: vault-cosmosigner-token
           key: token

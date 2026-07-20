@@ -67,7 +67,7 @@ func (r *Reconciler) initCosmosignerReplacementNames(ctx context.Context, nodeSe
 			st.StateStorageSize = old.StateStorageSize
 			st.StateStorageClassName = old.StateStorageClassName
 			st.KeyImported = old.KeyImported
-			if st.AppliedDigest == s.Digest() {
+			if st.AppliedDigest != "" && st.PublicKey != "" {
 				st.Migration = &appsv1.CosmosignerMigrationStatus{
 					DesiredDigest:    s.Digest(),
 					DesiredPublicKey: old.PublicKey,
@@ -280,7 +280,7 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			if st != nil && st.SigningDigest != "" && s.Digest() == st.SigningDigest {
 				continue
 			}
-			if st != nil && appsv1.ImportRecordMatchesTarget(st.KeyImported, s.Spec.Backend.Vault.ImportTargetFingerprint(s.SoftwareKeySecret)) {
+			if st != nil && s.Spec.Backend.Vault.ImportRecordMatchesTarget(st.KeyImported, s.SoftwareKeySecret) {
 				continue
 			}
 			if r.signerImportSourcePending(nodeSet, s) {
@@ -299,6 +299,75 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		}
 	}
 	return nil
+}
+
+func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (map[string]cosmosigner.Params, error) {
+	prepared := make(map[string]cosmosigner.Params)
+	publicKeyOwners := make(map[string]string)
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if r.signerImportSourcePending(nodeSet, s) &&
+			(s.Spec.UsesSoftwareBackend() || s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s))) {
+			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
+			if err != nil {
+				return nil, err
+			}
+			if len(keyMaterial) == 0 {
+				continue
+			}
+		}
+
+		params, err := r.cosmosignerParams(ctx, nodeSet, s)
+		if err != nil {
+			return nil, err
+		}
+		publicKey, err := r.cosmosignerPublicKeyWithParams(ctx, nodeSet, s, params)
+		if err != nil {
+			return nil, err
+		}
+		if previous, duplicate := publicKeyOwners[publicKey]; duplicate {
+			return nil, fmt.Errorf("cosmosigners %q and %q resolve to the same consensus public key on chain %q; one ChainNodeSet cannot run independent double-sign state for the same validator key", previous, s.Name, nodeSet.Status.ChainID)
+		}
+		publicKeyOwners[publicKey] = s.Name
+		if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, nodeSet.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
+			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(), Claim: nodeSetCosmosignerReservationClaim(nodeSet, s),
+		}); err != nil {
+			return nil, err
+		}
+		if s.TargetsValidator() {
+			for _, validator := range nodeSet.Status.Validators {
+				if validator.Group != s.ValidatorGroup || validator.PubKey == "" {
+					continue
+				}
+				onChain := cosmosigner.CanonicalSDKPublicKey(validator.PubKey)
+				if onChain == "" {
+					return nil, fmt.Errorf("cosmosigner %q cannot verify the on-chain validator public key recorded for group %q", s.Name, s.ValidatorGroup)
+				}
+				if publicKey != onChain {
+					return nil, fmt.Errorf("cosmosigner %q public key does not match the on-chain validator public key recorded for group %q; Cosmopilot does not rotate validator consensus keys", s.Name, s.ValidatorGroup)
+				}
+			}
+			if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.PublicKey != "" && publicKey != st.PublicKey {
+				return nil, fmt.Errorf("cosmosigner %q cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history", s.Name)
+			}
+		}
+		params.ExpectedPublicKey = publicKey
+
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		if st != nil && st.AppliedDigest == "" && st.SigningDigest == "" && st.Replicas != nil && st.StateStorageSize != "" {
+			if err := cosmosigner.ValidateRecoveredSigningIdentity(ctx, r.Client, nodeSet, params); err != nil {
+				return nil, err
+			}
+		}
+		prepared[s.Name] = params
+	}
+	return prepared, nil
+}
+
+func nodeSetCosmosignerReservationClaim(nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) string {
+	if signer.TargetsValidator() {
+		return validatorNodeName(nodeSet, signer.ValidatorGroup, 0)
+	}
+	return "signer-" + utils.Sha256(signer.Identity())
 }
 
 // validateRecoveredSignerTargets fails closed when a signer being recovered from live state (its
@@ -328,16 +397,42 @@ func (r *Reconciler) validateRecoveredSignerTargets(ctx context.Context, nodeSet
 	return nil
 }
 
-func (r *Reconciler) reconcileCosmosignerMigrations(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+func (r *Reconciler) reconcileCosmosignerMigrations(ctx context.Context, nodeSet *appsv1.ChainNodeSet, preparedArgs ...map[string]cosmosigner.Params) (bool, error) {
+	if nodeSet.Status.ChainID == "" {
+		return false, nil
+	}
 	pending := false
 	changed := false
+	var prepared map[string]cosmosigner.Params
+	hasPreparedArg := len(preparedArgs) > 0
+	if hasPreparedArg {
+		prepared = preparedArgs[0]
+	}
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		st := nodeSet.EnsureCosmosignerStatus(s.Name)
-		desiredDigest := s.Digest()
+		signingDigest := s.Digest()
+		params, ok := prepared[s.Name]
+		desiredDigest := ""
+		desiredPublicKey := ""
+		if ok {
+			var err error
+			desiredDigest, err = params.LifecycleDigest(signingDigest)
+			if err != nil {
+				return false, err
+			}
+			desiredPublicKey = params.ExpectedPublicKey
+		} else if hasPreparedArg {
+			continue
+		} else if st.Migration != nil {
+			desiredDigest = st.Migration.DesiredDigest
+			desiredPublicKey = st.Migration.DesiredPublicKey
+		} else {
+			continue
+		}
 		resourceName := nodeSet.CosmosignerResourceName(s)
 
 		if st.AppliedDigest == "" {
-			if st.SigningDigest != "" && st.SigningDigest != desiredDigest {
+			if st.SigningDigest != "" && st.SigningDigest != signingDigest {
 				return false, fmt.Errorf("cosmosigner %q applied public key was not recorded before the signing configuration changed; restore the previous configuration for one reconcile before migrating", s.Name)
 			}
 			rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), resourceName, s.Spec.GetReplicas())
@@ -345,34 +440,34 @@ func (r *Reconciler) reconcileCosmosignerMigrations(ctx context.Context, nodeSet
 				return false, err
 			}
 			if rolledOut {
-				publicKey, err := r.cosmosignerPublicKey(ctx, nodeSet, s)
+				liveDigest, found, err := cosmosigner.ReadLifecycleDigest(ctx, r.Client, nodeSet.GetNamespace(), resourceName)
 				if err != nil {
 					return false, err
 				}
-				st.AppliedDigest = desiredDigest
-				st.PublicKey = publicKey
+				if !found {
+					liveDigest = "legacy:" + signingDigest
+				}
+				st.AppliedDigest = liveDigest
+				st.PublicKey = desiredPublicKey
 				st.TargetGroups = sortedTargetGroups(s)
 				changed = true
+				pending = true
 			}
 			continue
 		}
 
-		if st.AppliedDigest == desiredDigest && st.Migration == nil {
+		if st.AppliedDigest == desiredDigest && st.PublicKey == desiredPublicKey && st.Migration == nil {
 			continue
 		}
-		if st.Migration == nil || st.Migration.DesiredDigest != desiredDigest {
+		if st.Migration == nil || st.Migration.DesiredDigest != desiredDigest || st.Migration.DesiredPublicKey != desiredPublicKey {
 			if st.PublicKey == "" {
 				return false, fmt.Errorf("cosmosigner %q applied public key is missing; restore the previous configuration so it can be recorded before migrating", s.Name)
 			}
-			publicKey, err := r.cosmosignerPublicKey(ctx, nodeSet, s)
-			if err != nil {
-				return false, err
-			}
 			st.Migration = &appsv1.CosmosignerMigrationStatus{
 				DesiredDigest:    desiredDigest,
-				DesiredPublicKey: publicKey,
+				DesiredPublicKey: desiredPublicKey,
 				Phase:            appsv1.CosmosignerMigrationQuiescing,
-				ResetState:       publicKey != st.PublicKey,
+				ResetState:       desiredPublicKey != st.PublicKey,
 			}
 			changed = true
 			pending = true
@@ -491,6 +586,10 @@ func (r *Reconciler) cosmosignerPublicKey(ctx context.Context, nodeSet *appsv1.C
 	if err != nil {
 		return "", err
 	}
+	return r.cosmosignerPublicKeyWithParams(ctx, nodeSet, s, params)
+}
+
+func (r *Reconciler) cosmosignerPublicKeyWithParams(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, params cosmosigner.Params) (string, error) {
 	if params.Backend.Software != nil {
 		return cosmosigner.PublicKeyFromSecret(ctx, r.Client, nodeSet.GetNamespace(), params.Backend.Software.SecretName)
 	}
@@ -502,7 +601,7 @@ func (r *Reconciler) cosmosignerPublicKey(ctx context.Context, nodeSet *appsv1.C
 		status := nodeSet.GetCosmosignerStatus(s.Name)
 		vault := s.Spec.Backend.Vault
 		if !errors.IsNotFound(err) || status == nil || vault == nil ||
-			!appsv1.ImportRecordMatchesTarget(status.KeyImported, vault.ImportTargetFingerprint(s.SoftwareKeySecret)) {
+			!vault.ImportRecordMatchesTarget(status.KeyImported, s.SoftwareKeySecret) {
 			return "", err
 		}
 	}
@@ -527,13 +626,16 @@ func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSe
 		if _, ok := desired[st.Name]; ok {
 			continue
 		}
+		if _, replaced := desiredReplacementSigner(nodeSet, desiredSigners, st); replaced {
+			continue
+		}
 		if st.ServingGroup == "" {
+			if st.AtEstablishment != nil && *st.AtEstablishment != "" {
+				return fmt.Errorf("cosmosigner %q cannot be removed: it protects an on-chain consensus key recorded at establishment and no equivalent replacement signer is configured", st.Name)
+			}
 			if st.SigningDigest != "" {
 				return fmt.Errorf("cosmosigner %q cannot be removed: its served validator group was not recorded; restore the previous signer configuration for one reconcile before removing it", st.Name)
 			}
-			continue
-		}
-		if _, replaced := desiredReplacementSigner(nodeSet, desiredSigners, st); replaced {
 			continue
 		}
 		if st.ServingIdentity == "" && st.SigningDigest == "" {
@@ -636,7 +738,6 @@ func (r *Reconciler) fallbackTmKMSPublicKey(ctx context.Context, nodeSet *appsv1
 				Mount:                 appsv1.DefaultCosmosignerVaultMount,
 				TokenSecret:           hashicorp.TokenSecret,
 				CertificateSecret:     hashicorp.CertificateSecret,
-				AutoRenewToken:        hashicorp.AutoRenewToken,
 				SkipCertificateVerify: hashicorp.SkipCertificateVerify,
 			}},
 		},
@@ -660,9 +761,11 @@ func desiredReplacementSigner(nodeSet *appsv1.ChainNodeSet, desired []appsv1.Res
 	}
 	for _, s := range desired {
 		if st.ServingGroup == "" {
-			if st.AtEstablishment != nil && *st.AtEstablishment != "" &&
-				nodeSet.GenesisSentryEstablishmentIdentity(s) == *st.AtEstablishment {
-				return s, true
+			if st.AtEstablishment != nil && *st.AtEstablishment != "" {
+				if nodeSet.GenesisSentryEstablishmentIdentity(s) == *st.AtEstablishment {
+					return s, true
+				}
+				continue
 			}
 			if equalStringSet(st.TargetGroups, s.TargetGroups) {
 				return s, true
@@ -724,7 +827,12 @@ type blockedSignerTargets map[string]struct{}
 // It runs before child reconciliation so an import failure cannot strand a validator after its local
 // signing path has been replaced. ready is false while an existing signer is still scaling down for
 // a safe re-import. Missing controller-generated source keys are left for the child bootstrap flow.
-func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (blockedSignerTargets, bool, error) {
+func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *appsv1.ChainNodeSet, preparedArgs ...map[string]cosmosigner.Params) (blockedSignerTargets, bool, error) {
+	var prepared map[string]cosmosigner.Params
+	hasPreparedArg := len(preparedArgs) > 0
+	if hasPreparedArg {
+		prepared = preparedArgs[0]
+	}
 	blocked := blockedSignerTargets{}
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		if s.Spec.UsesSoftwareBackend() && r.signerImportSourcePending(nodeSet, s) {
@@ -770,7 +878,7 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 			return nil, false, err
 		}
 		if len(keyMaterial) == 0 {
-			if st != nil && appsv1.ImportRecordMatchesTarget(st.KeyImported, s.Spec.Backend.Vault.ImportTargetFingerprint(s.SoftwareKeySecret)) {
+			if st != nil && s.Spec.Backend.Vault.ImportRecordMatchesTarget(st.KeyImported, s.SoftwareKeySecret) {
 				continue
 			}
 			if r.signerImportSourcePending(nodeSet, s) {
@@ -788,9 +896,19 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 			continue
 		}
 
-		params, err := r.cosmosignerParams(ctx, nodeSet, s)
-		if err != nil {
-			return nil, false, err
+		params, ok := prepared[s.Name]
+		if !ok {
+			if hasPreparedArg {
+				return nil, false, fmt.Errorf("cosmosigner %q key became available after reservation preflight; retrying before import", s.Name)
+			}
+			params, err = r.cosmosignerParams(ctx, nodeSet, s)
+			if err != nil {
+				return nil, false, err
+			}
+			params.ExpectedPublicKey, err = r.cosmosignerPublicKeyWithParams(ctx, nodeSet, s, params)
+			if err != nil {
+				return nil, false, err
+			}
 		}
 		pending, _, err := r.maybeImportCosmosignerKey(ctx, nodeSet, s, params)
 		if err != nil {
@@ -864,7 +982,7 @@ func (r *Reconciler) requireGenesisSentrySecrets(ctx context.Context, nodeSet *a
 	return nil
 }
 
-func (r *Reconciler) ensureCosmosignerWithBlockedTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
+func (r *Reconciler) ensureCosmosignerWithBlockedTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets, prepared map[string]cosmosigner.Params, requirePrepared bool) error {
 	signers := nodeSet.ResolveCosmosigners()
 	if len(signers) == 0 {
 		return nil
@@ -890,7 +1008,22 @@ func (r *Reconciler) ensureCosmosignerWithBlockedTargets(ctx context.Context, no
 		if _, ok := blocked[s.Name]; ok {
 			continue
 		}
-		c, err := r.reconcileSigner(ctx, nodeSet, s)
+		params, ok := prepared[s.Name]
+		if !ok {
+			if requirePrepared {
+				return fmt.Errorf("cosmosigner %q has no reserved signing identity", s.Name)
+			}
+			var err error
+			params, err = r.cosmosignerParams(ctx, nodeSet, s)
+			if err != nil {
+				return err
+			}
+			params.ExpectedPublicKey, err = r.cosmosignerPublicKeyWithParams(ctx, nodeSet, s, params)
+			if err != nil {
+				return err
+			}
+		}
+		c, err := r.reconcileSigner(ctx, nodeSet, s, params)
 		if err != nil {
 			return err
 		}
@@ -904,8 +1037,13 @@ func (r *Reconciler) ensureCosmosignerWithBlockedTargets(ctx context.Context, no
 
 // prepareCosmosignerRollouts applies desired signers and waits for every non-bootstrap target to be
 // ready before child reconciliation can publish its remote-signer path.
-func (r *Reconciler) prepareCosmosignerRollouts(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) (bool, error) {
-	if err := r.ensureCosmosignerWithBlockedTargets(ctx, nodeSet, blocked); err != nil {
+func (r *Reconciler) prepareCosmosignerRollouts(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets, preparedArgs ...map[string]cosmosigner.Params) (bool, error) {
+	var prepared map[string]cosmosigner.Params
+	hasPreparedArg := len(preparedArgs) > 0
+	if hasPreparedArg {
+		prepared = preparedArgs[0]
+	}
+	if err := r.ensureCosmosignerWithBlockedTargets(ctx, nodeSet, blocked, prepared, hasPreparedArg); err != nil {
 		return false, err
 	}
 	for _, s := range nodeSet.ResolveCosmosigners() {
@@ -1000,12 +1138,7 @@ func (r *Reconciler) initSignerLock(ctx context.Context, nodeSet *appsv1.ChainNo
 // reconcileSigner deploys one resolved signer and records its persisted status invariants, mutating
 // nodeSet.Status in memory. It returns whether a status field changed (so the caller batches a single
 // status write for all signers). Nothing is persisted here directly except through that batched write.
-func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) (bool, error) {
-	params, err := r.cosmosignerParams(ctx, nodeSet, s)
-	if err != nil {
-		return false, err
-	}
-
+func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, params cosmosigner.Params) (bool, error) {
 	// The status entry was persisted before any resource creation (so teardown
 	// can always discover this signer from status, even across a crash).
 	changed := false
@@ -1037,6 +1170,9 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	if err := r.applyCosmosignerObject(ctx, nodeSet, params.DiscoveryService()); err != nil {
 		return false, err
 	}
+	if err := r.applyCosmosignerObject(ctx, nodeSet, params.NetworkPolicy()); err != nil {
+		return false, err
+	}
 
 	// Do not roll out the signer until the validator's generated key has been imported into Vault,
 	// otherwise the signer would come up against an empty/stale transit key while the validator
@@ -1054,6 +1190,11 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	if err != nil {
 		return false, err
 	}
+	lifecycleDigest, err := params.LifecycleDigest(s.Digest())
+	if err != nil {
+		return false, err
+	}
+	cosmosigner.SetLifecycleDigest(sts, lifecycleDigest)
 	if err := r.applyCosmosignerObject(ctx, nodeSet, sts); err != nil {
 		return false, err
 	}
@@ -1063,7 +1204,7 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	// admission semantics.
 	needServing := (s.TargetsValidator() && st.SigningDigest == "") ||
 		(st.SigningDigest != "" && st.ServingIdentity == "" && s.TargetsValidator())
-	needApplied := st.AppliedDigest != s.Digest() || st.PublicKey == "" || st.Migration != nil
+	needApplied := st.AppliedDigest != lifecycleDigest || st.PublicKey != params.ExpectedPublicKey || st.Migration != nil
 	if needServing || needApplied {
 		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), params.Name, params.Replicas)
 		if err != nil {
@@ -1072,16 +1213,13 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 		if rolledOut {
 			if needApplied {
 				publicKey := ""
-				if st.Migration != nil && st.Migration.DesiredDigest == s.Digest() {
+				if st.Migration != nil && st.Migration.DesiredDigest == lifecycleDigest {
 					publicKey = st.Migration.DesiredPublicKey
 				}
 				if publicKey == "" {
-					publicKey, err = r.cosmosignerPublicKey(ctx, nodeSet, s)
-					if err != nil {
-						return false, err
-					}
+					publicKey = params.ExpectedPublicKey
 				}
-				st.AppliedDigest = s.Digest()
+				st.AppliedDigest = lifecycleDigest
 				st.PublicKey = publicKey
 				st.TargetGroups = sortedTargetGroups(s)
 				st.Migration = nil
@@ -1245,11 +1383,11 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		return cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
 			Address:           v.Address,
 			KeyName:           v.KeyName,
+			KeyVersion:        v.GetKeyVersion(),
 			Mount:             v.GetVaultMount(),
 			Namespace:         ptr.Deref(v.Namespace, ""),
 			TokenSecret:       v.TokenSecret,
 			CertificateSecret: v.CertificateSecret,
-			AutoRenewToken:    v.AutoRenewToken,
 		}}, nil
 
 	case c.UsesGcpKmsBackend():
@@ -1307,7 +1445,7 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		// Secret is only needed at import time, so a Secret deleted after that import must NOT re-mark
 		// the import pending (which would scale the signer to zero). A record from a DIFFERENT
 		// target/source proves nothing about this spec.
-		if appsv1.ImportRecordMatchesTarget(st.KeyImported, c.Backend.Vault.ImportTargetFingerprint(sourceSecret)) {
+		if c.Backend.Vault.ImportRecordMatchesTarget(st.KeyImported, sourceSecret) {
 			return false, false, nil
 		}
 		// Wait only while a controller-owned key-generation flow is genuinely pending. For an explicit
@@ -1329,6 +1467,16 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	want := c.Backend.Vault.ImportFingerprint(sourceSecret, keyMaterial)
 	if st.KeyImported == want {
 		return false, false, nil
+	}
+	if c.Backend.Vault.ImportRecordMatches(st.KeyImported, sourceSecret, keyMaterial) {
+		st.KeyImported = want
+		if err := r.Status().Update(ctx, nodeSet); err != nil {
+			return false, false, err
+		}
+		return false, false, nil
+	}
+	if c.Backend.Vault.ImportRecordMatchesTarget(st.KeyImported, sourceSecret) {
+		return false, false, fmt.Errorf("cosmosigner %q Vault uploadGenerated source key changed after import; Vault cannot overwrite an existing transit key — migrate to a new Vault keyName", s.Name)
 	}
 
 	// Quiesce any already-running signer BEFORE the (synchronous) re-import: on a source/target change

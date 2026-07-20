@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +66,7 @@ func (b Backend) backendEnv() []corev1.EnvVar {
 			{Name: "COSMOSIGNER_VAULT_ADDR", Value: b.Vault.Address},
 			{Name: "COSMOSIGNER_VAULT_TOKEN_FILE", Value: vaultTokenFile},
 			{Name: "COSMOSIGNER_VAULT_KEY", Value: b.Vault.KeyName},
+			{Name: "COSMOSIGNER_VAULT_KEY_VERSION", Value: strconv.Itoa(b.Vault.KeyVersion)},
 		}
 		if b.Vault.Mount != "" {
 			env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_VAULT_MOUNT", Value: b.Vault.Mount})
@@ -93,8 +95,16 @@ func (b Backend) backendEnv() []corev1.EnvVar {
 	}
 }
 
+func (b Backend) backendArgs() []string {
+	if b.Vault != nil {
+		return []string{"--vault-key-version", strconv.Itoa(b.Vault.KeyVersion)}
+	}
+	return nil
+}
+
 // runJob creates a one-shot pod, waits for it to succeed, returns its logs and always cleans up.
 func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string, extraVolumes []corev1.Volume, extraMounts []corev1.VolumeMount) (string, error) {
+	args = append(args, j.Params.Backend.backendArgs()...)
 	volumes := append(j.Params.Backend.volumes(), extraVolumes...)
 	mounts := append(j.Params.Backend.volumeMounts(), extraMounts...)
 

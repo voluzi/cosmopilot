@@ -75,9 +75,11 @@ docs: crd-to-markdown ## Generate markdown docs of CRD spec.
 		-f ./api/v1/chainnodeset_types.go \
 		-f ./api/v1/common_types.go \
 		-f ./api/v1/cosmosigner_types.go \
+		-f ./api/v1/consensuskeyreservation_types.go \
 		--header ./docs/docs/reference/crds/header.md \
 		-n ChainNode \
-		-n ChainNodeSet > ./docs/docs/reference/crds/crds.md
+		-n ChainNodeSet \
+		-n ConsensusKeyReservation > ./docs/docs/reference/crds/crds.md
 	@./contrib/scripts/generate-example-docs.sh
 
 ##@ Tests

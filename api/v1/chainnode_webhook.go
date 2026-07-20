@@ -132,7 +132,11 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// The node generates and registers its own consensus key when it initializes genesis or runs
 		// create-validator.
 		registers := isValidator && (chainNode.Spec.Validator.Init != nil || chainNode.Spec.Validator.CreateValidator != nil)
+		initializesGenesis := isValidator && chainNode.Spec.Validator.Init != nil
 		hasValidatorKey := isValidator && chainNode.Spec.Validator.PrivateKeySecret != nil && *chainNode.Spec.Validator.PrivateKeySecret != ""
+		if c.UsesVaultBackend() && c.VaultUploadsGenerated(initializesGenesis) && c.Backend.Vault.GetKeyVersion() != 1 {
+			return nil, fmt.Errorf(".spec.cosmosigner.backend.vault.uploadGenerated requires keyVersion 1 because Vault imports create the initial key version")
+		}
 
 		// The signer must use the node's own key. A validator therefore cannot point the software
 		// backend at a different secret, and a non-validator (which has no controller-created key)
@@ -179,13 +183,12 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// serving, so a matching digest proves the pre-provisioned key is the in-effect one — while
 		// a NEWLY added signer (no digest, or digest from a different identity) stays subject to the
 		// rule, since "registration completed" alone says nothing about the new backend's key.
-		hasInit := chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
 		recordedDigest := chainNode.Status.CosmosignerSigningDigest
 		migrationWaiver := (old != nil && old.Status.ChainID != "" && old.Spec.Validator != nil && old.Status.ValidatorAddress != "") ||
 			(old == nil && chainNode.Status.ChainID != "" && chainNode.Status.ValidatorAddress != "" &&
 				recordedDigest != "" && recordedDigest == chainNode.CosmosignerSigningDigest())
 		if registers && !migrationWaiver {
-			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(hasInit)
+			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(initializesGenesis)
 			if !matches {
 				return nil, fmt.Errorf(".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
 			}

@@ -15,10 +15,12 @@ wires everything for you.
 
 :::tip[Image]
 The signer image defaults to the operator-wide `cosmosignerImage` Helm value
-(`ghcr.io/voluzi/cosmosigner:0.1.0`), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
+(`ghcr.io/voluzi/cosmosigner:0.2.0`), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
 operator flag — see [Configuration](../getting-started/configuration.md#cosmosignerimage). Set
-`.spec.cosmosigner.image` to pin or override the image for one specific signer only (e.g. to test a
-newer version, such as `latest`, before rolling it out more broadly).
+`.spec.cosmosigner.image` to pin or override the image for one specific signer only. Cosmopilot's
+managed signing path requires Cosmosigner 0.2.0 or newer for Vault key-version pinning and startup
+public-key verification. For production validators, use an immutable image digest rather than a
+mutable tag so a rescheduled replica cannot pick up different code without a managed migration.
 :::
 
 ## How it works
@@ -71,10 +73,12 @@ spec:
   cosmosigner:
     nodeGroups: [fullnodes]      # the fullnodes group is the signing endpoint
     replicas: 3                  # odd number for raft HA
+    raftTLSSecret: cosmosigner-raft-tls
     backend:
       vault:
         address: https://vault:8200
         keyName: mychain-validator
+        keyVersion: 1
         tokenSecret: { name: vault-cosmosigner-token, key: token }
   nodes:
     - name: fullnodes
@@ -94,10 +98,12 @@ spec:
     info: { moniker: my-validator }
   cosmosigner:                    # nodeGroups empty -> targets the validator
     replicas: 3
+    raftTLSSecret: cosmosigner-raft-tls
     backend:
       vault:
         address: https://vault:8200
         keyName: my-validator
+        keyVersion: 1
         tokenSecret: { name: vault-cosmosigner-token, key: token }
 ```
 
@@ -114,20 +120,24 @@ spec:
       validator: {}
       cosmosigner:                       # signer "<nodeset>-validator-a-signer"
         replicas: 3
+        raftTLSSecret: validator-a-cosmosigner-raft-tls
         backend:
           vault:
             address: https://vault:8200
             keyName: chain-validator-a   # distinct key per validator
+            keyVersion: 1
             tokenSecret: { name: vault-cosmosigner-token, key: token }
     - name: validator-b
       instances: 1
       validator: {}
       cosmosigner:                       # signer "<nodeset>-validator-b-signer"
         replicas: 3
+        raftTLSSecret: validator-b-cosmosigner-raft-tls
         backend:
           vault:
             address: https://vault:8200
             keyName: chain-validator-b   # must differ from validator-a's key
+            keyVersion: 1
             tokenSecret: { name: vault-cosmosigner-token, key: token }
 ```
 
@@ -158,10 +168,12 @@ spec:
       validator: {}
       cosmosigner:
         replicas: 3
+        raftTLSSecret: validator-cosmosigner-raft-tls
         backend:
           vault:
             address: https://vault:8200
             keyName: chain-validator     # the group's single consensus identity
+            keyVersion: 1
             tokenSecret: { name: vault-cosmosigner-token, key: token }
 ```
 
@@ -188,14 +200,35 @@ cosmosigner:
     vault:
       address: https://vault:8200
       keyName: my-validator      # transit key name
+      keyVersion: 1              # immutable key version; never follow Vault's latest version
       mount: transit             # optional, defaults to "transit"
       tokenSecret: { name: vault-cosmosigner-token, key: token }
       certificateSecret: { name: vault-ca, key: ca.crt }   # optional CA
-      autoRenewToken: true       # optional token-renewer sidecar
       # uploadGenerated: true    # testnets only: import the validator's generated key into Vault.
       #                          # Requires targeting a validator (init/create-validator) so the
       #                          # imported key matches the one registered on-chain. Defaults to false.
 ```
+
+Cosmosigner renews renewable and periodic Vault tokens itself at half their current TTL. No
+`vault-token-renewer` sidecar is deployed for this backend. Startup rejects a finite non-renewable
+token because it cannot remain valid for a long-running validator; use a renewable or periodic token
+with permission to renew itself. Non-expiring tokens are accepted; Cosmosigner still polls token
+metadata so Secret-backed token replacement is detected, but it sends no renewal request.
+
+Changing a referenced credential or CA Secret **name/key** is a managed lifecycle migration. An
+in-place Secret data update does not restart the signer. Cosmosigner reloads a replacement Vault token
+after the old token fails lookup, but TLS CA and other client configuration are loaded at process
+startup; use a new Secret name when those values rotate so Cosmopilot performs break-before-make.
+
+`keyVersion` is pinned into every public-key lookup and signing request. Rotating the Vault Transit
+key therefore does not silently change the validator identity on restart. Deliberately moving to a
+new version is a managed signer migration and must match the key the chain expects.
+
+`uploadGenerated` creates version 1 of a previously unused Transit `keyName`; set `keyVersion: 1`.
+After a completed import, the source Secret is immutable for that target. To import different key
+material, choose a new `keyName` and perform a managed migration. Cosmopilot rejects an in-place
+source-key change before stopping the serving signer because Vault cannot overwrite an existing
+Transit identity.
 
 :::note[Key provenance]
 When cosmosigner targets a validator, the signer uses the **validator's own consensus key** — with
@@ -249,6 +282,10 @@ raft node and keeps its own state PVC. Only the raft leader dials the nodes and 
 another replica takes over. There is no HTTP health endpoint, so `Cosmopilot` uses a TCP probe against
 the raft port.
 
+Multi-replica signers require `raftTLSSecret`, containing `tls.crt`, `tls.key`, and `ca.crt`, so Raft
+membership and state replication use mutual TLS. `unsafeAllowInsecureRaft: true` is an explicit opt-out
+for isolated test networks only and cannot be combined with `raftTLSSecret`.
+
 ## Migrating from TmKMS
 
 `Cosmosigner`'s Vault backend can point at the **same transit key** a `TmKMS` validator already uses.
@@ -259,23 +296,75 @@ address.
 
 ## Updating and migrating a signer
 
-Image, resources, log-level, and credential changes use an ordinary StatefulSet rolling
-update. Changes to the backend/key, target groups, software-key Secret, or manifest placement use a
-managed break-before-make migration:
+Every signer lifecycle change uses a managed break-before-make migration. This includes image,
+resources, log level, credentials, backend/key, target groups, software-key Secret, and manifest
+placement changes:
 
 1. Cosmopilot preflights the destination key and configuration while the current signer remains up.
 2. It scales the signer StatefulSet to zero and waits for the StatefulSet controller to observe zero.
 3. It directly lists signer pods and waits until every pod is gone, including terminating pods.
 4. It deletes the StatefulSet, confirms it is absent, and lists pods again before recreation.
-5. If the destination reports the same public key, the existing raft-state PVCs are retained. If the
-   public key differs, the PVCs are deleted so the new signer starts with clean state.
+5. If the destination reports the same public key, the existing raft-state PVCs are retained. A
+   different sentry key resets its signer state; a validator-targeted signer is rejected if its key
+   differs from the public key already recorded on-chain or by the serving signer.
 6. Only then are the new signer configuration and targets applied and the StatefulSet recreated.
 
 Replica-count and state-storage changes remain unsupported because they require an explicit raft
 membership or PVC migration.
 
+## Consensus-key reservations
+
+Before importing a key, retargeting nodes, or creating signer pods, Cosmopilot atomically creates a
+cluster-scoped `ConsensusKeyReservation` keyed by chain ID and canonical public key. A different
+`ChainNode` or `ChainNodeSet` root cannot claim that same chain/key pair, even if it would use separate
+Raft state. Independent claims inside one `ChainNodeSet` are also rejected, while a local, TmKMS, and
+Cosmosigner migration for the same logical validator shares one claim. This closes the cross-resource
+and same-root double-sign windows during migrations and upgrades.
+
+Helm installs files from a chart's `crds/` directory on first install, but does not upgrade or add them
+on `helm upgrade`. Existing installations must apply the CRDs from the target chart before upgrading
+the controller:
+
+```shell
+helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply -f -
+```
+
+Confirm `consensuskeyreservations.cosmopilot.voluzi.com` exists before starting the new controller.
+Without it, reservation-aware reconciliation fails closed: new signing paths are not created, but
+already-running validators may remain online until the CRD is installed.
+
+Do not change a validator signing configuration while old and new Cosmopilot controller versions are
+running together during a rolling operator upgrade. Reservations are atomic among reservation-aware
+controllers, but an older controller does not consult them. Apply the CRD, finish the controller
+rollout, and only then begin a local/TmKMS/Cosmosigner migration.
+
+Reservations are intentionally never garbage-collected. Deleting the owning resource does not prove
+that its signer pods, TmKMS sidecars, local validators, retained PVCs, or externally managed replicas
+are unable to sign. Inspect reservations with `kubectl get ckr`.
+
+Delete a stale reservation only after proving every former signing path for that consensus key is
+stopped and cannot restart. Then inspect the reservation owner and remove the exact object:
+
+```shell
+kubectl get ckr <reservation-name> -o yaml
+kubectl delete ckr <reservation-name>
+```
+
+Deleting a reservation permits another controller root to claim the key; doing so while an old path
+can still sign can create independent double-sign state for the same validator.
+
 :::warning[Cosmos does not rotate the validator key]
-Cosmopilot can safely stop one signer and start another, but it does not submit an on-chain consensus
-key rotation. When selecting a different public key, you are responsible for ensuring that key is the
-one the chain expects. Cosmopilot resets local signer state and proceeds with the requested key.
+Cosmopilot does not submit an on-chain consensus-key rotation. Once validator status or a serving
+signer records the validator public key, a managed Cosmosigner migration must resolve to that same
+key. Perform consensus-key rotation through the chain's supported governance/validator procedure,
+not by changing the managed signer backend.
+:::
+
+:::warning[Slash-protection state at implementation boundaries]
+Break-before-make prevents two signing implementations from running concurrently, and Cosmosigner
+retains its Raft high-water mark across same-key Cosmosigner upgrades. It cannot import historical
+`priv_validator_state.json` from a local validator or TmKMS. Before the first migration into
+Cosmosigner, or any deliberate return to another signing implementation, stop the old path cleanly,
+ensure the validator data cannot roll back below the last signed height, and retain the old signing
+state for incident recovery. A public-key match alone does not transfer slash-protection history.
 :::

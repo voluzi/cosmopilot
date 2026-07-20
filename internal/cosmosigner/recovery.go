@@ -60,7 +60,8 @@ func ValidateRecoveredSigningIdentity(ctx context.Context, c client.Client, owne
 	if err := yaml.Unmarshal([]byte(liveYAML), liveConfig); err != nil {
 		return fmt.Errorf("cosmosigner %q has live state but its ConfigMap is invalid; refusing to recover an unverifiable live signing identity: %w", params.Name, err)
 	}
-	if !recoveredBackendMatches(liveConfig.Backend, params.Backend, sts) {
+	if !recoveredBackendMatches(liveConfig.Backend, params.Backend, sts) ||
+		(params.ExpectedPublicKey != "" && (liveConfig.ExpectedPublicKey == "" || liveConfig.ExpectedPublicKey != params.ExpectedPublicKey)) {
 		return fmt.Errorf("cosmosigner %q live signing identity does not match the desired spec; refusing to overwrite the recovered signer", params.Name)
 	}
 	return nil
@@ -101,7 +102,8 @@ func recoveredBackendMatches(live BackendConfig, desired Backend, sts *appsv1.St
 			live.Vault.Address == want.Vault.Address &&
 			live.Vault.Namespace == want.Vault.Namespace &&
 			live.Vault.Mount == want.Vault.Mount &&
-			live.Vault.KeyName == want.Vault.KeyName
+			live.Vault.KeyName == want.Vault.KeyName &&
+			live.Vault.KeyVersion == want.Vault.KeyVersion
 	case desired.GCP != nil:
 		return live.GCP != nil && want.GCP != nil && live.GCP.KeyVersion == want.GCP.KeyVersion
 	default:

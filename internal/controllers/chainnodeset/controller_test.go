@@ -82,7 +82,9 @@ func TestReconcileKeepsLocalValidatorWhenVaultImportFails(t *testing.T) {
 	signerStatus.Replicas = ptr.To(signer.Spec.GetReplicas())
 	signerStatus.StateStorageSize = signer.Spec.GetStateStorageSize()
 	signerStatus.StateStorageClassName = signer.Spec.StorageClassName
-	signerStatus.KeyImported = nodeSet.Spec.Cosmosigner.Backend.Vault.ImportFingerprint(signer.SoftwareKeySecret, []byte("previous-validator-key"))
+	previousVault := *nodeSet.Spec.Cosmosigner.Backend.Vault
+	previousVault.KeyName = "previous-val-key"
+	signerStatus.KeyImported = previousVault.ImportFingerprint(signer.SoftwareKeySecret, []byte("previous-validator-key"))
 
 	localNodeSet := nodeSet.DeepCopy()
 	localNodeSet.Spec.Cosmosigner = nil
@@ -653,7 +655,7 @@ func TestPrepareCosmosignerImportsRejectsMalformedKeyBeforeScaleDown(t *testing.
 }
 
 func TestPrepareCosmosignerRolloutsKeepsLocalValidatorUntilReady(t *testing.T) {
-	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
 	nodeSet.UID = types.UID("nodeset-uid")
 	signer := resolveSingleSigner(t, nodeSet)
 	signerStatus := nodeSet.EnsureCosmosignerStatus(signer.Name)
@@ -666,11 +668,13 @@ func TestPrepareCosmosignerRolloutsKeepsLocalValidatorUntilReady(t *testing.T) {
 	localNodeSet.Spec.Cosmosigner = nil
 	localValidator, err := newValidatorTestReconciler(t).getValidatorSpec(localNodeSet, "validators", 0, localNodeSet.Spec.Nodes[0].Validator)
 	require.NoError(t, err)
-	token := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("test-token")},
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	keySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: "default"},
+		Data:       map[string][]byte{privKeyFilename: key},
 	}
-	r := newValidatorTestReconciler(t, nodeSet, token, localValidator)
+	r := newValidatorTestReconciler(t, nodeSet, keySecret, localValidator)
 
 	ready, err := r.prepareCosmosignerRollouts(context.Background(), nodeSet, nil)
 	require.NoError(t, err)
@@ -1057,9 +1061,10 @@ func TestValidateForReconcileRejectsSentryReplicaChange(t *testing.T) {
 			Spec: appsv1.ChainNodeSetSpec{
 				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
 				Cosmosigner: &appsv1.Cosmosigner{
-					NodeGroups: []string{"fullnodes"},
-					Replicas:   ptr.To(replicas),
-					Backend:    cosmosignerVaultBackend(),
+					NodeGroups:              []string{"fullnodes"},
+					Replicas:                ptr.To(replicas),
+					UnsafeAllowInsecureRaft: true,
+					Backend:                 cosmosignerVaultBackend(),
 				},
 				Nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(3)}},
 			},
@@ -1192,6 +1197,18 @@ func TestValidateForReconcileAllowsRecordedSignerKeyMigration(t *testing.T) {
 	removed := recorded.DeepCopy()
 	removed.Spec.Cosmosigner = nil
 	_, err = validateForReconcile(removed)
+	require.NoError(t, err)
+}
+
+func TestValidateForReconcileAllowsProvenMultiInstancePlacementReplacement(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
+	nodeSet.Spec.Nodes[0].Instances = ptr.To(3)
+	recordSignerRollout(t, nodeSet)
+
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Cosmosigner = &appsv1.Cosmosigner{Backend: cosmosignerVaultBackend()}
+
+	_, err := validateForReconcile(nodeSet)
 	require.NoError(t, err)
 }
 
@@ -1527,9 +1544,7 @@ func genesisSentryNodeSet(genesisKey, sentryKey string) *appsv1.ChainNodeSet {
 	return ns
 }
 
-// TestValidateForReconcileMigratesGenesisSentryKey verifies a sentry with recorded lifecycle state
-// can change or remove its key through the controlled migration path.
-func TestValidateForReconcileMigratesGenesisSentryKey(t *testing.T) {
+func TestValidateForReconcileProtectsGenesisSentryKey(t *testing.T) {
 	base := genesisSentryNodeSet("genesis-sentry-key", "genesis-sentry-key")
 	recordSignerRollout(t, base)
 
@@ -1537,17 +1552,19 @@ func TestValidateForReconcileMigratesGenesisSentryKey(t *testing.T) {
 	_, err := validateForReconcile(base)
 	require.NoError(t, err)
 
-	// Rotating the genesis-registered sentry key is admitted for state reset.
+	// The immutable genesis key must retain a managed signing path.
 	changed := base.DeepCopy()
 	changed.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("other-key")
 	_, err = validateForReconcile(changed)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain consensus key")
 
-	// Removing it is also admitted; the user remains responsible for the on-chain key.
+	// Removing the signer would orphan the immutable genesis key.
 	removed := base.DeepCopy()
 	removed.Spec.Nodes[0].Cosmosigner = nil
 	_, err = validateForReconcile(removed)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain consensus key")
 
 	// A sentry whose key is NOT in genesis stays rotatable and removable.
 	free := genesisSentryNodeSet("some-genesis-key", "free-key")
@@ -1637,7 +1654,7 @@ func TestValidateForReconcileRejectsLegacyPreDigestValidator(t *testing.T) {
 	ns.Status.Cosmosigners[0].ServingGroup = ""
 	_, err := validateForReconcile(ns)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must keep serving that exact validator/genesis key")
+	assert.Contains(t, err.Error(), "on-chain consensus key")
 
 	// A genesis sentry (no served group by design) with the same legacy-empty ServingGroup is still
 	// admitted, because its key identity is verifiable against the immutable genesis set.

@@ -577,7 +577,7 @@ func TestCosmosignerStateStorageEqual(t *testing.T) {
 
 // TestValidateCosmosignerGenesisSentryKeyMigration verifies a recorded sentry signer may change or
 // remove its key through the controlled break-before-make path.
-func TestValidateCosmosignerGenesisSentryKeyMigration(t *testing.T) {
+func TestValidateCosmosignerProtectsGenesisSentryKey(t *testing.T) {
 	base := func(sentryKey string) *ChainNodeSet {
 		return &ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
@@ -610,21 +610,32 @@ func TestValidateCosmosignerGenesisSentryKeyMigration(t *testing.T) {
 	oldSigner := old.ResolveCosmosigners()[0]
 	old.Status.Cosmosigners = []CosmosignerStatus{{
 		Name: oldSigner.Name, AppliedDigest: oldSigner.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		AtEstablishment: ptr.To(oldSigner.Identity()),
 	}}
 
-	// Rotating that key to a different one is admitted and will reset signer state.
+	// The immutable genesis key must retain a managed signing path.
 	rotated := base("some-other-key")
 	_, err := rotated.Validate(old)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "genesis")
 
 	// Unchanged: accepted.
 	_, err = base("genesis-sentry-key").Validate(old)
 	require.NoError(t, err)
 
-	// Removing the signer is also admitted for controlled fallback.
+	// Removing the signer would orphan the immutable genesis key.
 	removed := base("genesis-sentry-key")
 	removed.Spec.Nodes[0].Cosmosigner = nil
 	_, err = removed.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "genesis")
+
+	// Moving the same key to another manifest placement preserves its signing path.
+	moved := base("genesis-sentry-key")
+	moved.Spec.Cosmosigner = moved.Spec.Nodes[0].Cosmosigner
+	moved.Spec.Cosmosigner.NodeGroups = []string{"sentries"}
+	moved.Spec.Nodes[0].Cosmosigner = nil
+	_, err = moved.Validate(old)
 	require.NoError(t, err)
 
 	// A sentry signer whose key is NOT a genesis key stays rotatable.

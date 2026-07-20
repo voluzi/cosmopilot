@@ -151,6 +151,14 @@ func (b *CosmosignerVaultBackend) GetVaultMount() string {
 	return DefaultCosmosignerVaultMount
 }
 
+// GetKeyVersion returns the pinned Vault Transit key version, defaulting to version 1.
+func (b *CosmosignerVaultBackend) GetKeyVersion() int {
+	if b != nil && b.KeyVersion != nil {
+		return *b.KeyVersion
+	}
+	return 1
+}
+
 // ImportTargetFingerprint fingerprints the import TARGET half of a key import: the Vault destination
 // (address, namespace, mount, key) plus the resolved source secret name. It deliberately excludes the
 // key material, so a controller that can no longer read the source Secret (deleted after a completed
@@ -158,6 +166,16 @@ func (b *CosmosignerVaultBackend) GetVaultMount() string {
 // target/source — a stale annotation from a different Vault destination or source secret never
 // satisfies the current spec.
 func (b *CosmosignerVaultBackend) ImportTargetFingerprint(sourceSecret string) string {
+	ns := ""
+	if b.Namespace != nil {
+		ns = *b.Namespace
+	}
+	return utils.Sha256(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", b.Address, ns, b.GetVaultMount(), b.KeyName, b.GetKeyVersion(), sourceSecret))
+}
+
+// LegacyImportTargetFingerprint reproduces the import target fingerprint written before Vault key
+// versions were pinned. It is retained only to migrate existing version-1 status records.
+func (b *CosmosignerVaultBackend) LegacyImportTargetFingerprint(sourceSecret string) string {
 	ns := ""
 	if b.Namespace != nil {
 		ns = *b.Namespace
@@ -176,12 +194,39 @@ func (b *CosmosignerVaultBackend) ImportFingerprint(sourceSecret string, keyMate
 	return b.ImportTargetFingerprint(sourceSecret) + "." + utils.Sha256(string(keyMaterial))
 }
 
+// LegacyImportFingerprint reproduces the full import proof written before Vault key versions were
+// pinned. Callers must only accept it through ImportRecordMatches, which limits compatibility to
+// version 1.
+func (b *CosmosignerVaultBackend) LegacyImportFingerprint(sourceSecret string, keyMaterial []byte) string {
+	return b.LegacyImportTargetFingerprint(sourceSecret) + "." + utils.Sha256(string(keyMaterial))
+}
+
 // ImportRecordMatchesTarget reports whether a recorded key import belongs to the given import target
 // (see ImportTargetFingerprint) regardless of which key bytes were imported. Used by the absent-source
 // fast-path: only an import completed for the CURRENT target/source proves the spec's Vault key holds
 // the registered material.
 func ImportRecordMatchesTarget(record, targetFingerprint string) bool {
 	return strings.HasPrefix(record, targetFingerprint+".")
+}
+
+// ImportRecordMatchesTarget reports whether record proves an import into this backend and source.
+// Version 1 also accepts the pre-key-version format so an operator upgrade does not attempt to import
+// over an already-existing Vault Transit key.
+func (b *CosmosignerVaultBackend) ImportRecordMatchesTarget(record, sourceSecret string) bool {
+	if ImportRecordMatchesTarget(record, b.ImportTargetFingerprint(sourceSecret)) {
+		return true
+	}
+	return b.GetKeyVersion() == 1 && ImportRecordMatchesTarget(record, b.LegacyImportTargetFingerprint(sourceSecret))
+}
+
+// ImportRecordMatches reports whether record proves that these exact source bytes were imported into
+// this backend. Legacy compatibility is deliberately limited to version 1, the version created by the
+// old unversioned import path.
+func (b *CosmosignerVaultBackend) ImportRecordMatches(record, sourceSecret string, keyMaterial []byte) bool {
+	if record == b.ImportFingerprint(sourceSecret, keyMaterial) {
+		return true
+	}
+	return b.GetKeyVersion() == 1 && record == b.LegacyImportFingerprint(sourceSecret, keyMaterial)
 }
 
 // CosmosignerValidatorTargetedIdentity returns the signer's effective signing identity ONLY when it
@@ -337,6 +382,12 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 		if c.Backend.Vault.KeyName == "" {
 			return fmt.Errorf("%s.backend.vault.keyName is required", path)
 		}
+		if c.Backend.Vault.GetKeyVersion() < 1 {
+			return fmt.Errorf("%s.backend.vault.keyVersion must be at least 1", path)
+		}
+		if c.Backend.Vault.UploadGenerated && c.Backend.Vault.GetKeyVersion() != 1 {
+			return fmt.Errorf("%s.backend.vault.uploadGenerated requires keyVersion 1 because Vault imports create the initial key version", path)
+		}
 		// Both name and key are required: the controller mounts the token with the selector key as a
 		// SubPath, so an empty key would mount the whole secret directory over the token file path.
 		if c.Backend.Vault.TokenSecret == nil || c.Backend.Vault.TokenSecret.Name == "" || c.Backend.Vault.TokenSecret.Key == "" {
@@ -363,6 +414,12 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 	if c.RaftTLSSecret != nil && *c.RaftTLSSecret == "" {
 		return fmt.Errorf("%s.raftTLSSecret must not be empty when set", path)
 	}
+	if replicas > 1 && c.RaftTLSSecret == nil && !c.UnsafeAllowInsecureRaft {
+		return fmt.Errorf("%s.raftTLSSecret is required when replicas is greater than 1; set unsafeAllowInsecureRaft only for an isolated test network", path)
+	}
+	if c.RaftTLSSecret != nil && c.UnsafeAllowInsecureRaft {
+		return fmt.Errorf("%s.raftTLSSecret and unsafeAllowInsecureRaft are mutually exclusive", path)
+	}
 
 	return nil
 }
@@ -380,7 +437,7 @@ func (c *Cosmosigner) effectiveSigningIdentity(softwareKeySecret string) string 
 		if v.Namespace != nil {
 			ns = *v.Namespace
 		}
-		return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s", v.Address, ns, v.GetVaultMount(), v.KeyName)
+		return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s\x00%d", v.Address, ns, v.GetVaultMount(), v.KeyName, v.GetKeyVersion())
 	case c.UsesGcpKmsBackend():
 		return "gcpkms\x00" + c.Backend.GcpKMS.KeyVersion
 	case c.UsesSoftwareBackend():

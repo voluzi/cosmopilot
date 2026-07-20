@@ -7,7 +7,7 @@ import (
 const (
 	// DefaultCosmosignerImage is the cosmosigner image used when none is specified (either via
 	// .spec.cosmosigner.image or the operator-wide cosmosignerImage Helm value / COSMOSIGNER_IMAGE).
-	DefaultCosmosignerImage = "ghcr.io/voluzi/cosmosigner:0.1.0"
+	DefaultCosmosignerImage = "ghcr.io/voluzi/cosmosigner:0.2.0"
 
 	// DefaultCosmosignerReplicas is the default number of signer replicas (single instance).
 	DefaultCosmosignerReplicas int32 = 1
@@ -54,7 +54,7 @@ type Cosmosigner struct {
 
 	// Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
 	// image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-	// defaulting to `ghcr.io/voluzi/cosmosigner:0.1.0`). Set this to pin or override the image for
+	// defaulting to `ghcr.io/voluzi/cosmosigner:0.2.0`). Set this to pin or override the image for
 	// this specific signer only.
 	// +optional
 	Image *string `json:"image,omitempty"`
@@ -78,10 +78,16 @@ type Cosmosigner struct {
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to
-	// secure the inter-replica raft transport with mutual TLS. When unset, the raft transport is
-	// plain TCP (only safe on a trusted network).
+	// secure the inter-replica raft transport with mutual TLS. It is required when replicas is
+	// greater than one unless unsafeAllowInsecureRaft explicitly opts into plain TCP.
 	// +optional
 	RaftTLSSecret *string `json:"raftTLSSecret,omitempty"`
+
+	// UnsafeAllowInsecureRaft permits a multi-replica signer to use plain TCP for Raft. This is an
+	// explicit security opt-out for isolated test networks; production HA signers should set
+	// raftTLSSecret instead.
+	// +optional
+	UnsafeAllowInsecureRaft bool `json:"unsafeAllowInsecureRaft,omitempty"`
 
 	// LogLevel is the log level for the signer. Defaults to `info`.
 	// +optional
@@ -130,6 +136,15 @@ type CosmosignerVaultBackend struct {
 	// KeyName is the name of the Vault transit key used for signing.
 	KeyName string `json:"keyName"`
 
+	// KeyVersion is the immutable Vault Transit key version used for public-key resolution and every
+	// signing request. Pinning the version prevents a Transit rotation from changing validator identity
+	// across signer restarts. Defaults to `1`. uploadGenerated requires version 1 because a new Vault
+	// import creates the initial key version.
+	// +optional
+	// +default=1
+	// +kubebuilder:validation:Minimum=1
+	KeyVersion *int `json:"keyVersion,omitempty"`
+
 	// Mount is the Vault transit mount path. Defaults to `transit`.
 	// +optional
 	// +default="transit"
@@ -151,11 +166,6 @@ type CosmosignerVaultBackend struct {
 	// validator initializes a new genesis. This should not be used in production.
 	// +optional
 	UploadGenerated bool `json:"uploadGenerated,omitempty"`
-
-	// AutoRenewToken indicates whether to run a sidecar that automatically renews the Vault token.
-	// Defaults to `false`.
-	// +optional
-	AutoRenewToken bool `json:"autoRenewToken,omitempty"`
 }
 
 // CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend.

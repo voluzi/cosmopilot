@@ -7,21 +7,25 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func testParams() Params {
 	return Params{
-		Name:             "mychain-signer",
-		Namespace:        "default",
-		ChainID:          "test-1",
-		Image:            "ghcr.io/voluzi/cosmosigner:0.1.0",
-		Replicas:         3,
-		LogLevel:         "info",
-		StateStorageSize: "1Gi",
+		Name:              "mychain-signer",
+		Namespace:         "default",
+		ChainID:           "test-1",
+		Image:             "ghcr.io/voluzi/cosmosigner:0.2.0",
+		Replicas:          3,
+		LogLevel:          "info",
+		ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		StateStorageSize:  "1Gi",
 		Backend: Backend{
 			Vault: &VaultBackend{
 				Address:     "https://vault:8200",
 				KeyName:     "myval",
+				KeyVersion:  4,
 				Mount:       "transit",
 				TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
 			},
@@ -54,6 +58,12 @@ func TestBuildConfigMultiReplicaMembers(t *testing.T) {
 	}
 	if cfg.Backend.Vault.TokenFile != "/vault/token-dir/token" {
 		t.Fatalf("unexpected vault token file %q", cfg.Backend.Vault.TokenFile)
+	}
+	if cfg.Backend.Vault.KeyVersion != 4 {
+		t.Fatalf("unexpected vault key version %d", cfg.Backend.Vault.KeyVersion)
+	}
+	if cfg.ExpectedPublicKey != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" {
+		t.Fatalf("unexpected expected public key %q", cfg.ExpectedPublicKey)
 	}
 }
 
@@ -112,7 +122,7 @@ func TestRenderYAMLUsesSnakeCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"chain_id:", "node_service:", "conn_key:", "state_dir:", "bind_addr:", "data_dir:", "key_name:", "token_file:"} {
+	for _, key := range []string{"chain_id:", "expected_public_key:", "node_service:", "conn_key:", "state_dir:", "bind_addr:", "data_dir:", "key_name:", "key_version:", "token_file:"} {
 		if !strings.Contains(out, key) {
 			t.Fatalf("rendered config missing %q:\n%s", key, out)
 		}
@@ -133,6 +143,9 @@ func TestStatefulSetShape(t *testing.T) {
 	if sts.Spec.PodManagementPolicy != "Parallel" {
 		t.Fatalf("expected Parallel pod management, got %q", sts.Spec.PodManagementPolicy)
 	}
+	if sts.Spec.UpdateStrategy.Type != appsv1.OnDeleteStatefulSetStrategyType {
+		t.Fatalf("signer StatefulSet must use OnDelete to prevent mixed-version automatic rolling updates, got %q", sts.Spec.UpdateStrategy.Type)
+	}
 	if sts.Spec.ServiceName != "mychain-signer" {
 		t.Fatalf("unexpected serviceName %q", sts.Spec.ServiceName)
 	}
@@ -143,6 +156,12 @@ func TestStatefulSetShape(t *testing.T) {
 		t.Fatalf("expected a single data volumeClaimTemplate")
 	}
 	c := sts.Spec.Template.Spec.Containers[0]
+	if len(sts.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("Vault token renewal is built into cosmosigner; expected no renewer sidecar, got %d containers", len(sts.Spec.Template.Spec.Containers))
+	}
+	if got := strings.Join(c.Args, " "); !strings.Contains(got, "--expected-public-key "+testParams().ExpectedPublicKey) {
+		t.Fatalf("statefulset must pass the expected public key as a compatibility-enforcing flag, args=%q", got)
+	}
 	var hasNodeID, hasAdvertise, hasRollme bool
 	for _, e := range c.Env {
 		switch e.Name {
@@ -159,6 +178,66 @@ func TestStatefulSetShape(t *testing.T) {
 	}
 	if c.LivenessProbe == nil || c.LivenessProbe.TCPSocket == nil {
 		t.Fatalf("expected TCP liveness probe")
+	}
+}
+
+func TestNetworkPolicyRestrictsRaftIngressToSignerPeers(t *testing.T) {
+	policy := testParams().NetworkPolicy()
+	if len(policy.Spec.PolicyTypes) != 1 || policy.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress {
+		t.Fatalf("unexpected policy types: %#v", policy.Spec.PolicyTypes)
+	}
+	if len(policy.Spec.Ingress) != 1 || len(policy.Spec.Ingress[0].From) != 1 {
+		t.Fatalf("expected one raft ingress rule, got %#v", policy.Spec.Ingress)
+	}
+	peer := policy.Spec.Ingress[0].From[0].PodSelector
+	if peer == nil || peer.MatchLabels["app.kubernetes.io/instance"] != testParams().Name {
+		t.Fatalf("raft ingress must be limited to this signer's peers: %#v", peer)
+	}
+	if len(policy.Spec.Ingress[0].Ports) != 1 || policy.Spec.Ingress[0].Ports[0].Port == nil || policy.Spec.Ingress[0].Ports[0].Port.IntVal != 7070 {
+		t.Fatalf("raft ingress must expose only port 7070: %#v", policy.Spec.Ingress[0].Ports)
+	}
+}
+
+func TestLifecycleDigestCoversRuntimeAndExpectedIdentity(t *testing.T) {
+	base := testParams()
+	digest, err := base.LifecycleDigest("signing-digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Params)
+	}{
+		{name: "image", mutate: func(p *Params) { p.Image = "ghcr.io/voluzi/cosmosigner:0.3.0" }},
+		{name: "expected public key", mutate: func(p *Params) { p.ExpectedPublicKey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=" }},
+		{name: "vault token secret", mutate: func(p *Params) { p.Backend.Vault.TokenSecret.Name = "rotated-token" }},
+		{name: "resources", mutate: func(p *Params) {
+			p.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")}
+		}},
+		{name: "service account", mutate: func(p *Params) { p.ServiceAccountName = "signer" }},
+		{name: "pod labels", mutate: func(p *Params) { p.Labels["security.example/policy"] = "restricted" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := testParams()
+			tc.mutate(&changed)
+			got, err := changed.LifecycleDigest("signing-digest")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == digest {
+				t.Fatalf("%s change must alter lifecycle digest", tc.name)
+			}
+		})
+	}
+
+	same, err := testParams().LifecycleDigest("signing-digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same != digest {
+		t.Fatalf("identical runtime must have stable digest: %q != %q", same, digest)
 	}
 }
 

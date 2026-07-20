@@ -452,11 +452,6 @@ spec:
                             description: Address is the full address of the Vault
                               cluster (e.g. `https://vault:8200`).
                             type: string
-                          autoRenewToken:
-                            description: |-
-                              AutoRenewToken indicates whether to run a sidecar that automatically renews the Vault token.
-                              Defaults to `false`.
-                            type: boolean
                           certificateSecret:
                             description: CertificateSecret references the secret containing
                               the CA certificate of the Vault cluster.
@@ -486,6 +481,15 @@ spec:
                             description: KeyName is the name of the Vault transit
                               key used for signing.
                             type: string
+                          keyVersion:
+                            default: 1
+                            description: |-
+                              KeyVersion is the immutable Vault Transit key version used for public-key resolution and every
+                              signing request. Pinning the version prevents a Transit rotation from changing validator identity
+                              across signer restarts. Defaults to `1`. uploadGenerated requires version 1 because a new Vault
+                              import creates the initial key version.
+                            minimum: 1
+                            type: integer
                           mount:
                             default: transit
                             description: Mount is the Vault transit mount path. Defaults
@@ -536,7 +540,7 @@ spec:
                     description: |-
                       Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
                       image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-                      defaulting to `ghcr.io/voluzi/cosmosigner:0.1.0`). Set this to pin or override the image for
+                      defaulting to `ghcr.io/voluzi/cosmosigner:0.2.0`). Set this to pin or override the image for
                       this specific signer only.
                     type: string
                   logLevel:
@@ -555,8 +559,8 @@ spec:
                   raftTLSSecret:
                     description: |-
                       RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to
-                      secure the inter-replica raft transport with mutual TLS. When unset, the raft transport is
-                      plain TCP (only safe on a trusted network).
+                      secure the inter-replica raft transport with mutual TLS. It is required when replicas is
+                      greater than one unless unsafeAllowInsecureRaft explicitly opts into plain TCP.
                     type: string
                   replicas:
                     default: 1
@@ -642,6 +646,12 @@ spec:
                       StorageClassName is the storage class for the per-replica state PVC. Defaults to the
                       cluster default storage class when unset.
                     type: string
+                  unsafeAllowInsecureRaft:
+                    description: |-
+                      UnsafeAllowInsecureRaft permits a multi-replica signer to use plain TCP for Raft. This is an
+                      explicit security opt-out for isolated test networks; production HA signers should set
+                      raftTLSSecret instead.
+                    type: boolean
                 required:
                 - backend
                 type: object
@@ -3404,11 +3414,6 @@ spec:
                                   description: Address is the full address of the
                                     Vault cluster (e.g. `https://vault:8200`).
                                   type: string
-                                autoRenewToken:
-                                  description: |-
-                                    AutoRenewToken indicates whether to run a sidecar that automatically renews the Vault token.
-                                    Defaults to `false`.
-                                  type: boolean
                                 certificateSecret:
                                   description: CertificateSecret references the secret
                                     containing the CA certificate of the Vault cluster.
@@ -3438,6 +3443,15 @@ spec:
                                   description: KeyName is the name of the Vault transit
                                     key used for signing.
                                   type: string
+                                keyVersion:
+                                  default: 1
+                                  description: |-
+                                    KeyVersion is the immutable Vault Transit key version used for public-key resolution and every
+                                    signing request. Pinning the version prevents a Transit rotation from changing validator identity
+                                    across signer restarts. Defaults to `1`. uploadGenerated requires version 1 because a new Vault
+                                    import creates the initial key version.
+                                  minimum: 1
+                                  type: integer
                                 mount:
                                   default: transit
                                   description: Mount is the Vault transit mount path.
@@ -3488,7 +3502,7 @@ spec:
                           description: |-
                             Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
                             image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-                            defaulting to `ghcr.io/voluzi/cosmosigner:0.1.0`). Set this to pin or override the image for
+                            defaulting to `ghcr.io/voluzi/cosmosigner:0.2.0`). Set this to pin or override the image for
                             this specific signer only.
                           type: string
                         logLevel:
@@ -3507,8 +3521,8 @@ spec:
                         raftTLSSecret:
                           description: |-
                             RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to
-                            secure the inter-replica raft transport with mutual TLS. When unset, the raft transport is
-                            plain TCP (only safe on a trusted network).
+                            secure the inter-replica raft transport with mutual TLS. It is required when replicas is
+                            greater than one unless unsafeAllowInsecureRaft explicitly opts into plain TCP.
                           type: string
                         replicas:
                           default: 1
@@ -3595,6 +3609,12 @@ spec:
                             StorageClassName is the storage class for the per-replica state PVC. Defaults to the
                             cluster default storage class when unset.
                           type: string
+                        unsafeAllowInsecureRaft:
+                          description: |-
+                            UnsafeAllowInsecureRaft permits a multi-replica signer to use plain TCP for Raft. This is an
+                            explicit security opt-out for isolated test networks; production HA signers should set
+                            raftTLSSecret instead.
+                          type: boolean
                       required:
                       - backend
                       type: object

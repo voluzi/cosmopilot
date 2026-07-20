@@ -44,7 +44,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 
 	It("accepts a sentry-mode signer targeting a fullnode group", func() {
 		cs := newNodeSet(
-			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), Backend: vaultBackend()},
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), UnsafeAllowInsecureRaft: true, Backend: vaultBackend()},
 			[]appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(3)}},
 			nil,
 		)
@@ -437,7 +437,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 
 	It("rejects a replicas change after creation", func() {
 		cs := newNodeSet(
-			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), Backend: vaultBackend()},
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), UnsafeAllowInsecureRaft: true, Backend: vaultBackend()},
 			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
 			nil,
 		)
