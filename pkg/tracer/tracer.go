@@ -15,7 +15,13 @@ import (
 	"github.com/nxadm/tail"
 )
 
-const traceErrorExcerptLength = 96
+const (
+	// Keep enough of the current JSON object to identify the trace without
+	// dumping potentially large base64 key/value payloads into logs.
+	traceErrorObjectPrefixLength = 64
+	// Keep a separate bounded window around parse failures outside the prefix.
+	traceErrorNearWindowLength = 64
+)
 
 // StoreTracer reads and parses store operation traces from a file or FIFO pipe.
 type StoreTracer struct {
@@ -91,11 +97,23 @@ func (t *StoreTracer) Start() {
 
 		decoder := json.NewDecoder(strings.NewReader(text))
 		for {
+			objectOffset := decoder.InputOffset()
 			trace := Trace{}
 			if err := decoder.Decode(&trace); err != nil {
 				if err != io.EOF {
-					offset := decoder.InputOffset()
-					t.Traces <- &Trace{Err: fmt.Errorf("failed to parse trace near byte %d (%q): %w", offset, traceErrorExcerpt(text, offset), err)}
+					errorOffset := decoder.InputOffset()
+					objectPrefix, nearError := traceErrorContext(text, objectOffset, errorOffset)
+					if nearError == "" {
+						t.Traces <- &Trace{Err: fmt.Errorf(
+							"failed to parse trace at byte %d of %d (object=%q): %w",
+							errorOffset, len(text), objectPrefix, err,
+						)}
+					} else {
+						t.Traces <- &Trace{Err: fmt.Errorf(
+							"failed to parse trace at byte %d of %d (object=%q near=%q): %w",
+							errorOffset, len(text), objectPrefix, nearError, err,
+						)}
+					}
 				}
 				break
 			}
@@ -104,34 +122,57 @@ func (t *StoreTracer) Start() {
 	}
 }
 
-func traceErrorExcerpt(text string, offset int64) string {
-	if len(text) <= traceErrorExcerptLength {
-		return text
+func traceErrorContext(text string, objectOffset, errorOffset int64) (string, string) {
+	objectStart := clampOffset(objectOffset, len(text))
+	for objectStart < len(text) && isJSONWhitespace(text[objectStart]) {
+		objectStart++
+	}
+	objectEnd := min(objectStart+traceErrorObjectPrefixLength, len(text))
+
+	nearCenter := clampOffset(errorOffset, len(text))
+	nearStart := nearCenter - traceErrorNearWindowLength/2
+	if nearStart < objectStart {
+		nearStart = objectStart
+	}
+	nearEnd := nearStart + traceErrorNearWindowLength
+	if nearEnd > len(text) {
+		nearEnd = len(text)
+		nearStart = max(objectStart, nearEnd-traceErrorNearWindowLength)
+	}
+	if nearStart < objectEnd {
+		objectEnd = min(max(objectEnd, nearEnd), objectStart+traceErrorObjectPrefixLength+traceErrorNearWindowLength)
+		objectPrefix := text[objectStart:objectEnd]
+		if objectEnd < len(text) {
+			objectPrefix += "..."
+		}
+		return objectPrefix, ""
 	}
 
-	center := int(offset)
-	if center < 0 {
-		center = 0
-	} else if center > len(text) {
-		center = len(text)
+	objectPrefix := text[objectStart:objectEnd]
+	if objectEnd < len(text) {
+		objectPrefix += "..."
 	}
 
-	start := center - traceErrorExcerptLength/2
-	if start < 0 {
-		start = 0
+	nearError := text[nearStart:nearEnd]
+	if nearStart > objectStart {
+		nearError = "..." + nearError
 	}
-	end := start + traceErrorExcerptLength
-	if end > len(text) {
-		end = len(text)
-		start = end - traceErrorExcerptLength
+	if nearEnd < len(text) {
+		nearError += "..."
 	}
+	return objectPrefix, nearError
+}
 
-	excerpt := text[start:end]
-	if start > 0 {
-		excerpt = "..." + excerpt
+func isJSONWhitespace(value byte) bool {
+	return value == ' ' || value == '	' || value == '\r' || value == '\n'
+}
+
+func clampOffset(offset int64, length int) int {
+	if offset < 0 {
+		return 0
 	}
-	if end < len(text) {
-		excerpt += "..."
+	if offset > int64(length) {
+		return length
 	}
-	return excerpt
+	return int(offset)
 }

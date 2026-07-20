@@ -200,11 +200,20 @@ func TestStoreTracer_TruncatesLongInvalidTraceInError(t *testing.T) {
 			t.Fatal("expected error for invalid JSON, got nil")
 		}
 		errorText := trace.Err.Error()
-		if len(errorText) > 512 {
+		if len(errorText) > 384 {
 			t.Errorf("expected bounded error, got %d characters", len(errorText))
 		}
 		if !strings.Contains(errorText, "...") {
 			t.Errorf("expected truncated error to contain ellipsis, got %q", errorText)
+		}
+		if !strings.Contains(errorText, `object="{\"operation\":\"write\",\"value\":\"`) {
+			t.Errorf("expected current object prefix, got %q", errorText)
+		}
+		if !strings.Contains(errorText, `near="...aaaaaaaa`) {
+			t.Errorf("expected context near the parse error, got %q", errorText)
+		}
+		if !strings.Contains(errorText, "of 4126") {
+			t.Errorf("expected error to include total length, got %q", errorText)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for trace")
@@ -259,8 +268,11 @@ func TestStoreTracer_EmitsValidTraceBeforeMalformedSuffix(t *testing.T) {
 		if trace.Err == nil {
 			t.Fatal("expected error for malformed suffix, got nil")
 		}
-		if !strings.Contains(trace.Err.Error(), "{invalid}") {
-			t.Errorf("expected error context near malformed suffix, got %q", trace.Err)
+		if !strings.Contains(trace.Err.Error(), `object="{invalid}"`) {
+			t.Errorf("expected current object context for malformed suffix, got %q", trace.Err)
+		}
+		if strings.Contains(trace.Err.Error(), "near=") {
+			t.Errorf("expected overlapping context to be collapsed, got %q", trace.Err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for malformed suffix error")
