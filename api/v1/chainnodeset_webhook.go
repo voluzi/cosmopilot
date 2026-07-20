@@ -784,7 +784,13 @@ func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s Resolve
 	if old != nil && old.Status.ChainID != "" {
 		migrationWaiver = registrationRecorded(old)
 	} else if old == nil && nodeSet.Status.ChainID != "" {
-		migrationWaiver = registrationRecorded(nodeSet)
+		// No-webhook path: the previous spec is unavailable, so a non-empty recorded signing digest that
+		// MATCHES this resolved signer proves the exact signer identity rolled out and served. Registration
+		// alone (a validator address) does not prove a NEWLY configured pre-provisioned Vault/GCP backend
+		// holds the validator's consensus key, so a missing or mismatched digest keeps the signer subject
+		// to the software/uploadGenerated rule.
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		migrationWaiver = registrationRecorded(nodeSet) && st != nil && st.SigningDigest != "" && st.SigningDigest == s.Digest()
 	}
 	if registers && !migrationWaiver {
 		matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(targetValidator.Init != nil)

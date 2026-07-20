@@ -109,6 +109,9 @@ func TestChainNodeCreateValidatorWaiverRequiresOldValidator(t *testing.T) {
 // — proof the node's key is in the on-chain validator set. An established external-genesis node
 // with a validator block but no completed registration keeps the key-matching rule: create-validator
 // would register the locally generated key while the pod signs through the external signer.
+// On the no-webhook path (Validate(nil)) the previous spec is unavailable, so the waiver
+// additionally requires a recorded signing digest that MATCHES the current signer — registration
+// alone cannot prove a newly configured pre-provisioned backend holds the registered consensus key.
 func TestChainNodeCreateValidatorWaiverRequiresCompletedRegistration(t *testing.T) {
 	tokenSecret := &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
@@ -155,11 +158,30 @@ func TestChainNodeCreateValidatorWaiverRequiresCompletedRegistration(t *testing.
 		t.Fatalf("no-webhook promotion before registration must be rejected with %q, got: %v", want, err)
 	}
 
-	// No-webhook path: recorded registration admits the migration.
-	noWebhookRegistered := promoted(base())
-	noWebhookRegistered.Status.ValidatorAddress = "cosmosvaloper1registered"
-	if _, err := noWebhookRegistered.Validate(nil); err != nil {
-		t.Fatalf("no-webhook promotion after registration must be admitted, got: %v", err)
+	// No-webhook path: registration alone does NOT waive the rule. Without a recorded signing digest,
+	// a completed registration says nothing about a newly configured pre-provisioned backend's key.
+	noWebhookRegisteredNoDigest := promoted(base())
+	noWebhookRegisteredNoDigest.Status.ValidatorAddress = "cosmosvaloper1registered"
+	if _, err := noWebhookRegisteredNoDigest.Validate(nil); err == nil || err.Error() != want {
+		t.Fatalf("no-webhook promotion with registration but no recorded digest must be rejected with %q, got: %v", want, err)
+	}
+
+	// No-webhook path: a recorded signing digest that does not match the current signer (e.g. a stale
+	// digest from a previously-served backend) does not waive the rule either.
+	noWebhookMismatchedDigest := promoted(base())
+	noWebhookMismatchedDigest.Status.ValidatorAddress = "cosmosvaloper1registered"
+	noWebhookMismatchedDigest.Status.CosmosignerSigningDigest = "stale-digest-from-a-different-identity"
+	if _, err := noWebhookMismatchedDigest.Validate(nil); err == nil || err.Error() != want {
+		t.Fatalf("no-webhook promotion with a mismatched recorded digest must be rejected with %q, got: %v", want, err)
+	}
+
+	// No-webhook path: registration plus a recorded digest matching the current signer proves this
+	// exact signer identity rolled out and served — the migration is admitted.
+	noWebhookMatchingDigest := promoted(base())
+	noWebhookMatchingDigest.Status.ValidatorAddress = "cosmosvaloper1registered"
+	noWebhookMatchingDigest.Status.CosmosignerSigningDigest = noWebhookMatchingDigest.CosmosignerSigningDigest()
+	if _, err := noWebhookMatchingDigest.Validate(nil); err != nil {
+		t.Fatalf("no-webhook promotion with registration and a matching recorded digest must be admitted, got: %v", err)
 	}
 }
 

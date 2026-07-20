@@ -180,8 +180,10 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// a NEWLY added signer (no digest, or digest from a different identity) stays subject to the
 		// rule, since "registration completed" alone says nothing about the new backend's key.
 		hasInit := chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
+		recordedDigest := chainNode.Status.CosmosignerSigningDigest
 		migrationWaiver := (old != nil && old.Status.ChainID != "" && old.Spec.Validator != nil && old.Status.ValidatorAddress != "") ||
-			(old == nil && chainNode.Status.ChainID != "" && chainNode.Status.ValidatorAddress != "")
+			(old == nil && chainNode.Status.ChainID != "" && chainNode.Status.ValidatorAddress != "" &&
+				recordedDigest != "" && recordedDigest == chainNode.CosmosignerSigningDigest())
 		if registers && !migrationWaiver {
 			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(hasInit)
 			if !matches {

@@ -457,6 +457,59 @@ func TestValidateCosmosignerRequiresCompletedRegistrationForMigrationWaiver(t *t
 	assert.Contains(t, err.Error(), "software backend or vault.uploadGenerated")
 }
 
+// TestValidateCosmosignerNoWebhookWaiverRequiresMatchingSigningDigest verifies the no-webhook
+// (Validate(nil)) parity of the migration waiver: with the previous spec unavailable, a completed
+// registration alone must NOT let a pre-provisioned Vault/GCP signer bypass the key-matching rule.
+// The waiver requires a recorded signing digest that matches the current signer — proof this exact
+// signer identity rolled out and served — otherwise a newly configured backend's key is unproven.
+func TestValidateCosmosignerNoWebhookWaiverRequiresMatchingSigningDigest(t *testing.T) {
+	const want = "software backend or vault.uploadGenerated"
+	base := func() *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes: []NodeGroupSpec{{
+					Name:        "validators",
+					Instances:   ptr.To(1),
+					Validator:   &NodeSetValidatorConfig{CreateValidator: &CreateValidatorConfig{}},
+					Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("preprovisioned-key")},
+				}},
+			},
+			Status: ChainNodeSetStatus{
+				ChainID: "test-1",
+				Validators: []ChainNodeSetValidatorStatus{{
+					Name: "cs-validators-0", Group: "validators", Address: "cosmosvaloper1registered",
+				}},
+			},
+		}
+	}
+
+	// Registration recorded but no signing digest → waiver denied.
+	noDigest := base()
+	if _, err := noDigest.Validate(nil); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("no-webhook migration with registration but no recorded digest must be rejected, got: %v", err)
+	}
+
+	// Registration + a signing digest that does not match the current signer → waiver denied.
+	mismatched := base()
+	mismatchedStatus := mismatched.EnsureCosmosignerStatus(mismatched.ResolveCosmosigners()[0].Name)
+	mismatchedStatus.SigningDigest = "stale-digest-from-a-different-identity"
+	if _, err := mismatched.Validate(nil); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("no-webhook migration with a mismatched recorded digest must be rejected, got: %v", err)
+	}
+
+	// Registration + a signing digest matching the current signer → waiver granted.
+	matching := base()
+	matchingSigner := matching.ResolveCosmosigners()[0]
+	matchingStatus := matching.EnsureCosmosignerStatus(matchingSigner.Name)
+	matchingStatus.SigningDigest = matchingSigner.Digest()
+	if _, err := matching.Validate(nil); err != nil {
+		t.Fatalf("no-webhook migration with registration and a matching recorded digest must be admitted, got: %v", err)
+	}
+}
+
 func TestResolvedSignerDigestSeparatesRollingUpdatesFromMigrations(t *testing.T) {
 	nodeSet := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
