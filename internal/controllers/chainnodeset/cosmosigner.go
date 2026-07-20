@@ -58,7 +58,12 @@ func (r *Reconciler) initCosmosignerReplacementNames(ctx context.Context, nodeSe
 			if old.LocalKeyEverServed != nil {
 				st.LocalKeyEverServed = ptr.To(*old.LocalKeyEverServed)
 			}
-			st.Replicas = ptr.To(ptr.Deref(old.Replicas, s.Spec.GetReplicas()))
+			// A missing replica lock must stay missing so initCosmosignerLocks recovers it from the live
+			// StatefulSet: defaulting to the replacement spec here would "re-lock" the surviving raft
+			// cluster to a membership it was never formed with.
+			if old.Replicas != nil {
+				st.Replicas = ptr.To(*old.Replicas)
+			}
 			st.StateStorageSize = old.StateStorageSize
 			st.StateStorageClassName = old.StateStorageClassName
 			st.KeyImported = old.KeyImported
@@ -93,6 +98,34 @@ func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv
 	desired := map[string]struct{}{}
 	for _, s := range desiredSigners {
 		desired[s.Name] = struct{}{}
+	}
+
+	// A signer StatefulSet owned by this ChainNodeSet but backed by no status entry and no desired
+	// signer can only exist when the status was lost or restored incomplete: status entries are
+	// recorded before any signer resource is created. Tearing it down blindly could remove a
+	// validator's only signing path with no fallback preflight, while ignoring it would let the old
+	// signer keep holding privval connections once children move to their fallback/replacement path.
+	// Fail closed so the operator restores the status or removes the signer deliberately.
+	knownResources := map[string]struct{}{}
+	for _, s := range desiredSigners {
+		knownResources[nodeSet.CosmosignerResourceName(s)] = struct{}{}
+	}
+	for i := range nodeSet.Status.Cosmosigners {
+		knownResources[appsv1.CosmosignerStatusResourceName(&nodeSet.Status.Cosmosigners[i])] = struct{}{}
+	}
+	statefulSets := &k8sappsv1.StatefulSetList{}
+	if err := r.List(ctx, statefulSets, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return false, err
+	}
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if !cosmosigner.IsOwnedSignerStatefulSet(sts, nodeSet) {
+			continue
+		}
+		if _, ok := knownResources[sts.GetName()]; ok {
+			continue
+		}
+		return false, fmt.Errorf("cosmosigner StatefulSet %q is owned by this ChainNodeSet but has no status entry (status lost or restored incomplete): cannot verify the signing identity it serves — restore .status.cosmosigners or delete the signer before reconciling", sts.GetName())
 	}
 
 	// Snapshot the recorded signer names: RemoveCosmosignerStatus mutates the slice we would iterate.
@@ -223,6 +256,9 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			if err := cosmosigner.ValidateRecoveredSigningIdentity(ctx, r.Client, nodeSet, params); err != nil {
 				return err
 			}
+			if err := r.validateRecoveredSignerTargets(ctx, nodeSet, s, resourceName); err != nil {
+				return err
+			}
 		}
 		// The raft mTLS Secret (when set) is mounted at startup; a missing/incomplete one keeps every
 		// signer pod from coming up. Verify it before children are retargeted, like the backend auth Secrets.
@@ -260,6 +296,33 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
 				return fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q contains an invalid %s: %w", s.Name, s.SoftwareKeySecret, privKeyFilename, err)
 			}
+		}
+	}
+	return nil
+}
+
+// validateRecoveredSignerTargets fails closed when a signer being recovered from live state (its
+// recorded digests are gone) still serves pods whose group the current spec no longer targets.
+// ValidateRecoveredSigningIdentity proves the live signer uses the desired backend, but not WHICH
+// nodes it signs for: the cosmosigner-target label on live pods is the last applied truth, and a
+// spec restored with different targets would otherwise rewrite children with none of the
+// migration/fallback guards the missing status would have triggered.
+func (r *Reconciler) validateRecoveredSignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, resourceName string) error {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
+		controllers.LabelChainNodeSet:      nodeSet.GetName(),
+		controllers.LabelCosmosignerTarget: resourceName,
+	}); err != nil {
+		return err
+	}
+	desired := make(map[string]struct{}, len(s.TargetGroups))
+	for _, group := range s.TargetGroups {
+		desired[group] = struct{}{}
+	}
+	for i := range pods.Items {
+		group := pods.Items[i].GetLabels()[controllers.LabelChainNodeSetGroup]
+		if _, ok := desired[group]; !ok {
+			return fmt.Errorf("cosmosigner %q is still serving pods of group %q, which the current spec no longer targets, and its recorded status was lost: refusing to adopt the live signer under the new targets — restore .status.cosmosigners or the previous target set", s.Name, group)
 		}
 	}
 	return nil

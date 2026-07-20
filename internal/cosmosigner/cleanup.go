@@ -6,11 +6,21 @@ import (
 	"strconv"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// IsOwnedSignerStatefulSet reports whether sts is a cosmosigner deployment controlled by owner,
+// identified by the immutable signer labels on its pod template (object labels are user-influenced
+// and cannot be trusted for this).
+func IsOwnedSignerStatefulSet(sts *appsv1.StatefulSet, owner metav1.Object) bool {
+	return metav1.IsControlledBy(sts, owner) &&
+		sts.Spec.Template.Labels[labelAppName] == appNameCosmosigner &&
+		sts.Spec.Template.Labels[labelInstance] == sts.GetName()
+}
 
 // DeletePVCs deletes the per-pod raft-state PVCs of a signer instance owned by owner. StatefulSet
 // PVCs are not garbage-collected with the StatefulSet, so they are cleaned up explicitly on teardown.

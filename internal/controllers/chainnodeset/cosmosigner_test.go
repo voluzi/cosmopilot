@@ -24,6 +24,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
 
@@ -1354,4 +1355,146 @@ func TestMaybeImportCosmosignerKeyPreservesCompletedImport(t *testing.T) {
 	pending, _, err = r.maybeImportCosmosignerKey(context.Background(), ns, resolveSingleSigner(t, ns), params)
 	require.NoError(t, err)
 	assert.True(t, pending, "generated key flow with no recorded pubkey may still produce the source key")
+}
+
+// TestInitCosmosignerReplacementNamesLeavesMissingReplicaLockForLiveRecovery verifies that a
+// placement move copying an old status entry with no replica lock (partial restore or pre-lock
+// record) does NOT default the lock to the replacement spec: the lock stays missing so
+// initCosmosignerLocks recovers it from the live StatefulSet, keeping a 3-replica raft cluster
+// from being re-locked to a 1-replica spec.
+func TestInitCosmosignerReplacementNamesLeavesMissingReplicaLockForLiveRecovery(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "sentries",
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	replacement := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name:             "test-nodeset-signer",
+		AppliedDigest:    "old-digest",
+		PublicKey:        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		TargetGroups:     []string{"sentries"},
+		StateStorageSize: "1Gi",
+		// Replicas deliberately unset: a partial restore / pre-lock record.
+	}}
+	live := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-signer", Namespace: "default"},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(3))},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, live, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, live)
+
+	recorded, err := r.initCosmosignerReplacementNames(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, recorded)
+
+	status := nodeSet.GetCosmosignerStatus(replacement.Name)
+	require.NotNil(t, status)
+	assert.Nil(t, status.Replicas, "a missing old replica lock must not default to the replacement spec")
+
+	// The next pass recovers the lock from the live 3-replica StatefulSet, not the 1-replica spec.
+	changed, err := r.initCosmosignerLocks(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	fresh := &appsv1.ChainNodeSet{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
+	require.NotNil(t, fresh.GetCosmosignerStatus(replacement.Name).Replicas)
+	assert.Equal(t, int32(3), *fresh.GetCosmosignerStatus(replacement.Name).Replicas)
+}
+
+// TestReconcileSignerTeardownFailsClosedOnOrphanedLiveSigner verifies that an owned signer
+// StatefulSet backed by no status entry and no desired signer (status lost or restored incomplete)
+// blocks reconciliation instead of being silently ignored while children change signing paths.
+func TestReconcileSignerTeardownFailsClosedOnOrphanedLiveSigner(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec:       appsv1.ChainNodeSetSpec{},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	orphan := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-signer", Namespace: "default"},
+		Spec: k8sappsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: cosmosigner.InstanceLabels("test-nodeset-signer")},
+		}},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, orphan, testScheme(t)))
+	foreign := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-signer", Namespace: "default", UID: "other-uid"},
+		Spec: k8sappsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: cosmosigner.InstanceLabels("other-signer")},
+		}},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, orphan, foreign)
+
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), "no status entry")
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-signer"}, &k8sappsv1.StatefulSet{}),
+		"the orphaned signer must be left in place for the operator to resolve")
+
+	// Once the operator deletes the orphan (or restores its status), teardown proceeds.
+	require.NoError(t, r.Delete(context.Background(), orphan))
+	done, err = r.reconcileSignerTeardown(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done)
+}
+
+// TestPreflightCosmosignersRejectsRecoveredSignerServingUntargetedGroup verifies that a signer
+// recovered from live state (recorded digests lost) cannot be adopted under a spec whose target
+// set no longer covers the pods it still serves: the live pods' target label is the last applied
+// truth, and the removed group's fallback guards would otherwise never run.
+func TestPreflightCosmosignersRejectsRecoveredSignerServingUntargetedGroup(t *testing.T) {
+	keyBytes, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "sentries-b",
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "test-1",
+			Cosmosigners: []appsv1.CosmosignerStatus{{
+				Name:             "test-nodeset-sentries-b-signer",
+				Replicas:         ptr.To(int32(1)),
+				StateStorageSize: "1Gi",
+			}},
+		},
+	}
+	keySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: "default"},
+		Data:       map[string][]byte{privKeyFilename: keyBytes},
+	}
+	servedPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-nodeset-sentries-a-0", Namespace: "default",
+		Labels: map[string]string{
+			controllers.LabelChainNodeSet:      "test-nodeset",
+			controllers.LabelChainNodeSetGroup: "sentries-a",
+			controllers.LabelCosmosignerTarget: "test-nodeset-sentries-b-signer",
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, keySecret, servedPod)
+
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"sentries-a"`)
+	assert.Contains(t, err.Error(), "no longer targets")
+
+	// A spec restored with the original target set adopts the live signer.
+	matchingPod := servedPod.DeepCopy()
+	matchingPod.Labels[controllers.LabelChainNodeSetGroup] = "sentries-b"
+	r = newValidatorTestReconciler(t, nodeSet, keySecret, matchingPod)
+	require.NoError(t, r.preflightCosmosigners(context.Background(), nodeSet))
 }
