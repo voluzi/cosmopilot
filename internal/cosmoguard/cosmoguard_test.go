@@ -164,6 +164,28 @@ func TestSelectsGuard(t *testing.T) {
 	assert.True(t, SelectsGuard(AppLabel()))
 	assert.False(t, SelectsGuard(map[string]string{"nodeset": "chain", "group": "fullnodes"}))
 	assert.False(t, SelectsGuard(nil))
+	// A node pod carrying inherited standard app.kubernetes.io labels (e.g. from Helm/GitOps blanket
+	// labeling) must NOT match the guard selector — selection is on the guard-private label domain.
+	assert.False(t, SelectsGuard(map[string]string{
+		"app.kubernetes.io/name":     "cosmoguard",
+		"app.kubernetes.io/instance": "chain-group-cosmoguard",
+	}))
+}
+
+func TestInstanceLabelsAreGuardPrivate(t *testing.T) {
+	sel := InstanceLabels("chain-group-cosmoguard")
+	// The selector must not key off the standard app.kubernetes.io labels (inheritable by node pods).
+	assert.NotContains(t, sel, "app.kubernetes.io/name")
+	assert.NotContains(t, sel, "app.kubernetes.io/instance")
+
+	// The pod still carries the standard labels for observability, plus the private selector labels.
+	p := baseParams()
+	p.UpstreamHost = "host"
+	tmpl := p.StatefulSet().Spec.Template
+	assert.Equal(t, appName, tmpl.Labels["app.kubernetes.io/name"])
+	for k, v := range sel {
+		assert.Equal(t, v, tmpl.Labels[k], "selector label %q must be present on the pod", k)
+	}
 }
 
 func TestGuardPodAnnotations(t *testing.T) {

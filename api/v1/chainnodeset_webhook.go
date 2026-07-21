@@ -196,6 +196,11 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		}
 		seenGroupNames[group.Name] = i
 
+		// The CosmoGuard dashboard port must not collide with a port the guard Service already exposes.
+		if err := group.GetServiceConfig().ValidateCosmoGuardDashboard(); err != nil {
+			return nil, fmt.Errorf(".spec.nodes[%d] %w", i, err)
+		}
+
 		// Validate persistence size
 		if group.Persistence != nil && group.Persistence.Size != nil {
 			_, err := resource.ParseQuantity(*group.Persistence.Size)

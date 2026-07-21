@@ -4,10 +4,32 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 )
+
+// TestValidateCosmoGuardDashboard verifies the dashboard port is rejected when it collides with a
+// port the guard Service already exposes (which would render an invalid duplicate-port Service).
+func TestValidateCosmoGuardDashboard(t *testing.T) {
+	dash := func(enable bool, port *int32) *Config {
+		return &Config{CosmoGuard: &CosmoGuardConfig{
+			Enable:    true,
+			Dashboard: &CosmoGuardDashboardConfig{Enable: enable, Port: port},
+		}}
+	}
+
+	assert.NoError(t, dash(false, ptr.To[int32](26657)).ValidateCosmoGuardDashboard(), "disabled dashboard is never invalid")
+	assert.NoError(t, dash(true, nil).ValidateCosmoGuardDashboard(), "default port 8080 does not collide")
+	assert.NoError(t, dash(true, ptr.To[int32](8090)).ValidateCosmoGuardDashboard(), "non-colliding explicit port ok")
+
+	err := dash(true, ptr.To[int32](26657)).ValidateCosmoGuardDashboard()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "collides")
+	assert.Error(t, dash(true, ptr.To[int32](9001)).ValidateCosmoGuardDashboard(), "metrics port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](9090)).ValidateCosmoGuardDashboard(), "gRPC port collision rejected")
+}
 
 func autoscaledConfig(res *corev1.ResourceRequirements) *Config {
 	return &Config{

@@ -39,12 +39,21 @@ import (
 func intToStr(i int) string { return strconv.Itoa(i) }
 
 const (
-	// labelAppName / appName / labelInstance identify CosmoGuard pods and back the StatefulSet
-	// selector. They are kept separate from caller-provided routing labels so the selector stays
-	// stable regardless of what the owner stamps on the resources.
+	// labelAppName / appName / labelInstance are the conventional Kubernetes labels stamped on
+	// CosmoGuard pods for observability. They are NOT used as Service/StatefulSet selectors (see the
+	// guard-private labels below) because blanket-labeling tooling (Helm/GitOps stamping
+	// app.kubernetes.io/name and a shared app.kubernetes.io/instance across a release) could otherwise
+	// make raw node pods match a guard selector and receive guard-port traffic.
 	labelAppName  = "app.kubernetes.io/name"
 	labelInstance = "app.kubernetes.io/instance"
 	appName       = "cosmoguard"
+
+	// labelGuardManagedBy / labelGuardInstance are guard-private selector labels under CosmoGuard's own
+	// label domain. The operator never stamps this domain onto node pods, so a guard Service selector
+	// keyed on them cannot be matched by raw node pods (even ones carrying inherited app.kubernetes.io
+	// labels). labelGuardManagedBy marks any guard pod; labelGuardInstance identifies one instance.
+	labelGuardManagedBy = "cosmoguard.voluzi.com/managed-by"
+	labelGuardInstance  = "cosmoguard.voluzi.com/instance"
 
 	// containerName is the name of the CosmoGuard container.
 	containerName = "cosmoguard"
@@ -195,26 +204,28 @@ type AutoscalingParams struct {
 	TargetMemory *int32
 }
 
-// InstanceLabels returns the immutable selector labels identifying a CosmoGuard instance's pods.
-// A group Service uses these to target exactly one guard's pods.
+// InstanceLabels returns the immutable, guard-private selector labels identifying a CosmoGuard
+// instance's pods. A group Service uses these to target exactly one guard's pods. They live under
+// CosmoGuard's own label domain so raw node pods (even with inherited app.kubernetes.io labels) can
+// never match a guard Service selector.
 func InstanceLabels(name string) map[string]string {
 	return map[string]string{
-		labelAppName:  appName,
-		labelInstance: name,
+		labelGuardManagedBy: appName,
+		labelGuardInstance:  name,
 	}
 }
 
-// AppLabel returns the label shared by every CosmoGuard pod. A global ingress/gateway Service uses
-// it (plus a per-route label) to target the guard pods of several groups at once.
+// AppLabel returns the guard-private label shared by every CosmoGuard pod. A global ingress/gateway
+// Service uses it (plus a per-route label) to target the guard pods of several groups at once.
 func AppLabel() map[string]string {
-	return map[string]string{labelAppName: appName}
+	return map[string]string{labelGuardManagedBy: appName}
 }
 
 // SelectsGuard reports whether a Service selector targets CosmoGuard pods (i.e. the Service has
 // already been flipped to the guard). Used to keep a guarded Service on the guard through transient
 // guard rollouts rather than reverting it to raw node pods.
 func SelectsGuard(selector map[string]string) bool {
-	return selector[labelAppName] == appName
+	return selector[labelGuardManagedBy] == appName
 }
 
 // PeerServiceName derives the headless peer Service name from the guard name.
@@ -224,7 +235,10 @@ func PeerServiceName(name string) string { return name + "-peer" }
 func EncryptionKeySecretName(name string) string { return name + "-cluster" }
 
 func (p Params) podLabels() map[string]string {
-	return utils.MergeMaps(p.Labels, InstanceLabels(p.Name))
+	// Stamp the conventional app.kubernetes.io labels for observability, then the guard-private
+	// selector labels (authoritative — they win over anything the owner passed in p.Labels).
+	standard := map[string]string{labelAppName: appName, labelInstance: p.Name}
+	return utils.MergeMaps(utils.MergeMaps(p.Labels, standard), InstanceLabels(p.Name))
 }
 
 // env builds the operator-managed COSMOGUARD_* environment injected into the guard container.
