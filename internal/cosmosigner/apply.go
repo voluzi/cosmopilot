@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"reflect"
 
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -22,6 +24,15 @@ import (
 )
 
 const LifecycleDigestAnnotation = "cosmopilot.voluzi.com/cosmosigner-lifecycle-digest"
+
+var errUnsafeRetainedState = stderrors.New("unsafe retained cosmosigner state")
+
+// applyGuard carries deployment-time checks that depend on persisted controller state rather than
+// the rendered Kubernetes object alone.
+type applyGuard struct {
+	RequireRetainedState  bool
+	RetainedStateReplicas int32
+}
 
 // SetLifecycleDigest stamps the rendered lifecycle fingerprint onto a signer StatefulSet.
 func SetLifecycleDigest(sts *appsv1.StatefulSet, digest string) {
@@ -48,12 +59,13 @@ func ReadLifecycleDigest(ctx context.Context, c client.Client, namespace, name s
 // running the SAME blocking checks its deployment performs — a name-collision refusal on EVERY object
 // the deployment creates/updates (each is applied with ApplyOwned, which refuses to overwrite an object
 // owned by a different controller; the one-shot import pod refuses the same way), plus the foreign/
-// ambiguous raft-state PVC guard on a fresh StatefulSet — without applying anything. The ChainNodeSet
-// controller calls this BEFORE it retargets child validators to the remote signer, so a signer that a
-// later apply would refuse (a same-name ConfigMap/Service/StatefulSet/pod owned by another CR, or a
-// stale foreign `data-<signer>-<ordinal>` claim) does not leave a validator with neither its local key
-// nor a deployable signer. Objects this owner already controls remain deployable only when their
-// immutable shape is compatible with the signer resource that will reuse the name.
+// ambiguous and required retained raft-state PVC guards — without creating resources. ApplyOwned
+// repeats both PVC checks immediately before a StatefulSet create, update, or no-op apply. Unsafe
+// retained state on an existing signer is latched at zero replicas. The ChainNodeSet controller calls
+// this BEFORE it retargets child validators to the remote signer, so a signer that a later apply would
+// refuse does not leave a validator with neither its local key nor a deployable signer. Objects this
+// owner already controls remain deployable only when their immutable shape is compatible with the
+// signer resource that will reuse the name.
 //
 // usesImportPod must be true only when the signer actually runs the one-shot `<name>-import` pod (a
 // Vault uploadGenerated signer). Software, GCP KMS and pre-provisioned Vault signers never create it, so
@@ -98,10 +110,19 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 	}
 
 	sts := &appsv1.StatefulSet{}
+	hasStatefulSet := false
 	switch err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); {
 	case err == nil:
 		if !metav1.IsControlledBy(sts, owner) {
 			return foreignObjectErr("StatefulSet", name)
+		}
+		hasStatefulSet = true
+		if sts.GetAnnotations()[retainedStateLostAnnotation] == "true" {
+			// A latched signer stays stopped by the apply path, but preflight must continue far enough
+			// to let a different-key migration persist its reset phases.
+			requireRetainedState = false
+		} else if statefulSetEverRolledOut(sts) {
+			requireRetainedState = true
 		}
 		if err := ensureReplicaPodNamesAvailable(ctx, c, namespace, name, replicas, sts); err != nil {
 			return err
@@ -115,12 +136,19 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 	default:
 		return err
 	}
-	// ApplyOwned's Create and Update paths re-run the foreign-PVC guard below.
+	// ApplyOwned re-runs both PVC guards immediately before every StatefulSet apply path.
 	if err := ensureNoForeignDataPVCs(ctx, c, owner, namespace, name); err != nil {
+		if hasStatefulSet {
+			return quiesceUnsafeRetainedState(ctx, c, sts, err)
+		}
 		return err
 	}
 	if requireRetainedState {
-		return ensureRetainedDataPVCs(ctx, c, owner, namespace, name, replicas)
+		err := ensureRetainedDataPVCs(ctx, c, owner, namespace, name, replicas)
+		if err != nil && hasStatefulSet {
+			return quiesceUnsafeRetainedState(ctx, c, sts, err)
+		}
+		return err
 	}
 	return nil
 }
@@ -131,15 +159,17 @@ func ensureRetainedDataPVCs(ctx context.Context, c client.Client, owner metav1.O
 		pvc := &corev1.PersistentVolumeClaim{}
 		switch err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: claimName}, pvc); {
 		case errors.IsNotFound(err):
-			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is missing, so slash-protection history may have been lost; restore the claim from the original volume or complete a persisted different-key state reset", name, claimName)
+			return fmt.Errorf("%w: refusing to deploy established cosmosigner %q: retained raft-state PVC %q is missing, so slash-protection history may have been lost; restore the claim from the original volume or complete a persisted different-key state reset", errUnsafeRetainedState, name, claimName)
 		case err != nil:
 			return err
 		case pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()):
-			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is not attributed to the current owner", name, claimName)
+			return fmt.Errorf("%w: refusing to deploy established cosmosigner %q: retained raft-state PVC %q is not attributed to the current owner", errUnsafeRetainedState, name, claimName)
 		case !pvc.GetDeletionTimestamp().IsZero():
-			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is terminating, so recreating the StatefulSet could replace slash-protection history with an empty volume", name, claimName)
+			return fmt.Errorf("%w: refusing to deploy established cosmosigner %q: retained raft-state PVC %q is terminating, so recreating the StatefulSet could replace slash-protection history with an empty volume", errUnsafeRetainedState, name, claimName)
 		case pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "":
-			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is not bound to a persistent volume, so its slash-protection history cannot be trusted", name, claimName)
+			return fmt.Errorf("%w: refusing to deploy established cosmosigner %q: retained raft-state PVC %q is not bound to a persistent volume, so its slash-protection history cannot be trusted", errUnsafeRetainedState, name, claimName)
+		case !controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer):
+			return fmt.Errorf("%w: refusing to deploy established cosmosigner %q: retained raft-state PVC %q is not protected against deletion", errUnsafeRetainedState, name, claimName)
 		}
 	}
 	return nil
@@ -198,9 +228,20 @@ func foreignObjectErr(kind, name string) error {
 
 // ApplyOwned creates or updates a cosmosigner-managed object owned by owner. It refuses to
 // overwrite an object owned by a different controller (a same-name CR collision), preserves
-// StatefulSet fields Kubernetes forbids updating, and skips the write entirely when nothing
-// changed (patch-equality), so steady-state reconciles do not churn resourceVersions.
-func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, obj client.Object) error {
+// StatefulSet fields Kubernetes forbids updating, rechecks requested PVC safety invariants at apply
+// time, and skips the write entirely when nothing changed (patch-equality), so steady-state
+// reconciles do not churn resourceVersions.
+func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, obj client.Object, guards ...applyGuard) error {
+	if len(guards) > 1 {
+		return fmt.Errorf("at most one cosmosigner apply guard may be supplied")
+	}
+	if _, isStatefulSet := obj.(*appsv1.StatefulSet); isStatefulSet && len(guards) != 1 {
+		return fmt.Errorf("a cosmosigner StatefulSet requires an explicit apply guard")
+	}
+	guard := applyGuard{}
+	if len(guards) == 1 {
+		guard = guards[0]
+	}
 	if policy, ok := obj.(*networkingv1.NetworkPolicy); ok {
 		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(policy)
 		if err != nil {
@@ -219,20 +260,13 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	}
 	err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing)
 	if errors.IsNotFound(err) {
-		// A FRESH signer StatefulSet must never bind raft-state PVCs left behind by another owner —
-		// e.g. a CR deleted and recreated under the same name (new UID), whose StatefulSet was
-		// garbage-collected but whose per-pod claims were not. In this branch no same-name StatefulSet
-		// exists at all, so any exact-match data claim not attributable to THIS owner is an orphan
-		// carrying unknown raft membership/state; refuse to deploy until the operator deletes or
-		// relabels it. (Claims owned by this CR are fine: re-binding its own state is the normal
-		// restart path, guarded by the replica/storage locks.)
-		if sts, isSts := obj.(*appsv1.StatefulSet); isSts {
-			if err := ensureNoForeignDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName()); err != nil {
-				return err
-			}
-		}
 		if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(obj); err != nil {
 			return err
+		}
+		if sts, isSts := obj.(*appsv1.StatefulSet); isSts {
+			if err := ensureStatefulSetPVCsForApply(ctx, c, owner, sts, nil, guard); err != nil {
+				return err
+			}
 		}
 		return c.Create(ctx, obj)
 	}
@@ -242,13 +276,22 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	if !metav1.IsControlledBy(existing, owner) {
 		return fmt.Errorf("cosmosigner resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
 	}
+	k8s.PreserveImmutableStatefulSetFields(obj, existing)
 	if sts, isSts := obj.(*appsv1.StatefulSet); isSts {
-		if err := ensureNoForeignDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName()); err != nil {
-			return err
+		live, ok := existing.(*appsv1.StatefulSet)
+		if !ok {
+			return fmt.Errorf("existing cosmosigner StatefulSet is not an apps/v1 StatefulSet")
+		}
+		if err := ensureStatefulSetPVCsForApply(ctx, c, owner, sts, live, guard); err != nil {
+			return quiesceUnsafeRetainedState(ctx, c, live, err)
+		}
+		if live.GetAnnotations()[EverRolledOutAnnotation] == "true" {
+			if sts.Annotations == nil {
+				sts.Annotations = map[string]string{}
+			}
+			sts.Annotations[EverRolledOutAnnotation] = "true"
 		}
 	}
-
-	k8s.PreserveImmutableStatefulSetFields(obj, existing)
 
 	// Skip the write when nothing changed, so steady-state reconciles do not bump
 	// resourceVersions (which would re-trigger the owner watch every cycle). The live object is
@@ -267,6 +310,48 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	}
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return c.Update(ctx, obj)
+}
+
+func ensureStatefulSetPVCsForApply(ctx context.Context, c client.Client, owner client.Object, sts, live *appsv1.StatefulSet, guard applyGuard) error {
+	if live != nil && live.GetAnnotations()[retainedStateLostAnnotation] == "true" {
+		return fmt.Errorf("%w: refusing to deploy cosmosigner %q because retained slash-protection state was previously lost or became unsafe; complete a persisted different-key state reset", errUnsafeRetainedState, sts.GetName())
+	}
+	if err := ensureNoForeignDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName()); err != nil {
+		return err
+	}
+	if live != nil && statefulSetEverRolledOut(live) {
+		guard.RequireRetainedState = true
+		if guard.RetainedStateReplicas <= 0 {
+			guard.RetainedStateReplicas = ptr.Deref(live.Spec.Replicas, 1)
+		}
+	}
+	if !guard.RequireRetainedState {
+		return nil
+	}
+	if guard.RetainedStateReplicas <= 0 {
+		return fmt.Errorf("%w: refusing to deploy established cosmosigner %q: retained raft-state replica lock is missing or invalid", errUnsafeRetainedState, sts.GetName())
+	}
+	return ensureRetainedDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName(), guard.RetainedStateReplicas)
+}
+
+func quiesceUnsafeRetainedState(ctx context.Context, c client.Client, sts *appsv1.StatefulSet, cause error) error {
+	if !stderrors.Is(cause, errUnsafeRetainedState) {
+		return cause
+	}
+	if sts.Annotations == nil {
+		sts.Annotations = map[string]string{}
+	}
+	alreadyLatched := sts.Annotations[retainedStateLostAnnotation] == "true"
+	alreadyStopped := sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0
+	if alreadyLatched && alreadyStopped {
+		return cause
+	}
+	sts.Annotations[retainedStateLostAnnotation] = "true"
+	sts.Spec.Replicas = new(int32)
+	if err := c.Update(ctx, sts); err != nil {
+		return fmt.Errorf("%w; additionally failed to quiesce unsafe StatefulSet %q: %v", cause, sts.GetName(), err)
+	}
+	return fmt.Errorf("%w; StatefulSet %q was latched at zero replicas", cause, sts.GetName())
 }
 
 // ScaleDown scales an existing signer StatefulSet owned by owner to zero replicas and reports
@@ -454,9 +539,43 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, d
 		}
 		return false, err
 	}
-	return sts.Status.ObservedGeneration == sts.Generation &&
-		sts.Status.UpdatedReplicas == desiredReplicas &&
-		sts.Status.ReadyReplicas == desiredReplicas, nil
+	return statefulSetRolledOut(sts, desiredReplicas), nil
+}
+
+func statefulSetRolledOut(sts *appsv1.StatefulSet, desiredReplicas int32) bool {
+	return desiredReplicas > 0 && sts.Status.ObservedGeneration == sts.Generation &&
+		sts.Status.UpdatedReplicas == desiredReplicas && sts.Status.ReadyReplicas == desiredReplicas
+}
+
+func statefulSetEverRolledOut(sts *appsv1.StatefulSet) bool {
+	return sts.GetAnnotations()[EverRolledOutAnnotation] == "true" ||
+		statefulSetRolledOut(sts, ptr.Deref(sts.Spec.Replicas, 1))
+}
+
+// MarkEverRolledOut persists monotonic live evidence before root status records the applied
+// lifecycle. A later status restore therefore cannot reinterpret an established signer as fresh.
+func MarkEverRolledOut(ctx context.Context, c client.Client, namespace, name string, desiredReplicas int32) (bool, error) {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !statefulSetRolledOut(sts, desiredReplicas) {
+		return false, nil
+	}
+	if sts.GetAnnotations()[EverRolledOutAnnotation] == "true" {
+		return true, nil
+	}
+	if sts.Annotations == nil {
+		sts.Annotations = map[string]string{}
+	}
+	sts.Annotations[EverRolledOutAnnotation] = "true"
+	if err := c.Update(ctx, sts); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Undeploy removes the managed signer resources for the given base name, deleting only objects the
@@ -466,10 +585,30 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string, d
 // StatefulSet holds the name — so this owner's lingering raft-state claims are never stranded (which
 // would deadlock the IsTornDown gate waiting on them).
 func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
+	sts := &appsv1.StatefulSet{}
+	switch err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); {
+	case err == nil && metav1.IsControlledBy(sts, owner):
+		deleted, err := DeleteStatefulSet(ctx, c, owner, namespace, name)
+		if err != nil || !deleted {
+			return err
+		}
+	case err == nil:
+		gone, err := SignerPodsGone(ctx, c, namespace, name)
+		if err != nil || !gone {
+			return err
+		}
+	case errors.IsNotFound(err):
+		gone, err := SignerPodsGone(ctx, c, namespace, name)
+		if err != nil || !gone {
+			return err
+		}
+	default:
+		return err
+	}
+
 	objects := []client.Object{
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: namespace}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + pubkeyJobSuffix, Namespace: namespace}},
-		&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: namespace}},

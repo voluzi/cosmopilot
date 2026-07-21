@@ -24,6 +24,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 )
 
 type chainNodeSetRoundTripperFunc func(*http.Request) (*http.Response, error)
@@ -64,6 +65,13 @@ func TestReconcileRejectsRecoveredSignerLockMismatchWithWebhooksEnabled(t *testi
 	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
 	require.NoError(t, r.Create(context.Background(), configMap))
 	require.NoError(t, r.Create(context.Background(), sts))
+	targetPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-0", Namespace: nodeSet.Namespace, Labels: map[string]string{
+		controllers.LabelChainNodeSet:      nodeSet.Name,
+		controllers.LabelChainNodeSetGroup: signer.ValidatorGroup,
+		controllers.LabelCosmosignerTarget: params.Name,
+		controllers.LabelValidator:         controllers.StringValueTrue,
+	}}}
+	require.NoError(t, r.Create(context.Background(), targetPod))
 
 	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
 		Namespace: nodeSet.Namespace,
@@ -619,7 +627,7 @@ func TestReconcileValidatesVaultMigrationSourceBeforeQuiescing(t *testing.T) {
 	require.NoError(t, r.Create(context.Background(), sts))
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-" + newSigner.Name + "-0", Namespace: nodeSet.Namespace,
-		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(nodeSet.UID)},
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(nodeSet.UID)}, Finalizers: []string{cosmosigner.RetainedStateFinalizer},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "validator-state-0"},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	require.NoError(t, r.Create(context.Background(), pvc))

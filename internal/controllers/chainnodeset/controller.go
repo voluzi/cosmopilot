@@ -3,7 +3,9 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"time"
 
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,6 +55,7 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes,verbs=get;list;watch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create
+//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
 //+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
@@ -81,6 +84,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.Error(err, "unable to fetch chainnodeset")
 		return ctrl.Result{}, err
 	}
+	if !nodeSet.GetDeletionTimestamp().IsZero() {
+		done, err := r.finalizeCosmosignerOwner(ctx, nodeSet)
+		if err != nil || !done {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+		return ctrl.Result{}, nil
+	}
 
 	// Check if namespace is being terminated - if so, skip reconcile to avoid errors
 	ns := &corev1.Namespace{}
@@ -95,6 +105,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if nodeSet.Labels[controllers.LabelWorkerName] != r.opts.WorkerName {
 		logger.V(1).Info("skipping chainnodeset due to worker-name mismatch.")
 		return ctrl.Result{}, nil
+	}
+	if changed, err := r.prepareCosmosignerOwner(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	if _, err := r.initializeLegacySignerServiceNames(ctx, nodeSet); err != nil {
@@ -658,6 +673,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.ChainNodeSet{}).
 		Owns(&appsv1.ChainNode{}).
+		Owns(&k8sappsv1.StatefulSet{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

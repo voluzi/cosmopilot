@@ -63,7 +63,8 @@ func (p GenerationChangedPredicate) Update(e event.UpdateEvent) bool {
 
 	switch o := e.ObjectNew.(type) {
 	case *appsv1.ChainNode:
-		return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration()
+		return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
+			(e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero())
 
 	case *corev1.Pod:
 		// Ignore events from temporary pods

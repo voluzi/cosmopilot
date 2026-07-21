@@ -13,6 +13,7 @@ import (
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -205,7 +206,7 @@ func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing
 	chainNode.Status.CosmosignerReplicas = ptr.To(int32(2))
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-" + cosmosignerName(chainNode) + "-0", Namespace: chainNode.Namespace,
-		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)},
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)}, Finalizers: []string{cosmosigner.RetainedStateFinalizer},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "sentry-state-0"},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	require.NoError(t, r.Create(context.Background(), pvc))
@@ -222,6 +223,40 @@ func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing
 	chainNode.Status.CosmosignerMigration.Phase = appsv1.CosmosignerMigrationResettingState
 	_, err = r.preflightCosmosigner(context.Background(), chainNode)
 	require.NoError(t, err)
+}
+
+func TestApplyCosmosignerObjectRechecksRetainedState(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
+		Status: appsv1.ChainNodeStatus{
+			CosmosignerAppliedDigest: "rolled-out",
+			CosmosignerReplicas:      ptr.To(int32(1)),
+		},
+	}
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+
+	err := r.applyCosmosignerObject(context.Background(), chainNode, sts)
+	require.ErrorContains(t, err, "retained raft-state PVC")
+	chainNode.Status.CosmosignerReplicas = nil
+	err = r.applyCosmosignerObject(context.Background(), chainNode, sts)
+	require.ErrorContains(t, err, "replica lock")
+	chainNode.Status.CosmosignerReplicas = ptr.To(int32(1))
+
+	chainNode.Status.CosmosignerMigration = &appsv1.CosmosignerMigrationStatus{
+		Phase: appsv1.CosmosignerMigrationResettingState, ResetState: true,
+	}
+	err = r.applyCosmosignerObject(context.Background(), chainNode, sts)
+	require.ErrorContains(t, err, "migration phase")
+	chainNode.Status.CosmosignerMigration.Phase = appsv1.CosmosignerMigrationRollingOut
+	require.NoError(t, r.applyCosmosignerObject(context.Background(), chainNode, sts))
 }
 
 func TestPreflightCosmosignerQuiescesSentrySignerOnReservationConflict(t *testing.T) {
@@ -259,7 +294,7 @@ func TestPreflightCosmosignerQuiescesSentrySignerOnReservationConflict(t *testin
 	}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-" + cosmosignerName(chainNode) + "-0", Namespace: chainNode.Namespace,
-		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)},
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)}, Finalizers: []string{cosmosigner.RetainedStateFinalizer},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "sentry-state-0"},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	scheme := runtime.NewScheme()
@@ -360,9 +395,12 @@ func TestReconcileCosmosignerMigrationRequeuesAfterRecoveringLiveLifecycle(t *te
 	require.NoError(t, err)
 	require.True(t, pending, "recovery must stop this reconcile before desired services or StatefulSet fields are applied")
 	require.Equal(t, oldDigest, chainNode.Status.CosmosignerAppliedDigest)
+	freshSTS := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sts), freshSTS))
+	require.Equal(t, "true", freshSTS.Annotations[cosmosigner.EverRolledOutAnnotation])
 }
 
-func TestReconcileCosmosignerMigrationRecoversUnreadyLiveLifecycle(t *testing.T) {
+func TestReconcileCosmosignerMigrationDoesNotRecordUnreadyLiveLifecycle(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -401,9 +439,9 @@ func TestReconcileCosmosignerMigrationRecoversUnreadyLiveLifecycle(t *testing.T)
 
 	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
 	require.NoError(t, err)
-	require.True(t, pending)
-	require.Equal(t, liveDigest, chainNode.Status.CosmosignerAppliedDigest)
-	require.Equal(t, params.ExpectedPublicKey, chainNode.Status.CosmosignerPublicKey)
+	require.False(t, pending)
+	require.Empty(t, chainNode.Status.CosmosignerAppliedDigest)
+	require.Empty(t, chainNode.Status.CosmosignerPublicKey)
 	require.Nil(t, chainNode.Status.CosmosignerMigration)
 }
 
@@ -644,7 +682,7 @@ func TestReconcileSigningConfigsValidatesMigrationSourceBeforeQuiescing(t *testi
 	}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-" + cosmosignerName(chainNode) + "-0", Namespace: chainNode.Namespace,
-		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)},
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)}, Finalizers: []string{cosmosigner.RetainedStateFinalizer},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "validator-state-0"},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	scheme := runtime.NewScheme()
@@ -680,14 +718,20 @@ func TestEnsureCosmosignerRejectsRecoveredLockMismatch(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace},
 		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(3))},
 	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name, Namespace: chainNode.Namespace, Labels: map[string]string{
+		controllers.LabelCosmosignerTarget: cosmosignerName(chainNode),
+		controllers.LabelValidator:         controllers.StringValueTrue,
+	}}}
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, pod, scheme))
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&appsv1.ChainNode{}).
-		WithObjects(chainNode, sts).
+		WithObjects(chainNode, sts, pod).
 		Build()
 	r := &Reconciler{Client: client, Scheme: scheme}
 
@@ -699,6 +743,45 @@ func TestEnsureCosmosignerRejectsRecoveredLockMismatch(t *testing.T) {
 	fresh := &k8sappsv1.StatefulSet{}
 	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Namespace: sts.Namespace, Name: sts.Name}, fresh))
 	require.Equal(t, int32(3), ptr.Deref(fresh.Spec.Replicas, 0))
+}
+
+func TestInitCosmosignerLocksRecoversValidatorTargetFromLivePod(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: types.UID("validator-uid")},
+		Spec:       appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
+		Status:     appsv1.ChainNodeStatus{ChainID: "test-1"},
+	}
+	one := int32(1)
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace},
+		Spec: k8sappsv1.StatefulSetSpec{
+			Replicas: &one,
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
+				ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+				}},
+			}},
+		}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name, Namespace: chainNode.Namespace, Labels: map[string]string{
+		controllers.LabelCosmosignerTarget: cosmosignerName(chainNode),
+		controllers.LabelValidator:         controllers.StringValueTrue,
+	}}}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, pod, scheme))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode, sts, pod).Build()
+	r := &Reconciler{Client: cl, Scheme: scheme}
+
+	changed, err := r.initCosmosignerLocks(context.Background(), chainNode)
+	require.NoError(t, err)
+	require.True(t, changed)
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(chainNode), fresh))
+	require.NotNil(t, fresh.Status.CosmosignerValidatorTargeted)
+	require.True(t, *fresh.Status.CosmosignerValidatorTargeted, "current sentry spec must not demote the recovered validator signer")
 }
 
 func TestPreflightCosmosignerRejectsRecoveredIdentityMismatch(t *testing.T) {
@@ -780,6 +863,9 @@ func requireRecoveredStandaloneIdentityMismatchRejected(t *testing.T, currentVal
 	fresh := &corev1.ConfigMap{}
 	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Namespace: chainNode.Namespace, Name: liveParams.Name}, fresh))
 	require.Equal(t, liveConfig, fresh.Data["config.yaml"])
+	freshSTS := &k8sappsv1.StatefulSet{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Namespace: liveStatefulSet.Namespace, Name: liveStatefulSet.Name}, freshSTS))
+	require.Zero(t, ptr.Deref(freshSTS.Spec.Replicas, 1), "a live signer with an unverifiable recovered identity must be quiesced")
 }
 
 func TestPreflightCosmosignerImportSourceIgnoresLegacyAnnotation(t *testing.T) {
@@ -887,7 +973,8 @@ func TestEnsureCosmosignerPreflightsLocalFallbackBeforeTeardown(t *testing.T) {
 	chainNode.Status.CosmosignerPublicKey = parsed.PubKey.Value
 	keySecret.Data[PrivKeyFilename] = key
 	require.NoError(t, client.Update(context.Background(), keySecret))
-	require.NoError(t, r.preflightCosmosignerFallback(context.Background(), chainNode))
+	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.ErrorContains(t, err, "slash-protection state")
 }
 
 func TestPreflightCosmosignerFallbackTreatsLegacySigningDigestAsValidator(t *testing.T) {
@@ -986,10 +1073,11 @@ func TestPreflightCosmosignerFallbackRequiresMatchingLocalPublicKey(t *testing.T
 
 	secret.Data[PrivKeyFilename] = servedKey
 	require.NoError(t, client.Update(context.Background(), secret))
-	require.NoError(t, r.preflightCosmosignerFallback(context.Background(), chainNode))
+	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.ErrorContains(t, err, "slash-protection state")
 }
 
-func TestPreflightCosmosignerFallbackDoesNotTrustDifferentTmKMSTarget(t *testing.T) {
+func TestPreflightCosmosignerFallbackAlwaysVerifiesTmKMSPublicKey(t *testing.T) {
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
 		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
@@ -1000,14 +1088,14 @@ func TestPreflightCosmosignerFallbackDoesNotTrustDifferentTmKMSTarget(t *testing
 					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
 					Key:                  "token",
 				},
-				SkipCertificateVerify: true,
 			},
 		}}}},
 		Status: appsv1.ChainNodeStatus{
-			CosmosignerServingIdentity: "vault\x00https://vault:8200\x00\x00transit\x00served-key",
-			CosmosignerPublicKey:       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			CosmosignerPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 		},
 	}
+	chainNode.Status.CosmosignerServingIdentity = chainNode.EffectiveSigningIdentity()
+	require.True(t, chainNode.ValidatorResolvesSigningIdentity(chainNode.Status.CosmosignerServingIdentity))
 	token := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: "default"},
 		Data:       map[string][]byte{"token": []byte("vault-token")},
@@ -1044,9 +1132,28 @@ func TestPreflightCosmosignerFallbackDoesNotTrustDifferentTmKMSTarget(t *testing
 
 	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
 	require.Error(t, err)
-	require.Contains(t, createdPod, "VAULT_SKIP_VERIFY")
-	require.Contains(t, createdPod, "true")
+	require.NotContains(t, createdPod, "VAULT_SKIP_VERIFY")
 	require.Contains(t, createdPod, `"--vault-key-version","1"`)
+}
+
+func TestPreflightCosmosignerFallbackRejectsUnverifiedVaultTLS(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+			Hashicorp: &appsv1.TmKmsHashicorpProvider{
+				Address: "https://vault:8200", Key: "fallback-key", SkipCertificateVerify: true,
+				TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"}, Key: "token"},
+			},
+		}}}},
+		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+
+	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.ErrorContains(t, err, "TLS verification")
 }
 
 func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {
@@ -1119,7 +1226,8 @@ func TestPreflightCosmosignerFallbackRequiresTmKMSSecrets(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-ca", Namespace: chainNode.Namespace},
 		Data:       map[string][]byte{"ca.crt": []byte("certificate")},
 	}))
-	require.NoError(t, r.preflightCosmosignerFallback(context.Background(), chainNode))
+	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
+	require.ErrorContains(t, err, "Kubernetes clientset")
 }
 
 func TestPreflightCosmosignerFallbackUsesRecordedServingIdentity(t *testing.T) {
@@ -1217,6 +1325,12 @@ func TestBackfillCosmosignerLegacyStatusRecordsTargetKind(t *testing.T) {
 			}
 			scheme := runtime.NewScheme()
 			if err := appsv1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := k8sappsv1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
 			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build()

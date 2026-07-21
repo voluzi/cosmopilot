@@ -537,8 +537,7 @@ func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *No
 }
 
 // ValidatorGroupResolvesSigningIdentity reports whether a validator group's own local/tmKMS path
-// points at the recorded signer identity. Controllers use this as the cheap same-backend proof before
-// querying an external fallback key's public key during signer removal.
+// points at the recorded signer identity.
 func (nodeSet *ChainNodeSet) ValidatorGroupResolvesSigningIdentity(group string, cfg *NodeSetValidatorConfig, identity string) bool {
 	return identity != "" && nodeSet.validatorGroupSigningIdentity(group, cfg) == identity
 }

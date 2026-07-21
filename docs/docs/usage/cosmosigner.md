@@ -342,6 +342,19 @@ placement changes:
    differs from the public key already recorded on-chain or by the serving signer.
 6. Only then are the new signer configuration and targets applied and the StatefulSet recreated.
 
+Raft-state PVCs carry a Cosmopilot finalizer so a normal deletion cannot silently replace slash state
+while the StatefulSet can still create pods. If an established signer's required claim is missing,
+terminating, unbound, foreign, or unprotected, Cosmopilot latches that StatefulSet at zero replicas.
+Automated recovery requires completing a persisted different-key reset. Restoring the original
+volume instead requires verifying it out of band and explicitly removing the
+`cosmopilot.voluzi.com/cosmosigner-retained-state-lost` StatefulSet annotation.
+During upgrades, bound non-terminating claims already labelled for the same owner are protected before
+any other signer preflight runs. Claims are released only after signer pods and the StatefulSet are
+gone; deleting the owning `ChainNode` or `ChainNodeSet` waits for that ordered cleanup, and any unrelated
+PVC finalizer can intentionally delay completion. The StatefulSet also records monotonic rollout
+evidence so restoring incomplete CR status cannot make a previously serving signer look like a fresh
+deployment.
+
 Replica-count and state-storage changes remain unsupported because they require an explicit raft
 membership or PVC migration.
 
@@ -397,7 +410,9 @@ not by changing the managed signer backend.
 Break-before-make prevents two signing implementations from running concurrently, and Cosmosigner
 retains its Raft high-water mark across same-key Cosmosigner upgrades. It cannot import historical
 `priv_validator_state.json` from a local validator or TmKMS. Before the first migration into
-Cosmosigner, or any deliberate return to another signing implementation, stop the old path cleanly,
-ensure the validator data cannot roll back below the last signed height, and retain the old signing
-state for incident recovery. A public-key match alone does not transfer slash-protection history.
+Cosmosigner, stop the old path cleanly, ensure the validator data cannot roll back below the last
+signed height, and retain the old signing state for incident recovery. A public-key match alone does
+not transfer slash-protection history, so Cosmopilot refuses to remove a validator-serving
+Cosmosigner back to an independent local or TmKMS engine. That handoff requires a future explicit
+quiesce, slash-state transfer, and verification protocol.
 :::

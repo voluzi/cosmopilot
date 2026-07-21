@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -135,6 +136,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.Error(err, "unable to fetch chainnode")
 		return ctrl.Result{}, err
 	}
+	if !chainNode.GetDeletionTimestamp().IsZero() {
+		done, err := r.finalizeCosmosignerOwner(ctx, chainNode)
+		if err != nil || !done {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+		return ctrl.Result{}, nil
+	}
 
 	// Check if namespace is being terminated - if so, skip reconcile to avoid errors
 	ns := &corev1.Namespace{}
@@ -149,6 +157,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if chainNode.Labels[controllers.LabelWorkerName] != r.opts.WorkerName {
 		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
 		return ctrl.Result{}, nil
+	}
+	if changed, err := r.prepareCosmosignerOwner(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	if r.opts.DisableWebhooks {
@@ -385,6 +398,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
+		Owns(&k8sappsv1.StatefulSet{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

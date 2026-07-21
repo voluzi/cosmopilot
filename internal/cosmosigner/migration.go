@@ -30,6 +30,27 @@ func RetainedStateRequired(established bool, migration *appsv1.CosmosignerMigrat
 	}
 }
 
+// StatefulSetApplyGuard derives the apply-time state checks from persisted migration and replica
+// locks. Migration phases before RollingOut are teardown/retarget stages and cannot recreate a
+// StatefulSet, even when a different-key reset no longer needs the old claims.
+func StatefulSetApplyGuard(established bool, migration *appsv1.CosmosignerMigrationStatus, lockedReplicas *int32, desiredReplicas int32) (applyGuard, error) {
+	if migration != nil && migration.Phase != appsv1.CosmosignerMigrationRollingOut {
+		return applyGuard{}, fmt.Errorf("cosmosigner StatefulSet cannot be applied during migration phase %q", migration.Phase)
+	}
+	guard := applyGuard{
+		RequireRetainedState:  RetainedStateRequired(established, migration),
+		RetainedStateReplicas: desiredReplicas,
+	}
+	if !guard.RequireRetainedState {
+		return guard, nil
+	}
+	if lockedReplicas == nil || *lockedReplicas <= 0 {
+		return applyGuard{}, fmt.Errorf("established cosmosigner retained raft-state replica lock is missing or invalid")
+	}
+	guard.RetainedStateReplicas = *lockedReplicas
+	return guard, nil
+}
+
 // ReconcileStatefulSetMigration advances one persisted break-before-make migration phase. A phase
 // transition is returned to the caller for status persistence; ready is true only in Recreating.
 func ReconcileStatefulSetMigration(

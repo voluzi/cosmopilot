@@ -529,7 +529,7 @@ func TestReconcileSigningConfigsWaitsForCosmosignerRollout(t *testing.T) {
 	}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-" + cosmosignerName(chainNode) + "-0", Namespace: namespace,
-		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)},
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)}, Finalizers: []string{cosmosigner.RetainedStateFinalizer},
 	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "sentry-state-0"},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	if err := r.Create(context.Background(), pvc); err != nil {

@@ -18,6 +18,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // TestIsRolledOut covers the rollout-gating logic that arms the signing-identity digest: only a
@@ -482,6 +483,48 @@ func TestUndeployCleansOwnPVCsDespiteForeignStatefulSet(t *testing.T) {
 	}
 }
 
+func TestUndeployKeepsRetainedPVCUntilSignerPodsAreGone(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	owner := fakeOwner("owner", types.UID("owner-uid"))
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Generation: 1, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)}},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &zero,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+		}, Status: appsv1.StatefulSetStatus{ObservedGeneration: 1, Replicas: 0}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns, Labels: InstanceLabels(name)}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
+		Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+	}}
+	scheme := lockScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sts, pod, pvc).Build()
+
+	if err := Undeploy(context.Background(), c, owner, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	freshPVC := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), freshPVC); err != nil {
+		t.Fatalf("retained claim must remain while a signer pod exists: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(freshPVC, RetainedStateFinalizer) {
+		t.Fatal("retained-state finalizer was released before signer pod termination")
+	}
+
+	if err := c.Delete(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := Undeploy(context.Background(), c, owner, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("retained claim must be deleted after signer termination, got %v", err)
+	}
+}
+
 // TestAmbiguousLegacyPVCBlocksTornDown verifies unlabeled legacy raft-state claims are never deleted
 // and never treated as torn down: they cannot be attributed to any owner without a race, so they
 // block completion until the operator resolves them (delete or label), preventing a recreated signer
@@ -596,7 +639,7 @@ func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
 	}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreignPVC).Build()
-	err := ApplyOwned(context.Background(), c, scheme, me, newSTS())
+	err := ApplyOwned(context.Background(), c, scheme, me, newSTS(), applyGuard{})
 	if err == nil {
 		t.Fatal("creating a fresh signer StatefulSet over a foreign raft-state PVC must be refused")
 	}
@@ -609,7 +652,7 @@ func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: InstanceLabels(name),
 	}}
 	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacyPVC).Build()
-	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS()); err == nil {
+	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS(), applyGuard{}); err == nil {
 		t.Fatal("creating a fresh signer StatefulSet over an unlabeled legacy PVC must be refused")
 	}
 
@@ -619,7 +662,7 @@ func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
 	}}
 	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(strippedPVC).Build()
-	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS()); err == nil {
+	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS(), applyGuard{}); err == nil {
 		t.Fatal("creating a fresh signer StatefulSet over a label-stripped name-matching PVC must be refused")
 	}
 
@@ -628,7 +671,7 @@ func TestApplyOwnedRefusesForeignDataPVCsOnFreshStatefulSet(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "me-uid"),
 	}}
 	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(ownPVC).Build()
-	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS()); err != nil {
+	if err := ApplyOwned(context.Background(), c, scheme, me, newSTS(), applyGuard{}); err != nil {
 		t.Fatalf("own claims must not block a fresh StatefulSet: %v", err)
 	}
 }
@@ -664,9 +707,174 @@ func TestApplyOwnedRechecksDataPVCsBeforeUpdatingStatefulSet(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec:       appsv1.StatefulSetSpec{Replicas: &one},
 	}
-	err := ApplyOwned(context.Background(), c, scheme, owner, desired)
+	err := ApplyOwned(context.Background(), c, scheme, owner, desired, applyGuard{})
 	if err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
 		t.Fatalf("a foreign PVC appearing after preflight must block StatefulSet scale-up, got %v", err)
+	}
+}
+
+func TestApplyOwnedRechecksRequiredRetainedPVCsBeforeCreatingStatefulSet(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("me-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
+			Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+	if err := PreflightDeployable(context.Background(), c, owner, ns, name, 1, false, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), pvc); err != nil {
+		t.Fatal(err)
+	}
+	one := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &one},
+	}
+	err := ApplyOwned(context.Background(), c, scheme, owner, sts, applyGuard{
+		RequireRetainedState: true, RetainedStateReplicas: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "retained raft-state PVC") || !strings.Contains(err.Error(), "is terminating") {
+		t.Fatalf("a retained PVC deletion after preflight must block StatefulSet creation, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the StatefulSet must not have been created, got err=%v", err)
+	}
+}
+
+func TestApplyOwnedRequiresStatefulSetGuard(t *testing.T) {
+	scheme := lockScheme(t)
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: types.UID("owner-uid")}}
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "mychain-signer", Namespace: "default"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	err := ApplyOwned(context.Background(), c, scheme, owner, sts)
+	if err == nil || !strings.Contains(err.Error(), "apply guard") {
+		t.Fatalf("StatefulSet apply without an explicit guard must fail closed, got %v", err)
+	}
+}
+
+func TestApplyOwnedQuiescesEstablishedStatefulSetWhenRetainedPVCIsTerminating(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	one := int32(1)
+	existing := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)}},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &one},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
+			Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing, pvc).Build()
+	desired := existing.DeepCopy()
+	desired.ResourceVersion = ""
+	desired.OwnerReferences = nil
+
+	err := ApplyOwned(context.Background(), c, scheme, owner, desired, applyGuard{
+		RequireRetainedState: true, RetainedStateReplicas: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "terminating") {
+		t.Fatalf("terminating retained state must fail closed, got %v", err)
+	}
+	fresh := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(fresh.Spec.Replicas, 1) != 0 || fresh.Annotations[retainedStateLostAnnotation] != "true" {
+		t.Fatalf("unsafe retained state must quiesce and latch the signer, got replicas=%d annotations=%v", ptr.Deref(fresh.Spec.Replicas, 1), fresh.Annotations)
+	}
+}
+
+func TestPreflightDeployableQuiescesEstablishedStatefulSetWhenRetainedPVCIsTerminating(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("owner-uid")}}
+	one := int32(1)
+	existing := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)}},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &one},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
+			Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing, pvc).Build()
+
+	err := PreflightDeployable(context.Background(), c, owner, ns, name, 1, false, false, true)
+	if err == nil || !strings.Contains(err.Error(), "terminating") {
+		t.Fatalf("terminating retained state must fail preflight, got %v", err)
+	}
+	fresh := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(fresh.Spec.Replicas, 1) != 0 || fresh.Annotations[retainedStateLostAnnotation] != "true" {
+		t.Fatalf("unsafe preflight state must quiesce and latch the signer, got replicas=%d annotations=%v", ptr.Deref(fresh.Spec.Replicas, 1), fresh.Annotations)
+	}
+}
+
+func TestPreflightDeployableUsesEverRolledOutEvidenceAfterStatusLoss(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	owner := fakeOwner("owner", types.UID("owner-uid"))
+	one := int32(1)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+		Annotations: map[string]string{EverRolledOutAnnotation: "true"},
+	}, Spec: appsv1.StatefulSetSpec{Replicas: &one}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts).Build()
+
+	err := PreflightDeployable(context.Background(), c, owner, ns, name, 1, false, false, false)
+	if err == nil || !strings.Contains(err.Error(), "retained raft-state PVC") {
+		t.Fatalf("status loss must not bypass retained-state checks after rollout, got %v", err)
+	}
+	fresh := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(fresh.Spec.Replicas, 1) != 0 {
+		t.Fatalf("status-loss signer with missing retained state must be quiesced, got replicas=%d", ptr.Deref(fresh.Spec.Replicas, 1))
+	}
+}
+
+func TestPreflightDeployableDoesNotLatchFreshPendingPVC(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	owner := fakeOwner("owner", types.UID("owner-uid"))
+	one := int32(1)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+	}, Spec: appsv1.StatefulSetSpec{Replicas: &one}, Status: appsv1.StatefulSetStatus{ObservedGeneration: 0}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, owner.UID),
+	}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts, pvc).Build()
+
+	if err := PreflightDeployable(context.Background(), c, owner, ns, name, 1, false, false, false); err != nil {
+		t.Fatalf("an unrolled first deployment may wait for its initial PVC without being latched: %v", err)
+	}
+	fresh := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(fresh.Spec.Replicas, 0) != 1 || fresh.Annotations[retainedStateLostAnnotation] == "true" {
+		t.Fatalf("fresh pending deployment was incorrectly latched: replicas=%d annotations=%v", ptr.Deref(fresh.Spec.Replicas, 0), fresh.Annotations)
 	}
 }
 
@@ -778,9 +986,10 @@ func TestPreflightDeployableRequiresCompleteRetainedRaftState(t *testing.T) {
 	owner := fakeOwner("cs", types.UID("owner-uid"))
 	claim := func(ordinal int) *corev1.PersistentVolumeClaim {
 		return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-			Name:      dataVolumeName + "-" + name + "-" + strconv.Itoa(ordinal),
-			Namespace: ns,
-			Labels:    pvcOwnerLabels(name, owner.UID),
+			Name:       dataVolumeName + "-" + name + "-" + strconv.Itoa(ordinal),
+			Namespace:  ns,
+			Labels:     pvcOwnerLabels(name, owner.UID),
+			Finalizers: []string{RetainedStateFinalizer},
 		}, Spec: corev1.PersistentVolumeClaimSpec{
 			VolumeName: "pv-" + strconv.Itoa(ordinal),
 		}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
@@ -788,7 +997,7 @@ func TestPreflightDeployableRequiresCompleteRetainedRaftState(t *testing.T) {
 	terminating := claim(0)
 	now := metav1.Now()
 	terminating.DeletionTimestamp = &now
-	terminating.Finalizers = []string{"test.voluzi.com/hold"}
+	terminating.Finalizers = append(terminating.Finalizers, "test.voluzi.com/hold")
 	unbound := claim(0)
 	unbound.Spec.VolumeName = ""
 	unbound.Status.Phase = corev1.ClaimPending

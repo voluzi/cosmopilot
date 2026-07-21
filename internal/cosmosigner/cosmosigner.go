@@ -35,6 +35,23 @@ const (
 	// the collided name, so it cannot distinguish owners.
 	labelOwnerUID = "cosmopilot.voluzi.com/cosmosigner-owner"
 
+	// RetainedStateFinalizer prevents a normal PVC deletion from replacing persisted slash state
+	// while its signer StatefulSet can still create pods. Controlled teardown removes it only after
+	// the signing path has entered a persisted migration/removal flow.
+	RetainedStateFinalizer = "cosmopilot.voluzi.com/cosmosigner-retained-state"
+
+	// OwnerFinalizer keeps the root CR available until every managed signer is quiesced and its
+	// retained PVC finalizers have been released.
+	OwnerFinalizer = "cosmopilot.voluzi.com/cosmosigner-cleanup"
+
+	// EverRolledOutAnnotation is monotonic evidence that this StatefulSet has served its desired
+	// generation. It survives root-status loss and makes retained-state checks fail closed.
+	EverRolledOutAnnotation = "cosmopilot.voluzi.com/cosmosigner-ever-rolled-out"
+
+	// retainedStateLostAnnotation latches a signer off after retained state becomes unsafe. A
+	// different-key migration deletes the StatefulSet before recreating it and clears the latch.
+	retainedStateLostAnnotation = "cosmopilot.voluzi.com/cosmosigner-retained-state-lost"
+
 	// containerName is the name of the signer container.
 	containerName = "cosmosigner"
 	configHashEnv = "ROLLME"
@@ -466,7 +483,10 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 					// Label the per-pod PVCs so they can be selected for cleanup when the signer is
 					// removed (StatefulSet PVCs are not garbage-collected automatically), including the
 					// owner UID so a same-name signer owned by a different CR is never conflated.
-					ObjectMeta: metav1.ObjectMeta{Name: dataVolumeName, Labels: p.pvcTemplateLabels()},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: dataVolumeName, Labels: p.pvcTemplateLabels(),
+						Finalizers: []string{RetainedStateFinalizer},
+					},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 						StorageClassName: p.StorageClassName,

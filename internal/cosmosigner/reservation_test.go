@@ -158,6 +158,31 @@ func TestEnsureConsensusKeyReservationAllowsSameRootOwner(t *testing.T) {
 	requireReservation(t, c, "chain-1", reservationTestPublicKey, holder)
 }
 
+func TestEnsureConsensusKeyReservationRejectsConflictingSiblingWhenExactReservationExists(t *testing.T) {
+	scheme := reservationScheme(t)
+	holder := ReservationHolder{UID: types.UID("nodeset-uid"), Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "validator"}
+	exact := &appsv1.ConsensusKeyReservation{
+		ObjectMeta: metav1.ObjectMeta{Name: ConsensusKeyReservationName("chain-1", reservationTestPublicKey)},
+		Spec: appsv1.ConsensusKeyReservationSpec{
+			ChainID: "chain-1", PublicKey: reservationTestPublicKey, OwnerUID: holder.UID,
+			OwnerKind: holder.Kind, Namespace: holder.Namespace, OwnerName: holder.Name, Claim: holder.Claim,
+		},
+	}
+	sibling := &appsv1.ConsensusKeyReservation{
+		ObjectMeta: metav1.ObjectMeta{Name: ConsensusKeyReservationName("chain-1", reservationOtherPublicKey)},
+		Spec: appsv1.ConsensusKeyReservationSpec{
+			ChainID: "chain-1", PublicKey: reservationOtherPublicKey, OwnerUID: holder.UID,
+			OwnerKind: holder.Kind, Namespace: holder.Namespace, OwnerName: holder.Name, Claim: holder.Claim,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(exact, sibling).Build()
+
+	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder)
+	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
+		t.Fatalf("an exact reservation must not hide a sibling reservation for the same claim, got %v", err)
+	}
+}
+
 func TestEnsureConsensusKeyReservationRejectsDifferentClaimWithinSameRoot(t *testing.T) {
 	scheme := reservationScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()

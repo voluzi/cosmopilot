@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,6 +202,44 @@ func TestRetainedStateRequired(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := RetainedStateRequired(tc.established, tc.migration); got != tc.want {
 				t.Fatalf("RetainedStateRequired() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStatefulSetApplyGuard(t *testing.T) {
+	locked := int32(3)
+	for _, tc := range []struct {
+		name         string
+		established  bool
+		migration    *cosmopilotv1.CosmosignerMigrationStatus
+		locked       *int32
+		wantRetain   bool
+		wantReplicas int32
+		wantErr      string
+	}{
+		{name: "first rollout", locked: nil, wantReplicas: 1},
+		{name: "established signer", established: true, locked: &locked, wantRetain: true, wantReplicas: 3},
+		{name: "missing established lock", established: true, wantErr: "replica lock"},
+		{name: "same-key rollout", established: true, locked: &locked, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRollingOut}, wantRetain: true, wantReplicas: 3},
+		{name: "different-key rollout", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRollingOut, ResetState: true}, wantReplicas: 1},
+		{name: "reset not completed", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationResettingState, ResetState: true}, wantErr: "migration phase"},
+		{name: "retarget not completed", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRetargeting, ResetState: true}, wantErr: "migration phase"},
+		{name: "recreation not authorized", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRecreating, ResetState: true}, wantErr: "migration phase"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			guard, err := StatefulSetApplyGuard(tc.established, tc.migration, tc.locked, 1)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("StatefulSetApplyGuard() error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if guard.RequireRetainedState != tc.wantRetain || guard.RetainedStateReplicas != tc.wantReplicas {
+				t.Fatalf("StatefulSetApplyGuard() = %+v, want retain=%v replicas=%d", guard, tc.wantRetain, tc.wantReplicas)
 			}
 		})
 	}

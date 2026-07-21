@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -265,6 +266,9 @@ func TestVolumeClaimTemplateLabeledForCleanup(t *testing.T) {
 		if pvc.Labels[k] != v {
 			t.Fatalf("PVC template missing label %s=%s (got %+v)", k, v, pvc.Labels)
 		}
+	}
+	if !slices.Contains(pvc.Finalizers, RetainedStateFinalizer) {
+		t.Fatalf("PVC template must protect retained slash state, got finalizers %v", pvc.Finalizers)
 	}
 }
 
