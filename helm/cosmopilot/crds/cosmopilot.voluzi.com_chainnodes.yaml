@@ -5310,7 +5310,6 @@ spec:
                               autoRenewToken:
                                 description: |-
                                   Whether to automatically renew the Vault token. Defaults to `false`.
-
                                   Deprecated: this deploys vault-token-renewer for legacy tmKMS configurations. Cosmosigner
                                   renews Vault tokens internally and does not use this sidecar.
                                 type: boolean
