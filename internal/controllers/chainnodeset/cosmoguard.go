@@ -91,8 +91,9 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 		// Run under the group pods' ServiceAccount so SA-bound pull secrets / workload identity still
 		// apply, as they did for the in-pod sidecar.
 		ServiceAccountName: cfg.GetServiceAccountName(),
-		// Mirror the group's safe-to-evict setting so a pinned group's guard isn't scaled away under it.
-		PodAnnotations:    cosmoguard.PodAnnotationsForSafeEvict(cfg.SafeToEvict),
+		// Carry the group's pod annotations (mesh/Vault injection, admission markers) plus the mirrored
+		// safe-to-evict setting, as the in-pod sidecar did by sharing the node pod.
+		PodAnnotations:    cosmoguard.GuardPodAnnotations(cfg.PodAnnotations, cfg.SafeToEvict),
 		PriorityClassName: priorityClassName,
 		NodeSelector:      nodeSelector,
 		Affinity:          affinity,

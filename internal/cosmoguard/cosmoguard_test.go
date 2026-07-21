@@ -166,17 +166,26 @@ func TestSelectsGuard(t *testing.T) {
 	assert.False(t, SelectsGuard(nil))
 }
 
-func TestPodAnnotationsForSafeEvict(t *testing.T) {
-	assert.Nil(t, PodAnnotationsForSafeEvict(nil), "unset -> no annotation (cluster default)")
-	assert.Equal(t, map[string]string{controllers.AnnotationSafeEvict: "false"}, PodAnnotationsForSafeEvict(ptr.To(false)))
-	assert.Equal(t, map[string]string{controllers.AnnotationSafeEvict: "true"}, PodAnnotationsForSafeEvict(ptr.To(true)))
+func TestGuardPodAnnotations(t *testing.T) {
+	assert.Nil(t, GuardPodAnnotations(nil, nil), "nothing to stamp -> nil")
+	assert.Equal(t, map[string]string{controllers.AnnotationSafeEvict: "false"}, GuardPodAnnotations(nil, ptr.To(false)))
 
-	// The annotation must land on the pod template so cluster-autoscaler sees it.
+	// User annotations (mesh/Vault injection etc.) are carried alongside the safe-to-evict annotation.
+	merged := GuardPodAnnotations(map[string]string{"sidecar.istio.io/inject": "true"}, ptr.To(true))
+	assert.Equal(t, "true", merged["sidecar.istio.io/inject"])
+	assert.Equal(t, "true", merged[controllers.AnnotationSafeEvict])
+
+	// The generated safe-to-evict annotation wins over a user-provided value for the same key.
+	won := GuardPodAnnotations(map[string]string{controllers.AnnotationSafeEvict: "true"}, ptr.To(false))
+	assert.Equal(t, "false", won[controllers.AnnotationSafeEvict])
+
+	// Annotations must land on the pod template so cluster-autoscaler / mesh injectors see them.
 	p := baseParams()
 	p.UpstreamHost = "host"
-	p.PodAnnotations = PodAnnotationsForSafeEvict(ptr.To(false))
+	p.PodAnnotations = GuardPodAnnotations(map[string]string{"vault.hashicorp.com/agent-inject": "true"}, ptr.To(false))
 	tmpl := p.StatefulSet().Spec.Template
 	assert.Equal(t, "false", tmpl.Annotations[controllers.AnnotationSafeEvict])
+	assert.Equal(t, "true", tmpl.Annotations["vault.hashicorp.com/agent-inject"])
 }
 
 func TestGenerateEncryptionKey(t *testing.T) {

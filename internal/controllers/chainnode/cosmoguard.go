@@ -92,17 +92,22 @@ func (r *Reconciler) standaloneRouteTargetsGuard(ctx context.Context, chainNode 
 		return false
 	}
 
-	ing := &networkingv1.Ingress{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: chainNode.GetName()}, ing); err != nil {
-		return false
-	}
-	for _, rule := range ing.Spec.Rules {
-		if rule.HTTP == nil {
+	// A gRPC-only Ingress lives in a separate "<node>-grpc" Ingress (getGrpcIngressSpec); the base
+	// "<node>" Ingress can carry no guard backend at all in that case. Inspect both so the sticky check
+	// still keeps a gRPC-exposed guard through a transient rollout.
+	for _, name := range []string{chainNode.GetName(), fmt.Sprintf("%s-grpc", chainNode.GetName())} {
+		ing := &networkingv1.Ingress{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: name}, ing); err != nil {
 			continue
 		}
-		for _, p := range rule.HTTP.Paths {
-			if p.Backend.Service != nil && p.Backend.Service.Name == guard {
-				return true
+		for _, rule := range ing.Spec.Rules {
+			if rule.HTTP == nil {
+				continue
+			}
+			for _, p := range rule.HTTP.Paths {
+				if p.Backend.Service != nil && p.Backend.Service.Name == guard {
+					return true
+				}
 			}
 		}
 	}
@@ -172,8 +177,9 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		// Run under the node's ServiceAccount so SA-bound pull secrets / workload identity still apply,
 		// as they did for the in-pod sidecar.
 		ServiceAccountName: cfg.GetServiceAccountName(),
-		// Mirror the node's safe-to-evict setting so a pinned node's guard isn't scaled away under it.
-		PodAnnotations: cosmoguard.PodAnnotationsForSafeEvict(cfg.SafeToEvict),
+		// Carry the node's pod annotations (mesh/Vault injection, admission markers) plus the mirrored
+		// safe-to-evict setting, as the in-pod sidecar did by sharing the node pod.
+		PodAnnotations: cosmoguard.GuardPodAnnotations(cfg.PodAnnotations, cfg.SafeToEvict),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {

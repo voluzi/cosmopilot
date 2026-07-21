@@ -143,12 +143,23 @@ type Params struct {
 	PodAnnotations map[string]string
 }
 
-// PodAnnotationsForSafeEvict returns the cluster-autoscaler safe-to-evict annotation for the guard
-// pods, mirroring the fronted node/group's setting (the in-pod sidecar inherited it implicitly).
-// Without it a single-replica guard stays evictable while a pinned node does not, so a scale-down
-// could remove the guard and leave already-flipped ingress/gateway traffic without a guarded backend.
-// Returns nil when unset, leaving the guard at the cluster default.
-func PodAnnotationsForSafeEvict(safeToEvict *bool) map[string]string {
+// GuardPodAnnotations returns the annotations the guard pods should carry: the fronted node/group's
+// user pod annotations (mesh/Vault injection, admission-policy markers, etc. — the in-pod sidecar
+// inherited these by sharing the node pod) merged with the generated safe-to-evict annotation. The
+// generated annotation wins on a key collision. Returns nil when there is nothing to stamp.
+func GuardPodAnnotations(userAnnotations map[string]string, safeToEvict *bool) map[string]string {
+	merged := utils.MergeMaps(userAnnotations, safeEvictAnnotation(safeToEvict))
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+// safeEvictAnnotation returns the cluster-autoscaler safe-to-evict annotation mirroring the fronted
+// node/group's setting. Without it a single-replica guard stays evictable while a pinned node does
+// not, so a scale-down could remove the guard and leave already-flipped traffic without a guarded
+// backend. Returns nil when unset, leaving the guard at the cluster default.
+func safeEvictAnnotation(safeToEvict *bool) map[string]string {
 	if safeToEvict == nil {
 		return nil
 	}

@@ -147,6 +147,37 @@ func TestAPIServiceName(t *testing.T) {
 	assert.Equal(t, "node-1", cosmoGuardTestReconciler(t).apiServiceName(ctx, unguarded))
 }
 
+// TestStandaloneStickyFlipViaGrpcIngress verifies the sticky check inspects the separate "<node>-grpc"
+// Ingress: for a gRPC-only exposure the base "<node>" Ingress carries no guard backend, so a guard
+// that is momentarily not-serving during a rollout must still be recognized via the gRPC Ingress and
+// keep its routes (rather than falling back to the raw node and bypassing CosmoGuard for gRPC).
+func TestStandaloneStickyFlipViaGrpcIngress(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "example.com", EnableGRPC: true}
+
+	grpcIng := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-0-grpc", Namespace: "ns"},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{Name: "node-0-cosmoguard"},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+
+	// Guard not serving, but the gRPC Ingress already targets it -> sticky keeps routes on the guard.
+	r := cosmoGuardTestReconciler(t, grpcIng)
+	assert.Equal(t, "node-0-cosmoguard", r.apiServiceName(ctx, cn))
+}
+
 // TestDisableAutoscalingRemovesHPA verifies the standalone guard deletes its HPA when autoscaling is
 // turned off, so it stops driving the StatefulSet's replica count.
 func TestDisableAutoscalingRemovesHPA(t *testing.T) {
