@@ -198,6 +198,27 @@ func TestDesiredReplacementSignerPreservesTargetMultiplicity(t *testing.T) {
 	require.False(t, ok, "duplicating one target must not replace a different target group")
 }
 
+func TestDesiredReplacementSignerRejectsValidatorHistoryWithoutServingGroup(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{{
+			Name: "validators", Validator: &NodeSetValidatorConfig{},
+			Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+				Software: &CosmosignerSoftwareBackend{},
+			}},
+		}}},
+	}
+	desired := nodeSet.ResolveCosmosigners()
+	require.Len(t, desired, 1)
+	status := &CosmosignerStatus{
+		ServingIdentity: desired[0].ValidatorTargetedIdentity(),
+		TargetGroups:    desired[0].TargetGroups,
+	}
+
+	_, ok := nodeSet.DesiredReplacementSigner(desired, status)
+	require.False(t, ok, "missing validator-group history must fail closed instead of matching by targets alone")
+}
+
 // TestResolveCosmosignersTopLevelPlusPerGroup verifies the two sources compose into independent signers.
 func TestResolveCosmosignersTopLevelPlusPerGroup(t *testing.T) {
 	nodeSet := &ChainNodeSet{

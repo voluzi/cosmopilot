@@ -1615,6 +1615,31 @@ func TestValidateCosmosignerUpdateRejectsStorageChangeDuringPlacementMove(t *tes
 	assert.Contains(t, err.Error(), "stateStorageSize")
 }
 
+func TestValidateCosmosignerUpdateRejectsServedValidatorRemovalWithoutReplacement(t *testing.T) {
+	old := placementMoveNodeSet()
+	updated := old.DeepCopy()
+	updated.Spec.Nodes[0].Cosmosigner = nil
+	updated.Spec.Nodes[0].Validator = nil
+
+	err := updated.validateCosmosignerUpdate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replacement")
+}
+
+func TestValidateCosmosignerUpdateAllowsUncreatedSignerRemoval(t *testing.T) {
+	old := placementMoveNodeSet()
+	status := &old.Status.Cosmosigners[0]
+	status.AppliedDigest = ""
+	status.PublicKey = ""
+	status.ServingIdentity = ""
+	status.SigningDigest = ""
+	updated := old.DeepCopy()
+	updated.Spec.Nodes[0].Cosmosigner = nil
+	updated.Spec.Nodes[0].Validator = nil
+
+	require.NoError(t, updated.validateCosmosignerUpdate(old))
+}
+
 func placementMoveNodeSet() *ChainNodeSet {
 	nodeSet := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "ns"},

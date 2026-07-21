@@ -1052,8 +1052,10 @@ func (r *Reconciler) undeployCosmosigner(ctx context.Context, chainNode *appsv1.
 		return false, err
 	}
 	if chainNode.Status.CosmosignerReplicas == nil && chainNode.Status.CosmosignerSigningDigest == "" &&
-		chainNode.Status.CosmosignerKeyImported == "" &&
-		chainNode.Status.CosmosignerValidatorTargeted == nil {
+		chainNode.Status.CosmosignerStateStorageSize == "" && chainNode.Status.CosmosignerStateStorageClassName == nil &&
+		chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerPublicKey == "" &&
+		chainNode.Status.CosmosignerMigration == nil && chainNode.Status.CosmosignerKeyImported == "" &&
+		chainNode.Status.CosmosignerServingIdentity == "" && chainNode.Status.CosmosignerValidatorTargeted == nil {
 		return true, nil
 	}
 	// Clear the recorded signer invariants only once the StatefulSet AND its PVCs are actually gone.

@@ -285,13 +285,29 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			return err
 		}
 		if signerStatusNeedsRecovery(st) {
-			_, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
+			recoveredPublicKey, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return r.quiesceCosmosigners(ctx, nodeSet, err, resourceName)
 			}
 			recordedRecovery := st != nil && st.Replicas != nil && st.StateStorageSize != ""
 			if live || recordedRecovery {
-				if err := r.validateRecoveredSignerTargets(ctx, nodeSet, s, resourceName, live); err != nil {
+				requireTargetEvidence := live
+				if live {
+					recoveredParams := params
+					recoveredParams.ExpectedPublicKey = recoveredPublicKey
+					desiredDigest, err := recoveredParams.LifecycleDigest(s.Digest())
+					if err != nil {
+						return err
+					}
+					liveDigest, found, err := cosmosigner.ReadLifecycleDigest(ctx, r.Client, nodeSet.GetNamespace(), resourceName)
+					if err != nil {
+						return err
+					}
+					// An exact lifecycle fingerprint can exist before the first target labels and status
+					// digests are persisted. Any older or unstamped signer still needs historical evidence.
+					requireTargetEvidence = !found || liveDigest != desiredDigest
+				}
+				if err := r.validateRecoveredSignerTargets(ctx, nodeSet, s, resourceName, requireTargetEvidence); err != nil {
 					return err
 				}
 			}
@@ -384,8 +400,12 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			return nil, r.quiesceCosmosigners(ctx, nodeSet, conflict, previous.resourceName, params.Name)
 		}
 		publicKeyOwners[publicKey] = publicKeyOwner{signerName: s.Name, resourceName: params.Name}
+		legacyNodeNames, err := r.nodeSetCosmosignerLegacyNodeNames(ctx, nodeSet, s)
+		if err != nil {
+			return nil, err
+		}
 		if s.TargetsValidator() {
-			if err := r.validateValidatorSignerPublicKey(ctx, nodeSet, s, publicKey); err != nil {
+			if err := r.validateValidatorSignerPublicKey(ctx, nodeSet, s, publicKey, legacyNodeNames); err != nil {
 				return nil, r.quiesceCosmosigners(ctx, nodeSet, err, params.Name)
 			}
 			if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.PublicKey != "" && publicKey != st.PublicKey {
@@ -397,7 +417,7 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(),
 			Claim:             nodeSetCosmosignerReservationClaim(nodeSet, s),
 			LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, desired, s),
-			LegacyNodeNames:   nodeSetCosmosignerLegacyNodeNames(nodeSet, s),
+			LegacyNodeNames:   legacyNodeNames,
 		}); err != nil {
 			if stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
 				return nil, r.quiesceCosmosigners(ctx, nodeSet, err, nodeSetCosmosignerConflictResourceNames(nodeSet, desired, publicKey, params.Name)...)
@@ -440,7 +460,7 @@ func nodeSetCosmosignerConflictResourceNames(nodeSet *appsv1.ChainNodeSet, desir
 	return resourceNames
 }
 
-func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, publicKey string) error {
+func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, publicKey string, legacyNodeNames []string) error {
 	for _, validator := range nodeSet.Status.Validators {
 		if validator.Group != signer.ValidatorGroup || validator.PubKey == "" {
 			continue
@@ -469,7 +489,7 @@ func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeS
 		return nil
 	}
 
-	for _, name := range nodeSetCosmosignerLegacyNodeNames(nodeSet, signer) {
+	for _, name := range legacyNodeNames {
 		child := &appsv1.ChainNode{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, child); err != nil {
 			if errors.IsNotFound(err) {
@@ -516,9 +536,15 @@ func nodeSetCosmosignerLegacyStatusNames(nodeSet *appsv1.ChainNodeSet, desired [
 	return names
 }
 
-func nodeSetCosmosignerLegacyNodeNames(nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) []string {
+func (r *Reconciler) nodeSetCosmosignerLegacyNodeNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) ([]string, error) {
 	if !signer.TargetsValidator() {
-		return nil
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		if name != "" {
+			seen[name] = struct{}{}
+		}
 	}
 	instances := 1
 	if signer.ValidatorGroup != appsv1.ReservedValidatorGroupName {
@@ -530,11 +556,43 @@ func nodeSetCosmosignerLegacyNodeNames(nodeSet *appsv1.ChainNodeSet, signer apps
 			}
 		}
 	}
-	names := make([]string, 0, instances)
 	for ordinal := 0; ordinal < instances; ordinal++ {
-		names = append(names, validatorNodeName(nodeSet, signer.ValidatorGroup, ordinal))
+		add(validatorNodeName(nodeSet, signer.ValidatorGroup, ordinal))
 	}
-	return names
+	for _, status := range nodeSet.Status.Validators {
+		if status.Group == signer.ValidatorGroup {
+			add(status.Name)
+		}
+	}
+	children := &appsv1.ChainNodeList{}
+	if err := r.List(ctx, children, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return nil, err
+	}
+	for i := range children.Items {
+		child := &children.Items[i]
+		if metav1.IsControlledBy(child, nodeSet) && validatorNodeNameMatchesGroup(nodeSet, signer.ValidatorGroup, child.GetName()) {
+			add(child.GetName())
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func validatorNodeNameMatchesGroup(nodeSet *appsv1.ChainNodeSet, group, name string) bool {
+	if group == appsv1.ReservedValidatorGroupName {
+		return name == validatorNodeName(nodeSet, group, 0)
+	}
+	prefix := nodeSet.GetName() + "-" + group + "-"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	ordinal := strings.TrimPrefix(name, prefix)
+	n, err := strconv.Atoi(ordinal)
+	return err == nil && n >= 0 && strconv.Itoa(n) == ordinal
 }
 
 func signerStatusNeedsRecovery(st *appsv1.CosmosignerStatus) bool {
@@ -883,7 +941,7 @@ func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSe
 			if st.AtEstablishment != nil && *st.AtEstablishment != "" {
 				return fmt.Errorf("cosmosigner %q cannot be removed: it protects an on-chain consensus key recorded at establishment and no equivalent replacement signer is configured", st.Name)
 			}
-			if st.SigningDigest != "" {
+			if st.SigningDigest != "" || st.ServingIdentity != "" {
 				return fmt.Errorf("cosmosigner %q cannot be removed: its served validator group was not recorded; restore the previous signer configuration for one reconcile before removing it", st.Name)
 			}
 			continue

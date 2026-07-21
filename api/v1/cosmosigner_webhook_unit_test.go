@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -472,4 +474,25 @@ func TestChainNodeNoWebhookSignerLifecycle(t *testing.T) {
 	if _, err := softwareServed.Validate(nil); err != nil {
 		t.Fatalf("removing a software signer backed by the validator's own key must be allowed, got: %v", err)
 	}
+}
+
+func TestChainNodeWebhookRejectsValidatorSignerRemovalWithoutHandoff(t *testing.T) {
+	old := &ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator"},
+		Spec: ChainNodeSpec{
+			Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Validator: &ValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+				Software: &CosmosignerSoftwareBackend{},
+			}},
+		},
+		Status: ChainNodeStatus{ChainID: "test-1"},
+	}
+	old.Status.CosmosignerServingIdentity = old.CosmosignerSigningIdentity()
+	updated := old.DeepCopy()
+	updated.Spec.Cosmosigner = nil
+
+	_, err := updated.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "handoff")
 }

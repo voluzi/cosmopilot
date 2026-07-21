@@ -221,6 +221,12 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			if old.Spec.Validator != nil && chainNode.Spec.Validator == nil {
 				return nil, fmt.Errorf(".spec.validator cannot be removed while migrating cosmosigner on an established validator")
 			}
+			validatorSignerServed := old.Status.CosmosignerServingIdentity != "" ||
+				old.Status.CosmosignerSigningDigest != "" ||
+				(old.Status.CosmosignerValidatorTargeted != nil && *old.Status.CosmosignerValidatorTargeted)
+			if old.Spec.Cosmosigner != nil && chainNode.Spec.Cosmosigner == nil && validatorSignerServed {
+				return nil, fmt.Errorf(".spec.cosmosigner cannot be removed from an established validator without a supported slash-protection state handoff; migrate to another managed signer before removing it")
+			}
 			if old.Spec.Cosmosigner != nil && chainNode.Spec.Cosmosigner != nil &&
 				old.CosmosignerSigningDigest() != chainNode.CosmosignerSigningDigest() &&
 				(old.Status.CosmosignerAppliedDigest == "" || old.Status.CosmosignerPublicKey == "") {

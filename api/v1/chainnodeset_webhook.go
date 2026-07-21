@@ -946,16 +946,20 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			addedSigner = true
 		}
 	}
-	if addedSigner {
-		for _, s := range old.ResolveCosmosigners() {
-			if _, kept := desiredNames[s.Name]; kept {
-				continue
-			}
-			st := old.GetCosmosignerStatus(s.Name)
+	for _, s := range old.ResolveCosmosigners() {
+		if _, kept := desiredNames[s.Name]; kept {
+			continue
+		}
+		st := old.GetCosmosignerStatus(s.Name)
+		replacement, replaced := nodeSet.DesiredReplacementSigner(desiredSigners, st)
+		if st != nil && (st.ServingIdentity != "" || st.SigningDigest != "") && !replaced {
+			return fmt.Errorf("cosmosigner %q cannot be removed without a replacement managed signer for validator group %q: no supported handoff can transfer its slash-protection state to an independent local/tmKMS path", s.Name, st.ServingGroup)
+		}
+		if addedSigner {
 			if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
 				return fmt.Errorf("cosmosigner %q cannot be moved to a new manifest placement until the controller records its applied public key; restore the previous configuration and wait for one reconcile", s.Name)
 			}
-			if replacement, ok := nodeSet.DesiredReplacementSigner(desiredSigners, st); ok {
+			if replaced {
 				path := nodeSet.signerFieldPath(replacement)
 				if st.Replicas != nil && *st.Replicas != replacement.Spec.GetReplicas() {
 					return fmt.Errorf("%s.replicas must stay %d during a manifest placement move: changing it does not migrate the existing raft membership", path, *st.Replicas)

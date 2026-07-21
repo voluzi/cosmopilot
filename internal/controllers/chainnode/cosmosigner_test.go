@@ -977,6 +977,39 @@ func TestEnsureCosmosignerPreflightsLocalFallbackBeforeTeardown(t *testing.T) {
 	require.ErrorContains(t, err, "slash-protection state")
 }
 
+func TestUndeployCosmosignerClearsPartialStatusAfterTeardown(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
+		Status: appsv1.ChainNodeStatus{
+			CosmosignerStateStorageSize:      "1Gi",
+			CosmosignerStateStorageClassName: ptr.To("fast"),
+			CosmosignerAppliedDigest:         "applied",
+			CosmosignerPublicKey:             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			CosmosignerMigration:             &appsv1.CosmosignerMigrationStatus{},
+			CosmosignerServingIdentity:       "software\x00validator-key",
+		},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build()
+	r := &Reconciler{Client: cl, Scheme: scheme}
+
+	done, err := r.undeployCosmosigner(context.Background(), chainNode)
+	require.NoError(t, err)
+	require.True(t, done)
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(chainNode), fresh))
+	require.Empty(t, fresh.Status.CosmosignerStateStorageSize)
+	require.Nil(t, fresh.Status.CosmosignerStateStorageClassName)
+	require.Empty(t, fresh.Status.CosmosignerAppliedDigest)
+	require.Empty(t, fresh.Status.CosmosignerPublicKey)
+	require.Nil(t, fresh.Status.CosmosignerMigration)
+	require.Empty(t, fresh.Status.CosmosignerServingIdentity)
+}
+
 func TestPreflightCosmosignerFallbackTreatsLegacySigningDigestAsValidator(t *testing.T) {
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},

@@ -263,6 +263,9 @@ func (nodeSet *ChainNodeSet) DesiredReplacementSigner(desired []ResolvedSigner, 
 	if st == nil {
 		return ResolvedSigner{}, false
 	}
+	if st.ServingGroup == "" && (st.ServingIdentity != "" || st.SigningDigest != "") {
+		return ResolvedSigner{}, false
+	}
 	for _, s := range desired {
 		if st.ServingGroup == "" {
 			if st.AtEstablishment != nil && *st.AtEstablishment != "" {
