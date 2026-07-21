@@ -87,6 +87,29 @@ func TestEnsureConsensusKeyReservationRejectsSiblingClaimLegacyChild(t *testing.
 	}
 }
 
+func TestEnsureConsensusKeyReservationAllowsHAValidatorStatusAliases(t *testing.T) {
+	scheme := reservationScheme(t)
+	legacy := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodeset-uid"},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "chain-1",
+			Validators: []appsv1.ChainNodeSetValidatorStatus{
+				{Name: "nodes-validators-0", Group: "validators", PubKey: `{"key":"` + reservationTestPublicKey + `"}`},
+				{Name: "nodes-validators-1", Group: "validators", PubKey: `{"key":"` + reservationTestPublicKey + `"}`},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacy).Build()
+	holder := ReservationHolder{
+		UID: "nodeset-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "nodes-validators-0",
+		LegacyNodeNames: []string{"nodes-validators-0", "nodes-validators-1"},
+	}
+
+	if err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder); err != nil {
+		t.Fatalf("redundant validator endpoints in one logical signer claim must share the reservation: %v", err)
+	}
+}
+
 func TestEnsureConsensusKeyReservationAllowsExactPlacementReplacementStatuses(t *testing.T) {
 	scheme := reservationScheme(t)
 	legacy := &appsv1.ChainNodeSet{

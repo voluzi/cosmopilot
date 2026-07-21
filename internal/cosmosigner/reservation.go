@@ -156,7 +156,7 @@ func ensureNoLegacyConsensusKeyOwner(ctx context.Context, c client.Client, chain
 		}
 		for _, validator := range set.Status.Validators {
 			if canonicalSDKPublicKey(validator.PubKey) == publicKey {
-				if set.UID == holder.UID && validator.Name == holder.Claim {
+				if set.UID == holder.UID && (validator.Name == holder.Claim || holder.matchesLegacyNode(validator.Name)) {
 					continue
 				}
 				return fmt.Errorf("%w: consensus key on chain %q is already recorded by ChainNodeSet %s/%s",
