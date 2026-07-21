@@ -59,7 +59,18 @@ func TestGetCosmoGuardAutoscalingTargets(t *testing.T) {
 	// Explicit user targets always win, regardless of requests.
 	cfg := autoscaledConfig(memOnly)
 	cfg.CosmoGuard.Autoscaling.TargetCPUUtilizationPercentage = ptr.To[int32](65)
-	_, cpu, mem = cfg.GetCosmoGuardAutoscalingTargets()
+	res, cpu, mem = cfg.GetCosmoGuardAutoscalingTargets()
 	assert.Equal(t, int32(65), *cpu)
 	assert.Nil(t, mem)
+	// ...and the CPU request it measures is injected against the memory-only block so the HPA works.
+	assert.False(t, res.Requests.Cpu().IsZero(), "CPU request injected for explicit CPU target")
+	assert.False(t, res.Requests.Memory().IsZero(), "user memory request preserved")
+
+	// Explicit CPU target against an empty block -> CPU request injected so the metric is measurable.
+	cfgEmpty := autoscaledConfig(&corev1.ResourceRequirements{})
+	cfgEmpty.CosmoGuard.Autoscaling.TargetCPUUtilizationPercentage = ptr.To[int32](70)
+	res, cpu, mem = cfgEmpty.GetCosmoGuardAutoscalingTargets()
+	assert.Equal(t, int32(70), *cpu)
+	assert.Nil(t, mem)
+	assert.False(t, res.Requests.Cpu().IsZero(), "CPU request injected for explicit CPU target on empty block")
 }

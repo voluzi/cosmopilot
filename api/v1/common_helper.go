@@ -354,11 +354,12 @@ func defaultCosmoGuardResources() corev1.ResourceRequirements {
 // GetCosmoGuardAutoscalingTargets resolves the guard container resources AND the HPA utilization
 // targets together, keeping them consistent: an HPA can only measure a resource the container
 // positively requests. Explicit user targets always win. When the user sets neither target, the
-// default metric follows whichever positive request the container has (CPU preferred). If the
-// configured resources request neither CPU nor memory (an empty or all-zero block), it falls back to
-// the default guard resources so the HPA has a positive request to measure instead of stalling — a
-// namespace LimitRange might otherwise supply one, but we cannot see that here, so injecting a known
-// request is the safe, self-contained choice. Returns the resources the container should use.
+// default metric follows whichever positive request the container has (CPU preferred). It then
+// guarantees every SELECTED metric — explicit or defaulted — has a positive matching request,
+// injecting the operator default for any that is missing or zero (e.g. an empty resources block, or
+// an explicit CPU target against a memory-only block). A namespace LimitRange might otherwise supply
+// the request at admission, but we cannot see that here, so injecting a known request is the safe,
+// self-contained choice. Returns the resources the container should use.
 func (cfg *Config) GetCosmoGuardAutoscalingTargets() (resources corev1.ResourceRequirements, targetCPU, targetMemory *int32) {
 	resources = cfg.GetCosmoGuardResources()
 	as := cfg.GetCosmoGuardAutoscaling()
@@ -367,22 +368,52 @@ func (cfg *Config) GetCosmoGuardAutoscalingTargets() (resources corev1.ResourceR
 	}
 	targetCPU = as.TargetCPUUtilizationPercentage
 	targetMemory = as.TargetMemoryUtilizationPercentage
-	if targetCPU != nil || targetMemory != nil {
-		return resources, targetCPU, targetMemory
-	}
 
 	hasCPU := cosmoGuardRequests(resources, corev1.ResourceCPU)
 	hasMemory := cosmoGuardRequests(resources, corev1.ResourceMemory)
+
+	// Container requests neither CPU nor memory (empty/all-zero block): fall back to the full default
+	// guard resources so it has sensible requests+limits rather than a single injected request.
 	if !hasCPU && !hasMemory {
 		resources = defaultCosmoGuardResources()
-		hasCPU = true
+		hasCPU, hasMemory = true, true
 	}
-	if hasCPU {
-		targetCPU = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
-	} else {
-		targetMemory = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
+
+	// Default the metric when the user set neither: follow whichever positive request the container has.
+	if targetCPU == nil && targetMemory == nil {
+		if hasMemory && !hasCPU {
+			targetMemory = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
+		} else {
+			targetCPU = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
+		}
 	}
+
+	// Every selected metric needs a positive corresponding request or the HPA cannot scale.
+	resources = ensureCosmoGuardRequests(resources, targetCPU != nil, targetMemory != nil)
 	return resources, targetCPU, targetMemory
+}
+
+// ensureCosmoGuardRequests guarantees the guard container positively requests each resource its
+// selected HPA metrics measure, injecting the operator default for any that is missing or zero. The
+// input is not mutated.
+func ensureCosmoGuardRequests(res corev1.ResourceRequirements, needCPU, needMemory bool) corev1.ResourceRequirements {
+	injectCPU := needCPU && !cosmoGuardRequests(res, corev1.ResourceCPU)
+	injectMemory := needMemory && !cosmoGuardRequests(res, corev1.ResourceMemory)
+	if !injectCPU && !injectMemory {
+		return res
+	}
+	defaults := defaultCosmoGuardResources()
+	out := *res.DeepCopy()
+	if out.Requests == nil {
+		out.Requests = corev1.ResourceList{}
+	}
+	if injectCPU {
+		out.Requests[corev1.ResourceCPU] = defaults.Requests[corev1.ResourceCPU]
+	}
+	if injectMemory {
+		out.Requests[corev1.ResourceMemory] = defaults.Requests[corev1.ResourceMemory]
+	}
+	return out
 }
 
 // cosmoGuardRequests reports whether the guard container effectively requests a positive amount of the
