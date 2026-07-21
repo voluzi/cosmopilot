@@ -100,7 +100,9 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
 		as := cfg.GetCosmoGuardAutoscaling()
-		targetCPU, targetMemory := cfg.GetCosmoGuardAutoscalingTargets()
+		// Resolve resources and targets together so the HPA always has a positive request to measure.
+		resources, targetCPU, targetMemory := cfg.GetCosmoGuardAutoscalingTargets()
+		p.Resources = resources
 		p.Autoscaling = &cosmoguard.AutoscalingParams{
 			MinReplicas:  as.MinReplicas,
 			MaxReplicas:  as.MaxReplicas,
