@@ -115,7 +115,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 func (r *Reconciler) getHTTPRouteSpecs(chainNode *appsv1.ChainNode) ([]*gwapiv1.HTTPRoute, error) {
 	cfg := chainNode.Spec.Gateway
 	parentRef := chainNode.GetGatewayParentRef()
-	svcName := chainNode.GetServiceName()
+	svcName := chainNode.GetAPIServiceName()
 
 	type endpointDef struct {
 		suffix string
@@ -183,7 +183,7 @@ func (r *Reconciler) getHTTPRouteSpecs(chainNode *appsv1.ChainNode) ([]*gwapiv1.
 func (r *Reconciler) getGRPCRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1.GRPCRoute, error) {
 	cfg := chainNode.Spec.Gateway
 	parentRef := chainNode.GetGatewayParentRef()
-	svcName := chainNode.GetServiceName()
+	svcName := chainNode.GetAPIServiceName()
 	hostname := gwapiv1.Hostname(fmt.Sprintf("%s.%s", cfg.Subdomains.GetGRPC(), cfg.Host))
 	port := gwapiv1.PortNumber(chainutils.GrpcPort)
 

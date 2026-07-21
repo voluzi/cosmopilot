@@ -1082,12 +1082,49 @@ spec:
                     format: duration
                     type: string
                   cosmoGuard:
-                    description: Deploys CosmoGuard to protect API endpoints of the
-                      node.
+                    description: Deploys a standalone CosmoGuard deployment fronting
+                      this node's API endpoints.
                     properties:
+                      autoscaling:
+                        description: Autoscaling configures a HorizontalPodAutoscaler
+                          for the CosmoGuard deployment.
+                        properties:
+                          enable:
+                            description: Whether to enable horizontal autoscaling
+                              for CosmoGuard.
+                            type: boolean
+                          maxReplicas:
+                            description: Maximum number of replicas.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          minReplicas:
+                            description: Minimum number of replicas. Defaults to `1`.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          targetCPUUtilizationPercentage:
+                            description: Target average CPU utilization (percentage)
+                              that triggers scaling. Defaults to `80`.
+                            format: int32
+                            maximum: 100
+                            minimum: 1
+                            type: integer
+                          targetMemoryUtilizationPercentage:
+                            description: Target average memory utilization (percentage)
+                              that triggers scaling. Disabled when unset.
+                            format: int32
+                            maximum: 100
+                            minimum: 1
+                            type: integer
+                        required:
+                        - enable
+                        - maxReplicas
+                        type: object
                       config:
-                        description: ConfigMap containing the CosmoGuard configuration
-                          for this node.
+                        description: |-
+                          ConfigMap containing the CosmoGuard rules configuration. Only rules should be set here;
+                          upstream, listener, metrics and dashboard settings are managed by Cosmopilot.
                         properties:
                           key:
                             description: The key to select.
@@ -1109,11 +1146,118 @@ spec:
                         - key
                         type: object
                         x-kubernetes-map-type: atomic
+                      dashboard:
+                        description: Dashboard exposes CosmoGuard's read-only web
+                          dashboard.
+                        properties:
+                          basicAuth:
+                            description: |-
+                              BasicAuth protects the dashboard with HTTP basic authentication using credentials
+                              sourced from a Secret.
+                            properties:
+                              password:
+                                description: Password credential.
+                                properties:
+                                  key:
+                                    description: The key of the secret to select from.  Must
+                                      be a valid secret key.
+                                    type: string
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                  optional:
+                                    description: Specify whether the Secret or its
+                                      key must be defined
+                                    type: boolean
+                                required:
+                                - key
+                                type: object
+                                x-kubernetes-map-type: atomic
+                              username:
+                                description: Username credential.
+                                properties:
+                                  key:
+                                    description: The key of the secret to select from.  Must
+                                      be a valid secret key.
+                                    type: string
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                  optional:
+                                    description: Specify whether the Secret or its
+                                      key must be defined
+                                    type: boolean
+                                required:
+                                - key
+                                type: object
+                                x-kubernetes-map-type: atomic
+                            required:
+                            - password
+                            - username
+                            type: object
+                          enable:
+                            description: Whether to enable the CosmoGuard dashboard.
+                            type: boolean
+                          ingress:
+                            description: Ingress exposes the dashboard through an
+                              Ingress resource.
+                            properties:
+                              annotations:
+                                additionalProperties:
+                                  type: string
+                                description: Annotations to add to the dashboard Ingress.
+                                type: object
+                              host:
+                                description: Host is the hostname to route dashboard
+                                  traffic from.
+                                type: string
+                              ingressClassName:
+                                description: IngressClassName is the name of the IngressClass
+                                  to use.
+                                type: string
+                              tlsSecretName:
+                                description: TLS enables TLS for the dashboard Ingress
+                                  using the given secret name for the certificate.
+                                type: string
+                            required:
+                            - host
+                            type: object
+                          port:
+                            description: Port the dashboard listens on. Defaults to
+                              `8080`.
+                            format: int32
+                            type: integer
+                        required:
+                        - enable
+                        type: object
                       enable:
-                        description: Whether to enable CosmoGuard on this node.
+                        description: Whether to enable CosmoGuard on this node or
+                          group.
                         type: boolean
+                      image:
+                        description: Container image to use for CosmoGuard. Overrides
+                          the operator-wide default image.
+                        type: string
+                      replicas:
+                        description: Number of CosmoGuard replicas to run. Defaults
+                          to `1`. Ignored when autoscaling is enabled.
+                        format: int32
+                        minimum: 1
+                        type: integer
                       resources:
-                        description: Compute Resources for CosmoGuard container.
+                        description: Compute Resources for each CosmoGuard pod.
                         properties:
                           claims:
                             description: |-
@@ -1172,8 +1316,9 @@ spec:
                             type: object
                         type: object
                       restartPodOnFailure:
-                        description: Whether the node's pod should be restarted when
-                          CosmoGuard fails.
+                        description: |-
+                          Deprecated: CosmoGuard now runs as a standalone Deployment supervised by Kubernetes,
+                          so this field has no effect and will be removed in a future release.
                         type: boolean
                     required:
                     - config

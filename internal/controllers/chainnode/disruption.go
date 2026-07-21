@@ -139,9 +139,9 @@ func isPodRunningAndReady(pod *corev1.Pod) bool {
 		}
 	}
 
-	// Check if node-utils and cosmoguard containers are ready
+	// Check if node-utils sidecar is ready
 	for _, containerStatus := range pod.Status.InitContainerStatuses {
-		if containerStatus.Name == nodeUtilsContainerName || containerStatus.Name == cosmoGuardContainerName {
+		if containerStatus.Name == nodeUtilsContainerName {
 			if !containerStatus.Ready || containerStatus.State.Running == nil {
 				return false
 			}

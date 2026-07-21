@@ -1,0 +1,55 @@
+# ChainNodeSet with a CosmoGuard-protected full node group.
+#
+# Cosmopilot deploys a standalone CosmoGuard v4 Deployment per node group. It fronts every node in
+# the group (discovered through a headless Service), can run multiple replicas, and is autoscaled by
+# an HPA. The group Service is routed through the guard once it is ready.
+#
+# Create the rules ConfigMap first (rules only — Cosmopilot manages upstream/listener/metrics):
+#   kubectl create configmap cosmoguard-config \
+#     --from-file=cosmoguard.yaml=./cosmoguard.yaml -n <namespace>
+apiVersion: cosmopilot.voluzi.com/v1
+kind: ChainNodeSet
+metadata:
+  name: nibiru-testnet
+spec:
+  app:
+    image: ghcr.io/nibiruchain/nibiru
+    version: 2.9.0
+    app: nibid
+    sdkVersion: v0.47
+
+  nodes:
+    - name: fullnodes
+      instances: 3
+
+      config:
+        override:
+          app.toml:
+            minimum-gas-prices: 0.025unibi
+
+        cosmoGuard:
+          enable: true
+          config:
+            name: cosmoguard-config
+            key: cosmoguard.yaml
+
+          # Run the guard with its own autoscaling, independent of the nodes.
+          autoscaling:
+            enable: true
+            minReplicas: 2
+            maxReplicas: 8
+            targetCPUUtilizationPercentage: 75
+
+          # Optional read-only dashboard, protected with basic-auth from a Secret and exposed via Ingress.
+          dashboard:
+            enable: true
+            basicAuth:
+              username:
+                name: cosmoguard-dashboard-auth
+                key: username
+              password:
+                name: cosmoguard-dashboard-auth
+                key: password
+            ingress:
+              host: cosmoguard.testnet.example.com
+              ingressClassName: nginx

@@ -33,8 +33,8 @@ $ helm show values oci://ghcr.io/voluzi/helm/cosmopilot
 - **Default**: `ghcr.io/voluzi/node-utils`
 
 ### `cosmoGuardImage`
-- **Description**: The container image of [CosmoGuard](https://github.com/voluzi/cosmoguard) (with version tag included).
-- **Default**: `ghcr.io/voluzi/cosmoguard`
+- **Description**: The container image of [CosmoGuard](https://github.com/voluzi/cosmoguard) (with version tag included) used for the standalone CosmoGuard deployments.
+- **Default**: `ghcr.io/voluzi/cosmoguard:4.0.0-rc.6`
 
 ### `cosmoseedImage`
 - **Description**: The container image of [Cosmoseed](https://github.com/voluzi/cosmoseed) (with version tag included). Used when deploying seed nodes.

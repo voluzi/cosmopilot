@@ -1,0 +1,100 @@
+package chainnodeset
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/cosmoguard"
+)
+
+func guardedNodeSet() (*appsv1.ChainNodeSet, appsv1.NodeGroupSpec) {
+	group := appsv1.NodeGroupSpec{
+		Name: "fullnodes",
+		Config: &appsv1.Config{
+			CosmoGuard: &appsv1.CosmoGuardConfig{
+				Enable: true,
+				Config: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "rules"},
+					Key:                  "cosmoguard.yaml",
+				},
+			},
+		},
+	}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "chain", Namespace: "ns"},
+		Spec:       appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{group}},
+	}
+	return nodeSet, group
+}
+
+// TestGroupServiceFlipsToGuardOnlyWhenReady verifies the group Service targets the node pods on raw
+// ports until the guard has rolled out, then flips its selector and target ports to the guard.
+func TestGroupServiceFlipsToGuardOnlyWhenReady(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	// Not ready: node selector + raw ports.
+	svc, err := r.getServiceSpec(nodeSet, group, false)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		controllers.LabelChainNodeSet:      "chain",
+		controllers.LabelChainNodeSetGroup: "fullnodes",
+	}, svc.Spec.Selector)
+	assert.Equal(t, int32(chainutils.RpcPort), svc.Spec.Ports[0].TargetPort.IntVal)
+
+	// Ready: guard selector + guard listener target ports.
+	svc, err = r.getServiceSpec(nodeSet, group, true)
+	require.NoError(t, err)
+	assert.Equal(t, cosmoguard.InstanceLabels(groupCosmoGuardName(nodeSet, group)), svc.Spec.Selector)
+	assert.Equal(t, int32(controllers.CosmoGuardRpcPort), svc.Spec.Ports[0].TargetPort.IntVal)
+	assert.Equal(t, int32(controllers.CosmoGuardLcdPort), svc.Spec.Ports[1].TargetPort.IntVal)
+	assert.Equal(t, int32(controllers.CosmoGuardGrpcPort), svc.Spec.Ports[2].TargetPort.IntVal)
+	// Public port numbers are preserved.
+	assert.Equal(t, int32(chainutils.RpcPort), svc.Spec.Ports[0].Port)
+}
+
+// TestGuardParamsUseDiscovery verifies a group's guard is configured to discover node pods through
+// the headless upstream Service.
+func TestGuardParamsUseDiscovery(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	p := r.groupCosmoGuardParams(nodeSet, group)
+	assert.Equal(t, "chain-fullnodes-cosmoguard-upstream.ns.svc.cluster.local", p.DiscoveryHost)
+	assert.Empty(t, p.UpstreamHost)
+	assert.Equal(t, "rules", p.ConfigMap.Name)
+}
+
+// TestUpstreamServiceIsHeadless verifies the guard's upstream Service is headless, publishes
+// not-ready addresses, and selects the group's node pods on raw ports.
+func TestUpstreamServiceIsHeadless(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	svc, err := r.buildGroupCosmoGuardUpstreamService(nodeSet, group)
+	require.NoError(t, err)
+	assert.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
+	assert.True(t, svc.Spec.PublishNotReadyAddresses)
+	assert.Equal(t, map[string]string{
+		controllers.LabelChainNodeSet:      "chain",
+		controllers.LabelChainNodeSetGroup: "fullnodes",
+	}, svc.Spec.Selector)
+	assert.Equal(t, int32(chainutils.RpcPort), svc.Spec.Ports[0].TargetPort.IntVal)
+}
+
+func TestCosmoGuardRouteReady(t *testing.T) {
+	nodeSet, _ := guardedNodeSet()
+
+	// Route targets the guarded group; not ready -> route not ready.
+	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": false}))
+	assert.True(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": true}))
+	// Reserved validator group is never blocking.
+	assert.True(t, cosmoGuardRouteReady(nodeSet, []string{appsv1.ReservedValidatorGroupName}, map[string]bool{}))
+}

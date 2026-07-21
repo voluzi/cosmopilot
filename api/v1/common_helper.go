@@ -86,6 +86,12 @@ const (
 	// DefaultCosmoGuardMemory is the default memory request for the CosmoGuard container.
 	DefaultCosmoGuardMemory = "250Mi"
 
+	// DefaultCosmoGuardDashboardPort is the default port the CosmoGuard dashboard listens on.
+	DefaultCosmoGuardDashboardPort int32 = 8080
+
+	// DefaultCosmoGuardAutoscalingCPUTarget is the default target CPU utilization for CosmoGuard autoscaling.
+	DefaultCosmoGuardAutoscalingCPUTarget int32 = 80
+
 	// DefaultVpaCooldown is the default cooldown period for VPA scaling actions.
 	DefaultVpaCooldown = 5 * time.Minute
 
@@ -323,16 +329,6 @@ func (cfg *Config) GetCosmoGuardConfig() *corev1.ConfigMapKeySelector {
 	return nil
 }
 
-func (cfg *Config) ShouldRestartPodOnCosmoGuardFailure() bool {
-	if cfg == nil {
-		return false
-	}
-	if cfg.CosmoGuard != nil && cfg.CosmoGuard.RestartPodOnFailure != nil {
-		return *cfg.CosmoGuard.RestartPodOnFailure
-	}
-	return false
-}
-
 func (cfg *Config) GetCosmoGuardResources() corev1.ResourceRequirements {
 	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Resources != nil {
 		return *cfg.CosmoGuard.Resources
@@ -347,6 +343,59 @@ func (cfg *Config) GetCosmoGuardResources() corev1.ResourceRequirements {
 			corev1.ResourceMemory: resource.MustParse(DefaultCosmoGuardMemory),
 		},
 	}
+}
+
+// GetCosmoGuardReplicas returns the desired CosmoGuard replica count. Defaults to 1.
+func (cfg *Config) GetCosmoGuardReplicas() int32 {
+	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Replicas != nil {
+		return *cfg.CosmoGuard.Replicas
+	}
+	return 1
+}
+
+// GetCosmoGuardImage returns the CosmoGuard image, using the per-CR override when set,
+// otherwise the provided operator-wide default.
+func (cfg *Config) GetCosmoGuardImage(defaultImage string) string {
+	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Image != nil && *cfg.CosmoGuard.Image != "" {
+		return *cfg.CosmoGuard.Image
+	}
+	return defaultImage
+}
+
+// GetCosmoGuardAutoscaling returns the CosmoGuard autoscaling config, or nil.
+func (cfg *Config) GetCosmoGuardAutoscaling() *CosmoGuardAutoscalingConfig {
+	if cfg != nil && cfg.CosmoGuard != nil {
+		return cfg.CosmoGuard.Autoscaling
+	}
+	return nil
+}
+
+// CosmoGuardAutoscalingEnabled reports whether horizontal autoscaling is enabled for CosmoGuard.
+func (cfg *Config) CosmoGuardAutoscalingEnabled() bool {
+	as := cfg.GetCosmoGuardAutoscaling()
+	return as != nil && as.Enable
+}
+
+// GetCosmoGuardDashboard returns the CosmoGuard dashboard config, or nil.
+func (cfg *Config) GetCosmoGuardDashboard() *CosmoGuardDashboardConfig {
+	if cfg != nil && cfg.CosmoGuard != nil {
+		return cfg.CosmoGuard.Dashboard
+	}
+	return nil
+}
+
+// CosmoGuardDashboardEnabled reports whether the CosmoGuard dashboard is enabled.
+func (cfg *Config) CosmoGuardDashboardEnabled() bool {
+	d := cfg.GetCosmoGuardDashboard()
+	return d != nil && d.Enable
+}
+
+// GetCosmoGuardDashboardPort returns the configured dashboard port or the default.
+func (cfg *Config) GetCosmoGuardDashboardPort() int32 {
+	if d := cfg.GetCosmoGuardDashboard(); d != nil && d.Port != nil {
+		return *d.Port
+	}
+	return DefaultCosmoGuardDashboardPort
 }
 
 func (cfg *Config) GetHaltHeight() int64 {

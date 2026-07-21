@@ -372,22 +372,6 @@ func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Servic
 		})
 	}
 
-	if chainNode.Spec.Config != nil && chainNode.Spec.Config.CosmoGuardEnabled() {
-		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.CosmoGuardRpcPort)
-		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
-		svc.Spec.Ports[3].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)
-		if chainNode.Spec.Config.IsEvmEnabled() {
-			svc.Spec.Ports[6].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcPort)
-			svc.Spec.Ports[7].TargetPort = intstr.FromInt32(controllers.CosmoGuardEvmRpcWsPort)
-		}
-		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
-			Name:       controllers.CosmoGuardMetricsPortName,
-			Protocol:   corev1.ProtocolTCP,
-			Port:       controllers.CosmoGuardMetricsPort,
-			TargetPort: intstr.FromInt32(controllers.CosmoGuardMetricsPort),
-		})
-	}
-
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
 }
 
@@ -463,15 +447,6 @@ func (r *Reconciler) getInternalServiceSpec(ctx context.Context, chainNode *apps
 			Protocol:   corev1.ProtocolTCP,
 			Port:       controllers.EvmRpcWsPort,
 			TargetPort: intstr.FromInt32(controllers.EvmRpcWsPort),
-		})
-	}
-
-	if chainNode.Spec.Config != nil && chainNode.Spec.Config.CosmoGuardEnabled() {
-		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
-			Name:       controllers.CosmoGuardMetricsPortName,
-			Protocol:   corev1.ProtocolTCP,
-			Port:       controllers.CosmoGuardMetricsPort,
-			TargetPort: intstr.FromInt32(controllers.CosmoGuardMetricsPort),
 		})
 	}
 

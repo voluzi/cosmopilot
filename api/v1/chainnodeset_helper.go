@@ -309,7 +309,7 @@ func (gi *GlobalIngressConfig) GetTlsSecretName(owner client.Object) string {
 	return fmt.Sprintf("%s-tls", gi.GetName(owner))
 }
 
-func (gi *GlobalIngressConfig) ShouldUseCosmoGuardPorts(nodeSet *ChainNodeSet) bool {
+func (gi *GlobalIngressConfig) ShouldUseCosmoGuard(nodeSet *ChainNodeSet) bool {
 	for _, groupName := range gi.Groups {
 		// The reserved "validator" group name refers to the legacy singleton .spec.validator, which is
 		// not in .spec.nodes. Check its config directly so a CosmoGuard-enabled legacy validator targeted
@@ -495,10 +495,10 @@ func (gg *GlobalGatewayConfig) GetServiceName(owner client.Object) string {
 	return fmt.Sprintf("%s-global-%s", owner.GetName(), gg.Name)
 }
 
-// ShouldUseCosmoGuardPorts returns true if any group in this gateway config has CosmoGuard enabled.
+// ShouldUseCosmoGuard returns true if any group in this gateway config has CosmoGuard enabled.
 // When a gateway spans multiple groups, CosmoGuard ports are used for the shared service if at least
 // one group enables it — this matches the ingress behavior where all traffic goes through the guard.
-func (gg *GlobalGatewayConfig) ShouldUseCosmoGuardPorts(nodeSet *ChainNodeSet) bool {
+func (gg *GlobalGatewayConfig) ShouldUseCosmoGuard(nodeSet *ChainNodeSet) bool {
 	for _, groupName := range gg.Groups {
 		// The reserved "validator" group name refers to the legacy singleton .spec.validator, which is
 		// not in .spec.nodes. Check its config directly so a CosmoGuard-enabled legacy validator targeted

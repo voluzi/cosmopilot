@@ -206,7 +206,7 @@ type Config struct {
 	// +optional
 	SafeToEvict *bool `json:"safeToEvict,omitempty"`
 
-	// Deploys CosmoGuard to protect API endpoints of the node.
+	// Deploys a standalone CosmoGuard deployment fronting this node's API endpoints.
 	// +optional
 	CosmoGuard *CosmoGuardConfig `json:"cosmoGuard,omitempty"`
 
@@ -301,21 +301,114 @@ type VolumeSpec struct {
 	DeleteWithNode *bool `json:"deleteWithNode,omitempty"`
 }
 
-// CosmoGuardConfig allows configuring CosmoGuard rules.
+// CosmoGuardConfig allows configuring CosmoGuard - a standalone firewall/policy proxy
+// deployed in front of the node API endpoints (RPC/LCD/gRPC/EVM).
 type CosmoGuardConfig struct {
-	// Whether to enable CosmoGuard on this node.
+	// Whether to enable CosmoGuard on this node or group.
 	Enable bool `json:"enable"`
 
-	// ConfigMap containing the CosmoGuard configuration for this node.
+	// ConfigMap containing the CosmoGuard rules configuration. Only rules should be set here;
+	// upstream, listener, metrics and dashboard settings are managed by Cosmopilot.
 	Config *corev1.ConfigMapKeySelector `json:"config"`
 
-	// Whether the node's pod should be restarted when CosmoGuard fails.
+	// Container image to use for CosmoGuard. Overrides the operator-wide default image.
 	// +optional
-	RestartPodOnFailure *bool `json:"restartPodOnFailure,omitempty"`
+	Image *string `json:"image,omitempty"`
 
-	// Compute Resources for CosmoGuard container.
+	// Number of CosmoGuard replicas to run. Defaults to `1`. Ignored when autoscaling is enabled.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Autoscaling configures a HorizontalPodAutoscaler for the CosmoGuard deployment.
+	// +optional
+	Autoscaling *CosmoGuardAutoscalingConfig `json:"autoscaling,omitempty"`
+
+	// Dashboard exposes CosmoGuard's read-only web dashboard.
+	// +optional
+	Dashboard *CosmoGuardDashboardConfig `json:"dashboard,omitempty"`
+
+	// Compute Resources for each CosmoGuard pod.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Deprecated: CosmoGuard now runs as a standalone Deployment supervised by Kubernetes,
+	// so this field has no effect and will be removed in a future release.
+	// +optional
+	RestartPodOnFailure *bool `json:"restartPodOnFailure,omitempty"`
+}
+
+// CosmoGuardAutoscalingConfig configures a HorizontalPodAutoscaler for CosmoGuard.
+type CosmoGuardAutoscalingConfig struct {
+	// Whether to enable horizontal autoscaling for CosmoGuard.
+	Enable bool `json:"enable"`
+
+	// Minimum number of replicas. Defaults to `1`.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
+
+	// Maximum number of replicas.
+	// +kubebuilder:validation:Minimum=1
+	MaxReplicas int32 `json:"maxReplicas"`
+
+	// Target average CPU utilization (percentage) that triggers scaling. Defaults to `80`.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	TargetCPUUtilizationPercentage *int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+
+	// Target average memory utilization (percentage) that triggers scaling. Disabled when unset.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	TargetMemoryUtilizationPercentage *int32 `json:"targetMemoryUtilizationPercentage,omitempty"`
+}
+
+// CosmoGuardDashboardConfig configures CosmoGuard's read-only web dashboard.
+type CosmoGuardDashboardConfig struct {
+	// Whether to enable the CosmoGuard dashboard.
+	Enable bool `json:"enable"`
+
+	// Port the dashboard listens on. Defaults to `8080`.
+	// +optional
+	Port *int32 `json:"port,omitempty"`
+
+	// BasicAuth protects the dashboard with HTTP basic authentication using credentials
+	// sourced from a Secret.
+	// +optional
+	BasicAuth *CosmoGuardDashboardAuth `json:"basicAuth,omitempty"`
+
+	// Ingress exposes the dashboard through an Ingress resource.
+	// +optional
+	Ingress *CosmoGuardDashboardIngress `json:"ingress,omitempty"`
+}
+
+// CosmoGuardDashboardAuth references Secret keys holding basic-auth credentials for the dashboard.
+type CosmoGuardDashboardAuth struct {
+	// Username credential.
+	Username corev1.SecretKeySelector `json:"username"`
+
+	// Password credential.
+	Password corev1.SecretKeySelector `json:"password"`
+}
+
+// CosmoGuardDashboardIngress exposes the CosmoGuard dashboard through an Ingress.
+type CosmoGuardDashboardIngress struct {
+	// Host is the hostname to route dashboard traffic from.
+	Host string `json:"host"`
+
+	// IngressClassName is the name of the IngressClass to use.
+	// +optional
+	IngressClassName *string `json:"ingressClassName,omitempty"`
+
+	// Annotations to add to the dashboard Ingress.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// TLS enables TLS for the dashboard Ingress using the given secret name for the certificate.
+	// +optional
+	TLSSecretName *string `json:"tlsSecretName,omitempty"`
 }
 
 // SidecarSpec allows configuring additional containers to run alongside the node.

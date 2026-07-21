@@ -509,6 +509,25 @@ func (chainNode *ChainNode) GetServiceName() string {
 	return chainNode.GetName()
 }
 
+// CosmoGuardName returns the name of the standalone CosmoGuard resources (Deployment/Service)
+// created for a standalone ChainNode.
+func (chainNode *ChainNode) CosmoGuardName() string {
+	return fmt.Sprintf("%s-cosmoguard", chainNode.GetName())
+}
+
+// GetAPIServiceName returns the Service that node API traffic (RPC/LCD/gRPC/EVM) should be
+// routed to. When CosmoGuard is enabled it is the standalone CosmoGuard Service; the internal
+// bypass service still takes precedence when explicitly requested.
+func (chainNode *ChainNode) GetAPIServiceName() string {
+	if chainNode.UseInternal() {
+		return fmt.Sprintf("%s-internal", chainNode.GetName())
+	}
+	if chainNode.Spec.Config.CosmoGuardEnabled() {
+		return chainNode.CosmoGuardName()
+	}
+	return chainNode.GetName()
+}
+
 func (chainNode *ChainNode) GetGatewayParentRef() gwapiv1.ParentReference {
 	ref := gwapiv1.ParentReference{
 		Name: gwapiv1.ObjectName(chainNode.Spec.Gateway.Gateway.Name),

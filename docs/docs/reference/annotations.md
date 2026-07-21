@@ -89,8 +89,9 @@ For EVM-enabled chains, the following are added:
 
 ### CosmoGuard ports
 
-When [CosmoGuard](../usage/cosmoguard) is enabled, it fronts the node's APIs on these
-ports:
+When [CosmoGuard](../usage/cosmoguard) is enabled, a standalone CosmoGuard Deployment
+fronts the node's APIs. Its container and `<name>-cosmoguard` Service listen on these
+ports (the group/global Services keep the public port numbers and target these):
 
 | Port name | Port | Fronts |
 | --- | --- | --- |

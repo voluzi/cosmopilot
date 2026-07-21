@@ -1,21 +1,39 @@
 # Using CosmoGuard
 
-[CosmoGuard](https://github.com/voluzi/cosmoguard) is a lightweight firewall designed specifically for protecting Cosmos nodes. With [CosmoGuard](https://github.com/voluzi/cosmoguard), you can control access at the API endpoint level, cache responses for performance, and limit WebSocket connections for better resource management.
+[CosmoGuard](https://github.com/voluzi/cosmoguard) is a lightweight firewall designed specifically for protecting Cosmos nodes. With CosmoGuard you can control access at the API endpoint level, cache responses for performance, rate-limit clients, and limit WebSocket connections for better resource management.
 
-`Cosmopilot` integrates seamlessly with [CosmoGuard](https://github.com/voluzi/cosmoguard) by allowing easy configuration of [CosmoGuard](https://github.com/voluzi/cosmoguard) rules through Kubernetes `ConfigMaps`.
+`Cosmopilot` integrates with CosmoGuard **v4** and deploys it as a **standalone Deployment** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
+
+## Topology
+
+```text
+client traffic
+  -> Service / Ingress / Gateway
+  -> CosmoGuard Deployment        (standalone, scalable, HPA-capable)
+  -> node pods                    (discovered via a headless Service)
+```
+
+- On a **`ChainNodeSet`**, Cosmopilot deploys **one CosmoGuard Deployment per node group**, fronting every node in that group. It can run multiple replicas and be autoscaled with an HPA.
+- On a standalone **`ChainNode`**, Cosmopilot deploys a single CosmoGuard Deployment fronting that node.
+- The node's main and `-internal` Services keep serving the raw node ports. Guarded traffic is routed through the group/global Services (whose selectors are flipped to the guard once it is ready) and through the dedicated `<name>-cosmoguard` Service.
+
+:::info[Migrating from the sidecar model]
+Earlier releases ran CosmoGuard as a sidecar container inside each node pod. Enabling CosmoGuard no longer modifies the node pod. When you upgrade, Cosmopilot brings the standalone guard up first and only routes traffic through it once it is ready (make-before-break), then recreates the node pods without the sidecar. Your rules `ConfigMap` is never modified.
+:::
 
 ## Why Use CosmoGuard?
 
-- **Fine-Grained API Access Control:** Manage access on a per-endpoint level.
-- **Performance Optimization with Caching:** Cache frequently accessed responses using either in-memory or Redis backends.
-- **WebSocket Connection Management:** Control the number of WebSocket connections to nodes, preventing resource overload on nodes.
-- **Hot-Reloading**: Apply configuration changes without needing to restart CosmoGuard.
+- **Fine-Grained API Access Control:** Manage access on a per-endpoint level (RPC, LCD, gRPC, EVM).
+- **Performance Optimization with Caching:** Cache frequently accessed responses (in-memory; no external cache needed for a single replica).
+- **Rate Limiting & WebSocket Management:** Protect nodes from overload.
+- **Independent Scaling:** Scale the guard independently of the nodes, with optional autoscaling.
+- **Hot-Reloading:** Rule changes in the `ConfigMap` are hot-reloaded without a restart.
 
 ## Setting Up CosmoGuard
 
-### Step 1: Create the CosmoGuard Configuration
+### Step 1: Create the CosmoGuard rules
 
-Create a configuration file following CosmoGuard's [rules structure](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md). An example configuration allowing only the `/status` endpoint on `RPC` and caching its response:
+Create a configuration file containing **only rules** following CosmoGuard's [config structure](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md). An example allowing only the `/status` endpoint on RPC and caching its response:
 
 ```yaml
 cache:
@@ -24,31 +42,28 @@ cache:
 rpc:
   rules:
     - action: allow
-      paths: 
-        - /status
-      methods: 
-        - GET
+      match:
+        path: /status
+        method: GET
       cache:
         enable: true
 ```
 
 :::warning[IMPORTANT]
-When using [CosmoGuard](https://github.com/voluzi/cosmoguard) with `Cosmopilot`, avoid manually configuring `Global Settings` and `Node Settings` in the `ConfigMap`. `Cosmopilot` will automatically handle these settings to ensure proper integration and functionality.
+Provide **rules only** in your `ConfigMap`. Cosmopilot manages the upstream (node discovery), listener ports, metrics and dashboard settings through environment variables — do not set them in the file.
+
+CosmoGuard v4 **removed Redis**: a `cache.backend`, `cache.redis` or `cache.redis-sentinel` key now fails startup. For multi-replica caches CosmoGuard uses an embedded cluster; single-replica needs no cache backend at all. See the CosmoGuard [v4 migration notes](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md) for other breaking changes (WebSocket cross-origin now denied by default, CosmoGuard owns CORS, gRPC reflection is no longer auto-allowed). You can validate a file with `cosmoguard validate <file>`.
 :::
 
 ### Step 2: Create a ConfigMap in Kubernetes
-
-Use the configuration from Step 1 to create a Kubernetes ConfigMap:
 
 ```bash
 kubectl create configmap cosmoguard-config --from-file=cosmoguard.yaml=/path/to/your/cosmoguard.yaml -n <namespace>
 ```
 
-This ConfigMap will be referenced by the CosmoGuard integration in Cosmopilot.
+### Step 3: Enable CosmoGuard
 
-### Step 3: Enable CosmoGuard in Cosmopilot
-
-To enable CosmoGuard for a `ChainNode` or a node group within a `ChainNodeSet`, specify the following configuration in your manifest:
+To enable CosmoGuard for a `ChainNode` or a node group within a `ChainNodeSet`, add the following to the node/group `config`:
 
 ```yaml
 config:
@@ -56,9 +71,10 @@ config:
     enable: true
     config:
       name: cosmoguard-config  # Name of the ConfigMap created in Step 2.
-      key: cosmoguard.yaml     # Key within the ConfigMap containing the configuration.
-    restartPodOnFailure: true  # Optional: Restart the pod if CosmoGuard fails.
-    resources:                 # Optional: Resource allocation for CosmoGuard. This example shows the default resources.
+      key: cosmoguard.yaml     # Key within the ConfigMap containing the rules.
+    replicas: 2                # Optional: number of CosmoGuard replicas (default 1). Ignored when autoscaling is enabled.
+    image: ghcr.io/voluzi/cosmoguard:4.0.0-rc.6  # Optional: override the operator-wide default image.
+    resources:                 # Optional: per-pod resources (defaults shown).
       requests:
         cpu: 200m
         memory: 250Mi
@@ -67,29 +83,75 @@ config:
         memory: 250Mi
 ```
 
+:::note
+`restartPodOnFailure` is deprecated and has no effect: CosmoGuard now runs as a standalone Deployment supervised by Kubernetes.
+:::
+
+## Autoscaling
+
+Scale CosmoGuard independently of the nodes with a HorizontalPodAutoscaler:
+
+```yaml
+config:
+  cosmoGuard:
+    enable: true
+    config:
+      name: cosmoguard-config
+      key: cosmoguard.yaml
+    autoscaling:
+      enable: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 75      # Optional (defaults to 80 when neither target is set).
+      targetMemoryUtilizationPercentage: 70   # Optional.
+```
+
+When autoscaling is enabled the HPA owns the replica count (the `replicas` field is ignored).
+
+## Dashboard
+
+CosmoGuard ships a read-only web dashboard. Expose it (opt-in, off by default):
+
+```yaml
+config:
+  cosmoGuard:
+    enable: true
+    config:
+      name: cosmoguard-config
+      key: cosmoguard.yaml
+    dashboard:
+      enable: true
+      port: 8080                    # Optional (default 8080).
+      basicAuth:                    # Optional: credentials sourced from a Secret (never inlined).
+        username:
+          name: cosmoguard-dashboard-auth
+          key: username
+        password:
+          name: cosmoguard-dashboard-auth
+          key: password
+      ingress:                      # Optional: expose the dashboard through an Ingress.
+        host: cosmoguard.example.com
+        ingressClassName: nginx
+        tlsSecretName: cosmoguard-dashboard-tls
+```
+
 ## Customizing Rules
 
-Refer to the [CosmoGuard repo](https://github.com/voluzi/cosmoguard) for detailed information on creating custom rules. Here are a few tips:
+Refer to the [CosmoGuard repo](https://github.com/voluzi/cosmoguard) for detailed information on creating custom rules. A few tips:
 
-- **Use Wildcards:**
-  - `*` matches any single component in a path.
-  - `**` matches multiple components.
+- **Match expressively:** v4 supports an expressive `match` tree (`all`/`any`/`none` + `path`/`method`/`query`/`header`/`sourceIP`) with glob values.
+- **Prioritize Rules:** lower `priority` numbers match first.
+- **Enable Caching:** cache frequently requested endpoints to reduce node load.
 
-- **Prioritize Rules:**
-  Assign lower numbers to higher-priority rules using the `priority` field.
-
-- **Enable Caching:**
-  Enable caching selectively for frequently requested endpoints to reduce load on nodes.
-
-Example rule allowing `/block` endpoint with caching:
+Example rule allowing the `/block` endpoint with caching:
 
 ```yaml
 rpc:
   rules:
     - action: allow
-      paths: 
-        - /block/**
-      methods: [GET]
+      match:
+        path: /block/**
+        method: GET
       cache:
         enable: true
         ttl: 15s

@@ -1759,10 +1759,10 @@ func TestChainNodeSetValidateRejectsValidatorInfoChangeAfterCreation(t *testing.
 	assert.NoError(t, err)
 }
 
-// TestShouldUseCosmoGuardPortsLegacyValidator verifies that a global route listing the reserved
+// TestShouldUseCosmoGuardLegacyValidator verifies that a global route listing the reserved
 // "validator" group reflects CosmoGuard enabled on the legacy .spec.validator (which is not in
 // .spec.nodes), so the global Service targets the CosmoGuard ports instead of the raw app ports.
-func TestShouldUseCosmoGuardPortsLegacyValidator(t *testing.T) {
+func TestShouldUseCosmoGuardLegacyValidator(t *testing.T) {
 	guarded := &Config{CosmoGuard: &CosmoGuardConfig{Enable: true}}
 
 	withGuard := &ChainNodeSet{Spec: ChainNodeSetSpec{
@@ -1773,12 +1773,12 @@ func TestShouldUseCosmoGuardPortsLegacyValidator(t *testing.T) {
 	}}
 
 	ing := &GlobalIngressConfig{Groups: []string{ReservedValidatorGroupName}}
-	assert.True(t, ing.ShouldUseCosmoGuardPorts(withGuard), "ingress should detect CosmoGuard on the legacy validator")
-	assert.False(t, ing.ShouldUseCosmoGuardPorts(withoutGuard))
+	assert.True(t, ing.ShouldUseCosmoGuard(withGuard), "ingress should detect CosmoGuard on the legacy validator")
+	assert.False(t, ing.ShouldUseCosmoGuard(withoutGuard))
 
 	gw := &GlobalGatewayConfig{Groups: []string{ReservedValidatorGroupName}}
-	assert.True(t, gw.ShouldUseCosmoGuardPorts(withGuard), "gateway should detect CosmoGuard on the legacy validator")
-	assert.False(t, gw.ShouldUseCosmoGuardPorts(withoutGuard))
+	assert.True(t, gw.ShouldUseCosmoGuard(withGuard), "gateway should detect CosmoGuard on the legacy validator")
+	assert.False(t, gw.ShouldUseCosmoGuard(withoutGuard))
 }
 
 func TestGenesisSigningMaterialChangedIncludesChainID(t *testing.T) {

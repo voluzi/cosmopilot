@@ -74,9 +74,10 @@ This API is internal to the operator and is not meant to be consumed directly. S
 ### CosmoGuard (optional)
 
 When API exposure with fine-grained access control and caching is enabled,
-`Cosmopilot` injects a [CosmoGuard](https://github.com/voluzi/cosmoguard) container
-(image `ghcr.io/voluzi/cosmoguard`) in front of the node's API endpoints. See
-[CosmoGuard](../usage/cosmoguard).
+`Cosmopilot` deploys a standalone [CosmoGuard](https://github.com/voluzi/cosmoguard) **v4**
+Deployment (image `ghcr.io/voluzi/cosmoguard`) in front of the node's API endpoints —
+one per node group on a `ChainNodeSet`, or one per standalone `ChainNode`. It can run
+multiple replicas and be autoscaled. See [CosmoGuard](../usage/cosmoguard).
 
 ### Cosmoseed (optional)
 
@@ -115,7 +116,6 @@ has fine-grained control over its lifecycle. A typical Pod contains:
 
 - **`app`** — the chain binary itself (your node image).
 - **`node-utils`** — the helper sidecar (always present).
-- **`cosmoguard`** — optional API firewall/cache.
 - **`tmkms`** — deprecated remote signer for legacy validators.
 - **`vault-token-renewer`** — deprecated Vault token renewer for legacy TMKMS configurations.
 
