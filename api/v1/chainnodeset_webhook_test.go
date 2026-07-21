@@ -45,6 +45,30 @@ func TestChainNodeSetValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
 			".spec.nodes[0].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[0].cosmosigner",
 		}, []string(warnings))
 	})
+
+	t.Run("deprecated vault token renewer", func(t *testing.T) {
+		tmkmsConfig := tmkms("legacy-key")
+		tmkmsConfig.Provider.Hashicorp.AutoRenewToken = true
+		groupTmKMSConfig := tmkms("group-key")
+		groupTmKMSConfig.Provider.Hashicorp.AutoRenewToken = true
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
+			Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Validator: &NodeSetValidatorConfig{TmKMS: tmkmsConfig},
+			Nodes: []NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(1),
+				Validator: &NodeSetValidatorConfig{TmKMS: groupTmKMSConfig},
+			}},
+		}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
+			".spec.validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.cosmosigner, which renews Vault tokens internally",
+			".spec.nodes[0].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[0].cosmosigner",
+			".spec.nodes[0].validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.nodes[0].cosmosigner, which renews Vault tokens internally",
+		}, []string(warnings))
+	})
 }
 
 func TestChainNodeSetValidateGenesis(t *testing.T) {

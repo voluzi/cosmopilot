@@ -111,10 +111,10 @@ Persistent flag (all subcommands):
 | --- | --- | --- | --- |
 | `--concurrent-jobs` | `CONCURRENT_JOBS` | `10` | Number of concurrent delete jobs. |
 
-## vault-token-renewer
+## vault-token-renewer (deprecated)
 
-A small sidecar that keeps a HashiCorp Vault token renewed when TMKMS is backed by
-Vault with a non-root (expiring) token. It is configured entirely through the
-standard Vault environment variables and is wired up automatically by the operator
-when you enable `autoRenewToken` — see [TMKMS](../usage/tmkms#basic-configuration).
-You do not run or configure it manually.
+This deprecated sidecar keeps a HashiCorp Vault token renewed for legacy TMKMS
+configurations when `autoRenewToken` is enabled. It remains available during the TMKMS
+deprecation period for compatibility and should not be used by new deployments. Migrate to
+[Cosmosigner](../usage/cosmosigner), which manages Vault token renewal internally. You do not run
+or configure the sidecar manually.

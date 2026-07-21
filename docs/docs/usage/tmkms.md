@@ -3,7 +3,9 @@
 :::danger[Deprecated]
 TmKMS support is deprecated and will be removed in a future version of Cosmopilot. Existing
 configurations remain supported during the deprecation period, but new deployments should use
-[`Cosmosigner`](./cosmosigner.md), and existing validators should plan a migration.
+[`Cosmosigner`](./cosmosigner.md), and existing validators should plan a migration. The
+`vault-token-renewer` sidecar and `autoRenewToken` option are also deprecated and remain available
+only for legacy TmKMS configurations.
 :::
 
 `TmKMS` (Tendermint Key Management System) allows you to secure your consensus private key by keeping it off-chain and using an external signing mechanism. `Cosmopilot` integrates with `TmKMS` to ensure your validator’s private key is securely managed.
@@ -135,11 +137,13 @@ validator:
         tokenSecret:
           name: vault
           key: token
-        autoRenewToken: true # Optional. Defaults to false. Use for tokens with expirity (non-root tokens)
+        autoRenewToken: true # Deprecated. Legacy TmKMS only. Defaults to false.
 ```
 
-:::tip[NOTE]
-Unless you are using root token, you should enable `autoRenewToken` to have it renewed by `Cosmopilot` using a sidecar container.
+:::warning[Legacy token renewal]
+Legacy TmKMS deployments using renewable or periodic Vault tokens can set `autoRenewToken` to have
+the deprecated `vault-token-renewer` sidecar keep the token alive. New deployments should use
+[Cosmosigner](./cosmosigner.md), which renews Vault tokens internally without this sidecar.
 :::
 
 ## CA Certificate

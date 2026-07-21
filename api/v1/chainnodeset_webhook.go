@@ -50,10 +50,16 @@ func (nodeSet *ChainNodeSet) tmKMSDeprecationWarnings() admission.Warnings {
 	warnings := admission.Warnings{}
 	if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.TmKMS != nil {
 		warnings = append(warnings, ".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner")
+		if hashicorp := nodeSet.Spec.Validator.TmKMS.Provider.Hashicorp; hashicorp != nil && hashicorp.AutoRenewToken {
+			warnings = append(warnings, ".spec.validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.cosmosigner, which renews Vault tokens internally")
+		}
 	}
 	for i, group := range nodeSet.Spec.Nodes {
 		if group.Validator != nil && group.Validator.TmKMS != nil {
 			warnings = append(warnings, fmt.Sprintf(".spec.nodes[%d].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[%d].cosmosigner", i, i))
+			if hashicorp := group.Validator.TmKMS.Provider.Hashicorp; hashicorp != nil && hashicorp.AutoRenewToken {
+				warnings = append(warnings, fmt.Sprintf(".spec.nodes[%d].validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.nodes[%d].cosmosigner, which renews Vault tokens internally", i, i))
+			}
 		}
 	}
 	return warnings

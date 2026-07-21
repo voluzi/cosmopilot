@@ -212,8 +212,8 @@ type CosmosignerMigrationStatus struct {
 // CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All
 // fields are controller-managed and not meant to be set by hand.
 type CosmosignerStatus struct {
-	// Name is the signer's resource name (<nodeset>-signer | <nodeset>-<group>-signer |
-	// <nodeset>-<group>-<index>-signer) and the key of this entry.
+	// Name is the signer's resource name (`<nodeset>-signer` | `<nodeset>-<group>-signer` |
+	// `<nodeset>-<group>-<index>-signer`) and the key of this entry.
 	Name string `json:"name"`
 
 	// ResourceName is the stable Kubernetes resource base name used by this signer. It differs from

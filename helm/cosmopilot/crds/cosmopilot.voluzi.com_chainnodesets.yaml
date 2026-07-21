@@ -10211,8 +10211,11 @@ spec:
                                       description: Full address of the Vault cluster.
                                       type: string
                                     autoRenewToken:
-                                      description: Whether to automatically renew
-                                        vault token. Defaults to `false`.
+                                      description: |-
+                                        Whether to automatically renew the Vault token. Defaults to `false`.
+
+                                        Deprecated: this deploys vault-token-renewer for legacy tmKMS configurations. Cosmosigner
+                                        renews Vault tokens internally and does not use this sidecar.
                                       type: boolean
                                     certificateSecret:
                                       description: Secret containing the CA certificate
@@ -15561,8 +15564,11 @@ spec:
                                 description: Full address of the Vault cluster.
                                 type: string
                               autoRenewToken:
-                                description: Whether to automatically renew vault
-                                  token. Defaults to `false`.
+                                description: |-
+                                  Whether to automatically renew the Vault token. Defaults to `false`.
+
+                                  Deprecated: this deploys vault-token-renewer for legacy tmKMS configurations. Cosmosigner
+                                  renews Vault tokens internally and does not use this sidecar.
                                 type: boolean
                               certificateSecret:
                                 description: Secret containing the CA certificate
@@ -16072,8 +16078,8 @@ spec:
                       type: object
                     name:
                       description: |-
-                        Name is the signer's resource name (<nodeset>-signer | <nodeset>-<group>-signer |
-                        <nodeset>-<group>-<index>-signer) and the key of this entry.
+                        Name is the signer's resource name (`<nodeset>-signer` | `<nodeset>-<group>-signer` |
+                        `<nodeset>-<group>-<index>-signer`) and the key of this entry.
                       type: string
                     publicKey:
                       description: PublicKey is the canonical base64 consensus public

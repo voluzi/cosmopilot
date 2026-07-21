@@ -741,7 +741,10 @@ type TmKmsHashicorpProvider struct {
 	// +optional
 	UploadGenerated bool `json:"uploadGenerated,omitempty"`
 
-	// Whether to automatically renew vault token. Defaults to `false`.
+	// Whether to automatically renew the Vault token. Defaults to `false`.
+	//
+	// Deprecated: this deploys vault-token-renewer for legacy tmKMS configurations. Cosmosigner
+	// renews Vault tokens internally and does not use this sidecar.
 	// +optional
 	AutoRenewToken bool `json:"autoRenewToken,omitempty"`
 

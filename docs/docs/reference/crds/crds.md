@@ -922,7 +922,7 @@ TmKmsHashicorpProvider holds `hashicorp` provider specific configurations.
 | certificateSecret | Secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
 | tokenSecret | Secret containing the token to be used. | *corev1.SecretKeySelector | true |
 | uploadGenerated | UploadGenerated indicates if the controller should upload the generated private key to vault. Defaults to `false`. Will be set to `true` if this validator is initializing a new genesis. This should not be used in production. | bool | false |
-| autoRenewToken | Whether to automatically renew vault token. Defaults to `false`. | bool | false |
+| autoRenewToken | Whether to automatically renew the Vault token. Defaults to `false`.\n\nDeprecated: this deploys vault-token-renewer for legacy tmKMS configurations. Cosmosigner renews Vault tokens internally and does not use this sidecar. | bool | false |
 | skipCertificateVerify | Whether to skip certificate verification. Defaults to `false`. | bool | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -1142,7 +1142,7 @@ CosmosignerStatus is the controller-recorded state of one managed cosmosigner de
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| name | Name is the signer's resource name (<nodeset>-signer \| <nodeset>-<group>-signer \| <nodeset>-<group>-<index>-signer) and the key of this entry. | string | true |
+| name | Name is the signer's resource name (`<nodeset>-signer` \| `<nodeset>-<group>-signer` \| `<nodeset>-<group>-<index>-signer`) and the key of this entry. | string | true |
 | resourceName | ResourceName is the stable Kubernetes resource base name used by this signer. It differs from Name only after moving a signer between manifest placements, allowing the new configuration to reuse the old StatefulSet PVCs without renaming them. | string | false |
 | appliedDigest | AppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. Unlike SigningDigest, it is recorded for sentry and validator signers. | string | false |
 | publicKey | PublicKey is the canonical base64 consensus public key of the applied signer backend. | string | false |

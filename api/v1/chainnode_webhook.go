@@ -59,9 +59,13 @@ func (chainNode *ChainNode) tmKMSDeprecationWarnings() admission.Warnings {
 	if chainNode.Spec.Validator == nil || chainNode.Spec.Validator.TmKMS == nil {
 		return nil
 	}
-	return admission.Warnings{
+	warnings := admission.Warnings{
 		".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
 	}
+	if hashicorp := chainNode.Spec.Validator.TmKMS.Provider.Hashicorp; hashicorp != nil && hashicorp.AutoRenewToken {
+		warnings = append(warnings, ".spec.validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.cosmosigner, which renews Vault tokens internally")
+	}
+	return warnings
 }
 
 func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error) {

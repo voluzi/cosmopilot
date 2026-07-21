@@ -58,6 +58,23 @@ func TestUndeployConfigAttemptsSecretDeleteAfterConfigMapError(t *testing.T) {
 	}
 }
 
+func TestHashicorpProviderUsesPinnedVaultTokenRenewerImage(t *testing.T) {
+	provider := HashicorpProvider{
+		Adapter:        &HashicorpAdapter{},
+		TokenSecret:    &corev1.SecretKeySelector{Key: "token"},
+		AutoRenewToken: true,
+	}
+
+	containers := provider.getContainers()
+	if len(containers) != 1 {
+		t.Fatalf("renewer containers = %d, want 1", len(containers))
+	}
+	want := "ghcr.io/voluzi/vault-renewer:1.0.0@sha256:55532cbf4c7a7c5038e1b7cf759fa5748216075719afde776226a4025cb8e579"
+	if got := containers[0].Image; got != want {
+		t.Fatalf("renewer image = %q, want %q", got, want)
+	}
+}
+
 func testKMSForCleanup(t *testing.T, transport roundTripperFunc) *KMS {
 	t.Helper()
 	client, err := kubernetes.NewForConfig(&rest.Config{Host: "https://kubernetes.invalid", Transport: transport})
