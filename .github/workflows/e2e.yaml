@@ -40,14 +40,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Checkout Cosmosigner dependency
-        uses: actions/checkout@v7
-        with:
-          repository: voluzi/cosmosigner
-          ref: 8fc8dc8e7a2c337cf88faff67ab8ba9cd14f708e
-          path: .ci/cosmosigner
-          persist-credentials: false
-
       - name: Configure kernel parameters
         run: |
           sudo tee /etc/sysctl.d/99-kubernetes.conf <<EOF
@@ -62,13 +54,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build Cosmosigner dependency
-        run: docker build -t ghcr.io/voluzi/cosmosigner:0.2.0 .ci/cosmosigner
-
       - name: Run E2E Tests
         run: |
           make test.e2e \
-            COSMOSIGNER_IMAGE=ghcr.io/voluzi/cosmosigner:0.2.0 \
             TEST_TIMEOUT=1h \
             PROCS=4 \
             REUSE_CLUSTER=false \
