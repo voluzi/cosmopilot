@@ -113,20 +113,23 @@ func TestServiceSelectsGuard(t *testing.T) {
 	assert.False(t, r.serviceSelectsGuard(context.Background(), "ns", "missing"))
 }
 
+func TestCosmoGuardRouteGuardable(t *testing.T) {
+	nodeSet, _ := guardedNodeSet()
+
+	// A guarded .spec.nodes group -> guardable.
+	assert.True(t, cosmoGuardRouteGuardable(nodeSet, []string{"fullnodes"}))
+	// Validator group, unknown group, mixed, or empty -> NOT guardable (structural; not sticky).
+	assert.False(t, cosmoGuardRouteGuardable(nodeSet, []string{appsv1.ReservedValidatorGroupName}))
+	assert.False(t, cosmoGuardRouteGuardable(nodeSet, []string{"fullnodes", appsv1.ReservedValidatorGroupName}))
+	assert.False(t, cosmoGuardRouteGuardable(nodeSet, []string{"nope"}))
+	assert.False(t, cosmoGuardRouteGuardable(nodeSet, nil))
+}
+
 func TestCosmoGuardRouteReady(t *testing.T) {
 	nodeSet, _ := guardedNodeSet()
 
-	// Single guarded group: flip only once its guard is ready.
+	// Readiness: every group's guard must be ready.
 	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": false}))
 	assert.True(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": true}))
-
-	// The reserved validator group has no managed guard: a route including it must NOT flip, or its
-	// endpoints would be dropped.
-	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{appsv1.ReservedValidatorGroupName}, map[string]bool{}))
-	// Mixed route (guarded group + validator): still must not flip.
-	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes", appsv1.ReservedValidatorGroupName}, map[string]bool{"fullnodes": true}))
-
-	// Unknown group / empty route: never flip.
-	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"nope"}, map[string]bool{"nope": true}))
-	assert.False(t, cosmoGuardRouteReady(nodeSet, nil, map[string]bool{}))
+	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"a", "b"}, map[string]bool{"a": true, "b": false}))
 }

@@ -84,10 +84,15 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		return r.ensureService(ctx, svc)
 	}
 
-	// routeFlip decides whether a global ingress/gateway route Service should select guard pods:
-	// strict rollout of every targeted group's guard (so the per-route pod label is present) OR the
-	// route Service is already flipped (sticky through subsequent rolls).
+	// routeFlip decides whether a global ingress/gateway route Service should select guard pods. The
+	// route must be structurally guardable (every targeted group guard-managed) — checked first and
+	// NOT sticky, so adding an unguarded/validator group to an already-flipped route reverts it to
+	// raw. Given that, flip on a strict rollout of every group's guard (so the per-route pod label is
+	// present) OR keep an already-flipped route flipped through subsequent rolls (sticky).
 	routeFlip := func(groups []string, serviceName string) bool {
+		if !cosmoGuardRouteGuardable(nodeSet, groups) {
+			return false
+		}
 		return cosmoGuardRouteReady(nodeSet, groups, guards.fullyReady) ||
 			r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), serviceName)
 	}

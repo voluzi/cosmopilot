@@ -297,6 +297,11 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 	if !patchResult.IsEmpty() || !reflect.DeepEqual(currentSvc.Annotations, svc.Annotations) {
 		logger.Info("updating service")
 		svc.ObjectMeta.ResourceVersion = currentSvc.ObjectMeta.ResourceVersion
+		// ClusterIP(s) are immutable and API-allocated; a full Update submitting the freshly rendered
+		// Service (empty ClusterIP) is rejected. This matters when migrating a sidecar-guarded node
+		// Service to raw ports. Copy the live allocation forward.
+		svc.Spec.ClusterIP = currentSvc.Spec.ClusterIP
+		svc.Spec.ClusterIPs = currentSvc.Spec.ClusterIPs
 		return r.Update(ctx, svc)
 	}
 

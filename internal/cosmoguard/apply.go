@@ -118,8 +118,10 @@ func IsFullyRolledOut(ctx context.Context, c client.Client, namespace, name stri
 	if sts.Status.ObservedGeneration < sts.Generation {
 		return false, nil
 	}
-	if sts.Spec.Replicas != nil && sts.Status.UpdatedReplicas < *sts.Spec.Replicas {
-		return false, nil
+	if sts.Spec.Replicas != nil {
+		// Require every replica updated AND ready before flipping a global route, so traffic isn't
+		// routed to a partially-available guard set (e.g. one ready pod out of several).
+		return sts.Status.UpdatedReplicas >= *sts.Spec.Replicas && sts.Status.ReadyReplicas >= *sts.Spec.Replicas, nil
 	}
 	return sts.Status.ReadyReplicas > 0, nil
 }

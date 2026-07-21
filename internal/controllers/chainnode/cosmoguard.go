@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -40,11 +41,56 @@ func (r *Reconciler) apiServiceName(ctx context.Context, chainNode *appsv1.Chain
 	}
 	if r.standaloneGuardManaged(chainNode) {
 		serving, err := cosmoguard.IsServing(ctx, r.Client, chainNode.GetNamespace(), chainNode.CosmoGuardName())
-		if err == nil && serving {
+		// Sticky: flip on first serving, and keep the route on the guard through transient rollout
+		// un-readiness once it already points there (checked against the live route backend).
+		if (err == nil && serving) || r.standaloneRouteTargetsGuard(ctx, chainNode) {
 			return chainNode.CosmoGuardName()
 		}
 	}
 	return chainNode.GetName()
+}
+
+// standaloneRouteTargetsGuard reports whether this node's live ingress/gateway route already points
+// at its CosmoGuard Service, used to keep the route on the guard during transient guard rollouts.
+func (r *Reconciler) standaloneRouteTargetsGuard(ctx context.Context, chainNode *appsv1.ChainNode) bool {
+	guard := chainNode.CosmoGuardName()
+
+	if chainNode.Spec.Gateway != nil {
+		routes := &gwapiv1.HTTPRouteList{}
+		if err := r.List(ctx, routes, client.InNamespace(chainNode.GetNamespace())); err != nil {
+			return false
+		}
+		for i := range routes.Items {
+			rt := &routes.Items[i]
+			if !metav1.IsControlledBy(rt, chainNode) {
+				continue
+			}
+			for _, rule := range rt.Spec.Rules {
+				for _, br := range rule.BackendRefs {
+					if string(br.Name) == guard {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	ing := &networkingv1.Ingress{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: chainNode.GetName()}, ing); err != nil {
+		return false
+	}
+	for _, rule := range ing.Spec.Rules {
+		if rule.HTTP == nil {
+			continue
+		}
+		for _, p := range rule.HTTP.Paths {
+			if p.Backend.Service != nil && p.Backend.Service.Name == guard {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ensureCosmoGuardSecret creates the olric gossip encryption Secret for a standalone guard if it
@@ -81,17 +127,20 @@ func (r *Reconciler) ensureCosmoGuardSecret(ctx context.Context, chainNode *apps
 }
 
 // cosmoGuardParams builds the CosmoGuard render parameters for a standalone ChainNode. The guard
-// fronts this single node, discovered statically through its internal Service.
+// fronts this single node via its ready-gated main Service, so client API traffic is never forwarded
+// to a node pod that is starting, upgrading, or stopped for snapshotting.
 func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Params {
 	cfg := chainNode.Spec.Config
 
 	name := chainNode.CosmoGuardName()
 	p := cosmoguard.Params{
-		Name:                name,
-		Namespace:           chainNode.GetNamespace(),
-		Image:               cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
-		Replicas:            cfg.GetCosmoGuardReplicas(),
-		UpstreamHost:        chainNode.GetNodeFQDN(),
+		Name:      name,
+		Namespace: chainNode.GetNamespace(),
+		Image:     cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
+		Replicas:  cfg.GetCosmoGuardReplicas(),
+		// The main node Service publishes only ready endpoints (unlike "-internal", which publishes
+		// not-ready addresses for peers/signer); client API traffic must go through the ready-gated one.
+		UpstreamHost:        fmt.Sprintf("%s.%s.svc.cluster.local", chainNode.GetName(), chainNode.GetNamespace()),
 		EvmEnabled:          cfg.IsEvmEnabled(),
 		ConfigMap:           cfg.GetCosmoGuardConfig(),
 		Resources:           cfg.GetCosmoGuardResources(),

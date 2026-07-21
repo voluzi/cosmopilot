@@ -64,6 +64,9 @@ const (
 	clusterBindPortName    = "cluster-resp"
 	clusterGossipPortName  = "cluster-gossip"
 	clusterPeerApiPortName = "cluster-peer"
+	// Kubernetes port names are IANA service names (max 15 chars); "cluster-gossip-udp" (18) is
+	// rejected, so the UDP gossip port gets its own short name.
+	clusterGossipUDPPortName = "gossip-udp"
 
 	// EncryptionKeySecretKey is the key under which the olric gossip encryption key is stored in the
 	// operator-managed Secret.
@@ -269,7 +272,7 @@ func (p Params) containerPorts() []corev1.ContainerPort {
 	ports = append(ports,
 		corev1.ContainerPort{Name: clusterBindPortName, ContainerPort: clusterBindPort, Protocol: corev1.ProtocolTCP},
 		corev1.ContainerPort{Name: clusterGossipPortName, ContainerPort: clusterGossipPort, Protocol: corev1.ProtocolTCP},
-		corev1.ContainerPort{Name: clusterGossipPortName + "-udp", ContainerPort: clusterGossipPort, Protocol: corev1.ProtocolUDP},
+		corev1.ContainerPort{Name: clusterGossipUDPPortName, ContainerPort: clusterGossipPort, Protocol: corev1.ProtocolUDP},
 		corev1.ContainerPort{Name: clusterPeerApiPortName, ContainerPort: clusterPeerApiPort, Protocol: corev1.ProtocolTCP},
 	)
 	return ports
@@ -418,7 +421,7 @@ func (p Params) PeerService() *corev1.Service {
 			Ports: []corev1.ServicePort{
 				{Name: clusterBindPortName, Protocol: corev1.ProtocolTCP, Port: clusterBindPort, TargetPort: intstr.FromInt32(clusterBindPort)},
 				{Name: clusterGossipPortName, Protocol: corev1.ProtocolTCP, Port: clusterGossipPort, TargetPort: intstr.FromInt32(clusterGossipPort)},
-				{Name: clusterGossipPortName + "-udp", Protocol: corev1.ProtocolUDP, Port: clusterGossipPort, TargetPort: intstr.FromInt32(clusterGossipPort)},
+				{Name: clusterGossipUDPPortName, Protocol: corev1.ProtocolUDP, Port: clusterGossipPort, TargetPort: intstr.FromInt32(clusterGossipPort)},
 				{Name: clusterPeerApiPortName, Protocol: corev1.ProtocolTCP, Port: clusterPeerApiPort, TargetPort: intstr.FromInt32(clusterPeerApiPort)},
 			},
 		},

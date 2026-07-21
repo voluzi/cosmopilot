@@ -56,3 +56,32 @@ func TestIsServing(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got)
 }
+
+func TestIsFullyRolledOut(t *testing.T) {
+	sts := func(gen, observed int64, replicas, updated, ready int32) *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "ns", Generation: gen},
+			Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(replicas)},
+			Status:     appsv1.StatefulSetStatus{ObservedGeneration: observed, UpdatedReplicas: updated, ReadyReplicas: ready},
+		}
+	}
+	cases := []struct {
+		name string
+		sts  *appsv1.StatefulSet
+		want bool
+	}{
+		{"all updated and ready", sts(2, 2, 3, 3, 3), true},
+		// Global route must NOT flip while only some updated pods are ready.
+		{"updated but only one ready", sts(2, 2, 3, 3, 1), false},
+		{"not all updated", sts(2, 2, 3, 1, 1), false},
+		{"generation not observed", sts(3, 2, 3, 3, 3), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(servingScheme(t)).WithObjects(tc.sts).Build()
+			got, err := IsFullyRolledOut(context.Background(), c, "ns", "g")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

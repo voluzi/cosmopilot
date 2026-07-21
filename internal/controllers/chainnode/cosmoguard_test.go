@@ -75,7 +75,8 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	for _, e := range env {
 		if e.Name == "COSMOGUARD_NODE_HOST" {
 			found = true
-			assert.Equal(t, cn.GetNodeFQDN(), e.Value)
+			// Upstream is the ready-gated main node Service, not the not-ready-publishing "-internal".
+			assert.Equal(t, "node-0.ns.svc.cluster.local", e.Value)
 		}
 	}
 	assert.True(t, found, "static upstream host must be injected")
