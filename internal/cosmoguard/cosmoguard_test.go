@@ -166,6 +166,19 @@ func TestSelectsGuard(t *testing.T) {
 	assert.False(t, SelectsGuard(nil))
 }
 
+func TestPodAnnotationsForSafeEvict(t *testing.T) {
+	assert.Nil(t, PodAnnotationsForSafeEvict(nil), "unset -> no annotation (cluster default)")
+	assert.Equal(t, map[string]string{controllers.AnnotationSafeEvict: "false"}, PodAnnotationsForSafeEvict(ptr.To(false)))
+	assert.Equal(t, map[string]string{controllers.AnnotationSafeEvict: "true"}, PodAnnotationsForSafeEvict(ptr.To(true)))
+
+	// The annotation must land on the pod template so cluster-autoscaler sees it.
+	p := baseParams()
+	p.UpstreamHost = "host"
+	p.PodAnnotations = PodAnnotationsForSafeEvict(ptr.To(false))
+	tmpl := p.StatefulSet().Spec.Template
+	assert.Equal(t, "false", tmpl.Annotations[controllers.AnnotationSafeEvict])
+}
+
 func TestGenerateEncryptionKey(t *testing.T) {
 	k, err := GenerateEncryptionKey()
 	require.NoError(t, err)

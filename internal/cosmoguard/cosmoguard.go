@@ -136,6 +136,23 @@ type Params struct {
 	// dedicated/tainted node pool instead of staying Pending.
 	NodeSelector map[string]string
 	Affinity     *corev1.Affinity
+
+	// PodAnnotations are extra annotations stamped on the guard pods — used to mirror the fronted
+	// node's cluster-autoscaler safe-to-evict setting so a pinned node's guard isn't scaled away out
+	// from under already-flipped traffic.
+	PodAnnotations map[string]string
+}
+
+// PodAnnotationsForSafeEvict returns the cluster-autoscaler safe-to-evict annotation for the guard
+// pods, mirroring the fronted node/group's setting (the in-pod sidecar inherited it implicitly).
+// Without it a single-replica guard stays evictable while a pinned node does not, so a scale-down
+// could remove the guard and leave already-flipped ingress/gateway traffic without a guarded backend.
+// Returns nil when unset, leaving the guard at the cluster default.
+func PodAnnotationsForSafeEvict(safeToEvict *bool) map[string]string {
+	if safeToEvict == nil {
+		return nil
+	}
+	return map[string]string{controllers.AnnotationSafeEvict: strconv.FormatBool(*safeToEvict)}
 }
 
 // peerDiscoveryHost is the in-cluster DNS name olric resolves to find peers.
@@ -353,7 +370,7 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: p.podLabels()},
+				ObjectMeta: metav1.ObjectMeta{Labels: p.podLabels(), Annotations: p.PodAnnotations},
 				Spec: corev1.PodSpec{
 					SecurityContext:    k8s.RestrictedPodSecurityContext(),
 					PriorityClassName:  p.PriorityClassName,

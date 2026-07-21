@@ -13,7 +13,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -92,22 +91,21 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 		// Run under the group pods' ServiceAccount so SA-bound pull secrets / workload identity still
 		// apply, as they did for the in-pod sidecar.
 		ServiceAccountName: cfg.GetServiceAccountName(),
-		PriorityClassName:  priorityClassName,
-		NodeSelector:       nodeSelector,
-		Affinity:           affinity,
+		// Mirror the group's safe-to-evict setting so a pinned group's guard isn't scaled away under it.
+		PodAnnotations:    cosmoguard.PodAnnotationsForSafeEvict(cfg.SafeToEvict),
+		PriorityClassName: priorityClassName,
+		NodeSelector:      nodeSelector,
+		Affinity:          affinity,
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
 		as := cfg.GetCosmoGuardAutoscaling()
-		target := as.TargetCPUUtilizationPercentage
-		if target == nil && as.TargetMemoryUtilizationPercentage == nil {
-			target = ptr.To(appsv1.DefaultCosmoGuardAutoscalingCPUTarget)
-		}
+		targetCPU, targetMemory := cfg.GetCosmoGuardAutoscalingTargets()
 		p.Autoscaling = &cosmoguard.AutoscalingParams{
 			MinReplicas:  as.MinReplicas,
 			MaxReplicas:  as.MaxReplicas,
-			TargetCPU:    target,
-			TargetMemory: as.TargetMemoryUtilizationPercentage,
+			TargetCPU:    targetCPU,
+			TargetMemory: targetMemory,
 		}
 	}
 

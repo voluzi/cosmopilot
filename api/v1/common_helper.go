@@ -345,6 +345,40 @@ func (cfg *Config) GetCosmoGuardResources() corev1.ResourceRequirements {
 	}
 }
 
+// GetCosmoGuardAutoscalingTargets resolves the HPA utilization targets for the CosmoGuard guard.
+// Explicit user targets win. When the user sets neither, it defaults the metric to whichever compute
+// resource the guard container actually requests (CPU preferred). An HPA cannot compute utilization
+// for a resource the container does not request, so blindly defaulting to CPU on a container that
+// only requests memory would leave the guard stuck at its initial replica count.
+func (cfg *Config) GetCosmoGuardAutoscalingTargets() (targetCPU, targetMemory *int32) {
+	as := cfg.GetCosmoGuardAutoscaling()
+	if as == nil {
+		return nil, nil
+	}
+	targetCPU = as.TargetCPUUtilizationPercentage
+	targetMemory = as.TargetMemoryUtilizationPercentage
+	if targetCPU == nil && targetMemory == nil {
+		res := cfg.GetCosmoGuardResources()
+		if cosmoGuardRequests(res, corev1.ResourceMemory) && !cosmoGuardRequests(res, corev1.ResourceCPU) {
+			targetMemory = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
+		} else {
+			targetCPU = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
+		}
+	}
+	return targetCPU, targetMemory
+}
+
+// cosmoGuardRequests reports whether the guard container effectively requests the given resource —
+// via an explicit request, or a limit (Kubernetes copies a limit to the request when the request is
+// unset). Utilization-based autoscaling needs that resulting request to exist.
+func cosmoGuardRequests(res corev1.ResourceRequirements, name corev1.ResourceName) bool {
+	if _, ok := res.Requests[name]; ok {
+		return true
+	}
+	_, ok := res.Limits[name]
+	return ok
+}
+
 // GetCosmoGuardReplicas returns the desired CosmoGuard replica count. Defaults to 1.
 func (cfg *Config) GetCosmoGuardReplicas() int32 {
 	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Replicas != nil {
