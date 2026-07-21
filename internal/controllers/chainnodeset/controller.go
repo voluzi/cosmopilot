@@ -75,7 +75,6 @@ func (r *Reconciler) reservationReader() client.Reader {
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=grpcroutes,verbs=get;list;watch;create;update;patch;delete
@@ -693,7 +692,6 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		For(&appsv1.ChainNodeSet{}).
 		Owns(&appsv1.ChainNode{}).
 		Owns(&k8sappsv1.StatefulSet{}).
-		Owns(&k8sappsv1.Deployment{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).

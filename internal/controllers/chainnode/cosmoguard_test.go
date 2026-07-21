@@ -31,7 +31,7 @@ func cosmoGuardTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	return &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
 		Scheme: scheme,
-		opts:   &controllers.ControllerRunOptions{CosmoGuardImage: "ghcr.io/voluzi/cosmoguard:4.0.0-rc.6"},
+		opts:   &controllers.ControllerRunOptions{CosmoGuardImage: "ghcr.io/voluzi/cosmoguard:4.0.0-rc.7"},
 	}
 }
 
@@ -56,18 +56,19 @@ func guardedChainNode(name string, child bool) *appsv1.ChainNode {
 	}
 }
 
-// TestStandaloneGuardCreatesDeploymentAndService verifies a standalone ChainNode gets a guard
-// Deployment + Service pointed at its internal Service (static upstream).
-func TestStandaloneGuardCreatesDeploymentAndService(t *testing.T) {
+// TestStandaloneGuardCreatesStatefulSetAndService verifies a standalone ChainNode gets a clustered
+// guard StatefulSet + client Service + headless peer Service + encryption Secret, pointed at its
+// internal Service (static upstream).
+func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	r := cosmoGuardTestReconciler(t, cn)
 
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
-	dep := &k8sappsv1.Deployment{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, dep))
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
 
-	env := dep.Spec.Template.Spec.Containers[0].Env
+	env := sts.Spec.Template.Spec.Containers[0].Env
 	found := false
 	for _, e := range env {
 		if e.Name == "COSMOGUARD_NODE_HOST" {
@@ -79,6 +80,15 @@ func TestStandaloneGuardCreatesDeploymentAndService(t *testing.T) {
 
 	svc := &corev1.Service{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, svc))
+
+	// Headless peer Service + encryption Secret provisioned for the olric cluster.
+	peer := &corev1.Service{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-peer"}, peer))
+	assert.Equal(t, corev1.ClusterIPNone, peer.Spec.ClusterIP)
+
+	secret := &corev1.Secret{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-cluster"}, secret))
+	assert.NotEmpty(t, secret.Data["encryptionKey"])
 }
 
 // TestNodeSetChildSkipsStandaloneGuard verifies a ChainNodeSet child never creates its own guard
@@ -100,11 +110,17 @@ func TestDisableGuardUndeploys(t *testing.T) {
 	r := cosmoGuardTestReconciler(t, cn)
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
-	// Disable and reconcile again.
+	// Confirm it was created first, then disable and reconcile again.
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
+
 	cn.Spec.Config.CosmoGuard.Enable = false
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
-	dep := &k8sappsv1.Deployment{}
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, dep)
-	assert.Error(t, err, "guard deployment should be removed when disabled")
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	assert.Error(t, err, "guard statefulset should be removed when disabled")
+	err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-peer"}, &corev1.Service{})
+	assert.Error(t, err, "peer service should be removed when disabled")
+	err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-cluster"}, &corev1.Secret{})
+	assert.Error(t, err, "encryption secret should be removed when disabled")
 }

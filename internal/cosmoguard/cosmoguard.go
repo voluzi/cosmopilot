@@ -1,13 +1,24 @@
-// Package cosmoguard renders the Kubernetes resources for a standalone CosmoGuard deployment
-// (Deployment, Service and HorizontalPodAutoscaler) that fronts one or more blockchain nodes.
+// Package cosmoguard renders the Kubernetes resources for a clustered CosmoGuard deployment
+// (StatefulSet, client Service, headless peer Service, HorizontalPodAutoscaler and an optional
+// dashboard Ingress) that fronts one or more blockchain nodes.
+//
+// CosmoGuard runs as a StatefulSet so its embedded olric cache cluster gets stable per-pod DNS:
+// every replica shares one distributed cache, so a request cached by one pod is served from cache
+// by all of them and the backing nodes are shielded regardless of how the load balancer spreads
+// traffic. Peers find each other through the headless peer Service (olric DNS discovery), and the
+// gossip channel is encrypted with a key the operator provisions as a Secret.
 //
 // CosmoGuard v4 is configured through a user-owned ConfigMap that carries ONLY policy rules.
-// Everything the operator controls (upstream node discovery, listener/metrics/dashboard settings)
-// is injected through COSMOGUARD_* environment variables, so the user ConfigMap is never rewritten
-// and CosmoGuard's rules hot-reload keeps working. See internal/controllers for the wiring.
+// Everything the operator controls (upstream node discovery, listener/metrics/dashboard settings
+// and the whole cache.cluster block) is injected through COSMOGUARD_* environment variables, so the
+// user ConfigMap is never rewritten and CosmoGuard's rules hot-reload keeps working. See
+// internal/controllers for the wiring.
 package cosmoguard
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
 	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -27,7 +38,7 @@ import (
 func intToStr(i int) string { return strconv.Itoa(i) }
 
 const (
-	// labelAppName / appName / labelInstance identify CosmoGuard pods and back the Deployment
+	// labelAppName / appName / labelInstance identify CosmoGuard pods and back the StatefulSet
 	// selector. They are kept separate from caller-provided routing labels so the selector stays
 	// stable regardless of what the owner stamps on the resources.
 	labelAppName  = "app.kubernetes.io/name"
@@ -42,7 +53,31 @@ const (
 	// fsnotify-based rules hot-reload on edits.
 	configVolumeName = "config"
 	configMountPath  = "/config"
+
+	// olric cluster ports (match CosmoGuard's ClusterConfig defaults). The gossip port carries both
+	// TCP and UDP. peerApiPort is bindPort+1 (CosmoGuard's default when left 0), declared explicitly
+	// here so the peer Service can expose it.
+	clusterBindPort    = 3320
+	clusterGossipPort  = 3322
+	clusterPeerApiPort = 3321
+
+	clusterBindPortName    = "cluster-resp"
+	clusterGossipPortName  = "cluster-gossip"
+	clusterPeerApiPortName = "cluster-peer"
+
+	// EncryptionKeySecretKey is the key under which the olric gossip encryption key is stored in the
+	// operator-managed Secret.
+	EncryptionKeySecretKey = "encryptionKey"
 )
+
+// GenerateEncryptionKey returns a fresh base64-encoded 32-byte key for olric gossip encryption.
+func GenerateEncryptionKey() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generating cosmoguard encryption key: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf), nil
+}
 
 // Params carries everything needed to render a CosmoGuard deployment's resources. The owner
 // (ChainNode or ChainNodeSet controller) sets owner references and applies the returned objects.
@@ -76,8 +111,21 @@ type Params struct {
 	Dashboard   *DashboardParams
 	Autoscaling *AutoscalingParams
 
+	// PeerServiceName is the headless Service that backs the StatefulSet and the olric cluster's DNS
+	// discovery (every replica resolves its peers through it).
+	PeerServiceName string
+
+	// EncryptionKeySecret is the name of the operator-managed Secret holding the olric gossip
+	// encryption key (under EncryptionKeySecretKey).
+	EncryptionKeySecret string
+
 	PriorityClassName string
 	ImagePullSecrets  []corev1.LocalObjectReference
+}
+
+// peerDiscoveryHost is the in-cluster DNS name olric resolves to find peers.
+func (p Params) peerDiscoveryHost() string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local", p.PeerServiceName, p.Namespace)
 }
 
 // DashboardParams configures CosmoGuard's read-only dashboard listener.
@@ -119,6 +167,12 @@ func AppLabel() map[string]string {
 	return map[string]string{labelAppName: appName}
 }
 
+// PeerServiceName derives the headless peer Service name from the guard name.
+func PeerServiceName(name string) string { return name + "-peer" }
+
+// EncryptionKeySecretName derives the olric encryption-key Secret name from the guard name.
+func EncryptionKeySecretName(name string) string { return name + "-cluster" }
+
 func (p Params) podLabels() map[string]string {
 	return utils.MergeMaps(p.Labels, InstanceLabels(p.Name))
 }
@@ -128,6 +182,21 @@ func (p Params) env() []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "COSMOGUARD_METRICS_ENABLE", Value: "true"},
 		{Name: "COSMOGUARD_METRICS_PORT", Value: intToStr(controllers.CosmoGuardMetricsPort)},
+
+		// olric cache cluster: every replica binds its own pod IP as the member name and discovers
+		// peers through the headless peer Service. The gossip encryption key comes from a Secret.
+		{Name: "COSMOGUARD_CLUSTER_ENABLE", Value: "true"},
+		{Name: "COSMOGUARD_CLUSTER_BIND_ADDR", ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+		}},
+		{Name: "COSMOGUARD_CLUSTER_DISCOVERY_MODE", Value: "dns"},
+		{Name: "COSMOGUARD_CLUSTER_DISCOVERY_DNS_HOST", Value: p.peerDiscoveryHost()},
+		{Name: "COSMOGUARD_CLUSTER_ENCRYPTION_KEY", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: p.EncryptionKeySecret},
+				Key:                  EncryptionKeySecretKey,
+			},
+		}},
 	}
 
 	// Upstream: DNS discovery against a headless Service (group) or a static host (single node).
@@ -185,6 +254,13 @@ func (p Params) containerPorts() []corev1.ContainerPort {
 	if p.Dashboard != nil {
 		ports = append(ports, corev1.ContainerPort{Name: "dashboard", ContainerPort: p.Dashboard.Port, Protocol: corev1.ProtocolTCP})
 	}
+	// olric cluster ports: RESP (TCP), gossip (TCP + UDP), peer API (TCP).
+	ports = append(ports,
+		corev1.ContainerPort{Name: clusterBindPortName, ContainerPort: clusterBindPort, Protocol: corev1.ProtocolTCP},
+		corev1.ContainerPort{Name: clusterGossipPortName, ContainerPort: clusterGossipPort, Protocol: corev1.ProtocolTCP},
+		corev1.ContainerPort{Name: clusterGossipPortName + "-udp", ContainerPort: clusterGossipPort, Protocol: corev1.ProtocolUDP},
+		corev1.ContainerPort{Name: clusterPeerApiPortName, ContainerPort: clusterPeerApiPort, Protocol: corev1.ProtocolTCP},
+	)
 	return ports
 }
 
@@ -196,8 +272,8 @@ func securityContext() *corev1.SecurityContext {
 	return sc
 }
 
-// Deployment renders the CosmoGuard Deployment.
-func (p Params) Deployment() *appsv1.Deployment {
+// StatefulSet renders the clustered CosmoGuard StatefulSet.
+func (p Params) StatefulSet() *appsv1.StatefulSet {
 	metricsPort := intstr.FromInt32(controllers.CosmoGuardMetricsPort)
 
 	container := corev1.Container{
@@ -235,20 +311,20 @@ func (p Params) Deployment() *appsv1.Deployment {
 		},
 	}
 
-	dep := &appsv1.Deployment{
+	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.Name,
 			Namespace: p.Namespace,
 			Labels:    p.podLabels(),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: InstanceLabels(p.Name)},
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxUnavailable: ptr.To(intstr.FromInt32(0)),
-					MaxSurge:       ptr.To(intstr.FromInt32(1)),
-				},
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName: p.PeerServiceName,
+			// Parallel so all replicas start together and can form the olric cluster quorum without
+			// waiting for ordinal-by-ordinal readiness.
+			PodManagementPolicy: appsv1.ParallelPodManagement,
+			Selector:            &metav1.LabelSelector{MatchLabels: InstanceLabels(p.Name)},
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: p.podLabels()},
@@ -275,10 +351,10 @@ func (p Params) Deployment() *appsv1.Deployment {
 	// When autoscaling is enabled the HPA owns .spec.replicas; leave it unset so reconciles don't
 	// fight the autoscaler.
 	if p.Autoscaling == nil {
-		dep.Spec.Replicas = ptr.To(p.Replicas)
+		sts.Spec.Replicas = ptr.To(p.Replicas)
 	}
 
-	return dep
+	return sts
 }
 
 // Service renders the ClusterIP Service that fronts the guard pods. It keeps the node's public
@@ -314,7 +390,31 @@ func (p Params) Service() *corev1.Service {
 	}
 }
 
-// HPA renders the HorizontalPodAutoscaler for the guard Deployment, or nil when autoscaling is off.
+// PeerService renders the headless Service that backs the StatefulSet and the olric cluster's DNS
+// discovery. It publishes not-ready addresses so peers can find each other during the initial
+// cluster join, before any pod passes its readiness probe.
+func (p Params) PeerService() *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.PeerServiceName,
+			Namespace: p.Namespace,
+			Labels:    p.podLabels(),
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:                corev1.ClusterIPNone,
+			PublishNotReadyAddresses: true,
+			Selector:                 InstanceLabels(p.Name),
+			Ports: []corev1.ServicePort{
+				{Name: clusterBindPortName, Protocol: corev1.ProtocolTCP, Port: clusterBindPort, TargetPort: intstr.FromInt32(clusterBindPort)},
+				{Name: clusterGossipPortName, Protocol: corev1.ProtocolTCP, Port: clusterGossipPort, TargetPort: intstr.FromInt32(clusterGossipPort)},
+				{Name: clusterGossipPortName + "-udp", Protocol: corev1.ProtocolUDP, Port: clusterGossipPort, TargetPort: intstr.FromInt32(clusterGossipPort)},
+				{Name: clusterPeerApiPortName, Protocol: corev1.ProtocolTCP, Port: clusterPeerApiPort, TargetPort: intstr.FromInt32(clusterPeerApiPort)},
+			},
+		},
+	}
+}
+
+// HPA renders the HorizontalPodAutoscaler for the guard StatefulSet, or nil when autoscaling is off.
 func (p Params) HPA() *autoscalingv2.HorizontalPodAutoscaler {
 	if p.Autoscaling == nil {
 		return nil
@@ -337,7 +437,7 @@ func (p Params) HPA() *autoscalingv2.HorizontalPodAutoscaler {
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
 				APIVersion: "apps/v1",
-				Kind:       "Deployment",
+				Kind:       "StatefulSet",
 				Name:       p.Name,
 			},
 			MinReplicas: p.Autoscaling.MinReplicas,

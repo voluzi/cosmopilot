@@ -1,10 +1,12 @@
 package cosmoguard
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 
@@ -16,12 +18,14 @@ func baseParams() Params {
 	return Params{
 		Name:      "chain-group-cosmoguard",
 		Namespace: "ns",
-		Image:     "ghcr.io/voluzi/cosmoguard:4.0.0-rc.6",
+		Image:     "ghcr.io/voluzi/cosmoguard:4.0.0-rc.7",
 		Replicas:  2,
 		ConfigMap: &corev1.ConfigMapKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: "rules"},
 			Key:                  "cosmoguard.yaml",
 		},
+		PeerServiceName:     PeerServiceName("chain-group-cosmoguard"),
+		EncryptionKeySecret: EncryptionKeySecretName("chain-group-cosmoguard"),
 		Labels: map[string]string{
 			controllers.LabelChainNodeSet:      "chain",
 			controllers.LabelChainNodeSetGroup: "group",
@@ -37,11 +41,11 @@ func envMap(env []corev1.EnvVar) map[string]corev1.EnvVar {
 	return m
 }
 
-func TestDeployment_StaticUpstream(t *testing.T) {
+func TestStatefulSet_StaticUpstream(t *testing.T) {
 	p := baseParams()
 	p.UpstreamHost = "chain-0-internal.ns.svc.cluster.local"
 
-	dep := p.Deployment()
+	dep := p.StatefulSet()
 
 	// Selector is the immutable instance labels only.
 	assert.Equal(t, InstanceLabels(p.Name), dep.Spec.Selector.MatchLabels)
@@ -69,17 +73,17 @@ func TestDeployment_StaticUpstream(t *testing.T) {
 	assert.Equal(t, int32(2), *dep.Spec.Replicas)
 }
 
-func TestDeployment_DiscoveryUpstream(t *testing.T) {
+func TestStatefulSet_DiscoveryUpstream(t *testing.T) {
 	p := baseParams()
 	p.DiscoveryHost = "chain-group-cosmoguard-upstream.ns.svc.cluster.local"
 
-	env := envMap(p.Deployment().Spec.Template.Spec.Containers[0].Env)
+	env := envMap(p.StatefulSet().Spec.Template.Spec.Containers[0].Env)
 	assert.Equal(t, "chain-group-cosmoguard-upstream.ns.svc.cluster.local", env["COSMOGUARD_DISCOVERY_HOST"].Value)
 	assert.Equal(t, "dns", env["COSMOGUARD_DISCOVERY_TYPE"].Value)
 	assert.NotContains(t, env, "COSMOGUARD_NODE_HOST")
 }
 
-func TestDeployment_EVMAndDashboard(t *testing.T) {
+func TestStatefulSet_EVMAndDashboard(t *testing.T) {
 	p := baseParams()
 	p.UpstreamHost = "host"
 	p.EvmEnabled = true
@@ -89,7 +93,7 @@ func TestDeployment_EVMAndDashboard(t *testing.T) {
 		AuthPassword: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "s"}, Key: "pass"},
 	}
 
-	c := p.Deployment().Spec.Template.Spec.Containers[0]
+	c := p.StatefulSet().Spec.Template.Spec.Containers[0]
 	env := envMap(c.Env)
 	assert.Equal(t, "true", env["COSMOGUARD_ENABLE_EVM"].Value)
 	assert.Equal(t, "true", env["COSMOGUARD_DASHBOARD_ENABLE"].Value)
@@ -107,13 +111,60 @@ func TestDeployment_EVMAndDashboard(t *testing.T) {
 	assert.True(t, portNames["dashboard"])
 }
 
-func TestDeployment_AutoscalingLeavesReplicasUnset(t *testing.T) {
+func TestStatefulSet_AutoscalingLeavesReplicasUnset(t *testing.T) {
 	p := baseParams()
 	p.UpstreamHost = "host"
 	p.Autoscaling = &AutoscalingParams{MaxReplicas: 5, TargetCPU: ptr.To[int32](80)}
 
-	dep := p.Deployment()
+	dep := p.StatefulSet()
 	assert.Nil(t, dep.Spec.Replicas, "HPA owns replicas; deployment must not set them")
+}
+
+func TestStatefulSet_ClusterConfig(t *testing.T) {
+	p := baseParams()
+	p.UpstreamHost = "host"
+	sts := p.StatefulSet()
+
+	assert.Equal(t, PeerServiceName(p.Name), sts.Spec.ServiceName)
+	assert.Equal(t, appsv1.ParallelPodManagement, sts.Spec.PodManagementPolicy)
+	assert.Empty(t, sts.Spec.VolumeClaimTemplates, "cosmoguard is in-memory; no PVCs")
+
+	env := envMap(sts.Spec.Template.Spec.Containers[0].Env)
+	assert.Equal(t, "true", env["COSMOGUARD_CLUSTER_ENABLE"].Value)
+	assert.Equal(t, "dns", env["COSMOGUARD_CLUSTER_DISCOVERY_MODE"].Value)
+	assert.Equal(t, "chain-group-cosmoguard-peer.ns.svc.cluster.local", env["COSMOGUARD_CLUSTER_DISCOVERY_DNS_HOST"].Value)
+	require.NotNil(t, env["COSMOGUARD_CLUSTER_BIND_ADDR"].ValueFrom)
+	assert.Equal(t, "status.podIP", env["COSMOGUARD_CLUSTER_BIND_ADDR"].ValueFrom.FieldRef.FieldPath)
+	require.NotNil(t, env["COSMOGUARD_CLUSTER_ENCRYPTION_KEY"].ValueFrom)
+	assert.Equal(t, EncryptionKeySecretName(p.Name), env["COSMOGUARD_CLUSTER_ENCRYPTION_KEY"].ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, EncryptionKeySecretKey, env["COSMOGUARD_CLUSTER_ENCRYPTION_KEY"].ValueFrom.SecretKeyRef.Key)
+}
+
+func TestPeerService(t *testing.T) {
+	svc := baseParams().PeerService()
+	assert.Equal(t, PeerServiceName("chain-group-cosmoguard"), svc.Name)
+	assert.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
+	assert.True(t, svc.Spec.PublishNotReadyAddresses)
+
+	var tcp, udp bool
+	for _, sp := range svc.Spec.Ports {
+		if sp.Port == clusterGossipPort && sp.Protocol == corev1.ProtocolTCP {
+			tcp = true
+		}
+		if sp.Port == clusterGossipPort && sp.Protocol == corev1.ProtocolUDP {
+			udp = true
+		}
+	}
+	assert.True(t, tcp, "gossip TCP port exposed")
+	assert.True(t, udp, "gossip UDP port exposed")
+}
+
+func TestGenerateEncryptionKey(t *testing.T) {
+	k, err := GenerateEncryptionKey()
+	require.NoError(t, err)
+	b, err := base64.StdEncoding.DecodeString(k)
+	require.NoError(t, err)
+	assert.Len(t, b, 32, "olric key must be 32 bytes")
 }
 
 func TestService_Ports(t *testing.T) {

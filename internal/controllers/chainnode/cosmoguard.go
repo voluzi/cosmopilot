@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
@@ -16,20 +18,51 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/cosmoguard"
 )
 
+// ensureCosmoGuardSecret creates the olric gossip encryption Secret for a standalone guard if it
+// does not exist yet. It never overwrites an existing Secret — the key must stay stable for the life
+// of the cluster.
+func (r *Reconciler) ensureCosmoGuardSecret(ctx context.Context, chainNode *appsv1.ChainNode, name string) error {
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: name}, secret)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	key, err := cosmoguard.GenerateEncryptionKey()
+	if err != nil {
+		return err
+	}
+	secret = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: chainNode.GetNamespace()},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{cosmoguard.EncryptionKeySecretKey: []byte(key)},
+	}
+	if err := controllerutil.SetControllerReference(chainNode, secret, r.Scheme); err != nil {
+		return err
+	}
+	return r.Create(ctx, secret)
+}
+
 // cosmoGuardParams builds the CosmoGuard render parameters for a standalone ChainNode. The guard
 // fronts this single node, discovered statically through its internal Service.
 func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Params {
 	cfg := chainNode.Spec.Config
 
+	name := chainNode.CosmoGuardName()
 	p := cosmoguard.Params{
-		Name:         chainNode.CosmoGuardName(),
-		Namespace:    chainNode.GetNamespace(),
-		Image:        cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
-		Replicas:     cfg.GetCosmoGuardReplicas(),
-		UpstreamHost: chainNode.GetNodeFQDN(),
-		EvmEnabled:   cfg.IsEvmEnabled(),
-		ConfigMap:    cfg.GetCosmoGuardConfig(),
-		Resources:    cfg.GetCosmoGuardResources(),
+		Name:                name,
+		Namespace:           chainNode.GetNamespace(),
+		Image:               cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
+		Replicas:            cfg.GetCosmoGuardReplicas(),
+		UpstreamHost:        chainNode.GetNodeFQDN(),
+		EvmEnabled:          cfg.IsEvmEnabled(),
+		ConfigMap:           cfg.GetCosmoGuardConfig(),
+		Resources:           cfg.GetCosmoGuardResources(),
+		PeerServiceName:     cosmoguard.PeerServiceName(name),
+		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -88,8 +121,14 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 
 	params := r.cosmoGuardParams(chainNode)
 
-	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.Deployment()); err != nil {
-		return fmt.Errorf("failed to apply cosmoguard deployment for %s: %w", chainNode.GetName(), err)
+	if err := r.ensureCosmoGuardSecret(ctx, chainNode, cosmoguard.EncryptionKeySecretName(chainNode.CosmoGuardName())); err != nil {
+		return fmt.Errorf("failed to ensure cosmoguard secret for %s: %w", chainNode.GetName(), err)
+	}
+	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.PeerService()); err != nil {
+		return fmt.Errorf("failed to apply cosmoguard peer service for %s: %w", chainNode.GetName(), err)
+	}
+	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.StatefulSet()); err != nil {
+		return fmt.Errorf("failed to apply cosmoguard statefulset for %s: %w", chainNode.GetName(), err)
 	}
 	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.Service()); err != nil {
 		return fmt.Errorf("failed to apply cosmoguard service for %s: %w", chainNode.GetName(), err)

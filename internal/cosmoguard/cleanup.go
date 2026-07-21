@@ -13,23 +13,31 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Undeploy deletes the owned CosmoGuard Deployment, Service and HorizontalPodAutoscaler for the
-// given name. Each object is only deleted when it exists and is controlled by owner, so a
-// name-collision with a resource owned by a different CR is never destroyed. Missing objects are
-// ignored, making the call idempotent. Owner-reference GC covers CR deletion; Undeploy covers the
-// case where CosmoGuard is disabled while the owning CR lives on.
+// Undeploy deletes the owned CosmoGuard StatefulSet, Services (client + headless peer), encryption
+// Secret, HorizontalPodAutoscaler and dashboard Ingress for the given name. Each object is only
+// deleted when it exists and is controlled by owner, so a name-collision with a resource owned by a
+// different CR is never destroyed. Missing objects are ignored, making the call idempotent.
+// Owner-reference GC covers CR deletion; Undeploy covers the case where CosmoGuard is disabled while
+// the owning CR lives on.
 func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespace, name string) error {
-	objs := []client.Object{
+	// Objects sharing the guard's own name.
+	sameName := []client.Object{
 		&autoscalingv2.HorizontalPodAutoscaler{},
 		&corev1.Service{},
-		&appsv1.Deployment{},
+		&appsv1.StatefulSet{},
 	}
-	for _, obj := range objs {
+	for _, obj := range sameName {
 		if err := deleteOwned(ctx, c, owner, namespace, name, obj); err != nil {
 			return err
 		}
 	}
-	// The dashboard Ingress (when present) is named "<name>-dashboard".
+	// Auxiliary resources with derived names.
+	if err := deleteOwned(ctx, c, owner, namespace, PeerServiceName(name), &corev1.Service{}); err != nil {
+		return err
+	}
+	if err := deleteOwned(ctx, c, owner, namespace, EncryptionKeySecretName(name), &corev1.Secret{}); err != nil {
+		return err
+	}
 	return deleteOwned(ctx, c, owner, namespace, name+"-dashboard", &networkingv1.Ingress{})
 }
 

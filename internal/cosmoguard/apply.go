@@ -59,22 +59,22 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	return c.Update(ctx, obj)
 }
 
-// IsRolledOut reports whether the named CosmoGuard Deployment has finished rolling out its current
+// IsRolledOut reports whether the named CosmoGuard StatefulSet has finished rolling out its current
 // generation and has at least one ready replica.
 func IsRolledOut(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
-	dep := &appsv1.Deployment{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, dep); err != nil {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
 		if errors.IsNotFound(err) {
 			return false, nil
 		}
 		return false, err
 	}
 
-	if dep.Status.ObservedGeneration < dep.Generation {
+	if sts.Status.ObservedGeneration < sts.Generation {
 		return false, nil
 	}
-	if dep.Spec.Replicas != nil && dep.Status.UpdatedReplicas < *dep.Spec.Replicas {
+	if sts.Spec.Replicas != nil && sts.Status.UpdatedReplicas < *sts.Spec.Replicas {
 		return false, nil
 	}
-	return dep.Status.ReadyReplicas > 0, nil
+	return sts.Status.ReadyReplicas > 0, nil
 }

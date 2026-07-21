@@ -2,20 +2,29 @@
 
 [CosmoGuard](https://github.com/voluzi/cosmoguard) is a lightweight firewall designed specifically for protecting Cosmos nodes. With CosmoGuard you can control access at the API endpoint level, cache responses for performance, rate-limit clients, and limit WebSocket connections for better resource management.
 
-`Cosmopilot` integrates with CosmoGuard **v4** and deploys it as a **standalone Deployment** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
+`Cosmopilot` integrates with CosmoGuard **v4** and deploys it as a **standalone clustered StatefulSet** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
 
 ## Topology
 
 ```text
 client traffic
   -> Service / Ingress / Gateway
-  -> CosmoGuard Deployment        (standalone, scalable, HPA-capable)
+  -> CosmoGuard StatefulSet       (clustered shared cache, scalable, HPA-capable)
   -> node pods                    (discovered via a headless Service)
 ```
 
-- On a **`ChainNodeSet`**, Cosmopilot deploys **one CosmoGuard Deployment per node group**, fronting every node in that group. It can run multiple replicas and be autoscaled with an HPA.
-- On a standalone **`ChainNode`**, Cosmopilot deploys a single CosmoGuard Deployment fronting that node.
+- On a **`ChainNodeSet`**, Cosmopilot deploys **one CosmoGuard StatefulSet per node group**, fronting every node in that group. It can run multiple replicas and be autoscaled with an HPA.
+- On a standalone **`ChainNode`**, Cosmopilot deploys a single CosmoGuard StatefulSet fronting that node.
 - The node's main and `-internal` Services keep serving the raw node ports. Guarded traffic is routed through the group/global Services (whose selectors are flipped to the guard once it is ready) and through the dedicated `<name>-cosmoguard` Service.
+
+### Shared cache (olric cluster)
+
+CosmoGuard runs as a StatefulSet so every replica joins one **embedded olric cache cluster** and shares a single distributed cache. A response cached by any replica is served from cache by all of them, so the backing nodes are shielded no matter how the load balancer spreads requests — this is the whole point of running multiple replicas in front of a group. Cosmopilot wires this automatically:
+
+- a **headless peer Service** (`<name>-cosmoguard-peer`) gives each replica stable DNS for olric's peer discovery;
+- gossip traffic is encrypted with a key Cosmopilot generates once into a **Secret** (`<name>-cosmoguard-cluster`) and mounts into every replica.
+
+You don't configure any of this — enabling CosmoGuard is enough.
 
 :::info[Migrating from the sidecar model]
 Earlier releases ran CosmoGuard as a sidecar container inside each node pod. Enabling CosmoGuard no longer modifies the node pod. When you upgrade, Cosmopilot brings the standalone guard up first and only routes traffic through it once it is ready (make-before-break), then recreates the node pods without the sidecar. Your rules `ConfigMap` is never modified.
@@ -73,7 +82,7 @@ config:
       name: cosmoguard-config  # Name of the ConfigMap created in Step 2.
       key: cosmoguard.yaml     # Key within the ConfigMap containing the rules.
     replicas: 2                # Optional: number of CosmoGuard replicas (default 1). Ignored when autoscaling is enabled.
-    image: ghcr.io/voluzi/cosmoguard:4.0.0-rc.6  # Optional: override the operator-wide default image.
+    image: ghcr.io/voluzi/cosmoguard:4.0.0-rc.7  # Optional: override the operator-wide default image.
     resources:                 # Optional: per-pod resources (defaults shown).
       requests:
         cpu: 200m
@@ -84,7 +93,7 @@ config:
 ```
 
 :::note
-`restartPodOnFailure` is deprecated and has no effect: CosmoGuard now runs as a standalone Deployment supervised by Kubernetes.
+`restartPodOnFailure` is deprecated and has no effect: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes.
 :::
 
 ## Autoscaling

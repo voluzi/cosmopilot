@@ -23,7 +23,7 @@ admission webhook server.
 | `-health-probe-bind-address` | `HEALTH_PROBE_BIND_ADDRESS` | `:8081` | Address the health/readiness probe endpoint binds to. |
 | `-enable-leader-election` | `ENABLE_LEADER_ELECTION` | `false` | Enable leader election so only one manager is active at a time. |
 | `-nodeutils-image` | `NODE_UTILS_IMAGE` | `ghcr.io/voluzi/node-utils` | `node-utils` image deployed as a sidecar with each node. |
-| `-cosmoguard-image` | `COSMOGUARD_IMAGE` | `ghcr.io/voluzi/cosmoguard:4.0.0-rc.6` | CosmoGuard image for the standalone deployments created when CosmoGuard is enabled. |
+| `-cosmoguard-image` | `COSMOGUARD_IMAGE` | `ghcr.io/voluzi/cosmoguard:4.0.0-rc.7` | CosmoGuard image for the standalone deployments created when CosmoGuard is enabled. |
 | `-cosmoseed-image` | `COSMOSEED_IMAGE` | `ghcr.io/voluzi/cosmoseed` | Image used for Cosmoseed deployments when enabled. |
 | `-worker-name` | `WORKER_NAME` | `""` | Name of this worker (set as the `worker-name` label). Used to shard which resources this instance reconciles. |
 | `-worker-count` | `WORKER_COUNT` | `1` | Maximum number of concurrent reconciles. |

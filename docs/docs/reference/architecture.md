@@ -75,9 +75,10 @@ This API is internal to the operator and is not meant to be consumed directly. S
 
 When API exposure with fine-grained access control and caching is enabled,
 `Cosmopilot` deploys a standalone [CosmoGuard](https://github.com/voluzi/cosmoguard) **v4**
-Deployment (image `ghcr.io/voluzi/cosmoguard`) in front of the node's API endpoints —
-one per node group on a `ChainNodeSet`, or one per standalone `ChainNode`. It can run
-multiple replicas and be autoscaled. See [CosmoGuard](../usage/cosmoguard).
+clustered StatefulSet (image `ghcr.io/voluzi/cosmoguard`) in front of the node's API
+endpoints — one per node group on a `ChainNodeSet`, or one per standalone `ChainNode`. Its
+replicas share one distributed (olric) cache, and it can be autoscaled. See
+[CosmoGuard](../usage/cosmoguard).
 
 ### Cosmoseed (optional)
 

@@ -3,11 +3,13 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -58,16 +60,19 @@ func cosmoGuardRouteLabels(nodeSet *appsv1.ChainNodeSet, groupName string) map[s
 func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) cosmoguard.Params {
 	cfg := group.GetServiceConfig()
 
+	name := groupCosmoGuardName(nodeSet, group)
 	p := cosmoguard.Params{
-		Name:          groupCosmoGuardName(nodeSet, group),
-		Namespace:     nodeSet.GetNamespace(),
-		Image:         cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
-		Replicas:      cfg.GetCosmoGuardReplicas(),
-		DiscoveryHost: fmt.Sprintf("%s.%s.svc.cluster.local", groupCosmoGuardUpstreamName(nodeSet, group), nodeSet.GetNamespace()),
-		EvmEnabled:    cfg.IsEvmEnabled(),
-		ConfigMap:     cfg.GetCosmoGuardConfig(),
-		Resources:     cfg.GetCosmoGuardResources(),
-		Labels:        cosmoGuardRouteLabels(nodeSet, group.Name),
+		Name:                name,
+		Namespace:           nodeSet.GetNamespace(),
+		Image:               cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
+		Replicas:            cfg.GetCosmoGuardReplicas(),
+		DiscoveryHost:       fmt.Sprintf("%s.%s.svc.cluster.local", groupCosmoGuardUpstreamName(nodeSet, group), nodeSet.GetNamespace()),
+		EvmEnabled:          cfg.IsEvmEnabled(),
+		ConfigMap:           cfg.GetCosmoGuardConfig(),
+		Resources:           cfg.GetCosmoGuardResources(),
+		Labels:              cosmoGuardRouteLabels(nodeSet, group.Name),
+		PeerServiceName:     cosmoguard.PeerServiceName(name),
+		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -196,12 +201,23 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 			return nil, fmt.Errorf("failed to apply cosmoguard upstream service for group %s: %w", group.Name, err)
 		}
 
+		// Provision the olric gossip encryption Secret (once) before the StatefulSet references it.
+		if err := r.ensureCosmoGuardSecret(ctx, nodeSet, cosmoguard.EncryptionKeySecretName(name)); err != nil {
+			return nil, fmt.Errorf("failed to ensure cosmoguard secret for group %s: %w", group.Name, err)
+		}
+
 		params := r.groupCosmoGuardParams(nodeSet, group)
 
-		dep := params.Deployment()
-		withCosmoGuardScope(dep)
-		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, dep); err != nil {
-			return nil, fmt.Errorf("failed to apply cosmoguard deployment for group %s: %w", group.Name, err)
+		peer := params.PeerService()
+		withCosmoGuardScope(peer)
+		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, peer); err != nil {
+			return nil, fmt.Errorf("failed to apply cosmoguard peer service for group %s: %w", group.Name, err)
+		}
+
+		sts := params.StatefulSet()
+		withCosmoGuardScope(sts)
+		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, sts); err != nil {
+			return nil, fmt.Errorf("failed to apply cosmoguard statefulset for group %s: %w", group.Name, err)
 		}
 
 		svc := params.Service()
@@ -259,9 +275,42 @@ func (r *Reconciler) deleteCosmoGuardHPA(ctx context.Context, nodeSet *appsv1.Ch
 	return client.IgnoreNotFound(r.Delete(ctx, hpa))
 }
 
+// ensureCosmoGuardSecret creates the olric gossip encryption Secret if it does not exist yet. It
+// never overwrites an existing Secret: the key must stay stable for the life of the cluster, so it
+// is generated exactly once.
+func (r *Reconciler) ensureCosmoGuardSecret(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, secret)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	key, err := cosmoguard.GenerateEncryptionKey()
+	if err != nil {
+		return err
+	}
+	secret = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: nodeSet.GetNamespace(),
+			Labels:    map[string]string{controllers.LabelScope: scopeCosmoGuard},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{cosmoguard.EncryptionKeySecretKey: []byte(key)},
+	}
+	if err := controllerutil.SetControllerReference(nodeSet, secret, r.Scheme); err != nil {
+		return err
+	}
+	return r.Create(ctx, secret)
+}
+
 // cleanupStaleCosmoGuards deletes guard resources whose group no longer enables CosmoGuard (or was
-// removed). It lists by the cosmoguard scope label and owner, deleting Deployments, Services (guard
-// + headless upstream) and HPAs that are not in the expected set.
+// removed). It lists by the cosmoguard scope label and owner, deleting StatefulSets, Services (guard
+// + headless upstream + peer), Secrets, HPAs and dashboard Ingresses that are not in the expected
+// set. Auxiliary resources are matched by stripping their suffix back to the guard name.
 func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv1.ChainNodeSet, expected, expectedIngress map[string]bool) error {
 	logger := log.FromContext(ctx)
 	sel := client.MatchingLabels{controllers.LabelScope: scopeCosmoGuard}
@@ -282,17 +331,17 @@ func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv
 		}
 	}
 
-	deps := &k8sappsv1.DeploymentList{}
-	if err := r.List(ctx, deps, ns, sel); err != nil {
+	sets := &k8sappsv1.StatefulSetList{}
+	if err := r.List(ctx, sets, ns, sel); err != nil {
 		return err
 	}
-	for i := range deps.Items {
-		d := &deps.Items[i]
-		if !metav1.IsControlledBy(d, nodeSet) || expected[d.GetName()] {
+	for i := range sets.Items {
+		s := &sets.Items[i]
+		if !metav1.IsControlledBy(s, nodeSet) || expected[s.GetName()] {
 			continue
 		}
-		logger.Info("deleting stale cosmoguard deployment", "name", d.GetName())
-		if err := client.IgnoreNotFound(r.Delete(ctx, d)); err != nil {
+		logger.Info("deleting stale cosmoguard statefulset", "name", s.GetName())
+		if err := client.IgnoreNotFound(r.Delete(ctx, s)); err != nil {
 			return err
 		}
 	}
@@ -311,17 +360,28 @@ func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv
 		}
 	}
 
+	secrets := &corev1.SecretList{}
+	if err := r.List(ctx, secrets, ns, sel); err != nil {
+		return err
+	}
+	for i := range secrets.Items {
+		s := &secrets.Items[i]
+		if !metav1.IsControlledBy(s, nodeSet) || expected[cosmoGuardBaseName(s.GetName())] {
+			continue
+		}
+		logger.Info("deleting stale cosmoguard secret", "name", s.GetName())
+		if err := client.IgnoreNotFound(r.Delete(ctx, s)); err != nil {
+			return err
+		}
+	}
+
 	svcs := &corev1.ServiceList{}
 	if err := r.List(ctx, svcs, ns, sel); err != nil {
 		return err
 	}
 	for i := range svcs.Items {
 		s := &svcs.Items[i]
-		if !metav1.IsControlledBy(s, nodeSet) {
-			continue
-		}
-		// The guard Service shares the guard name; the headless upstream ends in "-upstream".
-		if expected[s.GetName()] || expected[trimUpstreamSuffix(s.GetName())] {
+		if !metav1.IsControlledBy(s, nodeSet) || expected[cosmoGuardBaseName(s.GetName())] {
 			continue
 		}
 		logger.Info("deleting stale cosmoguard service", "name", s.GetName())
@@ -333,10 +393,13 @@ func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv
 	return nil
 }
 
-func trimUpstreamSuffix(name string) string {
-	const suffix = "-upstream"
-	if len(name) > len(suffix) && name[len(name)-len(suffix):] == suffix {
-		return name[:len(name)-len(suffix)]
+// cosmoGuardBaseName strips a guard resource's suffix back to the base guard name so auxiliary
+// resources (upstream/peer Services, cluster Secret) can be matched against the expected guard set.
+func cosmoGuardBaseName(name string) string {
+	for _, suffix := range []string{"-upstream", "-peer", "-cluster", "-dashboard"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
 	}
 	return name
 }
