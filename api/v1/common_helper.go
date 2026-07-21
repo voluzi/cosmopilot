@@ -408,12 +408,22 @@ func ensureCosmoGuardRequests(res corev1.ResourceRequirements, needCPU, needMemo
 		out.Requests = corev1.ResourceList{}
 	}
 	if injectCPU {
-		out.Requests[corev1.ResourceCPU] = defaults.Requests[corev1.ResourceCPU]
+		out.Requests[corev1.ResourceCPU] = cosmoGuardInjectedRequest(res, corev1.ResourceCPU, defaults.Requests[corev1.ResourceCPU])
 	}
 	if injectMemory {
-		out.Requests[corev1.ResourceMemory] = defaults.Requests[corev1.ResourceMemory]
+		out.Requests[corev1.ResourceMemory] = cosmoGuardInjectedRequest(res, corev1.ResourceMemory, defaults.Requests[corev1.ResourceMemory])
 	}
 	return out
+}
+
+// cosmoGuardInjectedRequest returns the request quantity to inject for a resource: the operator
+// default, capped at a smaller positive configured limit so the resulting requests never exceed
+// limits (which would render an invalid Pod).
+func cosmoGuardInjectedRequest(res corev1.ResourceRequirements, name corev1.ResourceName, def resource.Quantity) resource.Quantity {
+	if limit, ok := res.Limits[name]; ok && !limit.IsZero() && limit.Cmp(def) < 0 {
+		return limit.DeepCopy()
+	}
+	return def
 }
 
 // cosmoGuardRequests reports whether the guard container effectively requests a positive amount of the

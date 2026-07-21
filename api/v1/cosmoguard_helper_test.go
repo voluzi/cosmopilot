@@ -73,4 +73,18 @@ func TestGetCosmoGuardAutoscalingTargets(t *testing.T) {
 	assert.Equal(t, int32(70), *cpu)
 	assert.Nil(t, mem)
 	assert.False(t, res.Requests.Cpu().IsZero(), "CPU request injected for explicit CPU target on empty block")
+
+	// Zero CPU request + a smaller positive CPU limit + explicit CPU target: the injected request must
+	// be capped at the limit so requests.cpu never exceeds limits.cpu (which renders an invalid Pod).
+	cappedLimit := resource.MustParse("100m")
+	cfgCap := autoscaledConfig(&corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0"), corev1.ResourceMemory: resource.MustParse("256Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: cappedLimit},
+	})
+	cfgCap.CosmoGuard.Autoscaling.TargetCPUUtilizationPercentage = ptr.To[int32](80)
+	res, cpu, _ = cfgCap.GetCosmoGuardAutoscalingTargets()
+	assert.Equal(t, int32(80), *cpu)
+	assert.False(t, res.Requests.Cpu().IsZero(), "positive CPU request injected")
+	assert.True(t, res.Requests.Cpu().Cmp(*res.Limits.Cpu()) <= 0, "injected CPU request must not exceed the CPU limit")
+	assert.True(t, res.Requests.Cpu().Cmp(cappedLimit) == 0, "injected request capped at the smaller limit")
 }
