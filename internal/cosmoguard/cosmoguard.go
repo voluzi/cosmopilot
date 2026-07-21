@@ -215,7 +215,11 @@ func (p Params) env() []corev1.EnvVar {
 		env = append(env, corev1.EnvVar{Name: "COSMOGUARD_ENABLE_EVM", Value: "true"})
 	}
 
-	if p.Dashboard != nil {
+	if p.Dashboard == nil {
+		// Keep the dashboard explicitly off unless it is configured, so the operator's intent doesn't
+		// depend on CosmoGuard's default.
+		env = append(env, corev1.EnvVar{Name: "COSMOGUARD_DASHBOARD_ENABLE", Value: "false"})
+	} else {
 		env = append(env,
 			corev1.EnvVar{Name: "COSMOGUARD_DASHBOARD_ENABLE", Value: "true"},
 			corev1.EnvVar{Name: "COSMOGUARD_DASHBOARD_PORT", Value: intToStr(int(p.Dashboard.Port))},

@@ -73,6 +73,7 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 		Labels:              cosmoGuardRouteLabels(nodeSet, group.Name),
 		PeerServiceName:     cosmoguard.PeerServiceName(name),
 		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
+		ImagePullSecrets:    cfg.ImagePullSecrets,
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -417,23 +418,40 @@ func cosmoGuardRouteSelector(routeName string) map[string]string {
 	})
 }
 
-// cosmoGuardRouteReady reports whether every CosmoGuard-enabled group targeted by a global route has
-// finished rolling out. A route Service is only flipped to guard pods once this is true, so traffic
-// keeps flowing through the node pods until the guards are serving.
+// cosmoGuardRouteReady reports whether a global route's Service may be flipped to guard pods. The
+// flipped selector (cosmoGuardRouteSelector) matches ONLY guard pods carrying the route label, so it
+// is safe only when EVERY group the route targets is fronted by a ready standalone guard. If any
+// selected group is the reserved legacy validator (which has no managed guard), lacks CosmoGuard, or
+// whose guard has not rolled out yet, the Service stays on the node-pod selector (raw) so no backend
+// is dropped — otherwise a mixed or validator-including route would flip to a selector that matches
+// none of those pods and silently lose their endpoints.
 func cosmoGuardRouteReady(nodeSet *appsv1.ChainNodeSet, groups []string, guardReady map[string]bool) bool {
+	if len(groups) == 0 {
+		return false
+	}
 	for _, groupName := range groups {
+		// The legacy .spec.validator group has no managed guard: never flip a route that includes it.
 		if groupName == appsv1.ReservedValidatorGroupName {
-			// The legacy .spec.validator guard is not managed here; never block the flip on it.
-			continue
+			return false
 		}
-		for _, g := range nodeSet.Spec.Nodes {
-			if g.Name != groupName {
-				continue
-			}
-			if cfg := g.GetServiceConfig(); cfg != nil && cfg.CosmoGuardEnabled() && !guardReady[groupName] {
-				return false
-			}
+		g := findNodeGroup(nodeSet, groupName)
+		if g == nil {
+			return false
+		}
+		cfg := g.GetServiceConfig()
+		if cfg == nil || !cfg.CosmoGuardEnabled() || !guardReady[groupName] {
+			return false
 		}
 	}
 	return true
+}
+
+// findNodeGroup returns the named group from .spec.nodes, or nil.
+func findNodeGroup(nodeSet *appsv1.ChainNodeSet, name string) *appsv1.NodeGroupSpec {
+	for i := range nodeSet.Spec.Nodes {
+		if nodeSet.Spec.Nodes[i].Name == name {
+			return &nodeSet.Spec.Nodes[i]
+		}
+	}
+	return nil
 }

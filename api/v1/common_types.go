@@ -339,6 +339,7 @@ type CosmoGuardConfig struct {
 }
 
 // CosmoGuardAutoscalingConfig configures a HorizontalPodAutoscaler for CosmoGuard.
+// +kubebuilder:validation:XValidation:rule="!has(self.minReplicas) || self.minReplicas <= self.maxReplicas",message="minReplicas must not exceed maxReplicas"
 type CosmoGuardAutoscalingConfig struct {
 	// Whether to enable horizontal autoscaling for CosmoGuard.
 	Enable bool `json:"enable"`
@@ -372,6 +373,8 @@ type CosmoGuardDashboardConfig struct {
 
 	// Port the dashboard listens on. Defaults to `8080`.
 	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
 	Port *int32 `json:"port,omitempty"`
 
 	// BasicAuth protects the dashboard with HTTP basic authentication using credentials
@@ -396,6 +399,7 @@ type CosmoGuardDashboardAuth struct {
 // CosmoGuardDashboardIngress exposes the CosmoGuard dashboard through an Ingress.
 type CosmoGuardDashboardIngress struct {
 	// Host is the hostname to route dashboard traffic from.
+	// +kubebuilder:validation:MinLength=1
 	Host string `json:"host"`
 
 	// IngressClassName is the name of the IngressClass to use.

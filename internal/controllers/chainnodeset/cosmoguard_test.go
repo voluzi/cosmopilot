@@ -92,9 +92,17 @@ func TestUpstreamServiceIsHeadless(t *testing.T) {
 func TestCosmoGuardRouteReady(t *testing.T) {
 	nodeSet, _ := guardedNodeSet()
 
-	// Route targets the guarded group; not ready -> route not ready.
+	// Single guarded group: flip only once its guard is ready.
 	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": false}))
 	assert.True(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": true}))
-	// Reserved validator group is never blocking.
-	assert.True(t, cosmoGuardRouteReady(nodeSet, []string{appsv1.ReservedValidatorGroupName}, map[string]bool{}))
+
+	// The reserved validator group has no managed guard: a route including it must NOT flip, or its
+	// endpoints would be dropped.
+	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{appsv1.ReservedValidatorGroupName}, map[string]bool{}))
+	// Mixed route (guarded group + validator): still must not flip.
+	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes", appsv1.ReservedValidatorGroupName}, map[string]bool{"fullnodes": true}))
+
+	// Unknown group / empty route: never flip.
+	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"nope"}, map[string]bool{"nope": true}))
+	assert.False(t, cosmoGuardRouteReady(nodeSet, nil, map[string]bool{}))
 }

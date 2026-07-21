@@ -136,7 +136,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: chainNode.GetAPIServiceName(),
+									Name: r.apiServiceName(chainNode),
 									Port: v1.ServiceBackendPort{
 										Number: chainutils.RpcPort,
 									},
@@ -164,7 +164,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: chainNode.GetAPIServiceName(),
+									Name: r.apiServiceName(chainNode),
 									Port: v1.ServiceBackendPort{
 										Number: chainutils.LcdPort,
 									},
@@ -192,7 +192,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: chainNode.GetAPIServiceName(),
+									Name: r.apiServiceName(chainNode),
 									Port: v1.ServiceBackendPort{
 										Number: controllers.EvmRpcPort,
 									},
@@ -220,7 +220,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: chainNode.GetAPIServiceName(),
+									Name: r.apiServiceName(chainNode),
 									Port: v1.ServiceBackendPort{
 										Number: controllers.EvmRpcWsPort,
 									},
@@ -263,7 +263,7 @@ func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingres
 								PathType: &pathType,
 								Backend: v1.IngressBackend{
 									Service: &v1.IngressServiceBackend{
-										Name: chainNode.GetAPIServiceName(),
+										Name: r.apiServiceName(chainNode),
 										Port: v1.ServiceBackendPort{
 											Number: chainutils.GrpcPort,
 										},

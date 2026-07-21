@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -17,6 +18,21 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmoguard"
 )
+
+// apiServiceName returns the Service that a node's ingress/gateway API routes (RPC/LCD/gRPC/EVM)
+// should target. Only a STANDALONE ChainNode has its own CosmoGuard Service; a ChainNodeSet child is
+// fronted by its group's guard (a different, per-group Service that load-balances the whole group),
+// so a child's per-node routes must target the raw node Service rather than a never-created
+// "<child>-cosmoguard" Service.
+func (r *Reconciler) apiServiceName(chainNode *appsv1.ChainNode) string {
+	if chainNode.UseInternal() {
+		return fmt.Sprintf("%s-internal", chainNode.GetName())
+	}
+	if _, isChild := chainNode.Labels[controllers.LabelChainNodeSet]; !isChild && chainNode.Spec.Config.CosmoGuardEnabled() {
+		return chainNode.CosmoGuardName()
+	}
+	return chainNode.GetName()
+}
 
 // ensureCosmoGuardSecret creates the olric gossip encryption Secret for a standalone guard if it
 // does not exist yet. It never overwrites an existing Secret — the key must stay stable for the life
@@ -63,6 +79,7 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		Resources:           cfg.GetCosmoGuardResources(),
 		PeerServiceName:     cosmoguard.PeerServiceName(name),
 		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
+		ImagePullSecrets:    cfg.ImagePullSecrets,
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -136,6 +153,20 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 	if hpa := params.HPA(); hpa != nil {
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, hpa); err != nil {
 			return fmt.Errorf("failed to apply cosmoguard hpa for %s: %w", chainNode.GetName(), err)
+		}
+	} else {
+		// Autoscaling was disabled: remove any HPA we previously created so it stops driving the
+		// StatefulSet's replica count.
+		stale := &autoscalingv2.HorizontalPodAutoscaler{}
+		err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: chainNode.CosmoGuardName()}, stale)
+		if err == nil {
+			if metav1.IsControlledBy(stale, chainNode) {
+				if err := client.IgnoreNotFound(r.Delete(ctx, stale)); err != nil {
+					return err
+				}
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return err
 		}
 	}
 

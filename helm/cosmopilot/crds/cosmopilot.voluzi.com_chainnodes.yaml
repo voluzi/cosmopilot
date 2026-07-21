@@ -1121,6 +1121,9 @@ spec:
                         - enable
                         - maxReplicas
                         type: object
+                        x-kubernetes-validations:
+                        - message: minReplicas must not exceed maxReplicas
+                          rule: '!has(self.minReplicas) || self.minReplicas <= self.maxReplicas'
                       config:
                         description: |-
                           ConfigMap containing the CosmoGuard rules configuration. Only rules should be set here;
@@ -1222,6 +1225,7 @@ spec:
                               host:
                                 description: Host is the hostname to route dashboard
                                   traffic from.
+                                minLength: 1
                                 type: string
                               ingressClassName:
                                 description: IngressClassName is the name of the IngressClass
@@ -1238,6 +1242,8 @@ spec:
                             description: Port the dashboard listens on. Defaults to
                               `8080`.
                             format: int32
+                            maximum: 65535
+                            minimum: 1
                             type: integer
                         required:
                         - enable

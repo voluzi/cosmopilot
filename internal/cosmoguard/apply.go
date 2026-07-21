@@ -43,6 +43,15 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 		return fmt.Errorf("cosmoguard resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
 	}
 
+	// When autoscaling owns .spec.replicas we submit a nil Replicas. A full Update would reset the
+	// live value (the API defaults nil to 1), fighting the HPA on every reconcile — so copy the live
+	// replica count forward and let the autoscaler keep control.
+	if desired, ok := obj.(*appsv1.StatefulSet); ok && desired.Spec.Replicas == nil {
+		if live, ok := existing.(*appsv1.StatefulSet); ok {
+			desired.Spec.Replicas = live.Spec.Replicas
+		}
+	}
+
 	patchResult, err := patch.DefaultPatchMaker.Calculate(existing, obj, patch.IgnoreStatusFields())
 	if err != nil {
 		return err

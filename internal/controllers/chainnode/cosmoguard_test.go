@@ -12,6 +12,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -41,7 +42,7 @@ func guardedChainNode(name string, child bool) *appsv1.ChainNode {
 		labels[controllers.LabelChainNodeSet] = "some-set"
 	}
 	return &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels, UID: types.UID(name + "-uid")},
 		Spec: appsv1.ChainNodeSpec{
 			Config: &appsv1.Config{
 				CosmoGuard: &appsv1.CosmoGuardConfig{
@@ -89,6 +90,39 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	secret := &corev1.Secret{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-cluster"}, secret))
 	assert.NotEmpty(t, secret.Data["encryptionKey"])
+}
+
+// TestAPIServiceName verifies ingress/gateway route targets: a standalone guarded node points at its
+// own guard Service, while a ChainNodeSet child points at the raw node Service (its group's guard is
+// a separate Service, so "<child>-cosmoguard" would never exist).
+func TestAPIServiceName(t *testing.T) {
+	r := cosmoGuardTestReconciler(t)
+
+	standalone := guardedChainNode("node-0", false)
+	assert.Equal(t, "node-0-cosmoguard", r.apiServiceName(standalone))
+
+	child := guardedChainNode("chain-fullnodes-0", true)
+	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(child), "nodeset child must target the raw node service")
+
+	unguarded := guardedChainNode("node-1", false)
+	unguarded.Spec.Config.CosmoGuard.Enable = false
+	assert.Equal(t, "node-1", r.apiServiceName(unguarded))
+}
+
+// TestDisableAutoscalingRemovesHPA verifies the standalone guard deletes its HPA when autoscaling is
+// turned off, so it stops driving the StatefulSet's replica count.
+func TestDisableAutoscalingRemovesHPA(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Autoscaling = &appsv1.CosmoGuardAutoscalingConfig{Enable: true, MaxReplicas: 5}
+	r := cosmoGuardTestReconciler(t, cn)
+
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &autoscalingv2.HorizontalPodAutoscaler{}))
+
+	cn.Spec.Config.CosmoGuard.Autoscaling.Enable = false
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &autoscalingv2.HorizontalPodAutoscaler{})
+	assert.Error(t, err, "HPA should be removed when autoscaling is disabled")
 }
 
 // TestNodeSetChildSkipsStandaloneGuard verifies a ChainNodeSet child never creates its own guard
