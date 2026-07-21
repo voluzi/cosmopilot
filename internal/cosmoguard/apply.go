@@ -79,9 +79,14 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	return c.Update(ctx, obj)
 }
 
-// IsRolledOut reports whether the named CosmoGuard StatefulSet has finished rolling out its current
-// generation and has at least one ready replica.
-func IsRolledOut(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
+// IsServing reports whether the named CosmoGuard StatefulSet has at least one ready replica for its
+// observed generation — i.e. it can serve traffic. This intentionally does NOT require every replica
+// to be updated: a rolling update (or scale-up) keeps ready replicas serving throughout, so gating
+// the Service flip on full rollout would revert an already-guarded Service to raw node pods on every
+// routine guard update, briefly bypassing CosmoGuard policy. Ready-replica readiness keeps the flip
+// sticky once achieved while still holding off the first flip until the guard is actually serving
+// (make-before-break).
+func IsServing(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
 	sts := &appsv1.StatefulSet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
 		if errors.IsNotFound(err) {
@@ -91,9 +96,6 @@ func IsRolledOut(ctx context.Context, c client.Client, namespace, name string) (
 	}
 
 	if sts.Status.ObservedGeneration < sts.Generation {
-		return false, nil
-	}
-	if sts.Spec.Replicas != nil && sts.Status.UpdatedReplicas < *sts.Spec.Replicas {
 		return false, nil
 	}
 	return sts.Status.ReadyReplicas > 0, nil

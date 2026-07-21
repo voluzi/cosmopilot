@@ -206,6 +206,11 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 		logger.Info("updating service", "svc", svc.GetName())
 
 		svc.ObjectMeta.ResourceVersion = currentSvc.ObjectMeta.ResourceVersion
+		// ClusterIP(s) are immutable and API-allocated; a full Update that submits the freshly rendered
+		// Service (empty ClusterIP) is rejected. This matters for the CosmoGuard flip, which mutates an
+		// already-created Service's selector/target ports in place. Copy the live allocation forward.
+		svc.Spec.ClusterIP = currentSvc.Spec.ClusterIP
+		svc.Spec.ClusterIPs = currentSvc.Spec.ClusterIPs
 		if err := r.Update(ctx, svc); err != nil {
 			return err
 		}

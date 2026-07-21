@@ -171,11 +171,20 @@ func withCosmoGuardScope(obj client.Object) {
 	obj.SetLabels(labels)
 }
 
-// ensureCosmoGuards reconciles the per-group CosmoGuard deployments. It returns a map keyed by group
-// name reporting whether each group's guard has finished rolling out; the Service builders use this
-// to flip a group/global/gateway Service's selector to the guard pods only once it is serving,
-// preserving traffic during rollout and migration (make-before-break).
-func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (map[string]bool, error) {
+// cosmoGuardReconcile is the outcome of ensureCosmoGuards: per-group readiness (used to gate Service
+// flips) and the set of guard resource names that should exist (used by the deferred stale cleanup).
+type cosmoGuardReconcile struct {
+	ready           map[string]bool
+	expected        map[string]bool
+	expectedIngress map[string]bool
+}
+
+// ensureCosmoGuards reconciles the per-group CosmoGuard deployments and reports, per group, whether
+// the guard is serving (the Service builders use this to flip a group/global/gateway Service's
+// selector to the guard pods only once it is serving — make-before-break). It does NOT clean up stale
+// guards: that is deferred to cleanupStaleCosmoGuards, which the caller runs AFTER Services have been
+// retargeted, so a guard is never deleted while a live Service still selects its pods.
+func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (cosmoGuardReconcile, error) {
 	logger := log.FromContext(ctx)
 
 	ready := map[string]bool{}
@@ -200,15 +209,15 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 
 		upstream, err := r.buildGroupCosmoGuardUpstreamService(nodeSet, group)
 		if err != nil {
-			return nil, err
+			return cosmoGuardReconcile{}, err
 		}
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, upstream); err != nil {
-			return nil, fmt.Errorf("failed to apply cosmoguard upstream service for group %s: %w", group.Name, err)
+			return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard upstream service for group %s: %w", group.Name, err)
 		}
 
 		// Provision the olric gossip encryption Secret (once) before the StatefulSet references it.
 		if err := r.ensureCosmoGuardSecret(ctx, nodeSet, cosmoguard.EncryptionKeySecretName(name)); err != nil {
-			return nil, fmt.Errorf("failed to ensure cosmoguard secret for group %s: %w", group.Name, err)
+			return cosmoGuardReconcile{}, fmt.Errorf("failed to ensure cosmoguard secret for group %s: %w", group.Name, err)
 		}
 
 		params := r.groupCosmoGuardParams(nodeSet, group)
@@ -216,25 +225,25 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		peer := params.PeerService()
 		withCosmoGuardScope(peer)
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, peer); err != nil {
-			return nil, fmt.Errorf("failed to apply cosmoguard peer service for group %s: %w", group.Name, err)
+			return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard peer service for group %s: %w", group.Name, err)
 		}
 
 		sts := params.StatefulSet()
 		withCosmoGuardScope(sts)
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, sts); err != nil {
-			return nil, fmt.Errorf("failed to apply cosmoguard statefulset for group %s: %w", group.Name, err)
+			return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard statefulset for group %s: %w", group.Name, err)
 		}
 
 		svc := params.Service()
 		withCosmoGuardScope(svc)
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc); err != nil {
-			return nil, fmt.Errorf("failed to apply cosmoguard service for group %s: %w", group.Name, err)
+			return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard service for group %s: %w", group.Name, err)
 		}
 
 		if ing := params.DashboardIngress(); ing != nil {
 			withCosmoGuardScope(ing)
 			if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, ing); err != nil {
-				return nil, fmt.Errorf("failed to apply cosmoguard dashboard ingress for group %s: %w", group.Name, err)
+				return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard dashboard ingress for group %s: %w", group.Name, err)
 			}
 			expectedIngress[ing.GetName()] = true
 		}
@@ -242,30 +251,26 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		if hpa := params.HPA(); hpa != nil {
 			withCosmoGuardScope(hpa)
 			if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, hpa); err != nil {
-				return nil, fmt.Errorf("failed to apply cosmoguard hpa for group %s: %w", group.Name, err)
+				return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard hpa for group %s: %w", group.Name, err)
 			}
 		} else {
 			// Autoscaling was disabled: remove any HPA we previously created.
 			if err := r.deleteCosmoGuardHPA(ctx, nodeSet, name); err != nil {
-				return nil, err
+				return cosmoGuardReconcile{}, err
 			}
 		}
 
-		rolledOut, err := cosmoguard.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), name)
+		serving, err := cosmoguard.IsServing(ctx, r.Client, nodeSet.GetNamespace(), name)
 		if err != nil {
-			return nil, err
+			return cosmoGuardReconcile{}, err
 		}
-		ready[group.Name] = rolledOut
-		if !rolledOut {
-			logger.Info("waiting for cosmoguard rollout", "group", group.Name, "cosmoguard", name)
+		ready[group.Name] = serving
+		if !serving {
+			logger.Info("waiting for cosmoguard to become ready", "group", group.Name, "cosmoguard", name)
 		}
 	}
 
-	if err := r.cleanupStaleCosmoGuards(ctx, nodeSet, expected, expectedIngress); err != nil {
-		return nil, err
-	}
-
-	return ready, nil
+	return cosmoGuardReconcile{ready: ready, expected: expected, expectedIngress: expectedIngress}, nil
 }
 
 func (r *Reconciler) deleteCosmoGuardHPA(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {

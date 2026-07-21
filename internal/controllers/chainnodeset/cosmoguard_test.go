@@ -72,8 +72,9 @@ func TestGuardParamsUseDiscovery(t *testing.T) {
 	assert.Equal(t, "rules", p.ConfigMap.Name)
 }
 
-// TestUpstreamServiceIsHeadless verifies the guard's upstream Service is headless, publishes
-// not-ready addresses, and selects the group's node pods on raw ports.
+// TestUpstreamServiceIsHeadless verifies the guard's upstream Service is headless, does NOT publish
+// not-ready addresses (so only ready node pods are discoverable), and selects the group's node pods
+// on raw ports.
 func TestUpstreamServiceIsHeadless(t *testing.T) {
 	nodeSet, group := guardedNodeSet()
 	r := newValidatorTestReconciler(t, nodeSet)

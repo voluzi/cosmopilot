@@ -359,6 +359,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// If the node was set to stop, we will stop here as the pod is not running.
 	if chainNode.Status.Phase == appsv1.PhaseChainNodeStopped {
+		// Still tear down a disabled/orphaned standalone guard: a stopped node serves no traffic, so
+		// there is no route to retarget first, and this return skips the usual finalize step below.
+		if err = r.finalizeCosmoGuard(ctx, chainNode); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
 	}
 

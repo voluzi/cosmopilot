@@ -301,13 +301,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Reconcile standalone CosmoGuard deployments before Services so that Service selectors are only
-	// flipped to guard pods once each group's guard is serving (make-before-break).
-	guardReady, err := r.ensureCosmoGuards(ctx, nodeSet)
+	// flipped to guard pods once each group's guard is serving (make-before-break). Stale-guard
+	// cleanup is deferred until AFTER Services are retargeted (below) so a guard is never deleted
+	// while a live Service still selects its pods.
+	guards, err := r.ensureCosmoGuards(ctx, nodeSet)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureServices(ctx, nodeSet, guardReady); err != nil {
+	if err := r.ensureServices(ctx, nodeSet, guards.ready); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress); err != nil {
 		return ctrl.Result{}, err
 	}
 
