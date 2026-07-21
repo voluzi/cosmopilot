@@ -19,19 +19,30 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/cosmoguard"
 )
 
+// guardPriorityClassName returns the scheduling priority for a standalone guard: the validators'
+// class for a validator node, the nodes' class otherwise.
+func (r *Reconciler) guardPriorityClassName(chainNode *appsv1.ChainNode) string {
+	if chainNode.IsValidator() {
+		return r.opts.GetValidatorsPriorityClassName()
+	}
+	return r.opts.GetNodesPriorityClassName()
+}
+
 // apiServiceName returns the Service that a node's ingress/gateway API routes (RPC/LCD/gRPC/EVM)
 // should target: the node's own CosmoGuard Service when it manages one (a standalone node, or a
-// ChainNodeSet child with an individual ingress/gateway), otherwise the raw node Service. A child
-// fronted only by its group's guard must not target a never-created "<child>-cosmoguard" Service.
-func (r *Reconciler) apiServiceName(chainNode *appsv1.ChainNode) string {
+// ChainNodeSet child with an individual ingress/gateway) AND that guard is serving, otherwise the
+// raw node Service. Gating on readiness keeps routes on the raw node until the guard has ready
+// endpoints (make-before-break), so enabling CosmoGuard doesn't rewrite a live route to a guard with
+// zero endpoints. A child fronted only by its group's guard never targets "<child>-cosmoguard".
+func (r *Reconciler) apiServiceName(ctx context.Context, chainNode *appsv1.ChainNode) string {
 	if chainNode.UseInternal() {
 		return fmt.Sprintf("%s-internal", chainNode.GetName())
 	}
-	// Route through the node's own guard whenever it manages one — a standalone node, or a
-	// ChainNodeSet child that has an individual ingress/gateway. Children fronted only by their group
-	// guard (no individual route) target the raw node Service.
 	if r.standaloneGuardManaged(chainNode) {
-		return chainNode.CosmoGuardName()
+		serving, err := cosmoguard.IsServing(ctx, r.Client, chainNode.GetNamespace(), chainNode.CosmoGuardName())
+		if err == nil && serving {
+			return chainNode.CosmoGuardName()
+		}
 	}
 	return chainNode.GetName()
 }
@@ -87,6 +98,9 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		PeerServiceName:     cosmoguard.PeerServiceName(name),
 		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
 		ImagePullSecrets:    cfg.ImagePullSecrets,
+		// Match the node's scheduling priority so the guard isn't preempted while the node it protects
+		// keeps running (which would drop guarded API traffic).
+		PriorityClassName: r.guardPriorityClassName(chainNode),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {

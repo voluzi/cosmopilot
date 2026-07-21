@@ -74,6 +74,9 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 		PeerServiceName:     cosmoguard.PeerServiceName(name),
 		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
 		ImagePullSecrets:    cfg.ImagePullSecrets,
+		// Front the group's nodes at the same scheduling priority, so the guard isn't preempted while
+		// the nodes it protects keep running (which would drop guarded API traffic).
+		PriorityClassName: r.opts.GetNodesPriorityClassName(),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -174,7 +177,12 @@ func withCosmoGuardScope(obj client.Object) {
 // cosmoGuardReconcile is the outcome of ensureCosmoGuards: per-group readiness (used to gate Service
 // flips) and the set of guard resource names that should exist (used by the deferred stale cleanup).
 type cosmoGuardReconcile struct {
-	ready           map[string]bool
+	// ready is the sticky per-group readiness used to flip the GROUP Service (instance-label selector,
+	// always present on guard pods) — lenient so a guarded Service isn't reverted during a roll.
+	ready map[string]bool
+	// fullyReady is the strict per-group rollout used to first-flip a GLOBAL route Service, whose
+	// selector needs the per-route pod label that only lands after the current generation rolls out.
+	fullyReady      map[string]bool
 	expected        map[string]bool
 	expectedIngress map[string]bool
 }
@@ -188,6 +196,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 	logger := log.FromContext(ctx)
 
 	ready := map[string]bool{}
+	fullyReady := map[string]bool{}
 	expected := map[string]bool{}
 	expectedIngress := map[string]bool{}
 
@@ -275,9 +284,17 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		if !serving {
 			logger.Info("cosmoguard not yet serving", "group", group.Name, "cosmoguard", name, "keeping-flip", flipped)
 		}
+
+		// Strict rollout gates the FIRST flip of a global route (its selector needs the per-route pod
+		// label, present only after the current generation rolls out).
+		fully, err := cosmoguard.IsFullyRolledOut(ctx, r.Client, nodeSet.GetNamespace(), name)
+		if err != nil {
+			return cosmoGuardReconcile{}, err
+		}
+		fullyReady[group.Name] = fully
 	}
 
-	return cosmoGuardReconcile{ready: ready, expected: expected, expectedIngress: expectedIngress}, nil
+	return cosmoGuardReconcile{ready: ready, fullyReady: fullyReady, expected: expected, expectedIngress: expectedIngress}, nil
 }
 
 // serviceSelectsGuard reports whether the named Service currently selects CosmoGuard pods (i.e. it

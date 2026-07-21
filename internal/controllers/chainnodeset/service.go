@@ -69,7 +69,7 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 	return true, nil
 }
 
-func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guardReady map[string]bool) error {
+func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guards cosmoGuardReconcile) error {
 	logger := log.FromContext(ctx)
 
 	expectedGroup := map[string]bool{}
@@ -84,8 +84,16 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		return r.ensureService(ctx, svc)
 	}
 
+	// routeFlip decides whether a global ingress/gateway route Service should select guard pods:
+	// strict rollout of every targeted group's guard (so the per-route pod label is present) OR the
+	// route Service is already flipped (sticky through subsequent rolls).
+	routeFlip := func(groups []string, serviceName string) bool {
+		return cosmoGuardRouteReady(nodeSet, groups, guards.fullyReady) ||
+			r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), serviceName)
+	}
+
 	for _, group := range nodeSet.Spec.Nodes {
-		svc, err := r.getServiceSpec(nodeSet, group, guardReady[group.Name])
+		svc, err := r.getServiceSpec(nodeSet, group, guards.ready[group.Name])
 		if err != nil {
 			return err
 		}
@@ -103,7 +111,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, ingress := range nodeSet.Spec.Ingresses {
-		svc, err := r.getGlobalServiceSpec(nodeSet, ingress, cosmoGuardRouteReady(nodeSet, ingress.Groups, guardReady))
+		svc, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(ingress.Groups, ingress.GetName(nodeSet)))
 		if err != nil {
 			return err
 		}
@@ -121,7 +129,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, gw := range nodeSet.Spec.GatewayRoutes {
-		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, cosmoGuardRouteReady(nodeSet, gw.Groups, guardReady))
+		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, gw.GetName(nodeSet)))
 		if err != nil {
 			return err
 		}

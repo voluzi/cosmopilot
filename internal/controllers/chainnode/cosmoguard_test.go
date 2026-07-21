@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -92,21 +93,40 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	assert.NotEmpty(t, secret.Data["encryptionKey"])
 }
 
-// TestAPIServiceName verifies ingress/gateway route targets: a standalone guarded node points at its
-// own guard Service, while a ChainNodeSet child points at the raw node Service (its group's guard is
-// a separate Service, so "<child>-cosmoguard" would never exist).
+// servingGuard returns a guard StatefulSet reporting a ready replica (so IsServing is true).
+func servingGuard(name string) *k8sappsv1.StatefulSet {
+	return &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Generation: 1},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To[int32](1)},
+		Status:     k8sappsv1.StatefulSetStatus{ObservedGeneration: 1, ReadyReplicas: 1, UpdatedReplicas: 1},
+	}
+}
+
+// TestAPIServiceName verifies ingress/gateway route targets, readiness-gated: a guarded node targets
+// its own guard Service only once the guard is serving; otherwise (not serving, no individual guard,
+// or disabled) it targets the raw node Service.
 func TestAPIServiceName(t *testing.T) {
-	r := cosmoGuardTestReconciler(t)
-
+	ctx := context.Background()
 	standalone := guardedChainNode("node-0", false)
-	assert.Equal(t, "node-0-cosmoguard", r.apiServiceName(standalone))
 
+	// Guarded but guard not yet serving -> raw (make-before-break).
+	assert.Equal(t, "node-0", cosmoGuardTestReconciler(t).apiServiceName(ctx, standalone))
+	// Guarded and serving -> guard.
+	assert.Equal(t, "node-0-cosmoguard", cosmoGuardTestReconciler(t, servingGuard("node-0-cosmoguard")).apiServiceName(ctx, standalone))
+
+	// Child with an individual ingress + serving guard -> its own guard.
 	child := guardedChainNode("chain-fullnodes-0", true)
-	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(child), "nodeset child must target the raw node service")
+	child.Spec.Ingress = &appsv1.IngressConfig{Host: "0.rpc.example.com"}
+	assert.Equal(t, "chain-fullnodes-0-cosmoguard", cosmoGuardTestReconciler(t, servingGuard("chain-fullnodes-0-cosmoguard")).apiServiceName(ctx, child))
 
+	// Child without an individual ingress -> raw (fronted by the group guard).
+	childNoIngress := guardedChainNode("chain-fullnodes-1", true)
+	assert.Equal(t, "chain-fullnodes-1", cosmoGuardTestReconciler(t).apiServiceName(ctx, childNoIngress))
+
+	// Disabled -> raw.
 	unguarded := guardedChainNode("node-1", false)
 	unguarded.Spec.Config.CosmoGuard.Enable = false
-	assert.Equal(t, "node-1", r.apiServiceName(unguarded))
+	assert.Equal(t, "node-1", cosmoGuardTestReconciler(t).apiServiceName(ctx, unguarded))
 }
 
 // TestDisableAutoscalingRemovesHPA verifies the standalone guard deletes its HPA when autoscaling is
@@ -149,9 +169,7 @@ func TestChildWithIndividualIngressGetsGuard(t *testing.T) {
 	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "0.rpc.example.com"}
 	r := cosmoGuardTestReconciler(t, cn)
 
-	// Routes target the child's own guard, not the raw node.
-	assert.Equal(t, "chain-fullnodes-0-cosmoguard", r.apiServiceName(cn))
-
+	// The child manages its own guard (created here) even though it's a ChainNodeSet member.
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, &k8sappsv1.StatefulSet{}))
 
@@ -159,7 +177,7 @@ func TestChildWithIndividualIngressGetsGuard(t *testing.T) {
 	cn.Spec.Ingress = nil
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn))
-	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(cn))
+	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(context.Background(), cn))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "per-node guard should be removed once the individual ingress is gone")
 }

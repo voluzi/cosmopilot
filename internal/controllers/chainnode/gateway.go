@@ -28,8 +28,11 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 		return r.cleanupGatewayRoutes(ctx, chainNode)
 	}
 
+	// Resolve the API backend once (readiness-gated for a standalone/individual guard).
+	apiSvcName := r.apiServiceName(ctx, chainNode)
+
 	// Build desired HTTPRoutes (one per enabled HTTP endpoint)
-	desiredRoutes, err := r.getHTTPRouteSpecs(chainNode)
+	desiredRoutes, err := r.getHTTPRouteSpecs(chainNode, apiSvcName)
 	if err != nil {
 		return err
 	}
@@ -50,7 +53,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 	// Build or delete GRPCRoute
 	grpcRouteName := fmt.Sprintf("%s-grpc", chainNode.GetName())
 	if cfg.EnableGRPC {
-		grpcRoute, err := r.getGRPCRouteSpec(chainNode)
+		grpcRoute, err := r.getGRPCRouteSpec(chainNode, apiSvcName)
 		if err != nil {
 			return err
 		}
@@ -112,10 +115,10 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 }
 
 // getHTTPRouteSpecs returns one HTTPRoute per enabled HTTP endpoint (each has its own backend port).
-func (r *Reconciler) getHTTPRouteSpecs(chainNode *appsv1.ChainNode) ([]*gwapiv1.HTTPRoute, error) {
+func (r *Reconciler) getHTTPRouteSpecs(chainNode *appsv1.ChainNode, apiSvcName string) ([]*gwapiv1.HTTPRoute, error) {
 	cfg := chainNode.Spec.Gateway
 	parentRef := chainNode.GetGatewayParentRef()
-	svcName := r.apiServiceName(chainNode)
+	svcName := apiSvcName
 
 	type endpointDef struct {
 		suffix string
@@ -180,10 +183,10 @@ func (r *Reconciler) getHTTPRouteSpecs(chainNode *appsv1.ChainNode) ([]*gwapiv1.
 	return routes, nil
 }
 
-func (r *Reconciler) getGRPCRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1.GRPCRoute, error) {
+func (r *Reconciler) getGRPCRouteSpec(chainNode *appsv1.ChainNode, apiSvcName string) (*gwapiv1.GRPCRoute, error) {
 	cfg := chainNode.Spec.Gateway
 	parentRef := chainNode.GetGatewayParentRef()
-	svcName := r.apiServiceName(chainNode)
+	svcName := apiSvcName
 	hostname := gwapiv1.Hostname(fmt.Sprintf("%s.%s", cfg.Subdomains.GetGRPC(), cfg.Host))
 	port := gwapiv1.PortNumber(chainutils.GrpcPort)
 

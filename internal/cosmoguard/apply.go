@@ -100,3 +100,26 @@ func IsServing(ctx context.Context, c client.Client, namespace, name string) (bo
 	}
 	return sts.Status.ReadyReplicas > 0, nil
 }
+
+// IsFullyRolledOut reports whether the named CosmoGuard StatefulSet has fully rolled out its current
+// generation (every replica updated and at least one ready). Unlike IsServing, this waits for the
+// new pod template to be applied — used to gate a GLOBAL route flip, whose Service selector matches a
+// per-route pod label that only lands on pods created by the current generation. Flipping such a
+// route before the roll completes would select zero (or a stale subset of) guard pods.
+func IsFullyRolledOut(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if sts.Status.ObservedGeneration < sts.Generation {
+		return false, nil
+	}
+	if sts.Spec.Replicas != nil && sts.Status.UpdatedReplicas < *sts.Spec.Replicas {
+		return false, nil
+	}
+	return sts.Status.ReadyReplicas > 0, nil
+}

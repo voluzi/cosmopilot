@@ -38,7 +38,11 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, chainNode *appsv1.Chai
 			return err
 		}
 	} else {
-		ingress, err := r.getIngressSpec(chainNode)
+		// Resolve the API backend once (readiness-gated for a standalone/individual guard) so all
+		// ingress rules point at the same Service and stay on the raw node until the guard is serving.
+		apiSvcName := r.apiServiceName(ctx, chainNode)
+
+		ingress, err := r.getIngressSpec(chainNode, apiSvcName)
 		if err != nil {
 			return err
 		}
@@ -47,7 +51,7 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, chainNode *appsv1.Chai
 			return err
 		}
 
-		grpcIngress, err := r.getGrpcIngressSpec(chainNode)
+		grpcIngress, err := r.getGrpcIngressSpec(chainNode, apiSvcName)
 		if err != nil {
 			return err
 		}
@@ -97,7 +101,7 @@ func (r *Reconciler) ensureIngress(ctx context.Context, ingress *v1.Ingress) err
 	return nil
 }
 
-func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, error) {
+func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode, apiSvcName string) (*v1.Ingress, error) {
 	ingress := &v1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        chainNode.GetName(),
@@ -136,7 +140,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: r.apiServiceName(chainNode),
+									Name: apiSvcName,
 									Port: v1.ServiceBackendPort{
 										Number: chainutils.RpcPort,
 									},
@@ -164,7 +168,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: r.apiServiceName(chainNode),
+									Name: apiSvcName,
 									Port: v1.ServiceBackendPort{
 										Number: chainutils.LcdPort,
 									},
@@ -192,7 +196,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: r.apiServiceName(chainNode),
+									Name: apiSvcName,
 									Port: v1.ServiceBackendPort{
 										Number: controllers.EvmRpcPort,
 									},
@@ -220,7 +224,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 							PathType: &pathType,
 							Backend: v1.IngressBackend{
 								Service: &v1.IngressServiceBackend{
-									Name: r.apiServiceName(chainNode),
+									Name: apiSvcName,
 									Port: v1.ServiceBackendPort{
 										Number: controllers.EvmRpcWsPort,
 									},
@@ -243,7 +247,7 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, e
 	return ingress, controllerutil.SetControllerReference(chainNode, ingress, r.Scheme)
 }
 
-func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, error) {
+func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode, apiSvcName string) (*v1.Ingress, error) {
 	pathType := v1.PathTypeImplementationSpecific
 	ingress := &v1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
@@ -263,7 +267,7 @@ func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingres
 								PathType: &pathType,
 								Backend: v1.IngressBackend{
 									Service: &v1.IngressServiceBackend{
-										Name: r.apiServiceName(chainNode),
+										Name: apiSvcName,
 										Port: v1.ServiceBackendPort{
 											Number: chainutils.GrpcPort,
 										},

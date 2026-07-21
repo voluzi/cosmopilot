@@ -309,7 +309,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureServices(ctx, nodeSet, guards.ready); err != nil {
+	if err := r.ensureServices(ctx, nodeSet, guards); err != nil {
 		return ctrl.Result{}, err
 	}
 
