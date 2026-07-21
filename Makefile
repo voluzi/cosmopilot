@@ -104,6 +104,7 @@ test.integration: manifests generate fmt vet envtest ## Run integration tests (e
 test.e2e: CLUSTER_NAME?=cosmopilot-e2e
 test.e2e: REUSE_CLUSTER?=true
 test.e2e: BUILD_NODE_UTILS?=true
+test.e2e: COSMOSIGNER_IMAGE?=
 test.e2e: FOCUS?=
 test.e2e: SKIP?=
 test.e2e: TEST_TIMEOUT?=30m
@@ -115,6 +116,7 @@ test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Ru
 	E2E_TEST=true \
 	CLUSTER_NAME=$(CLUSTER_NAME) \
 	CONTROLLER_IMAGE=$(IMG) \
+	COSMOSIGNER_IMAGE=$(COSMOSIGNER_IMAGE) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
 	BUILD_NODE_UTILS=$(BUILD_NODE_UTILS) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \

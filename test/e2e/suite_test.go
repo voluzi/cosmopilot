@@ -39,6 +39,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 
 	clusterName := environ.GetString("CLUSTER_NAME", "cosmopilot-e2e")
 	controllerImage := environ.GetString("CONTROLLER_IMAGE", "")
+	cosmosignerImage := environ.GetString("COSMOSIGNER_IMAGE", "")
 	chartVersion := environ.GetString("CHART_VERSION", "")
 	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
 	reuseCluster := environ.GetBool("REUSE_CLUSTER", true)
@@ -47,6 +48,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	setupFramework := framework.NewKindFramework(
 		framework.WithClusterName(clusterName),
 		framework.WithControllerImage(controllerImage),
+		framework.WithCosmosignerImage(cosmosignerImage),
 		framework.WithChartVersion(chartVersion),
 		framework.WithNodeUtilsImage(nodeUtilsImage),
 		framework.WithReuseCluster(reuseCluster),
@@ -65,6 +67,11 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	if controllerImage != "" {
 		By("Loading controller image into Kind cluster")
 		err = setupFramework.LoadImage(controllerImage)
+		Expect(err).NotTo(HaveOccurred())
+	}
+	if cosmosignerImage != "" {
+		By("Loading cosmosigner image into Kind cluster")
+		err = setupFramework.LoadImage(cosmosignerImage)
 		Expect(err).NotTo(HaveOccurred())
 	}
 
@@ -94,6 +101,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 
 	clusterName := environ.GetString("CLUSTER_NAME", "cosmopilot-e2e")
 	controllerImage := environ.GetString("CONTROLLER_IMAGE", "")
+	cosmosignerImage := environ.GetString("COSMOSIGNER_IMAGE", "")
 	chartVersion := environ.GetString("CHART_VERSION", "")
 	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
 	installVault := environ.GetBool("INSTALL_VAULT", true)
@@ -102,6 +110,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	tf = framework.NewKindFramework(
 		framework.WithClusterName(clusterName),
 		framework.WithControllerImage(controllerImage),
+		framework.WithCosmosignerImage(cosmosignerImage),
 		framework.WithChartVersion(chartVersion),
 		framework.WithNodeUtilsImage(nodeUtilsImage),
 		framework.WithReuseCluster(true), // Always reuse - cluster is already set up
