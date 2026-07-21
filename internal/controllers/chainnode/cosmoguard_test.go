@@ -141,6 +141,29 @@ func TestFinalizeTearsDownGuardWhenNodeBecomesChild(t *testing.T) {
 	assert.Error(t, err, "standalone guard should be removed once the node is a ChainNodeSet child")
 }
 
+// TestChildWithIndividualIngressGetsGuard verifies a ChainNodeSet child that declares its own
+// individual ingress gets a per-node guard, and its API routes target that guard — preserving the
+// old sidecar behavior where individually-exposed nodes were guarded.
+func TestChildWithIndividualIngressGetsGuard(t *testing.T) {
+	cn := guardedChainNode("chain-fullnodes-0", true)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "0.rpc.example.com"}
+	r := cosmoGuardTestReconciler(t, cn)
+
+	// Routes target the child's own guard, not the raw node.
+	assert.Equal(t, "chain-fullnodes-0-cosmoguard", r.apiServiceName(cn))
+
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, &k8sappsv1.StatefulSet{}))
+
+	// Removing the individual ingress tears the per-node guard back down.
+	cn.Spec.Ingress = nil
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn))
+	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(cn))
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	assert.Error(t, err, "per-node guard should be removed once the individual ingress is gone")
+}
+
 // TestNodeSetChildSkipsStandaloneGuard verifies a ChainNodeSet child never creates its own guard
 // (the group's guard, managed by the set, fronts it).
 func TestNodeSetChildSkipsStandaloneGuard(t *testing.T) {

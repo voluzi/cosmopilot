@@ -20,15 +20,17 @@ import (
 )
 
 // apiServiceName returns the Service that a node's ingress/gateway API routes (RPC/LCD/gRPC/EVM)
-// should target. Only a STANDALONE ChainNode has its own CosmoGuard Service; a ChainNodeSet child is
-// fronted by its group's guard (a different, per-group Service that load-balances the whole group),
-// so a child's per-node routes must target the raw node Service rather than a never-created
-// "<child>-cosmoguard" Service.
+// should target: the node's own CosmoGuard Service when it manages one (a standalone node, or a
+// ChainNodeSet child with an individual ingress/gateway), otherwise the raw node Service. A child
+// fronted only by its group's guard must not target a never-created "<child>-cosmoguard" Service.
 func (r *Reconciler) apiServiceName(chainNode *appsv1.ChainNode) string {
 	if chainNode.UseInternal() {
 		return fmt.Sprintf("%s-internal", chainNode.GetName())
 	}
-	if _, isChild := chainNode.Labels[controllers.LabelChainNodeSet]; !isChild && chainNode.Spec.Config.CosmoGuardEnabled() {
+	// Route through the node's own guard whenever it manages one — a standalone node, or a
+	// ChainNodeSet child that has an individual ingress/gateway. Children fronted only by their group
+	// guard (no individual route) target the raw node Service.
+	if r.standaloneGuardManaged(chainNode) {
 		return chainNode.CosmoGuardName()
 	}
 	return chainNode.GetName()
@@ -123,13 +125,20 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 }
 
 // standaloneGuardManaged reports whether this ChainNode should have its own standalone CosmoGuard.
-// A ChainNodeSet child is fronted by its group's guard (managed by the ChainNodeSet controller), so
-// it never manages a per-node guard.
+//
+// A ChainNodeSet child is normally fronted by its group's guard (managed by the ChainNodeSet
+// controller), so it does not get a per-node guard — EXCEPT when it declares its own individual
+// ingress/gateway. Those are per-instance routes to one specific node, which the shared group guard
+// (a single deployment that load-balances the whole group via discovery) cannot target. To keep such
+// per-node endpoints guarded (as the in-pod sidecar did), the child gets its own single-node guard.
 func (r *Reconciler) standaloneGuardManaged(chainNode *appsv1.ChainNode) bool {
-	if _, isChild := chainNode.Labels[controllers.LabelChainNodeSet]; isChild {
+	if !chainNode.Spec.Config.CosmoGuardEnabled() {
 		return false
 	}
-	return chainNode.Spec.Config.CosmoGuardEnabled()
+	if _, isChild := chainNode.Labels[controllers.LabelChainNodeSet]; isChild {
+		return chainNode.Spec.Ingress != nil || chainNode.Spec.Gateway != nil
+	}
+	return true
 }
 
 // finalizeCosmoGuard tears down a standalone guard the node no longer uses (CosmoGuard disabled, or
