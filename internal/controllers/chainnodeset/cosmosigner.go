@@ -500,24 +500,25 @@ func (r *Reconciler) reconcileCosmosignerMigrations(ctx context.Context, nodeSet
 			if st.SigningDigest != "" && st.SigningDigest != signingDigest {
 				return false, fmt.Errorf("cosmosigner %q applied public key was not recorded before the signing configuration changed; restore the previous configuration for one reconcile before migrating", s.Name)
 			}
-			rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), resourceName, s.Spec.GetReplicas())
+			liveDigest, found, err := cosmosigner.ReadLifecycleDigest(ctx, r.Client, nodeSet.GetNamespace(), resourceName)
 			if err != nil {
 				return false, err
 			}
-			if rolledOut {
-				liveDigest, found, err := cosmosigner.ReadLifecycleDigest(ctx, r.Client, nodeSet.GetNamespace(), resourceName)
+			if !found {
+				rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, nodeSet.GetNamespace(), resourceName, s.Spec.GetReplicas())
 				if err != nil {
 					return false, err
 				}
-				if !found {
-					liveDigest = "legacy:" + signingDigest
+				if !rolledOut {
+					continue
 				}
-				st.AppliedDigest = liveDigest
-				st.PublicKey = desiredPublicKey
-				st.TargetGroups = sortedTargetGroups(s)
-				changed = true
-				pending = true
+				liveDigest = "legacy:" + signingDigest
 			}
+			st.AppliedDigest = liveDigest
+			st.PublicKey = desiredPublicKey
+			st.TargetGroups = sortedTargetGroups(s)
+			changed = true
+			pending = true
 			continue
 		}
 

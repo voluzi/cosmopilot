@@ -257,6 +257,50 @@ func TestReconcileCosmosignerMigrationsRequeuesAfterRecoveringLiveLifecycle(t *t
 	require.Equal(t, oldDigest, nodeSet.GetCosmosignerStatus(signer.Name).AppliedDigest)
 }
 
+func TestReconcileCosmosignerMigrationsRecoverUnreadyLiveLifecycle(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"sentries"}, Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+			}},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{Name: signer.Name}}
+	desired := cosmosigner.Params{
+		Name: signer.Name, Namespace: nodeSet.Namespace, ChainID: nodeSet.Status.ChainID, Image: "fixed-image", Replicas: 1,
+		ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", StateStorageSize: "1Gi",
+		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
+	}
+	liveParams := desired
+	liveParams.Image = "broken-image"
+	liveDigest, err := liveParams.LifecycleDigest(signer.Digest())
+	require.NoError(t, err)
+
+	one := int32(1)
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: signer.Name, Namespace: nodeSet.Namespace, Generation: 1,
+			Annotations: map[string]string{cosmosigner.LifecycleDigestAnnotation: liveDigest},
+		},
+		Spec:   k8sappsv1.StatefulSetSpec{Replicas: &one},
+		Status: k8sappsv1.StatefulSetStatus{ObservedGeneration: 1},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, sts)
+
+	pending, err := r.reconcileCosmosignerMigrations(context.Background(), nodeSet, map[string]cosmosigner.Params{signer.Name: desired})
+	require.NoError(t, err)
+	require.True(t, pending)
+	status := nodeSet.GetCosmosignerStatus(signer.Name)
+	require.Equal(t, liveDigest, status.AppliedDigest)
+	require.Equal(t, desired.ExpectedPublicKey, status.PublicKey)
+	require.Nil(t, status.Migration)
+}
+
 func TestPrepareCosmosignerParamsRejectsDifferentRecordedValidatorPublicKey(t *testing.T) {
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)

@@ -248,6 +248,51 @@ func TestReconcileCosmosignerMigrationRequeuesAfterRecoveringLiveLifecycle(t *te
 	require.Equal(t, oldDigest, chainNode.Status.CosmosignerAppliedDigest)
 }
 
+func TestReconcileCosmosignerMigrationRecoversUnreadyLiveLifecycle(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+		}}},
+	}
+	params := cosmosigner.Params{
+		Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "fixed-image", Replicas: 1,
+		ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", StateStorageSize: "1Gi",
+		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
+	}
+	liveParams := params
+	liveParams.Image = "broken-image"
+	liveDigest, err := liveParams.LifecycleDigest(chainNode.CosmosignerSigningDigest())
+	require.NoError(t, err)
+
+	one := int32(1)
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, Generation: 1,
+			Annotations: map[string]string{cosmosigner.LifecycleDigestAnnotation: liveDigest},
+		},
+		Spec:   k8sappsv1.StatefulSetSpec{Replicas: &one},
+		Status: k8sappsv1.StatefulSetStatus{ObservedGeneration: 1},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	r := &Reconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode, sts).Build(),
+		Scheme: scheme,
+	}
+
+	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, liveDigest, chainNode.Status.CosmosignerAppliedDigest)
+	require.Equal(t, params.ExpectedPublicKey, chainNode.Status.CosmosignerPublicKey)
+	require.Nil(t, chainNode.Status.CosmosignerMigration)
+}
+
 func TestReconcileCosmosignerMigrationRollingOutPreservesNewStatefulSet(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))

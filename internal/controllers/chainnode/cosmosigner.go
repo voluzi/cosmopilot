@@ -521,15 +521,15 @@ func (r *Reconciler) reconcileCosmosignerMigration(ctx context.Context, chainNod
 		if chainNode.Status.CosmosignerSigningDigest != "" && chainNode.Status.CosmosignerSigningDigest != signingDigest {
 			return false, fmt.Errorf("cosmosigner applied public key was not recorded before the signing configuration changed; restore the previous configuration for one reconcile before migrating")
 		}
-		rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
-		if err != nil || !rolledOut {
-			return false, err
-		}
 		liveDigest, found, err := cosmosigner.ReadLifecycleDigest(ctx, r.Client, chainNode.GetNamespace(), params.Name)
 		if err != nil {
 			return false, err
 		}
 		if !found {
+			rolledOut, err := cosmosigner.IsRolledOut(ctx, r.Client, chainNode.GetNamespace(), params.Name, params.Replicas)
+			if err != nil || !rolledOut {
+				return false, err
+			}
 			liveDigest = "legacy:" + signingDigest
 		}
 		chainNode.Status.CosmosignerAppliedDigest = liveDigest
