@@ -204,6 +204,7 @@ func (r *Reconciler) fallbackTmKMSPublicKey(ctx context.Context, chainNode *apps
 			Backend: cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
 				Address:               hashicorp.Address,
 				KeyName:               hashicorp.Key,
+				KeyVersion:            1,
 				Mount:                 appsv1.DefaultCosmosignerVaultMount,
 				TokenSecret:           hashicorp.TokenSecret,
 				CertificateSecret:     hashicorp.CertificateSecret,
@@ -429,14 +430,6 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 			return cosmosigner.Params{}, err
 		}
 	}
-	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
-		UID: chainNode.GetUID(), Kind: "ChainNode", Namespace: chainNode.GetNamespace(), Name: chainNode.GetName(), Claim: standaloneCosmosignerReservationClaim(chainNode),
-	}); err != nil {
-		if chainNode.IsValidator() && stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
-			return cosmosigner.Params{}, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
-		}
-		return cosmosigner.Params{}, err
-	}
 	if chainNode.IsValidator() {
 		if recorded := chainNode.Status.PubKey; recorded != "" {
 			onChain := cosmosigner.CanonicalSDKPublicKey(recorded)
@@ -450,6 +443,14 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 		if applied := chainNode.Status.CosmosignerPublicKey; applied != "" && publicKey != applied {
 			return cosmosigner.Params{}, fmt.Errorf("cosmosigner cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history")
 		}
+	}
+	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
+		UID: chainNode.GetUID(), Kind: "ChainNode", Namespace: chainNode.GetNamespace(), Name: chainNode.GetName(), Claim: standaloneCosmosignerReservationClaim(chainNode),
+	}); err != nil {
+		if chainNode.IsValidator() && stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
+			return cosmosigner.Params{}, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
+		}
+		return cosmosigner.Params{}, err
 	}
 	params.ExpectedPublicKey = publicKey
 	return params, nil

@@ -32,13 +32,6 @@ func (r *Reconciler) ensureValidatorConsensusKeyReservation(ctx context.Context,
 	if err != nil {
 		return false, err
 	}
-	holder := validatorReservationHolder(chainNode)
-	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, holder); err != nil {
-		if errors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
-			return false, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
-		}
-		return false, err
-	}
 	if recorded := chainNode.Status.PubKey; recorded != "" {
 		onChain := cosmosigner.CanonicalSDKPublicKey(recorded)
 		if onChain == "" {
@@ -48,6 +41,13 @@ func (r *Reconciler) ensureValidatorConsensusKeyReservation(ctx context.Context,
 			conflict := fmt.Errorf("validator signing public key does not match the on-chain public key recorded in status; Cosmopilot does not rotate validator consensus keys")
 			return false, r.quiesceValidatorOnReservationConflict(ctx, chainNode, conflict)
 		}
+	}
+	holder := validatorReservationHolder(chainNode)
+	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, holder); err != nil {
+		if errors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
+			return false, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
+		}
+		return false, err
 	}
 	if verifiedIdentity != "" && chainNode.Status.TmKMSReservationIdentity != verifiedIdentity {
 		chainNode.Status.TmKMSReservationIdentity = verifiedIdentity

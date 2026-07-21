@@ -13,6 +13,7 @@ import (
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -335,7 +336,8 @@ func TestPrepareCosmosignerParamsRejectsDifferentRecordedValidatorPublicKey(t *t
 	_, err = r.prepareCosmosignerParams(context.Background(), nodeSet)
 	require.ErrorContains(t, err, "on-chain validator public key")
 	reservation := &appsv1.ConsensusKeyReservation{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation))
+	getErr := r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation)
+	require.True(t, apierrors.IsNotFound(getErr), "a rejected signer key must not leave an immutable reservation: %v", getErr)
 }
 
 func TestPrepareCosmosignerParamsAllowsMultiInstanceValidatorEndpointsWithSharedKey(t *testing.T) {
@@ -1444,7 +1446,9 @@ func TestPreflightRemovedSignerFallbacksDoesNotTrustDifferentTmKMSTarget(t *test
 			Request:    req,
 		}, nil
 	})
-	clientSet, err := kubernetes.NewForConfig(&rest.Config{Host: "https://kubernetes.invalid", Transport: transport})
+	clientSet, err := kubernetes.NewForConfig(&rest.Config{
+		Host: "https://kubernetes.invalid", ContentConfig: rest.ContentConfig{ContentType: "application/json"}, Transport: transport,
+	})
 	require.NoError(t, err)
 	r.ClientSet = clientSet
 
@@ -1452,6 +1456,7 @@ func TestPreflightRemovedSignerFallbacksDoesNotTrustDifferentTmKMSTarget(t *test
 	require.Error(t, err)
 	require.Contains(t, createdPod, "validator-service-account")
 	require.NotContains(t, createdPod, "group-service-account")
+	require.Contains(t, createdPod, `"--vault-key-version","1"`)
 }
 
 func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {

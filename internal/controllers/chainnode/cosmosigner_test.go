@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -200,7 +201,8 @@ func TestPreflightCosmosignerRejectsDifferentRecordedValidatorPublicKey(t *testi
 	require.ErrorContains(t, err, "on-chain validator public key")
 	require.NotEqual(t, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", parsed.PubKey.Value)
 	reservation := &appsv1.ConsensusKeyReservation{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation))
+	getErr := r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation)
+	require.True(t, apierrors.IsNotFound(getErr), "a rejected signer key must not leave an immutable reservation: %v", getErr)
 }
 
 func TestReconcileCosmosignerMigrationRequeuesAfterRecoveringLiveLifecycle(t *testing.T) {
@@ -914,7 +916,9 @@ func TestPreflightCosmosignerFallbackDoesNotTrustDifferentTmKMSTarget(t *testing
 			Request:    req,
 		}, nil
 	})
-	clientSet, err := kubernetes.NewForConfig(&rest.Config{Host: "https://kubernetes.invalid", Transport: transport})
+	clientSet, err := kubernetes.NewForConfig(&rest.Config{
+		Host: "https://kubernetes.invalid", ContentConfig: rest.ContentConfig{ContentType: "application/json"}, Transport: transport,
+	})
 	require.NoError(t, err)
 	r := &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(token).Build(),
@@ -925,6 +929,7 @@ func TestPreflightCosmosignerFallbackDoesNotTrustDifferentTmKMSTarget(t *testing
 	require.Error(t, err)
 	require.Contains(t, createdPod, "VAULT_SKIP_VERIFY")
 	require.Contains(t, createdPod, "true")
+	require.Contains(t, createdPod, `"--vault-key-version","1"`)
 }
 
 func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {

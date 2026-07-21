@@ -332,14 +332,6 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			return nil, fmt.Errorf("cosmosigners %q and %q resolve to the same consensus public key on chain %q; one ChainNodeSet cannot run independent double-sign state for the same validator key", previous, s.Name, nodeSet.Status.ChainID)
 		}
 		publicKeyOwners[publicKey] = s.Name
-		if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, nodeSet.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
-			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(),
-			Claim:             nodeSetCosmosignerReservationClaim(nodeSet, s),
-			LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, desired, s),
-			LegacyNodeNames:   nodeSetCosmosignerLegacyNodeNames(nodeSet, s),
-		}); err != nil {
-			return nil, err
-		}
 		if s.TargetsValidator() {
 			for _, validator := range nodeSet.Status.Validators {
 				if validator.Group != s.ValidatorGroup || validator.PubKey == "" {
@@ -356,6 +348,14 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.PublicKey != "" && publicKey != st.PublicKey {
 				return nil, fmt.Errorf("cosmosigner %q cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history", s.Name)
 			}
+		}
+		if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, nodeSet.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
+			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(),
+			Claim:             nodeSetCosmosignerReservationClaim(nodeSet, s),
+			LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, desired, s),
+			LegacyNodeNames:   nodeSetCosmosignerLegacyNodeNames(nodeSet, s),
+		}); err != nil {
+			return nil, err
 		}
 		params.ExpectedPublicKey = publicKey
 
@@ -801,6 +801,7 @@ func (r *Reconciler) fallbackTmKMSPublicKey(ctx context.Context, nodeSet *appsv1
 			Backend: cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
 				Address:               hashicorp.Address,
 				KeyName:               hashicorp.Key,
+				KeyVersion:            1,
 				Mount:                 appsv1.DefaultCosmosignerVaultMount,
 				TokenSecret:           hashicorp.TokenSecret,
 				CertificateSecret:     hashicorp.CertificateSecret,

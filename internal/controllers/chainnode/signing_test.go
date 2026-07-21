@@ -254,7 +254,7 @@ func TestEnsureValidatorConsensusKeyReservationReusesVerifiedTmKMSIdentity(t *te
 	}
 }
 
-func TestEnsureValidatorConsensusKeyReservationClaimsActualKeyBeforeRejectingMalformedStatus(t *testing.T) {
+func TestEnsureValidatorConsensusKeyReservationRejectsMismatchedKeyBeforeClaim(t *testing.T) {
 	const namespace, name = "default", "validator"
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {
@@ -271,10 +271,18 @@ func TestEnsureValidatorConsensusKeyReservationClaimsActualKeyBeforeRejectingMal
 	if err != nil {
 		t.Fatal(err)
 	}
+	onChainKey, err := cometbft.GeneratePrivKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	onChain, err := cometbft.LoadPrivKey(onChainKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: "validator-uid"},
 		Spec:       appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{PrivateKeySecret: ptr.To("validator-key")}},
-		Status:     appsv1.ChainNodeStatus{ChainID: "chain-1", PubKey: "malformed"},
+		Status:     appsv1.ChainNodeStatus{ChainID: "chain-1", PubKey: `{"key":"` + onChain.PubKey.Value + `"}`},
 	}
 	keySecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: namespace},
@@ -284,11 +292,11 @@ func TestEnsureValidatorConsensusKeyReservationClaimsActualKeyBeforeRejectingMal
 
 	_, err = r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode)
 	if err == nil {
-		t.Fatal("malformed recorded validator status must fail closed")
+		t.Fatal("a validator key that differs from recorded on-chain status must fail closed")
 	}
 	reservation := &appsv1.ConsensusKeyReservation{}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: cosmosigner.ConsensusKeyReservationName("chain-1", parsed.PubKey.Value)}, reservation); err != nil {
-		t.Fatalf("the actual active key must still be reserved before returning the status error: %v", err)
+	if err := r.Get(context.Background(), types.NamespacedName{Name: cosmosigner.ConsensusKeyReservationName("chain-1", parsed.PubKey.Value)}, reservation); !apierrors.IsNotFound(err) {
+		t.Fatalf("a rejected signing key must not leave an immutable reservation, got %v", err)
 	}
 }
 
