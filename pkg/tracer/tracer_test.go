@@ -1,8 +1,10 @@
 package tracer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,9 +155,187 @@ func TestStoreTracer_ParseInvalidJSON(t *testing.T) {
 	case trace := <-tracesReceived:
 		if trace.Err == nil {
 			t.Error("expected error for invalid JSON, got nil")
+		} else if !strings.Contains(trace.Err.Error(), "not valid json") {
+			t.Errorf("expected error to include invalid trace input, got %q", trace.Err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for trace")
+	}
+
+	f.Close()
+	_ = tracer.Stop()
+	<-done
+}
+
+func TestStoreTracer_TruncatesLongInvalidTraceInError(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "trace.log")
+
+	f, err := os.Create(tracePath)
+	if err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tracer, err := NewStoreTracer(tracePath, false)
+	if err != nil {
+		f.Close()
+		t.Fatalf("NewStoreTracer() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tracer.Start()
+	}()
+
+	longValue := strings.Repeat("a", 1024)
+	invalidTrace := `{"operation":"write","value":"` + longValue
+	if _, err = f.WriteString(invalidTrace + "\n"); err != nil {
+		t.Fatalf("failed to write trace: %v", err)
+	}
+	_ = f.Sync()
+
+	select {
+	case trace := <-tracer.Traces:
+		if trace.Err == nil {
+			t.Fatal("expected error for invalid JSON, got nil")
+		}
+		errorText := trace.Err.Error()
+		if len(errorText) > 384 {
+			t.Errorf("expected bounded error, got %d characters", len(errorText))
+		}
+		if !strings.Contains(errorText, "...") {
+			t.Errorf("expected truncated error to contain ellipsis, got %q", errorText)
+		}
+		if !strings.Contains(errorText, `object="{\"operation\":\"write\",\"value\":\"`) {
+			t.Errorf("expected current object prefix, got %q", errorText)
+		}
+		if !strings.Contains(errorText, `near="...aaaaaaaa`) {
+			t.Errorf("expected context near the parse error, got %q", errorText)
+		}
+		if !strings.Contains(errorText, fmt.Sprintf("of %d", len(invalidTrace))) {
+			t.Errorf("expected error to include total length, got %q", errorText)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for trace")
+	}
+
+	f.Close()
+	_ = tracer.Stop()
+	<-done
+}
+
+func TestStoreTracer_EmitsValidTraceBeforeMalformedSuffix(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "trace.log")
+
+	f, err := os.Create(tracePath)
+	if err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tracer, err := NewStoreTracer(tracePath, false)
+	if err != nil {
+		f.Close()
+		t.Fatalf("NewStoreTracer() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tracer.Start()
+	}()
+
+	traceLine := `{"operation":"write","key":"valid"}{invalid}`
+	if _, err = f.WriteString(traceLine + "\n"); err != nil {
+		t.Fatalf("failed to write traces: %v", err)
+	}
+	_ = f.Sync()
+
+	select {
+	case trace := <-tracer.Traces:
+		if trace.Err != nil {
+			t.Fatalf("valid trace returned unexpected error: %v", trace.Err)
+		}
+		if trace.Key != "valid" {
+			t.Errorf("expected valid trace key, got %q", trace.Key)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for valid trace")
+	}
+
+	select {
+	case trace := <-tracer.Traces:
+		if trace.Err == nil {
+			t.Fatal("expected error for malformed suffix, got nil")
+		}
+		if !strings.Contains(trace.Err.Error(), `object="{invalid}"`) {
+			t.Errorf("expected current object context for malformed suffix, got %q", trace.Err)
+		}
+		if strings.Contains(trace.Err.Error(), "near=") {
+			t.Errorf("expected overlapping context to be collapsed, got %q", trace.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for malformed suffix error")
+	}
+
+	f.Close()
+	_ = tracer.Stop()
+	<-done
+}
+
+func TestStoreTracer_ParseMultipleTracesOnOneLine(t *testing.T) {
+	tmpDir := t.TempDir()
+	tracePath := filepath.Join(tmpDir, "trace.log")
+
+	f, err := os.Create(tracePath)
+	if err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	tracer, err := NewStoreTracer(tracePath, false)
+	if err != nil {
+		f.Close()
+		t.Fatalf("NewStoreTracer() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tracer.Start()
+	}()
+
+	tracesReceived := make(chan *Trace, 2)
+	go func() {
+		for trace := range tracer.Traces {
+			tracesReceived <- trace
+		}
+	}()
+
+	traceJSON := `{"operation":"write","key":"first"}{"operation":"read","key":"second"}`
+	if _, err = f.WriteString(traceJSON + "\n"); err != nil {
+		t.Fatalf("failed to write traces: %v", err)
+	}
+	_ = f.Sync()
+
+	for i, expected := range []struct {
+		operation string
+		key       string
+	}{
+		{operation: "write", key: "first"},
+		{operation: "read", key: "second"},
+	} {
+		select {
+		case trace := <-tracesReceived:
+			if trace.Err != nil {
+				t.Fatalf("trace %d returned unexpected error: %v", i, trace.Err)
+			}
+			if trace.Operation != expected.operation || trace.Key != expected.key {
+				t.Errorf("trace %d = operation %q, key %q; want operation %q, key %q", i, trace.Operation, trace.Key, expected.operation, expected.key)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for trace %d", i)
+		}
 	}
 
 	f.Close()
