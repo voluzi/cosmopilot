@@ -111,6 +111,23 @@ func TestStandaloneGuardInheritsServiceAccount(t *testing.T) {
 	assert.Equal(t, "node-sa", sts.Spec.Template.Spec.ServiceAccountName)
 }
 
+// TestStandaloneGuardInheritsUserLabels verifies the guard pods carry the node's genuine user labels
+// (so NetworkPolicies / monitoring cover them) but not cosmopilot-managed selector labels.
+func TestStandaloneGuardInheritsUserLabels(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Labels["team"] = "payments"             // user label -> propagated
+	cn.Labels[controllers.LabelChainID] = "c1" // managed selector -> stripped
+	r := cosmoGuardTestReconciler(t, cn)
+
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
+	labels := sts.Spec.Template.Labels
+	assert.Equal(t, "payments", labels["team"], "user label propagated to guard pods")
+	assert.NotContains(t, labels, controllers.LabelChainID, "managed selector label must not reach guard pods")
+}
+
 // servingGuard returns a guard StatefulSet reporting a ready replica (so IsServing is true).
 func servingGuard(name string) *k8sappsv1.StatefulSet {
 	return &k8sappsv1.StatefulSet{

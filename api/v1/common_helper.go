@@ -491,19 +491,24 @@ func (cfg *Config) GetCosmoGuardDashboardPort() int32 {
 	return DefaultCosmoGuardDashboardPort
 }
 
-// cosmoGuardServicePorts are the ports the guard Service always exposes (the chain's public ports
-// plus the metrics port). cosmoGuardEvmServicePorts are exposed only when EVM is enabled. The
-// dashboard must not reuse a rendered port, or the guard Service would carry two ServicePort entries
-// for the same port and be rejected by the API server. These mirror the values in internal/chainutils
-// and internal/controllers, which api/v1 cannot import (import cycle).
+// cosmoGuardReservedPorts are ports the guard already uses regardless of EVM: the public API Service
+// ports (RPC/LCD/gRPC), the metrics port, and the always-bound olric cluster listener ports
+// (bind/peer-API/gossip). cosmoGuardEvmReservedPorts are used only when EVM is enabled. The dashboard
+// must not reuse any rendered port, or the guard Service would carry two ServicePort entries for the
+// same port (rejected by the API server) or the container would bind one port twice (crash-loop).
+// These mirror values in internal/chainutils, internal/controllers and internal/cosmoguard, which
+// api/v1 cannot import (import cycle).
 var (
-	cosmoGuardServicePorts = map[int32]string{
+	cosmoGuardReservedPorts = map[int32]string{
 		26657: "RPC",
 		1317:  "LCD",
 		9090:  "gRPC",
 		9001:  "metrics",
+		3320:  "cluster bind",
+		3321:  "cluster peer API",
+		3322:  "cluster gossip",
 	}
-	cosmoGuardEvmServicePorts = map[int32]string{
+	cosmoGuardEvmReservedPorts = map[int32]string{
 		8545: "EVM RPC",
 		8546: "EVM RPC WS",
 	}
@@ -518,11 +523,11 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 		return nil
 	}
 	port := cfg.GetCosmoGuardDashboardPort()
-	if name, ok := cosmoGuardServicePorts[port]; ok {
-		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s Service port; choose a different port", port, name)
+	if name, ok := cosmoGuardReservedPorts[port]; ok {
+		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
 	}
-	if name, ok := cosmoGuardEvmServicePorts[port]; ok && cfg.IsEvmEnabled() {
-		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s Service port; choose a different port", port, name)
+	if name, ok := cosmoGuardEvmReservedPorts[port]; ok && cfg.IsEvmEnabled() {
+		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
 	}
 	return nil
 }

@@ -180,6 +180,9 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		// Carry the node's pod annotations (mesh/Vault injection, admission markers) plus the mirrored
 		// safe-to-evict setting, as the in-pod sidecar did by sharing the node pod.
 		PodAnnotations: cosmoguard.GuardPodAnnotations(cfg.PodAnnotations, cfg.SafeToEvict),
+		// Inherit the node's user labels (minus cosmopilot-managed selector keys) so NetworkPolicies /
+		// monitoring that selected the node pod also cover the standalone guard.
+		Labels: controllers.GuardInheritedLabels(chainNode.Labels),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {

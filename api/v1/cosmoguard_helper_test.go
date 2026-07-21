@@ -29,6 +29,9 @@ func TestValidateCosmoGuardDashboard(t *testing.T) {
 	assert.Contains(t, err.Error(), "collides")
 	assert.Error(t, dash(true, ptr.To[int32](9001)).ValidateCosmoGuardDashboard(), "metrics port collision rejected")
 	assert.Error(t, dash(true, ptr.To[int32](9090)).ValidateCosmoGuardDashboard(), "gRPC port collision rejected")
+	// Always-bound olric cluster listener ports must be rejected too (container-level collision).
+	assert.Error(t, dash(true, ptr.To[int32](3320)).ValidateCosmoGuardDashboard(), "cluster bind port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](3322)).ValidateCosmoGuardDashboard(), "cluster gossip port collision rejected")
 
 	// EVM ports are only reserved when EVM is enabled (the guard Service only exposes them then).
 	assert.NoError(t, dash(true, ptr.To[int32](8545)).ValidateCosmoGuardDashboard(), "8545 is free without EVM")
