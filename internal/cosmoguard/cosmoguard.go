@@ -472,11 +472,16 @@ func (p Params) HPA() *autoscalingv2.HorizontalPodAutoscaler {
 // PDB renders a PodDisruptionBudget protecting the guard from mass eviction (e.g. a node drain taking
 // down every replica while the protected nodes stay up). Returns nil for a single fixed-replica guard,
 // where a PDB would only risk blocking drains without providing availability.
+//
+// It uses minAvailable=1 rather than maxUnavailable=1: an autoscaled guard sitting at its minReplicas
+// of 1 must not have its only ready pod evicted (which would leave an already-flipped Service with no
+// guard endpoint). minAvailable=1 keeps at least one guard pod through any voluntary disruption at any
+// replica count, while still allowing multi-replica guards to drain down to one.
 func (p Params) PDB() *policyv1.PodDisruptionBudget {
 	if p.Autoscaling == nil && p.Replicas <= 1 {
 		return nil
 	}
-	maxUnavailable := intstr.FromInt32(1)
+	minAvailable := intstr.FromInt32(1)
 	return &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.Name,
@@ -484,8 +489,8 @@ func (p Params) PDB() *policyv1.PodDisruptionBudget {
 			Labels:    p.podLabels(),
 		},
 		Spec: policyv1.PodDisruptionBudgetSpec{
-			MaxUnavailable: &maxUnavailable,
-			Selector:       &metav1.LabelSelector{MatchLabels: InstanceLabels(p.Name)},
+			MinAvailable: &minAvailable,
+			Selector:     &metav1.LabelSelector{MatchLabels: InstanceLabels(p.Name)},
 		},
 	}
 }

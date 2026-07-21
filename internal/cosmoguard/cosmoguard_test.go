@@ -194,6 +194,29 @@ func TestService_Ports(t *testing.T) {
 	assert.Equal(t, int32(controllers.CosmoGuardEvmRpcPort), byName[controllers.EvmRpcPortName].TargetPort.IntVal)
 }
 
+func TestPDB(t *testing.T) {
+	// Single fixed replica -> no PDB (would only block drains).
+	p := baseParams()
+	p.Replicas = 1
+	assert.Nil(t, p.PDB())
+
+	// Multi-replica -> minAvailable=1.
+	p.Replicas = 3
+	pdb := p.PDB()
+	require.NotNil(t, pdb)
+	require.NotNil(t, pdb.Spec.MinAvailable)
+	assert.Equal(t, int32(1), pdb.Spec.MinAvailable.IntVal)
+	assert.Nil(t, pdb.Spec.MaxUnavailable, "must protect the last pod, not allow its eviction")
+	assert.Equal(t, InstanceLabels(p.Name), pdb.Spec.Selector.MatchLabels)
+
+	// Autoscaled at minReplicas=1 -> still protected (minAvailable=1).
+	p.Replicas = 1
+	p.Autoscaling = &AutoscalingParams{MinReplicas: ptr.To[int32](1), MaxReplicas: 5}
+	pdb = p.PDB()
+	require.NotNil(t, pdb)
+	assert.Equal(t, int32(1), pdb.Spec.MinAvailable.IntVal)
+}
+
 func TestHPA(t *testing.T) {
 	p := baseParams()
 	p.UpstreamHost = "host"
