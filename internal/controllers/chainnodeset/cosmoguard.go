@@ -61,6 +61,20 @@ func cosmoGuardRouteLabels(nodeSet *appsv1.ChainNodeSet, groupName string) map[s
 func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) cosmoguard.Params {
 	cfg := group.GetServiceConfig()
 
+	// Match the guard's scheduling to the pods it fronts. A validator group's pods are rendered from
+	// group.Validator (its own nodeSelector/affinity) and run at the validators' priority, so the guard
+	// must follow those; a regular group uses the group-level fields and the nodes' priority. Getting
+	// this wrong leaves the guard Pending (or on a lower-priority node) while the validators it fronts
+	// schedule in their dedicated pool, breaking guarded API access.
+	nodeSelector := group.NodeSelector
+	affinity := group.Affinity
+	priorityClassName := r.opts.GetNodesPriorityClassName()
+	if group.Validator != nil {
+		nodeSelector = group.Validator.NodeSelector
+		affinity = group.Validator.Affinity
+		priorityClassName = r.opts.GetValidatorsPriorityClassName()
+	}
+
 	name := groupCosmoGuardName(nodeSet, group)
 	p := cosmoguard.Params{
 		Name:                name,
@@ -75,12 +89,12 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 		PeerServiceName:     cosmoguard.PeerServiceName(name),
 		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
 		ImagePullSecrets:    cfg.ImagePullSecrets,
-		// Front the group's nodes at the same scheduling priority, so the guard isn't preempted while
-		// the nodes it protects keep running (which would drop guarded API traffic).
-		PriorityClassName: r.opts.GetNodesPriorityClassName(),
-		// Place the guard where the group's nodes run (dedicated/tainted pools).
-		NodeSelector: group.NodeSelector,
-		Affinity:     group.Affinity,
+		// Run under the group pods' ServiceAccount so SA-bound pull secrets / workload identity still
+		// apply, as they did for the in-pod sidecar.
+		ServiceAccountName: cfg.GetServiceAccountName(),
+		PriorityClassName:  priorityClassName,
+		NodeSelector:       nodeSelector,
+		Affinity:           affinity,
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {

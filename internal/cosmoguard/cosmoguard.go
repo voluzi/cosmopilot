@@ -126,6 +126,12 @@ type Params struct {
 	PriorityClassName string
 	ImagePullSecrets  []corev1.LocalObjectReference
 
+	// ServiceAccountName runs the guard pods under the same ServiceAccount the fronted node uses. The
+	// in-pod sidecar inherited it implicitly; the standalone guard must carry it explicitly so any
+	// registry pull secrets or workload-identity bindings attached to that SA still apply. Empty means
+	// the namespace default.
+	ServiceAccountName string
+
 	// NodeSelector / Affinity place the guard alongside the nodes it fronts, so it can schedule in a
 	// dedicated/tainted node pool instead of staying Pending.
 	NodeSelector map[string]string
@@ -349,12 +355,13 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: p.podLabels()},
 				Spec: corev1.PodSpec{
-					SecurityContext:   k8s.RestrictedPodSecurityContext(),
-					PriorityClassName: p.PriorityClassName,
-					ImagePullSecrets:  p.ImagePullSecrets,
-					NodeSelector:      p.NodeSelector,
-					Affinity:          p.Affinity,
-					Containers:        []corev1.Container{container},
+					SecurityContext:    k8s.RestrictedPodSecurityContext(),
+					PriorityClassName:  p.PriorityClassName,
+					ServiceAccountName: p.ServiceAccountName,
+					ImagePullSecrets:   p.ImagePullSecrets,
+					NodeSelector:       p.NodeSelector,
+					Affinity:           p.Affinity,
+					Containers:         []corev1.Container{container},
 					Volumes: []corev1.Volume{
 						{
 							Name: configVolumeName,

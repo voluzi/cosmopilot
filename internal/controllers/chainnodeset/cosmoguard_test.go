@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
@@ -59,6 +60,58 @@ func TestGroupServiceFlipsToGuardOnlyWhenReady(t *testing.T) {
 	assert.Equal(t, int32(controllers.CosmoGuardGrpcPort), svc.Spec.Ports[2].TargetPort.IntVal)
 	// Public port numbers are preserved.
 	assert.Equal(t, int32(chainutils.RpcPort), svc.Spec.Ports[0].Port)
+}
+
+// TestGroupGuardScheduling verifies the group guard follows the placement of the pods it fronts: a
+// regular group uses the group-level nodeSelector/affinity and the nodes' priority + the group
+// Config's ServiceAccount; a validator group uses the validator sub-config's nodeSelector/affinity,
+// the validators' priority, and the validator Config's ServiceAccount.
+func TestGroupGuardScheduling(t *testing.T) {
+	// Regular group: group-level placement, nodes priority, group Config SA.
+	regularNodeSet, regularGroup := guardedNodeSet()
+	regularGroup.NodeSelector = map[string]string{"pool": "nodes"}
+	regularGroup.Affinity = &corev1.Affinity{}
+	regularGroup.Config.ServiceAccountName = ptr.To("nodes-sa")
+	regularNodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{regularGroup}
+
+	r := newValidatorTestReconciler(t, regularNodeSet)
+	r.opts = &controllers.ControllerRunOptions{ReleaseName: "rel"}
+
+	p := r.groupCosmoGuardParams(regularNodeSet, regularGroup)
+	assert.Equal(t, map[string]string{"pool": "nodes"}, p.NodeSelector)
+	assert.Equal(t, regularGroup.Affinity, p.Affinity)
+	assert.Equal(t, "rel-nodes", p.PriorityClassName)
+	assert.Equal(t, "nodes-sa", p.ServiceAccountName)
+
+	// Validator group: the pods are rendered from group.Validator, so the guard must follow it.
+	valAffinity := &corev1.Affinity{}
+	valGroup := appsv1.NodeGroupSpec{
+		Name: "validators",
+		Validator: &appsv1.NodeSetValidatorConfig{
+			NodeSelector: map[string]string{"pool": "validators"},
+			Affinity:     valAffinity,
+			Config: &appsv1.Config{
+				ServiceAccountName: ptr.To("validators-sa"),
+				CosmoGuard: &appsv1.CosmoGuardConfig{
+					Enable: true,
+					Config: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "rules"},
+						Key:                  "cosmoguard.yaml",
+					},
+				},
+			},
+		},
+	}
+	valNodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "chain", Namespace: "ns"},
+		Spec:       appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{valGroup}},
+	}
+
+	p = r.groupCosmoGuardParams(valNodeSet, valGroup)
+	assert.Equal(t, map[string]string{"pool": "validators"}, p.NodeSelector)
+	assert.Equal(t, valAffinity, p.Affinity)
+	assert.Equal(t, "rel-validators", p.PriorityClassName)
+	assert.Equal(t, "validators-sa", p.ServiceAccountName)
 }
 
 // TestGuardParamsUseDiscovery verifies a group's guard is configured to discover node pods through

@@ -96,6 +96,21 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	assert.NotEmpty(t, secret.Data["encryptionKey"])
 }
 
+// TestStandaloneGuardInheritsServiceAccount verifies the standalone guard runs under the node's
+// configured ServiceAccount (the in-pod sidecar inherited it; the standalone guard must carry it so
+// SA-bound pull secrets / workload identity still apply).
+func TestStandaloneGuardInheritsServiceAccount(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.ServiceAccountName = ptr.To("node-sa")
+	r := cosmoGuardTestReconciler(t, cn)
+
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
+	assert.Equal(t, "node-sa", sts.Spec.Template.Spec.ServiceAccountName)
+}
+
 // servingGuard returns a guard StatefulSet reporting a ready replica (so IsServing is true).
 func servingGuard(name string) *k8sappsv1.StatefulSet {
 	return &k8sappsv1.StatefulSet{

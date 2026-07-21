@@ -170,6 +170,9 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		// Place the guard where the node runs (dedicated/tainted pools).
 		NodeSelector: chainNode.Spec.NodeSelector,
 		Affinity:     chainNode.Spec.Affinity,
+		// Run under the node's ServiceAccount so SA-bound pull secrets / workload identity still apply,
+		// as they did for the in-pod sidecar.
+		ServiceAccountName: cfg.GetServiceAccountName(),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
