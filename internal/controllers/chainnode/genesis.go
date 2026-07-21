@@ -67,19 +67,66 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 // recordGenesisDigestIfMissing records the genesis signing fingerprint (for a node that initialized
 // genesis) or the external sentinel (for one that consumed an external genesis) into status the first
 // time genesis is established, so the no-webhook reconcile path can reject post-genesis changes to
-// .spec.validator.init without a previous spec to diff against. It is recorded once and never
-// overwritten — the genesis is immutable — and also backfills nodes upgraded from a version that
-// predates the digest. Returns whether it performed a status update.
+// .spec.validator.init without a previous spec to diff against. It also backfills nodes upgraded from
+// a version that predates the digest. Returns whether it performed a status update.
+//
+// With admission webhooks enabled, the baseline may refresh only when the recorded fingerprint itself
+// proves all non-signing genesis fields are unchanged and the original signing path resolves to the
+// current effective key. With webhooks disabled the digest is never refreshed.
+//
+// A LEGACY backfill (digest empty, chainID already set — the node predates this field) cannot blindly
+// trust the current spec's init-ness: an external-genesis node converted to .validator.init before
+// its first post-upgrade reconcile would otherwise get the mutated init fingerprint recorded as the
+// trusted baseline. The init claim is corroborated before an init fingerprint is recorded:
+//   - the genesis on the data volume was DOWNLOADED (external marker persisted by the version that
+//     ran it) → record the external sentinel regardless of the spec;
+//   - the claimed init.chainID does not match the established chainID → record the external sentinel
+//     (a genuine initializer's chainID always came from its own init block).
+//
+// A deliberate conversion that also fakes init.chainID on a non-data-volume node remains undetectable
+// from status alone (the persisted genesis carries no initializer marker); like the other no-webhook
+// guards, this is an anti-footgun, not a security boundary against the resource owner.
 func (r *Reconciler) recordGenesisDigestIfMissing(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if chainNode.Status.GenesisSigningDigest != "" {
+	isLegacyBackfill := chainNode.Status.GenesisSigningDigest == "" && chainNode.Status.ChainID != ""
+	defaultPrivKeySecret := fmt.Sprintf("%s-priv-key", chainNode.GetName())
+
+	current := appsv1.GenesisDigestExternal
+	if chainNode.ShouldInitGenesis() {
+		current = chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
+		if isLegacyBackfill {
+			if chainNode.Spec.Validator.Init.ChainID != chainNode.Status.ChainID {
+				current = appsv1.GenesisDigestExternal
+			} else if downloaded, err := r.genesisWasDownloaded(ctx, chainNode); err != nil {
+				return false, err
+			} else if downloaded {
+				current = appsv1.GenesisDigestExternal
+			}
+		}
+	}
+	if chainNode.Status.GenesisSigningDigest == current {
 		return false, nil
 	}
-	if chainNode.ShouldInitGenesis() {
-		chainNode.Status.GenesisSigningDigest = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
-	} else {
-		chainNode.Status.GenesisSigningDigest = appsv1.GenesisDigestExternal
+	if chainNode.Status.GenesisSigningDigest != "" {
+		if !chainNode.GenesisSigningDigestAllowsRefresh(chainNode.Status.GenesisSigningDigest) {
+			return false, nil
+		}
 	}
+	chainNode.Status.GenesisSigningDigest = current
 	return true, r.Status().Update(ctx, chainNode)
+}
+
+// genesisWasDownloaded reports whether this node's data-volume PVC carries the genesis-downloaded
+// marker — persisted evidence (from any operator version) that the genesis was obtained from an
+// EXTERNAL source, contradicting a .validator.init claim.
+func (r *Reconciler) genesisWasDownloaded(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(chainNode), pvc); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return pvc.Annotations[controllers.AnnotationGenesisDownloaded] == controllers.StringValueTrue, nil
 }
 
 func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode) error {
@@ -115,7 +162,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 			if err = r.Update(ctx, pvc); err != nil {
 				return fmt.Errorf("failed to update pvc annotations: %w", err)
 			}
-			chainNode.Status.ChainID = *chainNode.Spec.Genesis.ChainID
+			chainNode.SetEstablishedChainID(*chainNode.Spec.Genesis.ChainID)
 			return r.Status().Update(ctx, chainNode)
 		}
 
@@ -172,7 +219,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 
 		// update chainID in status
 		logger.Info("updating .status.chainID", "chainID", chainID)
-		chainNode.Status.ChainID = chainID
+		chainNode.SetEstablishedChainID(chainID)
 		return r.Status().Update(ctx, chainNode)
 
 	default:
@@ -227,7 +274,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 
 	// update chainID in status
 	logger.Info("updating .status.chainID", "chainID", chainID)
-	chainNode.Status.ChainID = chainID
+	chainNode.SetEstablishedChainID(chainID)
 	return r.Status().Update(ctx, chainNode)
 }
 
@@ -374,7 +421,7 @@ func (r *Reconciler) initGenesis(ctx context.Context, app *chainutils.App, chain
 	// path can reject post-genesis changes to .validator.init (it validates with Validate(nil), with no
 	// previous spec to diff against).
 	logger.Info("updating .status.chainID", "chainID", chainNode.Spec.Validator.Init.ChainID)
-	chainNode.Status.ChainID = chainNode.Spec.Validator.Init.ChainID
+	chainNode.SetEstablishedChainID(chainNode.Spec.Validator.Init.ChainID)
 	chainNode.Status.GenesisSigningDigest = chainNode.Spec.Validator.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", chainNode.GetName()))
 	return r.Status().Update(ctx, chainNode)
 }

@@ -1,6 +1,9 @@
 package cometbft
 
 import (
+	"bytes"
+	"fmt"
+
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/libs/json"
 	"github.com/cometbft/cometbft/privval"
@@ -33,11 +36,48 @@ func GeneratePrivKey() ([]byte, error) {
 }
 
 func LoadPrivKey(b []byte) (*PrivKey, error) {
+	if err := validatePrivValidatorKey(b); err != nil {
+		return nil, err
+	}
 	var key PrivKey
 	if err := json.Unmarshal(b, &key); err != nil {
 		return nil, err
 	}
 	return &key, nil
+}
+
+func validatePrivValidatorKey(b []byte) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("invalid CometBFT private validator key: %v", recovered)
+		}
+	}()
+
+	var key privval.FilePVKey
+	if err := json.Unmarshal(b, &key); err != nil {
+		return fmt.Errorf("invalid CometBFT private validator key: %w", err)
+	}
+	if key.PrivKey == nil || key.PubKey == nil {
+		return fmt.Errorf("invalid CometBFT private validator key: private and public keys are required")
+	}
+
+	derivedPubKey := key.PrivKey.PubKey()
+	if !derivedPubKey.Equals(key.PubKey) {
+		return fmt.Errorf("invalid CometBFT private validator key: public key does not match private key")
+	}
+	if !bytes.Equal(derivedPubKey.Address(), key.Address) {
+		return fmt.Errorf("invalid CometBFT private validator key: address does not match private key")
+	}
+
+	message := []byte("cosmopilot validator key validation")
+	signature, err := key.PrivKey.Sign(message)
+	if err != nil {
+		return fmt.Errorf("invalid CometBFT private validator key: sign validation message: %w", err)
+	}
+	if !derivedPubKey.VerifySignature(message, signature) {
+		return fmt.Errorf("invalid CometBFT private validator key: private and public key material is inconsistent")
+	}
+	return nil
 }
 
 func GetPubKey(keyb []byte) (string, error) {

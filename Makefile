@@ -73,10 +73,14 @@ docs: crd-to-markdown ## Generate markdown docs of CRD spec.
 	@$(CRD_TO_MARKDOWN) \
 		-f ./api/v1/chainnode_types.go \
 		-f ./api/v1/chainnodeset_types.go \
+		-f ./api/v1/consensuskeyreservation_types.go \
 		-f ./api/v1/common_types.go \
+		-f ./api/v1/cosmosigner_types.go \
 		--header ./docs/docs/reference/crds/header.md \
 		-n ChainNode \
-		-n ChainNodeSet > ./docs/docs/reference/crds/crds.md
+		-n ChainNodeSet \
+		-n ConsensusKeyReservation > ./docs/docs/reference/crds/crds.md
+	@./contrib/scripts/sort-crd-subresource-toc.sh ./docs/docs/reference/crds/crds.md
 	@./contrib/scripts/generate-example-docs.sh
 
 ##@ Tests
@@ -100,6 +104,7 @@ test.integration: manifests generate fmt vet envtest ## Run integration tests (e
 test.e2e: CLUSTER_NAME?=cosmopilot-e2e
 test.e2e: REUSE_CLUSTER?=true
 test.e2e: BUILD_NODE_UTILS?=true
+test.e2e: COSMOSIGNER_IMAGE?=
 test.e2e: FOCUS?=
 test.e2e: SKIP?=
 test.e2e: TEST_TIMEOUT?=30m
@@ -111,6 +116,7 @@ test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Ru
 	E2E_TEST=true \
 	CLUSTER_NAME=$(CLUSTER_NAME) \
 	CONTROLLER_IMAGE=$(IMG) \
+	COSMOSIGNER_IMAGE=$(COSMOSIGNER_IMAGE) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
 	BUILD_NODE_UTILS=$(BUILD_NODE_UTILS) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \

@@ -3,7 +3,9 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +21,53 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
+
+func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	if nodeSet.Status.LegacySignerServiceNamesInitialized {
+		return false, nil
+	}
+
+	expected := map[string]string{}
+	for i := range nodeSet.Spec.Nodes {
+		expected[nodeSet.Spec.Nodes[i].GetServiceName(nodeSet)] = scopeGroup
+	}
+	for i := range nodeSet.Spec.Ingresses {
+		expected[nodeSet.Spec.Ingresses[i].GetName(nodeSet)] = scopeGlobal
+	}
+	for i := range nodeSet.Spec.GatewayRoutes {
+		expected[fmt.Sprintf("%s-global-%s", nodeSet.GetName(), nodeSet.Spec.GatewayRoutes[i].Name)] = scopeGlobal
+	}
+
+	services := &corev1.ServiceList{}
+	if err := r.List(ctx, services, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return false, err
+	}
+	names := map[string]struct{}{}
+	for i := range services.Items {
+		svc := &services.Items[i]
+		if !metav1.IsControlledBy(svc, nodeSet) {
+			continue
+		}
+		scope, derived := expected[svc.GetName()]
+		if !derived || svc.GetLabels()[controllers.LabelScope] != scope {
+			continue
+		}
+		if strings.HasSuffix(svc.GetName(), "-signer") || strings.HasSuffix(svc.GetName(), "-signer-privval") {
+			names[svc.GetName()] = struct{}{}
+		}
+	}
+
+	nodeSet.Status.LegacySignerServiceNames = make([]string, 0, len(names))
+	for name := range names {
+		nodeSet.Status.LegacySignerServiceNames = append(nodeSet.Status.LegacySignerServiceNames, name)
+	}
+	sort.Strings(nodeSet.Status.LegacySignerServiceNames)
+	nodeSet.Status.LegacySignerServiceNamesInitialized = true
+	if err := r.Status().Update(ctx, nodeSet); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
 func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	logger := log.FromContext(ctx)
@@ -140,6 +189,12 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 			return r.Create(ctx, svc)
 		}
 		return err
+	}
+	if desiredOwner := metav1.GetControllerOf(svc); desiredOwner != nil {
+		currentOwner := metav1.GetControllerOf(currentSvc)
+		if currentOwner == nil || currentOwner.UID != desiredOwner.UID {
+			return fmt.Errorf("service %q is managed by another owner or is unowned; refusing to overwrite it", svc.GetName())
+		}
 	}
 
 	patchResult, err := patch.DefaultPatchMaker.Calculate(currentSvc, svc)

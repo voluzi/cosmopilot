@@ -76,7 +76,17 @@ func (p *PodHelper) WaitForPodDeleted(ctx context.Context, timeout time.Duration
 	ctx, cfn := context.WithTimeout(ctx, timeout)
 	defer cfn()
 
-	last, err := watch.UntilWithSync(ctx, lw, &corev1.Pod{}, nil, func(event watchapi.Event) (bool, error) {
+	// Precondition: if the pod vanished between the existence check above and the informer's
+	// initial List (the store is already empty), it is deleted — don't wait for an event that
+	// will never come. When the precondition is met UntilWithSync returns (nil, nil), which is a
+	// success here, so the nil-event check below must not treat it as an error.
+	alreadyGone := false
+	precondition := func(store cache.Store) (bool, error) {
+		alreadyGone = len(store.List()) == 0
+		return alreadyGone, nil
+	}
+
+	last, err := watch.UntilWithSync(ctx, lw, &corev1.Pod{}, precondition, func(event watchapi.Event) (bool, error) {
 		switch event.Type {
 		case watchapi.Error:
 			return false, fmt.Errorf("error watching pod")
@@ -85,14 +95,18 @@ func (p *PodHelper) WaitForPodDeleted(ctx context.Context, timeout time.Duration
 			return true, nil
 
 		default:
-			*p.pod = *event.Object.(*corev1.Pod)
+			// Waiting for deletion must not replace p.pod with the old object being watched: callers
+			// commonly build a fresh manifest, wait for a previous same-name pod to disappear, and then
+			// create p.pod. UntilWithSync emits Added/Modified events for that previous pod before the
+			// final Deleted event, and copying them here would clobber the fresh manifest with stale
+			// resourceVersion/spec metadata.
 			return false, nil
 		}
 	})
 	if err != nil {
 		return err
 	}
-	if last == nil {
+	if last == nil && !alreadyGone {
 		return fmt.Errorf("no events received for pod %s/%s", p.pod.Namespace, p.pod.Name)
 	}
 	return nil

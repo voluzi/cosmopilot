@@ -84,11 +84,12 @@ For dedicated seed nodes, `Cosmopilot` can deploy
 [Cosmoseed](https://github.com/voluzi/cosmoseed) (image `ghcr.io/voluzi/cosmoseed`),
 a lightweight seed-only implementation. See [Cosmoseed](../usage/cosmoseed).
 
-### TMKMS & vault-token-renewer (optional)
+### TMKMS & vault-token-renewer (deprecated, optional)
 
-When a validator is configured to sign with [TMKMS](../usage/tmkms), a TMKMS container
-is added to the validator Pod. If TMKMS is backed by HashiCorp Vault with a
-non-root token, a `vault-token-renewer` sidecar keeps the Vault token renewed.
+For legacy validators configured with deprecated [TMKMS](../usage/tmkms), a TMKMS container is
+added to the validator Pod. If `autoRenewToken` is enabled, the deprecated
+`vault-token-renewer` sidecar keeps the Vault token renewed. New deployments should use
+[Cosmosigner](../usage/cosmosigner), which renews Vault tokens internally.
 
 ### dataexporter (job)
 
@@ -115,8 +116,8 @@ has fine-grained control over its lifecycle. A typical Pod contains:
 - **`app`** — the chain binary itself (your node image).
 - **`node-utils`** — the helper sidecar (always present).
 - **`cosmoguard`** — optional API firewall/cache.
-- **`tmkms`** — optional remote signer for validators.
-- **`vault-token-renewer`** — optional Vault token renewer for TMKMS.
+- **`tmkms`** — deprecated remote signer for legacy validators.
+- **`vault-token-renewer`** — deprecated Vault token renewer for legacy TMKMS configurations.
 
 Init containers handle one-time setup (data initialization, genesis retrieval, key
 provisioning) before the node starts.

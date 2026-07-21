@@ -31,6 +31,7 @@ const sidebars: SidebarsConfig = {
         'usage/validator',
         'usage/initializing-new-network',
         'usage/tmkms',
+        'usage/cosmosigner',
         'usage/cosmoguard',
         'usage/cosmoseed',
         'usage/pod-disruption-budgets',

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,6 +42,7 @@ func (r *Reconciler) SetStatsClientFactory(factory StatsClientFactory) {
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
 	client.Client
+	APIReader          client.Reader
 	ClientSet          *kubernetes.Clientset
 	RestConfig         *rest.Config
 	Scheme             *runtime.Scheme
@@ -81,6 +83,7 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 
 	r := &Reconciler{
 		Client:             mgr.GetClient(),
+		APIReader:          mgr.GetAPIReader(),
 		ClientSet:          clientSet,
 		RestConfig:         mgr.GetConfig(),
 		Scheme:             mgr.GetScheme(),
@@ -100,10 +103,20 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 	return r, nil
 }
 
+func (r *Reconciler) reservationReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/finalizers,verbs=update
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets,verbs=get;list;watch
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create
 //+kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims;configmaps;secrets;services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods/exec;pods/attach,verbs=create
 //+kubebuilder:rbac:groups="",resources=pods/log,verbs=get
@@ -116,6 +129,7 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=grpcroutes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
+//+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -130,6 +144,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		logger.Error(err, "unable to fetch chainnode")
 		return ctrl.Result{}, err
+	}
+	if !chainNode.GetDeletionTimestamp().IsZero() {
+		done, err := r.finalizeCosmosignerOwner(ctx, chainNode)
+		if err != nil || !done {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// Check if namespace is being terminated - if so, skip reconcile to avoid errors
@@ -146,8 +167,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
 		return ctrl.Result{}, nil
 	}
+	if changed, err := r.prepareCosmosignerOwner(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	if r.opts.DisableWebhooks {
+		// The reserved-name rule normally runs on the admission create path; here it applies only
+		// while the object has never been reconciled (empty status), so legacy names keep working.
+		if err := appsv1.ValidateCosmosignerReservedNameNoWebhook(chainNode.GetName(), chainNode.Status.NodeID != ""); err != nil {
+			logger.Error(err, "spec is invalid")
+			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid, "spec is invalid: %v", err)
+			return ctrl.Result{}, err
+		}
+		if err := appsv1.ValidateCosmosignerStatefulChildName(chainNode.GetName(), chainNode.Status.NodeID == ""); err != nil {
+			logger.Error(err, "spec is invalid")
+			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid, "spec is invalid: %v", err)
+			return ctrl.Result{}, err
+		}
 		warnings, err := chainNode.Validate(nil)
 		if err != nil {
 			logger.Error(err, "spec is invalid")
@@ -177,6 +215,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 	logger.Info("pre-checking pod status", "pod-running", nodePodRunning)
+
+	// Backfill legacy cosmosigner status markers BEFORE configs/pod are reconciled: the no-webhook
+	// guards judge these markers, and they must get that chance before the pod is switched to a
+	// potentially unverifiable remote-signer spec (dropping the validator's local key mount). When a
+	// backfill happened, requeue so validation re-runs against the fresh status first.
+	if backfilled, err := r.backfillCosmosignerLegacyStatus(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	} else if backfilled {
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	// Create/update secret with node key for this node.
 	logger.V(1).Info("ensure node key exists")
@@ -255,6 +303,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Prepare the desired signing path before publishing config that enables it. A failed or pending
+	// transition leaves the existing ConfigMap and pod template on their current signing mode.
+	logger.V(1).Info("ensure signing configs")
+	signingConfigPending, err := r.reconcileSigningConfigs(ctx, chainNode)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if signingConfigPending {
+		logger.Info("waiting for signing configuration transition before updating config")
+		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
+	}
+
 	// Create/update configmap with config files
 	logger.V(1).Info("ensure config")
 	configHash, err := r.ensureConfigs(ctx, app, chainNode, nodePodRunning)
@@ -268,16 +328,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// Deploy TMKMS configs if configured
-	logger.V(1).Info("ensure tmkms config if applicable")
-	if err = r.ensureTmKMSConfig(ctx, chainNode); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Ensure pod is running
 	logger.V(1).Info("ensure pod")
 	if err = r.ensurePod(ctx, app, chainNode, configHash); err != nil {
 		return ctrl.Result{}, err
+	}
+	// Keep tmKMS assets while the live pod still references them; disruption protection may defer
+	// replacement even when ensurePod returns successfully.
+	if chainNode.IsSignerTarget() {
+		cleanupSafe, err := r.canCleanupTmKMSConfig(ctx, chainNode)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if cleanupSafe {
+			logger.V(1).Info("cleanup tmKMS config after signing transition")
+			if err = r.ensureTmKMSConfig(ctx, chainNode); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 	}
 
 	// If the node was set to stop, we will stop here as the pod is not running.
@@ -339,6 +407,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
+		Owns(&k8sappsv1.StatefulSet{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

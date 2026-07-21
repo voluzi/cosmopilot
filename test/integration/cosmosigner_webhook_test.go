@@ -1,0 +1,828 @@
+package integration
+
+import (
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+)
+
+var _ = Describe("Cosmosigner Webhook Validation", func() {
+	var ns *corev1.Namespace
+
+	BeforeEach(func() {
+		ns = CreateTestNamespace()
+	})
+
+	softwareBackend := func() appsv1.CosmosignerBackend {
+		return appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}}
+	}
+	vaultBackend := func() appsv1.CosmosignerBackend {
+		return appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+			Address:     "https://vault:8200",
+			KeyName:     "myval",
+			TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		}}
+	}
+
+	newNodeSet := func(c *appsv1.Cosmosigner, groups []appsv1.NodeGroupSpec, validator *appsv1.NodeSetValidatorConfig) *appsv1.ChainNodeSet {
+		return &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSetSpec{
+				App:         DefaultChainNodeSetTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Nodes:       groups,
+				Validator:   validator,
+				Cosmosigner: c,
+			},
+		}
+	}
+
+	It("accepts a sentry-mode signer targeting a fullnode group", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), UnsafeAllowInsecureRaft: true, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(3)}},
+			nil,
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("accepts a signer defaulting to the validator when nodeGroups is empty", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: softwareBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			// A plain (external-genesis) validator must supply its key for the software signer.
+			&appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("existing-val-key")},
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects a signer with no backend configured", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("exactly one of software, vault or gcpKms"))
+	})
+
+	It("rejects an even replica count", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(2)), Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("odd number"))
+	})
+
+	It("rejects nodeGroups that do not exist", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"missing"}, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("does not match any group"))
+	})
+
+	It("rejects empty nodeGroups without a validator", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("nodeGroups is required when .spec.validator is not set"))
+	})
+
+	It("accepts targeting a multi-instance validator group (one identity, redundant endpoints)", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"validators"}, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "validators", Instances: ptr.To(3), Validator: &appsv1.NodeSetValidatorConfig{}}},
+			nil,
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects a signer and tmKMS on the same targeted validator", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+				Address:     "https://vault:8200",
+				Key:         "myval",
+				TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+			}}}},
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+	})
+
+	It("rejects a standalone ChainNode with both cosmosigner and tmKMS", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:     DefaultChainNodeTestApp,
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+					Address:     "https://vault:8200",
+					Key:         "myval",
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+				}}}},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+	})
+
+	It("rejects targeting more than one validator group", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"val-a", "val-b"}, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{
+				{Name: "val-a", Validator: &appsv1.NodeSetValidatorConfig{}},
+				{Name: "val-b", Validator: &appsv1.NodeSetValidatorConfig{}},
+			},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cannot target more than one validator"))
+	})
+
+	It("rejects a sentry-mode software backend without an explicit key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: softwareBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("privateKeySecret is required when no validator is targeted"))
+	})
+
+	It("accepts a sentry-mode software backend with an explicit key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("my-key")},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects uploadGenerated without a validator target", func() {
+		vb := vaultBackend()
+		vb.Vault.UploadGenerated = true
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vb},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uploadGenerated requires targeting a validator"))
+	})
+
+	It("accepts uploadGenerated when a validator with an importable key is targeted", func() {
+		vb := vaultBackend()
+		vb.Vault.UploadGenerated = true
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: vb},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("existing-val-key")},
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects an explicit software key when a validator is targeted", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("some-key")},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{},
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cannot be set when targeting a validator"))
+	})
+
+	It("rejects a pre-provisioned GCP key for a genesis-init validator target", func() {
+		// Vault gets uploadGenerated auto-defaulted for init targets (accepted — covered by a unit
+		// test, since creating a live init nodeset here would starve envtest workers). GCP has no
+		// import path, so an init target with a pre-provisioned GCP key is still rejected.
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+				GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+				ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
+			}},
+		)
+		// Genesis-init + external genesis is itself mutually exclusive, so use init without genesis.
+		cs.Spec.Genesis = nil
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("requires the software backend or vault.uploadGenerated"))
+	})
+
+	It("rejects targeting a zero-instance group", func() {
+		// A zero-instance group has no pods to sign for; it is rejected (by group validation and,
+		// defensively, by the cosmosigner target check).
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("k")},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(0)}},
+			nil,
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).NotTo(Succeed())
+	})
+
+	It("rejects node group Service names reserved for standalone signers", func() {
+		for _, name := range []string{"signer", "signer-privval", "fullnodes-signer", "fullnodes-signer-privval"} {
+			cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: name}}, nil)
+			err := Framework().Client().Create(Framework().Context(), cs)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("standalone ChainNode cosmosigner Service"))
+		}
+	})
+
+	It("rejects global route Service names reserved for standalone signers", func() {
+		ingress := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: "fullnodes"}}, nil)
+		ingress.Spec.Ingresses = []appsv1.GlobalIngressConfig{{
+			Name: "rpc-signer", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+		}}
+		err := Framework().Client().Create(Framework().Context(), ingress)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("standalone ChainNode cosmosigner Service"))
+
+		gateway := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: "fullnodes"}}, nil)
+		gateway.Spec.GatewayRoutes = []appsv1.GlobalGatewayConfig{{
+			Name: "rpc-signer-privval", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+			Gateway: appsv1.GatewayRef{Name: "gateway"},
+		}}
+		err = Framework().Client().Create(Framework().Context(), gateway)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("standalone ChainNode cosmosigner Service"))
+	})
+
+	It("rejects two validators using the same Vault key via tmKMS and cosmosigner", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{
+				{Name: "fullnodes"},
+				{Name: "val", Validator: &appsv1.NodeSetValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+					Address:     "https://vault:8200",
+					Key:         "myval", // same key the cosmosigner vaultBackend() uses
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+				}}}}},
+			},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("same Vault signing key"))
+	})
+
+	It("rejects a standalone software signer on a non-validator node without a key", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:         DefaultChainNodeTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: softwareBackend()},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("privateKeySecret is required when the node is not a validator"))
+	})
+
+	It("rejects vault uploadGenerated on a non-validator standalone node", func() {
+		vb := vaultBackend()
+		vb.Vault.UploadGenerated = true
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:         DefaultChainNodeTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vb},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("uploadGenerated requires the node to be a validator"))
+	})
+
+	It("rejects a non-controller ChainNodeSet ownerRef for remoteSignerTarget", func() {
+		// A well-formed but non-controller owner reference must not pass the guard.
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: ChainNodePrefix,
+				Namespace:    ns.Name,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "cosmopilot.voluzi.com/v1",
+					Kind:       "ChainNodeSet",
+					Name:       "fake",
+					UID:        "12345678-1234-1234-1234-123456789012",
+					Controller: ptr.To(false),
+				}},
+			},
+			Spec: appsv1.ChainNodeSpec{
+				App:                DefaultChainNodeTestApp,
+				Genesis:            &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				RemoteSignerTarget: true,
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("managed by the ChainNodeSet controller"))
+	})
+
+	It("rejects a pre-provisioned GCP key for a standalone genesis-init validator", func() {
+		// Vault gets uploadGenerated auto-defaulted for init validators (accepted); GCP has no
+		// import path, so it is still rejected for a pending genesis-init registration.
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App: DefaultChainNodeTestApp,
+				Validator: &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
+					ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
+				}},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"},
+				}},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("requires the software backend or vault.uploadGenerated"))
+	})
+
+	It("rejects an explicit software key on a standalone validator", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App: DefaultChainNodeTestApp,
+				Validator: &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
+					ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
+				}},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("other-key")},
+				}},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cannot be set when the node is a validator"))
+	})
+
+	It("rejects a manually-set remoteSignerTarget on a standalone node", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:                DefaultChainNodeTestApp,
+				Genesis:            &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				RemoteSignerTarget: true,
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("managed by the ChainNodeSet controller"))
+	})
+
+	It("rejects a Vault backend with an empty tokenSecret name", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Vault: &appsv1.CosmosignerVaultBackend{
+					Address:     "https://vault:8200",
+					KeyName:     "myval",
+					TokenSecret: &corev1.SecretKeySelector{Key: "token"}, // no name
+				},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("tokenSecret.name and .key are required"))
+	})
+
+	It("rejects a software signer targeting a plain validator without a key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: softwareBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{}, // plain external-genesis validator, no key
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("requires the validator to set privateKeySecret"))
+	})
+
+	It("rejects a replicas change after creation", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), UnsafeAllowInsecureRaft: true, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+		// Re-fetch and update in a retry loop: the controller reconciles the object concurrently, so a
+		// stale-write conflict is retried until the webhook's immutability rule is what rejects it.
+		Eventually(func() string {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cs), fresh); err != nil {
+				return err.Error()
+			}
+			fresh.Spec.Cosmosigner.Replicas = ptr.To(int32(1))
+			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
+				return err.Error()
+			}
+			return ""
+		}).Should(ContainSubstring("replicas is immutable"))
+	})
+
+	It("rejects a Vault backend with an empty tokenSecret key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Vault: &appsv1.CosmosignerVaultBackend{
+					Address:     "https://vault:8200",
+					KeyName:     "myval",
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}}, // no key
+				},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("tokenSecret.name and .key are required"))
+	})
+
+	It("allows a recorded cosmosigner key migration and rejects validator removal", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:     DefaultChainNodeTestApp,
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				// The immutability guard protects validators (a sentry's key is registered
+				// out-of-band and stays rotatable), so this node must be a validator.
+				Validator:   &appsv1.ValidatorConfig{},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
+
+		// Mark the chain as established and record the applied signer identity/public key.
+		cn.Status.ChainID = "test-chain-1"
+		cn.Status.CosmosignerAppliedDigest = cn.CosmosignerSigningDigest()
+		cn.Status.CosmosignerPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		Expect(Framework().Client().Status().Update(Framework().Context(), cn)).To(Succeed())
+
+		// Changing the Vault key is admitted for break-before-make migration.
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+
+		// Dropping both the signer and the validator block (emptying the signing identity) is
+		// rejected too — the on-chain validator would be left with no signing path.
+		Eventually(func() string {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err.Error()
+			}
+			fresh.Spec.Validator = nil
+			fresh.Spec.Cosmosigner = nil
+			if err := Framework().Client().Update(Framework().Context(), fresh); err != nil {
+				return err.Error()
+			}
+			return ""
+		}).Should(ContainSubstring("validator cannot be removed"))
+	})
+
+	It("allows a same-key migration from tmKMS to cosmosigner after the chain is established", func() {
+		// A validator signing via tmKMS on the same Vault key it later uses through cosmosigner is a
+		// supported migration: the effective key is unchanged, so it must be accepted.
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:     DefaultChainNodeTestApp,
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+					Address:     "https://vault:8200",
+					Key:         "myval",
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+				}}}},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
+		cn.Status.ChainID = "test-chain-1"
+		Expect(Framework().Client().Status().Update(Framework().Context(), cn)).To(Succeed())
+
+		// Switch to cosmosigner pointing at the same Vault transit key (default mount, no namespace).
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Spec.Validator.TmKMS = nil
+			fresh.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: vaultBackend()} // keyName "myval", same address
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+	})
+
+	It("rejects a sentry software key that collides with another validator's key", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("shared-key")},
+			}},
+			[]appsv1.NodeGroupSpec{
+				{Name: "fullnodes"},
+				{Name: "v", Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("shared-key")}},
+			},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("distinct key"))
+	})
+
+	It("rejects an empty raftTLSSecret", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackend(), RaftTLSSecret: ptr.To("")},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("raftTLSSecret must not be empty"))
+	})
+
+	It("allows recorded signer retargeting", func() {
+		// Sentry-only signer over regular groups: retargeting between fullnode groups stays
+		// allowed after establishment (no in-cluster validator identity is protected).
+		sentry := &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSetSpec{
+				App:         DefaultChainNodeSetTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Nodes:       []appsv1.NodeGroupSpec{{Name: "a"}, {Name: "b"}},
+				Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"a"}, Backend: vaultBackend()},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), sentry)).To(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(sentry), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-chain-1"
+			signer := fresh.ResolveCosmosigners()[0]
+			fresh.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+				Name: signer.Name, AppliedDigest: signer.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			}}
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(sentry), fresh); err != nil {
+				return err
+			}
+			fresh.Spec.Cosmosigner.NodeGroups = []string{"b"}
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+
+		// Validator-targeted signer: retargeting away from the validator is also a migration.
+		valTarget := &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSetSpec{
+				App:       DefaultChainNodeSetTestApp,
+				Genesis:   &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("existing-val-key")},
+				Nodes:     []appsv1.NodeGroupSpec{{Name: "a"}},
+				// Empty nodeGroups targets the validator.
+				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), valTarget)).To(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(valTarget), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-chain-2"
+			signer := fresh.ResolveCosmosigners()[0]
+			fresh.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+				Name: signer.Name, AppliedDigest: signer.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			}}
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNodeSet{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(valTarget), fresh); err != nil {
+				return err
+			}
+			fresh.Spec.Cosmosigner.NodeGroups = []string{"a"} // retarget validator -> sentry group
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+	})
+
+	It("allows an init validator to migrate tmKMS to cosmosigner on the same key", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App: DefaultChainNodeTestApp,
+				Validator: &appsv1.ValidatorConfig{
+					Init: &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi"},
+					TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
+						Address:     "https://vault:8200",
+						Key:         "myval",
+						TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+					}}},
+				},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-localnet"
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Spec.Validator.TmKMS = nil
+			fresh.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: vaultBackend()} // same Vault key "myval", uploadGenerated=false
+			return Framework().Client().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
+	})
+
+	// NOTE: the nodeset init-validator same-key migration (tmKMS→cosmosigner) is covered by a unit
+	// test on Validate directly (api/v1/cosmosigner_webhook_unit_test.go): creating a live init
+	// ChainNodeSet in envtest blocks a reconcile worker for minutes (its validator can never run
+	// here), starving the other specs.
+
+	It("rejects creating a resource with the reserved -signer name suffix", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "foo-signer", Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:     DefaultChainNodeTestApp,
+				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("reserved"))
+
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: "fullnodes"}}, nil)
+		cs.ObjectMeta = metav1.ObjectMeta{Name: "bar-signer", Namespace: ns.Name}
+		err = Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("reserved"))
+	})
+
+	It("rejects nodeGroups on a standalone ChainNode", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App:         DefaultChainNodeTestApp,
+				Genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
+				Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"x"}, Backend: vaultBackend()},
+			},
+		}
+		err := Framework().Client().Create(Framework().Context(), cn)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("nodeGroups is not valid here"))
+	})
+
+	// --- per-group cosmosigner (multiple validators, one signer each) ---
+
+	perGroupVault := func(keyName string) appsv1.CosmosignerBackend {
+		return appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+			Address:     "https://vault:8200",
+			KeyName:     keyName,
+			TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+		}}
+	}
+	gcpBackend := func(keyVersion string) appsv1.CosmosignerBackend {
+		return appsv1.CosmosignerBackend{GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: keyVersion}}
+	}
+
+	It("accepts a per-group signer on a multi-instance validator group (one identity, redundant endpoints)", func() {
+		// A 3-instance validator group with its own cosmosigner is ONE validator: a single signer
+		// ("<nodeset>-validators-signer") holds one consensus identity and dials all three pods as
+		// redundant signing endpoints.
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{
+			Name:        "validators",
+			Instances:   ptr.To(3),
+			Validator:   &appsv1.NodeSetValidatorConfig{},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("groupkey")},
+		}}, nil)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("accepts separate single-instance validator groups, each with its own signer and key", func() {
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "validator-a", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("key-a")}},
+			{Name: "validator-b", Instances: ptr.To(1), Validator: &appsv1.NodeSetValidatorConfig{},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("key-b")}},
+		}, nil)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects two per-group signers sharing the same Vault key", func() {
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "va", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("shared-key")}},
+			{Name: "vb", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("shared-key")}},
+		}, nil)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("same Vault signing key"))
+	})
+
+	It("rejects two per-group signers sharing the same GCP KMS key version", func() {
+		kv := "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "va", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: gcpBackend(kv)}},
+			{Name: "vb", Validator: &appsv1.NodeSetValidatorConfig{}, Cosmosigner: &appsv1.Cosmosigner{Backend: gcpBackend(kv)}},
+		}, nil)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("same GCP KMS signing key"))
+	})
+
+	It("rejects a group targeted by both the top-level and its own cosmosigner", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackend()},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes", Cosmosigner: &appsv1.Cosmosigner{Backend: perGroupVault("othergroupkey")}}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("a group can be signed by only one signer"))
+	})
+
+	It("rejects two sentry signers sharing the same software key, even a genesis-validator key", func() {
+		// "shared-key" is registered on-chain via a genesis-validator entry, which normally lets a
+		// sentry signer legitimately reuse it. Two sentry signers holding it would double-sign, so the
+		// pair must still be rejected.
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{
+			{Name: "sa", Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("shared-key")}}}},
+			{Name: "sb", Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("shared-key")}}}},
+			{Name: "v", Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{
+				ChainID:     "test-localnet",
+				Assets:      []string{"10000000unibi"},
+				StakeAmount: "1000000unibi",
+				GenesisValidators: []appsv1.GenesisValidator{{
+					PrivKeySecret:         "shared-key",
+					AccountMnemonicSecret: "shared-mnemonic",
+					Moniker:               "preserved",
+					Assets:                []string{"10000000unibi"},
+					StakeAmount:           "1000000unibi",
+				}},
+			}}},
+		}, nil)
+		// Genesis-init + external genesis are mutually exclusive.
+		cs.Spec.Genesis = nil
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("each signer must sign with a distinct key"))
+	})
+
+	It("rejects nodeGroups on a per-group cosmosigner", func() {
+		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{
+			Name:        "validators",
+			Validator:   &appsv1.NodeSetValidatorConfig{},
+			Cosmosigner: &appsv1.Cosmosigner{NodeGroups: []string{"x"}, Backend: vaultBackend()},
+		}}, nil)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("nodeGroups is not valid here"))
+	})
+})

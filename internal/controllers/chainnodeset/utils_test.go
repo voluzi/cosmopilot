@@ -7,6 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
 func TestValidatorNodeName(t *testing.T) {
@@ -271,6 +272,25 @@ func TestWithChainNodeSetLabels(t *testing.T) {
 			assert.Len(t, result, len(tt.wantKeys))
 		})
 	}
+}
+
+// TestWithChainNodeSetLabelsStripsDiscoveryScopeLabels verifies the signer discovery selector is never
+// inherited from ChainNodeSet metadata. The chain-node label is user metadata on non-target resources;
+// targeted child ChainNodes strip it at the point where they add cosmosigner-target.
+func TestWithChainNodeSetLabelsStripsDiscoveryScopeLabels(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"app":                              "myapp",
+				controllers.LabelCosmosignerTarget: "leaked-signer",
+				controllers.LabelChainNode:         "spoofed-standalone",
+			},
+		},
+	}
+	result := WithChainNodeSetLabels(nodeSet)
+	assert.Equal(t, "myapp", result["app"], "ordinary labels must be inherited")
+	assert.Equal(t, "spoofed-standalone", result[controllers.LabelChainNode], "chain-node is preserved until a target child explicitly drops it")
+	assert.NotContains(t, result, controllers.LabelCosmosignerTarget, "cosmosigner-target must never be inherited")
 }
 
 func TestContainsGroup(t *testing.T) {

@@ -102,9 +102,15 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.createPod(ctx, chainNode, pod)
 	}
 
-	// Patch pod without restart when labels change
+	// Patch pod labels without restart ONLY when the spec is otherwise unchanged. When the spec has
+	// also changed the pod is recreated below (podSpecChanged), which applies the new labels together
+	// with the new spec atomically. Patching labels onto the still-running old pod in that case is
+	// unsafe during a signer migration: it would stamp the cosmosigner discovery label onto a pod that
+	// is still running the previous signing path (e.g. a tmKMS sidecar bound to the privval laddr),
+	// exposing it to the new signer while the old signer is still live — two signers racing on one
+	// consensus key. Deferring to recreation closes that window.
 	logger.V(1).Info("checking for labels changes", "current", currentPod.Labels, "new", pod.Labels)
-	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) {
+	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) && !podSpecChanged(ctx, currentPod, pod) {
 		logger.Info("updating pod labels", "pod", pod.GetName())
 		modifiedPod := currentPod.DeepCopy()
 		modifiedPod.Labels = pod.Labels
@@ -422,7 +428,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 			},
 			{
 				Name:  "TMKMS_PROXY",
-				Value: strconv.FormatBool(chainNode.IsValidator() && chainNode.UsesTmKms()),
+				Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
 			},
 			{
 				Name:  "CREATE_FIFO",
@@ -627,17 +633,32 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		appSecurityContext = k8s.RestrictedSecurityContext()
 	}
 
+	podLabels := map[string]string{
+		controllers.LabelNodeID:    chainNode.Status.NodeID,
+		controllers.LabelChainID:   chainNode.Status.ChainID,
+		controllers.LabelValidator: strconv.FormatBool(chainNode.IsValidator()),
+		controllers.LabelUpgrading: controllers.StringValueFalse,
+	}
+	// Target pods must carry the cosmosigner discovery-service selector label so the signer can find
+	// and dial them. WithChainNodeLabels strips this controller-managed label from inherited metadata
+	// (so a stray user label never leaks it onto non-target pods), so it is re-added explicitly here:
+	// a standalone node uses its own signer name; a ChainNodeSet-managed target copies the value the
+	// nodeset controller stamped on the child ChainNode (`<nodeset>-signer`).
+	if v, ok := cosmosignerTargetLabelValue(chainNode); ok {
+		podLabels[controllers.LabelCosmosignerTarget] = v
+		// A standalone target additionally carries the chain-node label its discovery-service
+		// selector scopes on, so a same-named ChainNodeSet's target pods are never selected.
+		if chainNode.UsesCosmosigner() {
+			podLabels[controllers.LabelChainNode] = chainNode.GetName()
+		}
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        chainNode.GetName(),
 			Namespace:   chainNode.GetNamespace(),
 			Annotations: annotations,
-			Labels: WithChainNodeLabels(chainNode, map[string]string{
-				controllers.LabelNodeID:    chainNode.Status.NodeID,
-				controllers.LabelChainID:   chainNode.Status.ChainID,
-				controllers.LabelValidator: strconv.FormatBool(chainNode.IsValidator()),
-				controllers.LabelUpgrading: controllers.StringValueFalse,
-			}),
+			Labels:      WithChainNodeLabels(chainNode, podLabels),
 		},
 		Spec: corev1.PodSpec{
 			ShareProcessNamespace:         ptr.To(true),
@@ -745,29 +766,35 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 
 	if chainNode.IsValidator() {
 		pod.Spec.PriorityClassName = r.opts.GetValidatorsPriorityClassName()
-		if chainNode.UsesTmKms() {
-			_, kms, err := r.getTmkms(chainNode)
-			if err != nil {
-				return nil, err
-			}
-			pod.Spec.Volumes = append(pod.Spec.Volumes, kms.GetVolumes()...)
-			pod.Spec.Containers = append(pod.Spec.Containers, kms.GetContainersSpec()...)
+	}
 
-		} else {
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-				Name: "priv-key",
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: chainNode.Spec.Validator.GetPrivKeySecretName(chainNode),
-					},
-				},
-			})
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      "priv-key",
-				MountPath: "/home/app/config/" + PrivKeyFilename,
-				SubPath:   PrivKeyFilename,
-			})
+	switch {
+	case chainNode.UsesTmKms():
+		_, kms, err := r.getTmkms(chainNode)
+		if err != nil {
+			return nil, err
 		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, kms.GetVolumes()...)
+		pod.Spec.Containers = append(pod.Spec.Containers, kms.GetContainersSpec()...)
+
+	case chainNode.IsSignerTarget():
+		// Block signing is handled by an external cosmosigner deployment that dials this node's
+		// priv-validator address. No local key is mounted and no signer sidecar is injected.
+
+	case chainNode.IsValidator():
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: "priv-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: chainNode.Spec.Validator.GetPrivKeySecretName(chainNode),
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "priv-key",
+			MountPath: "/home/app/config/" + PrivKeyFilename,
+			SubPath:   PrivKeyFilename,
+		})
 	}
 
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Sidecars != nil {

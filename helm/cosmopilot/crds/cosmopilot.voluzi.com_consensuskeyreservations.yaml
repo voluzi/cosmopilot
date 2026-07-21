@@ -1,0 +1,93 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: consensuskeyreservations.cosmopilot.voluzi.com
+spec:
+  group: cosmopilot.voluzi.com
+  names:
+    kind: ConsensusKeyReservation
+    listKind: ConsensusKeyReservationList
+    plural: consensuskeyreservations
+    shortNames:
+    - ckr
+    singular: consensuskeyreservation
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.chainID
+      name: ChainID
+      type: string
+    - jsonPath: .spec.ownerName
+      name: Owner
+      type: string
+    - jsonPath: .spec.namespace
+      name: Namespace
+      type: string
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ConsensusKeyReservation atomically prevents independent roots or claims from managing separate
+          double-sign state for the same chain and consensus public key.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one
+              consensus public key on one chain. Reservations are intentionally not garbage-collected
+              automatically: an operator must verify every old signing path is gone before deleting a stale one.
+            properties:
+              chainID:
+                type: string
+              claim:
+                type: string
+              namespace:
+                type: string
+              ownerKind:
+                type: string
+              ownerName:
+                type: string
+              ownerUID:
+                description: OwnerUID identifies the controller root that owns this
+                  reservation for conflict detection.
+                type: string
+              publicKey:
+                type: string
+            required:
+            - chainID
+            - claim
+            - namespace
+            - ownerKind
+            - ownerName
+            - ownerUID
+            - publicKey
+            type: object
+            x-kubernetes-validations:
+            - message: consensus key reservations are immutable; delete only after
+                proving every old signing path is stopped
+              rule: self == oldSelf
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

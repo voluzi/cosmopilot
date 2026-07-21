@@ -15,7 +15,10 @@ type GenerationChangedPredicate struct {
 	predicate.Funcs
 }
 
-var ignoreSuffixes = []string{"config-generator", "data-init", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity", "write-file", "create-validator"}
+var ignoreSuffixes = []string{
+	"config-generator", "data-init", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity",
+	"write-file", "create-validator", "-signer-pubkey", "-signer-import",
+}
 
 // Create implements default CreateEvent filter
 func (p GenerationChangedPredicate) Create(e event.CreateEvent) bool {
@@ -60,7 +63,8 @@ func (p GenerationChangedPredicate) Update(e event.UpdateEvent) bool {
 
 	switch o := e.ObjectNew.(type) {
 	case *appsv1.ChainNode:
-		return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration()
+		return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
+			(e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero())
 
 	case *corev1.Pod:
 		// Ignore events from temporary pods

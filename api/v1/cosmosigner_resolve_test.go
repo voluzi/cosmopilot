@@ -1,0 +1,761 @@
+package v1
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+)
+
+func vaultBackendFor(key string) CosmosignerBackend {
+	return CosmosignerBackend{Vault: &CosmosignerVaultBackend{
+		Address:     "https://vault:8200",
+		KeyName:     key,
+		TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+	}}
+}
+
+// TestResolveCosmosignersTopLevel covers the top-level .spec.cosmosigner resolutions.
+func TestResolveCosmosignersTopLevel(t *testing.T) {
+	// Legacy singleton validator (nodeGroups empty).
+	legacy := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Validator:   &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-key")},
+			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("k")},
+		},
+	}
+	signers := legacy.ResolveCosmosigners()
+	require.Len(t, signers, 1)
+	assert.Equal(t, "cs-signer", signers[0].Name)
+	assert.Equal(t, []string{ReservedValidatorGroupName}, signers[0].TargetGroups)
+	assert.Equal(t, ReservedValidatorGroupName, signers[0].ValidatorGroup)
+	assert.Equal(t, "val-key", signers[0].SoftwareKeySecret)
+
+	// Sentry over a regular group.
+	sentry := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:       []NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(3)}},
+			Cosmosigner: &Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackendFor("k")},
+		},
+	}
+	signers = sentry.ResolveCosmosigners()
+	require.Len(t, signers, 1)
+	assert.Equal(t, "cs-signer", signers[0].Name)
+	assert.Equal(t, []string{"fullnodes"}, signers[0].TargetGroups)
+	assert.Empty(t, signers[0].ValidatorGroup)
+}
+
+// TestResolveCosmosignersPerGroup covers per-group .spec.nodes[].cosmosigner resolutions: one signer
+// per group, for a single-instance validator group or a sentry group.
+func TestResolveCosmosignersPerGroup(t *testing.T) {
+	// Single-instance validator group.
+	single := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes: []NodeGroupSpec{{
+				Name:        "vg",
+				Instances:   ptr.To(1),
+				Validator:   &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("vg-key")},
+				Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}}},
+			}},
+		},
+	}
+	signers := single.ResolveCosmosigners()
+	require.Len(t, signers, 1)
+	assert.Equal(t, "cs-vg-signer", signers[0].Name)
+	assert.Equal(t, "vg", signers[0].ValidatorGroup)
+	assert.Equal(t, "vg-key", signers[0].SoftwareKeySecret)
+
+	// Sentry per-group signer on a regular group.
+	sentry := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes: []NodeGroupSpec{{
+				Name:        "sg",
+				Instances:   ptr.To(3),
+				Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")}}},
+			}},
+		},
+	}
+	signers = sentry.ResolveCosmosigners()
+	require.Len(t, signers, 1)
+	assert.Equal(t, "cs-sg-signer", signers[0].Name)
+	assert.Empty(t, signers[0].ValidatorGroup)
+	assert.Equal(t, "sentry-key", signers[0].SoftwareKeySecret)
+}
+
+func TestHasLegacyPerInstanceCosmosignerStatusIgnoresModernNumericGroup(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Validator: &NodeSetValidatorConfig{}, Cosmosigner: &Cosmosigner{}},
+			{Name: "foo-1", Validator: &NodeSetValidatorConfig{}, Cosmosigner: &Cosmosigner{}},
+		}},
+		Status: ChainNodeSetStatus{Cosmosigners: []CosmosignerStatus{
+			{Name: "cs-foo-signer", ServingGroup: "foo"},
+			{Name: "cs-foo-1-signer", ServingGroup: "foo-1"},
+		}},
+	}
+
+	assert.False(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Status.Cosmosigners[1].ServingGroup = "foo"
+	assert.True(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Spec.Nodes[1].Validator = nil
+	nodeSet.Status.Cosmosigners[1] = CosmosignerStatus{Name: "cs-foo-1-signer", AtEstablishment: ptr.To("")}
+	assert.False(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Status.Cosmosigners[1].AtEstablishment = nil
+	assert.True(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"))
+
+	nodeSet.Spec.Nodes = nodeSet.Spec.Nodes[:1]
+	nodeSet.Status.Cosmosigners[1] = CosmosignerStatus{Name: "cs-foo-1-signer", AtEstablishment: ptr.To("")}
+	assert.False(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"), "a removed modern sentry must not masquerade as a legacy per-instance validator signer")
+}
+
+// TestResolveCosmosignersMultiInstanceValidatorGroup verifies a multi-instance validator group with
+// a cosmosigner is ONE validator: the webhook accepts it, it resolves to a single signer targeting
+// the whole group (one consensus identity, N redundant signing endpoints), and an explicit
+// privateKeySecret names that single identity. tmKMS on a multi-instance group stays rejected (a
+// per-pod sidecar would make every instance sign independently with the same key).
+func TestResolveCosmosignersMultiInstanceValidatorGroup(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:        "vg",
+				Instances:   ptr.To(3),
+				Validator:   &NodeSetValidatorConfig{},
+				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("basekey")},
+			}},
+		},
+	}
+	_, err := nodeSet.Validate(nil)
+	require.NoError(t, err, "multi-instance validator group with cosmosigner must be accepted (one identity, redundant endpoints)")
+
+	signers := nodeSet.ResolveCosmosigners()
+	require.Len(t, signers, 1, "one signer for the whole group, never one per instance")
+	assert.Equal(t, "cs-vg-signer", signers[0].Name)
+	assert.Equal(t, []string{"vg"}, signers[0].TargetGroups)
+	assert.Equal(t, "vg", signers[0].ValidatorGroup)
+	assert.Equal(t, "basekey", signers[0].Spec.Backend.Vault.KeyName, "no index-appended keys")
+	assert.Equal(t, "cs-vg-0-priv-key", signers[0].SoftwareKeySecret, "default identity key is instance 0's")
+
+	// An explicit privateKeySecret on the signer-targeted multi-instance group names the single
+	// identity and is honored.
+	explicit := nodeSet.DeepCopy()
+	explicit.Spec.Nodes[0].Validator.PrivateKeySecret = ptr.To("vg-key")
+	_, err = explicit.Validate(nil)
+	require.NoError(t, err, "explicit privateKeySecret is allowed on a signer-targeted multi-instance group")
+	signers = explicit.ResolveCosmosigners()
+	require.Len(t, signers, 1)
+	assert.Equal(t, "vg-key", signers[0].SoftwareKeySecret)
+
+	// Without a cosmosigner the shared privateKeySecret stays rejected (N validators, one key).
+	noSigner := explicit.DeepCopy()
+	noSigner.Spec.Nodes[0].Cosmosigner = nil
+	_, err = noSigner.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "privateKeySecret cannot be set when the validator group has multiple instances")
+
+	// tmKMS on a multi-instance validator group stays rejected.
+	tmkms := nodeSet.DeepCopy()
+	tmkms.Spec.Nodes[0].Cosmosigner = nil
+	tmkms.Spec.Nodes[0].Validator.TmKMS = &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
+		Address: "https://vault:8200",
+		Key:     "k",
+		TokenSecret: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+	}}}
+	_, err = tmkms.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tmKMS cannot be set when the validator group has multiple instances")
+
+	// A multi-instance SENTRY group with a cosmosigner stays valid too (one signer, whole group).
+	sentry := nodeSet.DeepCopy()
+	sentry.Spec.Nodes[0].Validator = nil
+	sentry.Spec.Nodes[0].Cosmosigner.Backend = CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")}}
+	_, err = sentry.Validate(nil)
+	require.NoError(t, err)
+}
+
+func TestDesiredReplacementSignerPreservesTargetMultiplicity(t *testing.T) {
+	nodeSet := &ChainNodeSet{}
+	desired := []ResolvedSigner{{Name: "replacement", TargetGroups: []string{"a", "a"}}}
+	status := &CosmosignerStatus{TargetGroups: []string{"a", "b"}}
+
+	_, ok := nodeSet.DesiredReplacementSigner(desired, status)
+	require.False(t, ok, "duplicating one target must not replace a different target group")
+}
+
+func TestDesiredReplacementSignerRejectsValidatorHistoryWithoutServingGroup(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{{
+			Name: "validators", Validator: &NodeSetValidatorConfig{},
+			Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+				Software: &CosmosignerSoftwareBackend{},
+			}},
+		}}},
+	}
+	desired := nodeSet.ResolveCosmosigners()
+	require.Len(t, desired, 1)
+	status := &CosmosignerStatus{
+		ServingIdentity: desired[0].ValidatorTargetedIdentity(),
+		TargetGroups:    desired[0].TargetGroups,
+	}
+
+	_, ok := nodeSet.DesiredReplacementSigner(desired, status)
+	require.False(t, ok, "missing validator-group history must fail closed instead of matching by targets alone")
+}
+
+// TestResolveCosmosignersTopLevelPlusPerGroup verifies the two sources compose into independent signers.
+func TestResolveCosmosignersTopLevelPlusPerGroup(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Cosmosigner: &Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackendFor("topkey")},
+			Nodes: []NodeGroupSpec{
+				{Name: "fullnodes", Instances: ptr.To(2)},
+				{Name: "vg", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("vg-key")},
+					Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("vgkey")}},
+			},
+		},
+	}
+	names := []string{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		names = append(names, s.Name)
+	}
+	assert.ElementsMatch(t, []string{"cs-signer", "cs-vg-signer"}, names)
+}
+
+// TestValidateCosmosignerSignerNameCollisions verifies a group whose own Service name equals a
+// signer's derived resource name is rejected.
+func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
+	base := func(nodes []NodeGroupSpec) *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes:   nodes,
+			},
+		}
+	}
+
+	// These group Services collide with a same-named standalone ChainNode's signer Services even when
+	// this ChainNodeSet does not configure its own signer.
+	for _, name := range []string{"signer", "signer-privval", "fullnodes-signer", "fullnodes-signer-privval"} {
+		t.Run("reserved group "+name, func(t *testing.T) {
+			_, err := base([]NodeGroupSpec{{Name: name, Instances: ptr.To(1)}}).Validate(nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
+		})
+	}
+
+	legacyGroup := base([]NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}})
+	_, err := legacyGroup.Validate(legacyGroup.DeepCopy())
+	require.NoError(t, err, "an unchanged pre-existing reserved group name must remain updateable")
+	legacyGroup.Status.LegacySignerServiceNamesInitialized = true
+	legacyGroup.Status.LegacySignerServiceNames = []string{legacyGroup.Spec.Nodes[0].GetServiceName(legacyGroup)}
+	_, err = legacyGroup.Validate(nil)
+	require.NoError(t, err, "a reconciled legacy group must remain valid on the no-webhook path")
+
+	editedNoWebhookGroup := base([]NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}})
+	editedNoWebhookGroup.Status.LegacySignerServiceNamesInitialized = true
+	editedNoWebhookGroup.Status.LegacySignerServiceNames = []string{"cs-fullnodes"}
+	_, err = editedNoWebhookGroup.Validate(nil)
+	require.Error(t, err, "the current spec must not whitelist a newly introduced reserved group name")
+	assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
+
+	introducedGroup := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+	oldWithoutReservedGroup := introducedGroup.DeepCopy()
+	introducedGroup.Spec.Nodes[0].Name = "fullnodes-signer"
+	_, err = introducedGroup.Validate(oldWithoutReservedGroup)
+	require.Error(t, err, "introducing a reserved group name on update must be rejected")
+
+	for _, route := range []struct {
+		name      string
+		ingresses []GlobalIngressConfig
+		gateways  []GlobalGatewayConfig
+	}{
+		{
+			name: "standalone collision from global ingress",
+			ingresses: []GlobalIngressConfig{{
+				Name: "rpc-signer", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+			}},
+		},
+		{
+			name: "standalone collision from global gateway",
+			gateways: []GlobalGatewayConfig{{
+				Name: "rpc-signer-privval", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+				Gateway: GatewayRef{Name: "gateway"},
+			}},
+		},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			nodeSet := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+			nodeSet.Spec.Ingresses = route.ingresses
+			nodeSet.Spec.GatewayRoutes = route.gateways
+
+			_, err := nodeSet.Validate(nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
+		})
+	}
+
+	legacyRoute := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+	legacyRoute.Spec.Ingresses = []GlobalIngressConfig{{
+		Name: "rpc-signer", Groups: []string{"fullnodes"}, Host: "nodes.example.com", EnableRPC: true,
+	}}
+	_, err = legacyRoute.Validate(legacyRoute.DeepCopy())
+	require.NoError(t, err, "an unchanged pre-existing reserved route name must remain updateable")
+	legacyRoute.Status.LegacySignerServiceNamesInitialized = true
+	legacyRoute.Status.LegacySignerServiceNames = []string{legacyRoute.Spec.Ingresses[0].GetName(legacyRoute)}
+	_, err = legacyRoute.Validate(nil)
+	require.NoError(t, err, "a reconciled legacy route must remain valid on the no-webhook path")
+
+	editedNoWebhookRoute := base([]NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}})
+	editedNoWebhookRoute.Spec.Ingresses = legacyRoute.Spec.Ingresses
+	editedNoWebhookRoute.Status.LegacySignerServiceNamesInitialized = true
+	editedNoWebhookRoute.Status.LegacySignerServiceNames = []string{"cs-global-rpc"}
+	_, err = editedNoWebhookRoute.Validate(nil)
+	require.Error(t, err, "the current spec must not whitelist a newly introduced reserved route name")
+	assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")
+
+	// Group Service name shadowing a signer resource name: group "vg-signer"'s Service is
+	// cs-vg-signer, the raft Service of group "vg"'s signer.
+	shadow := base([]NodeGroupSpec{
+		{Name: "vg", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
+		{Name: "vg-signer", Instances: ptr.To(1)},
+	})
+	_, err = shadow.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "collides with a cosmosigner's derived resource name")
+
+	// Group Service name shadowing a signer's discovery Service: group "vg-signer-privval"'s Service
+	// is cs-vg-signer-privval.
+	shadowPrivval := base([]NodeGroupSpec{
+		{Name: "vg", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+			Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")}},
+		{Name: "vg-signer-privval", Instances: ptr.To(1)},
+	})
+	_, err = shadowPrivval.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "discovery Service name")
+
+	for _, route := range []struct {
+		name      string
+		ingresses []GlobalIngressConfig
+		gateways  []GlobalGatewayConfig
+	}{
+		{
+			name: "global ingress",
+			ingresses: []GlobalIngressConfig{{
+				Name: "signer", Groups: []string{"global"}, Host: "nodes.example.com", EnableRPC: true,
+			}},
+		},
+		{
+			name: "global gateway",
+			gateways: []GlobalGatewayConfig{{
+				Name: "signer", Groups: []string{"global"}, Host: "nodes.example.com", EnableRPC: true,
+				Gateway: GatewayRef{Name: "gateway"},
+			}},
+		},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			nodeSet := base([]NodeGroupSpec{{
+				Name: "global", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("a")},
+			}})
+			nodeSet.Spec.Ingresses = route.ingresses
+			nodeSet.Spec.GatewayRoutes = route.gateways
+
+			_, err := nodeSet.Validate(nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "global route Service")
+		})
+	}
+}
+
+// TestValidateCosmosignerSignerAdditionToEstablishedValidator verifies that both pre-provisioned and
+// software signers can be added to an established validator. Cosmopilot controls the handoff; the
+// user remains responsible for the selected on-chain key.
+func TestValidateCosmosignerSignerAdditionToEstablishedValidator(t *testing.T) {
+	base := func(c *Cosmosigner) *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes: []NodeGroupSpec{{
+					Name:        "vg",
+					Instances:   ptr.To(1),
+					Validator:   &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("vg-key")},
+					Cosmosigner: c,
+				}},
+			},
+			Status: ChainNodeSetStatus{
+				ChainID: "test-1",
+				Validators: []ChainNodeSetValidatorStatus{{
+					Name: "cs-vg-0", Group: "vg", PubKey: "registered-pubkey", Address: "cosmosvaloper1registered",
+					Status: ValidatorStatusUnbonded,
+				}},
+			},
+		}
+	}
+	old := base(nil) // established, signing through its own local key
+
+	// Adding a pre-provisioned Vault signer is admitted for a controlled migration.
+	vaultAdded := base(&Cosmosigner{Backend: vaultBackendFor("prekey")})
+	_, err := vaultAdded.Validate(old)
+	require.NoError(t, err)
+
+	// Adding a software signer that uses the validator's own key: same identity -> accepted.
+	softwareAdded := base(&Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}}})
+	_, err = softwareAdded.Validate(old)
+	require.NoError(t, err)
+}
+
+func TestValidateCosmosignerRejectsPromotingSentrySignerToCreateValidator(t *testing.T) {
+	old := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:        "workers",
+				Instances:   ptr.To(1),
+				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("preprovisioned-key")},
+			}},
+		},
+	}
+	old.SetEstablishedChainID("test-1")
+	oldSigner := old.ResolveCosmosigners()[0]
+	oldStatus := old.EnsureCosmosignerStatus(oldSigner.Name)
+	oldStatus.AppliedDigest = oldSigner.Digest()
+	oldStatus.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	updated := old.DeepCopy()
+	updated.Spec.Nodes[0].Validator = &NodeSetValidatorConfig{CreateValidator: &CreateValidatorConfig{}}
+
+	_, err := updated.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "software backend or vault.uploadGenerated")
+}
+
+func TestValidateCosmosignerRequiresCompletedRegistrationForMigrationWaiver(t *testing.T) {
+	old := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(1),
+				Validator: &NodeSetValidatorConfig{CreateValidator: &CreateValidatorConfig{}},
+				Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+					Software: &CosmosignerSoftwareBackend{},
+				}},
+			}},
+		},
+		Status: ChainNodeSetStatus{
+			ChainID: "test-1",
+			Validators: []ChainNodeSetValidatorStatus{{
+				Name: "cs-validators-0", Group: "validators", Address: "cosmosvaloper1pending", PubKey: "generated-but-not-registered",
+			}},
+		},
+	}
+	oldSigner := old.ResolveCosmosigners()[0]
+	oldStatus := old.EnsureCosmosignerStatus(oldSigner.Name)
+	oldStatus.AppliedDigest = oldSigner.Digest()
+	oldStatus.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	updated := old.DeepCopy()
+	updated.Spec.Nodes[0].Cosmosigner.Backend = vaultBackendFor("preprovisioned-key")
+
+	_, err := updated.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "software backend or vault.uploadGenerated")
+}
+
+// TestValidateCosmosignerNoWebhookWaiverRequiresMatchingSigningDigest verifies the no-webhook
+// (Validate(nil)) parity of the migration waiver: with the previous spec unavailable, a completed
+// registration alone must NOT let a pre-provisioned Vault/GCP signer bypass the key-matching rule.
+// The waiver requires a recorded signing digest that matches the current signer — proof this exact
+// signer identity rolled out and served — otherwise a newly configured backend's key is unproven.
+func TestValidateCosmosignerNoWebhookWaiverRequiresMatchingSigningDigest(t *testing.T) {
+	const want = "software backend or vault.uploadGenerated"
+	base := func() *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes: []NodeGroupSpec{{
+					Name:        "validators",
+					Instances:   ptr.To(1),
+					Validator:   &NodeSetValidatorConfig{CreateValidator: &CreateValidatorConfig{}},
+					Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("preprovisioned-key")},
+				}},
+			},
+			Status: ChainNodeSetStatus{
+				ChainID: "test-1",
+				Validators: []ChainNodeSetValidatorStatus{{
+					Name: "cs-validators-0", Group: "validators", Address: "cosmosvaloper1registered",
+					PubKey: "registered-pubkey", Status: ValidatorStatusUnbonded,
+				}},
+			},
+		}
+	}
+
+	// A matching signer digest does not make a pre-on-chain address/public-key record sufficient.
+	pending := base()
+	pending.Status.Validators[0].Status = ""
+	pendingSigner := pending.ResolveCosmosigners()[0]
+	pendingStatus := pending.EnsureCosmosignerStatus(pendingSigner.Name)
+	pendingStatus.SigningDigest = pendingSigner.Digest()
+	if _, err := pending.Validate(nil); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("no-webhook migration before on-chain validator status must be rejected, got: %v", err)
+	}
+
+	// Registration recorded but no signing digest → waiver denied.
+	noDigest := base()
+	if _, err := noDigest.Validate(nil); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("no-webhook migration with registration but no recorded digest must be rejected, got: %v", err)
+	}
+
+	// Registration + a signing digest that does not match the current signer → waiver denied.
+	mismatched := base()
+	mismatchedStatus := mismatched.EnsureCosmosignerStatus(mismatched.ResolveCosmosigners()[0].Name)
+	mismatchedStatus.SigningDigest = "stale-digest-from-a-different-identity"
+	if _, err := mismatched.Validate(nil); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("no-webhook migration with a mismatched recorded digest must be rejected, got: %v", err)
+	}
+
+	// Registration + a signing digest matching the current signer → waiver granted.
+	matching := base()
+	matchingSigner := matching.ResolveCosmosigners()[0]
+	matchingStatus := matching.EnsureCosmosignerStatus(matchingSigner.Name)
+	matchingStatus.SigningDigest = matchingSigner.Digest()
+	if _, err := matching.Validate(nil); err != nil {
+		t.Fatalf("no-webhook migration with registration and a matching recorded digest must be admitted, got: %v", err)
+	}
+}
+
+func TestResolvedSignerDigestSeparatesRollingUpdatesFromMigrations(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Cosmosigner: &Cosmosigner{
+				NodeGroups: []string{"sentries"},
+				Backend:    vaultBackendFor("validator-key"),
+			},
+			Nodes: []NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+	}
+	original := nodeSet.ResolveCosmosigners()[0].Digest()
+
+	rolling := nodeSet.DeepCopy()
+	rolling.Spec.Cosmosigner.Image = ptr.To("ghcr.io/voluzi/cosmosigner:0.2.0")
+	rolling.Spec.Cosmosigner.LogLevel = ptr.To("debug")
+	rolling.Spec.Cosmosigner.Resources = &corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")}}
+	rolling.Spec.Cosmosigner.Backend.Vault.TokenSecret.Name = "rotated-token"
+	require.Equal(t, original, rolling.ResolveCosmosigners()[0].Digest(), "rolling-only fields must not trigger StatefulSet replacement")
+
+	migration := nodeSet.DeepCopy()
+	migration.Spec.Cosmosigner.Backend.Vault.KeyName = "different-key"
+	require.NotEqual(t, original, migration.ResolveCosmosigners()[0].Digest(), "backend/key changes must trigger migration")
+}
+
+// TestValidateCosmosignerNameLengthRejected verifies the derived discovery Service name is bounded to
+// 63 characters.
+func TestValidateCosmosignerNameLengthRejected(t *testing.T) {
+	longName := strings.Repeat("a", 50)
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: longName},
+		Spec: ChainNodeSetSpec{
+			App:     AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:        "vg",
+				Instances:   ptr.To(1),
+				Validator:   &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("k")},
+				Cosmosigner: &Cosmosigner{Backend: vaultBackendFor("vk")},
+			}},
+		},
+	}
+	_, err := nodeSet.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds the 63-character limit")
+}
+
+// TestCosmosignerStateStorageEqual verifies size is compared as a parsed quantity (so 1024Mi==1Gi)
+// and class is compared by pointer value (nil default distinct from explicit "").
+func TestCosmosignerStateStorageEqual(t *testing.T) {
+	// Quantity-equivalent sizes with matching (nil) class.
+	assert.True(t, CosmosignerStateStorageEqual("1024Mi", nil, "1Gi", nil))
+	// Different sizes.
+	assert.False(t, CosmosignerStateStorageEqual("10Gi", nil, "20Gi", nil))
+	// nil (cluster default) vs explicit "" are distinct.
+	assert.False(t, CosmosignerStateStorageEqual("10Gi", nil, "10Gi", ptr.To("")))
+	// Same explicit class.
+	assert.True(t, CosmosignerStateStorageEqual("10Gi", ptr.To("fast"), "10240Mi", ptr.To("fast")))
+	// Different class.
+	assert.False(t, CosmosignerStateStorageEqual("10Gi", ptr.To("fast"), "10Gi", ptr.To("slow")))
+	// Unparseable falls back to string equality.
+	assert.True(t, CosmosignerStateStorageEqual("bogus", nil, "bogus", nil))
+	assert.False(t, CosmosignerStateStorageEqual("bogus", nil, "other", nil))
+}
+
+// TestValidateCosmosignerGenesisSentryKeyMigration verifies a recorded sentry signer may change or
+// remove its key through the controlled break-before-make path.
+func TestValidateCosmosignerProtectsGenesisSentryKey(t *testing.T) {
+	base := func(sentryKey string) *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				App: AppSpec{Image: "img", App: "appd", Version: ptr.To("1.0.0")},
+				Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+					ChainID:     "test-1",
+					Assets:      []string{"1stake"},
+					StakeAmount: "1stake",
+					GenesisValidators: []GenesisValidator{{
+						PrivKeySecret:         "genesis-sentry-key",
+						AccountMnemonicSecret: "mn",
+						Moniker:               "preserved",
+						Assets:                []string{"1stake"},
+						StakeAmount:           "1stake",
+					}},
+				}},
+				Nodes: []NodeGroupSpec{{
+					Name:        "sentries",
+					Instances:   ptr.To(3),
+					Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(sentryKey)}}},
+				}},
+			},
+			Status: ChainNodeSetStatus{ChainID: "test-1"},
+		}
+	}
+
+	// Established with the sentry signer using the genesis-registered key.
+	old := base("genesis-sentry-key")
+	oldSigner := old.ResolveCosmosigners()[0]
+	old.Status.Cosmosigners = []CosmosignerStatus{{
+		Name: oldSigner.Name, AppliedDigest: oldSigner.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		AtEstablishment: ptr.To(oldSigner.Identity()),
+	}}
+
+	// The immutable genesis key must retain a managed signing path.
+	rotated := base("some-other-key")
+	_, err := rotated.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "genesis")
+
+	// Unchanged: accepted.
+	_, err = base("genesis-sentry-key").Validate(old)
+	require.NoError(t, err)
+
+	// Removing the signer would orphan the immutable genesis key.
+	removed := base("genesis-sentry-key")
+	removed.Spec.Nodes[0].Cosmosigner = nil
+	_, err = removed.Validate(old)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "genesis")
+
+	// Moving the same key to another manifest placement preserves its signing path.
+	moved := base("genesis-sentry-key")
+	moved.Spec.Cosmosigner = moved.Spec.Nodes[0].Cosmosigner
+	moved.Spec.Cosmosigner.NodeGroups = []string{"sentries"}
+	moved.Spec.Nodes[0].Cosmosigner = nil
+	_, err = moved.Validate(old)
+	require.NoError(t, err)
+
+	// A sentry signer whose key is NOT a genesis key stays rotatable.
+	oldFree := base("free-key")
+	oldFree.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key")
+	oldFreeSigner := oldFree.ResolveCosmosigners()[0]
+	oldFree.Status.Cosmosigners = []CosmosignerStatus{{
+		Name: oldFreeSigner.Name, AppliedDigest: oldFreeSigner.Digest(), PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}}
+	freeRotated := base("free-key-2")
+	freeRotated.Spec.Nodes[0].Cosmosigner.Backend.Software.PrivateKeySecret = ptr.To("free-key-2")
+	_, err = freeRotated.Validate(oldFree)
+	require.NoError(t, err)
+}
+
+// TestGenesisValidatorPrivKeySecretsExcludesZeroInstance verifies a genesisValidators entry on a
+// zero-instance group (which runs no validators and contributes nothing to genesis) is not collected
+// as an on-chain genesis key, so a sentry key matching it is not treated as immutable.
+func TestGenesisValidatorPrivKeySecretsExcludesZeroInstance(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes: []NodeGroupSpec{
+				{Name: "active", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+					GenesisValidators: []GenesisValidator{{PrivKeySecret: "active-key"}},
+				}}},
+				{Name: "inactive", Instances: ptr.To(0), Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+					GenesisValidators: []GenesisValidator{{PrivKeySecret: "inactive-key"}},
+				}}},
+			},
+		},
+	}
+	secrets := nodeSet.genesisValidatorPrivKeySecrets()
+	_, active := secrets["active-key"]
+	_, inactive := secrets["inactive-key"]
+	assert.True(t, active, "active group's genesis key must be collected")
+	assert.False(t, inactive, "zero-instance group's genesis key must be excluded")
+}
+
+// TestGenesisSentryEstablishmentIdentity verifies the marker helper returns an identity only for a
+// SOFTWARE sentry whose key is registered in init.genesisValidators (the case the controller can prove
+// from spec), and "" for validator-targeted signers, non-genesis sentries, and non-software sentries.
+// This is what SetEstablishedChainID records and what initCosmosignerLocks backfills for a genesis-sentry
+// signer whose status entry is first created after establishment.
+func TestGenesisSentryEstablishmentIdentity(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Validator: &NodeSetValidatorConfig{Init: &GenesisInitConfig{
+				GenesisValidators: []GenesisValidator{{PrivKeySecret: "genesis-key"}},
+			}},
+			Nodes: []NodeGroupSpec{
+				{Name: "gsentry", Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("genesis-key")}}}},
+				{Name: "fsentry", Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("free-key")}}}},
+			},
+		},
+	}
+
+	byGroup := map[string]ResolvedSigner{}
+	for _, s := range nodeSet.ResolveCosmosigners() {
+		if len(s.TargetGroups) == 1 {
+			byGroup[s.TargetGroups[0]] = s
+		}
+	}
+
+	// Genesis-registered software sentry: records its key identity.
+	gs := byGroup["gsentry"]
+	if got := nodeSet.GenesisSentryEstablishmentIdentity(gs); got == "" || got != gs.Identity() {
+		t.Fatalf("genesis sentry must record its identity, got %q", got)
+	}
+	// Non-genesis software sentry: records nothing.
+	if got := nodeSet.GenesisSentryEstablishmentIdentity(byGroup["fsentry"]); got != "" {
+		t.Fatalf("non-genesis sentry must record nothing, got %q", got)
+	}
+	// A validator-targeted signer: records nothing here (ValidatorTargetedIdentity handles it; nil marker
+	// is how the no-webhook ADD guard detects post-establishment validator additions).
+	validatorSigner := ResolvedSigner{ValidatorGroup: "validators", SoftwareKeySecret: "genesis-key", Spec: &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}}}}
+	if got := nodeSet.GenesisSentryEstablishmentIdentity(validatorSigner); got != "" {
+		t.Fatalf("validator-targeted signer must record nothing via the sentry helper, got %q", got)
+	}
+}

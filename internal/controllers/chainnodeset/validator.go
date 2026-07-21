@@ -21,10 +21,28 @@ import (
 )
 
 func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	return r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, nil)
+}
+
+func (r *Reconciler) ensureValidatorWithBlockedSignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
 	logger := log.FromContext(ctx)
 
 	desiredValidators := map[string]struct{}{}
 	nodeSetCopy := nodeSet.DeepCopy()
+	previousValidatorStatuses := make(map[string]appsv1.ChainNodeSetValidatorStatus, len(nodeSetCopy.Status.Validators))
+	genesisBaselineRecorded := nodeSetCopy.Status.GenesisInitGenerated != nil
+	if ptr.Deref(nodeSetCopy.Status.GenesisInitGenerated, false) && len(nodeSetCopy.Status.Validators) == 0 {
+		genesisBaselineRecorded = false
+	}
+	for _, status := range nodeSetCopy.Status.Validators {
+		previousValidatorStatuses[status.Name] = status
+		if status.Init || status.SigningKeyDigest != "" {
+			genesisBaselineRecorded = true
+		}
+	}
+	// Managed signer migrations may refresh only the signing-material portion of an init validator's
+	// baseline; GenesisSigningDigestAllowsRefresh still requires the non-signing config to match.
+	allowGenesisDigestRefresh := true
 	nodeSet.Status.Validators = nil
 	nodeSet.Status.ValidatorAddress = ""
 	nodeSet.Status.ValidatorStatus = ""
@@ -38,15 +56,17 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 	if nodeSet.Spec.Validator != nil {
 		name := fmt.Sprintf("%s-validator", nodeSet.GetName())
 		desiredValidators[name] = struct{}{}
-		validator, err := r.getValidatorSpec(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator)
+
+		validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, validatorGroupName, 0, nodeSet.Spec.Validator, blocked, true)
 		if err != nil {
 			return fmt.Errorf("failed to get validator spec for %s: %w", nodeSet.GetName(), err)
 		}
 
-		if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, nodeSet.Spec.Validator, 1)); err != nil {
+		if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, nodeSet.Spec.Validator, 1, validatorGroupName)); err != nil {
 			return fmt.Errorf("failed to ensure validator node for %s: %w", nodeSet.GetName(), err)
 		}
-		updateValidatorStatus(nodeSet, validator, nodeSet.Spec.Validator, validatorGroupName, nodeSet.Spec.Validator.Init != nil, !legacyAliasSet)
+		updateValidatorStatus(nodeSet, validator, nodeSet.Spec.Validator, validatorGroupName, nodeSet.Spec.Validator.Init != nil, !legacyAliasSet,
+			previousValidatorStatuses, genesisBaselineRecorded, allowGenesisDigestRefresh)
 		legacyAliasSet = true
 	}
 
@@ -56,12 +76,29 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		}
 		instances := group.GetInstances()
 
+		// A multi-instance group targeted by a managed signer must not add its secondary instances to
+		// the signer's discovery Service until instance 0 has completed its local→remote handover (its
+		// local-key pod is gone). Otherwise the signer, once ready, could sign through a secondary while
+		// instance 0 still signs locally — two signers, one consensus key.
+		secondariesDiscoverable := true
+		if instances > 1 {
+			if signerName, targeted := signerNameForNode(nodeSet, group.Name); targeted {
+				discoverable, err := r.cosmosignerSecondariesDiscoverable(ctx, nodeSet, group.Name, signerName, instances)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate cosmosigner handover for %s group %s: %w", nodeSet.GetName(), group.Name, err)
+				}
+				secondariesDiscoverable = discoverable
+			}
+		}
+
 		// When a group validator initializes genesis with more than one instance, only
 		// instance 0 initializes genesis; the others are part of that same genesis. Their
 		// account and signing-key secrets are pre-created here (deterministically, matching the
 		// default secret names of the generated ChainNodes) so instance 0 can derive their
 		// accounts and consensus keys when building genesis, without depending on the other
-		// ChainNode controllers having created those secrets first.
+		// ChainNode controllers having created those secrets first. User-listed
+		// init.genesisValidators are intentionally not auto-created: those names refer to
+		// operator-provided key material and must fail until the intended secrets exist.
 		//
 		// Only do this before genesis exists (ChainID unset). The consensus keys are baked into the
 		// immutable genesis validator set, so regenerating an accidentally-deleted secret after
@@ -81,7 +118,7 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 			desiredValidators[name] = struct{}{}
 
 			cfg := deriveGroupValidatorConfig(nodeSet, group.Name, i, instances, group.Validator)
-			validator, err := r.getValidatorSpec(nodeSet, group.Name, i, cfg)
+			validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group.Name, i, cfg, blocked, secondariesDiscoverable)
 			if err != nil {
 				return fmt.Errorf("failed to get validator spec for %s group %s index %d: %w", nodeSet.GetName(), group.Name, i, err)
 			}
@@ -113,14 +150,22 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 				validator.Spec.Persistence.Snapshots = nil
 			}
 
-			if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, cfg, instances)); err != nil {
+			if err := r.ensureNode(ctx, nodeSet, validator, validatorWaitMode(nodeSet, cfg, instances, group.Name)); err != nil {
 				return fmt.Errorf("failed to ensure validator node for %s group %s index %d: %w", nodeSet.GetName(), group.Name, i, err)
 			}
 			// Update status immediately, in spec order. For a genesis-initializing multi-validator
 			// group this propagates validator-0's chainID before validator-1's spec is derived,
 			// avoiding a transient "-genesis" ConfigMap reference on first reconcile. Every instance of
-			// an init group is part of the immutable genesis validator set, so mark them all init.
-			updateValidatorStatus(nodeSet, validator, cfg, group.Name, group.Validator.Init != nil, !legacyAliasSet)
+			// an init group is part of the immutable genesis validator set, so mark them all init —
+			// except in a cosmosigner-targeted group, where only instance 0 is a genesis validator (the
+			// other instances are redundant signing endpoints of the same identity) and the derived
+			// per-instance config reflects that (Init cleared for index > 0).
+			isInit := group.Validator.Init != nil
+			if nodeSet.IsCosmosignerTargetGroup(group.Name) {
+				isInit = cfg.Init != nil
+			}
+			updateValidatorStatus(nodeSet, validator, cfg, group.Name, isInit, !legacyAliasSet,
+				previousValidatorStatuses, genesisBaselineRecorded, allowGenesisDigestRefresh)
 			legacyAliasSet = true
 		}
 	}
@@ -156,6 +201,15 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 		}
 		DeleteValidatorStatus(nodeSet, node.Name)
 	}
+	for _, status := range nodeSetCopy.Status.Validators {
+		if !status.Init {
+			continue
+		}
+		if _, desired := desiredValidators[status.Name]; desired {
+			continue
+		}
+		AddOrUpdateValidatorStatus(nodeSet, status)
+	}
 
 	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {
 		logger.Info("updating validator status fields",
@@ -169,9 +223,17 @@ func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainN
 	return nil
 }
 
-func updateValidatorStatus(nodeSet *appsv1.ChainNodeSet, validator *appsv1.ChainNode, cfg *appsv1.NodeSetValidatorConfig, group string, isGenesisInit, setLegacyAlias bool) {
+func updateValidatorStatus(
+	nodeSet *appsv1.ChainNodeSet,
+	validator *appsv1.ChainNode,
+	cfg *appsv1.NodeSetValidatorConfig,
+	group string,
+	isGenesisInit, setLegacyAlias bool,
+	previousStatuses map[string]appsv1.ChainNodeSetValidatorStatus,
+	genesisBaselineRecorded, allowGenesisDigestRefresh bool,
+) {
 	if nodeSet.Status.ChainID == "" {
-		nodeSet.Status.ChainID = validator.Status.ChainID
+		nodeSet.SetEstablishedChainID(validator.Status.ChainID)
 	}
 	nodeStatus := appsv1.ChainNodeSetNodeStatus{
 		Name:    validator.Name,
@@ -198,7 +260,7 @@ func updateValidatorStatus(nodeSet *appsv1.ChainNodeSet, validator *appsv1.Chain
 	if isGenesisInit {
 		signingKeyDigest = cfg.GenesisSigningFingerprint(fmt.Sprintf("%s-priv-key", validator.Name))
 	}
-	AddOrUpdateValidatorStatus(nodeSet, appsv1.ChainNodeSetValidatorStatus{
+	status := appsv1.ChainNodeSetValidatorStatus{
 		Name:             validator.Name,
 		Group:            group,
 		Address:          validator.Status.ValidatorAddress,
@@ -206,7 +268,29 @@ func updateValidatorStatus(nodeSet *appsv1.ChainNodeSet, validator *appsv1.Chain
 		PubKey:           validator.Status.PubKey,
 		Init:             isGenesisInit,
 		SigningKeyDigest: signingKeyDigest,
-	})
+	}
+	if previous, ok := previousStatuses[validator.Name]; ok && genesisBaselineRecorded {
+		status.Init = previous.Init
+		if previous.Group != "" {
+			status.Group = previous.Group
+		}
+		if previous.Init {
+			switch {
+			case previous.SigningKeyDigest == "":
+			case previous.SigningKeyDigest == signingKeyDigest:
+			case allowGenesisDigestRefresh && isGenesisInit &&
+				nodeSet.GenesisSigningDigestAllowsRefresh(group, cfg, previous.SigningKeyDigest):
+			default:
+				status.SigningKeyDigest = previous.SigningKeyDigest
+			}
+		} else {
+			status.SigningKeyDigest = ""
+		}
+	} else if genesisBaselineRecorded {
+		status.Init = false
+		status.SigningKeyDigest = ""
+	}
+	AddOrUpdateValidatorStatus(nodeSet, status)
 
 	// Preserve legacy singleton status fields as an alias for the first validator in spec
 	// order. Pinning to the first validator (even before it reports status) keeps the alias
@@ -228,6 +312,57 @@ func validatorNodeName(nodeSet *appsv1.ChainNodeSet, group string, index int) st
 }
 
 func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig) (*appsv1.ChainNode, error) {
+	return r.getValidatorSpecWithBlockedSignerTargets(nodeSet, group, index, cfg, nil, true)
+}
+
+// cosmosignerSecondariesDiscoverable reports whether the secondary instances (index > 0) of a
+// signer-targeted multi-instance validator group may carry the signer's discovery-service label. It
+// is true once instance 0 has completed its local→remote handover, so the signer can safely dial the
+// secondaries without any local key being live for the same identity. It also latches: a secondary
+// that already joined the discovery Service stays eligible, so a later instance-0 pod restart does
+// not transiently eject the whole group from the signer.
+func (r *Reconciler) cosmosignerSecondariesDiscoverable(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group, signerName string, instances int) (bool, error) {
+	handedOver, err := r.validatorZeroHandedOver(ctx, nodeSet, group, signerName)
+	if err != nil {
+		return false, err
+	}
+	if handedOver {
+		return true, nil
+	}
+	for i := 1; i < instances; i++ {
+		node := &appsv1.ChainNode{}
+		key := types.NamespacedName{Namespace: nodeSet.GetNamespace(), Name: validatorNodeName(nodeSet, group, i)}
+		if err := r.Get(ctx, key, node); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return false, err
+		}
+		if node.Labels[controllers.LabelCosmosignerTarget] == signerName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// validatorZeroHandedOver reports whether instance 0 of a signer-targeted group is signing through
+// the remote signer rather than a local key. Instance 0's local→remote flip changes its pod spec, so
+// the ChainNode controller recreates the pod — deleting the local-key pod and waiting for its removal
+// before creating the labelled remote pod. The discovery-service label on instance 0's live pod is
+// therefore a race-free proof that no local key is live for this validator's identity.
+func (r *Reconciler) validatorZeroHandedOver(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group, signerName string) (bool, error) {
+	pod := &corev1.Pod{}
+	key := types.NamespacedName{Namespace: nodeSet.GetNamespace(), Name: validatorNodeName(nodeSet, group, 0)}
+	if err := r.Get(ctx, key, pod); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return pod.Labels[controllers.LabelCosmosignerTarget] == signerName, nil
+}
+
+func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig, blocked blockedSignerTargets, secondariesDiscoverable bool) (*appsv1.ChainNode, error) {
 	var genesisConfig *appsv1.GenesisConfig
 	switch {
 	case cfg.Init != nil:
@@ -247,6 +382,40 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string
 		controllers.LabelChainNodeSetGroup:     group,
 		controllers.LabelChainNodeSetValidator: strconv.FormatBool(true),
 	})
+
+	// A validator targeted by a managed cosmosigner signs through it and mounts no local key.
+	//
+	// Instance 0 (and the whole group in steady state) is driven by the blocked-aware resolution: while
+	// the signer waits for instance-0 bootstrap material (blocked) instance 0 keeps its local key and no
+	// signer label; otherwise it flips to a remote target. Its local→remote flip changes the pod spec,
+	// so the ChainNode controller RECREATES the pod — the discovery label lands only on the recreated
+	// remote pod, after the local-key pod is deleted, so there is no window.
+	//
+	// A secondary instance (index > 0) is ALWAYS a remote target when a signer targets the group — even
+	// while the signer is blocked — so it never mounts the shared consensus key. But adding its
+	// discovery label is an in-place pod patch that takes effect at once, so it joins the signer's dial
+	// set only once instance 0 has completed its handover (secondariesDiscoverable). Otherwise the
+	// signer, once ready, could sign through a secondary while instance 0 still signs locally — two
+	// signers on one consensus key would risk equivocation.
+	signerName, signerTargeted := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked)
+	remoteSignerTarget := signerTargeted
+	discoveryLabeled := signerTargeted
+	if index > 0 {
+		if name, targeted := signerNameForNode(nodeSet, group); targeted {
+			signerName = name
+			remoteSignerTarget = true
+			discoveryLabeled = secondariesDiscoverable
+		}
+	}
+
+	if discoveryLabeled {
+		// A targeted ChainNodeSet child must not inherit a user-set chain-node label: a same-named
+		// standalone signer's discovery Service selects chain-node + cosmosigner-target, and the
+		// target label below may equal that standalone signer's name. Preserve the user label on
+		// non-target resources, but drop it from target children before adding the signer selector.
+		delete(labels, controllers.LabelChainNode)
+		labels[controllers.LabelCosmosignerTarget] = signerName
+	}
 
 	// Carry the same global ingress/gateway membership labels regular group nodes get, so global
 	// Services that target this group via .groups select the validator ChainNodes as endpoints.
@@ -291,45 +460,76 @@ func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string
 			OverrideVersion:    cfg.OverrideVersion,
 		},
 	}
+
+	// A validator targeted by a managed cosmosigner deployment signs through the external signer:
+	// it listens for it and mounts no local key. Secondary instances stay remote targets even before
+	// they join the discovery Service, so they never mount the shared consensus key.
+	if remoteSignerTarget {
+		validator.Spec.RemoteSignerTarget = true
+	}
+
 	return validator, controllerutil.SetControllerReference(nodeSet, validator, r.Scheme)
 }
 
 // deriveGroupValidatorConfig returns the per-instance validator config to use for a
 // validator group. For a group that initializes genesis (Init != nil) with more than
 // one instance:
-//   - instance 0 keeps Init and gets the other instances recorded in Init.GenesisValidators
-//     so they are added to the generated genesis as actual genesis validators (account +
-//     gentx), not merely funded accounts.
+//   - instance 0 keeps Init and — unless a cosmosigner targets the group — gets the other
+//     instances recorded in Init.GenesisValidators so they are added to the generated genesis
+//     as actual genesis validators (account + gentx), not merely funded accounts.
 //   - instances > 0 get a copy with Init cleared so they consume the generated genesis
 //     instead of initializing their own.
+//
+// A cosmosigner-targeted group holds ONE consensus identity (the signer's): its instances are
+// redundant signing endpoints of the same validator, never N validators. So no sibling genesis
+// validators are recorded, and CreateValidator is cleared for index > 0 (only instance 0 runs the
+// registration flow — N flows would race to register the same pubkey).
 //
 // The user-provided config is never mutated in place: a DeepCopy is returned whenever a
 // change is needed, otherwise the original config is returned unchanged.
 func deriveGroupValidatorConfig(nodeSet *appsv1.ChainNodeSet, group string, index, instances int, cfg *appsv1.NodeSetValidatorConfig) *appsv1.NodeSetValidatorConfig {
-	// Nothing special to do for single-instance groups or groups that do not initialize
-	// genesis: every instance can use the config as-is.
-	if cfg.Init == nil || instances <= 1 {
+	// Nothing special to do for single-instance groups: the only instance uses the config as-is.
+	if instances <= 1 {
+		return cfg
+	}
+	signerTargeted := nodeSet.IsCosmosignerTargetGroup(group)
+	// Groups that neither initialize genesis nor need the one-identity CreateValidator derivation
+	// can use the config as-is on every instance.
+	if cfg.Init == nil && !(signerTargeted && cfg.CreateValidator != nil) {
 		return cfg
 	}
 
 	if index > 0 {
 		derived := cfg.DeepCopy()
-		// The init validator derives every group validator's genesis account using this group's
-		// resolved account settings (which may be configured under .init). Pin those resolved
-		// values onto the derived config before clearing .init, so the generated ChainNode derives
-		// the exact same account/valoper addresses and its identity matches the entry recorded in
-		// genesis.
-		if derived.AccountPrefix == nil {
-			derived.AccountPrefix = ptr.To(cfg.GetAccountPrefix())
+		if cfg.Init != nil {
+			// The init validator derives every group validator's genesis account using this group's
+			// resolved account settings (which may be configured under .init). Pin those resolved
+			// values onto the derived config before clearing .init, so the generated ChainNode derives
+			// the exact same account/valoper addresses and its identity matches the entry recorded in
+			// genesis.
+			if derived.AccountPrefix == nil {
+				derived.AccountPrefix = ptr.To(cfg.GetAccountPrefix())
+			}
+			if derived.ValPrefix == nil {
+				derived.ValPrefix = ptr.To(cfg.GetValPrefix())
+			}
+			if derived.AccountHDPath == nil {
+				derived.AccountHDPath = ptr.To(cfg.GetAccountHDPath())
+			}
+			derived.Init = nil
 		}
-		if derived.ValPrefix == nil {
-			derived.ValPrefix = ptr.To(cfg.GetValPrefix())
+		if signerTargeted {
+			// One identity: only instance 0 registers the validator; the other instances are
+			// redundant signing endpoints.
+			derived.CreateValidator = nil
 		}
-		if derived.AccountHDPath == nil {
-			derived.AccountHDPath = ptr.To(cfg.GetAccountHDPath())
-		}
-		derived.Init = nil
 		return derived
+	}
+
+	// Instance 0 of a cosmosigner-targeted group is the group's single validator: no sibling
+	// genesis validators to record.
+	if signerTargeted || cfg.Init == nil {
+		return cfg
 	}
 
 	// Instance 0: record the other validators in the group as genesis validators so
@@ -345,9 +545,10 @@ func deriveGroupValidatorConfig(nodeSet *appsv1.ChainNodeSet, group string, inde
 // (index 1..instances-1) of a genesis-initializing validator group. Each entry references
 // the deterministic account-mnemonic and priv-key secret names of the corresponding
 // generated ChainNode, and carries the group's default moniker, assets and stake amount.
-// It returns nil for groups that do not initialize genesis or have a single instance.
+// It returns nil for groups that do not initialize genesis, have a single instance, or are
+// targeted by a cosmosigner (one identity — the extra instances are not genesis validators).
 func groupGenesisValidators(nodeSet *appsv1.ChainNodeSet, group string, instances int, cfg *appsv1.NodeSetValidatorConfig) []appsv1.GenesisValidator {
-	if cfg.Init == nil || instances <= 1 {
+	if cfg.Init == nil || instances <= 1 || nodeSet.IsCosmosignerTargetGroup(group) {
 		return nil
 	}
 	validators := make([]appsv1.GenesisValidator, 0, instances-1)
@@ -482,11 +683,15 @@ func missingSecretKeys(data map[string][]byte, keys []string) []string {
 // returns; blocking on "running" would therefore deadlock. In that case we block only until the
 // genesis is ready (the chainID is populated and its ConfigMap exists), which is enough to derive
 // and create the remaining validators. All other validators reconcile without blocking.
-func validatorWaitMode(nodeSet *appsv1.ChainNodeSet, cfg *appsv1.NodeSetValidatorConfig, instances int) chainNodeWait {
+func validatorWaitMode(nodeSet *appsv1.ChainNodeSet, cfg *appsv1.NodeSetValidatorConfig, instances int, group string) chainNodeWait {
 	if cfg.Init == nil || nodeSet.Status.ChainID != "" {
 		return waitNone
 	}
-	if instances > 1 {
+	// A cosmosigner-targeted init validator starts as a remote-signer target with no local key: it
+	// blocks at startup waiting for the signer to dial in. The signer is deployed only after this
+	// wait returns, so blocking on "running" would deadlock. Wait only until genesis is ready (the
+	// chainID is populated), which is enough for the signer to be configured and dial in.
+	if instances > 1 || nodeSet.IsCosmosignerTargetGroup(group) {
 		return waitGenesisReady
 	}
 	return waitRunningOrSyncing

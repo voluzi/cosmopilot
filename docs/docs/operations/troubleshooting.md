@@ -94,12 +94,13 @@ but this requires a storage class with `allowVolumeExpansion: true`. If volumes 
 grow, verify the storage class supports expansion. See
 [Persistence & Backup](../usage/persistence-and-backup).
 
-## TMKMS / Vault issues
+## TMKMS / Vault issues (deprecated)
 
 - Ensure the Vault token has permission for the operations you enabled (including key
   upload when `uploadGenerated` is set).
-- For non-root tokens, enable `autoRenewToken` so the `vault-token-renewer` sidecar
-  keeps the token alive. See [TMKMS](../usage/tmkms).
+- For legacy TMKMS deployments using renewable or periodic tokens, `autoRenewToken` enables the
+  deprecated `vault-token-renewer` sidecar. Migrate to [Cosmosigner](../usage/cosmosigner), which
+  renews Vault tokens internally. See [TMKMS](../usage/tmkms).
 
 ## Leader election / multiple managers
 

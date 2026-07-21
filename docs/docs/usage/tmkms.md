@@ -1,5 +1,13 @@
 # Using TmKMS
 
+:::danger[Deprecated]
+TmKMS support is deprecated and will be removed in a future version of Cosmopilot. Existing
+configurations remain supported during the deprecation period, but new deployments should use
+[`Cosmosigner`](./cosmosigner.md), and existing validators should plan a migration. The
+`vault-token-renewer` sidecar and `autoRenewToken` option are also deprecated and remain available
+only for legacy TmKMS configurations.
+:::
+
 `TmKMS` (Tendermint Key Management System) allows you to secure your consensus private key by keeping it off-chain and using an external signing mechanism. `Cosmopilot` integrates with `TmKMS` to ensure your validator’s private key is securely managed.
 
 Currently, `Cosmopilot` supports the **HashiCorp Vault** provider for secure key storage and signing.
@@ -129,11 +137,13 @@ validator:
         tokenSecret:
           name: vault
           key: token
-        autoRenewToken: true # Optional. Defaults to false. Use for tokens with expirity (non-root tokens)
+        autoRenewToken: true # Deprecated. Legacy TmKMS only. Defaults to false.
 ```
 
-:::tip[NOTE]
-Unless you are using root token, you should enable `autoRenewToken` to have it renewed by `Cosmopilot` using a sidecar container.
+:::warning[Legacy token renewal]
+Legacy TmKMS deployments using renewable or periodic Vault tokens can set `autoRenewToken` to have
+the deprecated `vault-token-renewer` sidecar keep the token alive. New deployments should use
+[Cosmosigner](./cosmosigner.md), which renews Vault tokens internally without this sidecar.
 :::
 
 ## CA Certificate
@@ -156,14 +166,20 @@ validator:
         skipCertificateVerify: false # Optional. Defaults to false.
 ```
 
+:::tip[Consider Cosmosigner]
+For new deployments, consider [Cosmosigner](./cosmosigner.md) — a next-generation remote signer with
+raft-based high availability, double-sign protection, and support for signing across a whole group of
+nodes. It runs as a separate deployment rather than a validator sidecar.
+:::
+
 ## Persist State
 
-By default, `Cosmpilot` does not persist `TmKMS` state. If you need to enable it, use:
+By default, `Cosmopilot` persists `TmKMS` state. To disable it, use:
 
 ```yaml {3}
 validator:
   tmKMS:
-    persistState: true # Default is false.
+    persistState: false # Default is true.
 ```
 
 `Cosmopilot` will create an additional `1Gi` `PVC` to store `priv_validator_state.json`.

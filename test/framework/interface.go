@@ -77,6 +77,9 @@ type Config struct {
 	// ControllerImage is the controller image (for e2e only)
 	ControllerImage string
 
+	// CosmosignerImage is the managed signer image (for e2e only)
+	CosmosignerImage string
+
 	// ChartVersion is the helm chart version to deploy (for e2e release mode)
 	// If set, deploys from OCI registry instead of local chart
 	ChartVersion string
@@ -151,6 +154,13 @@ func WithNodeUtilsImage(image string) Option {
 func WithControllerImage(image string) Option {
 	return func(c *Config) {
 		c.ControllerImage = image
+	}
+}
+
+// WithCosmosignerImage sets the managed signer image (for e2e).
+func WithCosmosignerImage(image string) Option {
+	return func(c *Config) {
+		c.CosmosignerImage = image
 	}
 }
 

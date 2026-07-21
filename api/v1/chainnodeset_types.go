@@ -80,6 +80,12 @@ type ChainNodeSetSpec struct {
 	// Allows deploying seed nodes using Cosmoseed.
 	// +optional
 	Cosmoseed *CosmoseedConfig `json:"cosmoseed,omitempty"`
+
+	// Cosmosigner deploys a managed cosmosigner remote signer that signs for one or more node
+	// groups (or the validator group by default). Targeted nodes listen for the signer instead of
+	// mounting a local key or running TmKMS.
+	// +optional
+	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
 }
 
 // ChainNodeSetStatus defines the observed state of ChainNodeSet.
@@ -142,6 +148,26 @@ type ChainNodeSetStatus struct {
 
 	// Status of seed nodes (cosmoseed)
 	Seeds []SeedStatus `json:"seeds,omitempty"`
+
+	// Cosmosigners records controller-managed state for each managed cosmosigner deployment (the
+	// top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner). Keyed by the
+	// signer's resource name. Not meant to be set by hand.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Cosmosigners []CosmosignerStatus `json:"cosmosigners,omitempty"`
+
+	// LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now
+	// reserved for standalone ChainNode signer Services. The controller initializes this once from
+	// Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy
+	// names without trusting the current, possibly edited spec.
+	// +optional
+	LegacySignerServiceNames []string `json:"legacySignerServiceNames,omitempty"`
+
+	// LegacySignerServiceNamesInitialized distinguishes a recorded empty legacy-name set from an old
+	// ChainNodeSet whose status predates LegacySignerServiceNames.
+	// +optional
+	LegacySignerServiceNamesInitialized bool `json:"legacySignerServiceNamesInitialized,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.
@@ -251,6 +277,8 @@ type NodeSetValidatorConfig struct {
 
 	// TmKMS configuration for signing commits for this validator.
 	// When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.
+	//
+	// Deprecated: use the corresponding Cosmosigner field instead. TmKMS will be removed in a future version.
 	// +optional
 	TmKMS *TmKMS `json:"tmKMS,omitempty"`
 
@@ -305,6 +333,7 @@ type NodeSetValidatorConfig struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.individualIngresses) && has(self.individualGatewayRoutes))",message="individualIngresses and individualGatewayRoutes are mutually exclusive"
 type NodeGroupSpec struct {
 	// Name of this group.
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Number of ChainNode instances to run on this group.
@@ -321,6 +350,15 @@ type NodeGroupSpec struct {
 	// with its own consensus key and account secrets.
 	// +optional
 	Validator *NodeSetValidatorConfig `json:"validator,omitempty"`
+
+	// Cosmosigner deploys a managed cosmosigner remote signer for this group. When the group is a
+	// validator group, the signer signs for that group's single consensus identity — a multi-instance
+	// group is ONE validator whose instances are redundant signing endpoints, not N validators
+	// (multiple validators require multiple groups, each with its own signer). When the group has no
+	// validator, its nodes are the signing endpoints of a single out-of-band-registered identity
+	// (sentry mode). Its `nodeGroups` field must be empty — the enclosing group is the target.
+	// +optional
+	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
 
 	// Configures PVC for persisting data. Automated data snapshots can also be configured in
 	// this section.

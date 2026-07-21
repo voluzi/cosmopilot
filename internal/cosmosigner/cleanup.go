@@ -1,0 +1,295 @@
+package cosmosigner
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+)
+
+// IsOwnedSignerStatefulSet reports whether sts is a cosmosigner deployment controlled by owner,
+// identified by the immutable signer labels on its pod template (object labels are user-influenced
+// and cannot be trusted for this).
+func IsOwnedSignerStatefulSet(sts *appsv1.StatefulSet, owner metav1.Object) bool {
+	return metav1.IsControlledBy(sts, owner) &&
+		sts.Spec.Template.Labels[labelAppName] == appNameCosmosigner &&
+		sts.Spec.Template.Labels[labelInstance] == sts.GetName()
+}
+
+// DeletePVCs deletes the per-pod raft-state PVCs of a signer instance owned by owner. StatefulSet
+// PVCs are not garbage-collected with the StatefulSet, so they are cleaned up explicitly on teardown;
+// the retained-state finalizer is released only in this controlled path.
+// A claim is only deleted when its name matches the exact StatefulSet per-pod claim pattern
+// `<dataVolumeName>-<name>-<ordinal>` and its owner-UID label matches owner, so edited selector labels
+// cannot hide a name-bound claim and a same-name signer's claim owned by another CR is never deleted.
+func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) error {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for i := range pvcs.Items {
+		if !isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
+			continue
+		}
+		pvc := &pvcs.Items[i]
+		if controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
+			controllerutil.RemoveFinalizer(pvc, RetainedStateFinalizer)
+			if err := c.Update(ctx, pvc); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				return err
+			}
+		}
+		if !pvc.GetDeletionTimestamp().IsZero() {
+			continue
+		}
+		if err := c.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// ProtectRetainedStatePVCs ensures verified live claims carry the deletion guard that an immutable
+// volumeClaimTemplate cannot add in place. Owned StatefulSets whose template cannot protect new
+// claims are retired through the normal retain-and-quiesce path before reconciliation resumes.
+// Unknown or unsafe claims remain untouched for strict preflight to reject.
+func ProtectRetainedStatePVCs(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	changed := false
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		name := pvc.GetLabels()[labelInstance]
+		if pvc.GetLabels()[labelAppName] != appNameCosmosigner ||
+			pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
+			!isStatefulSetDataPVC(pvc.GetName(), name) ||
+			!pvc.GetDeletionTimestamp().IsZero() ||
+			pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" ||
+			controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
+			continue
+		}
+		controllerutil.AddFinalizer(pvc, RetainedStateFinalizer)
+		if err := c.Update(ctx, pvc); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+	statefulSets := &appsv1.StatefulSetList{}
+	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
+		return changed, err
+	}
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if !IsOwnedSignerStatefulSet(sts, owner) || statefulSetPVCTemplateRetainsState(sts) {
+			continue
+		}
+		_, err := DeleteStatefulSet(ctx, c, owner, namespace, sts.GetName())
+		return true, err
+	}
+	return changed, nil
+}
+
+// HasOwnedSignerState reports whether the root still has a managed signer StatefulSet or an
+// attributable raft-state claim, including status-loss and spec-removal recovery cases.
+func HasOwnedSignerState(ctx context.Context, c client.Client, owner metav1.Object, namespace string) (bool, error) {
+	statefulSets := &appsv1.StatefulSetList{}
+	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range statefulSets.Items {
+		if IsOwnedSignerStatefulSet(&statefulSets.Items[i], owner) {
+			return true, nil
+		}
+	}
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if pvc.GetLabels()[labelAppName] == appNameCosmosigner &&
+			pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID()) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// FinalizeOwner advances root-CR deletion in fail-safe order: quiesce signer pods, remove their
+// StatefulSets, then release and delete retained claims. It reports complete only after no owned
+// claim remains, including claims held by an unrelated external finalizer.
+func FinalizeOwner(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+	statefulSets := &appsv1.StatefulSetList{}
+	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if !IsOwnedSignerStatefulSet(sts, owner) {
+			continue
+		}
+		if !sts.GetDeletionTimestamp().IsZero() {
+			return false, nil
+		}
+		quiesced, err := ScaleDown(ctx, c, owner, namespace, sts.GetName())
+		if err != nil || !quiesced {
+			return false, err
+		}
+		if err := c.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
+			return false, err
+		}
+		return false, nil
+	}
+
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		name := pvc.GetLabels()[labelInstance]
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
+			!isStatefulSetDataPVC(pvc.GetName(), name) {
+			continue
+		}
+		gone, err := SignerPodsGone(ctx, c, namespace, name)
+		if err != nil || !gone {
+			return false, err
+		}
+		if controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
+			controllerutil.RemoveFinalizer(pvc, RetainedStateFinalizer)
+			if err := c.Update(ctx, pvc); err != nil {
+				if errors.IsNotFound(err) {
+					return false, nil
+				}
+				return false, err
+			}
+			return false, nil
+		}
+		if pvc.GetDeletionTimestamp().IsZero() {
+			if err := c.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// OwnedPVCsGone reports whether all raft-state claims attributable to owner are absent. Claims
+// still terminating under a finalizer remain present and keep a different-key migration blocked.
+func OwnedPVCsGone(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) (bool, error) {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range pvcs.Items {
+		if isOwnedStatefulSetDataPVC(&pvcs.Items[i], owner, name) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// isOwnedStatefulSetDataPVC reports whether pvc is a per-pod raft-state claim of the signer named
+// `name` attributable to owner: its name matches the StatefulSet per-pod pattern and its owner-UID
+// label equals owner's UID. Matching is STRICT — a claim without a matching label is never deleted,
+// regardless of any point-in-time StatefulSet ownership read (all such reads are racy: the
+// StatefulSet can be replaced between the check and the delete). Ambiguous unlabeled claims instead
+// BLOCK teardown completion (see isAmbiguousLegacyDataPVC), so no signer ever binds them silently.
+func isOwnedStatefulSetDataPVC(pvc *corev1.PersistentVolumeClaim, owner metav1.Object, name string) bool {
+	if !isStatefulSetDataPVC(pvc.GetName(), name) {
+		return false
+	}
+	return pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID())
+}
+
+// isAmbiguousLegacyDataPVC reports whether pvc is a per-pod raft-state claim of the signer named
+// `name` that carries NO owner-UID label. Such claims predate the owner label (an existing
+// StatefulSet keeps its original volumeClaimTemplates, since Kubernetes forbids updating them) and
+// cannot be attributed to any owner without a race, so they are never deleted NOR treated as gone:
+// they block IsTornDown until the operator resolves them (delete the claim, or label it with the
+// owning CR's UID). This keeps a recreated signer from silently binding stale raft state whose
+// membership is unknown. In practice such claims only exist on pre-release deployments of this
+// feature, so the block is a safety net rather than an operational path.
+func isAmbiguousLegacyDataPVC(pvc *corev1.PersistentVolumeClaim, name string) bool {
+	if !isStatefulSetDataPVC(pvc.GetName(), name) {
+		return false
+	}
+	_, labeled := pvc.GetLabels()[labelOwnerUID]
+	return !labeled
+}
+
+// ensureNoForeignDataPVCs fails when any per-pod raft-state claim of the signer named `name` exists
+// that is NOT attributable to owner — a FOREIGN claim (different owner-UID label, e.g. left behind by
+// a deleted CR recreated under the same name with a new UID) or an ambiguous claim without the label.
+// Called before creating or updating a StatefulSet, which would otherwise silently bind those claims
+// and inherit raft membership/double-sign-protection state from a different owner.
+//
+// The list is deliberately NOT label-scoped: the StatefulSet controller binds claims purely by NAME
+// (`<dataVolumeName>-<sts>-<ordinal>`), so a claim whose labels were stripped or edited would evade a
+// label selector yet still be re-bound. Every name-matching claim in the namespace is checked.
+func ensureNoForeignDataPVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string) error {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if !isStatefulSetDataPVC(pvc.GetName(), name) {
+			continue
+		}
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) {
+			return fmt.Errorf("%w: refusing to deploy cosmosigner %q: raft-state PVC %q belongs to a different owner (a previous same-name signer) and would be silently re-bound with its stale raft state — delete the claim, or label it with this owner's UID to adopt it", errUnsafeRetainedState, name, pvc.GetName())
+		}
+	}
+	return nil
+}
+
+// isStatefulSetDataPVC reports whether pvcName is exactly `<dataVolumeName>-<stsName>-<ordinal>`,
+// the name the StatefulSet controller gives the signer's per-pod state claims.
+func isStatefulSetDataPVC(pvcName, stsName string) bool {
+	_, ok := statefulSetDataPVCOrdinal(pvcName, stsName)
+	return ok
+}
+
+// statefulSetDataPVCOrdinal parses the pod ordinal from a `<dataVolumeName>-<stsName>-<ordinal>` claim
+// name, returning ok=false for any name that is not exactly that shape. It requires a canonical
+// non-negative ordinal (no sign, no leading zeros) — exactly what the StatefulSet controller produces —
+// so names like "data-<name>--1" or "data-<name>-007" never match.
+func statefulSetDataPVCOrdinal(pvcName, stsName string) (int, bool) {
+	prefix := dataVolumeName + "-" + stsName + "-"
+	if !strings.HasPrefix(pvcName, prefix) {
+		return 0, false
+	}
+	ordinal := strings.TrimPrefix(pvcName, prefix)
+	if ordinal == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(ordinal)
+	if err != nil || n < 0 || strconv.Itoa(n) != ordinal {
+		return 0, false
+	}
+	return n, true
+}
+
+func isStatefulSetReplicaPodName(podName, stsName string) bool {
+	prefix := stsName + "-"
+	if !strings.HasPrefix(podName, prefix) {
+		return false
+	}
+	ordinal := strings.TrimPrefix(podName, prefix)
+	n, err := strconv.Atoi(ordinal)
+	return err == nil && n >= 0 && strconv.Itoa(n) == ordinal
+}

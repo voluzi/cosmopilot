@@ -19,8 +19,9 @@ const (
 	hashicorpProviderName = "hashicorp"
 	hashicorpMountDir     = "/vault/"
 
-	tokenRenewerCpu    = "100m"
-	tokenRenewerMemory = "64Mi"
+	tokenRenewerCpu        = "100m"
+	tokenRenewerMemory     = "64Mi"
+	vaultTokenRenewerImage = "ghcr.io/voluzi/vault-renewer:1.0.0@sha256:55532cbf4c7a7c5038e1b7cf759fa5748216075719afde776226a4025cb8e579"
 )
 
 var (
@@ -145,7 +146,7 @@ func (v HashicorpProvider) getContainers() []corev1.Container {
 	if v.AutoRenewToken {
 		spec := corev1.Container{
 			Name:            "vault-token-renewer",
-			Image:           "ghcr.io/voluzi/vault-token-renewer",
+			Image:           vaultTokenRenewerImage,
 			SecurityContext: k8s.RestrictedSecurityContext(),
 			Env: []corev1.EnvVar{
 				{

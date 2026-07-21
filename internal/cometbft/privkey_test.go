@@ -1,6 +1,7 @@
 package cometbft
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,4 +23,33 @@ func TestGetPubKey(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, test.expected, pubKey)
 	}
+}
+
+func TestLoadPrivKeyRejectsMalformedTypedKey(t *testing.T) {
+	key := []byte(`{
+		"address":"0000000000000000000000000000000000000000",
+		"pub_key":{"type":"tendermint/PubKeyEd25519","value":"eA=="},
+		"priv_key":{"type":"tendermint/PrivKeyEd25519","value":"eA=="}
+	}`)
+
+	_, err := LoadPrivKey(key)
+	assert.Error(t, err)
+}
+
+func TestLoadPrivKeyRejectsInconsistentKey(t *testing.T) {
+	firstJSON, err := GeneratePrivKey()
+	assert.NoError(t, err)
+	first, err := LoadPrivKey(firstJSON)
+	assert.NoError(t, err)
+
+	secondJSON, err := GeneratePrivKey()
+	assert.NoError(t, err)
+	second, err := LoadPrivKey(secondJSON)
+	assert.NoError(t, err)
+
+	first.PrivKey = second.PrivKey
+	inconsistent, err := json.Marshal(first)
+	assert.NoError(t, err)
+	_, err = LoadPrivKey(inconsistent)
+	assert.Error(t, err)
 }

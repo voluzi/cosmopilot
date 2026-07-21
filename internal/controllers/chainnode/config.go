@@ -8,16 +8,19 @@ import (
 
 func GetKeyFormatter(chainNode *appsv1.ChainNode) *KeyFormatter {
 	return &KeyFormatter{
-		IsValidator: chainNode.IsValidator(),
-		UseTmkms:    chainNode.UsesTmKms(),
-		UseDashes:   chainNode.Spec.Config.UseDashedConfigToml(),
+		IsValidator:     chainNode.IsValidator(),
+		UseRemoteSigner: chainNode.UsesRemoteSigner(),
+		UseDashes:       chainNode.Spec.Config.UseDashedConfigToml(),
 	}
 }
 
 type KeyFormatter struct {
 	IsValidator bool
-	UseTmkms    bool
-	UseDashes   bool
+	// UseRemoteSigner is true when block signing happens outside the node process (TmKMS sidecar
+	// or an external cosmosigner deployment). In that case the node must listen for the signer on
+	// its priv_validator_laddr.
+	UseRemoteSigner bool
+	UseDashes       bool
 }
 
 func (kf *KeyFormatter) FormatKey(key string) string {
@@ -45,10 +48,13 @@ func (kf *KeyFormatter) GetBaseConfigToml() map[string]interface{} {
 
 	if kf.IsValidator {
 		cfg[kf.P2P()].(map[string]interface{})[kf.Pex()] = false
+	}
 
-		if kf.UseTmkms {
-			cfg[kf.PrivValidatorLaddr()] = "tcp://0.0.0.0:5555"
-		}
+	// A node signed by an external remote signer (TmKMS or cosmosigner) listens for it on the
+	// priv-validator address. This applies both to validator nodes and to non-validator group
+	// nodes acting as cosmosigner signing endpoints (sentry mode).
+	if kf.UseRemoteSigner {
+		cfg[kf.PrivValidatorLaddr()] = "tcp://0.0.0.0:5555"
 	}
 
 	return cfg

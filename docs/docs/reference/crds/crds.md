@@ -5,50 +5,59 @@ This page provides a detailed reference for the available Custom Resource Defini
 
 * [ChainNode](#chainnode)
 * [ChainNodeSet](#chainnodeset)
+* [ConsensusKeyReservation](#consensuskeyreservation)
 
 ### Sub Resources
 
+* [AccountAssets](#accountassets)
+* [AppSpec](#appspec)
+* [ChainNodeAssets](#chainnodeassets)
 * [ChainNodeList](#chainnodelist)
-* [ChainNodeSpec](#chainnodespec)
-* [ChainNodeStatus](#chainnodestatus)
-* [ValidatorConfig](#validatorconfig)
 * [ChainNodeSetList](#chainnodesetlist)
 * [ChainNodeSetNodeStatus](#chainnodesetnodestatus)
 * [ChainNodeSetSpec](#chainnodesetspec)
 * [ChainNodeSetStatus](#chainnodesetstatus)
 * [ChainNodeSetValidatorStatus](#chainnodesetvalidatorstatus)
+* [ChainNodeSpec](#chainnodespec)
+* [ChainNodeStatus](#chainnodestatus)
+* [Config](#config)
+* [ConsensusKeyReservationList](#consensuskeyreservationlist)
+* [ConsensusKeyReservationSpec](#consensuskeyreservationspec)
+* [CosmoGuardConfig](#cosmoguardconfig)
 * [CosmoseedConfig](#cosmoseedconfig)
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
 * [CosmoseedIngressConfig](#cosmoseedingressconfig)
-* [GatewayConfig](#gatewayconfig)
-* [GatewayRef](#gatewayref)
-* [GlobalGatewayConfig](#globalgatewayconfig)
-* [GlobalIngressConfig](#globalingressconfig)
-* [IndividualIngressConfig](#individualingressconfig)
-* [IngressConfig](#ingressconfig)
-* [NodeGroupSpec](#nodegroupspec)
-* [NodeSetValidatorConfig](#nodesetvalidatorconfig)
-* [PdbConfig](#pdbconfig)
-* [SeedStatus](#seedstatus)
-* [AccountAssets](#accountassets)
-* [AppSpec](#appspec)
-* [ChainNodeAssets](#chainnodeassets)
-* [Config](#config)
-* [CosmoGuardConfig](#cosmoguardconfig)
+* [Cosmosigner](#cosmosigner)
+* [CosmosignerBackend](#cosmosignerbackend)
+* [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
+* [CosmosignerMigrationStatus](#cosmosignermigrationstatus)
+* [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
+* [CosmosignerStatus](#cosmosignerstatus)
+* [CosmosignerVaultBackend](#cosmosignervaultbackend)
 * [CreateValidatorConfig](#createvalidatorconfig)
 * [ExportTarballConfig](#exporttarballconfig)
 * [ExposeConfig](#exposeconfig)
 * [ExposeGatewayConfig](#exposegatewayconfig)
 * [FromNodeRPCConfig](#fromnoderpcconfig)
+* [GatewayConfig](#gatewayconfig)
+* [GatewayRef](#gatewayref)
 * [GcsExportConfig](#gcsexportconfig)
 * [GenesisConfig](#genesisconfig)
 * [GenesisInitConfig](#genesisinitconfig)
 * [GenesisValidator](#genesisvalidator)
+* [GlobalGatewayConfig](#globalgatewayconfig)
+* [GlobalIngressConfig](#globalingressconfig)
+* [IndividualIngressConfig](#individualingressconfig)
+* [IngressConfig](#ingressconfig)
 * [InitCommand](#initcommand)
+* [NodeGroupSpec](#nodegroupspec)
+* [NodeSetValidatorConfig](#nodesetvalidatorconfig)
+* [PdbConfig](#pdbconfig)
 * [Peer](#peer)
 * [Persistence](#persistence)
 * [PvcSnapshot](#pvcsnapshot)
 * [SdkOptions](#sdkoptions)
+* [SeedStatus](#seedstatus)
 * [SidecarSpec](#sidecarspec)
 * [StateSyncConfig](#statesyncconfig)
 * [SubdomainsConfig](#subdomainsconfig)
@@ -58,6 +67,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [TmKmsProvider](#tmkmsprovider)
 * [Upgrade](#upgrade)
 * [UpgradeSpec](#upgradespec)
+* [ValidatorConfig](#validatorconfig)
 * [ValidatorInfo](#validatorinfo)
 * [VerticalAutoscalingConfig](#verticalautoscalingconfig)
 * [VerticalAutoscalingMetricConfig](#verticalautoscalingmetricconfig)
@@ -99,6 +109,8 @@ ChainNodeSpec defines the desired state of ChainNode.
 | config | Allows setting specific configurations for this node. | *[Config](#config) | false |
 | persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. | *[Persistence](#persistence) | false |
 | validator | Indicates this node is going to be a validator and allows configuring it. | *[ValidatorConfig](#validatorconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer for this node. When configured, the node listens for the signer on its priv_validator_laddr and no local key is mounted. | *[Cosmosigner](#cosmosigner) | false |
+| remoteSignerTarget | RemoteSignerTarget marks this node as a signing endpoint for a cosmosigner deployment owned by a parent ChainNodeSet. It is set by the ChainNodeSet controller on nodes of targeted groups and makes the node listen for the remote signer without mounting a local key. It is not meant to be set by hand. | bool | false |
 | autoDiscoverPeers | Ensures peers with same chain ID are connected with each other. Enabled by default. | *bool | false |
 | stateSyncRestore | Configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
 | stateSyncResources | Compute Resources to be used while the node is state-syncing. | corev1.ResourceRequirements | false |
@@ -139,7 +151,19 @@ ChainNodeStatus defines the observed state of ChainNode
 | seedMode | Indicates if this node is running with seed mode enabled. | bool | false |
 | upgrades | All scheduled/completed upgrades performed by cosmopilot on this ChainNode. | [][Upgrade](#upgrade) | false |
 | pubKey | Public key of the validator. | string | false |
+| tmKMSReservationIdentity | TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was verified against PubKey before its consensus-key reservation was created. An unchanged identity can reuse the canonical recorded public key without launching another key-discovery pod. | string | false |
 | validatorStatus | Indicates the current status of validator if this node is one. | ValidatorStatus | false |
+| cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity, captured once a validator signer rolls out. The applied digest and public key below are the lifecycle baseline used for managed migrations. Not meant to be set by hand. | string | false |
+| cosmosignerAppliedDigest | CosmosignerAppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. It is recorded for both validator and sentry signers. | string | false |
+| cosmosignerPublicKey | CosmosignerPublicKey is the canonical base64 consensus public key of the applied signer. | string | false |
+| cosmosignerMigration | CosmosignerMigration records an in-progress break-before-make signer migration. | *[CosmosignerMigrationStatus](#cosmosignermigrationstatus) | false |
+| cosmosignerKeyImported | CosmosignerKeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change without trusting user-editable metadata. Not meant to be set by hand. | string | false |
+| cosmosignerReplicas | CosmosignerReplicas records the raft replica count the managed signer was rolled out with, captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. Not meant to be set by hand. | *int32 | false |
+| cosmosignerValidatorTargeted | CosmosignerValidatorTargeted records whether the managed signer targeted this node as a validator when its deployment locks were initialized. The nullable marker lets the no-webhook path distinguish a pending validator rollout from a sentry after the current spec has already removed both .spec.cosmosigner and .spec.validator. Not meant to be set by hand. | *bool | false |
+| cosmosignerStateStorageSize | CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. Not meant to be set by hand. | string | false |
+| cosmosignerStateStorageClassName | CosmosignerStateStorageClassName records the storage class of the managed signer's raft-state PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default class was selected, while an explicit \"\" means no class was requested. See CosmosignerStateStorageSize. Not meant to be set by hand. | *string | false |
+| cosmosignerAtEstablishment | CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at the moment the chain ID was first recorded. Empty string when no signer targeted a validator at chain establishment — including sentry-mode signers, whose key identity is deliberately excluded. It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand. | *string | false |
+| cosmosignerServingIdentity | CosmosignerServingIdentity records the effective signing identity of the rolled-out validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on teardown. It records that this signer protected the node's validator role across removal and migration recovery. Not meant to be set by hand. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -152,7 +176,7 @@ ValidatorConfig contains the configuration for running a node as validator.
 | privateKeySecret | Indicates the secret containing the private key to be used by this validator. Defaults to `<chainnode>-priv-key`. Will be created if it does not exist. | *string | false |
 | info | Contains information details about this validator. | *[ValidatorInfo](#validatorinfo) | false |
 | init | Specifies configs and initialization commands for creating a new genesis. | *[GenesisInitConfig](#genesisinitconfig) | false |
-| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node. | *[TmKMS](#tmkms) | false |
+| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.\n\nDeprecated: use .spec.cosmosigner instead. TmKMS will be removed in a future version. | *[TmKMS](#tmkms) | false |
 | createValidator | Indicates that cosmopilot should run create-validator tx to make this node a validator. | *[CreateValidatorConfig](#createvalidatorconfig) | false |
 | accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
 | accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
@@ -214,6 +238,7 @@ ChainNodeSetSpec defines the desired state of ChainNode.
 | ingresses | List of ingresses to create for this ChainNodeSet. This allows to create ingresses targeting multiple groups of nodes. | [][GlobalIngressConfig](#globalingressconfig) | false |
 | gatewayRoutes | List of Gateway API route configs for this ChainNodeSet. This allows to create HTTPRoute/GRPCRoute resources targeting multiple groups of nodes. | [][GlobalGatewayConfig](#globalgatewayconfig) | false |
 | cosmoseed | Allows deploying seed nodes using Cosmoseed. | *[CosmoseedConfig](#cosmoseedconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer that signs for one or more node groups (or the validator group by default). Targeted nodes listen for the signer instead of mounting a local key or running TmKMS. | *[Cosmosigner](#cosmosigner) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -236,6 +261,9 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | upgrades | All scheduled or completed upgrades performed by cosmopilot on ChainNodes of this ChainNodeSet. | [][Upgrade](#upgrade) | false |
 | latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
 | seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
+| cosmosigners | Cosmosigners records controller-managed state for each managed cosmosigner deployment (the top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner). Keyed by the signer's resource name. Not meant to be set by hand. | [][CosmosignerStatus](#cosmosignerstatus) | false |
+| legacySignerServiceNames | LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now reserved for standalone ChainNode signer Services. The controller initializes this once from Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy names without trusting the current, possibly edited spec. | []string | false |
+| legacySignerServiceNamesInitialized | LegacySignerServiceNamesInitialized distinguishes a recorded empty legacy-name set from an old ChainNodeSet whose status predates LegacySignerServiceNames. | bool | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -420,6 +448,7 @@ NodeGroupSpec sets chainnode configurations for a group.
 | instances | Number of ChainNode instances to run on this group. | *int | false |
 | config | Specific configurations for these nodes. | *[Config](#config) | false |
 | validator | Validator config for this node group. When set, every instance in this group is reconciled as a validator with its own consensus key and account secrets. | *[NodeSetValidatorConfig](#nodesetvalidatorconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer for this group. When the group is a validator group, the signer signs for that group's single consensus identity — a multi-instance group is ONE validator whose instances are redundant signing endpoints, not N validators (multiple validators require multiple groups, each with its own signer). When the group has no validator, its nodes are the signing endpoints of a single out-of-band-registered identity (sentry mode). Its `nodeGroups` field must be empty — the enclosing group is the target. | *[Cosmosigner](#cosmosigner) | false |
 | persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. | *[Persistence](#persistence) | false |
 | peers | Additional persistent peers that should be added to these nodes. | [][Peer](#peer) | false |
 | expose | Allows exposing P2P traffic to public. | *[ExposeConfig](#exposeconfig) | false |
@@ -453,7 +482,7 @@ NodeSetValidatorConfig contains validator configurations.
 | resources | Compute Resources required by the app container. | corev1.ResourceRequirements | false |
 | nodeSelector | Selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. | map[string]string | false |
 | affinity | If specified, the pod's scheduling constraints. | *corev1.Affinity | false |
-| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node. | *[TmKMS](#tmkms) | false |
+| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.\n\nDeprecated: use the corresponding Cosmosigner field instead. TmKMS will be removed in a future version. | *[TmKMS](#tmkms) | false |
 | stateSyncRestore | Configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
 | stateSyncResources | Compute Resources to be used while the node is state-syncing. | corev1.ResourceRequirements | false |
 | createValidator | Indicates cosmopilot should run create-validator tx to make this node a validator. | *[CreateValidatorConfig](#createvalidatorconfig) | false |
@@ -486,6 +515,44 @@ SeedStatus contains status information about a cosmoseed node.
 | name |  | string | true |
 | id |  | string | true |
 | publicAddress |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservation
+
+ConsensusKeyReservation atomically prevents independent roots or claims from managing separate double-sign state for the same chain and consensus public key.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ObjectMeta | false |
+| spec |  | [ConsensusKeyReservationSpec](#consensuskeyreservationspec) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationList
+
+ConsensusKeyReservationList contains consensus-key reservations.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ListMeta | false |
+| items |  | [][ConsensusKeyReservation](#consensuskeyreservation) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationSpec
+
+ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one consensus public key on one chain. Reservations are intentionally not garbage-collected automatically: an operator must verify every old signing path is gone before deleting a stale one.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| chainID |  | string | true |
+| publicKey |  | string | true |
+| ownerUID | OwnerUID identifies the controller root that owns this reservation for conflict detection. | types.UID | true |
+| ownerKind |  | string | true |
+| namespace |  | string | true |
+| ownerName |  | string | true |
+| claim |  | string | true |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -855,7 +922,7 @@ TmKmsHashicorpProvider holds `hashicorp` provider specific configurations.
 | certificateSecret | Secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
 | tokenSecret | Secret containing the token to be used. | *corev1.SecretKeySelector | true |
 | uploadGenerated | UploadGenerated indicates if the controller should upload the generated private key to vault. Defaults to `false`. Will be set to `true` if this validator is initializing a new genesis. This should not be used in production. | bool | false |
-| autoRenewToken | Whether to automatically renew vault token. Defaults to `false`. | bool | false |
+| autoRenewToken | Deprecated: AutoRenewToken deploys vault-token-renewer for legacy tmKMS configurations and defaults to `false`. Cosmosigner renews Vault tokens internally and does not use this sidecar. | bool | false |
 | skipCertificateVerify | Whether to skip certificate verification. Defaults to `false`. | bool | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -1000,5 +1067,112 @@ VolumeSpec describes an additional volume to mount on a node.
 | path | Path specifies where this volume should be mounted. | string | true |
 | storageClass | Name of the storage class to use for this volume. If not specified, defaults to .persistence.storageClass. If that is also not specified, the cluster default storage class will be used. | *string | false |
 | deleteWithNode | Whether this volume should be deleted when node is deleted. Defaults to `false`. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### Cosmosigner
+
+Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment (github.com/voluzi/cosmosigner). Unlike TmKMS, which runs as a sidecar in the validator pod, cosmosigner runs as a separate StatefulSet that dials the targeted nodes' priv_validator_laddr over the network. This allows any group of nodes to act as the signing endpoint for a single consensus identity (horcrux-style fan-out), and enables raft-based high availability across multiple signer replicas.\n\nOn a ChainNodeSet, .nodeGroups selects which node groups the signer connects to; when it is empty and a validator is configured, the validator group is targeted by default. On a standalone ChainNode, the ChainNode itself is the target and .nodeGroups must be empty.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| nodeGroups | NodeGroups is the list of node group names (.spec.nodes[].name) the signer will connect to and sign for. Only valid on a ChainNodeSet. When empty, the configured validator group is targeted by default. Every targeted node listens for the signer and shares the single consensus identity held by the configured backend. | []string | false |
+| replicas | Replicas is the number of signer instances to run. Must be an odd number so the embedded raft cluster can form a quorum. Defaults to `1` (a single-instance signer with no HA). | *int32 | false |
+| image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:0.2.0`). Set this to pin or override the image for this specific signer only. | *string | false |
+| backend | Backend selects and configures where the consensus key material lives and how signing is performed. Exactly one backend must be configured. | [CosmosignerBackend](#cosmosignerbackend) | true |
+| stateStorageSize | StateStorageSize is the size of the per-replica PVC used for the raft double-sign protection state and the persisted connection key. Defaults to `1Gi`. | *string | false |
+| storageClassName | StorageClassName is the storage class for the per-replica state PVC. Defaults to the cluster default storage class when unset. | *string | false |
+| resources | Resources are the compute resources for the signer container. | *corev1.ResourceRequirements | false |
+| raftTLSSecret | RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to secure the inter-replica raft transport with mutual TLS. It is required when replicas is greater than one unless unsafeAllowInsecureRaft explicitly opts into plain TCP. | *string | false |
+| unsafeAllowInsecureRaft | UnsafeAllowInsecureRaft permits a multi-replica signer to use plain TCP for Raft. This is an explicit security opt-out for isolated test networks; production HA signers should set raftTLSSecret instead. | bool | false |
+| logLevel | LogLevel is the log level for the signer. Defaults to `info`. | *string | false |
+| serviceAccountName | ServiceAccountName is the Kubernetes service account the signer pods run as. Required in practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google service account to a specific Kubernetes service account). Defaults to the namespace default. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerBackend
+
+CosmosignerBackend selects the signing backend. Exactly one field must be set.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| software | Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is the simplest backend and is mainly intended for testnets and testing. | *[CosmosignerSoftwareBackend](#cosmosignersoftwarebackend) | false |
+| vault | Vault uses a non-exportable ed25519 key in HashiCorp Vault Transit. | *[CosmosignerVaultBackend](#cosmosignervaultbackend) | false |
+| gcpKms | GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS. | *[CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerGcpKmsBackend
+
+CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| keyVersion | KeyVersion is the full resource name of the KMS crypto key version used for signing (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`). | string | true |
+| credentialsSecret | CredentialsSecret references a secret containing a Google service account JSON key. When unset, Workload Identity / Application Default Credentials are used. | *corev1.SecretKeySelector | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerMigrationStatus
+
+CosmosignerMigrationStatus records enough progress to resume a migration after a controller restart without ever recreating a signer before the previous pods are confirmed gone.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| desiredDigest | DesiredDigest is the desired signer's lifecycle fingerprint. | string | true |
+| desiredPublicKey | DesiredPublicKey is the canonical base64 consensus public key resolved during preflight. | string | true |
+| phase | Phase is the current break-before-make migration stage. | CosmosignerMigrationPhase | true |
+| resetState | ResetState is true when the desired public key differs from the applied key, requiring the old raft-state PVCs to be deleted before recreation. | bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerSoftwareBackend
+
+CosmosignerSoftwareBackend configures the local software signing backend.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| privateKeySecret | PrivateKeySecret is the name of the secret holding `priv_validator_key.json`. When the signer targets a validator this must be left empty — the validator's own key secret is used (created by its genesis/create-validator flow when it generates one). For a sentry-mode signer (no validator targeted) it is required and must reference a pre-provisioned secret whose consensus key is already registered on-chain (e.g. via init.genesisValidators): a fresh key is never generated here, since it could not be in the validator set. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerStatus
+
+CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All fields are controller-managed and not meant to be set by hand.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name is the signer's resource name (`<nodeset>-signer` \| `<nodeset>-<group>-signer` \| `<nodeset>-<group>-<index>-signer`) and the key of this entry. | string | true |
+| resourceName | ResourceName is the stable Kubernetes resource base name used by this signer. It differs from Name only after moving a signer between manifest placements, allowing the new configuration to reuse the old StatefulSet PVCs without renaming them. | string | false |
+| appliedDigest | AppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. Unlike SigningDigest, it is recorded for sentry and validator signers. | string | false |
+| publicKey | PublicKey is the canonical base64 consensus public key of the applied signer backend. | string | false |
+| targetGroups | TargetGroups records the applied target-group set so a signer moved between manifest placements can inherit the stable resource name even when it is not validator-targeted. | []string | false |
+| migration | Migration records an in-progress break-before-make configuration migration. | *[CosmosignerMigrationStatus](#cosmosignermigrationstatus) | false |
+| replicas | Replicas records the raft replica count this signer was rolled out with, so the no-webhook reconcile path can reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. | *int32 | false |
+| stateStorageSize | StateStorageSize records the per-replica raft-state PVC size this signer was rolled out with. Together with StateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. | string | false |
+| stateStorageClassName | StateStorageClassName records the storage class of this signer's raft-state PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default class was selected, while an explicit \"\" means no class was requested. See StateStorageSize. | *string | false |
+| signingDigest | SigningDigest is a fingerprint of this signer's effective signing identity, replica count and target-group set, captured once a validator-targeted signer has rolled out. AppliedDigest is the lifecycle baseline used for managed migrations; this field retains validator-serving history. | string | false |
+| atEstablishment | AtEstablishment is a write-once record of the on-chain consensus identity this signer was responsible for at the moment the chain ID was first recorded: its validator-targeted identity, or — for a SOFTWARE sentry signer whose privateKeySecret is listed in an ACTIVE (non-zero-instance) validator's spec.validator.init.genesisValidators or spec.nodes[].validator.init.genesisValidators — that sentry key's identity. It is the empty string when the signer was responsible for no such provable on-chain key then; this includes sentries the controller cannot tie to a genesis entry from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key listed only under a zero-instance group, which contributes nothing to genesis). It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use AppliedDigest and PublicKey. | *string | false |
+| servingIdentity | ServingIdentity records the effective signing identity this validator-targeted signer served, captured with SigningDigest and cleared on teardown. Together with ServingGroup it identifies the validator protected by a stale status entry during removal or manifest-placement migration. | string | false |
+| servingGroup | ServingGroup records the validator group this signer targets (the reserved \"validator\" name for the legacy singleton). It identifies the protected validator during removal and replacement. | string | false |
+| localKeyEverServed | LocalKeyEverServed is a monotonic record of whether this validator signer may ever have served through the validator's local key secret. False is recorded only when the controller observes a pre-provisioned external signer at chain establishment; nil means the history is unknown. | *bool | false |
+| keyImported | KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change. | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerVaultBackend
+
+CosmosignerVaultBackend configures the HashiCorp Vault Transit signing backend.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| address | Address is the full address of the Vault cluster (e.g. `https://vault:8200`). | string | true |
+| keyName | KeyName is the name of the Vault transit key used for signing. | string | true |
+| keyVersion | KeyVersion is the immutable Vault Transit key version used for public-key resolution and every signing request. Pinning the version prevents a Transit rotation from changing validator identity across signer restarts. Defaults to `1`. uploadGenerated requires version 1 because a new Vault import creates the initial key version. | *int | false |
+| mount | Mount is the Vault transit mount path. Defaults to `transit`. | *string | false |
+| tokenSecret | TokenSecret references the secret containing the Vault token used to authenticate. | *corev1.SecretKeySelector | true |
+| certificateSecret | CertificateSecret references the secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
+| namespace | Namespace is the Vault namespace (Vault Enterprise), when applicable. | *string | false |
+| uploadGenerated | UploadGenerated indicates that the controller should generate a consensus key locally and import it into Vault. Defaults to `false`. It is set to `true` automatically when this validator initializes a new genesis. This should not be used in production. | bool | false |
 
 [Back to Custom Resources](#custom-resources)

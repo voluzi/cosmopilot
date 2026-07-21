@@ -18,12 +18,11 @@ import (
 func (r *Reconciler) ensureTmKMSConfig(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	if !chainNode.UsesTmKms() {
 		// Configuration not specified or removed. Let's try to delete it anyway.
-		_ = tmkms.New(r.ClientSet,
+		return tmkms.New(r.ClientSet,
 			r.Scheme,
 			fmt.Sprintf("%s-tmkms", chainNode.GetName()),
 			chainNode).
 			UndeployConfig(ctx)
-		return nil
 	}
 
 	provider, kms, err := r.getTmkms(chainNode)
@@ -68,6 +67,24 @@ func (r *Reconciler) ensureTmKMSConfig(ctx context.Context, chainNode *appsv1.Ch
 	}
 
 	return nil
+}
+
+func (r *Reconciler) canCleanupTmKMSConfig(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	pod, err := r.getChainNodePod(ctx, chainNode)
+	if err != nil || pod == nil {
+		return false, err
+	}
+
+	tmKMSName := fmt.Sprintf("%s-tmkms", chainNode.GetName())
+	for _, volume := range pod.Spec.Volumes {
+		if volume.ConfigMap != nil && volume.ConfigMap.Name == tmKMSName {
+			return false, nil
+		}
+		if volume.Secret != nil && volume.Secret.SecretName == tmKMSName {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (r *Reconciler) getTmkms(chainNode *appsv1.ChainNode) (tmkms.Provider, *tmkms.KMS, error) {

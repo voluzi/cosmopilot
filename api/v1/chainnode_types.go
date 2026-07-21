@@ -111,6 +111,18 @@ type ChainNodeSpec struct {
 	// +optional
 	Validator *ValidatorConfig `json:"validator,omitempty"`
 
+	// Cosmosigner deploys a managed cosmosigner remote signer for this node. When configured,
+	// the node listens for the signer on its priv_validator_laddr and no local key is mounted.
+	// +optional
+	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
+
+	// RemoteSignerTarget marks this node as a signing endpoint for a cosmosigner deployment owned
+	// by a parent ChainNodeSet. It is set by the ChainNodeSet controller on nodes of targeted
+	// groups and makes the node listen for the remote signer without mounting a local key. It is
+	// not meant to be set by hand.
+	// +optional
+	RemoteSignerTarget bool `json:"remoteSignerTarget,omitempty"`
+
 	// Ensures peers with same chain ID are connected with each other. Enabled by default.
 	// +optional
 	AutoDiscoverPeers *bool `json:"autoDiscoverPeers,omitempty"`
@@ -247,9 +259,86 @@ type ChainNodeStatus struct {
 	// +optional
 	PubKey string `json:"pubKey,omitempty"`
 
+	// TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was
+	// verified against PubKey before its consensus-key reservation was created. An unchanged identity
+	// can reuse the canonical recorded public key without launching another key-discovery pod.
+	// +optional
+	TmKMSReservationIdentity string `json:"tmKMSReservationIdentity,omitempty"`
+
 	// Indicates the current status of validator if this node is one.
 	// +optional
 	ValidatorStatus ValidatorStatus `json:"validatorStatus,omitempty"`
+
+	// CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's
+	// effective signing identity, captured once a validator signer rolls out. The applied digest and
+	// public key below are the lifecycle baseline used for managed migrations. Not meant to be set by
+	// hand.
+	// +optional
+	CosmosignerSigningDigest string `json:"cosmosignerSigningDigest,omitempty"`
+
+	// CosmosignerAppliedDigest is the lifecycle fingerprint of the configuration currently
+	// represented by the signer StatefulSet. It is recorded for both validator and sentry signers.
+	// +optional
+	CosmosignerAppliedDigest string `json:"cosmosignerAppliedDigest,omitempty"`
+
+	// CosmosignerPublicKey is the canonical base64 consensus public key of the applied signer.
+	// +optional
+	CosmosignerPublicKey string `json:"cosmosignerPublicKey,omitempty"`
+
+	// CosmosignerMigration records an in-progress break-before-make signer migration.
+	// +optional
+	CosmosignerMigration *CosmosignerMigrationStatus `json:"cosmosignerMigration,omitempty"`
+
+	// CosmosignerKeyImported is the fingerprint of a completed Vault key import (Vault target + source
+	// secret + key material). It lets the controller skip a repeated import and detect a source/target
+	// change without trusting user-editable metadata. Not meant to be set by hand.
+	// +optional
+	CosmosignerKeyImported string `json:"cosmosignerKeyImported,omitempty"`
+
+	// CosmosignerReplicas records the raft replica count the managed signer was rolled out with,
+	// captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path
+	// reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale,
+	// since the membership baked into the existing per-pod raft state is not migrated by rendering a
+	// new bootstrap list. Not meant to be set by hand.
+	// +optional
+	CosmosignerReplicas *int32 `json:"cosmosignerReplicas,omitempty"`
+
+	// CosmosignerValidatorTargeted records whether the managed signer targeted this node as a
+	// validator when its deployment locks were initialized. The nullable marker lets the no-webhook
+	// path distinguish a pending validator rollout from a sentry after the current spec has already
+	// removed both .spec.cosmosigner and .spec.validator. Not meant to be set by hand.
+	// +optional
+	CosmosignerValidatorTargeted *bool `json:"cosmosignerValidatorTargeted,omitempty"`
+
+	// CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was
+	// rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while
+	// the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet
+	// volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old
+	// size/class. Not meant to be set by hand.
+	// +optional
+	CosmosignerStateStorageSize string `json:"cosmosignerStateStorageSize,omitempty"`
+
+	// CosmosignerStateStorageClassName records the storage class of the managed signer's raft-state
+	// PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default
+	// class was selected, while an explicit "" means no class was requested. See
+	// CosmosignerStateStorageSize. Not meant to be set by hand.
+	// +optional
+	CosmosignerStateStorageClassName *string `json:"cosmosignerStateStorageClassName,omitempty"`
+
+	// CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at
+	// the moment the chain ID was first recorded. Empty string when no signer targeted a validator at
+	// chain establishment — including sentry-mode signers, whose key identity is deliberately
+	// excluded. It protects incomplete first rollouts and supports recovery of legacy status; managed
+	// migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand.
+	// +optional
+	CosmosignerAtEstablishment *string `json:"cosmosignerAtEstablishment,omitempty"`
+
+	// CosmosignerServingIdentity records the effective signing identity of the rolled-out
+	// validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on
+	// teardown. It records that this signer protected the node's validator role across removal and
+	// migration recovery. Not meant to be set by hand.
+	// +optional
+	CosmosignerServingIdentity string `json:"cosmosignerServingIdentity,omitempty"`
 }
 
 // ValidatorConfig contains the configuration for running a node as validator.
@@ -269,6 +358,8 @@ type ValidatorConfig struct {
 
 	// TmKMS configuration for signing commits for this validator.
 	// When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.
+	//
+	// Deprecated: use .spec.cosmosigner instead. TmKMS will be removed in a future version.
 	// +optional
 	TmKMS *TmKMS `json:"tmKMS,omitempty"`
 

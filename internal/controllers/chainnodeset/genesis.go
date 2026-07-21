@@ -60,7 +60,7 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, nod
 
 	if nodeSet.Spec.Genesis.ShouldDownloadUsingContainer() {
 		// Operator will download the genesis for each ChainNode directly into their volumes
-		nodeSet.Status.ChainID = *nodeSet.Spec.Genesis.ChainID
+		nodeSet.SetEstablishedChainID(*nodeSet.Spec.Genesis.ChainID)
 		return r.Status().Update(ctx, nodeSet)
 	}
 
@@ -129,7 +129,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, nodeSe
 
 		// update chainID in status
 		logger.Info("updating .status.chainID", "chainID", chainID)
-		nodeSet.Status.ChainID = chainID
+		nodeSet.SetEstablishedChainID(chainID)
 		return r.Status().Update(ctx, nodeSet)
 
 	default:
@@ -161,6 +161,6 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, nodeSe
 
 	// update chainID in status
 	logger.Info("updating .status.chainID", "chainID", chainID)
-	nodeSet.Status.ChainID = chainID
+	nodeSet.SetEstablishedChainID(chainID)
 	return r.Status().Update(ctx, nodeSet)
 }
