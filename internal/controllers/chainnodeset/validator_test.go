@@ -9,6 +9,7 @@ import (
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,6 +31,7 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).

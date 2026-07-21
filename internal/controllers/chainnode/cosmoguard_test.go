@@ -10,6 +10,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,6 +30,7 @@ func cosmoGuardTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	require.NoError(t, autoscalingv2.AddToScheme(scheme))
 	require.NoError(t, networkingv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 
 	return &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),

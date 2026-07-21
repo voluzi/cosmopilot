@@ -84,4 +84,20 @@ func TestIsFullyRolledOut(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+
+	// nil Replicas (HPA owns replicas): falls back to ReadyReplicas > 0.
+	nilReplicas := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "ns", Generation: 1},
+		Spec:       appsv1.StatefulSetSpec{Replicas: nil},
+		Status:     appsv1.StatefulSetStatus{ObservedGeneration: 1, ReadyReplicas: 1},
+	}
+	c := fake.NewClientBuilder().WithScheme(servingScheme(t)).WithObjects(nilReplicas).Build()
+	got, err := IsFullyRolledOut(context.Background(), c, "ns", "g")
+	require.NoError(t, err)
+	assert.True(t, got, "nil replicas -> ready>0 is fully rolled out")
+
+	// Missing StatefulSet -> false, no error.
+	got, err = IsFullyRolledOut(context.Background(), fake.NewClientBuilder().WithScheme(servingScheme(t)).Build(), "ns", "absent")
+	require.NoError(t, err)
+	assert.False(t, got)
 }

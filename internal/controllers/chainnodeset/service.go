@@ -134,7 +134,9 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, gw := range nodeSet.Spec.GatewayRoutes {
-		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, gw.GetName(nodeSet)))
+		// The gateway's global Service is "<set>-global-<name>" (gw.GetName is the "-gw" route name,
+		// NOT the Service), so the sticky check must look up the actual Service.
+		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)))
 		if err != nil {
 			return err
 		}

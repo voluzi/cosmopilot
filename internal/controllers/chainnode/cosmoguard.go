@@ -7,6 +7,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -57,18 +58,34 @@ func (r *Reconciler) standaloneRouteTargetsGuard(ctx context.Context, chainNode 
 
 	if chainNode.Spec.Gateway != nil {
 		routes := &gwapiv1.HTTPRouteList{}
-		if err := r.List(ctx, routes, client.InNamespace(chainNode.GetNamespace())); err != nil {
-			return false
-		}
-		for i := range routes.Items {
-			rt := &routes.Items[i]
-			if !metav1.IsControlledBy(rt, chainNode) {
-				continue
+		if err := r.List(ctx, routes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+			for i := range routes.Items {
+				rt := &routes.Items[i]
+				if !metav1.IsControlledBy(rt, chainNode) {
+					continue
+				}
+				for _, rule := range rt.Spec.Rules {
+					for _, br := range rule.BackendRefs {
+						if string(br.Name) == guard {
+							return true
+						}
+					}
+				}
 			}
-			for _, rule := range rt.Spec.Rules {
-				for _, br := range rule.BackendRefs {
-					if string(br.Name) == guard {
-						return true
+		}
+		// gRPC-only routes use a GRPCRoute, so a gRPC-exposed guard must be recognized here too.
+		grpcRoutes := &gwapiv1.GRPCRouteList{}
+		if err := r.List(ctx, grpcRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+			for i := range grpcRoutes.Items {
+				rt := &grpcRoutes.Items[i]
+				if !metav1.IsControlledBy(rt, chainNode) {
+					continue
+				}
+				for _, rule := range rt.Spec.Rules {
+					for _, br := range rule.BackendRefs {
+						if string(br.Name) == guard {
+							return true
+						}
 					}
 				}
 			}
@@ -150,6 +167,9 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		// Match the node's scheduling priority so the guard isn't preempted while the node it protects
 		// keeps running (which would drop guarded API traffic).
 		PriorityClassName: r.guardPriorityClassName(chainNode),
+		// Place the guard where the node runs (dedicated/tainted pools).
+		NodeSelector: chainNode.Spec.NodeSelector,
+		Affinity:     chainNode.Spec.Affinity,
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -243,6 +263,23 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 	}
 	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.Service()); err != nil {
 		return fmt.Errorf("failed to apply cosmoguard service for %s: %w", chainNode.GetName(), err)
+	}
+	if pdb := params.PDB(); pdb != nil {
+		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, pdb); err != nil {
+			return fmt.Errorf("failed to apply cosmoguard pdb for %s: %w", chainNode.GetName(), err)
+		}
+	} else {
+		stale := &policyv1.PodDisruptionBudget{}
+		err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: chainNode.CosmoGuardName()}, stale)
+		if err == nil {
+			if metav1.IsControlledBy(stale, chainNode) {
+				if err := client.IgnoreNotFound(r.Delete(ctx, stale)); err != nil {
+					return err
+				}
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
 	}
 	if hpa := params.HPA(); hpa != nil {
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, hpa); err != nil {

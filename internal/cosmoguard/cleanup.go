@@ -8,6 +8,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,6 +24,7 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 	// Objects sharing the guard's own name.
 	sameName := []client.Object{
 		&autoscalingv2.HorizontalPodAutoscaler{},
+		&policyv1.PodDisruptionBudget{},
 		&corev1.Service{},
 		&appsv1.StatefulSet{},
 	}

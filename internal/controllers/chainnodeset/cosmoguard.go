@@ -9,6 +9,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -77,6 +78,9 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 		// Front the group's nodes at the same scheduling priority, so the guard isn't preempted while
 		// the nodes it protects keep running (which would drop guarded API traffic).
 		PriorityClassName: r.opts.GetNodesPriorityClassName(),
+		// Place the guard where the group's nodes run (dedicated/tainted pools).
+		NodeSelector: group.NodeSelector,
+		Affinity:     group.Affinity,
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -249,6 +253,15 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 			return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard service for group %s: %w", group.Name, err)
 		}
 
+		if pdb := params.PDB(); pdb != nil {
+			withCosmoGuardScope(pdb)
+			if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, pdb); err != nil {
+				return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard pdb for group %s: %w", group.Name, err)
+			}
+		} else if err := r.deleteCosmoGuardPDB(ctx, nodeSet, name); err != nil {
+			return cosmoGuardReconcile{}, err
+		}
+
 		if ing := params.DashboardIngress(); ing != nil {
 			withCosmoGuardScope(ing)
 			if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, ing); err != nil {
@@ -317,6 +330,18 @@ func (r *Reconciler) deleteCosmoGuardHPA(ctx context.Context, nodeSet *appsv1.Ch
 		return nil
 	}
 	return client.IgnoreNotFound(r.Delete(ctx, hpa))
+}
+
+func (r *Reconciler) deleteCosmoGuardPDB(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
+	pdb := &policyv1.PodDisruptionBudget{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, pdb)
+	if err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(pdb, nodeSet) {
+		return nil
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, pdb))
 }
 
 // ensureCosmoGuardSecret creates the olric gossip encryption Secret if it does not exist yet. It
@@ -391,6 +416,21 @@ func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv
 		}
 		logger.Info("deleting stale cosmoguard statefulset", "name", s.GetName())
 		if err := client.IgnoreNotFound(r.Delete(ctx, s)); err != nil {
+			return err
+		}
+	}
+
+	pdbs := &policyv1.PodDisruptionBudgetList{}
+	if err := r.List(ctx, pdbs, ns, sel); err != nil {
+		return err
+	}
+	for i := range pdbs.Items {
+		p := &pdbs.Items[i]
+		if !metav1.IsControlledBy(p, nodeSet) || expected[p.GetName()] {
+			continue
+		}
+		logger.Info("deleting stale cosmoguard pdb", "name", p.GetName())
+		if err := client.IgnoreNotFound(r.Delete(ctx, p)); err != nil {
 			return err
 		}
 	}

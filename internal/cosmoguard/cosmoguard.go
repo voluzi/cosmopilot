@@ -25,6 +25,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -124,6 +125,11 @@ type Params struct {
 
 	PriorityClassName string
 	ImagePullSecrets  []corev1.LocalObjectReference
+
+	// NodeSelector / Affinity place the guard alongside the nodes it fronts, so it can schedule in a
+	// dedicated/tainted node pool instead of staying Pending.
+	NodeSelector map[string]string
+	Affinity     *corev1.Affinity
 }
 
 // peerDiscoveryHost is the in-cluster DNS name olric resolves to find peers.
@@ -346,6 +352,8 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 					SecurityContext:   k8s.RestrictedPodSecurityContext(),
 					PriorityClassName: p.PriorityClassName,
 					ImagePullSecrets:  p.ImagePullSecrets,
+					NodeSelector:      p.NodeSelector,
+					Affinity:          p.Affinity,
 					Containers:        []corev1.Container{container},
 					Volumes: []corev1.Volume{
 						{
@@ -457,6 +465,27 @@ func (p Params) HPA() *autoscalingv2.HorizontalPodAutoscaler {
 			MinReplicas: p.Autoscaling.MinReplicas,
 			MaxReplicas: p.Autoscaling.MaxReplicas,
 			Metrics:     metrics,
+		},
+	}
+}
+
+// PDB renders a PodDisruptionBudget protecting the guard from mass eviction (e.g. a node drain taking
+// down every replica while the protected nodes stay up). Returns nil for a single fixed-replica guard,
+// where a PDB would only risk blocking drains without providing availability.
+func (p Params) PDB() *policyv1.PodDisruptionBudget {
+	if p.Autoscaling == nil && p.Replicas <= 1 {
+		return nil
+	}
+	maxUnavailable := intstr.FromInt32(1)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.Name,
+			Namespace: p.Namespace,
+			Labels:    p.podLabels(),
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable: &maxUnavailable,
+			Selector:       &metav1.LabelSelector{MatchLabels: InstanceLabels(p.Name)},
 		},
 	}
 }
