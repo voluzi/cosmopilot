@@ -4,9 +4,10 @@ import "testing"
 
 func TestWithCosmosignerImage(t *testing.T) {
 	cfg := DefaultConfig()
-	WithCosmosignerImage("ghcr.io/voluzi/cosmosigner:test")(cfg)
+	want := "ghcr.io/voluzi/cosmosigner:test"
+	WithCosmosignerImage(want)(cfg)
 
-	if cfg.CosmosignerImage != "ghcr.io/voluzi/cosmosigner:test" {
-		t.Fatalf("CosmosignerImage = %q", cfg.CosmosignerImage)
+	if cfg.CosmosignerImage != want {
+		t.Fatalf("CosmosignerImage = %q, want %q", cfg.CosmosignerImage, want)
 	}
 }
