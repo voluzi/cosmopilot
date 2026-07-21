@@ -332,7 +332,7 @@ type CosmoGuardConfig struct {
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// Deprecated: CosmoGuard now runs as a standalone Deployment supervised by Kubernetes,
+	// Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes,
 	// so this field has no effect and will be removed in a future release.
 	// +optional
 	RestartPodOnFailure *bool `json:"restartPodOnFailure,omitempty"`

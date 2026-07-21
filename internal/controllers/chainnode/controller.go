@@ -376,6 +376,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// Tear down a no-longer-used standalone guard AFTER routes have been retargeted to the raw node
+	// Service, so a live ingress/gateway route never points at a deleted guard backend.
+	logger.V(1).Info("finalize cosmoguard")
+	if err = r.finalizeCosmoGuard(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	logger.V(1).Info("ensure pvc updates")
 	if err = r.ensurePvcUpdates(ctx, chainNode, pvc); err != nil {
 		return ctrl.Result{}, err

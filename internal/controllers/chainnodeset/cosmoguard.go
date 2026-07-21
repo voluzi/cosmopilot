@@ -144,8 +144,12 @@ func (r *Reconciler) buildGroupCosmoGuardUpstreamService(nodeSet *appsv1.ChainNo
 			}),
 		},
 		Spec: corev1.ServiceSpec{
-			ClusterIP:                corev1.ClusterIPNone,
-			PublishNotReadyAddresses: true,
+			ClusterIP: corev1.ClusterIPNone,
+			// Only ready node pods must be discoverable as upstreams — otherwise CosmoGuard would route
+			// client traffic to nodes that are syncing, upgrading, or stopped for snapshotting (which the
+			// public group Service withholds). Unlike the guard's peer Service (which needs not-ready
+			// addresses for cluster join), this upstream must mirror the public Service's readiness.
+			PublishNotReadyAddresses: false,
 			Ports:                    ports,
 			Selector: map[string]string{
 				controllers.LabelChainNodeSet:      nodeSet.GetName(),
@@ -283,6 +287,11 @@ func (r *Reconciler) ensureCosmoGuardSecret(ctx context.Context, nodeSet *appsv1
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, secret)
 	if err == nil {
+		// Refuse a same-named Secret we don't own: the guard would consume a foreign (possibly stale
+		// or keyless) Secret, and Undeploy would never clean it up.
+		if !metav1.IsControlledBy(secret, nodeSet) {
+			return fmt.Errorf("cosmoguard secret %q exists but is not owned by this ChainNodeSet; refusing to use it", name)
+		}
 		return nil
 	}
 	if !apierrors.IsNotFound(err) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,6 +50,16 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	if desired, ok := obj.(*appsv1.StatefulSet); ok && desired.Spec.Replicas == nil {
 		if live, ok := existing.(*appsv1.StatefulSet); ok {
 			desired.Spec.Replicas = live.Spec.Replicas
+		}
+	}
+
+	// Cluster IPs are immutable and API-allocated; a full Update that submits the freshly rendered
+	// Service (with empty ClusterIP/ClusterIPs) is rejected by the API server. Copy the live
+	// allocation forward so Service updates (added ports, changed selector/labels) apply cleanly.
+	if desired, ok := obj.(*corev1.Service); ok {
+		if live, ok := existing.(*corev1.Service); ok {
+			desired.Spec.ClusterIP = live.Spec.ClusterIP
+			desired.Spec.ClusterIPs = live.Spec.ClusterIPs
 		}
 	}
 

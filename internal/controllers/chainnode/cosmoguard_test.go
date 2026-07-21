@@ -125,6 +125,22 @@ func TestDisableAutoscalingRemovesHPA(t *testing.T) {
 	assert.Error(t, err, "HPA should be removed when autoscaling is disabled")
 }
 
+// TestFinalizeTearsDownGuardWhenNodeBecomesChild verifies that moving a standalone guarded node into
+// a ChainNodeSet removes its now-orphaned per-node guard on the next finalize.
+func TestFinalizeTearsDownGuardWhenNodeBecomesChild(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{}))
+
+	// The node joins a ChainNodeSet; ensure no longer manages a guard and finalize tears the old one down.
+	cn.Labels[controllers.LabelChainNodeSet] = "some-set"
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn))
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	assert.Error(t, err, "standalone guard should be removed once the node is a ChainNodeSet child")
+}
+
 // TestNodeSetChildSkipsStandaloneGuard verifies a ChainNodeSet child never creates its own guard
 // (the group's guard, managed by the set, fronts it).
 func TestNodeSetChildSkipsStandaloneGuard(t *testing.T) {
@@ -148,8 +164,10 @@ func TestDisableGuardUndeploys(t *testing.T) {
 	sts := &k8sappsv1.StatefulSet{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
 
+	// Disable, then finalize (teardown runs after routes are retargeted, not in ensureCosmoGuard).
 	cn.Spec.Config.CosmoGuard.Enable = false
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn))
 
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "guard statefulset should be removed when disabled")

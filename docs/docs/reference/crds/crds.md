@@ -23,7 +23,11 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [Config](#config)
 * [ConsensusKeyReservationList](#consensuskeyreservationlist)
 * [ConsensusKeyReservationSpec](#consensuskeyreservationspec)
+* [CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig)
 * [CosmoGuardConfig](#cosmoguardconfig)
+* [CosmoGuardDashboardAuth](#cosmoguarddashboardauth)
+* [CosmoGuardDashboardConfig](#cosmoguarddashboardconfig)
+* [CosmoGuardDashboardIngress](#cosmoguarddashboardingress)
 * [CosmoseedConfig](#cosmoseedconfig)
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
 * [CosmoseedIngressConfig](#cosmoseedingressconfig)
@@ -611,7 +615,7 @@ Config allows setting specific configurations for a node, including overriding c
 | env | List of environment variables to set in the app container. | []corev1.EnvVar | false |
 | podAnnotations | PodAnnotations allows setting additional annotations on the node's pod. | map[string]string | false |
 | safeToEvict | SafeToEvict sets cluster-autoscaler.kubernetes.io/safe-to-evict annotation to the given value. It allows/disallows cluster-autoscaler to evict this node's pod. | *bool | false |
-| cosmoGuard | Deploys CosmoGuard to protect API endpoints of the node. | *[CosmoGuardConfig](#cosmoguardconfig) | false |
+| cosmoGuard | Deploys a standalone CosmoGuard deployment fronting this node's API endpoints. | *[CosmoGuardConfig](#cosmoguardconfig) | false |
 | nodeUtilsLogLevel | Log level for node-utils container. Defaults to `info`. | *string | false |
 | startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
 | ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
@@ -629,16 +633,71 @@ Config allows setting specific configurations for a node, including overriding c
 
 [Back to Custom Resources](#custom-resources)
 
-#### CosmoGuardConfig
+#### CosmoGuardAutoscalingConfig
 
-CosmoGuardConfig allows configuring CosmoGuard rules.
+CosmoGuardAutoscalingConfig configures a HorizontalPodAutoscaler for CosmoGuard.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| enable | Whether to enable CosmoGuard on this node. | bool | true |
-| config | ConfigMap containing the CosmoGuard configuration for this node. | *corev1.ConfigMapKeySelector | true |
-| restartPodOnFailure | Whether the node's pod should be restarted when CosmoGuard fails. | *bool | false |
-| resources | Compute Resources for CosmoGuard container. | *corev1.ResourceRequirements | false |
+| enable | Whether to enable horizontal autoscaling for CosmoGuard. | bool | true |
+| minReplicas | Minimum number of replicas. Defaults to `1`. | *int32 | false |
+| maxReplicas | Maximum number of replicas. | int32 | true |
+| targetCPUUtilizationPercentage | Target average CPU utilization (percentage) that triggers scaling. Defaults to `80`. | *int32 | false |
+| targetMemoryUtilizationPercentage | Target average memory utilization (percentage) that triggers scaling. Disabled when unset. | *int32 | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardConfig
+
+CosmoGuardConfig allows configuring CosmoGuard - a standalone firewall/policy proxy deployed in front of the node API endpoints (RPC/LCD/gRPC/EVM).
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enable | Whether to enable CosmoGuard on this node or group. | bool | true |
+| config | ConfigMap containing the CosmoGuard rules configuration. Only rules should be set here; upstream, listener, metrics and dashboard settings are managed by Cosmopilot. | *corev1.ConfigMapKeySelector | true |
+| image | Container image to use for CosmoGuard. Overrides the operator-wide default image. | *string | false |
+| replicas | Number of CosmoGuard replicas to run. Defaults to `1`. Ignored when autoscaling is enabled. | *int32 | false |
+| autoscaling | Autoscaling configures a HorizontalPodAutoscaler for the CosmoGuard deployment. | *[CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig) | false |
+| dashboard | Dashboard exposes CosmoGuard's read-only web dashboard. | *[CosmoGuardDashboardConfig](#cosmoguarddashboardconfig) | false |
+| resources | Compute Resources for each CosmoGuard pod. | *corev1.ResourceRequirements | false |
+| restartPodOnFailure | Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes, so this field has no effect and will be removed in a future release. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardAuth
+
+CosmoGuardDashboardAuth references Secret keys holding basic-auth credentials for the dashboard.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| username | Username credential. | corev1.SecretKeySelector | true |
+| password | Password credential. | corev1.SecretKeySelector | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardConfig
+
+CosmoGuardDashboardConfig configures CosmoGuard's read-only web dashboard.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enable | Whether to enable the CosmoGuard dashboard. | bool | true |
+| port | Port the dashboard listens on. Defaults to `8080`. | *int32 | false |
+| basicAuth | BasicAuth protects the dashboard with HTTP basic authentication using credentials sourced from a Secret. | *[CosmoGuardDashboardAuth](#cosmoguarddashboardauth) | false |
+| ingress | Ingress exposes the dashboard through an Ingress resource. | *[CosmoGuardDashboardIngress](#cosmoguarddashboardingress) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardIngress
+
+CosmoGuardDashboardIngress exposes the CosmoGuard dashboard through an Ingress.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| host | Host is the hostname to route dashboard traffic from. | string | true |
+| ingressClassName | IngressClassName is the name of the IngressClass to use. | *string | false |
+| annotations | Annotations to add to the dashboard Ingress. | map[string]string | false |
+| tlsSecretName | TLS enables TLS for the dashboard Ingress using the given secret name for the certificate. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 

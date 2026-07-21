@@ -81,7 +81,9 @@ func TestUpstreamServiceIsHeadless(t *testing.T) {
 	svc, err := r.buildGroupCosmoGuardUpstreamService(nodeSet, group)
 	require.NoError(t, err)
 	assert.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
-	assert.True(t, svc.Spec.PublishNotReadyAddresses)
+	// Upstream discovery must only surface READY node pods, so the guard never routes client traffic
+	// to syncing/upgrading/snapshotting nodes.
+	assert.False(t, svc.Spec.PublishNotReadyAddresses)
 	assert.Equal(t, map[string]string{
 		controllers.LabelChainNodeSet:      "chain",
 		controllers.LabelChainNodeSetGroup: "fullnodes",

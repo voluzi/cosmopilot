@@ -41,6 +41,11 @@ func (r *Reconciler) ensureCosmoGuardSecret(ctx context.Context, chainNode *apps
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: name}, secret)
 	if err == nil {
+		// Refuse a same-named Secret we don't own: the guard would consume a foreign (possibly stale
+		// or keyless) Secret, and Undeploy would never clean it up.
+		if !metav1.IsControlledBy(secret, chainNode) {
+			return fmt.Errorf("cosmoguard secret %q exists but is not owned by this ChainNode; refusing to use it", name)
+		}
 		return nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -117,18 +122,35 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 	return p
 }
 
-// ensureCosmoGuard reconciles the standalone CosmoGuard deployment for a ChainNode. Nodes that are
-// part of a ChainNodeSet are skipped: their group's guard is managed by the ChainNodeSet controller.
+// standaloneGuardManaged reports whether this ChainNode should have its own standalone CosmoGuard.
+// A ChainNodeSet child is fronted by its group's guard (managed by the ChainNodeSet controller), so
+// it never manages a per-node guard.
+func (r *Reconciler) standaloneGuardManaged(chainNode *appsv1.ChainNode) bool {
+	if _, isChild := chainNode.Labels[controllers.LabelChainNodeSet]; isChild {
+		return false
+	}
+	return chainNode.Spec.Config.CosmoGuardEnabled()
+}
+
+// finalizeCosmoGuard tears down a standalone guard the node no longer uses (CosmoGuard disabled, or
+// the node was moved into a ChainNodeSet). It runs AFTER ingress/gateway routes are reconciled, so
+// routes have already been retargeted to the raw node Service before the guard Service is removed —
+// avoiding a window where a live route points at a deleted backend (make-before-break on teardown).
+func (r *Reconciler) finalizeCosmoGuard(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if r.standaloneGuardManaged(chainNode) {
+		return nil
+	}
+	return cosmoguard.Undeploy(ctx, r.Client, chainNode, chainNode.GetNamespace(), chainNode.CosmoGuardName())
+}
+
+// ensureCosmoGuard reconciles the standalone CosmoGuard deployment for a ChainNode. It only
+// creates/updates resources; teardown (disabled, or the node became a ChainNodeSet child) is handled
+// by finalizeCosmoGuard after routes are retargeted.
 func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
-	// A ChainNodeSet child is fronted by its group's guard; never manage a per-node guard for it.
-	if _, isChild := chainNode.Labels[controllers.LabelChainNodeSet]; isChild {
+	if !r.standaloneGuardManaged(chainNode) {
 		return nil
-	}
-
-	if !chainNode.Spec.Config.CosmoGuardEnabled() {
-		return cosmoguard.Undeploy(ctx, r.Client, chainNode, chainNode.GetNamespace(), chainNode.CosmoGuardName())
 	}
 
 	if chainNode.Spec.Config.GetCosmoGuardConfig() == nil {
