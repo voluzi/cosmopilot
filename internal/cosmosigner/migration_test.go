@@ -179,6 +179,33 @@ func TestReconcileStatefulSetMigrationRechecksStatefulSetAbsenceBeforeRecreation
 	}
 }
 
+func TestRetainedStateRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		established bool
+		migration   *cosmopilotv1.CosmosignerMigrationStatus
+		want        bool
+	}{
+		{name: "first rollout", established: false},
+		{name: "migration proves establishment", migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationQuiescing, ResetState: true}, want: true},
+		{name: "established without migration", established: true, want: true},
+		{name: "same-key migration always retains state", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRecreating}, want: true},
+		{name: "different-key migration quiescing", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationQuiescing, ResetState: true}, want: true},
+		{name: "different-key migration deleting StatefulSet", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationDeleting, ResetState: true}, want: true},
+		{name: "different-key migration resetting state", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationResettingState, ResetState: true}},
+		{name: "different-key migration retargeting", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRetargeting, ResetState: true}},
+		{name: "different-key migration recreating", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRecreating, ResetState: true}},
+		{name: "different-key migration rolling out", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: cosmopilotv1.CosmosignerMigrationRollingOut, ResetState: true}},
+		{name: "unknown phase fails closed", established: true, migration: &cosmopilotv1.CosmosignerMigrationStatus{Phase: "Unknown", ResetState: true}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RetainedStateRequired(tc.established, tc.migration); got != tc.want {
+				t.Fatalf("RetainedStateRequired() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func clientKey(namespace, name string) types.NamespacedName {
 	return types.NamespacedName{Namespace: namespace, Name: name}
 }

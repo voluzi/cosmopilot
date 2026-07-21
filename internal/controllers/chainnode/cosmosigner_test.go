@@ -168,6 +168,62 @@ func TestReconcileCosmosignerMigrationQuiescesRuntimeOnlyChange(t *testing.T) {
 	require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
 }
 
+func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing.T) {
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			ChainID:                  "test-1",
+			CosmosignerAppliedDigest: "established-digest",
+			CosmosignerPublicKey:     parsed.PubKey.Value,
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{PrivKeyFilename: key},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	r := &Reconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+		Scheme: scheme,
+		opts:   &controllers.ControllerRunOptions{},
+	}
+
+	_, err = r.preflightCosmosigner(context.Background(), chainNode)
+	require.ErrorContains(t, err, "retained raft-state PVC")
+
+	chainNode.Status.CosmosignerReplicas = ptr.To(int32(2))
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-" + cosmosignerName(chainNode) + "-0", Namespace: chainNode.Namespace,
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "sentry-state-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	require.NoError(t, r.Create(context.Background(), pvc))
+	_, err = r.preflightCosmosigner(context.Background(), chainNode)
+	require.ErrorContains(t, err, "data-"+cosmosignerName(chainNode)+"-1")
+
+	chainNode.Status.CosmosignerMigration = &appsv1.CosmosignerMigrationStatus{
+		Phase:      appsv1.CosmosignerMigrationQuiescing,
+		ResetState: true,
+	}
+	_, err = r.preflightCosmosigner(context.Background(), chainNode)
+	require.ErrorContains(t, err, "retained raft-state PVC")
+
+	chainNode.Status.CosmosignerMigration.Phase = appsv1.CosmosignerMigrationResettingState
+	_, err = r.preflightCosmosigner(context.Background(), chainNode)
+	require.NoError(t, err)
+}
+
 func TestPreflightCosmosignerRejectsDifferentRecordedValidatorPublicKey(t *testing.T) {
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
@@ -530,6 +586,11 @@ func TestReconcileSigningConfigsValidatesMigrationSourceBeforeQuiescing(t *testi
 		ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace},
 		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
 	}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-" + cosmosignerName(chainNode) + "-0", Namespace: chainNode.Namespace,
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "validator-state-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -537,7 +598,7 @@ func TestReconcileSigningConfigsValidatesMigrationSourceBeforeQuiescing(t *testi
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&appsv1.ChainNode{}, &k8sappsv1.StatefulSet{}).
-		WithObjects(chainNode, token, source, sts).Build()
+		WithObjects(chainNode, token, source, sts, pvc).Build()
 	r := &Reconciler{Client: fakeClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 
 	pending, err := r.reconcileSigningConfigs(context.Background(), chainNode)

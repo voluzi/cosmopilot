@@ -215,6 +215,59 @@ func TestReconcileCosmosignerMigrationsCoversRuntimeAndKeyDrift(t *testing.T) {
 	}
 }
 
+func TestPreflightCosmosignersRefusesEstablishedSignerWithoutRaftState(t *testing.T) {
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"sentries"},
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+					PrivateKeySecret: ptr.To("sentry-key"),
+				}},
+			},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	status.AppliedDigest = "established-digest"
+	status.PublicKey = parsed.PubKey.Value
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: key},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, secret)
+
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.ErrorContains(t, err, "retained raft-state PVC")
+
+	status.Replicas = ptr.To(int32(2))
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-" + signer.Name + "-0", Namespace: nodeSet.Namespace,
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(nodeSet.UID)},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "sentry-state-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	require.NoError(t, r.Create(context.Background(), pvc))
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.ErrorContains(t, err, "data-"+signer.Name+"-1")
+
+	status.Migration = &appsv1.CosmosignerMigrationStatus{
+		Phase:      appsv1.CosmosignerMigrationQuiescing,
+		ResetState: true,
+	}
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.ErrorContains(t, err, "retained raft-state PVC")
+
+	status.Migration.Phase = appsv1.CosmosignerMigrationResettingState
+	require.NoError(t, r.preflightCosmosigners(context.Background(), nodeSet))
+}
+
 func TestReconcileCosmosignerMigrationsRequeuesAfterRecoveringLiveLifecycle(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},

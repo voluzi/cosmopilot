@@ -61,9 +61,9 @@ func ReadLifecycleDigest(ctx context.Context, c client.Client, namespace, name s
 // every reconcile.
 // usesPubkeyPod must be true when public-key preflight runs the one-shot `<name>-pubkey` pod. Software
 // and uploadGenerated signers resolve that key directly from their source Secret.
-// replicas is the desired StatefulSet replica count; fresh deployment also reserves each deterministic
-// `<name>-<ordinal>` pod name before validators are retargeted.
-func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, replicas int32, usesImportPod, usesPubkeyPod bool) error {
+// replicas is the desired count for a first rollout and the locked Raft membership for an established
+// signer. Every deterministic `<name>-<ordinal>` pod name is reserved before validators are retargeted.
+func PreflightDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, name string, replicas int32, usesImportPod, usesPubkeyPod, requireRetainedState bool) error {
 	// Objects that need only the same-owner check. Services are handled separately because their
 	// headless shape is immutable and must also match before deployment.
 	named := []struct {
@@ -106,18 +106,43 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		if err := ensureReplicaPodNamesAvailable(ctx, c, namespace, name, replicas, sts); err != nil {
 			return err
 		}
-		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
 	case errors.IsNotFound(err):
 		// A fresh StatefulSet cannot create a replica while any pod already holds its deterministic
 		// <name>-<ordinal> name, regardless of that pod's owner.
 		if err := ensureReplicaPodNamesAvailable(ctx, c, namespace, name, replicas, nil); err != nil {
 			return err
 		}
-		// ApplyOwned's Create path runs the PVC guard below.
-		return ensureNoForeignDataPVCs(ctx, c, owner, namespace, name)
 	default:
 		return err
 	}
+	// ApplyOwned's Create and Update paths re-run the foreign-PVC guard below.
+	if err := ensureNoForeignDataPVCs(ctx, c, owner, namespace, name); err != nil {
+		return err
+	}
+	if requireRetainedState {
+		return ensureRetainedDataPVCs(ctx, c, owner, namespace, name, replicas)
+	}
+	return nil
+}
+
+func ensureRetainedDataPVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace, name string, replicas int32) error {
+	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+		claimName := fmt.Sprintf("%s-%s-%d", dataVolumeName, name, ordinal)
+		pvc := &corev1.PersistentVolumeClaim{}
+		switch err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: claimName}, pvc); {
+		case errors.IsNotFound(err):
+			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is missing, so slash-protection history may have been lost; restore the claim from the original volume or complete a persisted different-key state reset", name, claimName)
+		case err != nil:
+			return err
+		case pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()):
+			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is not attributed to the current owner", name, claimName)
+		case !pvc.GetDeletionTimestamp().IsZero():
+			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is terminating, so recreating the StatefulSet could replace slash-protection history with an empty volume", name, claimName)
+		case pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "":
+			return fmt.Errorf("refusing to deploy established cosmosigner %q: retained raft-state PVC %q is not bound to a persistent volume, so its slash-protection history cannot be trusted", name, claimName)
+		}
+	}
+	return nil
 }
 
 func ensureHeadlessServiceDeployable(ctx context.Context, c client.Client, owner client.Object, namespace, kind, name string) error {

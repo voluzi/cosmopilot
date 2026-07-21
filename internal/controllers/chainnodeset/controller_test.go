@@ -617,6 +617,12 @@ func TestReconcileValidatesVaultMigrationSourceBeforeQuiescing(t *testing.T) {
 	)
 	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
 	require.NoError(t, r.Create(context.Background(), sts))
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-" + newSigner.Name + "-0", Namespace: nodeSet.Namespace,
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(nodeSet.UID)},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "validator-state-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	require.NoError(t, r.Create(context.Background(), pvc))
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: nodeSet.Name}})
 	require.Error(t, err)

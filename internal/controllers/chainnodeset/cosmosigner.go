@@ -234,10 +234,20 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		// uploadGenerated signer runs the one-shot <name>-import pod, so only it checks that name.
 		usesImportPod := s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s))
 		usesPubkeyPod := !s.Spec.UsesSoftwareBackend() && !usesImportPod
-		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName, s.Spec.GetReplicas(), usesImportPod, usesPubkeyPod); err != nil {
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		established := st != nil && (st.AppliedDigest != "" || st.SigningDigest != "" || st.PublicKey != "" || st.ServingIdentity != "")
+		var migration *appsv1.CosmosignerMigrationStatus
+		if st != nil {
+			migration = st.Migration
+		}
+		requireRetainedState := cosmosigner.RetainedStateRequired(established, migration)
+		replicas := s.Spec.GetReplicas()
+		if requireRetainedState && st != nil && st.Replicas != nil {
+			replicas = *st.Replicas
+		}
+		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName, replicas, usesImportPod, usesPubkeyPod, requireRetainedState); err != nil {
 			return err
 		}
-		st := nodeSet.GetCosmosignerStatus(s.Name)
 		if signerStatusNeedsRecovery(st) {
 			_, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {

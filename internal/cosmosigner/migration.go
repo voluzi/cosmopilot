@@ -9,6 +9,27 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
+// RetainedStateRequired reports whether an established signer must still have every locked Raft PVC.
+// A different-key migration may discard old slash-protection state only after its persisted phase has
+// reached ResettingState; unknown phases retain state so recovery fails closed.
+func RetainedStateRequired(established bool, migration *appsv1.CosmosignerMigrationStatus) bool {
+	if !established && migration == nil {
+		return false
+	}
+	if migration == nil || !migration.ResetState {
+		return true
+	}
+	switch migration.Phase {
+	case appsv1.CosmosignerMigrationResettingState,
+		appsv1.CosmosignerMigrationRetargeting,
+		appsv1.CosmosignerMigrationRecreating,
+		appsv1.CosmosignerMigrationRollingOut:
+		return false
+	default:
+		return true
+	}
+}
+
 // ReconcileStatefulSetMigration advances one persisted break-before-make migration phase. A phase
 // transition is returned to the caller for status persistence; ready is true only in Recreating.
 func ReconcileStatefulSetMigration(

@@ -405,7 +405,14 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	// then refuses. Only an uploadGenerated signer runs the one-shot <name>-import pod.
 	usesImportPod := chainNode.Spec.Cosmosigner.VaultUploadsGenerated(chainNode.ShouldInitGenesis())
 	usesPubkeyPod := !chainNode.Spec.Cosmosigner.UsesSoftwareBackend() && !usesImportPod
-	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), chainNode.Spec.Cosmosigner.GetReplicas(), usesImportPod, usesPubkeyPod); err != nil {
+	established := chainNode.Status.CosmosignerAppliedDigest != "" || chainNode.Status.CosmosignerSigningDigest != "" ||
+		chainNode.Status.CosmosignerPublicKey != "" || chainNode.Status.CosmosignerServingIdentity != ""
+	requireRetainedState := cosmosigner.RetainedStateRequired(established, chainNode.Status.CosmosignerMigration)
+	replicas := chainNode.Spec.Cosmosigner.GetReplicas()
+	if requireRetainedState && chainNode.Status.CosmosignerReplicas != nil {
+		replicas = *chainNode.Status.CosmosignerReplicas
+	}
+	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), replicas, usesImportPod, usesPubkeyPod, requireRetainedState); err != nil {
 		return cosmosigner.Params{}, err
 	}
 	recovering := chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == ""

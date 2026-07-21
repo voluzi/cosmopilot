@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -653,7 +654,7 @@ func TestApplyOwnedRechecksDataPVCsBeforeUpdatingStatefulSet(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	requireNoError(PreflightDeployable(context.Background(), c, owner, ns, name, 1, false, false))
+	requireNoError(PreflightDeployable(context.Background(), c, owner, ns, name, 1, false, false, false))
 	requireNoError(c.Create(context.Background(), &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
 	}}))
@@ -693,7 +694,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	for _, tc := range cases {
 		c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(tc.obj).Build()
 		// usesImportPod=true so the import-pod name is included in the collision checks.
-		err := PreflightDeployable(context.Background(), c, me, ns, name, 1, true, false)
+		err := PreflightDeployable(context.Background(), c, me, ns, name, 1, true, false, false)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("foreign %s must block preflight; got err=%v", tc.want, err)
 		}
@@ -703,21 +704,21 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	// / pre-provisioned Vault): usesImportPod=false skips that name so an unrelated pod cannot wedge it.
 	foreignImportPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: foreign}}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignImportPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false, false); err != nil {
 		t.Fatalf("a non-uploadGenerated signer must ignore a foreign import pod, got %v", err)
 	}
 	foreignPubkeyPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + pubkeyJobSuffix, Namespace: ns, OwnerReferences: foreign}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignPubkeyPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, true); err == nil || !strings.Contains(err.Error(), "pubkey pod") {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, true, false); err == nil || !strings.Contains(err.Error(), "pubkey pod") {
 		t.Fatalf("an external backend must reserve its pubkey preflight pod, got %v", err)
 	}
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false, false); err != nil {
 		t.Fatalf("a Secret-resolved public key must ignore an unused foreign pubkey pod, got %v", err)
 	}
 
 	foreignReplicaPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns, OwnerReferences: foreign}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(foreignReplicaPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
 		t.Fatalf("a foreign signer replica pod must block preflight, got %v", err)
 	}
 
@@ -725,7 +726,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: name, Namespace: ns, UID: "signer-sts-uid", OwnerReferences: []metav1.OwnerReference{ownerRef(me)},
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, foreignReplicaPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false, false); err == nil || !strings.Contains(err.Error(), "replica pod") {
 		t.Fatalf("a foreign replica pod must block re-scaling an owned StatefulSet, got %v", err)
 	}
 
@@ -733,7 +734,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: name + "-0", Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(ownedSTS)},
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, ownedReplicaPod).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false, false); err != nil {
 		t.Fatalf("a replica pod controlled by the owned StatefulSet must remain deployable, got %v", err)
 	}
 
@@ -741,7 +742,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "other-uid"),
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, foreignDataPVC).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false, false); err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
 		t.Fatalf("a foreign retained data PVC must block re-scaling an owned StatefulSet, got %v", err)
 	}
 
@@ -749,13 +750,13 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		Name: dataVolumeName + "-" + name + "-0", Namespace: ns, Labels: pvcOwnerLabels(name, "me-uid"),
 	}}
 	c = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(ownedSTS, ownDataPVC).Build()
-	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false); err != nil {
+	if err := PreflightDeployable(context.Background(), c, me, ns, name, 1, false, false, false); err != nil {
 		t.Fatalf("an owned retained data PVC must remain deployable, got %v", err)
 	}
 
 	// Nothing present (true first rollout): allowed.
 	empty := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
-	if err := PreflightDeployable(context.Background(), empty, me, ns, name, 1, true, false); err != nil {
+	if err := PreflightDeployable(context.Background(), empty, me, ns, name, 1, true, false, false); err != nil {
 		t.Fatalf("empty namespace must be deployable, got %v", err)
 	}
 
@@ -767,8 +768,60 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 			Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
 		},
 	).Build()
-	if err := PreflightDeployable(context.Background(), mine, me, ns, name, 1, true, false); err != nil {
+	if err := PreflightDeployable(context.Background(), mine, me, ns, name, 1, true, false, false); err != nil {
 		t.Fatalf("own objects must be deployable, got %v", err)
+	}
+}
+
+func TestPreflightDeployableRequiresCompleteRetainedRaftState(t *testing.T) {
+	const ns, name = "default", "cs-signer"
+	owner := fakeOwner("cs", types.UID("owner-uid"))
+	claim := func(ordinal int) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Name:      dataVolumeName + "-" + name + "-" + strconv.Itoa(ordinal),
+			Namespace: ns,
+			Labels:    pvcOwnerLabels(name, owner.UID),
+		}, Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "pv-" + strconv.Itoa(ordinal),
+		}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	}
+	terminating := claim(0)
+	now := metav1.Now()
+	terminating.DeletionTimestamp = &now
+	terminating.Finalizers = []string{"test.voluzi.com/hold"}
+	unbound := claim(0)
+	unbound.Spec.VolumeName = ""
+	unbound.Status.Phase = corev1.ClaimPending
+
+	for _, tc := range []struct {
+		name    string
+		objects []client.Object
+		wantErr string
+	}{
+		{name: "all state missing", wantErr: dataVolumeName + "-" + name + "-0"},
+		{name: "partial HA state", objects: []client.Object{claim(0)}, wantErr: dataVolumeName + "-" + name + "-1"},
+		{name: "terminating state", objects: []client.Object{terminating, claim(1)}, wantErr: "is terminating"},
+		{name: "unbound state", objects: []client.Object{unbound, claim(1)}, wantErr: "is not bound"},
+		{name: "complete HA state", objects: []client.Object{claim(0), claim(1)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(tc.objects...).Build()
+			err := PreflightDeployable(context.Background(), c, owner, ns, name, 2, false, false, true)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "retained raft-state PVC") || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("unsafe retained state must fail closed with the affected claim, got %v", err)
+			}
+		})
+	}
+
+	empty := fake.NewClientBuilder().WithScheme(lockScheme(t)).Build()
+	if err := PreflightDeployable(context.Background(), empty, owner, ns, name, 2, false, false, false); err != nil {
+		t.Fatalf("a true first rollout must not require retained state: %v", err)
 	}
 }
 
@@ -781,21 +834,21 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessRaftService(t *testing.T) {
 	}
 	client := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(normal).Build()
 
-	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false)
+	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false, false)
 	if err == nil || !strings.Contains(err.Error(), "not headless") {
 		t.Fatalf("owned non-headless raft Service must block preflight, got %v", err)
 	}
 	externalName := normal.DeepCopy()
 	externalName.Spec = corev1.ServiceSpec{Type: corev1.ServiceTypeExternalName, ExternalName: "example.com"}
 	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(externalName).Build()
-	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false); err == nil || !strings.Contains(err.Error(), "not headless") {
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false, false); err == nil || !strings.Contains(err.Error(), "not headless") {
 		t.Fatalf("owned ExternalName raft Service must block preflight, got %v", err)
 	}
 
 	headless := normal.DeepCopy()
 	headless.Spec.ClusterIP = corev1.ClusterIPNone
 	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(headless).Build()
-	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false); err != nil {
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false, false); err != nil {
 		t.Fatalf("owned headless raft Service must remain deployable, got %v", err)
 	}
 }
@@ -809,7 +862,7 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessDiscoveryService(t *testing.T
 	}
 	client := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(normal).Build()
 
-	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false)
+	err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false, false)
 	if err == nil || !strings.Contains(err.Error(), "discovery Service") || !strings.Contains(err.Error(), "not headless") {
 		t.Fatalf("owned non-headless discovery Service must block preflight, got %v", err)
 	}
@@ -817,7 +870,7 @@ func TestPreflightDeployableRefusesOwnedNonHeadlessDiscoveryService(t *testing.T
 	headless := normal.DeepCopy()
 	headless.Spec.ClusterIP = corev1.ClusterIPNone
 	client = fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(headless).Build()
-	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false); err != nil {
+	if err := PreflightDeployable(context.Background(), client, me, ns, name, 1, false, false, false); err != nil {
 		t.Fatalf("owned headless discovery Service must remain deployable, got %v", err)
 	}
 }
