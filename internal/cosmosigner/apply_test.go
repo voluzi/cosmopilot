@@ -483,6 +483,40 @@ func TestUndeployCleansOwnPVCsDespiteForeignStatefulSet(t *testing.T) {
 	}
 }
 
+func TestUndeployKeepsOwnedPVCWhileForeignSameNameSignerPodExists(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := fakeOwner("owner", types.UID("owner-uid"))
+	foreignOwner := fakeOwner("foreign", types.UID("foreign-uid"))
+	foreignSTS := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(foreignOwner)},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns, Labels: InstanceLabels(name)}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
+		Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreignSTS, pod, pvc).Build()
+
+	if err := Undeploy(context.Background(), c, owner, ns, name); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), fresh); err != nil {
+		t.Fatalf("owned retained state must remain while the foreign signer pod is live: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(fresh, RetainedStateFinalizer) {
+		t.Fatal("retained-state finalizer was released while the foreign signer pod was live")
+	}
+	torn, err := IsTornDown(context.Background(), c, owner, ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if torn {
+		t.Fatal("a live same-name signer pod must keep teardown incomplete")
+	}
+}
+
 func TestUndeployKeepsRetainedPVCUntilSignerPodsAreGone(t *testing.T) {
 	const ns, name = "default", "cs-signer"
 	owner := fakeOwner("owner", types.UID("owner-uid"))
@@ -710,6 +744,53 @@ func TestApplyOwnedRechecksDataPVCsBeforeUpdatingStatefulSet(t *testing.T) {
 	err := ApplyOwned(context.Background(), c, scheme, owner, desired, applyGuard{})
 	if err == nil || !strings.Contains(err.Error(), "raft-state PVC") {
 		t.Fatalf("a foreign PVC appearing after preflight must block StatefulSet scale-up, got %v", err)
+	}
+}
+
+func TestApplyOwnedRefusesScaleUpWithUnprotectedLivePVCTemplate(t *testing.T) {
+	scheme := lockScheme(t)
+	const ns, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns, UID: types.UID("me-uid")}}
+	one := int32(1)
+	live := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &one,
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{
+				Name: dataVolumeName, Labels: pvcOwnerLabels(name, owner.UID),
+			}}},
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName + "-" + name + "-0", Namespace: ns,
+			Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "pv-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(live, pvc).Build()
+	desired := live.DeepCopy()
+	two := int32(2)
+	desired.Spec.Replicas = &two
+	desired.ResourceVersion = ""
+	desired.OwnerReferences = nil
+
+	err := ApplyOwned(context.Background(), c, scheme, owner, desired, applyGuard{
+		RequireRetainedState: true, RetainedStateReplicas: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "volume claim template") {
+		t.Fatalf("scale-up with an unprotected live PVC template must fail closed, got %v", err)
+	}
+	fresh := &appsv1.StatefulSet{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(live), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if ptr.Deref(fresh.Spec.Replicas, 1) != 0 || fresh.Annotations[retainedStateLostAnnotation] != "true" {
+		t.Fatalf("unsafe scale-up must quiesce and latch the signer, got replicas=%d annotations=%v", ptr.Deref(fresh.Spec.Replicas, 1), fresh.Annotations)
 	}
 }
 

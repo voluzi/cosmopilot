@@ -316,6 +316,10 @@ func ensureStatefulSetPVCsForApply(ctx context.Context, c client.Client, owner c
 	if live != nil && live.GetAnnotations()[retainedStateLostAnnotation] == "true" {
 		return fmt.Errorf("%w: refusing to deploy cosmosigner %q because retained slash-protection state was previously lost or became unsafe; complete a persisted different-key state reset", errUnsafeRetainedState, sts.GetName())
 	}
+	if live != nil && ptr.Deref(sts.Spec.Replicas, 1) > ptr.Deref(live.Spec.Replicas, 1) &&
+		!statefulSetPVCTemplateRetainsState(live) {
+		return fmt.Errorf("%w: refusing to scale cosmosigner %q because its live volume claim template does not protect newly created raft-state PVCs; complete the break-before-make StatefulSet migration first", errUnsafeRetainedState, sts.GetName())
+	}
 	if err := ensureNoForeignDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName()); err != nil {
 		return err
 	}
@@ -332,6 +336,16 @@ func ensureStatefulSetPVCsForApply(ctx context.Context, c client.Client, owner c
 		return fmt.Errorf("%w: refusing to deploy established cosmosigner %q: retained raft-state replica lock is missing or invalid", errUnsafeRetainedState, sts.GetName())
 	}
 	return ensureRetainedDataPVCs(ctx, c, owner, sts.GetNamespace(), sts.GetName(), guard.RetainedStateReplicas)
+}
+
+func statefulSetPVCTemplateRetainsState(sts *appsv1.StatefulSet) bool {
+	for i := range sts.Spec.VolumeClaimTemplates {
+		claim := &sts.Spec.VolumeClaimTemplates[i]
+		if claim.GetName() == dataVolumeName {
+			return controllerutil.ContainsFinalizer(claim, RetainedStateFinalizer)
+		}
+	}
+	return false
 }
 
 func quiesceUnsafeRetainedState(ctx context.Context, c client.Client, sts *appsv1.StatefulSet, cause error) error {

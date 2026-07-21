@@ -59,9 +59,10 @@ func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, names
 }
 
 // ProtectRetainedStatePVCs ensures verified live claims carry the deletion guard that an immutable
-// volumeClaimTemplate cannot add in place. Only bound, non-terminating claims already attributed to
-// this owner are protected; unknown or unsafe claims remain untouched for strict preflight to reject.
-func ProtectRetainedStatePVCs(ctx context.Context, c client.Client, owner metav1.Object, namespace string) (bool, error) {
+// volumeClaimTemplate cannot add in place. Owned StatefulSets whose template cannot protect new
+// claims are retired through the normal retain-and-quiesce path before reconciliation resumes.
+// Unknown or unsafe claims remain untouched for strict preflight to reject.
+func ProtectRetainedStatePVCs(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -83,6 +84,18 @@ func ProtectRetainedStatePVCs(ctx context.Context, c client.Client, owner metav1
 			return changed, err
 		}
 		changed = true
+	}
+	statefulSets := &appsv1.StatefulSetList{}
+	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
+		return changed, err
+	}
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if !IsOwnedSignerStatefulSet(sts, owner) || statefulSetPVCTemplateRetainsState(sts) {
+			continue
+		}
+		_, err := DeleteStatefulSet(ctx, c, owner, namespace, sts.GetName())
+		return true, err
 	}
 	return changed, nil
 }
@@ -146,8 +159,7 @@ func FinalizeOwner(ctx context.Context, c client.Client, owner client.Object, na
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
-		if pvc.GetLabels()[labelAppName] != appNameCosmosigner ||
-			pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
 			!isStatefulSetDataPVC(pvc.GetName(), name) {
 			continue
 		}

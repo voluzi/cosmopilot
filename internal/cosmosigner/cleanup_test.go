@@ -50,6 +50,42 @@ func TestProtectRetainedStatePVCsUpgradesOnlyVerifiedClaims(t *testing.T) {
 	}
 }
 
+func TestProtectRetainedStatePVCsRetiresLegacyTemplate(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: namespace, Generation: 1,
+			OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &zero,
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{
+				Name: dataVolumeName, Labels: pvcOwnerLabels(name, owner.UID),
+			}}},
+		},
+		Status: appsv1.StatefulSetStatus{ObservedGeneration: 1, Replicas: 0},
+	}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts).Build()
+
+	pending, err := ProtectRetainedStatePVCs(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending {
+		t.Fatal("a live legacy PVC template must keep owner preparation pending")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy-template StatefulSet must be retired before reconciliation resumes, got %v", err)
+	}
+}
+
 func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
@@ -120,6 +156,35 @@ func TestFinalizeOwnerIgnoresNonSignerStatefulSet(t *testing.T) {
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); err != nil {
 		t.Fatalf("non-signer StatefulSet was modified or deleted: %v", err)
+	}
+}
+
+func TestFinalizeOwnerFindsRetainedPVCWithoutAppLabel(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: namespace,
+		Labels: map[string]string{
+			labelInstance: name,
+			labelOwnerUID: string(owner.UID),
+		},
+		Finalizers: []string{RetainedStateFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
+
+	done := false
+	for attempts := 0; attempts < 4 && !done; attempts++ {
+		var err error
+		done, err = FinalizeOwner(context.Background(), c, owner, namespace)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !done {
+		t.Fatal("owner finalization did not remove the retained claim with a stripped app label")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("retained claim with a stripped app label must be deleted, got %v", err)
 	}
 }
 
