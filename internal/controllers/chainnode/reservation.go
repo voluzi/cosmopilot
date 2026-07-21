@@ -43,7 +43,7 @@ func (r *Reconciler) ensureValidatorConsensusKeyReservation(ctx context.Context,
 		}
 	}
 	holder := validatorReservationHolder(chainNode)
-	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, holder); err != nil {
+	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.reservationReader(), r.Client, chainNode.Status.ChainID, publicKey, holder); err != nil {
 		if errors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
 			return false, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
 		}

@@ -413,7 +413,7 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 				return nil, r.quiesceCosmosigners(ctx, nodeSet, err, params.Name)
 			}
 		}
-		if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, nodeSet.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
+		if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.reservationReader(), r.Client, nodeSet.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
 			UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(),
 			Claim:             nodeSetCosmosignerReservationClaim(nodeSet, s),
 			LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, desired, s),

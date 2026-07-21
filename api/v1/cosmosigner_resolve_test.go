@@ -410,6 +410,7 @@ func TestValidateCosmosignerSignerAdditionToEstablishedValidator(t *testing.T) {
 				ChainID: "test-1",
 				Validators: []ChainNodeSetValidatorStatus{{
 					Name: "cs-vg-0", Group: "vg", PubKey: "registered-pubkey", Address: "cosmosvaloper1registered",
+					Status: ValidatorStatusUnbonded,
 				}},
 			},
 		}
@@ -471,7 +472,7 @@ func TestValidateCosmosignerRequiresCompletedRegistrationForMigrationWaiver(t *t
 		Status: ChainNodeSetStatus{
 			ChainID: "test-1",
 			Validators: []ChainNodeSetValidatorStatus{{
-				Name: "cs-validators-0", Group: "validators", PubKey: "generated-but-not-registered",
+				Name: "cs-validators-0", Group: "validators", Address: "cosmosvaloper1pending", PubKey: "generated-but-not-registered",
 			}},
 		},
 	}
@@ -511,9 +512,20 @@ func TestValidateCosmosignerNoWebhookWaiverRequiresMatchingSigningDigest(t *test
 				ChainID: "test-1",
 				Validators: []ChainNodeSetValidatorStatus{{
 					Name: "cs-validators-0", Group: "validators", Address: "cosmosvaloper1registered",
+					PubKey: "registered-pubkey", Status: ValidatorStatusUnbonded,
 				}},
 			},
 		}
+	}
+
+	// A matching signer digest does not make a pre-on-chain address/public-key record sufficient.
+	pending := base()
+	pending.Status.Validators[0].Status = ""
+	pendingSigner := pending.ResolveCosmosigners()[0]
+	pendingStatus := pending.EnsureCosmosignerStatus(pendingSigner.Name)
+	pendingStatus.SigningDigest = pendingSigner.Digest()
+	if _, err := pending.Validate(nil); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("no-webhook migration before on-chain validator status must be rejected, got: %v", err)
 	}
 
 	// Registration recorded but no signing digest → waiver denied.

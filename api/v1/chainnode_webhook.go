@@ -172,20 +172,22 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		// so the backend must be software (which references it) or Vault uploadGenerated (which
 		// imports it — auto-defaulted for genesis-init validators, matching the documented tmKMS
 		// parity) — not a pre-provisioned Vault/GCP key with a different pubkey. Waived for a
-		// migration on an established validator whose registration COMPLETED — the controller records
-		// status.validatorAddress only once the node's key is found in the on-chain validator set, so
-		// a validator block or chain ID alone does not qualify (an external-genesis node can run with
-		// a validator block without ever registering): Cosmopilot performs a break-before-make signer
-		// transition, while the user remains responsible for ensuring the selected key is appropriate
+		// migration only after the controller records the operator address, consensus public key, and
+		// staking status returned by the on-chain validator query. Account and local-key setup can
+		// populate the address and public key before registration completes. Cosmopilot performs a
+		// break-before-make signer transition, while the user remains responsible for the selected key
 		// for the on-chain validator. On the no-webhook path
 		// (old == nil) the waiver requires the status-recorded signing digest to MATCH the current
 		// spec: the digest is only ever recorded after this exact signer identity was rolled out and
 		// serving, so a matching digest proves the pre-provisioned key is the in-effect one — while
 		// a NEWLY added signer (no digest, or digest from a different identity) stays subject to the
 		// rule, since "registration completed" alone says nothing about the new backend's key.
+		registrationRecorded := func(candidate *ChainNode) bool {
+			return candidate.Status.ValidatorAddress != "" && candidate.Status.PubKey != "" && candidate.Status.ValidatorStatus != ""
+		}
 		recordedDigest := chainNode.Status.CosmosignerSigningDigest
-		migrationWaiver := (old != nil && old.Status.ChainID != "" && old.Spec.Validator != nil && old.Status.ValidatorAddress != "") ||
-			(old == nil && chainNode.Status.ChainID != "" && chainNode.Status.ValidatorAddress != "" &&
+		migrationWaiver := (old != nil && old.Status.ChainID != "" && old.Spec.Validator != nil && registrationRecorded(old)) ||
+			(old == nil && chainNode.Status.ChainID != "" && registrationRecorded(chainNode) &&
 				recordedDigest != "" && recordedDigest == chainNode.CosmosignerSigningDigest())
 		if registers && !migrationWaiver {
 			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(initializesGenesis)

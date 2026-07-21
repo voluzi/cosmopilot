@@ -28,6 +28,7 @@ import (
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
 	client.Client
+	APIReader  client.Reader
 	ClientSet  *kubernetes.Clientset
 	RestConfig *rest.Config
 	Scheme     *runtime.Scheme
@@ -38,6 +39,7 @@ type Reconciler struct {
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {
 	r := &Reconciler{
 		Client:     mgr.GetClient(),
+		APIReader:  mgr.GetAPIReader(),
 		ClientSet:  clientSet,
 		RestConfig: mgr.GetConfig(),
 		Scheme:     mgr.GetScheme(),
@@ -48,6 +50,13 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 		return nil, err
 	}
 	return r, nil
+}
+
+func (r *Reconciler) reservationReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets,verbs=get;list;watch;create;update;patch;delete

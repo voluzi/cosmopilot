@@ -777,7 +777,7 @@ func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s Resolve
 	registers := targetValidator.Init != nil || targetValidator.CreateValidator != nil
 	registrationRecorded := func(candidate *ChainNodeSet) bool {
 		for _, validator := range candidate.Status.Validators {
-			if validator.Group == s.ValidatorGroup && validator.Address != "" {
+			if validator.Group == s.ValidatorGroup && validator.Address != "" && validator.PubKey != "" && validator.Status != "" {
 				return true
 			}
 		}

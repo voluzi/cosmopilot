@@ -540,7 +540,7 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 			return cosmosigner.Params{}, r.quiesceManagedCosmosigner(ctx, chainNode, params.Name, fmt.Errorf("cosmosigner cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history"))
 		}
 	}
-	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
+	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.reservationReader(), r.Client, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
 		UID: chainNode.GetUID(), Kind: "ChainNode", Namespace: chainNode.GetNamespace(), Name: chainNode.GetName(), Claim: standaloneCosmosignerReservationClaim(chainNode),
 	}); err != nil {
 		if stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {

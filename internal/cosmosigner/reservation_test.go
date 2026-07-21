@@ -25,8 +25,8 @@ func TestEnsureConsensusKeyReservationIsAtomicAcrossOwners(t *testing.T) {
 	first := ReservationHolder{UID: types.UID("owner-a"), Kind: "ChainNode", Namespace: "a", Name: "validator-a", Claim: "signer"}
 	second := ReservationHolder{UID: types.UID("owner-b"), Kind: "ChainNode", Namespace: "b", Name: "validator-b", Claim: "signer"}
 
-	requireReservation(t, c, "chain-1", reservationTestPublicKey, first)
-	if err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, second); err == nil {
+	requireReservation(t, c, c, "chain-1", reservationTestPublicKey, first)
+	if err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, second); err == nil {
 		t.Fatal("a second owner must not acquire the same chain/public-key reservation")
 	} else if !errors.Is(err, ErrConsensusKeyReservationConflict) {
 		t.Fatalf("reservation ownership conflict must be identifiable, got %v", err)
@@ -38,6 +38,19 @@ func TestEnsureConsensusKeyReservationIsAtomicAcrossOwners(t *testing.T) {
 	}
 	if reservation.Spec.OwnerUID != first.UID {
 		t.Fatalf("reservation owner changed: got %q want %q", reservation.Spec.OwnerUID, first.UID)
+	}
+}
+
+func TestEnsureConsensusKeyReservationRejectsClaimConflictWithStaleCachedLists(t *testing.T) {
+	scheme := reservationScheme(t)
+	direct := fake.NewClientBuilder().WithScheme(scheme).Build()
+	cached := &staleReservationListClient{Client: direct}
+	holder := ReservationHolder{UID: types.UID("owner-a"), Kind: "ChainNode", Namespace: "a", Name: "validator-a", Claim: "signer"}
+
+	requireReservation(t, direct, cached, "chain-1", reservationTestPublicKey, holder)
+	err := EnsureConsensusKeyReservation(context.Background(), direct, cached, "chain-1", reservationOtherPublicKey, holder)
+	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
+		t.Fatalf("a stale cached reservation list must not allow one claim to reserve two keys, got %v", err)
 	}
 }
 
@@ -53,7 +66,7 @@ func TestEnsureConsensusKeyReservationBlocksLegacyStatusOwner(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacy).Build()
 	holder := ReservationHolder{UID: types.UID("new-owner"), Kind: "ChainNodeSet", Namespace: "new", Name: "new", Claim: "signer"}
 
-	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder)
+	err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 	if err == nil {
 		t.Fatal("legacy status serving the key must block reservation acquisition")
 	}
@@ -81,7 +94,7 @@ func TestEnsureConsensusKeyReservationRejectsSiblingClaimLegacyChild(t *testing.
 		UID: "nodeset-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "nodes-validator-b",
 	}
 
-	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder)
+	err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
 		t.Fatalf("a sibling claim must not reuse a same-root child validator key, got %v", err)
 	}
@@ -105,7 +118,7 @@ func TestEnsureConsensusKeyReservationAllowsHAValidatorStatusAliases(t *testing.
 		LegacyNodeNames: []string{"nodes-validators-0", "nodes-validators-1"},
 	}
 
-	if err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder); err != nil {
+	if err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder); err != nil {
 		t.Fatalf("redundant validator endpoints in one logical signer claim must share the reservation: %v", err)
 	}
 }
@@ -128,7 +141,7 @@ func TestEnsureConsensusKeyReservationAllowsExactPlacementReplacementStatuses(t 
 		LegacyStatusNames: []string{"nodes-signer", "nodes-validators-signer"},
 	}
 
-	if err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder); err != nil {
+	if err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder); err != nil {
 		t.Fatalf("one logical signer placement replacement must share its reservation: %v", err)
 	}
 }
@@ -144,7 +157,7 @@ func TestEnsureConsensusKeyReservationBlocksLegacySingletonAlias(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(legacy).Build()
 	holder := ReservationHolder{UID: "new-owner", Kind: "ChainNode", Namespace: "new", Name: "new", Claim: "new"}
 
-	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder)
+	err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
 		t.Fatalf("a legacy singleton alias must block another root from reserving its live key, got %v", err)
 	}
@@ -154,8 +167,8 @@ func TestEnsureConsensusKeyReservationAllowsSameRootOwner(t *testing.T) {
 	scheme := reservationScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	holder := ReservationHolder{UID: types.UID("nodeset-uid"), Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "validator"}
-	requireReservation(t, c, "chain-1", reservationTestPublicKey, holder)
-	requireReservation(t, c, "chain-1", reservationTestPublicKey, holder)
+	requireReservation(t, c, c, "chain-1", reservationTestPublicKey, holder)
+	requireReservation(t, c, c, "chain-1", reservationTestPublicKey, holder)
 }
 
 func TestEnsureConsensusKeyReservationRejectsConflictingSiblingWhenExactReservationExists(t *testing.T) {
@@ -177,7 +190,7 @@ func TestEnsureConsensusKeyReservationRejectsConflictingSiblingWhenExactReservat
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(exact, sibling).Build()
 
-	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder)
+	err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
 		t.Fatalf("an exact reservation must not hide a sibling reservation for the same claim, got %v", err)
 	}
@@ -189,9 +202,9 @@ func TestEnsureConsensusKeyReservationRejectsDifferentClaimWithinSameRoot(t *tes
 	first := ReservationHolder{UID: types.UID("nodeset-uid"), Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "validator-a"}
 	second := first
 	second.Claim = "validator-b"
-	requireReservation(t, c, "chain-1", reservationTestPublicKey, first)
+	requireReservation(t, c, c, "chain-1", reservationTestPublicKey, first)
 
-	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, second)
+	err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, second)
 	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
 		t.Fatalf("independent claims in one root must not share slash-protection state, got %v", err)
 	}
@@ -201,9 +214,9 @@ func TestEnsureConsensusKeyReservationRejectsDifferentKeyForSameClaim(t *testing
 	scheme := reservationScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	holder := ReservationHolder{UID: types.UID("nodeset-uid"), Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "validator-a"}
-	requireReservation(t, c, "chain-1", reservationTestPublicKey, holder)
+	requireReservation(t, c, c, "chain-1", reservationTestPublicKey, holder)
 
-	err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationOtherPublicKey, holder)
+	err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationOtherPublicKey, holder)
 	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
 		t.Fatalf("a logical validator with an older reservation must not claim another key, got %v", err)
 	}
@@ -221,7 +234,7 @@ func TestEnsureConsensusKeyReservationRejectsInconsistentExistingObject(t *testi
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reservation).Build()
 
-	if err := EnsureConsensusKeyReservation(context.Background(), c, "chain-1", reservationTestPublicKey, holder); err == nil {
+	if err := EnsureConsensusKeyReservation(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder); err == nil {
 		t.Fatal("an existing reservation with mismatched identity fields must fail closed")
 	}
 }
@@ -238,9 +251,9 @@ func reservationScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func requireReservation(t *testing.T, c client.Client, chainID, publicKey string, holder ReservationHolder) {
+func requireReservation(t *testing.T, reader client.Reader, writer client.Writer, chainID, publicKey string, holder ReservationHolder) {
 	t.Helper()
-	if err := EnsureConsensusKeyReservation(context.Background(), c, chainID, publicKey, holder); err != nil {
+	if err := EnsureConsensusKeyReservation(context.Background(), reader, writer, chainID, publicKey, holder); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -252,6 +265,18 @@ func containsAll(value string, values ...string) bool {
 		}
 	}
 	return true
+}
+
+type staleReservationListClient struct {
+	client.Client
+}
+
+func (c *staleReservationListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if reservations, ok := list.(*appsv1.ConsensusKeyReservationList); ok {
+		reservations.Items = nil
+		return nil
+	}
+	return c.Client.List(ctx, list, opts...)
 }
 
 func reservationBoolPtr(value bool) *bool { return &value }
