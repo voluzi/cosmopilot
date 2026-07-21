@@ -2,6 +2,7 @@ package chainnodeset
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -302,8 +303,13 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 }
 
 func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (map[string]cosmosigner.Params, error) {
+	type publicKeyOwner struct {
+		signerName   string
+		resourceName string
+	}
+
 	prepared := make(map[string]cosmosigner.Params)
-	publicKeyOwners := make(map[string]string)
+	publicKeyOwners := make(map[string]publicKeyOwner)
 	desired := nodeSet.ResolveCosmosigners()
 	for _, s := range desired {
 		if r.signerImportSourcePending(nodeSet, s) &&
@@ -323,6 +329,7 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		}
 		st := nodeSet.GetCosmosignerStatus(s.Name)
 		publicKey := ""
+		recoveredLive := false
 		if signerStatusNeedsRecovery(st) {
 			recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
@@ -330,6 +337,7 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			}
 			if live {
 				publicKey = recovered
+				recoveredLive = true
 			}
 		}
 		if publicKey == "" {
@@ -339,21 +347,16 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			}
 		}
 		if previous, duplicate := publicKeyOwners[publicKey]; duplicate {
-			return nil, fmt.Errorf("cosmosigners %q and %q resolve to the same consensus public key on chain %q; one ChainNodeSet cannot run independent double-sign state for the same validator key", previous, s.Name, nodeSet.Status.ChainID)
+			conflict := fmt.Errorf("%w: cosmosigners %q and %q resolve to the same consensus public key on chain %q; one ChainNodeSet cannot run independent double-sign state for the same validator key", cosmosigner.ErrConsensusKeyReservationConflict, previous.signerName, s.Name, nodeSet.Status.ChainID)
+			return nil, r.quiesceCosmosigners(ctx, nodeSet, conflict, previous.resourceName, params.Name)
 		}
-		publicKeyOwners[publicKey] = s.Name
+		publicKeyOwners[publicKey] = publicKeyOwner{signerName: s.Name, resourceName: params.Name}
 		if s.TargetsValidator() {
-			for _, validator := range nodeSet.Status.Validators {
-				if validator.Group != s.ValidatorGroup || validator.PubKey == "" {
-					continue
+			if err := r.validateValidatorSignerPublicKey(ctx, nodeSet, s, publicKey); err != nil {
+				if recoveredLive {
+					return nil, r.quiesceCosmosigners(ctx, nodeSet, err, params.Name)
 				}
-				onChain := cosmosigner.CanonicalSDKPublicKey(validator.PubKey)
-				if onChain == "" {
-					return nil, fmt.Errorf("cosmosigner %q cannot verify the on-chain validator public key recorded for group %q", s.Name, s.ValidatorGroup)
-				}
-				if publicKey != onChain {
-					return nil, fmt.Errorf("cosmosigner %q public key does not match the on-chain validator public key recorded for group %q; Cosmopilot does not rotate validator consensus keys", s.Name, s.ValidatorGroup)
-				}
+				return nil, err
 			}
 			if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.PublicKey != "" && publicKey != st.PublicKey {
 				return nil, fmt.Errorf("cosmosigner %q cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history", s.Name)
@@ -365,6 +368,9 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, desired, s),
 			LegacyNodeNames:   nodeSetCosmosignerLegacyNodeNames(nodeSet, s),
 		}); err != nil {
+			if stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
+				return nil, r.quiesceCosmosigners(ctx, nodeSet, err, nodeSetCosmosignerConflictResourceNames(nodeSet, desired, publicKey, params.Name)...)
+			}
 			return nil, err
 		}
 		params.ExpectedPublicKey = publicKey
@@ -372,6 +378,97 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		prepared[s.Name] = params
 	}
 	return prepared, nil
+}
+
+func (r *Reconciler) quiesceCosmosigners(ctx context.Context, nodeSet *appsv1.ChainNodeSet, cause error, resourceNames ...string) error {
+	seen := make(map[string]struct{}, len(resourceNames))
+	for _, resourceName := range resourceNames {
+		if resourceName == "" {
+			continue
+		}
+		if _, duplicate := seen[resourceName]; duplicate {
+			continue
+		}
+		seen[resourceName] = struct{}{}
+		if _, err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName); err != nil {
+			cause = fmt.Errorf("%w; failed to scale down cosmosigner %q: %v", cause, resourceName, err)
+		}
+	}
+	return cause
+}
+
+func nodeSetCosmosignerConflictResourceNames(nodeSet *appsv1.ChainNodeSet, desired []appsv1.ResolvedSigner, publicKey, current string) []string {
+	resourceNames := []string{current}
+	for _, signer := range desired {
+		status := nodeSet.GetCosmosignerStatus(signer.Name)
+		if status == nil || status.PublicKey != publicKey {
+			continue
+		}
+		resourceNames = append(resourceNames, nodeSet.CosmosignerResourceName(signer))
+	}
+	return resourceNames
+}
+
+func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, publicKey string) error {
+	for _, validator := range nodeSet.Status.Validators {
+		if validator.Group != signer.ValidatorGroup || validator.PubKey == "" {
+			continue
+		}
+		onChain := cosmosigner.CanonicalSDKPublicKey(validator.PubKey)
+		if onChain == "" {
+			return fmt.Errorf("cosmosigner %q cannot verify the on-chain validator public key recorded for group %q", signer.Name, signer.ValidatorGroup)
+		}
+		if publicKey != onChain {
+			return fmt.Errorf("cosmosigner %q public key does not match the on-chain validator public key recorded for group %q; Cosmopilot does not rotate validator consensus keys", signer.Name, signer.ValidatorGroup)
+		}
+	}
+
+	seenChildren := map[string]struct{}{}
+	validateChild := func(child *appsv1.ChainNode) error {
+		if !metav1.IsControlledBy(child, nodeSet) || child.Status.PubKey == "" {
+			return nil
+		}
+		onChain := cosmosigner.CanonicalSDKPublicKey(child.Status.PubKey)
+		if onChain == "" {
+			return fmt.Errorf("cosmosigner %q cannot verify the on-chain validator public key recorded by owned child ChainNode %q", signer.Name, child.GetName())
+		}
+		if publicKey != onChain {
+			return fmt.Errorf("cosmosigner %q public key does not match the on-chain validator public key recorded by owned child ChainNode %q; Cosmopilot does not rotate validator consensus keys", signer.Name, child.GetName())
+		}
+		return nil
+	}
+
+	for _, name := range nodeSetCosmosignerLegacyNodeNames(nodeSet, signer) {
+		child := &appsv1.ChainNode{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, child); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		seenChildren[child.GetName()] = struct{}{}
+		if err := validateChild(child); err != nil {
+			return err
+		}
+	}
+
+	children := &appsv1.ChainNodeList{}
+	if err := r.List(ctx, children, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
+		controllers.LabelChainNodeSet:      nodeSet.GetName(),
+		controllers.LabelChainNodeSetGroup: signer.ValidatorGroup,
+	}); err != nil {
+		return err
+	}
+	for i := range children.Items {
+		child := &children.Items[i]
+		if _, seen := seenChildren[child.GetName()]; seen {
+			continue
+		}
+		if err := validateChild(child); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func nodeSetCosmosignerLegacyStatusNames(nodeSet *appsv1.ChainNodeSet, desired []appsv1.ResolvedSigner, signer appsv1.ResolvedSigner) []string {
@@ -446,27 +543,48 @@ func nodeSetCosmosignerReservationClaim(nodeSet *appsv1.ChainNodeSet, signer app
 }
 
 // validateRecoveredSignerTargets fails closed when a signer being recovered from live state (its
-// recorded digests are gone) still serves pods whose group the current spec no longer targets.
+// recorded digests are gone) still serves nodes whose group the current spec no longer targets.
 // ValidateRecoveredSigningIdentity proves the live signer uses the desired backend, but not WHICH
-// nodes it signs for: the cosmosigner-target label on live pods is the last applied truth, and a
-// spec restored with different targets would otherwise rewrite children with none of the
+// nodes it signs for: the target labels on live pods and owned child ChainNodes are the last applied
+// truth, and a spec restored with different targets would otherwise rewrite children without the
 // migration/fallback guards the missing status would have triggered.
 func (r *Reconciler) validateRecoveredSignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, resourceName string) error {
-	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
+	selector := client.MatchingLabels{
 		controllers.LabelChainNodeSet:      nodeSet.GetName(),
 		controllers.LabelCosmosignerTarget: resourceName,
-	}); err != nil {
-		return err
 	}
 	desired := make(map[string]struct{}, len(s.TargetGroups))
 	for _, group := range s.TargetGroups {
 		desired[group] = struct{}{}
 	}
-	for i := range pods.Items {
-		group := pods.Items[i].GetLabels()[controllers.LabelChainNodeSetGroup]
+	validateGroup := func(group string) error {
 		if _, ok := desired[group]; !ok {
-			return fmt.Errorf("cosmosigner %q is still serving pods of group %q, which the current spec no longer targets, and its recorded status was lost: refusing to adopt the live signer under the new targets — restore .status.cosmosigners or the previous target set", s.Name, group)
+			return fmt.Errorf("cosmosigner %q is still serving nodes of group %q, which the current spec no longer targets, and its recorded status was lost: refusing to adopt the live signer under the new targets — restore .status.cosmosigners or the previous target set", s.Name, group)
+		}
+		return nil
+	}
+
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(nodeSet.GetNamespace()), selector); err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		if err := validateGroup(pods.Items[i].GetLabels()[controllers.LabelChainNodeSetGroup]); err != nil {
+			return err
+		}
+	}
+
+	children := &appsv1.ChainNodeList{}
+	if err := r.List(ctx, children, client.InNamespace(nodeSet.GetNamespace()), selector); err != nil {
+		return err
+	}
+	for i := range children.Items {
+		child := &children.Items[i]
+		if !metav1.IsControlledBy(child, nodeSet) {
+			continue
+		}
+		if err := validateGroup(child.GetLabels()[controllers.LabelChainNodeSetGroup]); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -725,18 +843,26 @@ func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSe
 		}
 
 		var cfg *appsv1.NodeSetValidatorConfig
+		instances := 0
 		if st.ServingGroup == appsv1.ReservedValidatorGroupName {
 			cfg = nodeSet.Spec.Validator
+			if cfg != nil {
+				instances = 1
+			}
 		} else {
 			for j := range nodeSet.Spec.Nodes {
 				if nodeSet.Spec.Nodes[j].Name == st.ServingGroup {
 					cfg = nodeSet.Spec.Nodes[j].Validator
+					instances = nodeSet.Spec.Nodes[j].GetInstances()
 					break
 				}
 			}
 		}
 		if cfg == nil {
 			return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has no fallback signing path", st.Name, st.ServingGroup)
+		}
+		if instances <= 0 {
+			return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has zero instances and therefore no live fallback signing path", st.Name, st.ServingGroup)
 		}
 
 		if cfg.TmKMS != nil {

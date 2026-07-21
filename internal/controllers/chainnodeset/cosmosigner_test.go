@@ -438,6 +438,145 @@ func TestPrepareCosmosignerParamsAllowsMultiInstanceValidatorEndpointsWithShared
 	require.NoError(t, err, "redundant endpoints served by one signer must share its reservation")
 }
 
+func TestPrepareCosmosignerParamsRejectsOwnedChildValidatorKeyMismatch(t *testing.T) {
+	desiredKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	childKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	childParsed, err := cometbft.LoadPrivKey(childKey)
+	require.NoError(t, err)
+
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "validators", Instances: ptr.To(1),
+			Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{},
+			}},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: desiredKey},
+	}
+	child := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: validatorNodeName(nodeSet, "validators", 0), Namespace: nodeSet.Namespace},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: nodeSet.Status.ChainID,
+			PubKey:  `{"key":"` + childParsed.PubKey.Value + `"}`,
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, child, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, secret, child)
+
+	_, err = r.prepareCosmosignerParams(context.Background(), nodeSet)
+	require.ErrorContains(t, err, "owned child")
+	reservations := &appsv1.ConsensusKeyReservationList{}
+	require.NoError(t, r.List(context.Background(), reservations))
+	require.Empty(t, reservations.Items)
+}
+
+func TestPrepareCosmosignerParamsRejectsStaleOwnedChildValidatorKeyMismatch(t *testing.T) {
+	desiredKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	childKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	childParsed, err := cometbft.LoadPrivKey(childKey)
+	require.NoError(t, err)
+
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "validators", Instances: ptr.To(1),
+			Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{},
+			}},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: desiredKey},
+	}
+	child := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: validatorNodeName(nodeSet, "validators", 1), Namespace: nodeSet.Namespace,
+			Labels: map[string]string{
+				controllers.LabelChainNodeSet:      nodeSet.Name,
+				controllers.LabelChainNodeSetGroup: "validators",
+			},
+		},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: nodeSet.Status.ChainID,
+			PubKey:  `{"key":"` + childParsed.PubKey.Value + `"}`,
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, child, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, secret, child)
+
+	_, err = r.prepareCosmosignerParams(context.Background(), nodeSet)
+	require.ErrorContains(t, err, "owned child")
+}
+
+func TestPrepareCosmosignerParamsQuiescesRecoveredSignerOnChildKeyMismatch(t *testing.T) {
+	desiredKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	desiredParsed, err := cometbft.LoadPrivKey(desiredKey)
+	require.NoError(t, err)
+	liveKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	liveParsed, err := cometbft.LoadPrivKey(liveKey)
+	require.NoError(t, err)
+
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "validators", Instances: ptr.To(1),
+			Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+			Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+				Software: &appsv1.CosmosignerSoftwareBackend{},
+			}},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: desiredKey},
+	}
+	child := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: validatorNodeName(nodeSet, "validators", 0), Namespace: nodeSet.Namespace},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: nodeSet.Status.ChainID,
+			PubKey:  `{"key":"` + desiredParsed.PubKey.Value + `"}`,
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, child, testScheme(t)))
+	r := newValidatorTestReconciler(t, nodeSet, secret, child)
+	params, err := r.cosmosignerParams(context.Background(), nodeSet, signer)
+	require.NoError(t, err)
+	params.ExpectedPublicKey = liveParsed.PubKey.Value
+	configYAML, err := params.ConfigYAML()
+	require.NoError(t, err)
+	configMap, err := params.ConfigMap(configYAML)
+	require.NoError(t, err)
+	sts, err := params.StatefulSet(configYAML)
+	require.NoError(t, err)
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, configMap, r.Scheme))
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), configMap))
+	require.NoError(t, r.Create(context.Background(), sts))
+
+	_, err = r.prepareCosmosignerParams(context.Background(), nodeSet)
+	require.ErrorContains(t, err, "owned child")
+	fresh := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sts), fresh))
+	require.Zero(t, ptr.Deref(fresh.Spec.Replicas, int32(-1)))
+}
+
 func TestPrepareCosmosignerParamsRejectsDuplicateAndReservedKeys(t *testing.T) {
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
@@ -454,10 +593,27 @@ func TestPrepareCosmosignerParamsRejectsDuplicateAndReservedKeys(t *testing.T) {
 			}},
 			Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
 		}
-		r := newValidatorTestReconciler(t, nodeSet, sharedSecret.DeepCopy())
+		signers := nodeSet.ResolveCosmosigners()
+		objects := []client.Object{nodeSet, sharedSecret.DeepCopy()}
+		for _, signer := range signers {
+			status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+			status.AppliedDigest = "rolled-out"
+			sts := &k8sappsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeSet.CosmosignerResourceName(signer), Namespace: nodeSet.Namespace},
+				Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+			}
+			require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+			objects = append(objects, sts)
+		}
+		r := newValidatorTestReconciler(t, objects...)
 		_, err := r.prepareCosmosignerParams(context.Background(), nodeSet)
-		require.Error(t, err)
+		require.ErrorIs(t, err, cosmosigner.ErrConsensusKeyReservationConflict)
 		require.Contains(t, err.Error(), "same consensus public key")
+		for _, signer := range signers {
+			fresh := &k8sappsv1.StatefulSet{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: nodeSet.Namespace, Name: nodeSet.CosmosignerResourceName(signer)}, fresh))
+			require.Zero(t, ptr.Deref(fresh.Spec.Replicas, int32(-1)))
+		}
 	})
 
 	t.Run("reservation held by another root", func(t *testing.T) {
@@ -472,10 +628,22 @@ func TestPrepareCosmosignerParamsRejectsDuplicateAndReservedKeys(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)},
 			Spec:       appsv1.ConsensusKeyReservationSpec{ChainID: "test-1", PublicKey: parsed.PubKey.Value, OwnerUID: "other-uid", OwnerKind: "ChainNode", Namespace: "other", OwnerName: "validator"},
 		}
-		r := newValidatorTestReconciler(t, nodeSet, sharedSecret.DeepCopy(), reservation)
+		signer := resolveSingleSigner(t, nodeSet)
+		status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+		status.AppliedDigest = "rolled-out"
+		status.PublicKey = parsed.PubKey.Value
+		sts := &k8sappsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeSet.CosmosignerResourceName(signer), Namespace: nodeSet.Namespace},
+			Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+		}
+		require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+		r := newValidatorTestReconciler(t, nodeSet, sharedSecret.DeepCopy(), reservation, sts)
 		_, err := r.prepareCosmosignerParams(context.Background(), nodeSet)
-		require.Error(t, err)
+		require.ErrorIs(t, err, cosmosigner.ErrConsensusKeyReservationConflict)
 		require.Contains(t, err.Error(), "already reserved")
+		fresh := &k8sappsv1.StatefulSet{}
+		require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sts), fresh))
+		require.Zero(t, ptr.Deref(fresh.Spec.Replicas, int32(-1)))
 	})
 }
 
@@ -1460,6 +1628,27 @@ func TestPreflightRemovedSignerFallbacksRequiresMatchingLocalPublicKey(t *testin
 	require.NoError(t, r.preflightRemovedSignerFallbacks(context.Background(), nodeSet))
 }
 
+func TestPreflightRemovedSignerFallbacksRejectsZeroInstanceGroup(t *testing.T) {
+	servedKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	served, err := cometbft.LoadPrivKey(servedKey)
+	require.NoError(t, err)
+
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	recordSignerRollout(t, nodeSet)
+	nodeSet.Status.Cosmosigners[0].PublicKey = served.PubKey.Value
+	nodeSet.Spec.Cosmosigner = nil
+	nodeSet.Spec.Nodes[0].Instances = ptr.To(0)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "val-priv-key", Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: servedKey},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, secret)
+
+	err = r.preflightRemovedSignerFallbacks(context.Background(), nodeSet)
+	require.ErrorContains(t, err, "zero instances")
+}
+
 func TestPreflightRemovedSignerFallbacksDoesNotTrustDifferentTmKMSTarget(t *testing.T) {
 	nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 	recordSignerRollout(t, nodeSet)
@@ -1953,9 +2142,8 @@ func TestReconcileSignerTeardownFailsClosedOnOrphanedLiveSigner(t *testing.T) {
 }
 
 // TestPreflightCosmosignersRejectsRecoveredSignerServingUntargetedGroup verifies that a signer
-// recovered from live state (recorded digests lost) cannot be adopted under a spec whose target
-// set no longer covers the pods it still serves: the live pods' target label is the last applied
-// truth, and the removed group's fallback guards would otherwise never run.
+// recovered from live state cannot be adopted under a spec whose target set excludes an existing
+// pod or owned child that still records the previous target.
 func TestPreflightCosmosignersRejectsRecoveredSignerServingUntargetedGroup(t *testing.T) {
 	keyBytes, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
@@ -1996,6 +2184,26 @@ func TestPreflightCosmosignersRejectsRecoveredSignerServingUntargetedGroup(t *te
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `"sentries-a"`)
 	assert.Contains(t, err.Error(), "no longer targets")
+
+	servedChild := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-nodeset-sentries-a-0", Namespace: "default",
+		Labels: map[string]string{
+			controllers.LabelChainNodeSet:      "test-nodeset",
+			controllers.LabelChainNodeSetGroup: "sentries-a",
+			controllers.LabelCosmosignerTarget: "test-nodeset-sentries-b-signer",
+		},
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, servedChild, testScheme(t)))
+	r = newValidatorTestReconciler(t, nodeSet, keySecret, servedChild)
+	err = r.preflightCosmosigners(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"sentries-a"`)
+	assert.Contains(t, err.Error(), "no longer targets")
+
+	foreignChild := servedChild.DeepCopy()
+	foreignChild.OwnerReferences = nil
+	r = newValidatorTestReconciler(t, nodeSet, keySecret, foreignChild)
+	require.NoError(t, r.preflightCosmosigners(context.Background(), nodeSet))
 
 	// A spec restored with the original target set adopts the live signer.
 	matchingPod := servedPod.DeepCopy()

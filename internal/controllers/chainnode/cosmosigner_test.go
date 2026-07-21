@@ -224,6 +224,62 @@ func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing
 	require.NoError(t, err)
 }
 
+func TestPreflightCosmosignerQuiescesSentrySignerOnReservationConflict(t *testing.T) {
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	parsed, err := cometbft.LoadPrivKey(key)
+	require.NoError(t, err)
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			ChainID:                  "test-1",
+			CosmosignerAppliedDigest: "rolled-out",
+			CosmosignerPublicKey:     parsed.PubKey.Value,
+			CosmosignerReplicas:      ptr.To(int32(1)),
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sentry-key", Namespace: chainNode.Namespace},
+		Data:       map[string][]byte{PrivKeyFilename: key},
+	}
+	reservation := &appsv1.ConsensusKeyReservation{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosigner.ConsensusKeyReservationName(chainNode.Status.ChainID, parsed.PubKey.Value)},
+		Spec: appsv1.ConsensusKeyReservationSpec{
+			ChainID: chainNode.Status.ChainID, PublicKey: parsed.PubKey.Value, OwnerUID: "other-uid",
+			OwnerKind: "ChainNodeSet", Namespace: "other", OwnerName: "other", Claim: "other-validator",
+		},
+	}
+	sts := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace},
+		Spec:       k8sappsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-" + cosmosignerName(chainNode) + "-0", Namespace: chainNode.Namespace,
+		Labels: map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(chainNode.UID)},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "sentry-state-0"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
+	r := &Reconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, reservation, sts, pvc).Build(),
+		Scheme: scheme,
+		opts:   &controllers.ControllerRunOptions{},
+	}
+
+	_, err = r.preflightCosmosigner(context.Background(), chainNode)
+	require.ErrorIs(t, err, cosmosigner.ErrConsensusKeyReservationConflict)
+	fresh := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sts), fresh))
+	require.Zero(t, ptr.Deref(fresh.Spec.Replicas, int32(-1)))
+}
+
 func TestPreflightCosmosignerRejectsDifferentRecordedValidatorPublicKey(t *testing.T) {
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)

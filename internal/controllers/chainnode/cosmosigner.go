@@ -454,8 +454,13 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.Client, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
 		UID: chainNode.GetUID(), Kind: "ChainNode", Namespace: chainNode.GetNamespace(), Name: chainNode.GetName(), Claim: standaloneCosmosignerReservationClaim(chainNode),
 	}); err != nil {
-		if chainNode.IsValidator() && stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
-			return cosmosigner.Params{}, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
+		if stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
+			if _, scaleErr := cosmosigner.ScaleDown(ctx, r.Client, chainNode, chainNode.GetNamespace(), params.Name); scaleErr != nil {
+				err = fmt.Errorf("%w; failed to scale down conflicting cosmosigner %q: %v", err, params.Name, scaleErr)
+			}
+			if chainNode.IsValidator() {
+				return cosmosigner.Params{}, r.quiesceValidatorOnReservationConflict(ctx, chainNode, err)
+			}
 		}
 		return cosmosigner.Params{}, err
 	}
