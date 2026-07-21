@@ -922,7 +922,7 @@ TmKmsHashicorpProvider holds `hashicorp` provider specific configurations.
 | certificateSecret | Secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
 | tokenSecret | Secret containing the token to be used. | *corev1.SecretKeySelector | true |
 | uploadGenerated | UploadGenerated indicates if the controller should upload the generated private key to vault. Defaults to `false`. Will be set to `true` if this validator is initializing a new genesis. This should not be used in production. | bool | false |
-| autoRenewToken | Whether to automatically renew the Vault token. Defaults to `false`. Deprecated: this deploys vault-token-renewer for legacy tmKMS configurations. Cosmosigner renews Vault tokens internally and does not use this sidecar. | bool | false |
+| autoRenewToken | Deprecated: AutoRenewToken deploys vault-token-renewer for legacy tmKMS configurations and defaults to `false`. Cosmosigner renews Vault tokens internally and does not use this sidecar. | bool | false |
 | skipCertificateVerify | Whether to skip certificate verification. Defaults to `false`. | bool | false |
 
 [Back to Custom Resources](#custom-resources)

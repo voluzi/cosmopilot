@@ -5309,9 +5309,8 @@ spec:
                                 type: string
                               autoRenewToken:
                                 description: |-
-                                  Whether to automatically renew the Vault token. Defaults to `false`.
-                                  Deprecated: this deploys vault-token-renewer for legacy tmKMS configurations. Cosmosigner
-                                  renews Vault tokens internally and does not use this sidecar.
+                                  Deprecated: AutoRenewToken deploys vault-token-renewer for legacy tmKMS configurations and
+                                  defaults to `false`. Cosmosigner renews Vault tokens internally and does not use this sidecar.
                                 type: boolean
                               certificateSecret:
                                 description: Secret containing the CA certificate
