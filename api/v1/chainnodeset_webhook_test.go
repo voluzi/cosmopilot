@@ -10,6 +10,40 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestChainNodeSetValidateRejectsCosmoGuardOnLegacyValidator(t *testing.T) {
+	guardCfg := func() *Config {
+		return &Config{CosmoGuard: &CosmoGuardConfig{
+			Enable: true,
+			Config: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "rules"},
+				Key:                  "cosmoguard.yaml",
+			},
+		}}
+	}
+
+	// Legacy singleton .spec.validator with cosmoGuard -> rejected (it would be silently unguarded now
+	// that the in-pod sidecar is gone).
+	legacy := &ChainNodeSet{Spec: ChainNodeSetSpec{
+		Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+		Validator: &NodeSetValidatorConfig{Config: guardCfg()},
+	}}
+	_, err := legacy.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ".spec.validator.config.cosmoGuard is not supported")
+
+	// A .spec.nodes validator group with cosmoGuard is the supported form -> not rejected by this rule.
+	group := &ChainNodeSet{Spec: ChainNodeSetSpec{
+		Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+		Nodes: []NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(1),
+			Validator: &NodeSetValidatorConfig{Config: guardCfg()},
+		}},
+	}}
+	_, err = group.Validate(nil)
+	require.NoError(t, err)
+}
+
 func TestChainNodeSetValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
 	tmkms := func(key string) *TmKMS {
 		return &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
