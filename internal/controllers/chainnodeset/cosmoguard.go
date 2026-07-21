@@ -264,13 +264,30 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		if err != nil {
 			return cosmoGuardReconcile{}, err
 		}
-		ready[group.Name] = serving
+		// Sticky flip: a group is treated as guard-ready if its guard is serving OR its public Service
+		// is already flipped to the guard. This keeps a guarded Service on the guard through transient
+		// un-readiness (a spec change before the StatefulSet observes its generation, or a single
+		// replica restarting) instead of briefly reverting to raw node pods and bypassing policy. The
+		// first flip still requires the guard to actually be serving (make-before-break). On disable the
+		// group is skipped above, so its Service reverts to raw regardless of prior flip state.
+		flipped := serving || r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), group.GetServiceName(nodeSet))
+		ready[group.Name] = flipped
 		if !serving {
-			logger.Info("waiting for cosmoguard to become ready", "group", group.Name, "cosmoguard", name)
+			logger.Info("cosmoguard not yet serving", "group", group.Name, "cosmoguard", name, "keeping-flip", flipped)
 		}
 	}
 
 	return cosmoGuardReconcile{ready: ready, expected: expected, expectedIngress: expectedIngress}, nil
+}
+
+// serviceSelectsGuard reports whether the named Service currently selects CosmoGuard pods (i.e. it
+// has already been flipped). Missing/unreadable Services count as not-flipped.
+func (r *Reconciler) serviceSelectsGuard(ctx context.Context, namespace, name string) bool {
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, svc); err != nil {
+		return false
+	}
+	return cosmoguard.SelectsGuard(svc.Spec.Selector)
 }
 
 func (r *Reconciler) deleteCosmoGuardHPA(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {

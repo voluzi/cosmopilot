@@ -1,6 +1,7 @@
 package chainnodeset
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -90,6 +91,26 @@ func TestUpstreamServiceIsHeadless(t *testing.T) {
 		controllers.LabelChainNodeSetGroup: "fullnodes",
 	}, svc.Spec.Selector)
 	assert.Equal(t, int32(chainutils.RpcPort), svc.Spec.Ports[0].TargetPort.IntVal)
+}
+
+// TestServiceSelectsGuard verifies the sticky-flip detector recognizes a Service already flipped to
+// the guard, so a guarded Service is kept on the guard through transient rollout un-readiness.
+func TestServiceSelectsGuard(t *testing.T) {
+	flipped := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "chain-fullnodes", Namespace: "ns"},
+		Spec:       corev1.ServiceSpec{Selector: cosmoguard.InstanceLabels("chain-fullnodes-cosmoguard")},
+	}
+	raw := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "chain-other", Namespace: "ns"},
+		Spec: corev1.ServiceSpec{Selector: map[string]string{
+			controllers.LabelChainNodeSet: "chain", controllers.LabelChainNodeSetGroup: "other",
+		}},
+	}
+	r := newValidatorTestReconciler(t, flipped, raw)
+
+	assert.True(t, r.serviceSelectsGuard(context.Background(), "ns", "chain-fullnodes"))
+	assert.False(t, r.serviceSelectsGuard(context.Background(), "ns", "chain-other"))
+	assert.False(t, r.serviceSelectsGuard(context.Background(), "ns", "missing"))
 }
 
 func TestCosmoGuardRouteReady(t *testing.T) {

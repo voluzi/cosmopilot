@@ -167,6 +167,13 @@ func AppLabel() map[string]string {
 	return map[string]string{labelAppName: appName}
 }
 
+// SelectsGuard reports whether a Service selector targets CosmoGuard pods (i.e. the Service has
+// already been flipped to the guard). Used to keep a guarded Service on the guard through transient
+// guard rollouts rather than reverting it to raw node pods.
+func SelectsGuard(selector map[string]string) bool {
+	return selector[labelAppName] == appName
+}
+
 // PeerServiceName derives the headless peer Service name from the guard name.
 func PeerServiceName(name string) string { return name + "-peer" }
 

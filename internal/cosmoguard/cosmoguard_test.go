@@ -159,6 +159,13 @@ func TestPeerService(t *testing.T) {
 	assert.True(t, udp, "gossip UDP port exposed")
 }
 
+func TestSelectsGuard(t *testing.T) {
+	assert.True(t, SelectsGuard(InstanceLabels("chain-group-cosmoguard")))
+	assert.True(t, SelectsGuard(AppLabel()))
+	assert.False(t, SelectsGuard(map[string]string{"nodeset": "chain", "group": "fullnodes"}))
+	assert.False(t, SelectsGuard(nil))
+}
+
 func TestGenerateEncryptionKey(t *testing.T) {
 	k, err := GenerateEncryptionKey()
 	require.NoError(t, err)
