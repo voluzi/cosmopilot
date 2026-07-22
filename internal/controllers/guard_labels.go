@@ -39,13 +39,22 @@ func GuardInheritedLabels(ownerLabels map[string]string) map[string]string {
 		LabelCosmosignerTarget,
 		LabelWorkerName,
 	)
-	for k := range out {
-		// Match the two owned prefixes at the start of the key (guard-private and per-route), not
-		// anywhere in it — an unrelated user label whose DNS prefix merely ends in the domain (e.g.
-		// "acme-cosmoguard.voluzi.com/tier") must be preserved.
+	return StripCosmoGuardLabelDomain(out)
+}
+
+// StripCosmoGuardLabelDomain removes any label under CosmoGuard's owned domain — its guard-private
+// selector labels (cosmoguard.voluzi.com/…) and per-route selector labels (route.cosmoguard.voluzi.com/…)
+// — from a label set, matching the two owned prefixes at the START of the key (not anywhere in it, so
+// an unrelated user label whose DNS prefix merely ends in the domain like "acme-cosmoguard.voluzi.com/tier"
+// is preserved). Applied both to labels inherited onto guard pods and to labels inherited onto node
+// pods: a user-set label under this domain must never land on a raw node pod, or a flipped guard Service
+// (which selects on these labels) would select node pods that do not listen on the guard ports. Mutates
+// and returns the input map.
+func StripCosmoGuardLabelDomain(labels map[string]string) map[string]string {
+	for k := range labels {
 		if strings.HasPrefix(k, CosmoGuardLabelDomain) || strings.HasPrefix(k, "route."+CosmoGuardLabelDomain) {
-			delete(out, k)
+			delete(labels, k)
 		}
 	}
-	return out
+	return labels
 }

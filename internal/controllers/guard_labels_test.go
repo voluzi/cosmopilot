@@ -71,3 +71,16 @@ func TestGuardInheritedLabelsStripsGuardDomain(t *testing.T) {
 	assert.NotContains(t, out, "cosmoguard.voluzi.com/managed-by")
 	assert.NotContains(t, out, "cosmoguard.voluzi.com/instance")
 }
+
+// TestStripCosmoGuardLabelDomain verifies the shared helper (applied to node-pod labels too) removes
+// only the owned prefixes, so a user-set guard-domain label can never land on a node pod.
+func TestStripCosmoGuardLabelDomain(t *testing.T) {
+	out := StripCosmoGuardLabelDomain(map[string]string{
+		"team":                             "x",
+		"cosmoguard.voluzi.com/managed-by": "cosmoguard",
+		"cosmoguard.voluzi.com/instance":   "g",
+		"route.cosmoguard.voluzi.com/r":    "true",
+		"acme-cosmoguard.voluzi.com/tier":  "keep",
+	})
+	assert.Equal(t, map[string]string{"team": "x", "acme-cosmoguard.voluzi.com/tier": "keep"}, out)
+}

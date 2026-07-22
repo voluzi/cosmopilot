@@ -192,6 +192,9 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		// Inherit the node's user labels (minus cosmopilot-managed selector keys) so NetworkPolicies /
 		// monitoring that selected the node pod also cover the standalone guard.
 		Labels: controllers.GuardInheritedLabels(chainNode.Labels),
+		// Mirror the node's pod security context (fsGroup, supplemental groups, …) as the sidecar did;
+		// nil falls back to the restricted default.
+		PodSecurityContext: cfg.GetPodSecurityContext(),
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {

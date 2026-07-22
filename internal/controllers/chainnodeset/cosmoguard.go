@@ -95,10 +95,12 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 		ServiceAccountName: cfg.GetServiceAccountName(),
 		// Carry the group's pod annotations (mesh/Vault injection, admission markers) plus the mirrored
 		// safe-to-evict setting, as the in-pod sidecar did by sharing the node pod.
-		PodAnnotations:    cosmoguard.GuardPodAnnotations(cfg.PodAnnotations, cfg.SafeToEvict),
-		PriorityClassName: priorityClassName,
-		NodeSelector:      nodeSelector,
-		Affinity:          affinity,
+		PodAnnotations: cosmoguard.GuardPodAnnotations(cfg.PodAnnotations, cfg.SafeToEvict),
+		// Mirror the group's pod security context (fsGroup, supplemental groups, …); nil -> restricted.
+		PodSecurityContext: cfg.GetPodSecurityContext(),
+		PriorityClassName:  priorityClassName,
+		NodeSelector:       nodeSelector,
+		Affinity:           affinity,
 	}
 
 	if cfg.CosmoGuardAutoscalingEnabled() {
@@ -224,6 +226,13 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 	for _, group := range nodeSet.Spec.Nodes {
 		cfg := group.GetServiceConfig()
 		if !cfg.CosmoGuardEnabled() {
+			continue
+		}
+
+		// A scaled-to-zero group has no node pods behind the guard. Skip it so the guard is torn down
+		// (absent from the expected set) and the group Service falls back to the empty raw selector
+		// rather than leaving a routable guard proxy in front of an empty group.
+		if group.GetInstances() == 0 {
 			continue
 		}
 
@@ -542,6 +551,11 @@ func cosmoGuardRouteGuardable(nodeSet *appsv1.ChainNodeSet, groups []string) boo
 			return false
 		}
 		if cfg := g.GetServiceConfig(); cfg == nil || !cfg.CosmoGuardEnabled() {
+			return false
+		}
+		// A scaled-to-zero group has no guard (skipped in ensureCosmoGuards), so a route spanning it is
+		// not guardable — its route-labelled guard selector would match no pods for that group.
+		if g.GetInstances() == 0 {
 			return false
 		}
 	}

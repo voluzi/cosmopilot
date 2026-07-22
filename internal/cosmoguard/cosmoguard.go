@@ -150,6 +150,19 @@ type Params struct {
 	// node's cluster-autoscaler safe-to-evict setting so a pinned node's guard isn't scaled away out
 	// from under already-flipped traffic.
 	PodAnnotations map[string]string
+
+	// PodSecurityContext overrides the guard pod's security context (fsGroup, supplemental groups,
+	// runAs*, seccomp, …), mirroring the fronted node's — the in-pod sidecar inherited it. Nil falls
+	// back to the restricted default.
+	PodSecurityContext *corev1.PodSecurityContext
+}
+
+// podSecurityContext returns the configured pod security context, or the restricted default when unset.
+func (p Params) podSecurityContext() *corev1.PodSecurityContext {
+	if p.PodSecurityContext != nil {
+		return p.PodSecurityContext
+	}
+	return k8s.RestrictedPodSecurityContext()
 }
 
 // GuardPodAnnotations returns the annotations the guard pods should carry: the fronted node/group's
@@ -397,7 +410,7 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: p.podLabels(), Annotations: p.PodAnnotations},
 				Spec: corev1.PodSpec{
-					SecurityContext:    k8s.RestrictedPodSecurityContext(),
+					SecurityContext:    p.podSecurityContext(),
 					PriorityClassName:  p.PriorityClassName,
 					ServiceAccountName: p.ServiceAccountName,
 					ImagePullSecrets:   p.ImagePullSecrets,

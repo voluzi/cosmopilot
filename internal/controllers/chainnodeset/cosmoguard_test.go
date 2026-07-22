@@ -114,6 +114,24 @@ func TestGroupGuardScheduling(t *testing.T) {
 	assert.Equal(t, "validators-sa", p.ServiceAccountName)
 }
 
+// TestZeroInstanceGroupSkipsGuard verifies a group scaled to instances:0 (still CosmoGuard-enabled)
+// gets no guard: it is absent from the expected set (so cleanup removes any prior guard), never marked
+// ready (so its Service falls back to the empty raw selector), and is not route-guardable.
+func TestZeroInstanceGroupSkipsGuard(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	group.Instances = ptr.To(0)
+	nodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{group}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	res, err := r.ensureCosmoGuards(context.Background(), nodeSet)
+	require.NoError(t, err)
+
+	name := groupCosmoGuardName(nodeSet, group)
+	assert.NotContains(t, res.expected, name, "no guard expected for a zero-instance group")
+	assert.False(t, res.ready[group.Name], "zero-instance group must not flip its Service to a guard")
+	assert.False(t, cosmoGuardRouteGuardable(nodeSet, []string{group.Name}), "route over a zero-instance group is not guardable")
+}
+
 // TestGuardParamsUseDiscovery verifies a group's guard is configured to discover node pods through
 // the headless upstream Service.
 func TestGuardParamsUseDiscovery(t *testing.T) {

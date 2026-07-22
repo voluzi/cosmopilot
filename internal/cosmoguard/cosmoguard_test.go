@@ -159,6 +159,22 @@ func TestPeerService(t *testing.T) {
 	assert.True(t, udp, "gossip UDP port exposed")
 }
 
+func TestStatefulSet_PodSecurityContext(t *testing.T) {
+	p := baseParams()
+	p.UpstreamHost = "host"
+
+	// Unset -> restricted default (non-nil).
+	assert.NotNil(t, p.StatefulSet().Spec.Template.Spec.SecurityContext, "restricted default applied when unset")
+
+	// Set -> propagated verbatim (e.g. an fsGroup required for volume permissions/admission).
+	fsGroup := int64(2000)
+	p.PodSecurityContext = &corev1.PodSecurityContext{FSGroup: &fsGroup}
+	sc := p.StatefulSet().Spec.Template.Spec.SecurityContext
+	require.NotNil(t, sc)
+	require.NotNil(t, sc.FSGroup)
+	assert.Equal(t, int64(2000), *sc.FSGroup)
+}
+
 func TestSelectsGuard(t *testing.T) {
 	assert.True(t, SelectsGuard(InstanceLabels("chain-group-cosmoguard")))
 	assert.True(t, SelectsGuard(AppLabel()))

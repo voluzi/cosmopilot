@@ -28,7 +28,9 @@ func WithChainNodeLabels(chainNode *appsv1.ChainNode, additional ...map[string]s
 	if !chainNode.IsControlledByChainNodeSet() && labels[controllers.LabelCosmosignerTarget] != "" {
 		delete(labels, controllers.LabelChainNodeSet)
 	}
-	return labels
+	// A user-set label under CosmoGuard's own domain must never reach node pods, or a flipped guard
+	// Service would select them as if they were guard pods.
+	return controllers.StripCosmoGuardLabelDomain(labels)
 }
 
 func (r *Reconciler) filterNonWorkingPeers(ctx context.Context, chainNode *appsv1.ChainNode, peers []appsv1.Peer) []appsv1.Peer {
