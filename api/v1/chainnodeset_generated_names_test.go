@@ -530,6 +530,70 @@ func TestValidateChildDerivedServiceNameCollisions(t *testing.T) {
 	require.NoError(t, guardNoIndividual.validateServiceNameCollisions(nil))
 }
 
+// A CosmoGuard-guarded group with a dashboard Ingress owns Ingress "<nodeSet>-<group>-cg-dashboard".
+// A global ingress route named like "<group>-cg-dashboard" renders the same Ingress name under the
+// same ChainNodeSet owner, so validateIngressNameCollisions must reject it up front. gRPC route
+// Ingresses ("-grpc") share the same name space.
+func TestValidateIngressNameCollisions(t *testing.T) {
+	guardedDashboardGroup := NodeGroupSpec{
+		Name:      "global-rpc",
+		Instances: ptr.To(1),
+		Config: &Config{CosmoGuard: &CosmoGuardConfig{
+			Enable:    true,
+			Dashboard: &CosmoGuardDashboardConfig{Enable: true, Ingress: &CosmoGuardDashboardIngress{Host: "dash.example.com"}},
+		}},
+	}
+
+	// Route "rpc-cg-dashboard" -> Ingress "cs-global-rpc-cg-dashboard", shadowing the group guard
+	// dashboard Ingress.
+	collide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:     []NodeGroupSpec{guardedDashboardGroup},
+			Ingresses: []GlobalIngressConfig{{Name: "rpc-cg-dashboard"}},
+		},
+	}
+	err := collide.validateIngressNameCollisions(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-global-rpc-cg-dashboard")
+
+	// A pre-existing collision is grandfathered so the ChainNodeSet stays editable.
+	require.NoError(t, collide.validateIngressNameCollisions(collide))
+
+	// A non-shadowing route name is fine.
+	noCollide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:     []NodeGroupSpec{guardedDashboardGroup},
+			Ingresses: []GlobalIngressConfig{{Name: "api"}},
+		},
+	}
+	require.NoError(t, noCollide.validateIngressNameCollisions(nil))
+
+	// Without the dashboard Ingress the group owns no Ingress, so the same route name is free.
+	dashboardOff := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:     []NodeGroupSpec{{Name: "global-rpc", Instances: ptr.To(1), Config: &Config{CosmoGuard: &CosmoGuardConfig{Enable: true}}}},
+			Ingresses: []GlobalIngressConfig{{Name: "rpc-cg-dashboard"}},
+		},
+	}
+	require.NoError(t, dashboardOff.validateIngressNameCollisions(nil))
+
+	// A route's gRPC Ingress ("-grpc") collides with another route whose main Ingress renders the same
+	// name.
+	grpcCollide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Ingresses: []GlobalIngressConfig{
+			{Name: "rpc", EnableGRPC: true},
+			{Name: "rpc-grpc"},
+		}},
+	}
+	err = grpcCollide.validateIngressNameCollisions(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-global-rpc-grpc")
+}
+
 // The legacy singleton .spec.validator derives a Service "<nodeSet>-validator" and its -internal
 // variant; a node group named "validator" derives the same name and must be rejected. When
 // .spec.validator is unset no such Service exists.

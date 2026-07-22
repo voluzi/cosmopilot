@@ -353,6 +353,15 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, err
 	}
 
+	// Reject a group's CosmoGuard dashboard Ingress that collides with a global ingress route's Ingress
+	// (e.g. group "global-rpc" dashboard vs route "rpc-cg-dashboard", both rendering
+	// "<nodeSet>-global-rpc-cg-dashboard"). Both are applied under the ChainNodeSet owner, so ApplyOwned
+	// and ensureIngress overwrite the object on alternating reconciles. Same grandfathering as the
+	// Service collision check.
+	if err := nodeSet.validateIngressNameCollisions(old); err != nil {
+		return nil, err
+	}
+
 	// Reject a node group whose generated child ChainNode names collide with reserved StatefulSet-child
 	// patterns (…-cg-<n> / …-signer-<n>). Runs on create and update (via obj.Validate(nil) on create),
 	// gated on live instances and grandfathering groups already active in old, so an existing
@@ -1102,6 +1111,76 @@ func (nodeSet *ChainNodeSet) eachDerivedServiceName(fn func(name, owner string))
 		base := fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)
 		fn(base, owner)
 		fn(base+"-internal", owner)
+	}
+}
+
+// validateIngressNameCollisions rejects two distinct owners that derive the same Ingress name and
+// would fight over it. Only a subset of subsystems create Ingresses, but the ones this covers all
+// share the ChainNodeSet owner: a global ingress route renders "<nodeSet>-global-<route>" (plus a
+// "-grpc" variant when gRPC is enabled), and a CosmoGuard-guarded group with a dashboard Ingress
+// renders "<nodeSet>-<group>-cg-dashboard". A route named like "<group>-cg-dashboard" therefore
+// shadows that group's guard dashboard Ingress; both are applied under the ChainNodeSet owner, so the
+// ownership guard cannot arbitrate and ApplyOwned/ensureIngress overwrite the object on alternating
+// reconciles. Grandfathering matches validateServiceNameCollisions: a name that already collided in
+// old stays editable, so a pre-existing (already-broken) ChainNodeSet is not locked out of updates.
+func (nodeSet *ChainNodeSet) validateIngressNameCollisions(old *ChainNodeSet) error {
+	grandfathered := map[string]bool{}
+	if old != nil {
+		seen := map[string]string{}
+		old.eachDerivedIngressName(func(name, owner string) {
+			if prev, taken := seen[name]; taken && prev != owner {
+				grandfathered[name] = true
+			} else {
+				seen[name] = owner
+			}
+		})
+	}
+	owners := map[string]string{}
+	var collErr error
+	nodeSet.eachDerivedIngressName(func(name, owner string) {
+		if collErr != nil || grandfathered[name] {
+			return
+		}
+		if prev, taken := owners[name]; taken && prev != owner {
+			collErr = fmt.Errorf("Ingress name %q is derived by both %s and %s: rename one of them", name, prev, owner)
+			return
+		}
+		owners[name] = owner
+	})
+	return collErr
+}
+
+// eachDerivedIngressName invokes fn(name, owner) for every Ingress name this ChainNodeSet directly
+// owns, in deterministic order (node-group guard dashboards, then global ingress routes). Per-child
+// guard dashboard Ingresses ("<child>-cg-dashboard") are owned by the child ChainNode, not the
+// ChainNodeSet, so a collision there is arbitrated by ApplyOwned's cross-owner ownership guard and is
+// intentionally omitted (same reasoning as the cross-CR derived-vs-derived Service case).
+func (nodeSet *ChainNodeSet) eachDerivedIngressName(fn func(name, owner string)) {
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		cfg := g.GetServiceConfig()
+		// ensureCosmoGuards skips zero-instance groups, so the guard (and its dashboard Ingress) exists
+		// only once the group is scaled up; registering it at instances: 0 would flag a nonexistent object.
+		if g.GetInstances() == 0 || !cfg.CosmoGuardEnabled() {
+			continue
+		}
+		if d := cfg.GetCosmoGuardDashboard(); d != nil && d.Enable && d.Ingress != nil {
+			// groupCosmoGuardName(nodeSet, group) = "<nodeSet>-<group>-cg"; the dashboard Ingress appends
+			// "-dashboard", giving "<nodeSet>-<group>-cg-dashboard".
+			fn(g.GetServiceName(nodeSet)+"-cg-dashboard", fmt.Sprintf("node group %q CosmoGuard dashboard", g.Name))
+		}
+	}
+	for i := range nodeSet.Spec.Ingresses {
+		ing := &nodeSet.Spec.Ingresses[i]
+		// A services-only route creates the backing Services but no Ingress object.
+		if ing.CreateServicesOnly() {
+			continue
+		}
+		owner := fmt.Sprintf("global ingress route %q", ing.Name)
+		fn(ing.GetName(nodeSet), owner)
+		if ing.EnableGRPC {
+			fn(ing.GetGrpcName(nodeSet), owner)
+		}
 	}
 }
 
