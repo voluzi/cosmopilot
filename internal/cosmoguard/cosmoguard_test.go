@@ -18,7 +18,7 @@ func baseParams() Params {
 	return Params{
 		Name:      "chain-group-cosmoguard",
 		Namespace: "ns",
-		Image:     "ghcr.io/voluzi/cosmoguard:4.0.0-rc.7",
+		Image:     "ghcr.io/voluzi/cosmoguard:4.0.0",
 		Replicas:  2,
 		ConfigMap: &corev1.ConfigMapKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: "rules"},

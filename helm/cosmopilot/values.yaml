@@ -1,6 +1,6 @@
 image: ghcr.io/voluzi/cosmopilot
 nodeUtilsImage: ghcr.io/voluzi/node-utils:2.9.0
-cosmoGuardImage: ghcr.io/voluzi/cosmoguard:4.0.0-rc.7
+cosmoGuardImage: ghcr.io/voluzi/cosmoguard:4.0.0
 cosmoseedImage: ghcr.io/voluzi/cosmoseed:0.11.0
 cosmosignerImage: ghcr.io/voluzi/cosmosigner:0.2.0
 replicas: 1

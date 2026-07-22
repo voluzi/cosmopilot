@@ -35,7 +35,7 @@ func init() {
 	)
 
 	flag.StringVar(&runOpts.CosmoGuardImage, "cosmoguard-image",
-		environ.GetString("COSMOGUARD_IMAGE", "ghcr.io/voluzi/cosmoguard:4.0.0-rc.7"),
+		environ.GetString("COSMOGUARD_IMAGE", "ghcr.io/voluzi/cosmoguard:4.0.0"),
 		"cosmoguard image for the standalone deployments created when CosmoGuard is enabled.",
 	)
 

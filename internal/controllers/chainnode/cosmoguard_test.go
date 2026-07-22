@@ -35,7 +35,7 @@ func cosmoGuardTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	return &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
 		Scheme: scheme,
-		opts:   &controllers.ControllerRunOptions{CosmoGuardImage: "ghcr.io/voluzi/cosmoguard:4.0.0-rc.7"},
+		opts:   &controllers.ControllerRunOptions{CosmoGuardImage: "ghcr.io/voluzi/cosmoguard:4.0.0"},
 	}
 }
 
