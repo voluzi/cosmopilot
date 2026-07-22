@@ -243,15 +243,33 @@ func TestFinalizeDefersUndeployWhileRouteTargetsGuard(t *testing.T) {
 	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cosmoguard")))
 
 	// Finalize must NOT delete the guard while that Ingress points at it.
-	require.NoError(t, r.finalizeCosmoGuard(ctx, cn))
+	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, true))
 	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{}),
 		"guard must survive while a live route still targets it")
 
 	// Once the route no longer targets the guard, finalize tears it down.
 	require.NoError(t, r.Delete(ctx, guardIngress("node-0", "node-0-cosmoguard")))
-	require.NoError(t, r.finalizeCosmoGuard(ctx, cn))
+	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, true))
 	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "guard torn down once no route references it")
+}
+
+// TestFinalizeStoppedPathTearsDownDespiteRoute verifies the stopped-node path (deferWhileRouted=false)
+// tears the guard down even while a stale route still points at it — route reconciliation is skipped
+// for stopped nodes, so a route deferral would never clear and the guard would leak.
+func TestFinalizeStoppedPathTearsDownDespiteRoute(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+
+	cn.Spec.Config.CosmoGuard.Enable = false
+	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cosmoguard")))
+
+	// Stopped path: defer disabled -> tears down despite the stale route.
+	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, false))
+	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	assert.Error(t, err, "stopped-path finalize tears down the guard regardless of stale routes")
 }
 
 // TestDisableAutoscalingRemovesHPA verifies the standalone guard deletes its HPA when autoscaling is
@@ -281,7 +299,7 @@ func TestFinalizeTearsDownGuardWhenNodeBecomesChild(t *testing.T) {
 	// The node joins a ChainNodeSet; ensure no longer manages a guard and finalize tears the old one down.
 	cn.Labels[controllers.LabelChainNodeSet] = "some-set"
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
-	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "standalone guard should be removed once the node is a ChainNodeSet child")
 }
@@ -301,7 +319,7 @@ func TestChildWithIndividualIngressGetsGuard(t *testing.T) {
 	// Removing the individual ingress tears the per-node guard back down.
 	cn.Spec.Ingress = nil
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
-	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(context.Background(), cn))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "per-node guard should be removed once the individual ingress is gone")
@@ -333,7 +351,7 @@ func TestDisableGuardUndeploys(t *testing.T) {
 	// Disable, then finalize (teardown runs after routes are retargeted, not in ensureCosmoGuard).
 	cn.Spec.Config.CosmoGuard.Enable = false
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
-	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn))
+	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "guard statefulset should be removed when disabled")

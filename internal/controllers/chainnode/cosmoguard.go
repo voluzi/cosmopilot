@@ -245,21 +245,20 @@ func (r *Reconciler) standaloneGuardManaged(chainNode *appsv1.ChainNode) bool {
 	return true
 }
 
-// finalizeCosmoGuard tears down a standalone guard the node no longer uses (CosmoGuard disabled, or
-// the node was moved into a ChainNodeSet). It runs AFTER ingress/gateway routes are reconciled, so
-// routes have already been retargeted to the raw node Service before the guard Service is removed —
-// avoiding a window where a live route points at a deleted backend (make-before-break on teardown).
-func (r *Reconciler) finalizeCosmoGuard(ctx context.Context, chainNode *appsv1.ChainNode) error {
+// finalizeCosmoGuard tears down a standalone guard the node no longer uses. deferWhileRouted enables
+// make-before-break teardown for the normal post-routing path: keep the guard while any live
+// ingress/gateway route still points at its Service (routes are retargeted to raw earlier in the same
+// reconcile, so this is normally already false; the exception is a Gateway migration whose new routes
+// could not be applied — Gateway API CRDs missing — leaving the old guarded Ingress as a fallback,
+// where deleting the guard would strand that Ingress on a missing backend). It must be false on the
+// stopped-node path, which returns before routing runs: there the route is never retargeted, so the
+// deferral would never clear and the guard would leak. A stopped node serves no traffic, so tearing the
+// guard down despite a stale route is safe.
+func (r *Reconciler) finalizeCosmoGuard(ctx context.Context, chainNode *appsv1.ChainNode, deferWhileRouted bool) error {
 	if r.standaloneGuardManaged(chainNode) {
 		return nil
 	}
-	// Make-before-break teardown: keep the guard while any live ingress/gateway route still points at
-	// its Service. Normally routes are retargeted to the raw node earlier in the same reconcile, so this
-	// is already false. But when a Gateway migration cannot apply its new routes (Gateway API CRDs
-	// missing) the old guarded Ingress is preserved as a fallback; deleting the guard then would leave
-	// that Ingress with a missing backend. A later reconcile completes teardown once the route no longer
-	// targets the guard.
-	if r.standaloneRouteTargetsGuard(ctx, chainNode) {
+	if deferWhileRouted && r.standaloneRouteTargetsGuard(ctx, chainNode) {
 		return nil
 	}
 	return cosmoguard.Undeploy(ctx, r.Client, chainNode, chainNode.GetNamespace(), chainNode.CosmoGuardName())

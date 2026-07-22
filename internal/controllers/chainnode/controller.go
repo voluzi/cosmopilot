@@ -361,7 +361,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if chainNode.Status.Phase == appsv1.PhaseChainNodeStopped {
 		// Still tear down a disabled/orphaned standalone guard: a stopped node serves no traffic, so
 		// there is no route to retarget first, and this return skips the usual finalize step below.
-		if err = r.finalizeCosmoGuard(ctx, chainNode); err != nil {
+		// deferWhileRouted=false: routing is skipped here, so a route-based deferral would never clear.
+		if err = r.finalizeCosmoGuard(ctx, chainNode, false); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
@@ -383,8 +384,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Tear down a no-longer-used standalone guard AFTER routes have been retargeted to the raw node
 	// Service, so a live ingress/gateway route never points at a deleted guard backend.
+	// deferWhileRouted=true: hold teardown if a route still targets the guard (e.g. a preserved Ingress
+	// when Gateway CRDs are missing), completing on a later reconcile.
 	logger.V(1).Info("finalize cosmoguard")
-	if err = r.finalizeCosmoGuard(ctx, chainNode); err != nil {
+	if err = r.finalizeCosmoGuard(ctx, chainNode, true); err != nil {
 		return ctrl.Result{}, err
 	}
 
