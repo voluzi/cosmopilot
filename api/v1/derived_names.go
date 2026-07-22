@@ -47,7 +47,7 @@ func validateDerivedNameLengths(base, subject string, f nameFeatures) error {
 // two owners fight over the shared name. Every entry maps to a real derived resource:
 //   - node/group Services: -internal, -p2p, -grpc
 //   - secrets: -tls, -priv-key, -account, -cg-cluster
-//   - configmaps / one-shot pods: -upgrades, -init-data
+//   - configmaps / one-shot pods: -upgrades, -init-data, -config-generator, -genesis-init, -create-validator
 //   - tmkms: -tmkms, -tmkms-generate-identity, -tmkms-vault-upload
 //   - CosmoGuard: -cg, -cg-peer, -cg-cluster, -cg-dashboard, -cg-upstream
 //   - cosmosigner: -signer, -signer-privval, -signer-import, -signer-pubkey
@@ -56,7 +56,7 @@ func validateDerivedNameLengths(base, subject string, f nameFeatures) error {
 var reservedNameSuffixes = []string{
 	"-internal", "-p2p", "-grpc",
 	"-tls", "-priv-key", "-account",
-	"-upgrades", "-init-data",
+	"-upgrades", "-init-data", "-config-generator", "-genesis-init", "-create-validator",
 	"-tmkms", "-tmkms-generate-identity", "-tmkms-vault-upload",
 	"-cg", "-cg-peer", "-cg-cluster", "-cg-dashboard", "-cg-upstream",
 	"-signer", "-signer-privval", "-signer-import", "-signer-pubkey",
