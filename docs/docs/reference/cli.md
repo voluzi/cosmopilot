@@ -86,6 +86,8 @@ for manual or debugging use.
 ```bash
 dataexporter gcs upload <dir> <bucket> <name>
 dataexporter gcs delete <bucket> <name>
+dataexporter s3 upload <dir> <bucket> <name>
+dataexporter s3 delete <bucket> <name>
 ```
 
 Persistent flag (all subcommands):
@@ -98,6 +100,7 @@ Persistent flag (all subcommands):
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
+| `--compression` | `COMPRESSION` | `gzip` | Archive compression: `none`, `gzip`, `zstd`, or `lz4`. |
 | `--chunk-size` | `CHUNK_SIZE` | `250MB` | Chunk size for multi-part uploads. |
 | `--part-size` | `PART_SIZE` | `500GB` | Part size for multi-part uploads (used when the size limit is crossed). |
 | `--size-limit` | `SIZE_LIMIT` | `5TB` | Size limit for a single file. |
@@ -110,6 +113,21 @@ Persistent flag (all subcommands):
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `--concurrent-jobs` | `CONCURRENT_JOBS` | `10` | Number of concurrent delete jobs. |
+
+### `s3`
+
+The AWS SDK default credential chain supports environment variables, shared AWS
+configuration, web identity tokens such as IRSA, EKS Pod Identity, and EC2 instance
+roles.
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--region` | `AWS_REGION` / `AWS_DEFAULT_REGION` | empty | AWS region used to sign requests. |
+| `--endpoint` | `S3_ENDPOINT` | empty | Custom S3-compatible endpoint URL. |
+| `--force-path-style` | `S3_FORCE_PATH_STYLE` | `false` | Use path-style bucket addressing. |
+
+The `s3 upload` flags match `gcs upload`, except its default `--chunk-size` is
+`64MB`. The `s3 delete` command supports `--concurrent-jobs`.
 
 ## vault-token-renewer (deprecated)
 

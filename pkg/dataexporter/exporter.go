@@ -3,6 +3,7 @@
 package dataexporter
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -14,7 +15,7 @@ type Exporter interface {
 	// Provider returns the cloud storage provider type.
 	Provider() Provider
 
-	// Upload uploads a directory as a compressed tarball to the specified bucket.
+	// Upload uploads a directory as a tar archive to the specified bucket.
 	// The name parameter specifies the object name in the bucket.
 	// Options can be provided to customize the upload behavior.
 	Upload(dir, bucket, name string, opts ...UploadOption) error
@@ -30,6 +31,8 @@ func FromProvider(p Provider) (Exporter, error) {
 	switch p {
 	case GCS:
 		return NewGcsExporter()
+	case S3:
+		return NewS3Exporter(context.Background(), S3Config{})
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", p)
 	}

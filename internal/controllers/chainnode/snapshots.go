@@ -556,7 +556,16 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
-			chainNode.Spec.Persistence.Snapshots.ExportTarball.GCS,
+			chainNode.Spec.Persistence.Snapshots.ExportTarball,
+		), nil
+
+	case chainNode.Spec.Persistence.Snapshots.ExportTarball.S3 != nil:
+		return datasnapshot.NewS3SnapshotProvider(
+			r.ClientSet,
+			r.Scheme,
+			chainNode,
+			r.opts.GetDefaultPriorityClassName(),
+			chainNode.Spec.Persistence.Snapshots.ExportTarball,
 		), nil
 
 	default:

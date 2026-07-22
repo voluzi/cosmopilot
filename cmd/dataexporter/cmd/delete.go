@@ -10,28 +10,27 @@ import (
 	"github.com/voluzi/cosmopilot/v2/pkg/environ"
 )
 
-var concurrentDeleteJobs int
-
-var deleteCmd = &cobra.Command{
-	Use:   "delete <bucket> <name>",
-	Short: "Deletes objects from external storage",
-	Args:  cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
-		bucket, name := args[0], args[1]
-		start := time.Now()
-		err := exporter.Delete(bucket, name,
-			dataexporter.WithConcurrentDeleteJobs(concurrentDeleteJobs),
-		)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.WithField("time-elapsed", time.Since(start)).Info("delete successful")
-	},
-}
-
-func init() {
-	deleteCmd.Flags().IntVar(&concurrentDeleteJobs, "concurrent-jobs",
+func newDeleteCmd() *cobra.Command {
+	var concurrentDeleteJobs int
+	command := &cobra.Command{
+		Use:   "delete <bucket> <name>",
+		Short: "Deletes objects from external storage",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bucket, name := args[0], args[1]
+			start := time.Now()
+			if err := exporter.Delete(bucket, name,
+				dataexporter.WithConcurrentDeleteJobs(concurrentDeleteJobs),
+			); err != nil {
+				return err
+			}
+			log.WithField("time-elapsed", time.Since(start)).Info("delete successful")
+			return nil
+		},
+	}
+	command.Flags().IntVar(&concurrentDeleteJobs, "concurrent-jobs",
 		environ.GetInt("CONCURRENT_JOBS", dataexporter.DefaultConcurrentJobs),
 		"Number of concurrent jobs",
 	)
+	return command
 }

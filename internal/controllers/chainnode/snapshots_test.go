@@ -6,12 +6,58 @@ import (
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/datasnapshot"
 )
+
+func TestGetTarballExportProvider(t *testing.T) {
+	reconciler := &Reconciler{opts: &controllers.ControllerRunOptions{}}
+	tests := []struct {
+		name       string
+		export     *appsv1.ExportTarballConfig
+		assertType func(t *testing.T, provider datasnapshot.SnapshotProvider)
+	}{
+		{
+			name: "GCS",
+			export: &appsv1.ExportTarballConfig{
+				GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"},
+			},
+			assertType: func(t *testing.T, provider datasnapshot.SnapshotProvider) {
+				_, ok := provider.(*datasnapshot.GCS)
+				assert.True(t, ok)
+			},
+		},
+		{
+			name: "S3",
+			export: &appsv1.ExportTarballConfig{
+				S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"},
+			},
+			assertType: func(t *testing.T, provider datasnapshot.SnapshotProvider) {
+				_, ok := provider.(*datasnapshot.S3)
+				assert.True(t, ok)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{
+				Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+					Frequency:     "24h",
+					ExportTarball: tt.export,
+				}},
+			}}
+			provider, err := reconciler.getTarballExportProvider(node)
+			require.NoError(t, err)
+			tt.assertType(t, provider)
+		})
+	}
+}
 
 func TestIsSnapshotReady(t *testing.T) {
 	tests := []struct {

@@ -48,6 +48,9 @@ func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) e
 	for _, opt := range opts {
 		opt(options)
 	}
+	if err := validateUploadOptions(options); err != nil {
+		return err
+	}
 
 	// Check directory existence
 	fi, err := os.Stat(dir)
@@ -68,20 +71,20 @@ func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) e
 	}
 
 	log.WithFields(map[string]interface{}{
-		"size":   datasize.ByteSize(totalSize).HumanReadable(),
-		"source": dir,
-		"target": fmt.Sprintf("gs://%s/%s.tar.gz", bucket, name),
-	}).Infof("start compressing and uploading")
+		"size":        datasize.ByteSize(totalSize).HumanReadable(),
+		"source":      dir,
+		"target":      fmt.Sprintf("gs://%s/%s%s", bucket, name, options.Compression.Extension()),
+		"compression": options.Compression,
+	}).Info("start archiving and uploading")
 
-	// Create an io.Pipe to connect tar+gzip => GCS
 	pr, pw := io.Pipe()
 
-	// Tar + gzip in a goroutine
 	go func() {
-		defer pw.Close()
-		if err := compressTarGz(dir, pw); err != nil {
-			pw.CloseWithError(err)
+		if err := writeTarball(dir, pw, options.Compression); err != nil {
+			_ = pw.CloseWithError(err)
+			return
 		}
+		_ = pw.Close()
 	}()
 
 	return gcs.uploadChunks(context.Background(), pr, bucket, name, totalSize, options)
@@ -90,7 +93,7 @@ func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) e
 func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, bucket, objectName string, totalSize datasize.ByteSize, opts *UploadOptions) error {
 	partIndex := 0
 	partNames := []string{}
-	var bytesCompressed atomic.Uint64
+	var bytesArchived atomic.Uint64
 	var bytesUploaded atomic.Uint64
 
 	// Progress
@@ -100,23 +103,23 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 		ticker := time.NewTicker(opts.ReportPeriod)
 		defer ticker.Stop()
 
-		var lastCompressed, lastUploaded uint64
+		var lastArchived, lastUploaded uint64
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				currentCompressed := bytesCompressed.Load()
+				currentArchived := bytesArchived.Load()
 				currentUploaded := bytesUploaded.Load()
-				if lastCompressed != currentCompressed || lastUploaded != currentUploaded {
+				if lastArchived != currentArchived || lastUploaded != currentUploaded {
 					log.WithFields(map[string]interface{}{
-						"compressed": datasize.ByteSize(currentCompressed).HumanReadable(),
-						"uploaded":   datasize.ByteSize(currentUploaded).HumanReadable(),
-						"dir-size":   totalSize.HumanReadable(),
-					}).Info("compressing and uploading")
+						"archived": datasize.ByteSize(currentArchived).HumanReadable(),
+						"uploaded": datasize.ByteSize(currentUploaded).HumanReadable(),
+						"dir-size": totalSize.HumanReadable(),
+					}).Info("archiving and uploading")
 				}
-				lastCompressed, lastUploaded = currentCompressed, currentUploaded
+				lastArchived, lastUploaded = currentArchived, currentUploaded
 			}
 		}
 	}(progressCtx)
@@ -134,10 +137,10 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 			"max-size":   opts.ChunkSize.HumanReadable(),
 		}).Trace("reading chunk")
 		n, err := io.ReadFull(reader, buf)
-		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("error reading chunk: %v", err)
 		}
-		bytesCompressed.Add(uint64(n))
+		bytesArchived.Add(uint64(n))
 		if n == 0 {
 			break // Done reading
 		}
@@ -194,31 +197,31 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 
 func (gcs *GcsExporter) uploadToGCS(ctx context.Context, bucket, objName string, r io.Reader, bufferSize uint64) error {
 	w := gcs.client.Bucket(bucket).Object(objName).NewWriter(ctx)
-	defer w.Close()
 
 	buf := make([]byte, bufferSize)
 	if _, err := io.CopyBuffer(w, r, buf); err != nil {
+		_ = w.Close()
 		return err
 	}
 	return w.Close()
 }
 
 func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects []string, objectName string, totalSize datasize.ByteSize, opts *UploadOptions) error {
+	extension := opts.Compression.Extension()
 
 	if totalSize <= opts.SizeLimit {
 		log.WithFields(map[string]interface{}{
 			"parts": len(objects),
-			"name":  fmt.Sprintf("%s.tar.gz", objectName),
+			"name":  objectName + extension,
 		}).Info("composing final file")
-		return gcs.composeIntoSingleObject(ctx, bucket, objects, fmt.Sprintf("%s.tar.gz", objectName), opts)
+		return gcs.composeIntoSingleObject(ctx, bucket, objects, objectName+extension, opts)
 	}
 
-	// Edge case: if chunk size == part size, just rename parts with .tar.gz extension.
 	if totalSize > opts.SizeLimit && opts.ChunkSize == opts.PartSize {
 		log.WithFields(map[string]interface{}{
 			"parts":     len(objects),
 			"part-size": opts.PartSize.HumanReadable(),
-			"name":      fmt.Sprintf("%s-part-N.tar.gz", objectName),
+			"name":      fmt.Sprintf("%s-part-N%s", objectName, extension),
 		}).Info("composing final file parts")
 		return gcs.renameToFinalNames(ctx, objects, bucket, objectName, opts)
 	}
@@ -236,12 +239,12 @@ func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects
 	chunksPerPart := int(partSize / opts.ChunkSize)
 
 	digits := getDigitCount(len(objects) / chunksPerPart)
-	formatString := fmt.Sprintf("%%s-part-%%0%dd.tar.gz", digits)
+	formatString := fmt.Sprintf("%%s-part-%%0%dd%s", digits, extension)
 
 	log.WithFields(map[string]interface{}{
 		"parts":     len(objects) / chunksPerPart,
 		"part-size": partSize.HumanReadable(),
-		"name":      fmt.Sprintf("%s-part-N.tar.gz", objectName),
+		"name":      fmt.Sprintf("%s-part-N%s", objectName, extension),
 	}).Info("composing final file parts")
 
 	for i := 0; i < len(objects); i += chunksPerPart {
@@ -259,18 +262,19 @@ func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects
 }
 
 func (gcs *GcsExporter) renameToFinalNames(ctx context.Context, objects []string, bucket, objectName string, opts *UploadOptions) error {
-	log.Infof("renaming %d objects to have tar.gz extension", len(objects))
+	extension := opts.Compression.Extension()
+	log.Infof("renaming %d objects to have %s extension", len(objects), extension)
 
 	if len(objects) == 0 {
 		return nil
 	}
 
 	if len(objects) == 1 {
-		return gcs.renameObject(ctx, bucket, objectName, fmt.Sprintf("%s.tar.gz", objectName))
+		return gcs.renameObject(ctx, bucket, objects[0], objectName+extension)
 	}
 
 	digits := getDigitCount(len(objects) - 1)
-	formatString := fmt.Sprintf("%%s-part-%%0%dd.tar.gz", digits)
+	formatString := fmt.Sprintf("%%s-part-%%0%dd%s", digits, extension)
 
 	for i, object := range objects {
 		finalName := fmt.Sprintf(formatString, objectName, i)

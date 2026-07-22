@@ -60,6 +60,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [Peer](#peer)
 * [Persistence](#persistence)
 * [PvcSnapshot](#pvcsnapshot)
+* [S3ExportConfig](#s3exportconfig)
 * [SdkOptions](#sdkoptions)
 * [SeedStatus](#seedstatus)
 * [SidecarSpec](#sidecarspec)
@@ -728,7 +729,9 @@ ExportTarballConfig holds config options for tarball upload.
 | ----- | ----------- | ------ | -------- |
 | suffix | Suffix to add to archive name. The name of the tarball will be `<chain-id>-<timestamp>-<suffix>`. | *string | false |
 | deleteOnExpire | Whether to delete the tarball when the snapshot expires. Default is `false`. | *bool | false |
+| compression | Compression applied to the tar archive. Defaults to `gzip` for compatibility with existing exports. | *TarballCompression | false |
 | gcs | Configuration to upload tarballs to a GCS bucket. | *[GcsExportConfig](#gcsexportconfig) | false |
+| s3 | Configuration to upload tarballs to Amazon S3 or an S3-compatible object store. | *[S3ExportConfig](#s3exportconfig) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -896,6 +899,26 @@ PvcSnapshot represents a snapshot to be used to restore a PVC.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | name | Name of the volume snapshot being referenced. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### S3ExportConfig
+
+S3ExportConfig holds settings for Amazon S3 and S3-compatible object stores.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| bucket | Name of the bucket to upload tarballs to. | string | true |
+| region | AWS region used to sign S3 requests. S3-compatible stores commonly accept `us-east-1`. | string | true |
+| endpoint | Custom S3-compatible API endpoint, including the `http` or `https` scheme. | *string | false |
+| forcePathStyle | Use path-style bucket addressing. This is commonly required by MinIO and other compatible stores. | *bool | false |
+| credentialsSecret | Secret whose keys are exposed to the exporter as environment variables. Use the standard AWS names `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`. Mutually exclusive with `serviceAccountName`. When both are omitted, the AWS SDK default credential chain is used, including EKS Pod Identity and EC2 instance roles. | *corev1.LocalObjectReference | false |
+| serviceAccountName | Kubernetes ServiceAccount used by snapshot Jobs. On EKS this enables IRSA or EKS Pod Identity. Mutually exclusive with `credentialsSecret`. | *string | false |
+| sizeLimit | Size limit at which the archive is split into multiple objects. Defaults to `5TB`. The S3 multipart part-count limit can require splitting at a smaller size. | *string | false |
+| partSize | Maximum size of each archive object after `sizeLimit` is crossed. Defaults to `500GB`. | *string | false |
+| chunkSize | Size of each S3 multipart upload chunk. Must be between 5MiB and 5GiB. Defaults to `64MB`. | *string | false |
+| bufferSize | Size of the streaming upload buffer. Defaults to `32MB`. | *string | false |
+| concurrentJobs | Number of concurrent multipart upload workers. Defaults to `10`. | *int | false |
 
 [Back to Custom Resources](#custom-resources)
 

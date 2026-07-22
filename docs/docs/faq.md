@@ -42,7 +42,8 @@ upgrades. See [Upgrades](./usage/upgrades).
 
 `Cosmopilot` takes volume snapshots on a configurable schedule with retention
 policies, can optionally verify their integrity by starting a throwaway node from the
-snapshot, and can export snapshots as tarballs to external storage (GCS). See
+snapshot, and can export snapshots as tar archives to GCS, Amazon S3, or
+S3-compatible storage. See
 [Persistence & Backup](./usage/persistence-and-backup).
 
 ### Can I expose my node's API publicly?

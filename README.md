@@ -27,7 +27,8 @@ It automates tasks like node deployment, upgrades, disk-resize, api exposure, ba
 
 - **Backup and Snapshot Management**:
     - Configurable snapshot frequency and retention policies (with optional node shutdown during snapshot creation).
-    - Export snapshots to Google Cloud Storage (GCS) as tarball files.
+    - Export snapshots to Google Cloud Storage (GCS), Amazon S3, and S3-compatible storage.
+    - Stream uncompressed tar archives or compress them with gzip, zstd, or lz4.
     - Verifies snapshot integrity.
 
 - **Genesis Management**:
@@ -65,4 +66,3 @@ Cosmopilot is open source and available under the [MIT License](LICENSE.md).
 ## Contact
 
 Have questions or need help? Feel free to open an issue or reach out to us via [dev@voluzi.com](mailto:dev@voluzi.com).
-

@@ -14,6 +14,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
+
+	"github.com/voluzi/cosmopilot/v2/pkg/dataexporter"
 )
 
 func TestGCSCreateSnapshotAuthModes(t *testing.T) {
@@ -50,7 +53,10 @@ func TestGCSCreateSnapshotAuthModes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestGCSProvider(t, tt.config)
+			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{
+				Compression: ptr.To(appsv1.TarballCompression(dataexporter.CompressionZstd)),
+				GCS:         tt.config,
+			})
 			vs := &snapshotv1.VolumeSnapshot{
 				TypeMeta:   metav1.TypeMeta{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"},
 				ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"},
@@ -69,6 +75,7 @@ func TestGCSCreateSnapshotAuthModes(t *testing.T) {
 			assert.Equal(t, tt.wantCredentialsVol, hasVolume(podSpec.Volumes, "credentials"))
 			assert.Equal(t, tt.wantCredentialsMount, hasVolumeMount(container.VolumeMounts, "credentials"))
 			assert.Equal(t, tt.wantCredentialsEnv, hasEnv(container.Env, "GOOGLE_APPLICATION_CREDENTIALS"))
+			assert.Equal(t, "zstd", envValue(container.Env, "COMPRESSION"))
 		})
 	}
 }
@@ -107,7 +114,7 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestGCSProvider(t, tt.config)
+			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: tt.config})
 
 			err := provider.DeleteSnapshot(context.Background(), "snapshot")
 			require.NoError(t, err)
@@ -123,7 +130,7 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 	}
 }
 
-func newTestGCSProvider(t *testing.T, cfg *appsv1.GcsExportConfig) *GCS {
+func newTestGCSProvider(t *testing.T, cfg *appsv1.ExportTarballConfig) *GCS {
 	t.Helper()
 
 	scheme := runtime.NewScheme()

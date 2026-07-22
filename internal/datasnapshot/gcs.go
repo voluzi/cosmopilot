@@ -31,12 +31,14 @@ type GCS struct {
 	Owner         metav1.Object
 	priorityClass string
 	Config        *appsv1.GcsExportConfig
+	ExportConfig  *appsv1.ExportTarballConfig
 }
 
-func NewGcsSnapshotProvider(client kubernetes.Interface, scheme *runtime.Scheme, owner metav1.Object, priorityClass string, cfg *appsv1.GcsExportConfig) SnapshotProvider {
+func NewGcsSnapshotProvider(client kubernetes.Interface, scheme *runtime.Scheme, owner metav1.Object, priorityClass string, cfg *appsv1.ExportTarballConfig) SnapshotProvider {
 	return &GCS{
 		Client:        client,
-		Config:        cfg,
+		Config:        cfg.GCS,
+		ExportConfig:  cfg,
 		Owner:         owner,
 		Scheme:        scheme,
 		priorityClass: priorityClass,
@@ -154,6 +156,10 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 							Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
 							WorkingDir:      "/home/app",
 							Env: append(gcs.credentialsEnv(),
+								corev1.EnvVar{
+									Name:  "COMPRESSION",
+									Value: string(gcs.ExportConfig.GetCompression()),
+								},
 								corev1.EnvVar{
 									Name:  "SIZE_LIMIT",
 									Value: gcs.Config.GetSizeLimit(),

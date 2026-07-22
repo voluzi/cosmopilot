@@ -4579,6 +4579,16 @@ spec:
                         description: Whether to create a tarball of data directory
                           in each snapshot and upload it to external storage.
                         properties:
+                          compression:
+                            default: gzip
+                            description: Compression applied to the tar archive. Defaults
+                              to `gzip` for compatibility with existing exports.
+                            enum:
+                            - none
+                            - gzip
+                            - zstd
+                            - lz4
+                            type: string
                           deleteOnExpire:
                             default: false
                             description: Whether to delete the tarball when the snapshot
@@ -4650,11 +4660,91 @@ spec:
                             required:
                             - bucket
                             type: object
+                          s3:
+                            description: Configuration to upload tarballs to Amazon
+                              S3 or an S3-compatible object store.
+                            properties:
+                              bucket:
+                                description: Name of the bucket to upload tarballs
+                                  to.
+                                minLength: 1
+                                type: string
+                              bufferSize:
+                                description: Size of the streaming upload buffer.
+                                  Defaults to `32MB`.
+                                type: string
+                              chunkSize:
+                                description: Size of each S3 multipart upload chunk.
+                                  Must be between 5MiB and 5GiB. Defaults to `64MB`.
+                                type: string
+                              concurrentJobs:
+                                description: Number of concurrent multipart upload
+                                  workers. Defaults to `10`.
+                                type: integer
+                              credentialsSecret:
+                                description: |-
+                                  Secret whose keys are exposed to the exporter as environment variables. Use the standard AWS
+                                  names `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`.
+                                  Mutually exclusive with `serviceAccountName`. When both are omitted, the AWS SDK default
+                                  credential chain is used, including EKS Pod Identity and EC2 instance roles.
+                                properties:
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                type: object
+                                x-kubernetes-map-type: atomic
+                              endpoint:
+                                description: Custom S3-compatible API endpoint, including
+                                  the `http` or `https` scheme.
+                                type: string
+                              forcePathStyle:
+                                default: false
+                                description: Use path-style bucket addressing. This
+                                  is commonly required by MinIO and other compatible
+                                  stores.
+                                type: boolean
+                              partSize:
+                                description: Maximum size of each archive object after
+                                  `sizeLimit` is crossed. Defaults to `500GB`.
+                                type: string
+                              region:
+                                description: AWS region used to sign S3 requests.
+                                  S3-compatible stores commonly accept `us-east-1`.
+                                minLength: 1
+                                type: string
+                              serviceAccountName:
+                                description: |-
+                                  Kubernetes ServiceAccount used by snapshot Jobs. On EKS this enables IRSA or EKS Pod Identity.
+                                  Mutually exclusive with `credentialsSecret`.
+                                minLength: 1
+                                type: string
+                              sizeLimit:
+                                description: |-
+                                  Size limit at which the archive is split into multiple objects. Defaults to `5TB`.
+                                  The S3 multipart part-count limit can require splitting at a smaller size.
+                                type: string
+                            required:
+                            - bucket
+                            - region
+                            type: object
+                            x-kubernetes-validations:
+                            - message: credentialsSecret and serviceAccountName are
+                                mutually exclusive
+                              rule: '!(has(self.credentialsSecret) && has(self.serviceAccountName))'
                           suffix:
                             description: Suffix to add to archive name. The name of
                               the tarball will be `<chain-id>-<timestamp>-<suffix>`.
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of gcs or s3 must be set
+                          rule: has(self.gcs) != has(self.s3)
                       frequency:
                         description: How often a snapshot should be created.
                         format: duration

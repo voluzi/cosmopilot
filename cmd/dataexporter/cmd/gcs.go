@@ -11,17 +11,17 @@ var gcsCmd = &cobra.Command{
 	Short: "Google Cloud Storage (GCS) operations",
 	Long:  "Manage uploads and deletions in Google Cloud Storage (GCS).",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		err := cmd.Parent().PersistentPreRunE(cmd.Parent(), args)
-		if err != nil {
+		if err := rootCmd.PersistentPreRunE(cmd, args); err != nil {
 			return err
 		}
-		exporter, err = dataexporter.FromProvider(dataexporter.GCS)
+		gcsExporter, err := dataexporter.FromProvider(dataexporter.GCS)
+		exporter = gcsExporter
 		return err
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(gcsCmd)
-	gcsCmd.AddCommand(uploadCmd)
-	gcsCmd.AddCommand(deleteCmd)
+	gcsCmd.AddCommand(newUploadCmd(dataexporter.DefaultChunkSize))
+	gcsCmd.AddCommand(newDeleteCmd())
 }
