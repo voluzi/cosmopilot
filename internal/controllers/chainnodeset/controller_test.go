@@ -786,6 +786,58 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	assert.False(t, initialized)
 }
 
+// The no-webhook collision grandfather sets must record a within-CR collision only when the colliding
+// resource already exists as a live owned object — the "already reconciled" signal. Recording it straight
+// from the spec would grandfather a brand-new object's own collision and let it escape
+// validateServiceNameCollisions, whose no-webhook path (old == nil) trusts the recorded set.
+func TestInitializeLegacyCollisionsGatedOnLiveResources(t *testing.T) {
+	// Group "g" child-0 derives Services "test-nodeset-g-0" and "test-nodeset-g-0-internal"; group "g-0"
+	// derives the same two as its base — a within-CR collision between two distinct owners.
+	newNodeSet := func() *appsv1.ChainNodeSet {
+		return &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+			Spec: appsv1.ChainNodeSetSpec{
+				Nodes: []appsv1.NodeGroupSpec{
+					{Name: "g", Instances: ptr.To(1)},
+					{Name: "g-0", Instances: ptr.To(1)},
+				},
+			},
+		}
+	}
+	collisionNames := []string{"test-nodeset-g-0", "test-nodeset-g-0-internal"}
+	// Sanity: the spec really derives exactly these collision candidates.
+	svcCandidates, _ := newNodeSet().LegacyDerivedNameCollisions()
+	require.Equal(t, collisionNames, svcCandidates)
+
+	t.Run("brand-new object grandfathers nothing", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		r := newValidatorTestReconciler(t, nodeSet)
+		_, err := r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.True(t, nodeSet.Status.LegacyServiceNameCollisionsInitialized)
+		assert.Empty(t, nodeSet.Status.LegacyServiceNameCollisions,
+			"a first reconcile has materialized no resources, so its own spec collision must not be grandfathered")
+	})
+
+	t.Run("pre-existing collision grandfathered from child-owned resources", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		// The child ChainNode "test-nodeset-g-0" owns the colliding Services, so they are already live.
+		child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset-g-0", Namespace: "default", UID: types.UID("child-uid"),
+		}}
+		r := newValidatorTestReconciler(t, nodeSet, child)
+		for _, name := range collisionNames {
+			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+			require.NoError(t, controllerutil.SetControllerReference(child, svc, r.Scheme))
+			require.NoError(t, r.Create(context.Background(), svc))
+		}
+		_, err := r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.Equal(t, collisionNames, nodeSet.Status.LegacyServiceNameCollisions,
+			"a collision already materialized as live owned (child ChainNode) resources is grandfathered")
+	})
+}
+
 func TestEnsureServiceRefusesForeignOwner(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},

@@ -185,11 +185,13 @@ type ChainNodeSetStatus struct {
 	// +optional
 	LegacyReservedChildGroupNamesInitialized bool `json:"legacyReservedChildGroupNamesInitialized,omitempty"`
 
-	// LegacyServiceNameCollisions records Service names that were already derived by two distinct owners
-	// (node groups, global routes) when this validation was first enforced, computed once from the spec.
-	// validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil), where the
-	// controller cannot diff against a previous revision, so a pre-existing (already-broken) ChainNodeSet
-	// keeps reconciling while a collision newly introduced on a later revision is still rejected.
+	// LegacyServiceNameCollisions records Service names derived by two distinct owners (node groups, global
+	// routes) whose colliding resource already existed as a live owned object when this validation was
+	// first enforced — the "already reconciled" signal, so a brand-new object (nothing materialized yet)
+	// records none. validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil),
+	// where the controller cannot diff against a previous revision, so a pre-existing (already-broken)
+	// ChainNodeSet keeps reconciling while a collision newly introduced on a later revision is still
+	// rejected.
 	// +optional
 	LegacyServiceNameCollisions []string `json:"legacyServiceNameCollisions,omitempty"`
 
@@ -198,8 +200,9 @@ type ChainNodeSetStatus struct {
 	// +optional
 	LegacyServiceNameCollisionsInitialized bool `json:"legacyServiceNameCollisionsInitialized,omitempty"`
 
-	// LegacyIngressNameCollisions records Ingress names that were already derived by two distinct owners
-	// when this validation was first enforced, computed once from the spec. validateIngressNameCollisions
+	// LegacyIngressNameCollisions records Ingress names derived by two distinct owners whose colliding
+	// resource already existed as a live owned object when this validation was first enforced (see
+	// LegacyServiceNameCollisions for the live-resource gating rationale). validateIngressNameCollisions
 	// grandfathers these on the no-webhook path (old == nil), matching LegacyServiceNameCollisions.
 	// +optional
 	LegacyIngressNameCollisions []string `json:"legacyIngressNameCollisions,omitempty"`
