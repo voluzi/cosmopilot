@@ -348,6 +348,12 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, err
 	}
 
+	// Reject a group whose Service name collides with another group's CosmoGuard Service (e.g. a
+	// guarded group "g" and a second group named "g-cg" both derive "<nodeSet>-g-cg").
+	if err := nodeSet.validateGroupGuardNameCollisions(); err != nil {
+		return nil, err
+	}
+
 	// Two validators that explicitly reference the same signing material would sign with the same
 	// consensus key (double-signing). Reject duplicates across every validator that actually runs.
 	if err := nodeSet.validateUniqueSigningKeys(); err != nil {
@@ -878,11 +884,11 @@ func (nodeSet *ChainNodeSet) validateCosmosignerTargetUniqueness() error {
 	return nil
 }
 
-// validateGeneratedNameLengths rejects any node-group or signer name whose derived resource names
-// would exceed the 63-character DNS label limit. It checks, per node group, the group base (its
-// always-on -internal Service and, when CosmoGuard is enabled, the -cg-upstream Service) and the
-// group's longest child pod name; and, per resolved signer, the discovery Service "<signer>-privval"
-// (the longest name any signer derives).
+// validateGeneratedNameLengths rejects any derived resource name that would exceed the 63-character
+// DNS label limit. It checks, per node group, the group base (its always-on -internal Service and,
+// when CosmoGuard is enabled, the -cg-upstream Service) and the group's longest child pod name; the
+// legacy singleton .spec.validator's own ChainNode base; each global ingress/gateway route's backing
+// Service; and, per resolved signer, the discovery Service "<signer>-privval".
 func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 	const subject = "ChainNodeSet or node-group name"
 	for i := range nodeSet.Spec.Nodes {
@@ -894,9 +900,32 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 			return err
 		}
 		// The group's highest-ordinal child ChainNode carries the longest always-on 63-bound name.
-		child := fmt.Sprintf("%s-%d", base, g.GetInstances()-1)
-		if err := validateDerivedNameLengths(child, subject, nameFeatures{}); err != nil {
+		// A scaled-to-zero group has no child ChainNodes, so skip the nonexistent "<base>--1" child.
+		if g.GetInstances() > 0 {
+			child := fmt.Sprintf("%s-%d", base, g.GetInstances()-1)
+			if err := validateDerivedNameLengths(child, subject, nameFeatures{}); err != nil {
+				return err
+			}
+		}
+	}
+	// The legacy singleton .spec.validator is a ChainNode named "<nodeSet>-validator" that is not in
+	// .spec.nodes; validate its always-on -internal Service (its longest always-on 63-bound name).
+	if nodeSet.Spec.Validator != nil {
+		base := fmt.Sprintf("%s-%s", nodeSet.GetName(), ReservedValidatorGroupName)
+		if err := validateDerivedNameLengths(base, subject, nameFeatures{}); err != nil {
 			return err
+		}
+	}
+	// Each global ingress/gateway route creates a backing Service; a long route name pushes that
+	// Service past the 63-char label limit even when every node-group name fits.
+	for i := range nodeSet.Spec.Ingresses {
+		if svc := nodeSet.Spec.Ingresses[i].GetServiceName(nodeSet); len(svc) > 63 {
+			return fmt.Errorf("the global ingress Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name or the ingress route name %q", svc, len(svc), nodeSet.Spec.Ingresses[i].Name)
+		}
+	}
+	for i := range nodeSet.Spec.GatewayRoutes {
+		if svc := nodeSet.Spec.GatewayRoutes[i].GetServiceName(nodeSet); len(svc) > 63 {
+			return fmt.Errorf("the global gateway Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name or the gateway route name %q", svc, len(svc), nodeSet.Spec.GatewayRoutes[i].Name)
 		}
 	}
 	// The discovery Service name already contains the "-signer" segment, so keep a dedicated check
@@ -904,6 +933,30 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		if svc := s.Name + "-privval"; len(svc) > 63 {
 			return fmt.Errorf("the cosmosigner discovery Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet or node-group name", svc, len(svc))
+		}
+	}
+	return nil
+}
+
+// validateGroupGuardNameCollisions rejects a node group whose Service name collides with another
+// group's CosmoGuard Service. A guarded group <g> derives a guard Service "<nodeSet>-<g>-cg"; a
+// second group literally named "<g>-cg" derives that same Service name. Both objects share the
+// ChainNodeSet owner, so the ownership guard would not stop the two reconcile paths from overwriting
+// each other. Mirrors the "<g>-signer" group/signer collision check in validateCosmosignerTargetUniqueness.
+func (nodeSet *ChainNodeSet) validateGroupGuardNameCollisions() error {
+	groupServices := map[string]string{}
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		groupServices[g.GetServiceName(nodeSet)] = g.Name
+	}
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		if !g.GetServiceConfig().CosmoGuardEnabled() {
+			continue
+		}
+		guard := fmt.Sprintf("%s-cg", g.GetServiceName(nodeSet))
+		if other, collides := groupServices[guard]; collides {
+			return fmt.Errorf("node group %q has CosmoGuard enabled and derives guard Service name %q, which node group %q also derives: rename one of the groups", g.Name, guard, other)
 		}
 	}
 	return nil
