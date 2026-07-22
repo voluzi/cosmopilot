@@ -240,7 +240,7 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 	job, err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return SnapshotNotFound, nil
+			return SnapshotNotFound, gcs.cleanUp(ctx, name)
 		}
 		return "", err
 	}
@@ -250,7 +250,7 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 		return SnapshotActive, nil
 
 	case job.Status.Failed > 0:
-		return SnapshotFailed, nil
+		return SnapshotFailed, gcs.cleanUp(ctx, name)
 
 	case job.Status.Succeeded >= 1:
 		return SnapshotSucceeded, gcs.cleanUp(ctx, name)

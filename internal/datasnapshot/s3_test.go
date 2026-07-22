@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -107,6 +108,46 @@ func TestS3DeleteSnapshotUsesSameAuthentication(t *testing.T) {
 	container := getS3Job(t, provider, "snapshot-delete").Spec.Template.Spec.Containers[0]
 	assert.Equal(t, "aws-credentials", secretEnvFromName(container.EnvFrom))
 	assert.Equal(t, []string{"s3", "delete", "snapshots", "snapshot"}, container.Args)
+}
+
+func TestS3GetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
+	tests := []struct {
+		name       string
+		createJob  bool
+		wantStatus SnapshotStatus
+	}{
+		{name: "failed job", createJob: true, wantStatus: SnapshotFailed},
+		{name: "missing job", wantStatus: SnapshotNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+				Bucket: "snapshots",
+				Region: "eu-west-1",
+			}})
+			if tt.createJob {
+				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
+					ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
+					Status:     batchv1.JobStatus{Failed: 1},
+				}, metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+			_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
+			}, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			status, err := provider.GetSnapshotStatus(context.Background(), "snapshot")
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, status)
+
+			_, err = provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+		})
+	}
 }
 
 func newTestS3Provider(t *testing.T, cfg *appsv1.ExportTarballConfig) *S3 {

@@ -176,7 +176,7 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 	job, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return SnapshotNotFound, nil
+			return SnapshotNotFound, provider.cleanUp(ctx, name)
 		}
 		return "", err
 	}
@@ -184,7 +184,7 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 	case job.Status.Active > 0:
 		return SnapshotActive, nil
 	case job.Status.Failed > 0:
-		return SnapshotFailed, nil
+		return SnapshotFailed, provider.cleanUp(ctx, name)
 	case job.Status.Succeeded >= 1:
 		return SnapshotSucceeded, provider.cleanUp(ctx, name)
 	default:

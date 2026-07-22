@@ -597,9 +597,17 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonTarballExportError,
-			"Tarball %s export job not found", getTarballName(chainNode, snapshot),
+			"Tarball %s export job not found; retrying", getTarballName(chainNode, snapshot),
 		)
-		return true, nil
+		return false, r.resetTarballExportForRetry(ctx, snapshot)
+
+	case datasnapshot.SnapshotFailed:
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonTarballExportError,
+			"Tarball %s export failed; retrying", getTarballName(chainNode, snapshot),
+		)
+		return false, r.resetTarballExportForRetry(ctx, snapshot)
 
 	case datasnapshot.SnapshotSucceeded:
 		r.recorder.Eventf(chainNode,
@@ -612,6 +620,11 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 	default:
 		return false, nil
 	}
+}
+
+func (r *Reconciler) resetTarballExportForRetry(ctx context.Context, snapshot *snapshotv1.VolumeSnapshot) error {
+	delete(snapshot.Annotations, controllers.AnnotationExportingTarball)
+	return r.Update(ctx, snapshot)
 }
 
 func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {

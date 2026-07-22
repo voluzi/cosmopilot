@@ -1,6 +1,7 @@
 package chainnode
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -8,7 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -57,6 +61,29 @@ func TestGetTarballExportProvider(t *testing.T) {
 			tt.assertType(t, provider)
 		})
 	}
+}
+
+func TestResetTarballExportForRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	snapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationExportingTarball: "true",
+			},
+		},
+	}
+	client := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	reconciler := &Reconciler{Client: client}
+
+	require.NoError(t, reconciler.resetTarballExportForRetry(context.Background(), snapshot))
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+	_, exporting := stored.Annotations[controllers.AnnotationExportingTarball]
+	assert.False(t, exporting)
 }
 
 func TestIsSnapshotReady(t *testing.T) {
