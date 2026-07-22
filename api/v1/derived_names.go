@@ -51,7 +51,8 @@ func validateDerivedNameLengths(base, subject string, f nameFeatures) error {
 //   - tmkms: -tmkms, -tmkms-generate-identity, -tmkms-vault-upload
 //   - CosmoGuard: -cg, -cg-peer, -cg-cluster, -cg-dashboard, -cg-upstream
 //   - cosmosigner: -signer, -signer-privval, -signer-import, -signer-pubkey
-//   - cosmoseed: -seed, -seed-headless
+//   - cosmoseed: -seed, -seed-headless, -cosmoseed (node-key Secret + config ConfigMap)
+//   - legacy .spec.validator: -validator (its child ChainNode "<set>-validator" and Services)
 var reservedNameSuffixes = []string{
 	"-internal", "-p2p", "-grpc",
 	"-tls", "-priv-key", "-account",
@@ -59,7 +60,8 @@ var reservedNameSuffixes = []string{
 	"-tmkms", "-tmkms-generate-identity", "-tmkms-vault-upload",
 	"-cg", "-cg-peer", "-cg-cluster", "-cg-dashboard", "-cg-upstream",
 	"-signer", "-signer-privval", "-signer-import", "-signer-pubkey",
-	"-seed", "-seed-headless",
+	"-seed", "-seed-headless", "-cosmoseed",
+	"-validator",
 }
 
 // ValidateReservedResourceName rejects creating a ChainNode whose name ends in a suffix cosmopilot

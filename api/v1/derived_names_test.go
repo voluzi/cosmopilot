@@ -67,7 +67,7 @@ func TestValidateReservedResourceName(t *testing.T) {
 	}
 
 	// Non-colliding names pass on create.
-	for _, name := range []string{"foo", "foo-bar", "my-validator", "foo-signer-0", "foo-cg-0"} {
+	for _, name := range []string{"foo", "foo-bar", "my-node", "foo-signer-0", "foo-cg-0"} {
 		if err := ValidateReservedResourceName(name, true); err != nil {
 			t.Fatalf("non-colliding name %q must be accepted on create, got %v", name, err)
 		}
