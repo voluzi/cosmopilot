@@ -4613,6 +4613,7 @@ spec:
                               concurrentJobs:
                                 description: Number of concurrent upload or delete
                                   jobs. Defaults to `10`.
+                                minimum: 1
                                 type: integer
                               credentialsSecret:
                                 description: |-
@@ -4670,8 +4671,8 @@ spec:
                                 minLength: 1
                                 type: string
                               bufferSize:
-                                description: Size of the streaming upload buffer.
-                                  Defaults to `32MB`.
+                                description: Size of the buffer used to stage multipart
+                                  chunks. Must not exceed 64MiB. Defaults to `32MB`.
                                 type: string
                               chunkSize:
                                 description: Size of each S3 multipart upload chunk.
@@ -4680,6 +4681,7 @@ spec:
                               concurrentJobs:
                                 description: Number of concurrent multipart upload
                                   workers. Defaults to `10`.
+                                minimum: 1
                                 type: integer
                               credentialsSecret:
                                 description: |-

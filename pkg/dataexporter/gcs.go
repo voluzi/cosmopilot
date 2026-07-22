@@ -66,7 +66,11 @@ func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) e
 	if err != nil {
 		return fmt.Errorf("failed to calculate directory size: %v", err)
 	}
-	if totalSize > options.SizeLimit && options.ChunkSize > options.PartSize {
+	estimatedArchiveSize, err := estimateArchiveUpperBound(dir, totalSize, options.Compression)
+	if err != nil {
+		return err
+	}
+	if estimatedArchiveSize > options.SizeLimit && options.ChunkSize > options.PartSize {
 		return errors.New("on multi-part, chunk size cannot be greater than part size")
 	}
 
@@ -78,6 +82,7 @@ func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) e
 	}).Info("start archiving and uploading")
 
 	pr, pw := io.Pipe()
+	defer pr.Close()
 
 	go func() {
 		if err := writeTarball(dir, pw, options.Compression); err != nil {
@@ -87,10 +92,10 @@ func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) e
 		_ = pw.Close()
 	}()
 
-	return gcs.uploadChunks(context.Background(), pr, bucket, name, totalSize, options)
+	return gcs.uploadChunks(context.Background(), pr, bucket, name, totalSize, estimatedArchiveSize, options)
 }
 
-func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, bucket, objectName string, totalSize datasize.ByteSize, opts *UploadOptions) error {
+func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, bucket, objectName string, totalSize, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) error {
 	partIndex := 0
 	partNames := []string{}
 	var bytesArchived atomic.Uint64
@@ -192,7 +197,7 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 		return fmt.Errorf("upload failed: %w", err.(error))
 	}
 
-	return gcs.composeParts(ctx, bucket, partNames, objectName, totalSize, opts)
+	return gcs.composeParts(ctx, bucket, partNames, objectName, estimatedArchiveSize, opts)
 }
 
 func (gcs *GcsExporter) uploadToGCS(ctx context.Context, bucket, objName string, r io.Reader, bufferSize uint64) error {
@@ -206,10 +211,10 @@ func (gcs *GcsExporter) uploadToGCS(ctx context.Context, bucket, objName string,
 	return w.Close()
 }
 
-func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects []string, objectName string, totalSize datasize.ByteSize, opts *UploadOptions) error {
+func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects []string, objectName string, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) error {
 	extension := opts.Compression.Extension()
 
-	if totalSize <= opts.SizeLimit {
+	if estimatedArchiveSize <= opts.SizeLimit {
 		log.WithFields(map[string]interface{}{
 			"parts": len(objects),
 			"name":  objectName + extension,
@@ -217,7 +222,7 @@ func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects
 		return gcs.composeIntoSingleObject(ctx, bucket, objects, objectName+extension, opts)
 	}
 
-	if totalSize > opts.SizeLimit && opts.ChunkSize == opts.PartSize {
+	if estimatedArchiveSize > opts.SizeLimit && opts.ChunkSize == opts.PartSize {
 		log.WithFields(map[string]interface{}{
 			"parts":     len(objects),
 			"part-size": opts.PartSize.HumanReadable(),
@@ -434,7 +439,9 @@ func (gcs *GcsExporter) Delete(bucket, name string, opts ...DeleteOption) error 
 		if err != nil {
 			return fmt.Errorf("failed to list objects: %v", err)
 		}
-		objectNames = append(objectNames, objAttrs.Name)
+		if isArchiveObjectName(name, objAttrs.Name) {
+			objectNames = append(objectNames, objAttrs.Name)
+		}
 	}
 
 	if len(objectNames) == 0 {

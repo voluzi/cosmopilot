@@ -103,6 +103,9 @@ func TestS3UploadCreatesCompressedMultipartObject(t *testing.T) {
 	if got := client.contentType("cosmoshub-1.tar.zst"); got != "application/zstd" {
 		t.Fatalf("content type = %q, want application/zstd", got)
 	}
+	if !client.multipartBodiesAreFiles() {
+		t.Fatal("multipart upload bodies must be disk-backed to bound memory usage")
+	}
 }
 
 func TestS3UploadSplitsOversizedArchives(t *testing.T) {
@@ -182,15 +185,19 @@ func TestS3UploadAbortsMultipartUploadOnFailure(t *testing.T) {
 func TestS3DeleteRemovesAllObjectsWithPrefix(t *testing.T) {
 	client := newFakeS3Client()
 	client.listedObjects = []types.Object{
+		{Key: aws.String("snapshot.tar.zst")},
 		{Key: aws.String("snapshot-part-00000000.tar.lz4")},
 		{Key: aws.String("snapshot-part-00000001.tar.lz4")},
+		{Key: aws.String("snapshot-old.tar.gz")},
+		{Key: aws.String("snapshot.tar.gz.backup")},
+		{Key: aws.String("snapshot-part-invalid.tar.lz4")},
 	}
 	exporter := newS3Exporter(client)
 
 	if err := exporter.Delete("snapshots", "snapshot"); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
-	want := []string{"snapshot-part-00000000.tar.lz4", "snapshot-part-00000001.tar.lz4"}
+	want := []string{"snapshot.tar.zst", "snapshot-part-00000000.tar.lz4", "snapshot-part-00000001.tar.lz4"}
 	if fmt.Sprint(client.deletedKeys) != fmt.Sprint(want) {
 		t.Fatalf("deleted keys = %v, want %v", client.deletedKeys, want)
 	}
@@ -206,6 +213,7 @@ type fakeS3Client struct {
 	uploadErr     error
 	abortCount    int
 	nextUploadID  int
+	diskBacked    bool
 }
 
 func newFakeS3Client() *fakeS3Client {
@@ -213,6 +221,7 @@ func newFakeS3Client() *fakeS3Client {
 		parts:        make(map[string]map[int32][]byte),
 		contentTypes: make(map[string]string),
 		completed:    make(map[string][]byte),
+		diskBacked:   true,
 	}
 }
 
@@ -229,6 +238,11 @@ func (f *fakeS3Client) CreateMultipartUpload(_ context.Context, input *s3.Create
 func (f *fakeS3Client) UploadPart(_ context.Context, input *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
 	if f.uploadErr != nil {
 		return nil, f.uploadErr
+	}
+	if _, ok := input.Body.(*os.File); !ok {
+		f.mu.Lock()
+		f.diskBacked = false
+		f.mu.Unlock()
 	}
 	content, err := io.ReadAll(input.Body)
 	if err != nil {
@@ -306,4 +320,10 @@ func (f *fakeS3Client) contentType(name string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.contentTypes[name]
+}
+
+func (f *fakeS3Client) multipartBodiesAreFiles() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.diskBacked
 }

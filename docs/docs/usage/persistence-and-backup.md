@@ -348,6 +348,11 @@ before `sizeLimit` when necessary. The default `partSize` is `500GB`; increase
 `chunkSize` or lower `partSize` if a custom combination cannot fit within the
 multipart limit.
 
+Each in-flight S3 chunk is staged as a temporary file under `/tmp` before upload,
+which bounds memory use even for large chunk sizes. Plan pod ephemeral storage for
+up to roughly `chunkSize * concurrentJobs`; lowering either value reduces that
+requirement. The staging buffer defaults to `32MB` and is limited to `64MiB`.
+
 #### IRSA and EKS Pod Identity
 
 Set `serviceAccountName` to a Kubernetes ServiceAccount configured for IRSA or

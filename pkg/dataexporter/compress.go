@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/c2h5oh/datasize"
 	"github.com/klauspost/compress/zstd"
 	"github.com/klauspost/pgzip"
 	"github.com/pierrec/lz4/v4"
@@ -22,6 +24,12 @@ const (
 	CompressionGzip Compression = "gzip"
 	CompressionZstd Compression = "zstd"
 	CompressionLz4  Compression = "lz4"
+)
+
+const (
+	// Covers tar block padding plus worst-case PAX path and link headers per entry.
+	archiveEntryHeadroom = uint64(16 * 1024)
+	archiveFixedHeadroom = uint64(1024 * 1024)
 )
 
 // ParseCompression validates and normalizes a compression name.
@@ -168,4 +176,94 @@ type nopWriteCloser struct {
 
 func (nopWriteCloser) Close() error {
 	return nil
+}
+
+func estimateArchiveUpperBound(dir string, sourceSize datasize.ByteSize, compression Compression) (datasize.ByteSize, error) {
+	var entries uint64
+	if err := filepath.Walk(dir, func(_ string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			entries++
+		}
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("estimate archive overhead: %w", err)
+	}
+	sourceBytes := uint64(sourceSize)
+	if sourceBytes > math.MaxUint64-archiveFixedHeadroom {
+		return 0, fmt.Errorf("estimated archive size overflows uint64")
+	}
+	if entries > (math.MaxUint64-sourceBytes-archiveFixedHeadroom)/archiveEntryHeadroom {
+		return 0, fmt.Errorf("estimated archive size overflows uint64")
+	}
+	estimate := sourceBytes + entries*archiveEntryHeadroom + archiveFixedHeadroom
+	if compression != CompressionNone {
+		codecHeadroom := estimate/100 + archiveFixedHeadroom
+		if estimate > math.MaxUint64-codecHeadroom {
+			return 0, fmt.Errorf("estimated compressed archive size overflows uint64")
+		}
+		estimate += codecHeadroom
+	}
+	return datasize.ByteSize(estimate), nil
+}
+
+func isArchiveObjectName(baseName, objectName string) bool {
+	extensions := []string{
+		CompressionNone.Extension(),
+		CompressionGzip.Extension(),
+		CompressionZstd.Extension(),
+		CompressionLz4.Extension(),
+	}
+	for _, extension := range extensions {
+		if objectName == baseName+extension {
+			return true
+		}
+	}
+
+	partPrefix := baseName + "-part-"
+	if strings.HasPrefix(objectName, partPrefix) {
+		remainder := strings.TrimPrefix(objectName, partPrefix)
+		if isDecimal(remainder) {
+			return true
+		}
+		for _, extension := range extensions {
+			if strings.HasSuffix(remainder, extension) && isDecimal(strings.TrimSuffix(remainder, extension)) {
+				return true
+			}
+			partNumber, temporarySuffix, found := strings.Cut(remainder, extension+"-temp-")
+			if found && isDecimal(partNumber) && isCompositionTemporarySuffix(temporarySuffix) {
+				return true
+			}
+		}
+	}
+
+	for _, extension := range extensions {
+		tempPrefix := baseName + extension + "-temp-"
+		if !strings.HasPrefix(objectName, tempPrefix) {
+			continue
+		}
+		if isCompositionTemporarySuffix(strings.TrimPrefix(objectName, tempPrefix)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCompositionTemporarySuffix(value string) bool {
+	parts := strings.Split(value, "-")
+	return len(parts) == 2 && isDecimal(parts[0]) && isDecimal(parts[1])
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }

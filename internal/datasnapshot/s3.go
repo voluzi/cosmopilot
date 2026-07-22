@@ -166,9 +166,17 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 		},
 	}
 	if err := controllerutil.SetControllerReference(createdJob, pvc, provider.Scheme); err != nil {
+		if cleanupErr := provider.cleanUp(ctx, name); cleanupErr != nil {
+			return fmt.Errorf("set PVC owner reference: %w; clean up upload job: %v", err, cleanupErr)
+		}
 		return err
 	}
 	_, err = provider.Client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	if err != nil {
+		if cleanupErr := provider.cleanUp(ctx, name); cleanupErr != nil {
+			return fmt.Errorf("create upload PVC: %w; clean up upload job: %v", err, cleanupErr)
+		}
+	}
 	return err
 }
 
@@ -217,7 +225,7 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) error {
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"s3", "delete", provider.Config.Bucket, name},
-						WorkingDir:      "/home/app",
+						WorkingDir:      "/app",
 						Env:             append(provider.storageEnv(), corev1.EnvVar{Name: "CONCURRENT_JOBS", Value: strconv.Itoa(provider.Config.GetConcurrentJobs())}),
 						EnvFrom:         provider.credentialsEnvFrom(),
 					}},

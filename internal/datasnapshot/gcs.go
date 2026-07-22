@@ -229,10 +229,18 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 
 	err = controllerutil.SetControllerReference(job, pvc, gcs.Scheme)
 	if err != nil {
+		if cleanupErr := gcs.cleanUp(ctx, name); cleanupErr != nil {
+			return fmt.Errorf("set PVC owner reference: %w; clean up upload job: %v", err, cleanupErr)
+		}
 		return err
 	}
 
 	_, err = gcs.Client.CoreV1().PersistentVolumeClaims(pvc.GetNamespace()).Create(ctx, pvc, metav1.CreateOptions{})
+	if err != nil {
+		if cleanupErr := gcs.cleanUp(ctx, name); cleanupErr != nil {
+			return fmt.Errorf("create upload PVC: %w; clean up upload job: %v", err, cleanupErr)
+		}
+	}
 	return err
 }
 
@@ -311,7 +319,7 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 							ImagePullPolicy: corev1.PullAlways,
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args:            []string{"gcs", "delete", gcs.Config.Bucket, name},
-							WorkingDir:      "/home/app",
+							WorkingDir:      "/app",
 							Env: append(gcs.credentialsEnv(),
 								corev1.EnvVar{
 									Name:  "CONCURRENT_JOBS",

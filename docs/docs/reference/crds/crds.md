@@ -917,7 +917,7 @@ S3ExportConfig holds settings for Amazon S3 and S3-compatible object stores.
 | sizeLimit | Size limit at which the archive is split into multiple objects. Defaults to `5TB`. The S3 multipart part-count limit can require splitting at a smaller size. | *string | false |
 | partSize | Maximum size of each archive object after `sizeLimit` is crossed. Defaults to `500GB`. | *string | false |
 | chunkSize | Size of each S3 multipart upload chunk. Must be between 5MiB and 5GiB. Defaults to `64MB`. | *string | false |
-| bufferSize | Size of the streaming upload buffer. Defaults to `32MB`. | *string | false |
+| bufferSize | Size of the buffer used to stage multipart chunks. Must not exceed 64MiB. Defaults to `32MB`. | *string | false |
 | concurrentJobs | Number of concurrent multipart upload workers. Defaults to `10`. | *int | false |
 
 [Back to Custom Resources](#custom-resources)

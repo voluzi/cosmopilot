@@ -883,6 +883,15 @@ func (s3 *S3ExportConfig) Validate(path string) error {
 			return fmt.Errorf("%s.endpoint must use http or https", path)
 		}
 	}
+	if err := dataexporter.ValidateS3UploadOptions(
+		dataexporter.WithChunkSize(s3.GetChunkSize()),
+		dataexporter.WithPartSize(s3.GetPartSize()),
+		dataexporter.WithSizeLimit(s3.GetSizeLimit()),
+		dataexporter.WithBufferSize(s3.GetBufferSize()),
+		dataexporter.WithConcurrentUploadJobs(s3.GetConcurrentJobs()),
+	); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
 	return nil
 }
 

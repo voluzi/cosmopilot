@@ -2,6 +2,7 @@ package datasnapshot
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
 	"github.com/voluzi/cosmopilot/v2/pkg/dataexporter"
@@ -127,6 +129,7 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 			assert.Equal(t, tt.wantCredentialsVol, hasVolume(podSpec.Volumes, "credentials"))
 			assert.Equal(t, tt.wantCredentialsMount, hasVolumeMount(container.VolumeMounts, "credentials"))
 			assert.Equal(t, tt.wantCredentialsEnv, hasEnv(container.Env, "GOOGLE_APPLICATION_CREDENTIALS"))
+			assert.Equal(t, "/app", container.WorkingDir)
 		})
 	}
 }
@@ -169,6 +172,23 @@ func TestGCSGetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
 			assert.True(t, apierrors.IsNotFound(err))
 		})
 	}
+}
+
+func TestGCSCreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
+		Bucket:             "snapshots",
+		ServiceAccountName: ptr.To("snapshot-exporter"),
+	}})
+	client := provider.Client.(*fake.Clientset)
+	client.PrependReactor("create", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("PVC create failed")
+	})
+
+	err := provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot())
+	require.ErrorContains(t, err, "PVC create failed")
+
+	_, err = provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func newTestGCSProvider(t *testing.T, cfg *appsv1.ExportTarballConfig) *GCS {

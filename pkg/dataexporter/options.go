@@ -42,6 +42,12 @@ func defaultUploadOptions() *UploadOptions {
 	}
 }
 
+func defaultS3UploadOptions() *UploadOptions {
+	options := defaultUploadOptions()
+	options.ChunkSize = datasize.MustParseString(DefaultS3ChunkSize)
+	return options
+}
+
 // UploadOption is a functional option for configuring uploads.
 type UploadOption func(*UploadOptions)
 
@@ -136,6 +142,15 @@ func validateUploadOptions(options *UploadOptions) error {
 		return fmt.Errorf("concurrent jobs must be greater than zero")
 	}
 	return nil
+}
+
+// ValidateS3UploadOptions validates S3 transfer settings without starting an upload.
+func ValidateS3UploadOptions(opts ...UploadOption) error {
+	options := defaultS3UploadOptions()
+	for _, opt := range opts {
+		opt(options)
+	}
+	return validateS3UploadOptions(options)
 }
 
 // DeleteOptions configures the behavior of data deletion from cloud storage.

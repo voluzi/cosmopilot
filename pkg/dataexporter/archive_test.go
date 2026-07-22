@@ -181,3 +181,51 @@ func TestCompressionContentType(t *testing.T) {
 		})
 	}
 }
+
+func TestEstimateArchiveUpperBoundIncludesArchiveOverhead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.db"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	estimate, err := estimateArchiveUpperBound(dir, 1, CompressionNone)
+	if err != nil {
+		t.Fatalf("estimateArchiveUpperBound() error = %v", err)
+	}
+	if estimate <= 1 {
+		t.Fatalf("estimateArchiveUpperBound() = %d, want archive overhead above source size", estimate)
+	}
+
+	compressedEstimate, err := estimateArchiveUpperBound(dir, 1, CompressionZstd)
+	if err != nil {
+		t.Fatalf("estimateArchiveUpperBound() error = %v", err)
+	}
+	if compressedEstimate <= estimate {
+		t.Fatalf("compressed estimate = %d, want codec headroom above tar estimate %d", compressedEstimate, estimate)
+	}
+}
+
+func TestIsArchiveObjectName(t *testing.T) {
+	tests := []struct {
+		name       string
+		objectName string
+		want       bool
+	}{
+		{name: "single archive", objectName: "snapshot.tar.zst", want: true},
+		{name: "raw upload part", objectName: "snapshot-part-00000000", want: true},
+		{name: "final split archive", objectName: "snapshot-part-00000000.tar.lz4", want: true},
+		{name: "single archive composition temporary", objectName: "snapshot.tar.gz-temp-0-1", want: true},
+		{name: "split archive composition temporary", objectName: "snapshot-part-0.tar.gz-temp-0-1", want: true},
+		{name: "similar snapshot", objectName: "snapshot-old.tar.gz", want: false},
+		{name: "archive backup", objectName: "snapshot.tar.gz.backup", want: false},
+		{name: "invalid part", objectName: "snapshot-part-invalid.tar.lz4", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isArchiveObjectName("snapshot", tt.objectName); got != tt.want {
+				t.Fatalf("isArchiveObjectName() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}

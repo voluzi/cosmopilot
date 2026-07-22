@@ -153,6 +153,53 @@ func TestS3ExportConfigValidate(t *testing.T) {
 			wantErr:     true,
 			errContains: "endpoint is invalid",
 		},
+		{
+			name:        "invalid chunk size",
+			config:      &S3ExportConfig{Bucket: "snapshots", Region: "us-east-1", ChunkSize: ptr.To("not-a-size")},
+			wantErr:     true,
+			errContains: "invalid chunk size",
+		},
+		{
+			name:        "chunk size below S3 minimum",
+			config:      &S3ExportConfig{Bucket: "snapshots", Region: "us-east-1", ChunkSize: ptr.To("4MB")},
+			wantErr:     true,
+			errContains: "at least 5MiB",
+		},
+		{
+			name: "part size below chunk size",
+			config: &S3ExportConfig{
+				Bucket:    "snapshots",
+				Region:    "us-east-1",
+				ChunkSize: ptr.To("5MB"),
+				PartSize:  ptr.To("4MB"),
+			},
+			wantErr:     true,
+			errContains: "part size cannot be smaller",
+		},
+		{
+			name:        "size limit above S3 maximum",
+			config:      &S3ExportConfig{Bucket: "snapshots", Region: "us-east-1", SizeLimit: ptr.To("6TB")},
+			wantErr:     true,
+			errContains: "size limit must not exceed 5TB",
+		},
+		{
+			name:        "zero buffer size",
+			config:      &S3ExportConfig{Bucket: "snapshots", Region: "us-east-1", BufferSize: ptr.To("0B")},
+			wantErr:     true,
+			errContains: "buffer size must be greater than zero",
+		},
+		{
+			name:        "buffer size above exporter maximum",
+			config:      &S3ExportConfig{Bucket: "snapshots", Region: "us-east-1", BufferSize: ptr.To("65MB")},
+			wantErr:     true,
+			errContains: "buffer size must not exceed 64MiB",
+		},
+		{
+			name:        "zero concurrent jobs",
+			config:      &S3ExportConfig{Bucket: "snapshots", Region: "us-east-1", ConcurrentJobs: ptr.To(0)},
+			wantErr:     true,
+			errContains: "concurrent jobs must be greater than zero",
+		},
 	}
 
 	for _, tt := range tests {

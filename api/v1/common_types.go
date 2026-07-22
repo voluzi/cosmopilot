@@ -1073,6 +1073,7 @@ type GcsExportConfig struct {
 	BufferSize *string `json:"bufferSize,omitempty"`
 
 	// Number of concurrent upload or delete jobs. Defaults to `10`.
+	// +kubebuilder:validation:Minimum=1
 	ConcurrentJobs *int `json:"concurrentJobs,omitempty"`
 }
 
@@ -1122,12 +1123,13 @@ type S3ExportConfig struct {
 	// +optional
 	ChunkSize *string `json:"chunkSize,omitempty"`
 
-	// Size of the streaming upload buffer. Defaults to `32MB`.
+	// Size of the buffer used to stage multipart chunks. Must not exceed 64MiB. Defaults to `32MB`.
 	// +optional
 	BufferSize *string `json:"bufferSize,omitempty"`
 
 	// Number of concurrent multipart upload workers. Defaults to `10`.
 	// +optional
+	// +kubebuilder:validation:Minimum=1
 	ConcurrentJobs *int `json:"concurrentJobs,omitempty"`
 }
 

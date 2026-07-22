@@ -2,7 +2,6 @@ package dataexporter
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -30,6 +29,7 @@ const (
 	s3MaximumObjectSize = 5 * datasize.TB
 	s3MaximumParts      = 10000
 	s3DeleteBatchSize   = 1000
+	s3MaximumBufferSize = 64 * 1024 * 1024
 )
 
 // S3Config configures Amazon S3 and S3-compatible endpoint behavior.
@@ -95,7 +95,7 @@ func (exporter *S3Exporter) Provider() Provider {
 }
 
 func (exporter *S3Exporter) Upload(dir, bucket, name string, opts ...UploadOption) error {
-	options := defaultUploadOptions()
+	options := defaultS3UploadOptions()
 	for _, opt := range opts {
 		opt(options)
 	}
@@ -114,7 +114,11 @@ func (exporter *S3Exporter) Upload(dir, bucket, name string, opts ...UploadOptio
 	if err != nil {
 		return fmt.Errorf("calculate directory size: %w", err)
 	}
-	splitArchive, err := s3ArchiveRequiresSplit(totalSize, options)
+	estimatedArchiveSize, err := estimateArchiveUpperBound(dir, totalSize, options.Compression)
+	if err != nil {
+		return err
+	}
+	splitArchive, err := s3ArchiveRequiresSplit(estimatedArchiveSize, options)
 	if err != nil {
 		return err
 	}
@@ -196,6 +200,8 @@ func validateS3UploadOptions(options *UploadOptions) error {
 		return fmt.Errorf("S3 archive part size must not exceed 5TB")
 	case options.SizeLimit > s3MaximumObjectSize:
 		return fmt.Errorf("S3 size limit must not exceed 5TB")
+	case options.BufferSize.Bytes() > s3MaximumBufferSize:
+		return fmt.Errorf("S3 buffer size must not exceed 64MiB")
 	}
 	return nil
 }
@@ -258,25 +264,8 @@ func (exporter *S3Exporter) uploadObject(
 	}
 
 	var totalRead int64
-	bufferedReader := bufio.NewReaderSize(reader, int(options.BufferSize.Bytes()))
+	spoolBuffer := make([]byte, int(options.BufferSize.Bytes()))
 	for partNumber := int32(1); ; partNumber++ {
-		buffer := make([]byte, int(options.ChunkSize.Bytes()))
-		n, readErr := io.ReadFull(bufferedReader, buffer)
-		if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
-			setError(fmt.Errorf("read archive for %q: %w", objectName, readErr))
-			break
-		}
-		if n == 0 {
-			break
-		}
-		if partNumber > s3MaximumParts {
-			setError(fmt.Errorf("S3 object %q exceeds the %d-part multipart limit", objectName, s3MaximumParts))
-			break
-		}
-		buffer = buffer[:n]
-		totalRead += int64(n)
-		archivedBytes.Add(uint64(n))
-
 		semaphore <- struct{}{}
 		errMu.Lock()
 		hasError := firstErr != nil
@@ -286,29 +275,54 @@ func (exporter *S3Exporter) uploadObject(
 			break
 		}
 
+		partFile, n, readErr := spoolS3Part(reader, options.ChunkSize.Bytes(), spoolBuffer)
+		if readErr != nil {
+			<-semaphore
+			setError(fmt.Errorf("read archive for %q: %w", objectName, readErr))
+			break
+		}
+		if n == 0 {
+			<-semaphore
+			closeAndRemoveS3Part(partFile)
+			break
+		}
+		if partNumber > s3MaximumParts {
+			<-semaphore
+			closeAndRemoveS3Part(partFile)
+			setError(fmt.Errorf("S3 object %q exceeds the %d-part multipart limit", objectName, s3MaximumParts))
+			break
+		}
+		errMu.Lock()
+		hasError = firstErr != nil
+		errMu.Unlock()
+		if hasError {
+			<-semaphore
+			closeAndRemoveS3Part(partFile)
+			break
+		}
+		totalRead += n
+		archivedBytes.Add(uint64(n))
+
 		wg.Add(1)
-		go func(number int32, data []byte) {
+		go func(number int32, file *os.File, size int64) {
 			defer wg.Done()
 			defer func() { <-semaphore }()
+			defer closeAndRemoveS3Part(file)
 			output, uploadErr := exporter.client.UploadPart(uploadCtx, &s3.UploadPartInput{
 				Bucket:        aws.String(bucket),
 				Key:           aws.String(objectName),
 				UploadId:      aws.String(uploadID),
 				PartNumber:    aws.Int32(number),
-				Body:          bytes.NewReader(data),
-				ContentLength: aws.Int64(int64(len(data))),
+				Body:          file,
+				ContentLength: aws.Int64(size),
 			})
 			if uploadErr != nil {
 				setError(fmt.Errorf("upload S3 part %d for %q: %w", number, objectName, uploadErr))
 				return
 			}
-			uploadedBytes.Add(uint64(len(data)))
+			uploadedBytes.Add(uint64(size))
 			results <- types.CompletedPart{ETag: output.ETag, PartNumber: aws.Int32(number)}
-		}(partNumber, buffer)
-
-		if errors.Is(readErr, io.ErrUnexpectedEOF) {
-			break
-		}
+		}(partNumber, partFile, n)
 	}
 
 	wg.Wait()
@@ -343,6 +357,56 @@ func (exporter *S3Exporter) uploadObject(
 	}
 	completed = true
 	return totalRead, nil
+}
+
+func spoolS3Part(reader io.Reader, maximumSize uint64, buffer []byte) (*os.File, int64, error) {
+	file, err := os.CreateTemp("", "cosmopilot-s3-part-*")
+	if err != nil {
+		return nil, 0, fmt.Errorf("create temporary S3 part: %w", err)
+	}
+	fail := func(partErr error) (*os.File, int64, error) {
+		closeAndRemoveS3Part(file)
+		return nil, 0, partErr
+	}
+
+	var total int64
+	remaining := maximumSize
+	for remaining > 0 {
+		readSize := min(remaining, uint64(len(buffer)))
+		n, readErr := io.ReadFull(reader, buffer[:int(readSize)])
+		if n > 0 {
+			written, writeErr := file.Write(buffer[:n])
+			if writeErr != nil {
+				return fail(fmt.Errorf("write temporary S3 part: %w", writeErr))
+			}
+			if written != n {
+				return fail(io.ErrShortWrite)
+			}
+			total += int64(n)
+			remaining -= uint64(n)
+		}
+		switch {
+		case readErr == nil:
+			continue
+		case errors.Is(readErr, io.EOF), errors.Is(readErr, io.ErrUnexpectedEOF):
+			remaining = 0
+		default:
+			return fail(readErr)
+		}
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fail(fmt.Errorf("rewind temporary S3 part: %w", err))
+	}
+	return file, total, nil
+}
+
+func closeAndRemoveS3Part(file *os.File) {
+	if file == nil {
+		return
+	}
+	name := file.Name()
+	_ = file.Close()
+	_ = os.Remove(name)
 }
 
 func monitorS3Progress(
@@ -393,7 +457,9 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 			return fmt.Errorf("list S3 objects with prefix %q: %w", name, err)
 		}
 		for _, object := range output.Contents {
-			objectIDs = append(objectIDs, types.ObjectIdentifier{Key: object.Key})
+			if isArchiveObjectName(name, aws.ToString(object.Key)) {
+				objectIDs = append(objectIDs, types.ObjectIdentifier{Key: object.Key})
+			}
 		}
 		if !aws.ToBool(output.IsTruncated) {
 			break
