@@ -901,8 +901,12 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
 		base := g.GetServiceName(nodeSet)
+		// ensureCosmoGuards skips groups with instances: 0, so a zero-instance group materializes no
+		// guard Service (-cg-upstream/-cg-peer). Gate the guard-derived length check on instances > 0 —
+		// mirroring the child check below — so a nonexistent guard name cannot reject an otherwise-valid
+		// scaled-to-zero group; it is re-validated when the group is scaled up.
 		if err := validateDerivedNameLengths(base, subject, nameFeatures{
-			cosmoguardGroup: g.GetServiceConfig().CosmoGuardEnabled(),
+			cosmoguardGroup: g.GetInstances() > 0 && g.GetServiceConfig().CosmoGuardEnabled(),
 		}); err != nil {
 			return err
 		}
@@ -985,9 +989,11 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 		owner := fmt.Sprintf("node group %q", g.Name)
 		base := g.GetServiceName(nodeSet)
 		names := []string{base, base + "-internal"}
-		if g.GetServiceConfig().CosmoGuardEnabled() {
+		if g.GetInstances() > 0 && g.GetServiceConfig().CosmoGuardEnabled() {
 			// A guarded group derives a CosmoGuard client Service (base+"-cg"), an upstream Service
 			// (base+"-cg-upstream") and a peer Service (base+"-cg-peer") — all in the shared name space.
+			// ensureCosmoGuards skips zero-instance groups, so these exist only once the group is scaled
+			// up; registering them at instances: 0 would flag a collision with a nonexistent Service.
 			names = append(names, base+"-cg", base+"-cg-upstream", base+"-cg-peer")
 		}
 		for _, name := range names {
@@ -1067,10 +1073,12 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 // actually materialize children now — a scaled-to-zero group creates no child, so it is skipped until
 // it is scaled up. Groups whose Service name was already active are grandfathered so an unrelated
 // update to a ChainNodeSet that predates this validation is never blocked; the grandfathered set is
-// built the same way validateCosmosigner builds its legacy whitelist — from the old spec's active
-// group Service names on the update path, or from the controller-recorded LegacySignerServiceNames on
-// the no-webhook path (old == nil). A group that is newly added, renamed into a reserved shape, or
-// scaled up from zero is not in that set and is caught before its children are stranded.
+// built from the old spec's active group Service names on the update path, or from the
+// controller-recorded LegacyReservedChildGroupNames on the no-webhook path (old == nil). That status
+// field captures only scope-"group" bases with instances > 0 ending in -cg/-signer — exactly the
+// child-bearing groups — so a global route or a zero-instance group sharing the shape is never
+// wrongly grandfathered. A group that is newly added, renamed into a reserved shape, or scaled up from
+// zero is not in that set and is caught before its children are stranded.
 func (nodeSet *ChainNodeSet) validateGroupChildReservedNames(old *ChainNodeSet) error {
 	grandfathered := map[string]bool{}
 	if old != nil {
@@ -1080,8 +1088,8 @@ func (nodeSet *ChainNodeSet) validateGroupChildReservedNames(old *ChainNodeSet) 
 				grandfathered[g.GetServiceName(old)] = true
 			}
 		}
-	} else if nodeSet.Status.LegacySignerServiceNamesInitialized {
-		for _, name := range nodeSet.Status.LegacySignerServiceNames {
+	} else if nodeSet.Status.LegacyReservedChildGroupNamesInitialized {
+		for _, name := range nodeSet.Status.LegacyReservedChildGroupNames {
 			grandfathered[name] = true
 		}
 	}

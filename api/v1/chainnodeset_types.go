@@ -157,11 +157,12 @@ type ChainNodeSetStatus struct {
 	// +listMapKey=name
 	Cosmosigners []CosmosignerStatus `json:"cosmosigners,omitempty"`
 
-	// LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now
-	// reserved for standalone ChainNode derived Services — signer Services (-signer/-signer-privval)
-	// and CosmoGuard client Services (-cg). The controller initializes this once from Services already
-	// owned by the ChainNodeSet, so no-webhook validation can grandfather legacy names without trusting
-	// the current, possibly edited spec.
+	// LegacySignerServiceNames records pre-existing owned group/global Service names ending in
+	// -signer/-signer-privval — suffixes now reserved for a standalone ChainNode's raft/discovery
+	// Services. The controller initializes this once from Services already owned by the ChainNodeSet, so
+	// validateCosmosigner can grandfather legacy names on the no-webhook path without trusting the
+	// current, possibly edited spec. Both scopes are captured because a group OR a global route named
+	// "<x>-signer" materializes the colliding Service.
 	// +optional
 	LegacySignerServiceNames []string `json:"legacySignerServiceNames,omitempty"`
 
@@ -169,6 +170,20 @@ type ChainNodeSetStatus struct {
 	// ChainNodeSet whose status predates LegacySignerServiceNames.
 	// +optional
 	LegacySignerServiceNamesInitialized bool `json:"legacySignerServiceNamesInitialized,omitempty"`
+
+	// LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope
+	// "group", instances > 0) ending in -cg/-signer, i.e. groups that already materialize child
+	// ChainNodes "<base>-<n>" under a now-reserved StatefulSet-child suffix. Unlike
+	// LegacySignerServiceNames this excludes global routes and zero-instance groups — neither creates
+	// such children — so validateGroupChildReservedNames grandfathers only genuinely child-bearing
+	// groups on the no-webhook path and never lets a later same-named group strand its children.
+	// +optional
+	LegacyReservedChildGroupNames []string `json:"legacyReservedChildGroupNames,omitempty"`
+
+	// LegacyReservedChildGroupNamesInitialized distinguishes a recorded empty set from a ChainNodeSet
+	// whose status predates LegacyReservedChildGroupNames (so it is back-filled once after upgrade).
+	// +optional
+	LegacyReservedChildGroupNamesInitialized bool `json:"legacyReservedChildGroupNamesInitialized,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.

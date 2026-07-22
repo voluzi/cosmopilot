@@ -23,13 +23,23 @@ import (
 )
 
 func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
-	if nodeSet.Status.LegacySignerServiceNamesInitialized {
+	signerDone := nodeSet.Status.LegacySignerServiceNamesInitialized
+	childDone := nodeSet.Status.LegacyReservedChildGroupNamesInitialized
+	if signerDone && childDone {
 		return false, nil
 	}
 
+	// expected maps every owned group/global base Service name to its scope label. activeGroupBases is
+	// the subset of scope-"group" bases whose group actually materializes child ChainNodes (instances
+	// > 0) — the only names that can strand a reserved "<base>-<n>" child.
 	expected := map[string]string{}
+	activeGroupBases := map[string]bool{}
 	for i := range nodeSet.Spec.Nodes {
-		expected[nodeSet.Spec.Nodes[i].GetServiceName(nodeSet)] = scopeGroup
+		base := nodeSet.Spec.Nodes[i].GetServiceName(nodeSet)
+		expected[base] = scopeGroup
+		if nodeSet.Spec.Nodes[i].GetInstances() > 0 {
+			activeGroupBases[base] = true
+		}
 	}
 	for i := range nodeSet.Spec.Ingresses {
 		expected[nodeSet.Spec.Ingresses[i].GetName(nodeSet)] = scopeGlobal
@@ -42,39 +52,58 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 	if err := r.List(ctx, services, client.InNamespace(nodeSet.GetNamespace())); err != nil {
 		return false, err
 	}
-	names := map[string]struct{}{}
+	signerNames := map[string]struct{}{}
+	reservedChildNames := map[string]struct{}{}
 	for i := range services.Items {
 		svc := &services.Items[i]
 		if !metav1.IsControlledBy(svc, nodeSet) {
 			continue
 		}
-		scope, derived := expected[svc.GetName()]
+		name := svc.GetName()
+		scope, derived := expected[name]
 		if !derived || svc.GetLabels()[controllers.LabelScope] != scope {
 			continue
 		}
-		// Capture group/global Service names whose suffix is now reserved for standalone-ChainNode
-		// derived Services — signer Services (-signer/-signer-privval) and CosmoGuard client Services
-		// (-cg) — so validateGroupChildReservedNames and validateCosmosigner can grandfather them on
-		// the no-webhook path. `expected` already restricts these to actually-owned group/global base
-		// names, so a guarded group's guard Service (scopeCosmoGuard, absent from `expected`) is never
-		// captured here — only a group literally named "<x>-cg" whose own base Service ends in "-cg".
-		if strings.HasSuffix(svc.GetName(), "-signer") ||
-			strings.HasSuffix(svc.GetName(), "-signer-privval") ||
-			strings.HasSuffix(svc.GetName(), "-cg") {
-			names[svc.GetName()] = struct{}{}
+		// validateCosmosigner grandfather set: any owned group/global Service literally named
+		// "<x>-signer"/"<x>-signer-privval" collides with a standalone ChainNode's signer Service,
+		// regardless of scope or instance count, so capture both scopes here.
+		if strings.HasSuffix(name, "-signer") || strings.HasSuffix(name, "-signer-privval") {
+			signerNames[name] = struct{}{}
+		}
+		// validateGroupChildReservedNames grandfather set: only a scope-"group" base with instances > 0
+		// materializes child ChainNodes "<base>-<n>", so restrict to active group bases. A global route
+		// or a zero-instance group ending in -cg/-signer never bears such children and must NOT be
+		// captured, otherwise a later same-named group would be wrongly grandfathered and strand its
+		// children. (A guarded group's guard Service is scopeCosmoGuard, absent from `expected`, so it is
+		// never seen here — only a group literally named "<x>-cg"/"<x>-signer".)
+		if scope == scopeGroup && activeGroupBases[name] &&
+			(strings.HasSuffix(name, "-cg") || strings.HasSuffix(name, "-signer")) {
+			reservedChildNames[name] = struct{}{}
 		}
 	}
 
-	nodeSet.Status.LegacySignerServiceNames = make([]string, 0, len(names))
-	for name := range names {
-		nodeSet.Status.LegacySignerServiceNames = append(nodeSet.Status.LegacySignerServiceNames, name)
+	if !signerDone {
+		nodeSet.Status.LegacySignerServiceNames = sortedKeys(signerNames)
+		nodeSet.Status.LegacySignerServiceNamesInitialized = true
 	}
-	sort.Strings(nodeSet.Status.LegacySignerServiceNames)
-	nodeSet.Status.LegacySignerServiceNamesInitialized = true
+	if !childDone {
+		nodeSet.Status.LegacyReservedChildGroupNames = sortedKeys(reservedChildNames)
+		nodeSet.Status.LegacyReservedChildGroupNamesInitialized = true
+	}
 	if err := r.Status().Update(ctx, nodeSet); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// sortedKeys returns the keys of set as a sorted slice (nil-safe, empty set -> empty slice).
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guards cosmoGuardReconcile) error {

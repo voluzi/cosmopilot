@@ -732,18 +732,17 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 		require.NoError(t, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme))
 		return svc
 	}
-	legacyNames := []string{
-		"test-nodeset-fullnodes-signer",
-		"test-nodeset-global-grpc-signer-privval",
-		"test-nodeset-global-rpc-signer",
-		"test-nodeset-sentries-cg",
+	ownedDerived := []struct {
+		name  string
+		scope string
+	}{
+		{"test-nodeset-fullnodes-signer", scopeGroup},
+		{"test-nodeset-global-grpc-signer-privval", scopeGlobal},
+		{"test-nodeset-global-rpc-signer", scopeGlobal},
+		{"test-nodeset-sentries-cg", scopeGroup},
 	}
-	for i, name := range legacyNames {
-		scope := scopeGlobal
-		if i == 0 || i == 3 {
-			scope = scopeGroup
-		}
-		require.NoError(t, r.Create(context.Background(), ownedService(name, scope)))
+	for _, s := range ownedDerived {
+		require.NoError(t, r.Create(context.Background(), ownedService(s.name, s.scope)))
 	}
 	// A guarded group's CosmoGuard client Service also ends in "-cg" but is scopeCosmoGuard and not a
 	// group base name, so it is not derived by the current spec and must not be grandfathered.
@@ -761,7 +760,21 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, initialized)
 	assert.True(t, nodeSet.Status.LegacySignerServiceNamesInitialized)
-	assert.Equal(t, legacyNames, nodeSet.Status.LegacySignerServiceNames)
+	// LegacySignerServiceNames grandfathers -signer/-signer-privval owned Services in any scope, for
+	// validateCosmosigner.
+	assert.Equal(t, []string{
+		"test-nodeset-fullnodes-signer",
+		"test-nodeset-global-grpc-signer-privval",
+		"test-nodeset-global-rpc-signer",
+	}, nodeSet.Status.LegacySignerServiceNames)
+	// LegacyReservedChildGroupNames grandfathers only scope-"group" bases with instances > 0 ending in
+	// -cg/-signer (the child-bearing groups), for validateGroupChildReservedNames — never the global
+	// -signer Services, which materialize no child ChainNodes.
+	assert.True(t, nodeSet.Status.LegacyReservedChildGroupNamesInitialized)
+	assert.Equal(t, []string{
+		"test-nodeset-fullnodes-signer",
+		"test-nodeset-sentries-cg",
+	}, nodeSet.Status.LegacyReservedChildGroupNames)
 
 	initialized, err = r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
 	require.NoError(t, err)
