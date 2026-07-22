@@ -527,8 +527,10 @@ var (
 // collide with a port the guard already uses (Service or container listener — a duplicate Service port
 // is rejected by the API server, and a duplicate container port crash-loops the pod), and when basic
 // auth is configured both credential selectors must reference a Secret name and key (an empty name
-// renders an unresolvable env var). The EVM ports are only reserved when EVM is enabled. Returns nil
-// when the dashboard is disabled.
+// renders an unresolvable env var). Only the public EVM Service ports (cosmoGuardEvmReservedPorts) are
+// reserved conditionally on EVM being enabled; the EVM listener ports are in cosmoGuardReservedPorts and
+// reserved unconditionally (a flipped global route targets them regardless of a group's evmEnabled).
+// Returns nil when the dashboard is disabled.
 func (cfg *Config) ValidateCosmoGuardDashboard() error {
 	if !cfg.CosmoGuardDashboardEnabled() {
 		return nil
