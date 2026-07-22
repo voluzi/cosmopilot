@@ -16626,12 +16626,30 @@ spec:
                 description: Last height read on the nodes by cosmopilot.
                 format: int64
                 type: integer
+              legacyReservedChildGroupNames:
+                description: |-
+                  LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope
+                  "group", instances > 0) ending in -cg/-signer/-seed, i.e. groups that already materialize child
+                  ChainNodes "<base>-<n>" under a now-reserved StatefulSet-child suffix. Unlike
+                  LegacySignerServiceNames this excludes global routes and zero-instance groups — neither creates
+                  such children — so validateGroupChildReservedNames grandfathers only genuinely child-bearing
+                  groups on the no-webhook path and never lets a later same-named group strand its children.
+                items:
+                  type: string
+                type: array
+              legacyReservedChildGroupNamesInitialized:
+                description: |-
+                  LegacyReservedChildGroupNamesInitialized distinguishes a recorded empty set from a ChainNodeSet
+                  whose status predates LegacyReservedChildGroupNames (so it is back-filled once after upgrade).
+                type: boolean
               legacySignerServiceNames:
                 description: |-
-                  LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now
-                  reserved for standalone ChainNode signer Services. The controller initializes this once from
-                  Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy
-                  names without trusting the current, possibly edited spec.
+                  LegacySignerServiceNames records pre-existing owned group/global Service names ending in
+                  -signer/-signer-privval — suffixes now reserved for a standalone ChainNode's raft/discovery
+                  Services. The controller initializes this once from Services already owned by the ChainNodeSet, so
+                  validateCosmosigner can grandfather legacy names on the no-webhook path without trusting the
+                  current, possibly edited spec. Both scopes are captured because a group OR a global route named
+                  "<x>-signer" materializes the colliding Service.
                 items:
                   type: string
                 type: array
