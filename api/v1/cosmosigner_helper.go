@@ -541,18 +541,6 @@ func (nodeSet *ChainNodeSet) ValidatorGroupResolvesSigningIdentity(group string,
 	return identity != "" && nodeSet.validatorGroupSigningIdentity(group, cfg) == identity
 }
 
-// ValidateCosmosignerReservedNameNoWebhook applies the reserved-name rule on the no-webhook
-// reconcile path, where create cannot be distinguished from update. It enforces only while the
-// object has never been successfully reconciled (isEstablished == false, i.e. empty status), so a
-// pre-existing legacy resource with a reserved name keeps updating while a NEW no-webhook resource
-// with a reserved name is rejected before the controllers start fighting over derived names.
-func ValidateCosmosignerReservedNameNoWebhook(name string, isEstablished bool) error {
-	if isEstablished {
-		return nil
-	}
-	return ValidateReservedResourceName(name, true)
-}
-
 // validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the
 // embedded raft cluster is not a plain Kubernetes scale: the membership recorded in the existing
 // per-pod raft state is not updated by rendering a new bootstrap list, so scaling down can lose

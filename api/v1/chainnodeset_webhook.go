@@ -24,13 +24,7 @@ func (nodeSet *ChainNodeSet) ValidateCreate(_ context.Context, obj *ChainNodeSet
 		"kind", "ChainNodeSet",
 		"resource", obj.GetNamespacedName(),
 	)
-	if err := ValidateReservedResourceName(obj.GetName(), true); err != nil {
-		return nil, err
-	}
-	if err := ValidateReservedStatefulChildName(obj.GetName(), true); err != nil {
-		return nil, err
-	}
-	if err := obj.validateGroupChildReservedNames(); err != nil {
+	if err := ValidateReservedNodeSetName(obj.GetName(), true); err != nil {
 		return nil, err
 	}
 	return obj.Validate(nil)
@@ -351,9 +345,18 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, err
 	}
 
-	// Reject a group whose Service name collides with another group's CosmoGuard Service (e.g. a
-	// guarded group "g" and a second group named "g-cg" both derive "<nodeSet>-g-cg").
-	if err := nodeSet.validateGroupGuardNameCollisions(); err != nil {
+	// Reject a group whose derived Service name collides with another group's/route's derived Service
+	// (e.g. guarded group "g" vs a group named "g-cg", or group "g" vs a group named "g-internal").
+	if err := nodeSet.validateServiceNameCollisions(); err != nil {
+		return nil, err
+	}
+
+	// Reject a node group whose generated child ChainNode names collide with reserved StatefulSet-child
+	// patterns (…-cg-<n> / …-signer-<n>). Runs on create and update (via obj.Validate(nil) on create),
+	// gated on live instances and grandfathering groups already active in old, so an existing
+	// ChainNodeSet is never locked out of unrelated updates while a newly added/activated group is
+	// still caught before its children are stranded.
+	if err := nodeSet.validateGroupChildReservedNames(old); err != nil {
 		return nil, err
 	}
 
@@ -890,8 +893,9 @@ func (nodeSet *ChainNodeSet) validateCosmosignerTargetUniqueness() error {
 // validateGeneratedNameLengths rejects any derived resource name that would exceed the 63-character
 // DNS label limit. It checks, per node group, the group base (its always-on -internal Service and,
 // when CosmoGuard is enabled, the -cg-upstream Service) and the group's longest child pod name; the
-// legacy singleton .spec.validator's own ChainNode base; each global ingress/gateway route's backing
-// Service; and, per resolved signer, the discovery Service "<signer>-privval".
+// legacy singleton .spec.validator's own ChainNode base; each global ingress/gateway route's
+// always-created -internal Service; cosmoseed's headless and highest-ordinal instance Services (when
+// enabled); and, per resolved signer, the discovery Service "<signer>-privval".
 func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 	const subject = "ChainNodeSet or node-group name"
 	for i := range nodeSet.Spec.Nodes {
@@ -919,16 +923,33 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 			return err
 		}
 	}
-	// Each global ingress/gateway route creates a backing Service; a long route name pushes that
-	// Service past the 63-char label limit even when every node-group name fits.
+	// Each global ingress/gateway route always creates a "<nodeSet>-global-<route>-internal" Service
+	// (getGlobalInternalServiceSpec runs unconditionally, independent of useInternal), and that
+	// -internal name is the longest 63-bound name the route derives. A long route name pushes it past
+	// the label limit even when every node-group name fits.
 	for i := range nodeSet.Spec.Ingresses {
-		if svc := nodeSet.Spec.Ingresses[i].GetServiceName(nodeSet); len(svc) > 63 {
-			return fmt.Errorf("the global ingress Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name or the ingress route name %q", svc, len(svc), nodeSet.Spec.Ingresses[i].Name)
+		route := &nodeSet.Spec.Ingresses[i]
+		if svc := fmt.Sprintf("%s-internal", route.GetName(nodeSet)); len(svc) > 63 {
+			return fmt.Errorf("the global ingress Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name or the ingress route name %q", svc, len(svc), route.Name)
 		}
 	}
 	for i := range nodeSet.Spec.GatewayRoutes {
-		if svc := nodeSet.Spec.GatewayRoutes[i].GetServiceName(nodeSet); len(svc) > 63 {
-			return fmt.Errorf("the global gateway Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name or the gateway route name %q", svc, len(svc), nodeSet.Spec.GatewayRoutes[i].Name)
+		route := &nodeSet.Spec.GatewayRoutes[i]
+		if svc := fmt.Sprintf("%s-global-%s-internal", nodeSet.GetName(), route.Name); len(svc) > 63 {
+			return fmt.Errorf("the global gateway Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name or the gateway route name %q", svc, len(svc), route.Name)
+		}
+	}
+	// Cosmoseed derives a bare headless Service "<nodeSet>-seed-headless" and, per instance, a
+	// StatefulSet whose pods and per-instance "<nodeSet>-seed-<i>-internal" Service are 63-bound. The
+	// highest-ordinal instance carries the longest such name. Only checked when cosmoseed is enabled.
+	if nodeSet.Spec.Cosmoseed.IsEnabled() {
+		if svc := fmt.Sprintf("%s-seed-headless", nodeSet.GetName()); len(svc) > 63 {
+			return fmt.Errorf("the cosmoseed headless Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name", svc, len(svc))
+		}
+		if inst := nodeSet.Spec.Cosmoseed.GetInstances(); inst > 0 {
+			if svc := fmt.Sprintf("%s-seed-%d-internal", nodeSet.GetName(), inst-1); len(svc) > 63 {
+				return fmt.Errorf("the cosmoseed instance Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet name or reduce cosmoseed instances", svc, len(svc))
+			}
 		}
 	}
 	// The discovery Service name already contains the "-signer" segment, so keep a dedicated check
@@ -941,36 +962,55 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 	return nil
 }
 
-// validateGroupGuardNameCollisions rejects a node group whose CosmoGuard Service collides with
-// another Service the same ChainNodeSet derives. A guarded group <g> derives a guard Service
-// "<nodeSet>-<g>-cg"; a second node group literally named "<g>-cg", or a global ingress/gateway route
-// whose backing Service resolves to that same name, would fight over it. Both objects share the
-// ChainNodeSet owner, so the ownership guard would not stop the two reconcile paths from overwriting
-// each other. Mirrors the "<g>-signer" group/signer collision check in validateCosmosignerTargetUniqueness.
-func (nodeSet *ChainNodeSet) validateGroupGuardNameCollisions() error {
-	// Every non-guard Service name the ChainNodeSet derives, mapped to a description of what derives it
-	// so a colliding guard Service can name its counterpart.
-	serviceOwners := map[string]string{}
+// validateServiceNameCollisions rejects two distinct owners (node groups, global ingress/gateway
+// routes) that derive the same Service name and would fight over it — both share the ChainNodeSet
+// owner, so the ownership guard does not stop the reconcile paths from overwriting each other. Every
+// group derives a main Service "<nodeSet>-<g>", an always-on "<nodeSet>-<g>-internal" Service, and,
+// when CosmoGuard is enabled, a guard Service "<nodeSet>-<g>-cg"; every route always creates a
+// "<nodeSet>-global-<route>-internal" Service plus its public backing Service. Collisions this
+// catches include a guarded group "g" vs a group named "g-cg" (guard vs main) and a group "g" vs a
+// group named "g-internal" (internal Service vs main). Mirrors the "<g>-signer" group/signer
+// collision check in validateCosmosignerTargetUniqueness.
+func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
+	owners := map[string]string{}
+	add := func(name, owner string) error {
+		if prev, taken := owners[name]; taken && prev != owner {
+			return fmt.Errorf("Service name %q is derived by both %s and %s: rename one of them", name, prev, owner)
+		}
+		owners[name] = owner
+		return nil
+	}
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
-		serviceOwners[g.GetServiceName(nodeSet)] = fmt.Sprintf("node group %q", g.Name)
+		owner := fmt.Sprintf("node group %q", g.Name)
+		base := g.GetServiceName(nodeSet)
+		for _, name := range []string{base, base + "-internal"} {
+			if err := add(name, owner); err != nil {
+				return err
+			}
+		}
+		if g.GetServiceConfig().CosmoGuardEnabled() {
+			if err := add(base+"-cg", owner); err != nil {
+				return err
+			}
+		}
 	}
 	for i := range nodeSet.Spec.Ingresses {
 		ing := &nodeSet.Spec.Ingresses[i]
-		serviceOwners[ing.GetServiceName(nodeSet)] = fmt.Sprintf("global ingress route %q", ing.Name)
+		owner := fmt.Sprintf("global ingress route %q", ing.Name)
+		for _, name := range []string{ing.GetServiceName(nodeSet), fmt.Sprintf("%s-internal", ing.GetName(nodeSet))} {
+			if err := add(name, owner); err != nil {
+				return err
+			}
+		}
 	}
 	for i := range nodeSet.Spec.GatewayRoutes {
 		gw := &nodeSet.Spec.GatewayRoutes[i]
-		serviceOwners[gw.GetServiceName(nodeSet)] = fmt.Sprintf("global gateway route %q", gw.Name)
-	}
-	for i := range nodeSet.Spec.Nodes {
-		g := &nodeSet.Spec.Nodes[i]
-		if !g.GetServiceConfig().CosmoGuardEnabled() {
-			continue
-		}
-		guard := fmt.Sprintf("%s-cg", g.GetServiceName(nodeSet))
-		if other, collides := serviceOwners[guard]; collides {
-			return fmt.Errorf("node group %q has CosmoGuard enabled and derives guard Service name %q, which %s also derives: rename one of them", g.Name, guard, other)
+		owner := fmt.Sprintf("global gateway route %q", gw.Name)
+		for _, name := range []string{gw.GetServiceName(nodeSet), fmt.Sprintf("%s-global-%s-internal", nodeSet.GetName(), gw.Name)} {
+			if err := add(name, owner); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -981,12 +1021,37 @@ func (nodeSet *ChainNodeSet) validateGroupGuardNameCollisions() error {
 // ChainNodes "<base>-<ordinal>"; if <base> ends in "-cg" or "-signer" (e.g. a group named "foo-cg"),
 // the child name "<nodeSet>-foo-cg-0" is itself rejected by ValidateReservedStatefulChildName at its
 // own admission create, leaving the ChainNodeSet admitted but permanently unable to reconcile its
-// children. Surface that up front on the parent with a clear error. Create-only, mirroring the other
-// reserved-name checks, so an already-existing ChainNodeSet is never locked out of updates.
-func (nodeSet *ChainNodeSet) validateGroupChildReservedNames() error {
+// children. Surface that up front on the parent with a clear error.
+//
+// The check runs on create and update (via obj.Validate(nil) on create), but only for groups that
+// actually materialize children now — a scaled-to-zero group creates no child, so it is skipped until
+// it is scaled up. Groups whose Service name was already active are grandfathered so an unrelated
+// update to a ChainNodeSet that predates this validation is never blocked; the grandfathered set is
+// built the same way validateCosmosigner builds its legacy whitelist — from the old spec's active
+// group Service names on the update path, or from the controller-recorded LegacySignerServiceNames on
+// the no-webhook path (old == nil). A group that is newly added, renamed into a reserved shape, or
+// scaled up from zero is not in that set and is caught before its children are stranded.
+func (nodeSet *ChainNodeSet) validateGroupChildReservedNames(old *ChainNodeSet) error {
+	grandfathered := map[string]bool{}
+	if old != nil {
+		for i := range old.Spec.Nodes {
+			g := &old.Spec.Nodes[i]
+			if g.GetInstances() > 0 {
+				grandfathered[g.GetServiceName(old)] = true
+			}
+		}
+	} else if nodeSet.Status.LegacySignerServiceNamesInitialized {
+		for _, name := range nodeSet.Status.LegacySignerServiceNames {
+			grandfathered[name] = true
+		}
+	}
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
-		child := fmt.Sprintf("%s-0", g.GetServiceName(nodeSet))
+		base := g.GetServiceName(nodeSet)
+		if g.GetInstances() == 0 || grandfathered[base] {
+			continue
+		}
+		child := fmt.Sprintf("%s-0", base)
 		if err := ValidateReservedStatefulChildName(child, true); err != nil {
 			return fmt.Errorf("node group %q derives child ChainNode names like %q that collide with reserved CosmoGuard/cosmosigner StatefulSet child names: rename the group", g.Name, child)
 		}

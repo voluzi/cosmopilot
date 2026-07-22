@@ -362,10 +362,7 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 	// The reserved-name rule normally runs on the admission create path; on the no-webhook path it
 	// applies only while the object has never been reconciled (no chainID recorded), so legacy
 	// names keep working.
-	if err := appsv1.ValidateCosmosignerReservedNameNoWebhook(nodeSet.GetName(), nodeSet.Status.ChainID != ""); err != nil {
-		return nil, err
-	}
-	if err := appsv1.ValidateReservedStatefulChildName(nodeSet.GetName(), nodeSet.Status.ChainID == ""); err != nil {
+	if err := appsv1.ValidateReservedNodeSetNameNoWebhook(nodeSet.GetName(), nodeSet.Status.ChainID != ""); err != nil {
 		return nil, err
 	}
 	if nodeSet.Status.ChainID != "" {

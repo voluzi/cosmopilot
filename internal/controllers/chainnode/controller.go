@@ -178,7 +178,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if r.opts.DisableWebhooks {
 		// The reserved-name rule normally runs on the admission create path; here it applies only
 		// while the object has never been reconciled (empty status), so legacy names keep working.
-		if err := appsv1.ValidateCosmosignerReservedNameNoWebhook(chainNode.GetName(), chainNode.Status.NodeID != ""); err != nil {
+		if err := appsv1.ValidateReservedResourceNameNoWebhook(chainNode.GetName(), chainNode.Status.NodeID != ""); err != nil {
 			logger.Error(err, "spec is invalid")
 			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid, "spec is invalid: %v", err)
 			return ctrl.Result{}, err

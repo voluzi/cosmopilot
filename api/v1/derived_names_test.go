@@ -74,6 +74,29 @@ func TestValidateReservedResourceName(t *testing.T) {
 	}
 }
 
+func TestValidateReservedNodeSetName(t *testing.T) {
+	// A ChainNodeSet only bare-materializes the signer and seed families, so only those suffixes are
+	// reserved on its own name.
+	for _, suffix := range reservedNodeSetNameSuffixes {
+		name := "foo" + suffix
+		if err := ValidateReservedNodeSetName(name, true); err == nil {
+			t.Fatalf("ChainNodeSet metadata.name %q ending in reserved suffix %q must be rejected on create", name, suffix)
+		}
+		// Reserved only on create: an already-existing ChainNodeSet keeps updating.
+		if err := ValidateReservedNodeSetName(name, false); err != nil {
+			t.Fatalf("reserved ChainNodeSet name %q must stay valid on update, got %v", name, err)
+		}
+	}
+
+	// Suffixes that only a ChainNode (never a ChainNodeSet's own name) can collide with are NOT
+	// reserved on a ChainNodeSet — the narrowing that keeps node-group names like "<x>-cg" usable.
+	for _, name := range []string{"foo", "foo-bar", "foo-cg", "foo-internal", "foo-p2p", "foo-grpc", "foo-tls", "foo-cg-peer"} {
+		if err := ValidateReservedNodeSetName(name, true); err != nil {
+			t.Fatalf("non-reserved ChainNodeSet name %q must be accepted on create, got %v", name, err)
+		}
+	}
+}
+
 func TestValidateReservedStatefulChildName(t *testing.T) {
 	// StatefulSet pod / PVC child names are rejected on create.
 	for _, name := range []string{"foo-signer-0", "foo-signer-12", "data-foo-signer-3", "foo-cg-0", "foo-cg-7", "bar-cg-10"} {

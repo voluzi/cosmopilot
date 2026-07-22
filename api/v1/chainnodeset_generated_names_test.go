@@ -84,7 +84,7 @@ func TestValidateGroupGuardNameCollisions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guarded, {Name: "foo-cg"}}},
 	}
-	err := collide.validateGroupGuardNameCollisions()
+	err := collide.validateServiceNameCollisions()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-foo-cg")
 
@@ -93,14 +93,14 @@ func TestValidateGroupGuardNameCollisions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guarded, {Name: "bar"}}},
 	}
-	require.NoError(t, ok.validateGroupGuardNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions())
 
 	// The same "foo-cg" group name is fine when "foo" is not guarded (no guard Service exists).
 	unguarded := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "foo-cg"}}},
 	}
-	require.NoError(t, unguarded.validateGroupGuardNameCollisions())
+	require.NoError(t, unguarded.validateServiceNameCollisions())
 }
 
 // A guard Service name can also collide with a global ingress/gateway route's backing Service. A
@@ -116,7 +116,7 @@ func TestValidateGroupGuardNameCollisionsWithRoutes(t *testing.T) {
 			Ingresses: []GlobalIngressConfig{{Name: "rpc-cg"}},
 		},
 	}
-	err := ingColl.validateGroupGuardNameCollisions()
+	err := ingColl.validateServiceNameCollisions()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-global-rpc-cg")
 	require.Contains(t, err.Error(), "global ingress route")
@@ -128,19 +128,42 @@ func TestValidateGroupGuardNameCollisionsWithRoutes(t *testing.T) {
 			GatewayRoutes: []GlobalGatewayConfig{{Name: "rpc-cg"}},
 		},
 	}
-	err = gwColl.validateGroupGuardNameCollisions()
+	err = gwColl.validateServiceNameCollisions()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "global gateway route")
 
-	// A non-colliding route is fine.
+	// A non-colliding route is fine. The route name must differ from the guarded group's own name
+	// ("global-rpc"), otherwise the route's backing Service "cs-global-rpc" would collide with the
+	// group's main Service — a real collision the broadened check now also catches.
 	ok := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec: ChainNodeSetSpec{
 			Nodes:     []NodeGroupSpec{guarded},
-			Ingresses: []GlobalIngressConfig{{Name: "rpc"}},
+			Ingresses: []GlobalIngressConfig{{Name: "p2p"}},
 		},
 	}
-	require.NoError(t, ok.validateGroupGuardNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions())
+}
+
+// Two node groups whose derived Service names shadow each other must be rejected even without any
+// CosmoGuard: a group "foo" always creates an "<nodeSet>-foo-internal" Service, and a second group
+// literally named "foo-internal" derives that same name as its main Service. Regression test for the
+// -internal shadowing gap.
+func TestValidateServiceNameCollisionsInternalShadowing(t *testing.T) {
+	collide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "foo-internal"}}},
+	}
+	err := collide.validateServiceNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-internal")
+
+	// Distinct base names never shadow one another.
+	ok := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "bar"}}},
+	}
+	require.NoError(t, ok.validateServiceNameCollisions())
 }
 
 // A group whose name ends in "-cg"/"-signer" makes the controller generate child ChainNodes like
@@ -152,7 +175,7 @@ func TestValidateGroupChildReservedNames(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 			Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: groupName}}},
 		}
-		err := cs.validateGroupChildReservedNames()
+		err := cs.validateGroupChildReservedNames(nil)
 		require.Errorf(t, err, "group %q must be rejected", groupName)
 		require.Contains(t, err.Error(), groupName)
 	}
@@ -162,5 +185,85 @@ func TestValidateGroupChildReservedNames(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "fullnodes"}, {Name: "sentries"}}},
 	}
-	require.NoError(t, ok.validateGroupChildReservedNames())
+	require.NoError(t, ok.validateGroupChildReservedNames(nil))
+}
+
+// A reserved-shaped group with zero instances materializes no child ChainNodes, so it must pass at
+// create; scaling it up on a later update (0 -> >0) makes the child real and must then be rejected.
+// A group that was already active in the old spec is grandfathered so unrelated updates to a
+// predating ChainNodeSet are never blocked.
+func TestValidateGroupChildReservedNamesUpdatePath(t *testing.T) {
+	zero := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo-cg", Instances: ptr.To(0)}}},
+	}
+	// Zero instances at create: no child yet, so it must not be rejected.
+	require.NoError(t, zero.validateGroupChildReservedNames(nil))
+
+	scaledUp := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo-cg", Instances: ptr.To(1)}}},
+	}
+	// Scaling the same group up on update makes "cs-foo-cg-0" real: it must now be rejected.
+	err := scaledUp.validateGroupChildReservedNames(zero)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "foo-cg")
+
+	// A group already active (>0) in the old spec is grandfathered: an update leaving it active is fine.
+	require.NoError(t, scaledUp.validateGroupChildReservedNames(scaledUp))
+}
+
+// A global ingress/gateway route always creates a "<nodeSet>-global-<route>-internal" Service. A
+// route name can be short enough that the public backing Service "<nodeSet>-global-<route>" fits in
+// 63 chars while the always-created -internal variant overflows. Regression test for the -internal
+// route Service length gap.
+func TestValidateGeneratedNameLengthsGlobalRouteInternal(t *testing.T) {
+	// "cs-global-" (10) + 50 = 60 (public fits) but + "-internal" (9) = 69 (overflows).
+	route50 := strings.Repeat("r", 50)
+
+	ing := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Ingresses: []GlobalIngressConfig{{Name: route50}}},
+	}
+	err := ing.validateGeneratedNameLengths()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "global ingress Service name")
+
+	gw := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{GatewayRoutes: []GlobalGatewayConfig{{Name: route50}}},
+	}
+	err = gw.validateGeneratedNameLengths()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "global gateway Service name")
+}
+
+// Cosmoseed derives a "<nodeSet>-seed-headless" Service and per-instance
+// "<nodeSet>-seed-<i>-internal" Services; both are 63-bound. They must be length-validated only when
+// cosmoseed is enabled.
+func TestValidateGeneratedNameLengthsCosmoseed(t *testing.T) {
+	// name 50 + "-seed-headless" (14) = 64: the headless Service overflows.
+	headless := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 50)},
+		Spec:       ChainNodeSetSpec{Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(true)}},
+	}
+	err := headless.validateGeneratedNameLengths()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cosmoseed headless Service name")
+
+	// name 48: headless (62) fits, but the instance Service "<48>-seed-0-internal" (64) overflows.
+	instance := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 48)},
+		Spec:       ChainNodeSetSpec{Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(true), Instances: ptr.To(1)}},
+	}
+	err = instance.validateGeneratedNameLengths()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cosmoseed instance Service name")
+
+	// Disabled cosmoseed derives no seed Services, so an over-long name is not rejected on its account.
+	disabled := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 60)},
+		Spec:       ChainNodeSetSpec{Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(false)}},
+	}
+	require.NoError(t, disabled.validateGeneratedNameLengths())
 }
