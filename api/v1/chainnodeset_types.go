@@ -158,9 +158,10 @@ type ChainNodeSetStatus struct {
 	Cosmosigners []CosmosignerStatus `json:"cosmosigners,omitempty"`
 
 	// LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now
-	// reserved for standalone ChainNode signer Services. The controller initializes this once from
-	// Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy
-	// names without trusting the current, possibly edited spec.
+	// reserved for standalone ChainNode derived Services — signer Services (-signer/-signer-privval)
+	// and CosmoGuard client Services (-cg). The controller initializes this once from Services already
+	// owned by the ChainNodeSet, so no-webhook validation can grandfather legacy names without trusting
+	// the current, possibly edited spec.
 	// +optional
 	LegacySignerServiceNames []string `json:"legacySignerServiceNames,omitempty"`
 

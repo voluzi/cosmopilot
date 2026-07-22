@@ -52,7 +52,15 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 		if !derived || svc.GetLabels()[controllers.LabelScope] != scope {
 			continue
 		}
-		if strings.HasSuffix(svc.GetName(), "-signer") || strings.HasSuffix(svc.GetName(), "-signer-privval") {
+		// Capture group/global Service names whose suffix is now reserved for standalone-ChainNode
+		// derived Services — signer Services (-signer/-signer-privval) and CosmoGuard client Services
+		// (-cg) — so validateGroupChildReservedNames and validateCosmosigner can grandfather them on
+		// the no-webhook path. `expected` already restricts these to actually-owned group/global base
+		// names, so a guarded group's guard Service (scopeCosmoGuard, absent from `expected`) is never
+		// captured here — only a group literally named "<x>-cg" whose own base Service ends in "-cg".
+		if strings.HasSuffix(svc.GetName(), "-signer") ||
+			strings.HasSuffix(svc.GetName(), "-signer-privval") ||
+			strings.HasSuffix(svc.GetName(), "-cg") {
 			names[svc.GetName()] = struct{}{}
 		}
 	}

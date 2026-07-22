@@ -76,7 +76,7 @@ func TestValidateReservedResourceName(t *testing.T) {
 
 func TestValidateReservedStatefulChildName(t *testing.T) {
 	// StatefulSet pod / PVC child names are rejected on create.
-	for _, name := range []string{"foo-signer-0", "foo-signer-12", "data-foo-signer-3", "foo-cg-0", "foo-cg-7", "bar-cg-10"} {
+	for _, name := range []string{"foo-signer-0", "foo-signer-12", "data-foo-signer-3", "foo-cg-0", "foo-cg-7", "bar-cg-10", "foo-seed-0", "foo-seed-9", "bar-seed-15"} {
 		if err := ValidateReservedStatefulChildName(name, true); err == nil {
 			t.Fatalf("child name %q must be reserved on create", name)
 		}
@@ -87,7 +87,7 @@ func TestValidateReservedStatefulChildName(t *testing.T) {
 	}
 
 	// Non-canonical or unrelated names remain available on create.
-	for _, name := range []string{"foo-cg-x", "foo-signer-canary", "foo-cg-00", "foo-signer-01", "foo-bar-0", "foo-cg", "foo-signer"} {
+	for _, name := range []string{"foo-cg-x", "foo-signer-canary", "foo-cg-00", "foo-signer-01", "foo-bar-0", "foo-cg", "foo-signer", "foo-seed", "foo-seed-x", "foo-seed-00"} {
 		if err := ValidateReservedStatefulChildName(name, true); err != nil {
 			t.Fatalf("name %q must remain available, got %v", name, err)
 		}

@@ -267,3 +267,107 @@ func TestValidateGeneratedNameLengthsCosmoseed(t *testing.T) {
 	}
 	require.NoError(t, disabled.validateGeneratedNameLengths())
 }
+
+// A guarded group derives, besides the client Service "<nodeSet>-<group>-cg", an upstream Service
+// "<nodeSet>-<group>-cg-upstream" and a peer Service "<nodeSet>-<group>-cg-peer". A second group
+// literally named "<group>-cg-upstream"/"<group>-cg-peer" derives the same Service name and must be
+// rejected.
+func TestValidateGroupGuardAuxiliaryNameCollisions(t *testing.T) {
+	guarded := NodeGroupSpec{Name: "foo", Config: &Config{CosmoGuard: &CosmoGuardConfig{Enable: true}}}
+
+	for _, collider := range []string{"foo-cg-upstream", "foo-cg-peer"} {
+		cs := &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guarded, {Name: collider}}},
+		}
+		err := cs.validateServiceNameCollisions()
+		require.Errorf(t, err, "group %q must collide with the guard auxiliary Service", collider)
+		require.Contains(t, err.Error(), "cs-"+collider)
+	}
+
+	// Without CosmoGuard no auxiliary Services exist, so the same names are free.
+	ok := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "foo-cg-upstream"}, {Name: "foo-cg-peer"}}},
+	}
+	require.NoError(t, ok.validateServiceNameCollisions())
+}
+
+// Cosmoseed derives a client Service "<nodeSet>-seed" and a headless Service
+// "<nodeSet>-seed-headless"; a node group named "seed"/"seed-headless" derives the same name and must
+// be rejected only when cosmoseed is enabled.
+func TestValidateCosmoseedServiceNameCollisions(t *testing.T) {
+	for _, collider := range []string{"seed", "seed-headless"} {
+		cs := &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(true)},
+				Nodes:     []NodeGroupSpec{{Name: collider}},
+			},
+		}
+		err := cs.validateServiceNameCollisions()
+		require.Errorf(t, err, "group %q must collide with a cosmoseed Service", collider)
+		require.Contains(t, err.Error(), "cs-"+collider)
+	}
+
+	// Disabled cosmoseed derives no seed Services, so the same group names are free.
+	ok := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(false)},
+			Nodes:     []NodeGroupSpec{{Name: "seed"}, {Name: "seed-headless"}},
+		},
+	}
+	require.NoError(t, ok.validateServiceNameCollisions())
+}
+
+// The legacy singleton .spec.validator derives a Service "<nodeSet>-validator" and its -internal
+// variant; a node group named "validator" derives the same name and must be rejected. When
+// .spec.validator is unset no such Service exists.
+func TestValidateLegacyValidatorServiceNameCollisions(t *testing.T) {
+	collide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Validator: &NodeSetValidatorConfig{},
+			Nodes:     []NodeGroupSpec{{Name: "validator"}},
+		},
+	}
+	err := collide.validateServiceNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-validator")
+
+	// No legacy validator: the "validator" group name is free.
+	ok := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "validator"}}},
+	}
+	require.NoError(t, ok.validateServiceNameCollisions())
+}
+
+// A global route always materializes the public "<nodeSet>-global-<route>" Service even when
+// UseInternalServices flips its own backing Service to the -internal variant. A node group deriving
+// that public name must still be rejected — the check must register GetName (public), not
+// GetServiceName (which returns the internal name here).
+func TestValidateRoutePublicServiceNameCollisionWithInternal(t *testing.T) {
+	ing := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Ingresses: []GlobalIngressConfig{{Name: "rpc", UseInternalServices: ptr.To(true)}},
+			Nodes:     []NodeGroupSpec{{Name: "global-rpc"}},
+		},
+	}
+	err := ing.validateServiceNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-global-rpc")
+
+	gw := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			GatewayRoutes: []GlobalGatewayConfig{{Name: "rpc", UseInternalServices: ptr.To(true)}},
+			Nodes:         []NodeGroupSpec{{Name: "global-rpc"}},
+		},
+	}
+	err = gw.validateServiceNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-global-rpc")
+}

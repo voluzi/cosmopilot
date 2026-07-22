@@ -84,9 +84,10 @@ func ValidateReservedResourceName(name string, isCreate bool) error {
 }
 
 // ValidateReservedStatefulChildName rejects a CR name that exactly matches a StatefulSet pod (or
-// raft-state PVC) name cosmopilot derives: the cosmosigner children `<x>-signer-<n>` and the
-// CosmoGuard children `<x>-cg-<n>`. Such a name is not caught by ValidateReservedResourceName because
-// it ends in an ordinal, not a reserved suffix. Only enforced on create.
+// raft-state PVC) name cosmopilot derives: the cosmosigner children `<x>-signer-<n>`, the CosmoGuard
+// children `<x>-cg-<n>` and the cosmoseed instances `<x>-seed-<n>`. Such a name is not caught by
+// ValidateReservedResourceName because it ends in an ordinal, not a reserved suffix. Only enforced on
+// create.
 func ValidateReservedStatefulChildName(name string, isCreate bool) error {
 	if !isCreate {
 		return nil
@@ -96,7 +97,7 @@ func ValidateReservedStatefulChildName(name string, isCreate bool) error {
 		return nil
 	}
 	base := name[:lastDash]
-	if !strings.HasSuffix(base, "-signer") && !strings.HasSuffix(base, "-cg") {
+	if !strings.HasSuffix(base, "-signer") && !strings.HasSuffix(base, "-cg") && !strings.HasSuffix(base, "-seed") {
 		return nil
 	}
 	ordinal := name[lastDash+1:]
@@ -104,7 +105,7 @@ func ValidateReservedStatefulChildName(name string, isCreate bool) error {
 	if err != nil || n < 0 || strconv.FormatInt(n, 10) != ordinal {
 		return nil
 	}
-	return fmt.Errorf("metadata.name %q is reserved: it collides with a StatefulSet pod or PVC name cosmopilot derives (cosmosigner %q / CosmoGuard %q); choose a different name", name, "-signer-<n>", "-cg-<n>")
+	return fmt.Errorf("metadata.name %q is reserved: it collides with a StatefulSet pod or PVC name cosmopilot derives (cosmosigner %q / CosmoGuard %q / cosmoseed %q); choose a different name", name, "-signer-<n>", "-cg-<n>", "-seed-<n>")
 }
 
 // ValidateReservedResourceNameNoWebhook applies the full-operator-set reserved-name rule

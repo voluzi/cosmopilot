@@ -984,13 +984,36 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 		g := &nodeSet.Spec.Nodes[i]
 		owner := fmt.Sprintf("node group %q", g.Name)
 		base := g.GetServiceName(nodeSet)
+		names := []string{base, base + "-internal"}
+		if g.GetServiceConfig().CosmoGuardEnabled() {
+			// A guarded group derives a CosmoGuard client Service (base+"-cg"), an upstream Service
+			// (base+"-cg-upstream") and a peer Service (base+"-cg-peer") — all in the shared name space.
+			names = append(names, base+"-cg", base+"-cg-upstream", base+"-cg-peer")
+		}
+		for _, name := range names {
+			if err := add(name, owner); err != nil {
+				return err
+			}
+		}
+	}
+	// The legacy singleton .spec.validator materializes a ChainNode "<nodeSet>-validator" outside
+	// .spec.nodes; its main Service and always-created -internal variant share the name space.
+	if nodeSet.Spec.Validator != nil {
+		owner := "legacy validator"
+		base := fmt.Sprintf("%s-validator", nodeSet.GetName())
 		for _, name := range []string{base, base + "-internal"} {
 			if err := add(name, owner); err != nil {
 				return err
 			}
 		}
-		if g.GetServiceConfig().CosmoGuardEnabled() {
-			if err := add(base+"-cg", owner); err != nil {
+	}
+	// Cosmoseed derives a client Service "<nodeSet>-seed" and a headless Service
+	// "<nodeSet>-seed-headless"; both share the operator-wide Service name space.
+	if nodeSet.Spec.Cosmoseed.IsEnabled() {
+		owner := "cosmoseed"
+		base := fmt.Sprintf("%s-seed", nodeSet.GetName())
+		for _, name := range []string{base, base + "-headless"} {
+			if err := add(name, owner); err != nil {
 				return err
 			}
 		}
@@ -998,7 +1021,11 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 	for i := range nodeSet.Spec.Ingresses {
 		ing := &nodeSet.Spec.Ingresses[i]
 		owner := fmt.Sprintf("global ingress route %q", ing.Name)
-		for _, name := range []string{ing.GetServiceName(nodeSet), fmt.Sprintf("%s-internal", ing.GetName(nodeSet))} {
+		// ensureServices always creates BOTH the public "<nodeSet>-global-<route>" Service and its
+		// "-internal" variant regardless of UseInternal, so register the public name directly rather
+		// than GetServiceName (which flips to the internal name when UseInternal is set).
+		base := ing.GetName(nodeSet)
+		for _, name := range []string{base, base + "-internal"} {
 			if err := add(name, owner); err != nil {
 				return err
 			}
@@ -1007,7 +1034,11 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 	for i := range nodeSet.Spec.GatewayRoutes {
 		gw := &nodeSet.Spec.GatewayRoutes[i]
 		owner := fmt.Sprintf("global gateway route %q", gw.Name)
-		for _, name := range []string{gw.GetServiceName(nodeSet), fmt.Sprintf("%s-global-%s-internal", nodeSet.GetName(), gw.Name)} {
+		// GatewayConfig.GetName is the Gateway object name ("<nodeSet>-<route>-gw"); the backing Service
+		// is "<nodeSet>-global-<route>". ensureServices always creates both it and its -internal variant
+		// regardless of UseInternal, so register the public name directly rather than GetServiceName.
+		base := fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)
+		for _, name := range []string{base, base + "-internal"} {
 			if err := add(name, owner); err != nil {
 				return err
 			}

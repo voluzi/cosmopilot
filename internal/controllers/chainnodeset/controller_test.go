@@ -714,7 +714,12 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
 		Spec: appsv1.ChainNodeSetSpec{
-			Nodes:         []appsv1.NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "fullnodes-signer", Instances: ptr.To(1)},
+				// A group literally named "<x>-cg": its base Service ends in the now-reserved "-cg"
+				// suffix and must be grandfathered too.
+				{Name: "sentries-cg", Instances: ptr.To(1)},
+			},
 			Ingresses:     []appsv1.GlobalIngressConfig{{Name: "rpc-signer"}},
 			GatewayRoutes: []appsv1.GlobalGatewayConfig{{Name: "grpc-signer-privval"}},
 		},
@@ -731,14 +736,18 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 		"test-nodeset-fullnodes-signer",
 		"test-nodeset-global-grpc-signer-privval",
 		"test-nodeset-global-rpc-signer",
+		"test-nodeset-sentries-cg",
 	}
 	for i, name := range legacyNames {
 		scope := scopeGlobal
-		if i == 0 {
+		if i == 0 || i == 3 {
 			scope = scopeGroup
 		}
 		require.NoError(t, r.Create(context.Background(), ownedService(name, scope)))
 	}
+	// A guarded group's CosmoGuard client Service also ends in "-cg" but is scopeCosmoGuard and not a
+	// group base name, so it is not derived by the current spec and must not be grandfathered.
+	require.NoError(t, r.Create(context.Background(), ownedService("test-nodeset-fullnodes-signer-cg", scopeCosmoGuard)))
 	// Owned and correctly scoped is insufficient: this stale name is not derived by the current spec.
 	require.NoError(t, r.Create(context.Background(), ownedService("test-nodeset-unused-signer", scopeGroup)))
 	require.NoError(t, r.Create(context.Background(), &corev1.Service{ObjectMeta: metav1.ObjectMeta{
