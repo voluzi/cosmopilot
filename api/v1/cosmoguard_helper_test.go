@@ -35,6 +35,7 @@ func TestValidateCosmoGuardDashboard(t *testing.T) {
 
 	// The guard's own API listener container ports must be rejected (container binds them too).
 	assert.Error(t, dash(true, ptr.To[int32](16657)).ValidateCosmoGuardDashboard(), "RPC listener port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](11317)).ValidateCosmoGuardDashboard(), "LCD listener port collision rejected")
 	assert.Error(t, dash(true, ptr.To[int32](19090)).ValidateCosmoGuardDashboard(), "gRPC listener port collision rejected")
 
 	// EVM ports (Service + listener) are only reserved when EVM is enabled.

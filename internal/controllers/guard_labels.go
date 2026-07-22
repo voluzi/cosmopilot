@@ -40,7 +40,10 @@ func GuardInheritedLabels(ownerLabels map[string]string) map[string]string {
 		LabelWorkerName,
 	)
 	for k := range out {
-		if strings.Contains(k, CosmoGuardLabelDomain) {
+		// Match the two owned prefixes at the start of the key (guard-private and per-route), not
+		// anywhere in it — an unrelated user label whose DNS prefix merely ends in the domain (e.g.
+		// "acme-cosmoguard.voluzi.com/tier") must be preserved.
+		if strings.HasPrefix(k, CosmoGuardLabelDomain) || strings.HasPrefix(k, "route."+CosmoGuardLabelDomain) {
 			delete(out, k)
 		}
 	}

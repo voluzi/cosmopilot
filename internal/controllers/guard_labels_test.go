@@ -61,9 +61,12 @@ func TestGuardInheritedLabelsStripsGuardDomain(t *testing.T) {
 		"route.cosmoguard.voluzi.com/my-route": "true",
 		"cosmoguard.voluzi.com/managed-by":     "cosmoguard",
 		"cosmoguard.voluzi.com/instance":       "chain-fullnodes-cosmoguard",
+		// An unrelated user label whose DNS prefix merely ends in the domain must be preserved.
+		"acme-cosmoguard.voluzi.com/tier": "frontend",
 	})
 
 	assert.Equal(t, "payments", out["team"])
+	assert.Equal(t, "frontend", out["acme-cosmoguard.voluzi.com/tier"], "only the owned prefixes are stripped")
 	assert.NotContains(t, out, "route.cosmoguard.voluzi.com/my-route")
 	assert.NotContains(t, out, "cosmoguard.voluzi.com/managed-by")
 	assert.NotContains(t, out, "cosmoguard.voluzi.com/instance")
