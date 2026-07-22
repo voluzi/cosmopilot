@@ -72,12 +72,14 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 		}
 		// validateGroupChildReservedNames grandfather set: only a scope-"group" base with instances > 0
 		// materializes child ChainNodes "<base>-<n>", so restrict to active group bases. A global route
-		// or a zero-instance group ending in -cg/-signer never bears such children and must NOT be
+		// or a zero-instance group ending in -cg/-signer/-seed never bears such children and must NOT be
 		// captured, otherwise a later same-named group would be wrongly grandfathered and strand its
-		// children. (A guarded group's guard Service is scopeCosmoGuard, absent from `expected`, so it is
-		// never seen here — only a group literally named "<x>-cg"/"<x>-signer".)
+		// children. The suffix set must mirror ValidateReservedStatefulChildName's guarded bases
+		// (-signer/-cg/-seed) exactly, or an existing group of the un-mirrored shape stops reconciling on
+		// upgrade. (A guarded group's guard Service is scopeCosmoGuard, absent from `expected`, so it is
+		// never seen here — only a group literally named "<x>-cg"/"<x>-signer"/"<x>-seed".)
 		if scope == scopeGroup && activeGroupBases[name] &&
-			(strings.HasSuffix(name, "-cg") || strings.HasSuffix(name, "-signer")) {
+			(strings.HasSuffix(name, "-cg") || strings.HasSuffix(name, "-signer") || strings.HasSuffix(name, "-seed")) {
 			reservedChildNames[name] = struct{}{}
 		}
 	}

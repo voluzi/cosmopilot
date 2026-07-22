@@ -172,7 +172,7 @@ type ChainNodeSetStatus struct {
 	LegacySignerServiceNamesInitialized bool `json:"legacySignerServiceNamesInitialized,omitempty"`
 
 	// LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope
-	// "group", instances > 0) ending in -cg/-signer, i.e. groups that already materialize child
+	// "group", instances > 0) ending in -cg/-signer/-seed, i.e. groups that already materialize child
 	// ChainNodes "<base>-<n>" under a now-reserved StatefulSet-child suffix. Unlike
 	// LegacySignerServiceNames this excludes global routes and zero-instance groups — neither creates
 	// such children — so validateGroupChildReservedNames grandfathers only genuinely child-bearing

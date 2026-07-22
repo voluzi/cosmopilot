@@ -1075,7 +1075,7 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 // update to a ChainNodeSet that predates this validation is never blocked; the grandfathered set is
 // built from the old spec's active group Service names on the update path, or from the
 // controller-recorded LegacyReservedChildGroupNames on the no-webhook path (old == nil). That status
-// field captures only scope-"group" bases with instances > 0 ending in -cg/-signer — exactly the
+// field captures only scope-"group" bases with instances > 0 ending in -cg/-signer/-seed — exactly the
 // child-bearing groups — so a global route or a zero-instance group sharing the shape is never
 // wrongly grandfathered. A group that is newly added, renamed into a reserved shape, or scaled up from
 // zero is not in that set and is caught before its children are stranded.

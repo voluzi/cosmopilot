@@ -719,6 +719,9 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 				// A group literally named "<x>-cg": its base Service ends in the now-reserved "-cg"
 				// suffix and must be grandfathered too.
 				{Name: "sentries-cg", Instances: ptr.To(1)},
+				// A group whose base ends in "-seed" is also child-bearing under a reserved suffix and
+				// must be grandfathered, but must NOT land in the signer set.
+				{Name: "archive-seed", Instances: ptr.To(1)},
 			},
 			Ingresses:     []appsv1.GlobalIngressConfig{{Name: "rpc-signer"}},
 			GatewayRoutes: []appsv1.GlobalGatewayConfig{{Name: "grpc-signer-privval"}},
@@ -740,6 +743,7 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 		{"test-nodeset-global-grpc-signer-privval", scopeGlobal},
 		{"test-nodeset-global-rpc-signer", scopeGlobal},
 		{"test-nodeset-sentries-cg", scopeGroup},
+		{"test-nodeset-archive-seed", scopeGroup},
 	}
 	for _, s := range ownedDerived {
 		require.NoError(t, r.Create(context.Background(), ownedService(s.name, s.scope)))
@@ -768,10 +772,11 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 		"test-nodeset-global-rpc-signer",
 	}, nodeSet.Status.LegacySignerServiceNames)
 	// LegacyReservedChildGroupNames grandfathers only scope-"group" bases with instances > 0 ending in
-	// -cg/-signer (the child-bearing groups), for validateGroupChildReservedNames — never the global
-	// -signer Services, which materialize no child ChainNodes.
+	// -cg/-signer/-seed (the child-bearing groups), for validateGroupChildReservedNames — never the
+	// global -signer Services, which materialize no child ChainNodes.
 	assert.True(t, nodeSet.Status.LegacyReservedChildGroupNamesInitialized)
 	assert.Equal(t, []string{
+		"test-nodeset-archive-seed",
 		"test-nodeset-fullnodes-signer",
 		"test-nodeset-sentries-cg",
 	}, nodeSet.Status.LegacyReservedChildGroupNames)
