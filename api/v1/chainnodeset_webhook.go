@@ -30,6 +30,9 @@ func (nodeSet *ChainNodeSet) ValidateCreate(_ context.Context, obj *ChainNodeSet
 	if err := ValidateReservedStatefulChildName(obj.GetName(), true); err != nil {
 		return nil, err
 	}
+	if err := obj.validateGroupChildReservedNames(); err != nil {
+		return nil, err
+	}
 	return obj.Validate(nil)
 }
 
@@ -938,16 +941,27 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 	return nil
 }
 
-// validateGroupGuardNameCollisions rejects a node group whose Service name collides with another
-// group's CosmoGuard Service. A guarded group <g> derives a guard Service "<nodeSet>-<g>-cg"; a
-// second group literally named "<g>-cg" derives that same Service name. Both objects share the
+// validateGroupGuardNameCollisions rejects a node group whose CosmoGuard Service collides with
+// another Service the same ChainNodeSet derives. A guarded group <g> derives a guard Service
+// "<nodeSet>-<g>-cg"; a second node group literally named "<g>-cg", or a global ingress/gateway route
+// whose backing Service resolves to that same name, would fight over it. Both objects share the
 // ChainNodeSet owner, so the ownership guard would not stop the two reconcile paths from overwriting
 // each other. Mirrors the "<g>-signer" group/signer collision check in validateCosmosignerTargetUniqueness.
 func (nodeSet *ChainNodeSet) validateGroupGuardNameCollisions() error {
-	groupServices := map[string]string{}
+	// Every non-guard Service name the ChainNodeSet derives, mapped to a description of what derives it
+	// so a colliding guard Service can name its counterpart.
+	serviceOwners := map[string]string{}
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
-		groupServices[g.GetServiceName(nodeSet)] = g.Name
+		serviceOwners[g.GetServiceName(nodeSet)] = fmt.Sprintf("node group %q", g.Name)
+	}
+	for i := range nodeSet.Spec.Ingresses {
+		ing := &nodeSet.Spec.Ingresses[i]
+		serviceOwners[ing.GetServiceName(nodeSet)] = fmt.Sprintf("global ingress route %q", ing.Name)
+	}
+	for i := range nodeSet.Spec.GatewayRoutes {
+		gw := &nodeSet.Spec.GatewayRoutes[i]
+		serviceOwners[gw.GetServiceName(nodeSet)] = fmt.Sprintf("global gateway route %q", gw.Name)
 	}
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
@@ -955,8 +969,26 @@ func (nodeSet *ChainNodeSet) validateGroupGuardNameCollisions() error {
 			continue
 		}
 		guard := fmt.Sprintf("%s-cg", g.GetServiceName(nodeSet))
-		if other, collides := groupServices[guard]; collides {
-			return fmt.Errorf("node group %q has CosmoGuard enabled and derives guard Service name %q, which node group %q also derives: rename one of the groups", g.Name, guard, other)
+		if other, collides := serviceOwners[guard]; collides {
+			return fmt.Errorf("node group %q has CosmoGuard enabled and derives guard Service name %q, which %s also derives: rename one of them", g.Name, guard, other)
+		}
+	}
+	return nil
+}
+
+// validateGroupChildReservedNames rejects a node group whose generated child ChainNode names collide
+// with the reserved StatefulSet-child patterns (…-cg-<n> / …-signer-<n>). The controller creates child
+// ChainNodes "<base>-<ordinal>"; if <base> ends in "-cg" or "-signer" (e.g. a group named "foo-cg"),
+// the child name "<nodeSet>-foo-cg-0" is itself rejected by ValidateReservedStatefulChildName at its
+// own admission create, leaving the ChainNodeSet admitted but permanently unable to reconcile its
+// children. Surface that up front on the parent with a clear error. Create-only, mirroring the other
+// reserved-name checks, so an already-existing ChainNodeSet is never locked out of updates.
+func (nodeSet *ChainNodeSet) validateGroupChildReservedNames() error {
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		child := fmt.Sprintf("%s-0", g.GetServiceName(nodeSet))
+		if err := ValidateReservedStatefulChildName(child, true); err != nil {
+			return fmt.Errorf("node group %q derives child ChainNode names like %q that collide with reserved CosmoGuard/cosmosigner StatefulSet child names: rename the group", g.Name, child)
 		}
 	}
 	return nil

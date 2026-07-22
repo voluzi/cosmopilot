@@ -102,3 +102,65 @@ func TestValidateGroupGuardNameCollisions(t *testing.T) {
 	}
 	require.NoError(t, unguarded.validateGroupGuardNameCollisions())
 }
+
+// A guard Service name can also collide with a global ingress/gateway route's backing Service. A
+// guarded group "global-rpc" derives guard Service "cs-global-rpc-cg"; a global route named "rpc-cg"
+// derives that same Service name. Those collisions must be rejected too.
+func TestValidateGroupGuardNameCollisionsWithRoutes(t *testing.T) {
+	guarded := NodeGroupSpec{Name: "global-rpc", Config: &Config{CosmoGuard: &CosmoGuardConfig{Enable: true}}}
+
+	ingColl := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:     []NodeGroupSpec{guarded},
+			Ingresses: []GlobalIngressConfig{{Name: "rpc-cg"}},
+		},
+	}
+	err := ingColl.validateGroupGuardNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-global-rpc-cg")
+	require.Contains(t, err.Error(), "global ingress route")
+
+	gwColl := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:         []NodeGroupSpec{guarded},
+			GatewayRoutes: []GlobalGatewayConfig{{Name: "rpc-cg"}},
+		},
+	}
+	err = gwColl.validateGroupGuardNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "global gateway route")
+
+	// A non-colliding route is fine.
+	ok := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:     []NodeGroupSpec{guarded},
+			Ingresses: []GlobalIngressConfig{{Name: "rpc"}},
+		},
+	}
+	require.NoError(t, ok.validateGroupGuardNameCollisions())
+}
+
+// A group whose name ends in "-cg"/"-signer" makes the controller generate child ChainNodes like
+// "<nodeSet>-foo-cg-0", which the reserved-StatefulSet-child check rejects at their own admission
+// create — silently stranding the parent. Reject the group name up front at ChainNodeSet create.
+func TestValidateGroupChildReservedNames(t *testing.T) {
+	for _, groupName := range []string{"foo-cg", "foo-signer"} {
+		cs := &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: groupName}}},
+		}
+		err := cs.validateGroupChildReservedNames()
+		require.Errorf(t, err, "group %q must be rejected", groupName)
+		require.Contains(t, err.Error(), groupName)
+	}
+
+	// Ordinary group names are fine.
+	ok := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "fullnodes"}, {Name: "sentries"}}},
+	}
+	require.NoError(t, ok.validateGroupChildReservedNames())
+}
