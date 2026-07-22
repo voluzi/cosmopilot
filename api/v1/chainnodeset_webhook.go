@@ -24,9 +24,9 @@ func (nodeSet *ChainNodeSet) ValidateCreate(_ context.Context, obj *ChainNodeSet
 		"kind", "ChainNodeSet",
 		"resource", obj.GetNamespacedName(),
 	)
-	if err := ValidateReservedNodeSetName(obj.GetName(), true); err != nil {
-		return nil, err
-	}
+	// A ChainNodeSet's own name is never a resource it derives (every derived name carries a
+	// "-<group>"/"-signer"/"-seed"/ordinal segment), so there is no set-name suffix to reserve; the
+	// concrete collisions a nodeset can cause are validated inside Validate.
 	return obj.Validate(nil)
 }
 

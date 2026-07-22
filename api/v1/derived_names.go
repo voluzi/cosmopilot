@@ -62,24 +62,15 @@ var reservedNameSuffixes = []string{
 	"-seed", "-seed-headless",
 }
 
-// reservedNodeSetNameSuffixes is the narrow subset of reservedNameSuffixes that a ChainNodeSet
-// bare-materializes — resources named exactly "<set><suffix>", with no node-group/ordinal segment
-// in between. Only two families qualify: the top-level .spec.cosmosigner ("<set>-signer" and its
-// -privval/-import/-pubkey material) and cosmoseed's route/headless Services ("<set>-seed",
-// "<set>-seed-headless"). Every other operator-derived name inserts a "-<group>"/"-validator"/
-// ordinal segment, so it can never collide with the ChainNodeSet's own name. Reserving the full
-// operator set on the ChainNodeSet name was over-broad; concrete-derived-name checks
-// (validateGeneratedNameLengths, validateServiceNameCollisions, validateGroupChildReservedNames)
-// cover the real collisions a node group can cause.
-var reservedNodeSetNameSuffixes = []string{
-	"-signer", "-signer-privval", "-signer-import", "-signer-pubkey",
-	"-seed", "-seed-headless",
-}
-
-// ValidateReservedResourceName rejects creating a ChainNode/ChainNodeSet whose name ends in a suffix
-// cosmopilot derives from another CR's name (see reservedNameSuffixes). Only enforced on create so
-// pre-existing CRs with such names keep updating; the reconcilers' ownership guards remain the
-// backstop for them.
+// ValidateReservedResourceName rejects creating a ChainNode whose name ends in a suffix cosmopilot
+// derives from another CR's name (see reservedNameSuffixes) — e.g. a standalone ChainNode "foo-signer"
+// whose main Service "foo-signer" collides with the "<set>-signer" a ChainNodeSet "foo" materializes.
+// It is deliberately NOT applied to a ChainNodeSet's own name: a nodeset never creates a resource
+// named exactly its own name (every derived name carries a "-<group>"/"-signer"/"-seed"/ordinal
+// segment), so a set named "foo-signer" has no self-collision; the concrete collisions a nodeset can
+// cause are covered by validateGeneratedNameLengths / validateServiceNameCollisions /
+// validateGroupChildReservedNames. Only enforced on create so pre-existing CRs with such names keep
+// updating; the reconcilers' ownership guards remain the backstop for them.
 func ValidateReservedResourceName(name string, isCreate bool) error {
 	if !isCreate {
 		return nil
@@ -87,24 +78,6 @@ func ValidateReservedResourceName(name string, isCreate bool) error {
 	for _, suffix := range reservedNameSuffixes {
 		if strings.HasSuffix(name, suffix) {
 			return fmt.Errorf("metadata.name %q is reserved: the %q suffix collides with a resource name cosmopilot derives from another resource; choose a different name", name, suffix)
-		}
-	}
-	return nil
-}
-
-// ValidateReservedNodeSetName rejects creating a ChainNodeSet whose name ends in a suffix the
-// ChainNodeSet itself bare-materializes (see reservedNodeSetNameSuffixes). Unlike a ChainNode — which
-// can collide with any operator-derived suffix and so uses the full reservedNameSuffixes set via
-// ValidateReservedResourceName — a ChainNodeSet only ever creates a resource named exactly its own
-// name for the signer and cosmoseed families; every other derived name carries an extra segment.
-// Only enforced on create, so pre-existing ChainNodeSets keep updating.
-func ValidateReservedNodeSetName(name string, isCreate bool) error {
-	if !isCreate {
-		return nil
-	}
-	for _, suffix := range reservedNodeSetNameSuffixes {
-		if strings.HasSuffix(name, suffix) {
-			return fmt.Errorf("metadata.name %q is reserved: the %q suffix collides with a resource name cosmopilot derives for this ChainNodeSet's signer or seed nodes; choose a different name", name, suffix)
 		}
 	}
 	return nil
@@ -145,15 +118,4 @@ func ValidateReservedResourceNameNoWebhook(name string, isEstablished bool) erro
 		return nil
 	}
 	return ValidateReservedResourceName(name, true)
-}
-
-// ValidateReservedNodeSetNameNoWebhook is the ChainNodeSet counterpart of
-// ValidateReservedResourceNameNoWebhook: it applies the narrow ChainNodeSet reserved-name rule
-// (ValidateReservedNodeSetName) on the no-webhook reconcile path, enforcing only while the object has
-// never been reconciled (isEstablished == false).
-func ValidateReservedNodeSetNameNoWebhook(name string, isEstablished bool) error {
-	if isEstablished {
-		return nil
-	}
-	return ValidateReservedNodeSetName(name, true)
 }
