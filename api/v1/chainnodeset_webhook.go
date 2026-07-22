@@ -970,11 +970,13 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 // routes) that derive the same Service name and would fight over it — both share the ChainNodeSet
 // owner, so the ownership guard does not stop the reconcile paths from overwriting each other. Every
 // group derives a main Service "<nodeSet>-<g>", an always-on "<nodeSet>-<g>-internal" Service, and,
-// when CosmoGuard is enabled, a guard Service "<nodeSet>-<g>-cg"; every route always creates a
-// "<nodeSet>-global-<route>-internal" Service plus its public backing Service. Collisions this
-// catches include a guarded group "g" vs a group named "g-cg" (guard vs main) and a group "g" vs a
-// group named "g-internal" (internal Service vs main). Mirrors the "<g>-signer" group/signer
-// collision check in validateCosmosignerTargetUniqueness.
+// when CosmoGuard is enabled, a guard Service "<nodeSet>-<g>-cg"; each active instance materializes a
+// child ChainNode whose own main "<nodeSet>-<g>-<i>" and "-internal" Services also land here; every
+// route always creates a "<nodeSet>-global-<route>-internal" Service plus its public backing Service.
+// Collisions this catches include a guarded group "g" vs a group named "g-cg" (guard vs main), a group
+// "g" vs a group named "g-internal" (internal Service vs main), and a scaled group "g" vs a group named
+// "g-0" (child instance Service vs main). Mirrors the "<g>-signer" group/signer collision check in
+// validateCosmosignerTargetUniqueness.
 func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 	owners := map[string]string{}
 	add := func(name, owner string) error {
@@ -995,6 +997,15 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 			// ensureCosmoGuards skips zero-instance groups, so these exist only once the group is scaled
 			// up; registering them at instances: 0 would flag a collision with a nonexistent Service.
 			names = append(names, base+"-cg", base+"-cg-upstream", base+"-cg-peer")
+		}
+		// Every instance materializes a child ChainNode "<base>-<i>" whose own main Service ("<base>-<i>")
+		// and always-created "-internal" variant share the name space. A sibling group or route shaped
+		// like an ordinal child (e.g. a group "g-0" next to a scaled group "g") would otherwise collide
+		// only at reconcile, where both Services share the ChainNodeSet owner and the ownership guard
+		// cannot arbitrate. Only active ordinals exist, so a zero-instance group adds none.
+		for j := 0; j < g.GetInstances(); j++ {
+			child := fmt.Sprintf("%s-%d", base, j)
+			names = append(names, child, child+"-internal")
 		}
 		for _, name := range names {
 			if err := add(name, owner); err != nil {

@@ -376,6 +376,56 @@ func TestValidateCosmoseedInstanceServiceNameCollisions(t *testing.T) {
 	require.NoError(t, exposed.validateServiceNameCollisions())
 }
 
+// Each active instance of a group materializes a child ChainNode whose own main "<base>-<i>" and
+// "-internal" Services share the name space. A sibling group shaped like an ordinal child ("foo-0"
+// next to a scaled "foo") derives the same Service and must be rejected up front — at reconcile both
+// Services share the ChainNodeSet owner, so the ownership guard cannot arbitrate.
+func TestValidateChildInstanceServiceNameCollisions(t *testing.T) {
+	// Group "foo" (1 instance) child Service "cs-foo-0" vs group "foo-0" main Service "cs-foo-0".
+	collide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(1)},
+			{Name: "foo-0", Instances: ptr.To(1)},
+		}},
+	}
+	err := collide.validateServiceNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-0")
+
+	// The instance loop honours GetInstances(): "foo-1" is free with a single "foo" instance but
+	// collides once "foo" is scaled to two.
+	single := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(1)},
+			{Name: "foo-1", Instances: ptr.To(1)},
+		}},
+	}
+	require.NoError(t, single.validateServiceNameCollisions())
+
+	two := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(2)},
+			{Name: "foo-1", Instances: ptr.To(1)},
+		}},
+	}
+	err = two.validateServiceNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-1")
+
+	// A zero-instance group materializes no children, so its ordinal-shaped sibling is free.
+	zero := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(0)},
+			{Name: "foo-0", Instances: ptr.To(1)},
+		}},
+	}
+	require.NoError(t, zero.validateServiceNameCollisions())
+}
+
 // The legacy singleton .spec.validator derives a Service "<nodeSet>-validator" and its -internal
 // variant; a node group named "validator" derives the same name and must be rejected. When
 // .spec.validator is unset no such Service exists.
