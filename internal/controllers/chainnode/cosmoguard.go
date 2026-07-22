@@ -238,11 +238,15 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 // ingress/gateway. Those are per-instance routes to one specific node, which the shared group guard
 // (a single deployment that load-balances the whole group via discovery) cannot target. To keep such
 // per-node endpoints guarded (as the in-pod sidecar did), the child gets its own single-node guard.
+//
+// Child detection keys off the ChainNodeSet controller owner reference, not the user-settable
+// "nodeset" label: a standalone node carrying a stray label would otherwise be silently skipped here
+// and never get its guard.
 func (r *Reconciler) standaloneGuardManaged(chainNode *appsv1.ChainNode) bool {
 	if !chainNode.Spec.Config.CosmoGuardEnabled() {
 		return false
 	}
-	if _, isChild := chainNode.Labels[controllers.LabelChainNodeSet]; isChild {
+	if chainNode.IsControlledByChainNodeSet() {
 		return chainNode.Spec.Ingress != nil || chainNode.Spec.Gateway != nil
 	}
 	return true

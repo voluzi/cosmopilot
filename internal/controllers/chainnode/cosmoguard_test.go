@@ -39,13 +39,26 @@ func cosmoGuardTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	}
 }
 
-func guardedChainNode(name string, child bool) *appsv1.ChainNode {
-	labels := map[string]string{}
-	if child {
-		labels[controllers.LabelChainNodeSet] = "some-set"
+// markChainNodeSetChild makes a ChainNode look like a generated ChainNodeSet member: it stamps the
+// controller owner reference IsControlledByChainNodeSet() checks, plus the "nodeset" label a real
+// child also carries. Child detection keys off the owner reference, not the (user-settable) label.
+func markChainNodeSetChild(cn *appsv1.ChainNode) {
+	cn.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: appsv1.GroupVersion.String(),
+		Kind:       "ChainNodeSet",
+		Name:       "some-set",
+		UID:        types.UID("some-set-uid"),
+		Controller: ptr.To(true),
+	}}
+	if cn.Labels == nil {
+		cn.Labels = map[string]string{}
 	}
-	return &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels, UID: types.UID(name + "-uid")},
+	cn.Labels[controllers.LabelChainNodeSet] = "some-set"
+}
+
+func guardedChainNode(name string, child bool) *appsv1.ChainNode {
+	cn := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: map[string]string{}, UID: types.UID(name + "-uid")},
 		Spec: appsv1.ChainNodeSpec{
 			Config: &appsv1.Config{
 				CosmoGuard: &appsv1.CosmoGuardConfig{
@@ -58,6 +71,10 @@ func guardedChainNode(name string, child bool) *appsv1.ChainNode {
 			},
 		},
 	}
+	if child {
+		markChainNodeSetChild(cn)
+	}
+	return cn
 }
 
 // TestStandaloneGuardCreatesStatefulSetAndService verifies a standalone ChainNode gets a clustered
@@ -297,7 +314,7 @@ func TestFinalizeTearsDownGuardWhenNodeBecomesChild(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{}))
 
 	// The node joins a ChainNodeSet; ensure no longer manages a guard and finalize tears the old one down.
-	cn.Labels[controllers.LabelChainNodeSet] = "some-set"
+	markChainNodeSetChild(cn)
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
@@ -336,6 +353,38 @@ func TestNodeSetChildSkipsStandaloneGuard(t *testing.T) {
 	dep := &k8sappsv1.Deployment{}
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, dep)
 	assert.Error(t, err, "no standalone guard should be created for a nodeset child")
+}
+
+// TestStandaloneGuardManagedUsesOwnerRef verifies child detection keys off the ChainNodeSet
+// controller owner reference, not the user-settable "nodeset" label. Regression for S4_0W: a
+// standalone node carrying a stray label must still get its own guard.
+func TestStandaloneGuardManagedUsesOwnerRef(t *testing.T) {
+	r := &Reconciler{}
+
+	// Guard disabled -> never managed.
+	off := guardedChainNode("node-0", false)
+	off.Spec.Config.CosmoGuard.Enable = false
+	assert.False(t, r.standaloneGuardManaged(off))
+
+	// Standalone node -> managed.
+	assert.True(t, r.standaloneGuardManaged(guardedChainNode("node-0", false)))
+
+	// A stray "nodeset" label but no owner reference must not suppress the guard (the S4_0W bug).
+	strayLabel := guardedChainNode("node-0", false)
+	strayLabel.Labels[controllers.LabelChainNodeSet] = "some-set"
+	assert.True(t, r.standaloneGuardManaged(strayLabel), "stray nodeset label must not skip the guard")
+
+	// A real child (owner ref) without individual routes -> not managed (the group guard fronts it).
+	assert.False(t, r.standaloneGuardManaged(guardedChainNode("chain-fullnodes-0", true)))
+
+	// A real child that declares its own individual ingress/gateway -> managed.
+	childIngress := guardedChainNode("chain-fullnodes-0", true)
+	childIngress.Spec.Ingress = &appsv1.IngressConfig{Host: "0.rpc.example.com"}
+	assert.True(t, r.standaloneGuardManaged(childIngress))
+
+	childGateway := guardedChainNode("chain-fullnodes-0", true)
+	childGateway.Spec.Gateway = &appsv1.GatewayConfig{Host: "0.rpc.example.com"}
+	assert.True(t, r.standaloneGuardManaged(childGateway))
 }
 
 // TestDisableGuardUndeploys verifies disabling CosmoGuard removes the previously-created guard.
