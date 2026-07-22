@@ -25,8 +25,33 @@ import (
 func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
 	signerDone := nodeSet.Status.LegacySignerServiceNamesInitialized
 	childDone := nodeSet.Status.LegacyReservedChildGroupNamesInitialized
-	if signerDone && childDone {
+	svcCollDone := nodeSet.Status.LegacyServiceNameCollisionsInitialized
+	ingCollDone := nodeSet.Status.LegacyIngressNameCollisionsInitialized
+	if signerDone && childDone && svcCollDone && ingCollDone {
 		return false, nil
+	}
+
+	// The Service/Ingress name-collision grandfather sets are derived purely from the current spec (the
+	// names two distinct owners already derive), so they need no live-resource listing. Record them once
+	// so validateServiceNameCollisions / validateIngressNameCollisions can grandfather a pre-existing
+	// collision on the no-webhook path, where old is nil.
+	if !svcCollDone || !ingCollDone {
+		svcCollisions, ingCollisions := nodeSet.LegacyDerivedNameCollisions()
+		if !svcCollDone {
+			nodeSet.Status.LegacyServiceNameCollisions = svcCollisions
+			nodeSet.Status.LegacyServiceNameCollisionsInitialized = true
+		}
+		if !ingCollDone {
+			nodeSet.Status.LegacyIngressNameCollisions = ingCollisions
+			nodeSet.Status.LegacyIngressNameCollisionsInitialized = true
+		}
+	}
+
+	if signerDone && childDone {
+		if err := r.Status().Update(ctx, nodeSet); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 
 	// expected maps every owned group/global base Service name to its scope label. activeGroupBases is

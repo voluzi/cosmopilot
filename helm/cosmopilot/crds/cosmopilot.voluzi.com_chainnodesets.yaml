@@ -16626,6 +16626,19 @@ spec:
                 description: Last height read on the nodes by cosmopilot.
                 format: int64
                 type: integer
+              legacyIngressNameCollisions:
+                description: |-
+                  LegacyIngressNameCollisions records Ingress names that were already derived by two distinct owners
+                  when this validation was first enforced, computed once from the spec. validateIngressNameCollisions
+                  grandfathers these on the no-webhook path (old == nil), matching LegacyServiceNameCollisions.
+                items:
+                  type: string
+                type: array
+              legacyIngressNameCollisionsInitialized:
+                description: |-
+                  LegacyIngressNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose
+                  status predates LegacyIngressNameCollisions (so it is back-filled once after upgrade).
+                type: boolean
               legacyReservedChildGroupNames:
                 description: |-
                   LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope
@@ -16641,6 +16654,21 @@ spec:
                 description: |-
                   LegacyReservedChildGroupNamesInitialized distinguishes a recorded empty set from a ChainNodeSet
                   whose status predates LegacyReservedChildGroupNames (so it is back-filled once after upgrade).
+                type: boolean
+              legacyServiceNameCollisions:
+                description: |-
+                  LegacyServiceNameCollisions records Service names that were already derived by two distinct owners
+                  (node groups, global routes) when this validation was first enforced, computed once from the spec.
+                  validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil), where the
+                  controller cannot diff against a previous revision, so a pre-existing (already-broken) ChainNodeSet
+                  keeps reconciling while a collision newly introduced on a later revision is still rejected.
+                items:
+                  type: string
+                type: array
+              legacyServiceNameCollisionsInitialized:
+                description: |-
+                  LegacyServiceNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose
+                  status predates LegacyServiceNameCollisions (so it is back-filled once after upgrade).
                 type: boolean
               legacySignerServiceNames:
                 description: |-

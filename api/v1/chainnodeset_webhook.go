@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1004,6 +1005,12 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions(old *ChainNodeSet) er
 				seen[name] = owner
 			}
 		})
+	} else if nodeSet.Status.LegacyServiceNameCollisionsInitialized {
+		// No-webhook path: old is nil, so grandfather the collisions the controller recorded from the spec
+		// the first time this validation ran (see initializeLegacySignerServiceNames).
+		for _, name := range nodeSet.Status.LegacyServiceNameCollisions {
+			grandfathered[name] = true
+		}
 	}
 	owners := map[string]string{}
 	var collErr error
@@ -1134,6 +1141,12 @@ func (nodeSet *ChainNodeSet) validateIngressNameCollisions(old *ChainNodeSet) er
 				seen[name] = owner
 			}
 		})
+	} else if nodeSet.Status.LegacyIngressNameCollisionsInitialized {
+		// No-webhook path: old is nil, so grandfather the collisions the controller recorded from the spec
+		// the first time this validation ran (see initializeLegacySignerServiceNames).
+		for _, name := range nodeSet.Status.LegacyIngressNameCollisions {
+			grandfathered[name] = true
+		}
 	}
 	owners := map[string]string{}
 	var collErr error
@@ -1150,15 +1163,65 @@ func (nodeSet *ChainNodeSet) validateIngressNameCollisions(old *ChainNodeSet) er
 	return collErr
 }
 
-// eachDerivedIngressName invokes fn(name, owner) for every Ingress name this ChainNodeSet directly
-// owns, in deterministic order (node-group guard dashboards, then global ingress routes). Per-child
-// guard dashboard Ingresses ("<child>-cg-dashboard") are owned by the child ChainNode, not the
-// ChainNodeSet, so a collision there is arbitrated by ApplyOwned's cross-owner ownership guard and is
-// intentionally omitted (same reasoning as the cross-CR derived-vs-derived Service case).
+// LegacyDerivedNameCollisions returns the Service names and Ingress names this ChainNodeSet's current
+// spec already derives from two distinct owners. The controller records them once
+// (Status.LegacyServiceNameCollisions / Status.LegacyIngressNameCollisions) so
+// validateServiceNameCollisions / validateIngressNameCollisions can grandfather a pre-existing
+// (already-broken) ChainNodeSet on the no-webhook path, where old is nil and the collisions cannot be
+// diffed against a previous revision. Both slices are returned sorted for a deterministic status write.
+func (nodeSet *ChainNodeSet) LegacyDerivedNameCollisions() (serviceNames, ingressNames []string) {
+	return collidingDerivedNames(nodeSet.eachDerivedServiceName), collidingDerivedNames(nodeSet.eachDerivedIngressName)
+}
+
+// collidingDerivedNames drives one of the eachDerived* registrations and returns, sorted, the names
+// registered by more than one distinct owner (the collisions those validators reject).
+func collidingDerivedNames(each func(func(name, owner string))) []string {
+	seen := map[string]string{}
+	collisions := map[string]bool{}
+	each(func(name, owner string) {
+		if prev, taken := seen[name]; taken && prev != owner {
+			collisions[name] = true
+		} else {
+			seen[name] = owner
+		}
+	})
+	out := make([]string, 0, len(collisions))
+	for name := range collisions {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// eachDerivedIngressName invokes fn(name, owner) for every Ingress name this ChainNodeSet's reconcile
+// produces, in deterministic order (node-group guard dashboards, per-instance child Ingresses, then
+// global ingress routes). None of these Ingresses are arbitrated by an ownership guard: the ChainNode
+// and ChainNodeSet ensureIngress paths Get-by-name then blindly Update/Delete, so two owners deriving
+// the same Ingress name overwrite (or delete) each other every reconcile, cross-owner included.
+//
+// The one exception intentionally omitted is the per-child CosmoGuard *dashboard* Ingress
+// ("<child>-cg-dashboard"): it is applied by the child ChainNode via cosmoguard.ApplyOwned, whose
+// cross-owner ownership guard refuses to overwrite a resource owned by anyone else, so that collision
+// is backstopped (same reasoning as the cross-CR derived-vs-derived Service case).
 func (nodeSet *ChainNodeSet) eachDerivedIngressName(fn func(name, owner string)) {
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
 		cfg := g.GetServiceConfig()
+		owner := fmt.Sprintf("node group %q", g.Name)
+		base := g.GetServiceName(nodeSet)
+		// A group with individual ingress routes sets Spec.Ingress on each child ChainNode, which the
+		// chainnode reconcile renders as an Ingress named exactly "<child>" plus a "<child>-grpc" variant.
+		// That path (chainnode ensureIngress) has no ownership guard: when the child has no ingress it
+		// deletes both names by name, and when it does it Updates them in place — so the child claims both
+		// names whether or not gRPC is on. Register them so a global route rendering the same name (e.g.
+		// group "global" child "-5" vs route "5") is rejected up front rather than fighting at reconcile.
+		if g.IndividualIngresses != nil {
+			for j := 0; j < g.GetInstances(); j++ {
+				child := fmt.Sprintf("%s-%d", base, j)
+				fn(child, owner)
+				fn(child+"-grpc", owner)
+			}
+		}
 		// ensureCosmoGuards skips zero-instance groups, so the guard (and its dashboard Ingress) exists
 		// only once the group is scaled up; registering it at instances: 0 would flag a nonexistent object.
 		if g.GetInstances() == 0 || !cfg.CosmoGuardEnabled() {
@@ -1167,7 +1230,7 @@ func (nodeSet *ChainNodeSet) eachDerivedIngressName(fn func(name, owner string))
 		if d := cfg.GetCosmoGuardDashboard(); d != nil && d.Enable && d.Ingress != nil {
 			// groupCosmoGuardName(nodeSet, group) = "<nodeSet>-<group>-cg"; the dashboard Ingress appends
 			// "-dashboard", giving "<nodeSet>-<group>-cg-dashboard".
-			fn(g.GetServiceName(nodeSet)+"-cg-dashboard", fmt.Sprintf("node group %q CosmoGuard dashboard", g.Name))
+			fn(base+"-cg-dashboard", fmt.Sprintf("node group %q CosmoGuard dashboard", g.Name))
 		}
 	}
 	for i := range nodeSet.Spec.Ingresses {
@@ -1178,9 +1241,11 @@ func (nodeSet *ChainNodeSet) eachDerivedIngressName(fn func(name, owner string))
 		}
 		owner := fmt.Sprintf("global ingress route %q", ing.Name)
 		fn(ing.GetName(nodeSet), owner)
-		if ing.EnableGRPC {
-			fn(ing.GetGrpcName(nodeSet), owner)
-		}
+		// The "-grpc" Ingress is claimed regardless of EnableGRPC: ensureIngresses creates it when gRPC is
+		// on and Deletes it by name when gRPC is off (to clear a stale gRPC Ingress). Either way the route
+		// owns that name, so a sibling route named "<route>-grpc" whose main Ingress renders the same name
+		// would be deleted/overwritten every reconcile — register it unconditionally to catch that.
+		fn(ing.GetGrpcName(nodeSet), owner)
 	}
 }
 

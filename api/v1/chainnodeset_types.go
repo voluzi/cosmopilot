@@ -184,6 +184,30 @@ type ChainNodeSetStatus struct {
 	// whose status predates LegacyReservedChildGroupNames (so it is back-filled once after upgrade).
 	// +optional
 	LegacyReservedChildGroupNamesInitialized bool `json:"legacyReservedChildGroupNamesInitialized,omitempty"`
+
+	// LegacyServiceNameCollisions records Service names that were already derived by two distinct owners
+	// (node groups, global routes) when this validation was first enforced, computed once from the spec.
+	// validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil), where the
+	// controller cannot diff against a previous revision, so a pre-existing (already-broken) ChainNodeSet
+	// keeps reconciling while a collision newly introduced on a later revision is still rejected.
+	// +optional
+	LegacyServiceNameCollisions []string `json:"legacyServiceNameCollisions,omitempty"`
+
+	// LegacyServiceNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose
+	// status predates LegacyServiceNameCollisions (so it is back-filled once after upgrade).
+	// +optional
+	LegacyServiceNameCollisionsInitialized bool `json:"legacyServiceNameCollisionsInitialized,omitempty"`
+
+	// LegacyIngressNameCollisions records Ingress names that were already derived by two distinct owners
+	// when this validation was first enforced, computed once from the spec. validateIngressNameCollisions
+	// grandfathers these on the no-webhook path (old == nil), matching LegacyServiceNameCollisions.
+	// +optional
+	LegacyIngressNameCollisions []string `json:"legacyIngressNameCollisions,omitempty"`
+
+	// LegacyIngressNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose
+	// status predates LegacyIngressNameCollisions (so it is back-filled once after upgrade).
+	// +optional
+	LegacyIngressNameCollisionsInitialized bool `json:"legacyIngressNameCollisionsInitialized,omitempty"`
 }
 
 // ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.
