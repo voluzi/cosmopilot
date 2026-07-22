@@ -46,9 +46,6 @@ const (
 	initDataRetryPeriod        = 10 * time.Second
 	initDataUnknownPhasePeriod = 10 * time.Second
 
-	cosmoGuardContainerName = "cosmoguard"
-	cosmoGuardVolumeName    = "cosmoguard-config"
-
 	initContainerCPU    = "100m"
 	initContainerMemory = "250Mi"
 

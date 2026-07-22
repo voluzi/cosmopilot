@@ -6,6 +6,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	k8sappsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -130,6 +131,7 @@ func (r *Reconciler) reservationReader() client.Reader {
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -303,6 +305,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Reconcile the standalone CosmoGuard deployment (after services so its upstream internal Service
+	// exists). Skipped for ChainNodeSet children, whose guard is managed per-group by the set.
+	logger.V(1).Info("ensure cosmoguard")
+	if err = r.ensureCosmoGuard(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Prepare the desired signing path before publishing config that enables it. A failed or pending
 	// transition leaves the existing ConfigMap and pod template on their current signing mode.
 	logger.V(1).Info("ensure signing configs")
@@ -350,6 +359,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// If the node was set to stop, we will stop here as the pod is not running.
 	if chainNode.Status.Phase == appsv1.PhaseChainNodeStopped {
+		// Still tear down a disabled/orphaned standalone guard: a stopped node serves no traffic, so
+		// there is no route to retarget first, and this return skips the usual finalize step below.
+		// deferWhileRouted=false: routing is skipped here, so a route-based deferral would never clear.
+		if err = r.finalizeCosmoGuard(ctx, chainNode, false); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
 	}
 
@@ -365,6 +380,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err = r.cleanupGatewayRoutes(ctx, chainNode); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// Tear down a no-longer-used standalone guard AFTER routes have been retargeted to the raw node
+	// Service, so a live ingress/gateway route never points at a deleted guard backend.
+	// deferWhileRouted=true: hold teardown if a route still targets the guard (e.g. a preserved Ingress
+	// when Gateway CRDs are missing), completing on a later reconcile.
+	logger.V(1).Info("finalize cosmoguard")
+	if err = r.finalizeCosmoGuard(ctx, chainNode, true); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	logger.V(1).Info("ensure pvc updates")
@@ -408,6 +432,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Service{}).
 		Owns(&k8sappsv1.StatefulSet{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

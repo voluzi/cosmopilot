@@ -10,6 +10,40 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestChainNodeSetValidateRejectsCosmoGuardOnLegacyValidator(t *testing.T) {
+	guardCfg := func() *Config {
+		return &Config{CosmoGuard: &CosmoGuardConfig{
+			Enable: true,
+			Config: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "rules"},
+				Key:                  "cosmoguard.yaml",
+			},
+		}}
+	}
+
+	// Legacy singleton .spec.validator with cosmoGuard -> rejected (it would be silently unguarded now
+	// that the in-pod sidecar is gone).
+	legacy := &ChainNodeSet{Spec: ChainNodeSetSpec{
+		Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+		Validator: &NodeSetValidatorConfig{Config: guardCfg()},
+	}}
+	_, err := legacy.Validate(nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ".spec.validator.config.cosmoGuard is not supported")
+
+	// A .spec.nodes validator group with cosmoGuard is the supported form -> not rejected by this rule.
+	group := &ChainNodeSet{Spec: ChainNodeSetSpec{
+		Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+		Nodes: []NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(1),
+			Validator: &NodeSetValidatorConfig{Config: guardCfg()},
+		}},
+	}}
+	_, err = group.Validate(nil)
+	require.NoError(t, err)
+}
+
 func TestChainNodeSetValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
 	tmkms := func(key string) *TmKMS {
 		return &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
@@ -1759,10 +1793,10 @@ func TestChainNodeSetValidateRejectsValidatorInfoChangeAfterCreation(t *testing.
 	assert.NoError(t, err)
 }
 
-// TestShouldUseCosmoGuardPortsLegacyValidator verifies that a global route listing the reserved
+// TestShouldUseCosmoGuardLegacyValidator verifies that a global route listing the reserved
 // "validator" group reflects CosmoGuard enabled on the legacy .spec.validator (which is not in
 // .spec.nodes), so the global Service targets the CosmoGuard ports instead of the raw app ports.
-func TestShouldUseCosmoGuardPortsLegacyValidator(t *testing.T) {
+func TestShouldUseCosmoGuardLegacyValidator(t *testing.T) {
 	guarded := &Config{CosmoGuard: &CosmoGuardConfig{Enable: true}}
 
 	withGuard := &ChainNodeSet{Spec: ChainNodeSetSpec{
@@ -1773,12 +1807,12 @@ func TestShouldUseCosmoGuardPortsLegacyValidator(t *testing.T) {
 	}}
 
 	ing := &GlobalIngressConfig{Groups: []string{ReservedValidatorGroupName}}
-	assert.True(t, ing.ShouldUseCosmoGuardPorts(withGuard), "ingress should detect CosmoGuard on the legacy validator")
-	assert.False(t, ing.ShouldUseCosmoGuardPorts(withoutGuard))
+	assert.True(t, ing.ShouldUseCosmoGuard(withGuard), "ingress should detect CosmoGuard on the legacy validator")
+	assert.False(t, ing.ShouldUseCosmoGuard(withoutGuard))
 
 	gw := &GlobalGatewayConfig{Groups: []string{ReservedValidatorGroupName}}
-	assert.True(t, gw.ShouldUseCosmoGuardPorts(withGuard), "gateway should detect CosmoGuard on the legacy validator")
-	assert.False(t, gw.ShouldUseCosmoGuardPorts(withoutGuard))
+	assert.True(t, gw.ShouldUseCosmoGuard(withGuard), "gateway should detect CosmoGuard on the legacy validator")
+	assert.False(t, gw.ShouldUseCosmoGuard(withoutGuard))
 }
 
 func TestGenesisSigningMaterialChangedIncludesChainID(t *testing.T) {

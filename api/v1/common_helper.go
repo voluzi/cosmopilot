@@ -86,6 +86,12 @@ const (
 	// DefaultCosmoGuardMemory is the default memory request for the CosmoGuard container.
 	DefaultCosmoGuardMemory = "250Mi"
 
+	// DefaultCosmoGuardDashboardPort is the default port the CosmoGuard dashboard listens on.
+	DefaultCosmoGuardDashboardPort int32 = 8080
+
+	// DefaultCosmoGuardAutoscalingCPUTarget is the default target CPU utilization for CosmoGuard autoscaling.
+	DefaultCosmoGuardAutoscalingCPUTarget int32 = 80
+
 	// DefaultVpaCooldown is the default cooldown period for VPA scaling actions.
 	DefaultVpaCooldown = 5 * time.Minute
 
@@ -323,20 +329,16 @@ func (cfg *Config) GetCosmoGuardConfig() *corev1.ConfigMapKeySelector {
 	return nil
 }
 
-func (cfg *Config) ShouldRestartPodOnCosmoGuardFailure() bool {
-	if cfg == nil {
-		return false
-	}
-	if cfg.CosmoGuard != nil && cfg.CosmoGuard.RestartPodOnFailure != nil {
-		return *cfg.CosmoGuard.RestartPodOnFailure
-	}
-	return false
-}
-
 func (cfg *Config) GetCosmoGuardResources() corev1.ResourceRequirements {
 	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Resources != nil {
 		return *cfg.CosmoGuard.Resources
 	}
+	return defaultCosmoGuardResources()
+}
+
+// defaultCosmoGuardResources returns the operator's default guard container resources (positive CPU
+// and memory requests + matching limits).
+func defaultCosmoGuardResources() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse(DefaultCosmoGuardCPU),
@@ -347,6 +349,203 @@ func (cfg *Config) GetCosmoGuardResources() corev1.ResourceRequirements {
 			corev1.ResourceMemory: resource.MustParse(DefaultCosmoGuardMemory),
 		},
 	}
+}
+
+// GetCosmoGuardAutoscalingTargets resolves the guard container resources AND the HPA utilization
+// targets together, keeping them consistent: an HPA can only measure a resource the container
+// positively requests. Explicit user targets always win. When the user sets neither target, the
+// default metric follows whichever positive request the container has (CPU preferred). It then
+// guarantees every SELECTED metric — explicit or defaulted — has a positive matching request,
+// injecting the operator default for any that is missing or zero (e.g. an empty resources block, or
+// an explicit CPU target against a memory-only block). A namespace LimitRange might otherwise supply
+// the request at admission, but we cannot see that here, so injecting a known request is the safe,
+// self-contained choice. Returns the resources the container should use.
+func (cfg *Config) GetCosmoGuardAutoscalingTargets() (resources corev1.ResourceRequirements, targetCPU, targetMemory *int32) {
+	resources = cfg.GetCosmoGuardResources()
+	as := cfg.GetCosmoGuardAutoscaling()
+	if as == nil {
+		return resources, nil, nil
+	}
+	targetCPU = as.TargetCPUUtilizationPercentage
+	targetMemory = as.TargetMemoryUtilizationPercentage
+
+	hasCPU := cosmoGuardRequests(resources, corev1.ResourceCPU)
+	hasMemory := cosmoGuardRequests(resources, corev1.ResourceMemory)
+
+	// Container requests neither CPU nor memory (empty/all-zero block): fall back to the full default
+	// guard resources so it has sensible requests+limits rather than a single injected request.
+	if !hasCPU && !hasMemory {
+		resources = defaultCosmoGuardResources()
+		hasCPU, hasMemory = true, true
+	}
+
+	// Default the metric when the user set neither: follow whichever positive request the container has.
+	if targetCPU == nil && targetMemory == nil {
+		if hasMemory && !hasCPU {
+			targetMemory = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
+		} else {
+			targetCPU = ptr.To(DefaultCosmoGuardAutoscalingCPUTarget)
+		}
+	}
+
+	// Every selected metric needs a positive corresponding request or the HPA cannot scale.
+	resources = ensureCosmoGuardRequests(resources, targetCPU != nil, targetMemory != nil)
+	return resources, targetCPU, targetMemory
+}
+
+// ensureCosmoGuardRequests guarantees the guard container positively requests each resource its
+// selected HPA metrics measure, injecting the operator default for any that is missing or zero. The
+// input is not mutated.
+func ensureCosmoGuardRequests(res corev1.ResourceRequirements, needCPU, needMemory bool) corev1.ResourceRequirements {
+	injectCPU := needCPU && !cosmoGuardRequests(res, corev1.ResourceCPU)
+	injectMemory := needMemory && !cosmoGuardRequests(res, corev1.ResourceMemory)
+	if !injectCPU && !injectMemory {
+		return res
+	}
+	defaults := defaultCosmoGuardResources()
+	out := *res.DeepCopy()
+	if out.Requests == nil {
+		out.Requests = corev1.ResourceList{}
+	}
+	if injectCPU {
+		out.Requests[corev1.ResourceCPU] = cosmoGuardInjectedRequest(res, corev1.ResourceCPU, defaults.Requests[corev1.ResourceCPU])
+	}
+	if injectMemory {
+		out.Requests[corev1.ResourceMemory] = cosmoGuardInjectedRequest(res, corev1.ResourceMemory, defaults.Requests[corev1.ResourceMemory])
+	}
+	return out
+}
+
+// cosmoGuardInjectedRequest returns the request quantity to inject for a resource: the operator
+// default, capped at a smaller positive configured limit so the resulting requests never exceed
+// limits (which would render an invalid Pod).
+func cosmoGuardInjectedRequest(res corev1.ResourceRequirements, name corev1.ResourceName, def resource.Quantity) resource.Quantity {
+	if limit, ok := res.Limits[name]; ok && !limit.IsZero() && limit.Cmp(def) < 0 {
+		return limit.DeepCopy()
+	}
+	return def
+}
+
+// cosmoGuardRequests reports whether the guard container effectively requests a positive amount of the
+// given resource — via an explicit request, or a limit (Kubernetes copies a limit to the request when
+// the request is unset). A present-but-zero quantity counts as absent: utilization-based autoscaling
+// needs a positive request to measure against.
+func cosmoGuardRequests(res corev1.ResourceRequirements, name corev1.ResourceName) bool {
+	if request, ok := res.Requests[name]; ok {
+		return !request.IsZero()
+	}
+	limit, ok := res.Limits[name]
+	return ok && !limit.IsZero()
+}
+
+// GetCosmoGuardReplicas returns the desired CosmoGuard replica count. Defaults to 1.
+func (cfg *Config) GetCosmoGuardReplicas() int32 {
+	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Replicas != nil {
+		return *cfg.CosmoGuard.Replicas
+	}
+	return 1
+}
+
+// GetCosmoGuardImage returns the CosmoGuard image, using the per-CR override when set,
+// otherwise the provided operator-wide default.
+func (cfg *Config) GetCosmoGuardImage(defaultImage string) string {
+	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Image != nil && *cfg.CosmoGuard.Image != "" {
+		return *cfg.CosmoGuard.Image
+	}
+	return defaultImage
+}
+
+// GetCosmoGuardAutoscaling returns the CosmoGuard autoscaling config, or nil.
+func (cfg *Config) GetCosmoGuardAutoscaling() *CosmoGuardAutoscalingConfig {
+	if cfg != nil && cfg.CosmoGuard != nil {
+		return cfg.CosmoGuard.Autoscaling
+	}
+	return nil
+}
+
+// CosmoGuardAutoscalingEnabled reports whether horizontal autoscaling is enabled for CosmoGuard.
+func (cfg *Config) CosmoGuardAutoscalingEnabled() bool {
+	as := cfg.GetCosmoGuardAutoscaling()
+	return as != nil && as.Enable
+}
+
+// GetCosmoGuardDashboard returns the CosmoGuard dashboard config, or nil.
+func (cfg *Config) GetCosmoGuardDashboard() *CosmoGuardDashboardConfig {
+	if cfg != nil && cfg.CosmoGuard != nil {
+		return cfg.CosmoGuard.Dashboard
+	}
+	return nil
+}
+
+// CosmoGuardDashboardEnabled reports whether the CosmoGuard dashboard is enabled.
+func (cfg *Config) CosmoGuardDashboardEnabled() bool {
+	d := cfg.GetCosmoGuardDashboard()
+	return d != nil && d.Enable
+}
+
+// GetCosmoGuardDashboardPort returns the configured dashboard port or the default.
+func (cfg *Config) GetCosmoGuardDashboardPort() int32 {
+	if d := cfg.GetCosmoGuardDashboard(); d != nil && d.Port != nil {
+		return *d.Port
+	}
+	return DefaultCosmoGuardDashboardPort
+}
+
+// cosmoGuardReservedPorts are ports the guard uses regardless of EVM: the public API Service ports
+// (RPC/LCD/gRPC), the metrics port, the always-bound olric cluster listener ports (bind/peer-API/
+// gossip), the guard's own API listener container ports (RPC/LCD/gRPC listeners) and both the public
+// EVM Service ports and the EVM listener ports. Every EVM port is reserved even for non-EVM groups: an
+// EVM route (an individual node via the apiServiceName() flip, a per-group route, or a ChainNodeSet
+// global route) retargets to the guard Service by port NUMBER regardless of any group's evmEnabled, so
+// a dashboard bound to a public EVM Service port (8545/8546) would be served on the external EVM
+// hostname, and one bound to an EVM listener port (18545/18546) would receive misrouted EVM traffic.
+// The dashboard must not reuse any rendered port, or a Service would carry two entries for the same
+// port (rejected by the API server) or the container would bind one port twice (crash-loop). These
+// mirror values in internal/chainutils, internal/controllers and internal/cosmoguard, which api/v1
+// cannot import (import cycle).
+var cosmoGuardReservedPorts = map[int32]string{
+	26657: "RPC",
+	1317:  "LCD",
+	9090:  "gRPC",
+	9001:  "metrics",
+	3320:  "cluster bind",
+	3321:  "cluster peer API",
+	3322:  "cluster gossip",
+	16657: "RPC listener",
+	11317: "LCD listener",
+	19090: "gRPC listener",
+	8545:  "EVM RPC",
+	8546:  "EVM RPC WS",
+	18545: "EVM RPC listener",
+	18546: "EVM RPC WS listener",
+}
+
+// ValidateCosmoGuardDashboard checks the CosmoGuard dashboard config is renderable: its port must not
+// collide with a port the guard already uses (Service or container listener — a duplicate Service port
+// is rejected by the API server, and a duplicate container port crash-loops the pod), and when basic
+// auth is configured both credential selectors must reference a Secret name and key (an empty name
+// renders an unresolvable env var). Every EVM port (public Service ports 8545/8546 and listener ports
+// 18545/18546) is reserved unconditionally in cosmoGuardReservedPorts, because an EVM route retargets to
+// the guard Service by port number regardless of a group's evmEnabled. Returns nil when the dashboard is
+// disabled.
+func (cfg *Config) ValidateCosmoGuardDashboard() error {
+	if !cfg.CosmoGuardDashboardEnabled() {
+		return nil
+	}
+	port := cfg.GetCosmoGuardDashboardPort()
+	if name, ok := cosmoGuardReservedPorts[port]; ok {
+		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
+	}
+
+	if auth := cfg.GetCosmoGuardDashboard().BasicAuth; auth != nil {
+		if auth.Username.Name == "" || auth.Username.Key == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.username must reference both a Secret name and key")
+		}
+		if auth.Password.Name == "" || auth.Password.Key == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.password must reference both a Secret name and key")
+		}
+	}
+	return nil
 }
 
 func (cfg *Config) GetHaltHeight() int64 {

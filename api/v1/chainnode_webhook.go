@@ -92,6 +92,11 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		}
 	}
 
+	// The CosmoGuard dashboard port must not collide with a port the guard Service already exposes.
+	if err := chainNode.Spec.Config.ValidateCosmoGuardDashboard(); err != nil {
+		return nil, fmt.Errorf(".spec.config.%w", err)
+	}
+
 	// Reject duplicate subdomain prefixes across enabled endpoints
 	if ing := chainNode.Spec.Ingress; ing != nil {
 		if err := ValidateSubdomainPrefixes(".spec.ingress", ing.Subdomains,

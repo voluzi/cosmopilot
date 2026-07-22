@@ -92,7 +92,9 @@ func WithChainNodeSetLabels(nodeSet *v1.ChainNodeSet, additional ...map[string]s
 	for _, m := range additional {
 		labels = utils.MergeMaps(labels, m)
 	}
-	return labels
+	// A user-set label under CosmoGuard's own domain must never reach node pods, or a flipped guard
+	// Service would select them as if they were guard pods.
+	return controllers.StripCosmoGuardLabelDomain(labels)
 }
 
 func ContainsGroup(groups []v1.NodeGroupSpec, groupName string) bool {

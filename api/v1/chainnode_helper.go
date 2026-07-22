@@ -509,6 +509,12 @@ func (chainNode *ChainNode) GetServiceName() string {
 	return chainNode.GetName()
 }
 
+// CosmoGuardName returns the name of the standalone CosmoGuard resources (Deployment/Service)
+// created for a standalone ChainNode.
+func (chainNode *ChainNode) CosmoGuardName() string {
+	return fmt.Sprintf("%s-cosmoguard", chainNode.GetName())
+}
+
 func (chainNode *ChainNode) GetGatewayParentRef() gwapiv1.ParentReference {
 	ref := gwapiv1.ParentReference{
 		Name: gwapiv1.ObjectName(chainNode.Spec.Gateway.Gateway.Name),

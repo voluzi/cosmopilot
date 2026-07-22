@@ -69,7 +69,7 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 	return true, nil
 }
 
-func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guards cosmoGuardReconcile) error {
 	logger := log.FromContext(ctx)
 
 	expectedGroup := map[string]bool{}
@@ -84,8 +84,21 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		return r.ensureService(ctx, svc)
 	}
 
+	// routeFlip decides whether a global ingress/gateway route Service should select guard pods. The
+	// route must be structurally guardable (every targeted group guard-managed) — checked first and
+	// NOT sticky, so adding an unguarded/validator group to an already-flipped route reverts it to
+	// raw. Given that, flip on a strict rollout of every group's guard (so the per-route pod label is
+	// present) OR keep an already-flipped route flipped through subsequent rolls (sticky).
+	routeFlip := func(groups []string, serviceName string) bool {
+		if !cosmoGuardRouteGuardable(nodeSet, groups) {
+			return false
+		}
+		return cosmoGuardRouteReady(nodeSet, groups, guards.fullyReady) ||
+			r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), serviceName)
+	}
+
 	for _, group := range nodeSet.Spec.Nodes {
-		svc, err := r.getServiceSpec(nodeSet, group)
+		svc, err := r.getServiceSpec(nodeSet, group, guards.ready[group.Name])
 		if err != nil {
 			return err
 		}
@@ -103,7 +116,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, ingress := range nodeSet.Spec.Ingresses {
-		svc, err := r.getGlobalServiceSpec(nodeSet, ingress)
+		svc, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(ingress.Groups, ingress.GetName(nodeSet)))
 		if err != nil {
 			return err
 		}
@@ -121,7 +134,9 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, gw := range nodeSet.Spec.GatewayRoutes {
-		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw)
+		// The gateway's global Service is "<set>-global-<name>" (gw.GetName is the "-gw" route name,
+		// NOT the Service), so the sticky check must look up the actual Service.
+		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)))
 		if err != nil {
 			return err
 		}
@@ -206,6 +221,11 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 		logger.Info("updating service", "svc", svc.GetName())
 
 		svc.ObjectMeta.ResourceVersion = currentSvc.ObjectMeta.ResourceVersion
+		// ClusterIP(s) are immutable and API-allocated; a full Update that submits the freshly rendered
+		// Service (empty ClusterIP) is rejected. This matters for the CosmoGuard flip, which mutates an
+		// already-created Service's selector/target ports in place. Copy the live allocation forward.
+		svc.Spec.ClusterIP = currentSvc.Spec.ClusterIP
+		svc.Spec.ClusterIPs = currentSvc.Spec.ClusterIPs
 		if err := r.Update(ctx, svc); err != nil {
 			return err
 		}
@@ -215,7 +235,7 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 	return nil
 }
 
-func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) (*corev1.Service, error) {
+func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec, guardReady bool) (*corev1.Service, error) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      group.GetServiceName(nodeSet),
@@ -270,7 +290,11 @@ func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.N
 		})
 	}
 
-	if cfg != nil && cfg.CosmoGuardEnabled() {
+	// When CosmoGuard is enabled and its Deployment is serving, flip the group Service to the guard
+	// pods: repoint the selector at the standalone guard and target its listener ports. Until the
+	// guard is ready the Service keeps targeting the node pods on raw ports (make-before-break).
+	if cfg != nil && cfg.CosmoGuardEnabled() && guardReady {
+		svc.Spec.Selector = cosmoGuardGroupSelector(nodeSet, group)
 		svc.Spec.Ports[0].TargetPort = intstr.FromInt32(controllers.CosmoGuardRpcPort)
 		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)
@@ -340,7 +364,7 @@ func (r *Reconciler) getInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, group 
 	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
 }
 
-func (r *Reconciler) getGlobalServiceSpec(nodeSet *appsv1.ChainNodeSet, globalIngress appsv1.GlobalIngressConfig) (*corev1.Service, error) {
+func (r *Reconciler) getGlobalServiceSpec(nodeSet *appsv1.ChainNodeSet, globalIngress appsv1.GlobalIngressConfig, guardReady bool) (*corev1.Service, error) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      globalIngress.GetName(nodeSet),
@@ -391,7 +415,8 @@ func (r *Reconciler) getGlobalServiceSpec(nodeSet *appsv1.ChainNodeSet, globalIn
 		},
 	}
 
-	if globalIngress.ShouldUseCosmoGuardPorts(nodeSet) {
+	if globalIngress.ShouldUseCosmoGuard(nodeSet) && guardReady {
+		svc.Spec.Selector = cosmoGuardRouteSelector(globalIngress.GetName(nodeSet))
 		svc.Spec.Ports[0].TargetPort = intstr.FromInt32(controllers.CosmoGuardRpcPort)
 		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)
@@ -456,7 +481,7 @@ func (r *Reconciler) getGlobalInternalServiceSpec(nodeSet *appsv1.ChainNodeSet, 
 	return svc, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme)
 }
 
-func (r *Reconciler) getGlobalGatewayServiceSpec(nodeSet *appsv1.ChainNodeSet, gw appsv1.GlobalGatewayConfig) (*corev1.Service, error) {
+func (r *Reconciler) getGlobalGatewayServiceSpec(nodeSet *appsv1.ChainNodeSet, gw appsv1.GlobalGatewayConfig, guardReady bool) (*corev1.Service, error) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name),
@@ -507,7 +532,8 @@ func (r *Reconciler) getGlobalGatewayServiceSpec(nodeSet *appsv1.ChainNodeSet, g
 		},
 	}
 
-	if gw.ShouldUseCosmoGuardPorts(nodeSet) {
+	if gw.ShouldUseCosmoGuard(nodeSet) && guardReady {
+		svc.Spec.Selector = cosmoGuardRouteSelector(gw.GetName(nodeSet))
 		svc.Spec.Ports[0].TargetPort = intstr.FromInt32(controllers.CosmoGuardRpcPort)
 		svc.Spec.Ports[1].TargetPort = intstr.FromInt32(controllers.CosmoGuardLcdPort)
 		svc.Spec.Ports[2].TargetPort = intstr.FromInt32(controllers.CosmoGuardGrpcPort)

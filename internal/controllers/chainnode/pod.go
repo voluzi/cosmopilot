@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -862,81 +861,6 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		pod.Annotations[controllers.AnnotationSafeEvict] = strconv.FormatBool(*chainNode.Spec.Config.SafeToEvict)
 	}
 
-	if chainNode.Spec.Config != nil && chainNode.Spec.Config.CosmoGuardEnabled() {
-		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-			Name: cosmoGuardVolumeName,
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: chainNode.Spec.Config.GetCosmoGuardConfig().LocalObjectReference,
-				},
-			},
-		})
-		cosmoGuardContainer := corev1.Container{
-			Name:            cosmoGuardContainerName,
-			Image:           r.opts.CosmoGuardImage,
-			ImagePullPolicy: corev1.PullAlways,
-			RestartPolicy:   &sidecarRestartAlways,
-			SecurityContext: k8s.RestrictedSecurityContext(),
-			Args:            []string{"-config", filepath.Join("/config/", chainNode.Spec.Config.GetCosmoGuardConfig().Key)},
-			Ports: []corev1.ContainerPort{
-				{
-					Name:          controllers.CosmoGuardRpcPortName,
-					ContainerPort: controllers.CosmoGuardRpcPort,
-					Protocol:      corev1.ProtocolTCP,
-				},
-				{
-					Name:          controllers.CosmoGuardLcdPortName,
-					ContainerPort: controllers.CosmoGuardLcdPort,
-					Protocol:      corev1.ProtocolTCP,
-				},
-				{
-					Name:          controllers.CosmoGuardGrpcPortName,
-					ContainerPort: controllers.CosmoGuardGrpcPort,
-					Protocol:      corev1.ProtocolTCP,
-				},
-				{
-					Name:          controllers.CosmoGuardMetricsPortName,
-					ContainerPort: controllers.CosmoGuardMetricsPort,
-					Protocol:      corev1.ProtocolTCP,
-				},
-			},
-			VolumeMounts: []corev1.VolumeMount{
-				{
-					Name:      cosmoGuardVolumeName,
-					MountPath: "/config",
-				},
-			},
-			Resources: chainNode.Spec.Config.GetCosmoGuardResources(),
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/metrics",
-						Port: intstr.IntOrString{
-							Type:   intstr.Int,
-							IntVal: controllers.CosmoGuardMetricsPort,
-						},
-						Scheme: "HTTP",
-					},
-				},
-				FailureThreshold: 1,
-				PeriodSeconds:    2,
-			},
-		}
-		if chainNode.Spec.Config.IsEvmEnabled() {
-			cosmoGuardContainer.Ports = append(cosmoGuardContainer.Ports, corev1.ContainerPort{
-				Name:          controllers.CosmoGuardEvmRpcPortName,
-				ContainerPort: controllers.CosmoGuardEvmRpcPort,
-				Protocol:      corev1.ProtocolTCP,
-			})
-			cosmoGuardContainer.Ports = append(cosmoGuardContainer.Ports, corev1.ContainerPort{
-				Name:          controllers.CosmoGuardEvmRpcWsPortName,
-				ContainerPort: controllers.CosmoGuardEvmRpcWsPort,
-				Protocol:      corev1.ProtocolTCP,
-			})
-		}
-		pod.Spec.InitContainers = append(pod.Spec.InitContainers, cosmoGuardContainer)
-	}
-
 	specHash, err := podSpecHash(pod)
 	if err != nil {
 		return nil, err
@@ -1261,11 +1185,6 @@ func podInFailedState(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
 
 	for _, c := range pod.Status.InitContainerStatuses {
 		if !c.Ready && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
-			if c.Name == cosmoGuardContainerName {
-				if chainNode.Spec.Config.ShouldRestartPodOnCosmoGuardFailure() {
-					return true
-				}
-			}
 			if chainNode.Spec.Config != nil {
 				for _, s := range chainNode.Spec.Config.Sidecars {
 					if s.Name == c.Name && s.ShouldRestartPodOnFailure() {

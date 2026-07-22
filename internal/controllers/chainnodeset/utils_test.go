@@ -293,6 +293,26 @@ func TestWithChainNodeSetLabelsStripsDiscoveryScopeLabels(t *testing.T) {
 	assert.NotContains(t, result, controllers.LabelCosmosignerTarget, "cosmosigner-target must never be inherited")
 }
 
+// TestWithChainNodeSetLabelsStripsCosmoGuardDomain verifies a user-set label under CosmoGuard's own
+// domain is never inherited onto node pods — otherwise a flipped guard Service would select them.
+func TestWithChainNodeSetLabelsStripsCosmoGuardDomain(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"team":                             "payments",
+				"cosmoguard.voluzi.com/managed-by": "cosmoguard",
+				"cosmoguard.voluzi.com/instance":   "chain-fullnodes-cosmoguard",
+				"route.cosmoguard.voluzi.com/r":    "true",
+			},
+		},
+	}
+	result := WithChainNodeSetLabels(nodeSet)
+	assert.Equal(t, "payments", result["team"], "ordinary labels must be inherited")
+	assert.NotContains(t, result, "cosmoguard.voluzi.com/managed-by")
+	assert.NotContains(t, result, "cosmoguard.voluzi.com/instance")
+	assert.NotContains(t, result, "route.cosmoguard.voluzi.com/r")
+}
+
 func TestContainsGroup(t *testing.T) {
 	tests := []struct {
 		name      string

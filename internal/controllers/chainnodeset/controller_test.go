@@ -764,7 +764,7 @@ func TestEnsureServiceRefusesForeignOwner(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
 	}
 	r := newValidatorTestReconciler(t, nodeSet)
-	desired, err := r.getServiceSpec(nodeSet, appsv1.NodeGroupSpec{Name: "fullnodes"})
+	desired, err := r.getServiceSpec(nodeSet, appsv1.NodeGroupSpec{Name: "fullnodes"}, false)
 	require.NoError(t, err)
 	require.NoError(t, r.Create(context.Background(), &corev1.Service{ObjectMeta: metav1.ObjectMeta{
 		Name: desired.Name, Namespace: desired.Namespace,

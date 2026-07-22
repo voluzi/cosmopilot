@@ -156,6 +156,15 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		}
 	}
 
+	// CosmoGuard is not supported on the legacy singleton .spec.validator. With the in-pod sidecar
+	// removed, a guard is only reconciled for .spec.nodes groups (and standalone ChainNodes), so
+	// enabling it here would leave the validator's API traffic silently unguarded. Reject it (rather
+	// than silently dropping protection) and steer users to the supported form: a .spec.nodes
+	// validator group with cosmoGuard enabled, which the per-group guard fronts.
+	if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Config.CosmoGuardEnabled() {
+		return nil, fmt.Errorf(".spec.validator.config.cosmoGuard is not supported on the legacy singleton validator; define the validator as a .spec.nodes group with cosmoGuard enabled instead")
+	}
+
 	// Index the previous groups (on update) so we can detect disallowed changes such as scaling
 	// up a genesis-initializing validator group after genesis has been created.
 	oldGroups := map[string]NodeGroupSpec{}
@@ -186,6 +195,11 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			return nil, fmt.Errorf(".spec.nodes[%d].name %q duplicates .spec.nodes[%d].name", i, group.Name, prev)
 		}
 		seenGroupNames[group.Name] = i
+
+		// The CosmoGuard dashboard port must not collide with a port the guard Service already exposes.
+		if err := group.GetServiceConfig().ValidateCosmoGuardDashboard(); err != nil {
+			return nil, fmt.Errorf(".spec.nodes[%d] %w", i, err)
+		}
 
 		// Validate persistence size
 		if group.Persistence != nil && group.Persistence.Size != nil {

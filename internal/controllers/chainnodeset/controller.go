@@ -6,6 +6,7 @@ import (
 	"time"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -74,6 +75,7 @@ func (r *Reconciler) reservationReader() client.Reader {
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=grpcroutes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
@@ -298,7 +300,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureServices(ctx, nodeSet); err != nil {
+	// Reconcile standalone CosmoGuard deployments before Services so that Service selectors are only
+	// flipped to guard pods once each group's guard is serving (make-before-break). Stale-guard
+	// cleanup is deferred until AFTER Services are retargeted (below) so a guard is never deleted
+	// while a live Service still selects its pods.
+	guards, err := r.ensureCosmoGuards(ctx, nodeSet)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.ensureServices(ctx, nodeSet, guards); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -683,6 +698,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		For(&appsv1.ChainNodeSet{}).
 		Owns(&appsv1.ChainNode{}).
 		Owns(&k8sappsv1.StatefulSet{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)
