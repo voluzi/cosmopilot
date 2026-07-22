@@ -493,53 +493,47 @@ func (cfg *Config) GetCosmoGuardDashboardPort() int32 {
 
 // cosmoGuardReservedPorts are ports the guard uses regardless of EVM: the public API Service ports
 // (RPC/LCD/gRPC), the metrics port, the always-bound olric cluster listener ports (bind/peer-API/
-// gossip), the guard's own API listener container ports (RPC/LCD/gRPC listeners) and the EVM listener
-// ports. The EVM LISTENER ports are reserved even for non-EVM groups: a ChainNodeSet global route
-// Service always renders EVM ports and, once flipped to guards, targets these listener ports
-// regardless of any group's evmEnabled, so a dashboard bound to one would receive misrouted global EVM
-// traffic (or be exposed externally). cosmoGuardEvmReservedPorts are the public EVM Service ports,
-// which only collide with the guard's own Service when EVM is enabled. The dashboard must not reuse any
-// rendered port, or a Service would carry two entries for the same port (rejected by the API server)
-// or the container would bind one port twice (crash-loop). These mirror values in internal/chainutils,
-// internal/controllers and internal/cosmoguard, which api/v1 cannot import (import cycle).
-var (
-	cosmoGuardReservedPorts = map[int32]string{
-		26657: "RPC",
-		1317:  "LCD",
-		9090:  "gRPC",
-		9001:  "metrics",
-		3320:  "cluster bind",
-		3321:  "cluster peer API",
-		3322:  "cluster gossip",
-		16657: "RPC listener",
-		11317: "LCD listener",
-		19090: "gRPC listener",
-		18545: "EVM RPC listener",
-		18546: "EVM RPC WS listener",
-	}
-	cosmoGuardEvmReservedPorts = map[int32]string{
-		8545: "EVM RPC",
-		8546: "EVM RPC WS",
-	}
-)
+// gossip), the guard's own API listener container ports (RPC/LCD/gRPC listeners) and both the public
+// EVM Service ports and the EVM listener ports. Every EVM port is reserved even for non-EVM groups: an
+// EVM route (an individual node via the apiServiceName() flip, a per-group route, or a ChainNodeSet
+// global route) retargets to the guard Service by port NUMBER regardless of any group's evmEnabled, so
+// a dashboard bound to a public EVM Service port (8545/8546) would be served on the external EVM
+// hostname, and one bound to an EVM listener port (18545/18546) would receive misrouted EVM traffic.
+// The dashboard must not reuse any rendered port, or a Service would carry two entries for the same
+// port (rejected by the API server) or the container would bind one port twice (crash-loop). These
+// mirror values in internal/chainutils, internal/controllers and internal/cosmoguard, which api/v1
+// cannot import (import cycle).
+var cosmoGuardReservedPorts = map[int32]string{
+	26657: "RPC",
+	1317:  "LCD",
+	9090:  "gRPC",
+	9001:  "metrics",
+	3320:  "cluster bind",
+	3321:  "cluster peer API",
+	3322:  "cluster gossip",
+	16657: "RPC listener",
+	11317: "LCD listener",
+	19090: "gRPC listener",
+	8545:  "EVM RPC",
+	8546:  "EVM RPC WS",
+	18545: "EVM RPC listener",
+	18546: "EVM RPC WS listener",
+}
 
 // ValidateCosmoGuardDashboard checks the CosmoGuard dashboard config is renderable: its port must not
 // collide with a port the guard already uses (Service or container listener — a duplicate Service port
 // is rejected by the API server, and a duplicate container port crash-loops the pod), and when basic
 // auth is configured both credential selectors must reference a Secret name and key (an empty name
-// renders an unresolvable env var). Only the public EVM Service ports (cosmoGuardEvmReservedPorts) are
-// reserved conditionally on EVM being enabled; the EVM listener ports are in cosmoGuardReservedPorts and
-// reserved unconditionally (a flipped global route targets them regardless of a group's evmEnabled).
-// Returns nil when the dashboard is disabled.
+// renders an unresolvable env var). Every EVM port (public Service ports 8545/8546 and listener ports
+// 18545/18546) is reserved unconditionally in cosmoGuardReservedPorts, because an EVM route retargets to
+// the guard Service by port number regardless of a group's evmEnabled. Returns nil when the dashboard is
+// disabled.
 func (cfg *Config) ValidateCosmoGuardDashboard() error {
 	if !cfg.CosmoGuardDashboardEnabled() {
 		return nil
 	}
 	port := cfg.GetCosmoGuardDashboardPort()
 	if name, ok := cosmoGuardReservedPorts[port]; ok {
-		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
-	}
-	if name, ok := cosmoGuardEvmReservedPorts[port]; ok && cfg.IsEvmEnabled() {
 		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
 	}
 

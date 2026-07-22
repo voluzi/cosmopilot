@@ -38,12 +38,14 @@ func TestValidateCosmoGuardDashboard(t *testing.T) {
 	assert.Error(t, dash(true, ptr.To[int32](11317)).ValidateCosmoGuardDashboard(), "LCD listener port collision rejected")
 	assert.Error(t, dash(true, ptr.To[int32](19090)).ValidateCosmoGuardDashboard(), "gRPC listener port collision rejected")
 
-	// The public EVM Service ports are only reserved when EVM is enabled (they collide only with the
-	// guard's own Service).
-	assert.NoError(t, dash(true, ptr.To[int32](8545)).ValidateCosmoGuardDashboard(), "8545 is free without EVM")
+	// The public EVM Service ports are reserved even without EVM: an EVM route (individual/group/global)
+	// retargets to the guard Service by port number, so a dashboard bound to 8545/8546 would be served on
+	// the external EVM hostname. Regression for S2n5O.
+	assert.Error(t, dash(true, ptr.To[int32](8545)).ValidateCosmoGuardDashboard(), "8545 EVM RPC Service port reserved even without EVM")
+	assert.Error(t, dash(true, ptr.To[int32](8546)).ValidateCosmoGuardDashboard(), "8546 EVM RPC WS Service port reserved even without EVM")
 	evm := dash(true, ptr.To[int32](8545))
 	evm.EvmEnabled = ptr.To(true)
-	assert.Error(t, evm.ValidateCosmoGuardDashboard(), "8545 collides once EVM is enabled")
+	assert.Error(t, evm.ValidateCosmoGuardDashboard(), "8545 collides with EVM enabled too")
 
 	// The EVM LISTENER ports are reserved even without EVM: a flipped global route Service targets them
 	// regardless of the group's evmEnabled, so a dashboard there would receive misrouted EVM traffic.
