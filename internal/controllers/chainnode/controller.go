@@ -183,7 +183,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid, "spec is invalid: %v", err)
 			return ctrl.Result{}, err
 		}
-		if err := appsv1.ValidateCosmosignerStatefulChildName(chainNode.GetName(), chainNode.Status.NodeID == ""); err != nil {
+		if err := appsv1.ValidateReservedStatefulChildName(chainNode.GetName(), chainNode.Status.NodeID == ""); err != nil {
 			logger.Error(err, "spec is invalid")
 			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid, "spec is invalid: %v", err)
 			return ctrl.Result{}, err

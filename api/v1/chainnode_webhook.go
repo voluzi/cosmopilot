@@ -30,10 +30,10 @@ func (chainNode *ChainNode) ValidateCreate(_ context.Context, obj *ChainNode) (w
 		"kind", "ChainNode",
 		"resource", obj.GetNamespacedName(),
 	)
-	if err := ValidateCosmosignerReservedName(obj.GetName(), true); err != nil {
+	if err := ValidateReservedResourceName(obj.GetName(), true); err != nil {
 		return nil, err
 	}
-	if err := ValidateCosmosignerStatefulChildName(obj.GetName(), true); err != nil {
+	if err := ValidateReservedStatefulChildName(obj.GetName(), true); err != nil {
 		return nil, err
 	}
 	return obj.Validate(nil)
@@ -73,6 +73,15 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	_, err := resource.ParseQuantity(chainNode.GetPersistenceSize())
 	if err != nil {
 		return nil, fmt.Errorf("bad format for .spec.size: %v", err)
+	}
+
+	// Reject a node name whose derived resource names would exceed the 63-character DNS label limit
+	// (and then fail every reconcile). Enforced on create and update since Validate runs on both.
+	if err := validateDerivedNameLengths(chainNode.GetName(), "ChainNode name", nameFeatures{
+		cosmosigner:    chainNode.Spec.Cosmosigner != nil,
+		cosmoguardNode: chainNode.Spec.Config.CosmoGuardEnabled(),
+	}); err != nil {
+		return nil, err
 	}
 
 	// Ensure a genesis is specified when .spec.validator.init is not.
@@ -126,11 +135,6 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	if c := chainNode.Spec.Cosmosigner; c != nil {
 		if err := c.Validate(".spec.cosmosigner", false); err != nil {
 			return nil, err
-		}
-		// The signer derives "<name>-signer-privval" (its longest resource name); reject a node name
-		// that would push it past the 63-character Kubernetes name limit and fail every reconcile.
-		if svc := chainNode.GetName() + "-signer-privval"; len(svc) > 63 {
-			return nil, fmt.Errorf("the cosmosigner discovery Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNode name", svc, len(svc))
 		}
 		// A node cannot both sign through a TmKMS sidecar and a cosmosigner deployment.
 		if chainNode.UsesTmKms() {

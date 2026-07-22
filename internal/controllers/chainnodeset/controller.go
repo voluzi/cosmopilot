@@ -365,6 +365,9 @@ func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, err
 	if err := appsv1.ValidateCosmosignerReservedNameNoWebhook(nodeSet.GetName(), nodeSet.Status.ChainID != ""); err != nil {
 		return nil, err
 	}
+	if err := appsv1.ValidateReservedStatefulChildName(nodeSet.GetName(), nodeSet.Status.ChainID == ""); err != nil {
+		return nil, err
+	}
 	if nodeSet.Status.ChainID != "" {
 		if err := validateNoWebhookGenesisInitState(nodeSet); err != nil {
 			return nil, err

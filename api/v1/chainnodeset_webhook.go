@@ -24,7 +24,10 @@ func (nodeSet *ChainNodeSet) ValidateCreate(_ context.Context, obj *ChainNodeSet
 		"kind", "ChainNodeSet",
 		"resource", obj.GetNamespacedName(),
 	)
-	if err := ValidateCosmosignerReservedName(obj.GetName(), true); err != nil {
+	if err := ValidateReservedResourceName(obj.GetName(), true); err != nil {
+		return nil, err
+	}
+	if err := ValidateReservedStatefulChildName(obj.GetName(), true); err != nil {
 		return nil, err
 	}
 	return obj.Validate(nil)
@@ -336,6 +339,12 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, err
 	}
 	if err := nodeSet.validateCosmosignerUpdate(old); err != nil {
+		return nil, err
+	}
+
+	// Reject any node-group or signer name whose derived resource names would exceed the 63-character
+	// DNS label limit (and then fail every reconcile). Runs on create and update.
+	if err := nodeSet.validateGeneratedNameLengths(); err != nil {
 		return nil, err
 	}
 
@@ -665,7 +674,7 @@ func (nodeSet *ChainNodeSet) validateCosmosigner(old *ChainNodeSet) error {
 	if err := nodeSet.validateCosmosignerTargetUniqueness(); err != nil {
 		return err
 	}
-	return nodeSet.validateCosmosignerNameLengths()
+	return nil
 }
 
 // validateTopLevelCosmosigner validates the shape of .spec.cosmosigner: exactly-one-backend (via
@@ -869,10 +878,29 @@ func (nodeSet *ChainNodeSet) validateCosmosignerTargetUniqueness() error {
 	return nil
 }
 
-// validateCosmosignerNameLengths rejects a signer whose derived discovery Service name
-// "<signer>-privval" would exceed the 63-character Kubernetes name limit. This is the longest name
-// any signer derives, so it bounds all of them.
-func (nodeSet *ChainNodeSet) validateCosmosignerNameLengths() error {
+// validateGeneratedNameLengths rejects any node-group or signer name whose derived resource names
+// would exceed the 63-character DNS label limit. It checks, per node group, the group base (its
+// always-on -internal Service and, when CosmoGuard is enabled, the -cg-upstream Service) and the
+// group's longest child pod name; and, per resolved signer, the discovery Service "<signer>-privval"
+// (the longest name any signer derives).
+func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
+	const subject = "ChainNodeSet or node-group name"
+	for i := range nodeSet.Spec.Nodes {
+		g := &nodeSet.Spec.Nodes[i]
+		base := g.GetServiceName(nodeSet)
+		if err := validateDerivedNameLengths(base, subject, nameFeatures{
+			cosmoguardGroup: g.GetServiceConfig().CosmoGuardEnabled(),
+		}); err != nil {
+			return err
+		}
+		// The group's highest-ordinal child ChainNode carries the longest always-on 63-bound name.
+		child := fmt.Sprintf("%s-%d", base, g.GetInstances()-1)
+		if err := validateDerivedNameLengths(child, subject, nameFeatures{}); err != nil {
+			return err
+		}
+	}
+	// The discovery Service name already contains the "-signer" segment, so keep a dedicated check
+	// rather than routing through validateDerivedNameLengths (which would re-append it).
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		if svc := s.Name + "-privval"; len(svc) > 63 {
 			return fmt.Errorf("the cosmosigner discovery Service name %q (%d chars) exceeds the 63-character limit: shorten the ChainNodeSet or node-group name", svc, len(svc))
