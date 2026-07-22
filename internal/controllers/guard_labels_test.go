@@ -50,3 +50,21 @@ func TestGuardInheritedLabels(t *testing.T) {
 	// Nil in -> empty out, never panics.
 	assert.Empty(t, GuardInheritedLabels(nil))
 }
+
+// TestGuardInheritedLabelsStripsGuardDomain verifies labels under CosmoGuard's own domain (its
+// guard-private selector labels and per-route selector labels) are never inherited — otherwise an
+// inherited route.cosmoguard.voluzi.com/<route> label would make a global-route Service select
+// unrelated group guards.
+func TestGuardInheritedLabelsStripsGuardDomain(t *testing.T) {
+	out := GuardInheritedLabels(map[string]string{
+		"team":                                 "payments",
+		"route.cosmoguard.voluzi.com/my-route": "true",
+		"cosmoguard.voluzi.com/managed-by":     "cosmoguard",
+		"cosmoguard.voluzi.com/instance":       "chain-fullnodes-cosmoguard",
+	})
+
+	assert.Equal(t, "payments", out["team"])
+	assert.NotContains(t, out, "route.cosmoguard.voluzi.com/my-route")
+	assert.NotContains(t, out, "cosmoguard.voluzi.com/managed-by")
+	assert.NotContains(t, out, "cosmoguard.voluzi.com/instance")
+}

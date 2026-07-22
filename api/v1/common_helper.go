@@ -492,12 +492,13 @@ func (cfg *Config) GetCosmoGuardDashboardPort() int32 {
 }
 
 // cosmoGuardReservedPorts are ports the guard already uses regardless of EVM: the public API Service
-// ports (RPC/LCD/gRPC), the metrics port, and the always-bound olric cluster listener ports
-// (bind/peer-API/gossip). cosmoGuardEvmReservedPorts are used only when EVM is enabled. The dashboard
-// must not reuse any rendered port, or the guard Service would carry two ServicePort entries for the
-// same port (rejected by the API server) or the container would bind one port twice (crash-loop).
-// These mirror values in internal/chainutils, internal/controllers and internal/cosmoguard, which
-// api/v1 cannot import (import cycle).
+// ports (RPC/LCD/gRPC), the metrics port, the always-bound olric cluster listener ports
+// (bind/peer-API/gossip) and the guard's own API listener container ports (RPC/LCD/gRPC listeners).
+// cosmoGuardEvmReservedPorts are used only when EVM is enabled (EVM Service ports + EVM listeners).
+// The dashboard must not reuse any rendered port, or the guard Service would carry two ServicePort
+// entries for the same port (rejected by the API server) or the container would bind one port twice
+// (crash-loop). These mirror values in internal/chainutils, internal/controllers and
+// internal/cosmoguard, which api/v1 cannot import (import cycle).
 var (
 	cosmoGuardReservedPorts = map[int32]string{
 		26657: "RPC",
@@ -507,17 +508,24 @@ var (
 		3320:  "cluster bind",
 		3321:  "cluster peer API",
 		3322:  "cluster gossip",
+		16657: "RPC listener",
+		11317: "LCD listener",
+		19090: "gRPC listener",
 	}
 	cosmoGuardEvmReservedPorts = map[int32]string{
-		8545: "EVM RPC",
-		8546: "EVM RPC WS",
+		8545:  "EVM RPC",
+		8546:  "EVM RPC WS",
+		18545: "EVM RPC listener",
+		18546: "EVM RPC WS listener",
 	}
 )
 
-// ValidateCosmoGuardDashboard checks the CosmoGuard dashboard config is renderable: its Service port
-// must not collide with a port the guard Service already exposes (which would produce an invalid
-// Service with duplicate ports). The EVM ports are only reserved when EVM is enabled, since the guard
-// Service only exposes them then. Returns nil when the dashboard is disabled.
+// ValidateCosmoGuardDashboard checks the CosmoGuard dashboard config is renderable: its port must not
+// collide with a port the guard already uses (Service or container listener — a duplicate Service port
+// is rejected by the API server, and a duplicate container port crash-loops the pod), and when basic
+// auth is configured both credential selectors must reference a Secret name and key (an empty name
+// renders an unresolvable env var). The EVM ports are only reserved when EVM is enabled. Returns nil
+// when the dashboard is disabled.
 func (cfg *Config) ValidateCosmoGuardDashboard() error {
 	if !cfg.CosmoGuardDashboardEnabled() {
 		return nil
@@ -528,6 +536,15 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 	}
 	if name, ok := cosmoGuardEvmReservedPorts[port]; ok && cfg.IsEvmEnabled() {
 		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
+	}
+
+	if auth := cfg.GetCosmoGuardDashboard().BasicAuth; auth != nil {
+		if auth.Username.Name == "" || auth.Username.Key == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.username must reference both a Secret name and key")
+		}
+		if auth.Password.Name == "" || auth.Password.Key == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.password must reference both a Secret name and key")
+		}
 	}
 	return nil
 }

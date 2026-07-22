@@ -33,11 +33,47 @@ func TestValidateCosmoGuardDashboard(t *testing.T) {
 	assert.Error(t, dash(true, ptr.To[int32](3320)).ValidateCosmoGuardDashboard(), "cluster bind port collision rejected")
 	assert.Error(t, dash(true, ptr.To[int32](3322)).ValidateCosmoGuardDashboard(), "cluster gossip port collision rejected")
 
-	// EVM ports are only reserved when EVM is enabled (the guard Service only exposes them then).
+	// The guard's own API listener container ports must be rejected (container binds them too).
+	assert.Error(t, dash(true, ptr.To[int32](16657)).ValidateCosmoGuardDashboard(), "RPC listener port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](19090)).ValidateCosmoGuardDashboard(), "gRPC listener port collision rejected")
+
+	// EVM ports (Service + listener) are only reserved when EVM is enabled.
 	assert.NoError(t, dash(true, ptr.To[int32](8545)).ValidateCosmoGuardDashboard(), "8545 is free without EVM")
+	assert.NoError(t, dash(true, ptr.To[int32](18545)).ValidateCosmoGuardDashboard(), "18545 is free without EVM")
 	evm := dash(true, ptr.To[int32](8545))
 	evm.EvmEnabled = ptr.To(true)
 	assert.Error(t, evm.ValidateCosmoGuardDashboard(), "8545 collides once EVM is enabled")
+	evmListener := dash(true, ptr.To[int32](18545))
+	evmListener.EvmEnabled = ptr.To(true)
+	assert.Error(t, evmListener.ValidateCosmoGuardDashboard(), "18545 EVM listener collides once EVM is enabled")
+}
+
+// TestValidateCosmoGuardDashboardBasicAuth verifies basic-auth selectors must reference both a Secret
+// name and a key, so the guard's auth env vars resolve.
+func TestValidateCosmoGuardDashboardBasicAuth(t *testing.T) {
+	withAuth := func(auth *CosmoGuardDashboardAuth) *Config {
+		return &Config{CosmoGuard: &CosmoGuardConfig{
+			Enable:    true,
+			Dashboard: &CosmoGuardDashboardConfig{Enable: true, Port: ptr.To[int32](8090), BasicAuth: auth},
+		}}
+	}
+	sel := func(name, key string) corev1.SecretKeySelector {
+		return corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}
+	}
+
+	// Both selectors fully specified -> ok.
+	assert.NoError(t, withAuth(&CosmoGuardDashboardAuth{Username: sel("creds", "user"), Password: sel("creds", "pass")}).ValidateCosmoGuardDashboard())
+
+	// Missing Secret name (only key set) -> rejected.
+	err := withAuth(&CosmoGuardDashboardAuth{Username: sel("", "user"), Password: sel("creds", "pass")}).ValidateCosmoGuardDashboard()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "username")
+
+	// Missing key on the password selector -> rejected.
+	assert.Error(t, withAuth(&CosmoGuardDashboardAuth{Username: sel("creds", "user"), Password: sel("creds", "")}).ValidateCosmoGuardDashboard())
+
+	// No basic auth (no-auth internal dashboard) -> ok.
+	assert.NoError(t, withAuth(nil).ValidateCosmoGuardDashboard())
 }
 
 func autoscaledConfig(res *corev1.ResourceRequirements) *Config {
