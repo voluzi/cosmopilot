@@ -1007,12 +1007,21 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 			}
 		}
 	}
-	// Cosmoseed derives a client Service "<nodeSet>-seed" and a headless Service
-	// "<nodeSet>-seed-headless"; both share the operator-wide Service name space.
+	// Cosmoseed derives a client Service "<nodeSet>-seed", a headless Service "<nodeSet>-seed-headless"
+	// and, per configured instance, an internal Service "<nodeSet>-seed-<i>-internal" (always) plus an
+	// exposure Service "<nodeSet>-seed-<i>" (only when P2P expose is enabled). All share the operator-wide
+	// Service name space, so a group named e.g. "seed-0" collides with an instance Service.
 	if nodeSet.Spec.Cosmoseed.IsEnabled() {
 		owner := "cosmoseed"
 		base := fmt.Sprintf("%s-seed", nodeSet.GetName())
-		for _, name := range []string{base, base + "-headless"} {
+		names := []string{base, base + "-headless"}
+		for i := 0; i < nodeSet.Spec.Cosmoseed.GetInstances(); i++ {
+			names = append(names, fmt.Sprintf("%s-%d-internal", base, i))
+			if nodeSet.Spec.Cosmoseed.Expose.Enabled() {
+				names = append(names, fmt.Sprintf("%s-%d", base, i))
+			}
+		}
+		for _, name := range names {
 			if err := add(name, owner); err != nil {
 				return err
 			}

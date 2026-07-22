@@ -321,6 +321,61 @@ func TestValidateCosmoseedServiceNameCollisions(t *testing.T) {
 	require.NoError(t, ok.validateServiceNameCollisions())
 }
 
+// Cosmoseed also derives, per configured instance, an internal Service "<nodeSet>-seed-<i>-internal"
+// (always) and an exposure Service "<nodeSet>-seed-<i>" (only when P2P expose is enabled). A node group
+// named "seed-<i>" or "seed-<i>-internal" collides with the always-created instance internal Service
+// under the same owner and must be rejected — but only up to the configured instance count.
+func TestValidateCosmoseedInstanceServiceNameCollisions(t *testing.T) {
+	// A group named "seed-0" collides via its own -internal Service with the always-created instance-0
+	// internal Service; "seed-0-internal" collides at its base with the same Service. Neither needs
+	// P2P expose to be enabled.
+	for _, collider := range []string{"seed-0", "seed-0-internal"} {
+		cs := &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{
+				Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(true), Instances: ptr.To(1)},
+				Nodes:     []NodeGroupSpec{{Name: collider}},
+			},
+		}
+		err := cs.validateServiceNameCollisions()
+		require.Errorf(t, err, "group %q must collide with a cosmoseed instance Service", collider)
+		require.Contains(t, err.Error(), "cs-seed-0-internal")
+	}
+
+	// The instance loop honours GetInstances(): "seed-1" is free with a single instance but collides
+	// once a second instance is configured.
+	single := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(true), Instances: ptr.To(1)},
+			Nodes:     []NodeGroupSpec{{Name: "seed-1"}},
+		},
+	}
+	require.NoError(t, single.validateServiceNameCollisions())
+
+	two := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(true), Instances: ptr.To(2)},
+			Nodes:     []NodeGroupSpec{{Name: "seed-1"}},
+		},
+	}
+	err := two.validateServiceNameCollisions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-seed-1-internal")
+
+	// With P2P expose enabled the per-instance exposure Service "<nodeSet>-seed-<i>" is also registered;
+	// a non-colliding set still passes (exercises the expose registration path).
+	exposed := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Cosmoseed: &CosmoseedConfig{Enabled: ptr.To(true), Instances: ptr.To(2), Expose: &ExposeConfig{P2P: ptr.To(true)}},
+			Nodes:     []NodeGroupSpec{{Name: "fullnodes"}},
+		},
+	}
+	require.NoError(t, exposed.validateServiceNameCollisions())
+}
+
 // The legacy singleton .spec.validator derives a Service "<nodeSet>-validator" and its -internal
 // variant; a node group named "validator" derives the same name and must be rejected. When
 // .spec.validator is unset no such Service exists.
