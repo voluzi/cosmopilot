@@ -1052,23 +1052,21 @@ func (nodeSet *ChainNodeSet) eachDerivedServiceName(fn func(name, owner string))
 		// only at reconcile, where both Services share the ChainNodeSet owner and the ownership guard
 		// cannot arbitrate. Only active ordinals exist, so a zero-instance group adds none.
 		//
-		// A child also derives a "-p2p" Service when P2P expose is enabled in Service mode (LoadBalancer /
-		// NodePort — Gateway mode routes via a TCPRoute and deletes that Service instead), and its own
+		// A child always claims a "-p2p" Service name: chainnode ensureService creates it when P2P expose
+		// is enabled in Service mode (LoadBalancer / NodePort) and Deletes it by name otherwise (Gateway
+		// mode routes via a TCPRoute of the same name; disabled expose deletes it). It also derives its own
 		// single-node CosmoGuard Services "<child>-cg"/"<child>-cg-peer" when the group both enables
 		// CosmoGuard and defines individual ingress/gateway routes (standaloneGuardManaged: the shared
 		// group guard cannot target a per-node route, so the child runs its own guard). Register those too
 		// so an ordinal-shaped sibling ("g-0-p2p", "g-0-cg-peer") is rejected up front rather than fighting
 		// the child at reconcile under the same owner.
-		childP2P := g.Expose.Enabled() && !g.Expose.UsesGateway()
 		childGuard := g.GetServiceConfig().CosmoGuardEnabled() &&
 			(g.IndividualIngresses != nil || g.IndividualGatewayRoutes != nil)
 		for j := 0; j < g.GetInstances(); j++ {
 			child := fmt.Sprintf("%s-%d", base, j)
 			fn(child, owner)
 			fn(child+"-internal", owner)
-			if childP2P {
-				fn(child+"-p2p", owner)
-			}
+			fn(child+"-p2p", owner)
 			if childGuard {
 				fn(child+"-cg", owner)
 				fn(child+"-cg-peer", owner)
@@ -1209,18 +1207,17 @@ func (nodeSet *ChainNodeSet) eachDerivedIngressName(fn func(name, owner string))
 		cfg := g.GetServiceConfig()
 		owner := fmt.Sprintf("node group %q", g.Name)
 		base := g.GetServiceName(nodeSet)
-		// A group with individual ingress routes sets Spec.Ingress on each child ChainNode, which the
-		// chainnode reconcile renders as an Ingress named exactly "<child>" plus a "<child>-grpc" variant.
-		// That path (chainnode ensureIngress) has no ownership guard: when the child has no ingress it
-		// deletes both names by name, and when it does it Updates them in place — so the child claims both
-		// names whether or not gRPC is on. Register them so a global route rendering the same name (e.g.
-		// group "global" child "-5" vs route "5") is rejected up front rather than fighting at reconcile.
-		if g.IndividualIngresses != nil {
-			for j := 0; j < g.GetInstances(); j++ {
-				child := fmt.Sprintf("%s-%d", base, j)
-				fn(child, owner)
-				fn(child+"-grpc", owner)
-			}
+		// Every child ChainNode claims an Ingress named exactly "<child>" plus a "<child>-grpc" variant.
+		// A group with individual ingress routes sets Spec.Ingress on each child, which chainnode
+		// ensureIngresses renders as those Ingresses; a group without them leaves the child's Spec.Ingress
+		// nil, and that same path Deletes both names by name every reconcile. Either way the child owns
+		// both names (whether or not gRPC is on) and the path has no ownership guard — so register them for
+		// all active children so a global route rendering the same name (e.g. group "global" child "-5" vs
+		// route "5") is rejected up front rather than fighting at reconcile.
+		for j := 0; j < g.GetInstances(); j++ {
+			child := fmt.Sprintf("%s-%d", base, j)
+			fn(child, owner)
+			fn(child+"-grpc", owner)
 		}
 		// ensureCosmoGuards skips zero-instance groups, so the guard (and its dashboard Ingress) exists
 		// only once the group is scaled up; registering it at instances: 0 would flag a nonexistent object.

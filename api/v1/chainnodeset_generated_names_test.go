@@ -472,27 +472,22 @@ func TestValidateServiceNameCollisionsGrandfathersExisting(t *testing.T) {
 // individual ingress/gateway routes). An ordinal-shaped sibling group ("foo-0-p2p", "foo-0-cg-peer")
 // derives the same name under the same ChainNodeSet owner and must be rejected up front.
 func TestValidateChildDerivedServiceNameCollisions(t *testing.T) {
-	// P2P expose in Service mode: child "cs-foo-0" also owns Service "cs-foo-0-p2p".
-	p2pCollide := &ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
-		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-			{Name: "foo", Instances: ptr.To(1), Expose: &ExposeConfig{P2P: ptr.To(true)}},
-			{Name: "foo-0-p2p"},
-		}},
+	// A child always claims a "-p2p" Service name: chainnode ensureService creates it under P2P expose in
+	// Service mode and Deletes it by name otherwise (Gateway mode uses a same-named TCPRoute; disabled
+	// expose deletes it). So an ordinal-shaped sibling "foo-0-p2p" collides with child "cs-foo-0"'s
+	// "cs-foo-0-p2p" whether or not P2P expose is on.
+	for _, expose := range []*ExposeConfig{{P2P: ptr.To(true)}, nil} {
+		p2pCollide := &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+				{Name: "foo", Instances: ptr.To(1), Expose: expose},
+				{Name: "foo-0-p2p"},
+			}},
+		}
+		err := p2pCollide.validateServiceNameCollisions(nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cs-foo-0-p2p")
 	}
-	err := p2pCollide.validateServiceNameCollisions(nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cs-foo-0-p2p")
-
-	// Without P2P expose no "-p2p" child Service exists, so the sibling name is free.
-	p2pOff := &ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
-		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-			{Name: "foo", Instances: ptr.To(1)},
-			{Name: "foo-0-p2p"},
-		}},
-	}
-	require.NoError(t, p2pOff.validateServiceNameCollisions(nil))
 
 	// CosmoGuard + individual ingress routes: the child runs its own guard, owning "cs-foo-0-cg" and
 	// "cs-foo-0-cg-peer".
@@ -506,7 +501,7 @@ func TestValidateChildDerivedServiceNameCollisions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guardChild, {Name: "foo-0-cg-peer"}}},
 	}
-	err = guardPeerCollide.validateServiceNameCollisions(nil)
+	err := guardPeerCollide.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-foo-0-cg-peer")
 
@@ -579,6 +574,21 @@ func TestValidateIngressNameCollisions(t *testing.T) {
 		},
 	}
 	require.NoError(t, dashboardOff.validateIngressNameCollisions(nil))
+
+	// Every active child claims an Ingress named exactly "<child>" (plus "<child>-grpc"), whether or not
+	// the group defines individual ingress routes: chainnode ensureIngresses renders them when the child's
+	// Spec.Ingress is set and Deletes them by name otherwise. So a global route rendering an ordinal-child
+	// name collides even for a group with no individual ingresses.
+	childIngressCollide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{
+			Nodes:     []NodeGroupSpec{{Name: "global-rpc", Instances: ptr.To(1)}},
+			Ingresses: []GlobalIngressConfig{{Name: "rpc-0"}},
+		},
+	}
+	err = childIngressCollide.validateIngressNameCollisions(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-global-rpc-0")
 
 	// A route's gRPC Ingress ("-grpc") collides with another route whose main Ingress renders the same
 	// name.
