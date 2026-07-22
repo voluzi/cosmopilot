@@ -491,14 +491,17 @@ func (cfg *Config) GetCosmoGuardDashboardPort() int32 {
 	return DefaultCosmoGuardDashboardPort
 }
 
-// cosmoGuardReservedPorts are ports the guard already uses regardless of EVM: the public API Service
-// ports (RPC/LCD/gRPC), the metrics port, the always-bound olric cluster listener ports
-// (bind/peer-API/gossip) and the guard's own API listener container ports (RPC/LCD/gRPC listeners).
-// cosmoGuardEvmReservedPorts are used only when EVM is enabled (EVM Service ports + EVM listeners).
-// The dashboard must not reuse any rendered port, or the guard Service would carry two ServicePort
-// entries for the same port (rejected by the API server) or the container would bind one port twice
-// (crash-loop). These mirror values in internal/chainutils, internal/controllers and
-// internal/cosmoguard, which api/v1 cannot import (import cycle).
+// cosmoGuardReservedPorts are ports the guard uses regardless of EVM: the public API Service ports
+// (RPC/LCD/gRPC), the metrics port, the always-bound olric cluster listener ports (bind/peer-API/
+// gossip), the guard's own API listener container ports (RPC/LCD/gRPC listeners) and the EVM listener
+// ports. The EVM LISTENER ports are reserved even for non-EVM groups: a ChainNodeSet global route
+// Service always renders EVM ports and, once flipped to guards, targets these listener ports
+// regardless of any group's evmEnabled, so a dashboard bound to one would receive misrouted global EVM
+// traffic (or be exposed externally). cosmoGuardEvmReservedPorts are the public EVM Service ports,
+// which only collide with the guard's own Service when EVM is enabled. The dashboard must not reuse any
+// rendered port, or a Service would carry two entries for the same port (rejected by the API server)
+// or the container would bind one port twice (crash-loop). These mirror values in internal/chainutils,
+// internal/controllers and internal/cosmoguard, which api/v1 cannot import (import cycle).
 var (
 	cosmoGuardReservedPorts = map[int32]string{
 		26657: "RPC",
@@ -511,12 +514,12 @@ var (
 		16657: "RPC listener",
 		11317: "LCD listener",
 		19090: "gRPC listener",
-	}
-	cosmoGuardEvmReservedPorts = map[int32]string{
-		8545:  "EVM RPC",
-		8546:  "EVM RPC WS",
 		18545: "EVM RPC listener",
 		18546: "EVM RPC WS listener",
+	}
+	cosmoGuardEvmReservedPorts = map[int32]string{
+		8545: "EVM RPC",
+		8546: "EVM RPC WS",
 	}
 )
 
