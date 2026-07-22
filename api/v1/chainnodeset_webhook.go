@@ -347,7 +347,9 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 
 	// Reject a group whose derived Service name collides with another group's/route's derived Service
 	// (e.g. guarded group "g" vs a group named "g-cg", or group "g" vs a group named "g-internal").
-	if err := nodeSet.validateServiceNameCollisions(); err != nil {
+	// Grandfathers collisions already present in old so a pre-existing (already-broken) ChainNodeSet
+	// stays editable; only a collision newly introduced or newly activated on this revision is rejected.
+	if err := nodeSet.validateServiceNameCollisions(old); err != nil {
 		return nil, err
 	}
 
@@ -977,26 +979,56 @@ func (nodeSet *ChainNodeSet) validateGeneratedNameLengths() error {
 // "g" vs a group named "g-internal" (internal Service vs main), and a scaled group "g" vs a group named
 // "g-0" (child instance Service vs main). Mirrors the "<g>-signer" group/signer collision check in
 // validateCosmosignerTargetUniqueness.
-func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
+//
+// A name that already collided in old is grandfathered: this validation is newly added and several of
+// the names it registers depend on live instance counts, so an existing (already-broken) ChainNodeSet
+// stays editable — only a collision newly introduced or newly activated on this revision is rejected.
+// The reconcilers' ownership guards remain the backstop for grandfathered ones.
+func (nodeSet *ChainNodeSet) validateServiceNameCollisions(old *ChainNodeSet) error {
+	grandfathered := map[string]bool{}
+	if old != nil {
+		seen := map[string]string{}
+		old.eachDerivedServiceName(func(name, owner string) {
+			if prev, taken := seen[name]; taken && prev != owner {
+				grandfathered[name] = true
+			} else {
+				seen[name] = owner
+			}
+		})
+	}
 	owners := map[string]string{}
-	add := func(name, owner string) error {
+	var collErr error
+	nodeSet.eachDerivedServiceName(func(name, owner string) {
+		if collErr != nil || grandfathered[name] {
+			return
+		}
 		if prev, taken := owners[name]; taken && prev != owner {
-			return fmt.Errorf("Service name %q is derived by both %s and %s: rename one of them", name, prev, owner)
+			collErr = fmt.Errorf("Service name %q is derived by both %s and %s: rename one of them", name, prev, owner)
+			return
 		}
 		owners[name] = owner
-		return nil
-	}
+	})
+	return collErr
+}
+
+// eachDerivedServiceName invokes fn(name, owner) for every Service name this ChainNodeSet derives, in a
+// deterministic order (node groups, legacy validator, cosmoseed, ingress routes, gateway routes). It is
+// the shared registration used by validateServiceNameCollisions for both the current and previous spec.
+func (nodeSet *ChainNodeSet) eachDerivedServiceName(fn func(name, owner string)) {
 	for i := range nodeSet.Spec.Nodes {
 		g := &nodeSet.Spec.Nodes[i]
 		owner := fmt.Sprintf("node group %q", g.Name)
 		base := g.GetServiceName(nodeSet)
-		names := []string{base, base + "-internal"}
+		fn(base, owner)
+		fn(base+"-internal", owner)
 		if g.GetInstances() > 0 && g.GetServiceConfig().CosmoGuardEnabled() {
 			// A guarded group derives a CosmoGuard client Service (base+"-cg"), an upstream Service
 			// (base+"-cg-upstream") and a peer Service (base+"-cg-peer") — all in the shared name space.
 			// ensureCosmoGuards skips zero-instance groups, so these exist only once the group is scaled
 			// up; registering them at instances: 0 would flag a collision with a nonexistent Service.
-			names = append(names, base+"-cg", base+"-cg-upstream", base+"-cg-peer")
+			fn(base+"-cg", owner)
+			fn(base+"-cg-upstream", owner)
+			fn(base+"-cg-peer", owner)
 		}
 		// Every instance materializes a child ChainNode "<base>-<i>" whose own main Service ("<base>-<i>")
 		// and always-created "-internal" variant share the name space. A sibling group or route shaped
@@ -1005,12 +1037,8 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 		// cannot arbitrate. Only active ordinals exist, so a zero-instance group adds none.
 		for j := 0; j < g.GetInstances(); j++ {
 			child := fmt.Sprintf("%s-%d", base, j)
-			names = append(names, child, child+"-internal")
-		}
-		for _, name := range names {
-			if err := add(name, owner); err != nil {
-				return err
-			}
+			fn(child, owner)
+			fn(child+"-internal", owner)
 		}
 	}
 	// The legacy singleton .spec.validator materializes a ChainNode "<nodeSet>-validator" outside
@@ -1018,11 +1046,8 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 	if nodeSet.Spec.Validator != nil {
 		owner := "legacy validator"
 		base := fmt.Sprintf("%s-validator", nodeSet.GetName())
-		for _, name := range []string{base, base + "-internal"} {
-			if err := add(name, owner); err != nil {
-				return err
-			}
-		}
+		fn(base, owner)
+		fn(base+"-internal", owner)
 	}
 	// Cosmoseed derives a client Service "<nodeSet>-seed", a headless Service "<nodeSet>-seed-headless"
 	// and, per configured instance, an internal Service "<nodeSet>-seed-<i>-internal" (always) plus an
@@ -1031,16 +1056,12 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 	if nodeSet.Spec.Cosmoseed.IsEnabled() {
 		owner := "cosmoseed"
 		base := fmt.Sprintf("%s-seed", nodeSet.GetName())
-		names := []string{base, base + "-headless"}
+		fn(base, owner)
+		fn(base+"-headless", owner)
 		for i := 0; i < nodeSet.Spec.Cosmoseed.GetInstances(); i++ {
-			names = append(names, fmt.Sprintf("%s-%d-internal", base, i))
+			fn(fmt.Sprintf("%s-%d-internal", base, i), owner)
 			if nodeSet.Spec.Cosmoseed.Expose.Enabled() {
-				names = append(names, fmt.Sprintf("%s-%d", base, i))
-			}
-		}
-		for _, name := range names {
-			if err := add(name, owner); err != nil {
-				return err
+				fn(fmt.Sprintf("%s-%d", base, i), owner)
 			}
 		}
 	}
@@ -1051,11 +1072,8 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 		// "-internal" variant regardless of UseInternal, so register the public name directly rather
 		// than GetServiceName (which flips to the internal name when UseInternal is set).
 		base := ing.GetName(nodeSet)
-		for _, name := range []string{base, base + "-internal"} {
-			if err := add(name, owner); err != nil {
-				return err
-			}
-		}
+		fn(base, owner)
+		fn(base+"-internal", owner)
 	}
 	for i := range nodeSet.Spec.GatewayRoutes {
 		gw := &nodeSet.Spec.GatewayRoutes[i]
@@ -1064,13 +1082,9 @@ func (nodeSet *ChainNodeSet) validateServiceNameCollisions() error {
 		// is "<nodeSet>-global-<route>". ensureServices always creates both it and its -internal variant
 		// regardless of UseInternal, so register the public name directly rather than GetServiceName.
 		base := fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)
-		for _, name := range []string{base, base + "-internal"} {
-			if err := add(name, owner); err != nil {
-				return err
-			}
-		}
+		fn(base, owner)
+		fn(base+"-internal", owner)
 	}
-	return nil
 }
 
 // validateGroupChildReservedNames rejects a node group whose generated child ChainNode names collide

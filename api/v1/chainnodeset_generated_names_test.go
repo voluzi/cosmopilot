@@ -84,7 +84,7 @@ func TestValidateGroupGuardNameCollisions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guarded, {Name: "foo-cg"}}},
 	}
-	err := collide.validateServiceNameCollisions()
+	err := collide.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-foo-cg")
 
@@ -93,14 +93,14 @@ func TestValidateGroupGuardNameCollisions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guarded, {Name: "bar"}}},
 	}
-	require.NoError(t, ok.validateServiceNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions(nil))
 
 	// The same "foo-cg" group name is fine when "foo" is not guarded (no guard Service exists).
 	unguarded := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "foo-cg"}}},
 	}
-	require.NoError(t, unguarded.validateServiceNameCollisions())
+	require.NoError(t, unguarded.validateServiceNameCollisions(nil))
 }
 
 // A guard Service name can also collide with a global ingress/gateway route's backing Service. A
@@ -116,7 +116,7 @@ func TestValidateGroupGuardNameCollisionsWithRoutes(t *testing.T) {
 			Ingresses: []GlobalIngressConfig{{Name: "rpc-cg"}},
 		},
 	}
-	err := ingColl.validateServiceNameCollisions()
+	err := ingColl.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-global-rpc-cg")
 	require.Contains(t, err.Error(), "global ingress route")
@@ -128,7 +128,7 @@ func TestValidateGroupGuardNameCollisionsWithRoutes(t *testing.T) {
 			GatewayRoutes: []GlobalGatewayConfig{{Name: "rpc-cg"}},
 		},
 	}
-	err = gwColl.validateServiceNameCollisions()
+	err = gwColl.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "global gateway route")
 
@@ -142,7 +142,7 @@ func TestValidateGroupGuardNameCollisionsWithRoutes(t *testing.T) {
 			Ingresses: []GlobalIngressConfig{{Name: "p2p"}},
 		},
 	}
-	require.NoError(t, ok.validateServiceNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions(nil))
 }
 
 // Two node groups whose derived Service names shadow each other must be rejected even without any
@@ -154,7 +154,7 @@ func TestValidateServiceNameCollisionsInternalShadowing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "foo-internal"}}},
 	}
-	err := collide.validateServiceNameCollisions()
+	err := collide.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-foo-internal")
 
@@ -163,7 +163,7 @@ func TestValidateServiceNameCollisionsInternalShadowing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "bar"}}},
 	}
-	require.NoError(t, ok.validateServiceNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions(nil))
 }
 
 // A group whose name ends in "-cg"/"-signer" makes the controller generate child ChainNodes like
@@ -280,7 +280,7 @@ func TestValidateGroupGuardAuxiliaryNameCollisions(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 			Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guarded, {Name: collider}}},
 		}
-		err := cs.validateServiceNameCollisions()
+		err := cs.validateServiceNameCollisions(nil)
 		require.Errorf(t, err, "group %q must collide with the guard auxiliary Service", collider)
 		require.Contains(t, err.Error(), "cs-"+collider)
 	}
@@ -290,7 +290,7 @@ func TestValidateGroupGuardAuxiliaryNameCollisions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo"}, {Name: "foo-cg-upstream"}, {Name: "foo-cg-peer"}}},
 	}
-	require.NoError(t, ok.validateServiceNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions(nil))
 }
 
 // Cosmoseed derives a client Service "<nodeSet>-seed" and a headless Service
@@ -305,7 +305,7 @@ func TestValidateCosmoseedServiceNameCollisions(t *testing.T) {
 				Nodes:     []NodeGroupSpec{{Name: collider}},
 			},
 		}
-		err := cs.validateServiceNameCollisions()
+		err := cs.validateServiceNameCollisions(nil)
 		require.Errorf(t, err, "group %q must collide with a cosmoseed Service", collider)
 		require.Contains(t, err.Error(), "cs-"+collider)
 	}
@@ -318,7 +318,7 @@ func TestValidateCosmoseedServiceNameCollisions(t *testing.T) {
 			Nodes:     []NodeGroupSpec{{Name: "seed"}, {Name: "seed-headless"}},
 		},
 	}
-	require.NoError(t, ok.validateServiceNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions(nil))
 }
 
 // Cosmoseed also derives, per configured instance, an internal Service "<nodeSet>-seed-<i>-internal"
@@ -337,7 +337,7 @@ func TestValidateCosmoseedInstanceServiceNameCollisions(t *testing.T) {
 				Nodes:     []NodeGroupSpec{{Name: collider}},
 			},
 		}
-		err := cs.validateServiceNameCollisions()
+		err := cs.validateServiceNameCollisions(nil)
 		require.Errorf(t, err, "group %q must collide with a cosmoseed instance Service", collider)
 		require.Contains(t, err.Error(), "cs-seed-0-internal")
 	}
@@ -351,7 +351,7 @@ func TestValidateCosmoseedInstanceServiceNameCollisions(t *testing.T) {
 			Nodes:     []NodeGroupSpec{{Name: "seed-1"}},
 		},
 	}
-	require.NoError(t, single.validateServiceNameCollisions())
+	require.NoError(t, single.validateServiceNameCollisions(nil))
 
 	two := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
@@ -360,7 +360,7 @@ func TestValidateCosmoseedInstanceServiceNameCollisions(t *testing.T) {
 			Nodes:     []NodeGroupSpec{{Name: "seed-1"}},
 		},
 	}
-	err := two.validateServiceNameCollisions()
+	err := two.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-seed-1-internal")
 
@@ -373,7 +373,7 @@ func TestValidateCosmoseedInstanceServiceNameCollisions(t *testing.T) {
 			Nodes:     []NodeGroupSpec{{Name: "fullnodes"}},
 		},
 	}
-	require.NoError(t, exposed.validateServiceNameCollisions())
+	require.NoError(t, exposed.validateServiceNameCollisions(nil))
 }
 
 // Each active instance of a group materializes a child ChainNode whose own main "<base>-<i>" and
@@ -389,7 +389,7 @@ func TestValidateChildInstanceServiceNameCollisions(t *testing.T) {
 			{Name: "foo-0", Instances: ptr.To(1)},
 		}},
 	}
-	err := collide.validateServiceNameCollisions()
+	err := collide.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-foo-0")
 
@@ -402,7 +402,7 @@ func TestValidateChildInstanceServiceNameCollisions(t *testing.T) {
 			{Name: "foo-1", Instances: ptr.To(1)},
 		}},
 	}
-	require.NoError(t, single.validateServiceNameCollisions())
+	require.NoError(t, single.validateServiceNameCollisions(nil))
 
 	two := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
@@ -411,7 +411,7 @@ func TestValidateChildInstanceServiceNameCollisions(t *testing.T) {
 			{Name: "foo-1", Instances: ptr.To(1)},
 		}},
 	}
-	err = two.validateServiceNameCollisions()
+	err = two.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-foo-1")
 
@@ -423,7 +423,48 @@ func TestValidateChildInstanceServiceNameCollisions(t *testing.T) {
 			{Name: "foo-0", Instances: ptr.To(1)},
 		}},
 	}
-	require.NoError(t, zero.validateServiceNameCollisions())
+	require.NoError(t, zero.validateServiceNameCollisions(nil))
+}
+
+// A collision already present in the previous revision is grandfathered so an existing (already-broken)
+// ChainNodeSet stays editable; only a collision newly introduced or newly activated on this revision is
+// rejected. This validation was added after such objects could already exist, so update must not lock
+// them out — the reconcilers' ownership guards remain the backstop for the grandfathered ones.
+func TestValidateServiceNameCollisionsGrandfathersExisting(t *testing.T) {
+	collided := func() *ChainNodeSet {
+		return &ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+				{Name: "foo", Instances: ptr.To(1)},
+				{Name: "foo-0", Instances: ptr.To(1)},
+			}},
+		}
+	}
+
+	// Updating an object that already carried the "cs-foo-0" collision is allowed: it collided in old.
+	require.NoError(t, collided().validateServiceNameCollisions(collided()))
+
+	// A collision newly introduced on this revision (old had no "foo-0" sibling) is still rejected.
+	oldClean := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "foo", Instances: ptr.To(1)}}},
+	}
+	err := collided().validateServiceNameCollisions(oldClean)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-0")
+
+	// A collision newly activated (old had the sibling but "foo" was scaled to zero, so no child existed)
+	// is rejected once the group scales up and the child Service materializes.
+	oldZero := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(0)},
+			{Name: "foo-0", Instances: ptr.To(1)},
+		}},
+	}
+	err = collided().validateServiceNameCollisions(oldZero)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-0")
 }
 
 // The legacy singleton .spec.validator derives a Service "<nodeSet>-validator" and its -internal
@@ -437,7 +478,7 @@ func TestValidateLegacyValidatorServiceNameCollisions(t *testing.T) {
 			Nodes:     []NodeGroupSpec{{Name: "validator"}},
 		},
 	}
-	err := collide.validateServiceNameCollisions()
+	err := collide.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-validator")
 
@@ -446,7 +487,7 @@ func TestValidateLegacyValidatorServiceNameCollisions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
 		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{{Name: "validator"}}},
 	}
-	require.NoError(t, ok.validateServiceNameCollisions())
+	require.NoError(t, ok.validateServiceNameCollisions(nil))
 }
 
 // A global route always materializes the public "<nodeSet>-global-<route>" Service even when
@@ -461,7 +502,7 @@ func TestValidateRoutePublicServiceNameCollisionWithInternal(t *testing.T) {
 			Nodes:     []NodeGroupSpec{{Name: "global-rpc"}},
 		},
 	}
-	err := ing.validateServiceNameCollisions()
+	err := ing.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-global-rpc")
 
@@ -472,7 +513,7 @@ func TestValidateRoutePublicServiceNameCollisionWithInternal(t *testing.T) {
 			Nodes:         []NodeGroupSpec{{Name: "global-rpc"}},
 		},
 	}
-	err = gw.validateServiceNameCollisions()
+	err = gw.validateServiceNameCollisions(nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cs-global-rpc")
 }
