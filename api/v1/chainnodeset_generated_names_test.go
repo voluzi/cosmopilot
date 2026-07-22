@@ -467,6 +467,69 @@ func TestValidateServiceNameCollisionsGrandfathersExisting(t *testing.T) {
 	require.Contains(t, err.Error(), "cs-foo-0")
 }
 
+// Beyond its main "<child>" and "-internal" Services, an active child also derives a "-p2p" Service
+// (P2P expose in Service mode) and its own "<child>-cg"/"<child>-cg-peer" guard Services (CosmoGuard +
+// individual ingress/gateway routes). An ordinal-shaped sibling group ("foo-0-p2p", "foo-0-cg-peer")
+// derives the same name under the same ChainNodeSet owner and must be rejected up front.
+func TestValidateChildDerivedServiceNameCollisions(t *testing.T) {
+	// P2P expose in Service mode: child "cs-foo-0" also owns Service "cs-foo-0-p2p".
+	p2pCollide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(1), Expose: &ExposeConfig{P2P: ptr.To(true)}},
+			{Name: "foo-0-p2p"},
+		}},
+	}
+	err := p2pCollide.validateServiceNameCollisions(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-0-p2p")
+
+	// Without P2P expose no "-p2p" child Service exists, so the sibling name is free.
+	p2pOff := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(1)},
+			{Name: "foo-0-p2p"},
+		}},
+	}
+	require.NoError(t, p2pOff.validateServiceNameCollisions(nil))
+
+	// CosmoGuard + individual ingress routes: the child runs its own guard, owning "cs-foo-0-cg" and
+	// "cs-foo-0-cg-peer".
+	guardChild := NodeGroupSpec{
+		Name:                "foo",
+		Instances:           ptr.To(1),
+		Config:              &Config{CosmoGuard: &CosmoGuardConfig{Enable: true}},
+		IndividualIngresses: &IngressConfig{},
+	}
+	guardPeerCollide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guardChild, {Name: "foo-0-cg-peer"}}},
+	}
+	err = guardPeerCollide.validateServiceNameCollisions(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-0-cg-peer")
+
+	guardCollide := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec:       ChainNodeSetSpec{Nodes: []NodeGroupSpec{guardChild, {Name: "foo-0-cg"}}},
+	}
+	err = guardCollide.validateServiceNameCollisions(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-foo-0-cg")
+
+	// CosmoGuard without individual routes fronts the group with a single shared guard and gives the
+	// children no per-node guard, so the "foo-0-cg-peer" sibling is free.
+	guardNoIndividual := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
+			{Name: "foo", Instances: ptr.To(1), Config: &Config{CosmoGuard: &CosmoGuardConfig{Enable: true}}},
+			{Name: "foo-0-cg-peer"},
+		}},
+	}
+	require.NoError(t, guardNoIndividual.validateServiceNameCollisions(nil))
+}
+
 // The legacy singleton .spec.validator derives a Service "<nodeSet>-validator" and its -internal
 // variant; a node group named "validator" derives the same name and must be rejected. When
 // .spec.validator is unset no such Service exists.

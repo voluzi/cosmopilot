@@ -1035,10 +1035,28 @@ func (nodeSet *ChainNodeSet) eachDerivedServiceName(fn func(name, owner string))
 		// like an ordinal child (e.g. a group "g-0" next to a scaled group "g") would otherwise collide
 		// only at reconcile, where both Services share the ChainNodeSet owner and the ownership guard
 		// cannot arbitrate. Only active ordinals exist, so a zero-instance group adds none.
+		//
+		// A child also derives a "-p2p" Service when P2P expose is enabled in Service mode (LoadBalancer /
+		// NodePort — Gateway mode routes via a TCPRoute and deletes that Service instead), and its own
+		// single-node CosmoGuard Services "<child>-cg"/"<child>-cg-peer" when the group both enables
+		// CosmoGuard and defines individual ingress/gateway routes (standaloneGuardManaged: the shared
+		// group guard cannot target a per-node route, so the child runs its own guard). Register those too
+		// so an ordinal-shaped sibling ("g-0-p2p", "g-0-cg-peer") is rejected up front rather than fighting
+		// the child at reconcile under the same owner.
+		childP2P := g.Expose.Enabled() && !g.Expose.UsesGateway()
+		childGuard := g.GetServiceConfig().CosmoGuardEnabled() &&
+			(g.IndividualIngresses != nil || g.IndividualGatewayRoutes != nil)
 		for j := 0; j < g.GetInstances(); j++ {
 			child := fmt.Sprintf("%s-%d", base, j)
 			fn(child, owner)
 			fn(child+"-internal", owner)
+			if childP2P {
+				fn(child+"-p2p", owner)
+			}
+			if childGuard {
+				fn(child+"-cg", owner)
+				fn(child+"-cg-peer", owner)
+			}
 		}
 	}
 	// The legacy singleton .spec.validator materializes a ChainNode "<nodeSet>-validator" outside
