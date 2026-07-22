@@ -54,47 +54,56 @@ func (r *Reconciler) apiServiceName(ctx context.Context, chainNode *appsv1.Chain
 // at its CosmoGuard Service, used to keep the route on the guard during transient guard rollouts.
 func (r *Reconciler) standaloneRouteTargetsGuard(ctx context.Context, chainNode *appsv1.ChainNode) bool {
 	guard := chainNode.CosmoGuardName()
+	// Inspect BOTH route types regardless of which Spec.* is currently set. During an Ingress<->Gateway
+	// migration the live guarded backend can still be on the OLD route type while Spec already points at
+	// the new one; checking only the new type would drop the sticky flip and let the new routes be
+	// created on the raw Service before the old guarded routes are torn down (a brief bypass).
+	return r.gatewayRoutesTargetGuard(ctx, chainNode, guard) || r.ingressRoutesTargetGuard(ctx, chainNode, guard)
+}
 
-	if chainNode.Spec.Gateway != nil {
-		routes := &gwapiv1.HTTPRouteList{}
-		if err := r.List(ctx, routes, client.InNamespace(chainNode.GetNamespace())); err == nil {
-			for i := range routes.Items {
-				rt := &routes.Items[i]
-				if !metav1.IsControlledBy(rt, chainNode) {
-					continue
-				}
-				for _, rule := range rt.Spec.Rules {
-					for _, br := range rule.BackendRefs {
-						if string(br.Name) == guard {
-							return true
-						}
+// gatewayRoutesTargetGuard reports whether any HTTPRoute/GRPCRoute owned by this node points at its
+// guard Service. Missing Gateway API CRDs make the List error out, which is treated as "no match".
+func (r *Reconciler) gatewayRoutesTargetGuard(ctx context.Context, chainNode *appsv1.ChainNode, guard string) bool {
+	httpRoutes := &gwapiv1.HTTPRouteList{}
+	if err := r.List(ctx, httpRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+		for i := range httpRoutes.Items {
+			rt := &httpRoutes.Items[i]
+			if !metav1.IsControlledBy(rt, chainNode) {
+				continue
+			}
+			for _, rule := range rt.Spec.Rules {
+				for _, br := range rule.BackendRefs {
+					if string(br.Name) == guard {
+						return true
 					}
 				}
 			}
 		}
-		// gRPC-only routes use a GRPCRoute, so a gRPC-exposed guard must be recognized here too.
-		grpcRoutes := &gwapiv1.GRPCRouteList{}
-		if err := r.List(ctx, grpcRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
-			for i := range grpcRoutes.Items {
-				rt := &grpcRoutes.Items[i]
-				if !metav1.IsControlledBy(rt, chainNode) {
-					continue
-				}
-				for _, rule := range rt.Spec.Rules {
-					for _, br := range rule.BackendRefs {
-						if string(br.Name) == guard {
-							return true
-						}
-					}
-				}
-			}
-		}
-		return false
 	}
+	// gRPC-only routes use a GRPCRoute, so a gRPC-exposed guard must be recognized here too.
+	grpcRoutes := &gwapiv1.GRPCRouteList{}
+	if err := r.List(ctx, grpcRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+		for i := range grpcRoutes.Items {
+			rt := &grpcRoutes.Items[i]
+			if !metav1.IsControlledBy(rt, chainNode) {
+				continue
+			}
+			for _, rule := range rt.Spec.Rules {
+				for _, br := range rule.BackendRefs {
+					if string(br.Name) == guard {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
 
-	// A gRPC-only Ingress lives in a separate "<node>-grpc" Ingress (getGrpcIngressSpec); the base
-	// "<node>" Ingress can carry no guard backend at all in that case. Inspect both so the sticky check
-	// still keeps a gRPC-exposed guard through a transient rollout.
+// ingressRoutesTargetGuard reports whether the node's base "<node>" or gRPC-only "<node>-grpc" Ingress
+// points at its guard Service. A gRPC-only Ingress lives in the separate "<node>-grpc" Ingress
+// (getGrpcIngressSpec); the base Ingress can carry no guard backend at all in that case, so inspect both.
+func (r *Reconciler) ingressRoutesTargetGuard(ctx context.Context, chainNode *appsv1.ChainNode, guard string) bool {
 	for _, name := range []string{chainNode.GetName(), fmt.Sprintf("%s-grpc", chainNode.GetName())} {
 		ing := &networkingv1.Ingress{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: name}, ing); err != nil {
@@ -242,6 +251,15 @@ func (r *Reconciler) standaloneGuardManaged(chainNode *appsv1.ChainNode) bool {
 // avoiding a window where a live route points at a deleted backend (make-before-break on teardown).
 func (r *Reconciler) finalizeCosmoGuard(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	if r.standaloneGuardManaged(chainNode) {
+		return nil
+	}
+	// Make-before-break teardown: keep the guard while any live ingress/gateway route still points at
+	// its Service. Normally routes are retargeted to the raw node earlier in the same reconcile, so this
+	// is already false. But when a Gateway migration cannot apply its new routes (Gateway API CRDs
+	// missing) the old guarded Ingress is preserved as a fallback; deleting the guard then would leave
+	// that Ingress with a missing backend. A later reconcile completes teardown once the route no longer
+	// targets the guard.
+	if r.standaloneRouteTargetsGuard(ctx, chainNode) {
 		return nil
 	}
 	return cosmoguard.Undeploy(ctx, r.Client, chainNode, chainNode.GetNamespace(), chainNode.CosmoGuardName())

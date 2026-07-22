@@ -195,6 +195,65 @@ func TestStandaloneStickyFlipViaGrpcIngress(t *testing.T) {
 	assert.Equal(t, "node-0-cosmoguard", r.apiServiceName(ctx, cn))
 }
 
+// guardIngress builds an Ingress named `name` whose single HTTP path points at `backend`.
+func guardIngress(name, backend string) *networkingv1.Ingress {
+	return &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{Name: backend},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+}
+
+// TestStandaloneRouteTargetsGuardChecksBothTypes verifies the sticky check inspects the old route type
+// during an Ingress<->Gateway migration: a node whose Spec now points at Gateway but whose live guarded
+// backend is still on the old Ingress is recognized as targeting the guard (so the flip stays sticky and
+// the new routes aren't created on the raw Service before the old guarded ones are torn down).
+func TestStandaloneRouteTargetsGuardChecksBothTypes(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Gateway = &appsv1.GatewayConfig{Host: "rpc.example.com"} // migrated to Gateway
+	ing := guardIngress("node-0", "node-0-cosmoguard")               // old guarded Ingress still live
+
+	r := cosmoGuardTestReconciler(t, ing)
+	assert.True(t, r.standaloneRouteTargetsGuard(context.Background(), cn),
+		"old guarded Ingress must keep the flip sticky even though Spec points at Gateway")
+}
+
+// TestFinalizeDefersUndeployWhileRouteTargetsGuard verifies the guard is not torn down while a live
+// route still points at it (e.g. a Gateway migration whose routes could not be applied because the CRDs
+// are missing, leaving the old guarded Ingress as a fallback), and is torn down once it no longer is.
+func TestFinalizeDefersUndeployWhileRouteTargetsGuard(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+
+	// Disable CosmoGuard, but a live Ingress still references the guard Service.
+	cn.Spec.Config.CosmoGuard.Enable = false
+	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cosmoguard")))
+
+	// Finalize must NOT delete the guard while that Ingress points at it.
+	require.NoError(t, r.finalizeCosmoGuard(ctx, cn))
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{}),
+		"guard must survive while a live route still targets it")
+
+	// Once the route no longer targets the guard, finalize tears it down.
+	require.NoError(t, r.Delete(ctx, guardIngress("node-0", "node-0-cosmoguard")))
+	require.NoError(t, r.finalizeCosmoGuard(ctx, cn))
+	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	assert.Error(t, err, "guard torn down once no route references it")
+}
+
 // TestDisableAutoscalingRemovesHPA verifies the standalone guard deletes its HPA when autoscaling is
 // turned off, so it stops driving the StatefulSet's replica count.
 func TestDisableAutoscalingRemovesHPA(t *testing.T) {
