@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -51,10 +52,26 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 	// restricts grandfathering to collisions that genuinely predate this operator version.
 	if !svcCollDone || !ingCollDone {
 		svcCandidates, ingCandidates := nodeSet.LegacyDerivedNameCollisions()
+
+		// childUIDs are the ChainNodes this nodeSet controls. A per-child Service/Ingress counts as
+		// materialized only when owned by one of them; matching the controller ref's UID (not just its
+		// Kind) stops an unrelated ChainNode's identically-named resource in the same namespace from
+		// making a brand-new collision look legacy and bypassing the no-webhook checks.
+		childNodes := &appsv1.ChainNodeList{}
+		if err := r.List(ctx, childNodes, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+			return false, err
+		}
+		childUIDs := map[types.UID]struct{}{}
+		for i := range childNodes.Items {
+			if metav1.IsControlledBy(&childNodes.Items[i], nodeSet) {
+				childUIDs[childNodes.Items[i].GetUID()] = struct{}{}
+			}
+		}
+
 		if !svcCollDone {
 			live := map[string]struct{}{}
 			for i := range services.Items {
-				if ownedByNodeSetOrChild(&services.Items[i], nodeSet) {
+				if ownedByNodeSetOrChild(&services.Items[i], nodeSet, childUIDs) {
 					live[services.Items[i].GetName()] = struct{}{}
 				}
 			}
@@ -68,7 +85,7 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 			}
 			live := map[string]struct{}{}
 			for i := range ingresses.Items {
-				if ownedByNodeSetOrChild(&ingresses.Items[i], nodeSet) {
+				if ownedByNodeSetOrChild(&ingresses.Items[i], nodeSet, childUIDs) {
 					live[ingresses.Items[i].GetName()] = struct{}{}
 				}
 			}
@@ -147,16 +164,20 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 
 // ownedByNodeSetOrChild reports whether obj is a resource this nodeSet is responsible for: controlled
 // directly by the nodeSet (group/global/guard/cosmoseed/validator Services, global/dashboard Ingresses)
-// or by a ChainNode (its per-child main/-internal/-p2p/-cg/-cg-peer Services and <child>/<child>-grpc
-// Ingresses). The child ChainNode is itself nodeSet-owned, and the collision names this is matched against
-// all derive from this nodeSet's spec, so a name match scopes the ChainNode owner to this nodeSet's own
-// children.
-func ownedByNodeSetOrChild(obj metav1.Object, nodeSet *appsv1.ChainNodeSet) bool {
+// or by one of this nodeSet's child ChainNodes (its per-child main/-internal/-p2p/-cg/-cg-peer Services
+// and <child>/<child>-grpc Ingresses). childUIDs is the UID set of the ChainNodes this nodeSet controls;
+// matching the controller ref by UID rather than Kind ensures an unrelated ChainNode's identically-named
+// resource in the same namespace can't make a brand-new collision look pre-existing.
+func ownedByNodeSetOrChild(obj metav1.Object, nodeSet *appsv1.ChainNodeSet, childUIDs map[types.UID]struct{}) bool {
 	if metav1.IsControlledBy(obj, nodeSet) {
 		return true
 	}
 	ref := metav1.GetControllerOf(obj)
-	return ref != nil && ref.Kind == "ChainNode"
+	if ref == nil {
+		return false
+	}
+	_, ok := childUIDs[ref.UID]
+	return ok
 }
 
 // intersectSorted returns the members of candidates present in live, preserving candidates' order

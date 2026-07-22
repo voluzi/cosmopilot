@@ -821,11 +821,13 @@ func TestInitializeLegacyCollisionsGatedOnLiveResources(t *testing.T) {
 
 	t.Run("pre-existing collision grandfathered from child-owned resources", func(t *testing.T) {
 		nodeSet := newNodeSet()
-		// The child ChainNode "test-nodeset-g-0" owns the colliding Services, so they are already live.
+		r := newValidatorTestReconciler(t, nodeSet)
+		// A child ChainNode controlled by THIS nodeSet owns the colliding Services, so they are already live.
 		child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 			Name: "test-nodeset-g-0", Namespace: "default", UID: types.UID("child-uid"),
 		}}
-		r := newValidatorTestReconciler(t, nodeSet, child)
+		require.NoError(t, controllerutil.SetControllerReference(nodeSet, child, r.Scheme))
+		require.NoError(t, r.Create(context.Background(), child))
 		for _, name := range collisionNames {
 			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
 			require.NoError(t, controllerutil.SetControllerReference(child, svc, r.Scheme))
@@ -835,6 +837,27 @@ func TestInitializeLegacyCollisionsGatedOnLiveResources(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, collisionNames, nodeSet.Status.LegacyServiceNameCollisions,
 			"a collision already materialized as live owned (child ChainNode) resources is grandfathered")
+	})
+
+	t.Run("foreign ChainNode-owned resources do not grandfather", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		r := newValidatorTestReconciler(t, nodeSet)
+		// A ChainNode NOT controlled by this nodeSet (a different nodeSet's child, or standalone) owns
+		// identically-named Services. Its UID is absent from this nodeSet's child set, so the collision must
+		// stay ungrandfathered and the no-webhook checks still reject it.
+		foreign := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset-g-0", Namespace: "default", UID: types.UID("foreign-uid"),
+		}}
+		require.NoError(t, r.Create(context.Background(), foreign))
+		for _, name := range collisionNames {
+			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+			require.NoError(t, controllerutil.SetControllerReference(foreign, svc, r.Scheme))
+			require.NoError(t, r.Create(context.Background(), svc))
+		}
+		_, err := r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.Empty(t, nodeSet.Status.LegacyServiceNameCollisions,
+			"resources owned by a ChainNode not controlled by this nodeSet must not be treated as legacy")
 	})
 }
 
