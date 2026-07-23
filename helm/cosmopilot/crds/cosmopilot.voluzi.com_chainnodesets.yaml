@@ -16916,8 +16916,9 @@ spec:
                 type: integer
               legacyIngressNameCollisions:
                 description: |-
-                  LegacyIngressNameCollisions records Ingress names that were already derived by two distinct owners
-                  when this validation was first enforced, computed once from the spec. validateIngressNameCollisions
+                  LegacyIngressNameCollisions records Ingress names derived by two distinct owners whose colliding
+                  resource already existed as a live owned object when this validation was first enforced (see
+                  LegacyServiceNameCollisions for the live-resource gating rationale). validateIngressNameCollisions
                   grandfathers these on the no-webhook path (old == nil), matching LegacyServiceNameCollisions.
                 items:
                   type: string
@@ -16931,7 +16932,7 @@ spec:
                 description: |-
                   LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope
                   "group", instances > 0) ending in -cg/-signer/-seed, i.e. groups that already materialize child
-                  ChainNodes "<base>-<n>" under a now-reserved StatefulSet-child suffix. Unlike
+                  ChainNodes `<base>-<n>` under a now-reserved StatefulSet-child suffix. Unlike
                   LegacySignerServiceNames this excludes global routes and zero-instance groups — neither creates
                   such children — so validateGroupChildReservedNames grandfathers only genuinely child-bearing
                   groups on the no-webhook path and never lets a later same-named group strand its children.
@@ -16945,11 +16946,13 @@ spec:
                 type: boolean
               legacyServiceNameCollisions:
                 description: |-
-                  LegacyServiceNameCollisions records Service names that were already derived by two distinct owners
-                  (node groups, global routes) when this validation was first enforced, computed once from the spec.
-                  validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil), where the
-                  controller cannot diff against a previous revision, so a pre-existing (already-broken) ChainNodeSet
-                  keeps reconciling while a collision newly introduced on a later revision is still rejected.
+                  LegacyServiceNameCollisions records Service names derived by two distinct owners (node groups, global
+                  routes) whose colliding resource already existed as a live owned object when this validation was
+                  first enforced — the "already reconciled" signal, so a brand-new object (nothing materialized yet)
+                  records none. validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil),
+                  where the controller cannot diff against a previous revision, so a pre-existing (already-broken)
+                  ChainNodeSet keeps reconciling while a collision newly introduced on a later revision is still
+                  rejected.
                 items:
                   type: string
                 type: array
@@ -16965,7 +16968,7 @@ spec:
                   Services. The controller initializes this once from Services already owned by the ChainNodeSet, so
                   validateCosmosigner can grandfather legacy names on the no-webhook path without trusting the
                   current, possibly edited spec. Both scopes are captured because a group OR a global route named
-                  "<x>-signer" materializes the colliding Service.
+                  `<x>-signer` materializes the colliding Service.
                 items:
                   type: string
                 type: array
