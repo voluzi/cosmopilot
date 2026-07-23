@@ -234,19 +234,7 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 		return "", err
 	}
 
-	switch {
-	case job.Status.Active > 0:
-		return SnapshotActive, nil
-
-	case job.Status.Failed > 0:
-		return SnapshotFailed, nil
-
-	case job.Status.Succeeded >= 1:
-		return SnapshotSucceeded, nil
-
-	default:
-		return "", fmt.Errorf("could not determine job status")
-	}
+	return snapshotJobStatus(job), nil
 }
 
 func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {
@@ -355,8 +343,7 @@ func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
 
 	names := make(map[string]struct{}, len(list.Items))
 	for _, job := range list.Items {
-		name := strings.TrimSuffix(strings.TrimSuffix(job.GetName(), "-upload"), "-delete")
-		names[name] = struct{}{}
+		names[snapshotNameFromJob(&job)] = struct{}{}
 	}
 	snapshotNames := make([]string, 0, len(names))
 	for name := range names {

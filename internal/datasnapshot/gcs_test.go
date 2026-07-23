@@ -143,8 +143,20 @@ func TestGCSDeleteSnapshotReportsTerminalStatus(t *testing.T) {
 		jobStatus  batchv1.JobStatus
 		wantStatus SnapshotStatus
 	}{
-		{name: "failed", jobStatus: batchv1.JobStatus{Failed: 1}, wantStatus: SnapshotFailed},
-		{name: "succeeded", jobStatus: batchv1.JobStatus{Succeeded: 1}, wantStatus: SnapshotSucceeded},
+		{
+			name: "failed",
+			jobStatus: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+			}}},
+			wantStatus: SnapshotFailed,
+		},
+		{
+			name: "succeeded",
+			jobStatus: batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}},
+			wantStatus: SnapshotSucceeded,
+		},
 	}
 
 	for _, tt := range tests {
@@ -178,6 +190,15 @@ func TestGCSListSnapshotsIncludesDeletionJobs(t *testing.T) {
 	assert.Equal(t, []string{"snapshot"}, names)
 }
 
+func TestGCSListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot-delete", testVolumeSnapshot()))
+
+	names, err := provider.ListSnapshots(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"snapshot-delete"}, names)
+}
+
 func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -185,8 +206,22 @@ func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
 		jobStatus  batchv1.JobStatus
 		wantStatus SnapshotStatus
 	}{
-		{name: "failed job", createJob: true, jobStatus: batchv1.JobStatus{Failed: 1}, wantStatus: SnapshotFailed},
-		{name: "successful job", createJob: true, jobStatus: batchv1.JobStatus{Succeeded: 1}, wantStatus: SnapshotSucceeded},
+		{
+			name:      "failed job",
+			createJob: true,
+			jobStatus: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+			}}},
+			wantStatus: SnapshotFailed,
+		},
+		{
+			name:      "successful job",
+			createJob: true,
+			jobStatus: batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}},
+			wantStatus: SnapshotSucceeded,
+		},
 		{name: "missing job", wantStatus: SnapshotNotFound},
 	}
 

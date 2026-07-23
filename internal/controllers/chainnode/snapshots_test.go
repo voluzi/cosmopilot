@@ -130,7 +130,9 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 	clientSet := fake.NewSimpleClientset(
 		&batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{Name: "-00010101000000-upload", Namespace: "default"},
-			Status:     batchv1.JobStatus{Failed: 1},
+			Status: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+			}}},
 		},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "-00010101000000-upload", Namespace: "default"}},
 	)
@@ -206,8 +208,8 @@ func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {
 
 	job, err = clientSet.BatchV1().Jobs("default").Get(context.Background(), "-00010101000000-delete", metav1.GetOptions{})
 	require.NoError(t, err)
-	job.Status.Failed = 0
 	job.Status.Succeeded = 1
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 	_, err = clientSet.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	deleted, err = reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)

@@ -171,16 +171,7 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 		}
 		return "", err
 	}
-	switch {
-	case job.Status.Active > 0:
-		return SnapshotActive, nil
-	case job.Status.Failed > 0:
-		return SnapshotFailed, nil
-	case job.Status.Succeeded >= 1:
-		return SnapshotSucceeded, nil
-	default:
-		return "", fmt.Errorf("could not determine job status")
-	}
+	return snapshotJobStatus(job), nil
 }
 
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
@@ -266,8 +257,7 @@ func (provider *S3) ListSnapshots(ctx context.Context) ([]string, error) {
 	}
 	uniqueNames := make(map[string]struct{}, len(list.Items))
 	for _, job := range list.Items {
-		name := strings.TrimSuffix(strings.TrimSuffix(job.Name, "-upload"), "-delete")
-		uniqueNames[name] = struct{}{}
+		uniqueNames[snapshotNameFromJob(&job)] = struct{}{}
 	}
 	names := make([]string, 0, len(uniqueNames))
 	for name := range uniqueNames {

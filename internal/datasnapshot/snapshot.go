@@ -3,6 +3,7 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -94,13 +95,32 @@ func ensureSnapshotJob(
 }
 
 func snapshotJobStatus(job *batchv1.Job) SnapshotStatus {
-	switch {
-	case job.Status.Failed > 0:
+	failed := false
+	for _, condition := range job.Status.Conditions {
+		if condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		switch condition.Type {
+		case batchv1.JobComplete:
+			return SnapshotSucceeded
+		case batchv1.JobFailed:
+			failed = true
+		}
+	}
+	if failed {
 		return SnapshotFailed
-	case job.Status.Succeeded > 0:
-		return SnapshotSucceeded
+	}
+	return SnapshotActive
+}
+
+func snapshotNameFromJob(job *batchv1.Job) string {
+	switch job.Labels[labelType] {
+	case typeUpload:
+		return strings.TrimSuffix(job.Name, "-upload")
+	case typeDelete:
+		return strings.TrimSuffix(job.Name, "-delete")
 	default:
-		return SnapshotActive
+		return job.Name
 	}
 }
 
