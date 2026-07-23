@@ -216,38 +216,54 @@ persistence:
 
 ## Exporting Tarball
 
-`Cosmopilot` provides an option to export data from a volume snapshot as a tarball file and upload it to external storage. Currently, this feature supports uploading to Google Cloud Storage (GCS) buckets. 
+`Cosmopilot` can stream data from a volume snapshot as a tar archive to Google
+Cloud Storage (GCS), Amazon S3, or an S3-compatible object store such as MinIO or
+DigitalOcean Spaces. Archives can be uncompressed or use gzip, zstd, or lz4.
 
 To enable this functionality, configure the `.persistence.snapshots.exportTarball` field.
 
 ### Configuration
 
-Here’s an example configuration for exporting tarballs:
+Here is a GCS example using zstd compression:
 
 ```yaml
 persistence:
   snapshots:
     exportTarball:
-      suffix: "-archive" # Optional. Default: empty.
-      deleteOnExpire: false # Optional. Default: false.
+      suffix: archive
+      deleteOnExpire: false
+      compression: zstd
       gcs:
         bucket: my-backup-bucket
-        credentialsSecret: gcs-credentials
+        credentialsSecret:
+          name: gcs-credentials
+          key: credentials.json
 ```
 
 ### General Fields
 - **`suffix`**: 
   - Optional. Adds a suffix to the tarball name. 
-  - By default, the tarball name is `<chain-id>-<timestamp><suffix>`. If no suffix is provided, it will be empty.
+  - The tarball name is `<chain-id>-<timestamp>-<suffix>` when a suffix is set.
   - **Use Cases**:
-    - Add context about the tarball (e.g., `-archive` or `-pruned` to indicate the data type).
-    - Specify database backend (e.g., `-goleveldb` or `-pebbledb`).
+    - Add context about the tarball (for example, `archive` or `pruned`).
+    - Specify the database backend (for example, `goleveldb` or `pebbledb`).
 - **`deleteOnExpire`**:
   - Optional. Defaults to `false`.
   - Indicates whether the tarball should also be deleted when the associated volume snapshot is removed due to expiration (`.persistence.snapshots.retention`).
+- **`compression`**:
+  - Optional. One of `none`, `gzip`, `zstd`, or `lz4`. Defaults to `gzip` for
+    compatibility with existing exports.
+  - `zstd` is recommended for the best balance of export speed, archive size, and
+    restoration speed. `lz4` prioritizes restoration speed, while `gzip` offers
+    the broadest compatibility.
 
-### Provider-Specific Fields
-Currently, `Cosmopilot` supports exporting tarballs to **Google Cloud Storage (`GCS`)**. The following fields are available for `GCS` configuration:
+The resulting extensions are `.tar`, `.tar.gz`, `.tar.zst`, and `.tar.lz4`.
+
+Exactly one provider, `gcs` or `s3`, must be configured.
+
+### Google Cloud Storage
+
+The following fields are available for GCS:
 - **`bucket`**:
   - The name of the `GCS` bucket where the tarball will be uploaded.
 - **`credentialsSecret`**:
@@ -303,6 +319,114 @@ persistence:
       gcs:
         bucket: my-backup-bucket
         serviceAccountName: gcs-uploader
+```
+
+### Amazon S3
+
+The S3 exporter uses the AWS SDK default credential chain. It supports static
+access keys, IRSA/web identity, EKS Pod Identity, EC2 instance roles, and shared
+AWS configuration when mounted into the Job.
+
+```yaml
+persistence:
+  snapshots:
+    exportTarball:
+      compression: zstd
+      deleteOnExpire: true
+      s3:
+        bucket: cosmos-snapshots
+        region: eu-west-1
+        serviceAccountName: snapshot-exporter
+```
+
+The IAM identity needs `s3:PutObject`, `s3:AbortMultipartUpload`,
+`s3:ListBucket`, and `s3:DeleteObject` for the configured bucket and prefix.
+
+S3 uploads use multipart requests with a default `chunkSize` of `64MB`. Amazon
+S3 allows at most 10,000 chunks per object, so the exporter can split an archive
+before `sizeLimit` when necessary. The default `partSize` is `500GB`; increase
+`chunkSize` or lower `partSize` if a custom combination cannot fit within the
+multipart limit.
+
+Each in-flight S3 chunk is staged as a temporary file under `/tmp` before upload,
+which bounds memory use even for large chunk sizes. Plan pod ephemeral storage for
+up to roughly `chunkSize * concurrentJobs`; lowering either value reduces that
+requirement. The staging buffer defaults to `32MB` and is limited to `64MiB`.
+
+#### IRSA and EKS Pod Identity
+
+Set `serviceAccountName` to a Kubernetes ServiceAccount configured for IRSA or
+EKS Pod Identity. The EKS integration injects the web identity or container
+credentials consumed by the default AWS credential chain.
+
+#### Access keys
+
+Create a Secret using standard AWS environment variable names:
+
+```bash
+kubectl create secret generic s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID='<access-key-id>' \
+  --from-literal=AWS_SECRET_ACCESS_KEY='<secret-access-key>'
+```
+
+Reference it from the export configuration:
+
+```yaml
+persistence:
+  snapshots:
+    exportTarball:
+      compression: lz4
+      s3:
+        bucket: cosmos-snapshots
+        region: eu-west-1
+        credentialsSecret:
+          name: s3-credentials
+```
+
+`AWS_SESSION_TOKEN` can be added to the same Secret for temporary credentials.
+`credentialsSecret` and `serviceAccountName` are mutually exclusive. When both
+are omitted, the exporter relies entirely on the default credential chain, which
+supports EKS Pod Identity and EC2 instance roles.
+
+#### S3-compatible storage
+
+Set `endpoint` for the provider API. Enable `forcePathStyle` when the provider
+does not support virtual-hosted bucket names, as is common with MinIO:
+
+```yaml
+persistence:
+  snapshots:
+    exportTarball:
+      compression: zstd
+      s3:
+        bucket: cosmos-snapshots
+        region: us-east-1
+        endpoint: http://minio.storage.svc.cluster.local:9000
+        forcePathStyle: true
+        credentialsSecret:
+          name: minio-credentials
+```
+
+For DigitalOcean Spaces, use the region-specific HTTPS endpoint and normally
+leave `forcePathStyle` disabled.
+
+### Restoring exported archives
+
+After downloading an archive, extract it into the node home directory using the
+command matching its extension:
+
+```bash
+tar -xf snapshot.tar
+tar -xzf snapshot.tar.gz
+zstd -dc snapshot.tar.zst | tar -xf -
+lz4 -dc snapshot.tar.lz4 | tar -xf -
+```
+
+Archives exceeding `sizeLimit` are stored as ordered parts. Concatenate them
+before decompression, for example:
+
+```bash
+cat snapshot-part-*.tar.zst | zstd -dc | tar -xf -
 ```
 
 

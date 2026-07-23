@@ -1,18 +1,31 @@
+# syntax=docker/dockerfile:1.7
+
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /workspace
 COPY go.mod go.sum* ./
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
 COPY cmd/dataexporter cmd/dataexporter
 COPY pkg/dataexporter pkg/dataexporter
 COPY pkg/environ pkg/environ
 COPY pkg/utils pkg/utils
 
+ARG TARGETOS=linux
+ARG TARGETARCH
+
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux go build -a -trimpath -o dataexporter ./cmd/dataexporter
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/dataexporter ./cmd/dataexporter
 
-FROM gcr.io/distroless/static
-WORKDIR /
-COPY --from=builder /workspace/dataexporter .
+FROM gcr.io/distroless/static-debian12:nonroot
 
-ENTRYPOINT ["/dataexporter"]
+WORKDIR /app
+COPY --from=builder --chown=nonroot:nonroot /out/dataexporter /app/dataexporter
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/app/dataexporter"]

@@ -48,6 +48,7 @@ const (
 	ReasonTarballExportFinish        = "TarballFinished"
 	ReasonTarballDeleted             = "TarballDeleted"
 	ReasonTarballExportError         = "TarballExportError"
+	ReasonTarballDeleteError         = "TarballDeleteError"
 	ReasonSnapshotIntegrityStart     = "IntegrityCheckStart"
 	ReasonUpgradeCompleted           = "UpgradeCompleted"
 	ReasonUpgradeFailed              = "UpgradeFailed"
@@ -1011,7 +1012,12 @@ type PvcSnapshot struct {
 	Name string `json:"name"`
 }
 
+// TarballCompression identifies the compression applied to exported tar archives.
+// +kubebuilder:validation:Enum=none;gzip;zstd;lz4
+type TarballCompression string
+
 // ExportTarballConfig holds config options for tarball upload.
+// +kubebuilder:validation:XValidation:rule="has(self.gcs) != has(self.s3)",message="exactly one of gcs or s3 must be set"
 type ExportTarballConfig struct {
 	// Suffix to add to archive name. The name of the tarball will be `<chain-id>-<timestamp>-<suffix>`.
 	// +optional
@@ -1022,9 +1028,18 @@ type ExportTarballConfig struct {
 	// +default=false
 	DeleteOnExpire *bool `json:"deleteOnExpire,omitempty"`
 
+	// Compression applied to the tar archive. Defaults to `gzip` for compatibility with existing exports.
+	// +optional
+	// +kubebuilder:default=gzip
+	Compression *TarballCompression `json:"compression,omitempty"`
+
 	// Configuration to upload tarballs to a GCS bucket.
 	// +optional
 	GCS *GcsExportConfig `json:"gcs,omitempty"`
+
+	// Configuration to upload tarballs to Amazon S3 or an S3-compatible object store.
+	// +optional
+	S3 *S3ExportConfig `json:"s3,omitempty"`
 }
 
 // GcsExportConfig holds required settings to upload to GCS.
@@ -1059,6 +1074,63 @@ type GcsExportConfig struct {
 	BufferSize *string `json:"bufferSize,omitempty"`
 
 	// Number of concurrent upload or delete jobs. Defaults to `10`.
+	// +kubebuilder:validation:Minimum=1
+	ConcurrentJobs *int `json:"concurrentJobs,omitempty"`
+}
+
+// S3ExportConfig holds settings for Amazon S3 and S3-compatible object stores.
+// +kubebuilder:validation:XValidation:rule="!(has(self.credentialsSecret) && has(self.serviceAccountName))",message="credentialsSecret and serviceAccountName are mutually exclusive"
+type S3ExportConfig struct {
+	// Name of the bucket to upload tarballs to.
+	// +kubebuilder:validation:MinLength=1
+	Bucket string `json:"bucket"`
+
+	// AWS region used to sign S3 requests. S3-compatible stores commonly accept `us-east-1`.
+	// +kubebuilder:validation:MinLength=1
+	Region string `json:"region"`
+
+	// Custom S3-compatible API endpoint, including the `http` or `https` scheme.
+	// +optional
+	Endpoint *string `json:"endpoint,omitempty"`
+
+	// Use path-style bucket addressing. This is commonly required by MinIO and other compatible stores.
+	// +optional
+	// +default=false
+	ForcePathStyle *bool `json:"forcePathStyle,omitempty"`
+
+	// Secret whose keys are exposed to the exporter as environment variables. Use the standard AWS
+	// names `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`.
+	// Mutually exclusive with `serviceAccountName`. When both are omitted, the AWS SDK default
+	// credential chain is used, including EKS Pod Identity and EC2 instance roles.
+	// +optional
+	CredentialsSecret *corev1.LocalObjectReference `json:"credentialsSecret,omitempty"`
+
+	// Kubernetes ServiceAccount used by snapshot Jobs. On EKS this enables IRSA or EKS Pod Identity.
+	// Mutually exclusive with `credentialsSecret`.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
+
+	// Size limit at which the archive is split into multiple objects. Defaults to `5TB`.
+	// The S3 multipart part-count limit can require splitting at a smaller size.
+	// +optional
+	SizeLimit *string `json:"sizeLimit,omitempty"`
+
+	// Maximum size of each archive object after `sizeLimit` is crossed. Defaults to `500GB`.
+	// +optional
+	PartSize *string `json:"partSize,omitempty"`
+
+	// Size of each S3 multipart upload chunk. Must be between 5MiB and 5GiB. Defaults to `64MB`.
+	// +optional
+	ChunkSize *string `json:"chunkSize,omitempty"`
+
+	// Size of the buffer used to stage multipart chunks. Must not exceed 64MiB. Defaults to `32MB`.
+	// +optional
+	BufferSize *string `json:"bufferSize,omitempty"`
+
+	// Number of concurrent multipart upload workers. Defaults to `10`.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
 	ConcurrentJobs *int `json:"concurrentJobs,omitempty"`
 }
 

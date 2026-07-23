@@ -3,6 +3,7 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -31,12 +32,14 @@ type GCS struct {
 	Owner         metav1.Object
 	priorityClass string
 	Config        *appsv1.GcsExportConfig
+	ExportConfig  *appsv1.ExportTarballConfig
 }
 
-func NewGcsSnapshotProvider(client kubernetes.Interface, scheme *runtime.Scheme, owner metav1.Object, priorityClass string, cfg *appsv1.GcsExportConfig) SnapshotProvider {
+func NewGcsSnapshotProvider(client kubernetes.Interface, scheme *runtime.Scheme, owner metav1.Object, priorityClass string, cfg *appsv1.ExportTarballConfig) SnapshotProvider {
 	return &GCS{
 		Client:        client,
-		Config:        cfg,
+		Config:        cfg.GCS,
+		ExportConfig:  cfg,
 		Owner:         owner,
 		Scheme:        scheme,
 		priorityClass: priorityClass,
@@ -128,8 +131,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: ptr.To[int32](180),
-			BackoffLimit:            ptr.To[int32](0),
+			BackoffLimit: ptr.To[int32](0),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -154,6 +156,10 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 							Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
 							WorkingDir:      "/home/app",
 							Env: append(gcs.credentialsEnv(),
+								corev1.EnvVar{
+									Name:  "COMPRESSION",
+									Value: string(gcs.ExportConfig.GetCompression()),
+								},
 								corev1.EnvVar{
 									Name:  "SIZE_LIMIT",
 									Value: gcs.Config.GetSizeLimit(),
@@ -193,11 +199,6 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 		return err
 	}
 
-	job, err = gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{})
-	if err != nil {
-		return err
-	}
-
 	// Create PVC from Snapshot
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -221,13 +222,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 		},
 	}
 
-	err = controllerutil.SetControllerReference(job, pvc, gcs.Scheme)
-	if err != nil {
-		return err
-	}
-
-	_, err = gcs.Client.CoreV1().PersistentVolumeClaims(pvc.GetNamespace()).Create(ctx, pvc, metav1.CreateOptions{})
-	return err
+	return ensureUploadResources(ctx, gcs.Client, gcs.Scheme, gcs.Owner, job, pvc)
 }
 
 func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
@@ -239,19 +234,11 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 		return "", err
 	}
 
-	switch {
-	case job.Status.Active > 0:
-		return SnapshotActive, nil
+	return snapshotJobStatus(job), nil
+}
 
-	case job.Status.Failed > 0:
-		return SnapshotFailed, nil
-
-	case job.Status.Succeeded >= 1:
-		return SnapshotSucceeded, gcs.cleanUp(ctx, name)
-
-	default:
-		return "", fmt.Errorf("could not determine job status")
-	}
+func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {
+	return gcs.cleanUp(ctx, name)
 }
 
 func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
@@ -278,7 +265,7 @@ func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
 	return nil
 }
 
-func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
+func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -290,8 +277,7 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: ptr.To[int32](60),
-			BackoffLimit:            ptr.To[int32](5),
+			BackoffLimit: ptr.To[int32](5),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -305,7 +291,7 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 							ImagePullPolicy: corev1.PullAlways,
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args:            []string{"gcs", "delete", gcs.Config.Bucket, name},
-							WorkingDir:      "/home/app",
+							WorkingDir:      "/app",
 							Env: append(gcs.credentialsEnv(),
 								corev1.EnvVar{
 									Name:  "CONCURRENT_JOBS",
@@ -322,13 +308,25 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 
 	err := controllerutil.SetControllerReference(gcs.Owner, job, gcs.Scheme)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	if _, err = gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+	job, _, err = ensureSnapshotJob(ctx, gcs.Client, gcs.Owner, job, "delete")
+	if err != nil {
+		return "", err
+	}
+	if err = gcs.cleanUp(ctx, name); err != nil {
+		return "", err
+	}
+	return snapshotJobStatus(job), nil
+}
+
+func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, name string) error {
+	err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-delete", name), metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
-	return gcs.cleanUp(ctx, name)
+	return nil
 }
 
 func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
@@ -336,7 +334,6 @@ func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
 		LabelSelector: labels.SelectorFromSet(map[string]string{
 			labelExporter: gcsExporter,
 			labelOwner:    gcs.Owner.GetName(),
-			labelType:     typeUpload, // We only list uploading jobs since the deleting jobs are auto deleted
 		}).String(),
 	}
 	list, err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).List(ctx, listOptions)
@@ -344,9 +341,14 @@ func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	snapshotNames := make([]string, len(list.Items))
-	for i, job := range list.Items {
-		snapshotNames[i] = strings.TrimSuffix(job.GetName(), "-upload")
+	names := make(map[string]struct{}, len(list.Items))
+	for _, job := range list.Items {
+		names[snapshotNameFromJob(&job)] = struct{}{}
 	}
+	snapshotNames := make([]string, 0, len(names))
+	for name := range names {
+		snapshotNames = append(snapshotNames, name)
+	}
+	sort.Strings(snapshotNames)
 	return snapshotNames, nil
 }

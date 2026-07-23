@@ -2,6 +2,7 @@ package v1
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -769,6 +770,33 @@ func (e *ExportTarballConfig) DeleteWhenExpired() bool {
 	return false
 }
 
+func (e *ExportTarballConfig) GetCompression() dataexporter.Compression {
+	if e != nil && e.Compression != nil {
+		return dataexporter.Compression(*e.Compression)
+	}
+	return dataexporter.CompressionGzip
+}
+
+// Validate ensures one destination and a supported compression format are configured.
+func (e *ExportTarballConfig) Validate(path string) error {
+	if e == nil {
+		return nil
+	}
+	switch {
+	case e.GCS != nil && e.S3 != nil:
+		return fmt.Errorf("%s: gcs and s3 are mutually exclusive", path)
+	case e.GCS == nil && e.S3 == nil:
+		return fmt.Errorf("%s: one of gcs or s3 must be set", path)
+	}
+	if _, err := dataexporter.ParseCompression(string(e.GetCompression())); err != nil {
+		return fmt.Errorf("%s.compression: %w", path, err)
+	}
+	if e.GCS != nil {
+		return e.GCS.Validate(path + ".gcs")
+	}
+	return e.S3.Validate(path + ".s3")
+}
+
 // GcsExporter helper methods
 
 // Validate ensures exactly one authentication method is configured for uploading to GCS: either a
@@ -823,6 +851,92 @@ func (gcs *GcsExportConfig) GetBufferSize() string {
 func (gcs *GcsExportConfig) GetConcurrentJobs() int {
 	if gcs != nil && gcs.ConcurrentJobs != nil {
 		return *gcs.ConcurrentJobs
+	}
+	return dataexporter.DefaultConcurrentJobs
+}
+
+func (s3 *S3ExportConfig) Validate(path string) error {
+	if s3 == nil {
+		return nil
+	}
+	if s3.Bucket == "" {
+		return fmt.Errorf("%s.bucket must not be empty", path)
+	}
+	if s3.Region == "" {
+		return fmt.Errorf("%s.region must not be empty", path)
+	}
+	if s3.CredentialsSecret != nil && s3.ServiceAccountName != nil {
+		return fmt.Errorf("%s: credentialsSecret and serviceAccountName are mutually exclusive", path)
+	}
+	if s3.ServiceAccountName != nil && *s3.ServiceAccountName == "" {
+		return fmt.Errorf("%s.serviceAccountName must not be empty", path)
+	}
+	if s3.CredentialsSecret != nil && s3.CredentialsSecret.Name == "" {
+		return fmt.Errorf("%s.credentialsSecret.name must not be empty", path)
+	}
+	if s3.Endpoint != nil {
+		endpoint, err := url.ParseRequestURI(*s3.Endpoint)
+		if err != nil || endpoint.Host == "" {
+			return fmt.Errorf("%s.endpoint is invalid", path)
+		}
+		if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
+			return fmt.Errorf("%s.endpoint must use http or https", path)
+		}
+	}
+	if err := dataexporter.ValidateS3UploadOptions(
+		dataexporter.WithChunkSize(s3.GetChunkSize()),
+		dataexporter.WithPartSize(s3.GetPartSize()),
+		dataexporter.WithSizeLimit(s3.GetSizeLimit()),
+		dataexporter.WithBufferSize(s3.GetBufferSize()),
+		dataexporter.WithConcurrentUploadJobs(s3.GetConcurrentJobs()),
+	); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
+
+func (s3 *S3ExportConfig) GetEndpoint() string {
+	if s3 != nil && s3.Endpoint != nil {
+		return *s3.Endpoint
+	}
+	return ""
+}
+
+func (s3 *S3ExportConfig) ShouldForcePathStyle() bool {
+	return s3 != nil && s3.ForcePathStyle != nil && *s3.ForcePathStyle
+}
+
+func (s3 *S3ExportConfig) GetSizeLimit() string {
+	if s3 != nil && s3.SizeLimit != nil {
+		return *s3.SizeLimit
+	}
+	return dataexporter.DefaultSizeLimit
+}
+
+func (s3 *S3ExportConfig) GetPartSize() string {
+	if s3 != nil && s3.PartSize != nil {
+		return *s3.PartSize
+	}
+	return dataexporter.DefaultPartSize
+}
+
+func (s3 *S3ExportConfig) GetChunkSize() string {
+	if s3 != nil && s3.ChunkSize != nil {
+		return *s3.ChunkSize
+	}
+	return dataexporter.DefaultS3ChunkSize
+}
+
+func (s3 *S3ExportConfig) GetBufferSize() string {
+	if s3 != nil && s3.BufferSize != nil {
+		return *s3.BufferSize
+	}
+	return dataexporter.DefaultBufferSize
+}
+
+func (s3 *S3ExportConfig) GetConcurrentJobs() int {
+	if s3 != nil && s3.ConcurrentJobs != nil {
+		return *s3.ConcurrentJobs
 	}
 	return dataexporter.DefaultConcurrentJobs
 }

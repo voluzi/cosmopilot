@@ -17,7 +17,7 @@ var logLevel string
 var rootCmd = &cobra.Command{
 	Use:   "dataexporter",
 	Short: "CLI tool for exporting and managing data",
-	Long:  `DataExporter is a command-line tool for uploading and deleting tarballs to external storage.`,
+	Long:  `DataExporter is a command-line tool for uploading and deleting snapshot archives in external storage.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		logLvl, err := log.ParseLevel(logLevel)
 		if err != nil {

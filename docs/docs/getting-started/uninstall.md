@@ -62,7 +62,7 @@ kubectl delete pvc <name> -n <namespace>
 kubectl delete volumesnapshot <name> -n <namespace>
 ```
 
-If you exported snapshot tarballs to external storage (e.g. GCS), remove those
+If you exported snapshot tarballs to external storage (for example GCS or S3), remove those
 separately from your storage provider.
 
 ## 5. Namespace (optional)

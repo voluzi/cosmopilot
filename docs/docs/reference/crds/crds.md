@@ -60,6 +60,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [Peer](#peer)
 * [Persistence](#persistence)
 * [PvcSnapshot](#pvcsnapshot)
+* [S3ExportConfig](#s3exportconfig)
 * [SdkOptions](#sdkoptions)
 * [SeedStatus](#seedstatus)
 * [SidecarSpec](#sidecarspec)
@@ -266,8 +267,14 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
 | seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
 | cosmosigners | Cosmosigners records controller-managed state for each managed cosmosigner deployment (the top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner). Keyed by the signer's resource name. Not meant to be set by hand. | [][CosmosignerStatus](#cosmosignerstatus) | false |
-| legacySignerServiceNames | LegacySignerServiceNames records pre-existing group/global Service names that use suffixes now reserved for standalone ChainNode signer Services. The controller initializes this once from Services already owned by the ChainNodeSet, so no-webhook validation can grandfather legacy names without trusting the current, possibly edited spec. | []string | false |
+| legacySignerServiceNames | LegacySignerServiceNames records pre-existing owned group/global Service names ending in -signer/-signer-privval — suffixes now reserved for a standalone ChainNode's raft/discovery Services. The controller initializes this once from Services already owned by the ChainNodeSet, so validateCosmosigner can grandfather legacy names on the no-webhook path without trusting the current, possibly edited spec. Both scopes are captured because a group OR a global route named `<x>-signer` materializes the colliding Service. | []string | false |
 | legacySignerServiceNamesInitialized | LegacySignerServiceNamesInitialized distinguishes a recorded empty legacy-name set from an old ChainNodeSet whose status predates LegacySignerServiceNames. | bool | false |
+| legacyReservedChildGroupNames | LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope \"group\", instances > 0) ending in -cg/-signer/-seed, i.e. groups that already materialize child ChainNodes `<base>-<n>` under a now-reserved StatefulSet-child suffix. Unlike LegacySignerServiceNames this excludes global routes and zero-instance groups — neither creates such children — so validateGroupChildReservedNames grandfathers only genuinely child-bearing groups on the no-webhook path and never lets a later same-named group strand its children. | []string | false |
+| legacyReservedChildGroupNamesInitialized | LegacyReservedChildGroupNamesInitialized distinguishes a recorded empty set from a ChainNodeSet whose status predates LegacyReservedChildGroupNames (so it is back-filled once after upgrade). | bool | false |
+| legacyServiceNameCollisions | LegacyServiceNameCollisions records Service names derived by two distinct owners (node groups, global routes) whose colliding resource already existed as a live owned object when this validation was first enforced — the \"already reconciled\" signal, so a brand-new object (nothing materialized yet) records none. validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil), where the controller cannot diff against a previous revision, so a pre-existing (already-broken) ChainNodeSet keeps reconciling while a collision newly introduced on a later revision is still rejected. | []string | false |
+| legacyServiceNameCollisionsInitialized | LegacyServiceNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose status predates LegacyServiceNameCollisions (so it is back-filled once after upgrade). | bool | false |
+| legacyIngressNameCollisions | LegacyIngressNameCollisions records Ingress names derived by two distinct owners whose colliding resource already existed as a live owned object when this validation was first enforced (see LegacyServiceNameCollisions for the live-resource gating rationale). validateIngressNameCollisions grandfathers these on the no-webhook path (old == nil), matching LegacyServiceNameCollisions. | []string | false |
+| legacyIngressNameCollisionsInitialized | LegacyIngressNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose status predates LegacyIngressNameCollisions (so it is back-filled once after upgrade). | bool | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -728,7 +735,9 @@ ExportTarballConfig holds config options for tarball upload.
 | ----- | ----------- | ------ | -------- |
 | suffix | Suffix to add to archive name. The name of the tarball will be `<chain-id>-<timestamp>-<suffix>`. | *string | false |
 | deleteOnExpire | Whether to delete the tarball when the snapshot expires. Default is `false`. | *bool | false |
+| compression | Compression applied to the tar archive. Defaults to `gzip` for compatibility with existing exports. | *TarballCompression | false |
 | gcs | Configuration to upload tarballs to a GCS bucket. | *[GcsExportConfig](#gcsexportconfig) | false |
+| s3 | Configuration to upload tarballs to Amazon S3 or an S3-compatible object store. | *[S3ExportConfig](#s3exportconfig) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -896,6 +905,26 @@ PvcSnapshot represents a snapshot to be used to restore a PVC.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | name | Name of the volume snapshot being referenced. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### S3ExportConfig
+
+S3ExportConfig holds settings for Amazon S3 and S3-compatible object stores.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| bucket | Name of the bucket to upload tarballs to. | string | true |
+| region | AWS region used to sign S3 requests. S3-compatible stores commonly accept `us-east-1`. | string | true |
+| endpoint | Custom S3-compatible API endpoint, including the `http` or `https` scheme. | *string | false |
+| forcePathStyle | Use path-style bucket addressing. This is commonly required by MinIO and other compatible stores. | *bool | false |
+| credentialsSecret | Secret whose keys are exposed to the exporter as environment variables. Use the standard AWS names `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`. Mutually exclusive with `serviceAccountName`. When both are omitted, the AWS SDK default credential chain is used, including EKS Pod Identity and EC2 instance roles. | *corev1.LocalObjectReference | false |
+| serviceAccountName | Kubernetes ServiceAccount used by snapshot Jobs. On EKS this enables IRSA or EKS Pod Identity. Mutually exclusive with `credentialsSecret`. | *string | false |
+| sizeLimit | Size limit at which the archive is split into multiple objects. Defaults to `5TB`. The S3 multipart part-count limit can require splitting at a smaller size. | *string | false |
+| partSize | Maximum size of each archive object after `sizeLimit` is crossed. Defaults to `500GB`. | *string | false |
+| chunkSize | Size of each S3 multipart upload chunk. Must be between 5MiB and 5GiB. Defaults to `64MB`. | *string | false |
+| bufferSize | Size of the buffer used to stage multipart chunks. Must not exceed 64MiB. Defaults to `32MB`. | *string | false |
+| concurrentJobs | Number of concurrent multipart upload workers. Defaults to `10`. | *int | false |
 
 [Back to Custom Resources](#custom-resources)
 

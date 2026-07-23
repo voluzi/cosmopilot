@@ -13,8 +13,12 @@ const (
 	configTomlFilename = "config.toml"
 	genesisLocation    = "data/genesis.json"
 	MnemonicKey        = "mnemonic"
+	tarballUploaded    = "uploaded"
 	tarballFinished    = "finished"
+	tarballFailed      = "failed"
 	upgradesConfigFile = "upgrades.json"
+
+	tarballExportMaxAttempts = 3
 
 	timeoutPodRunning              = 5 * time.Minute
 	timeoutPodDeleted              = 2 * time.Minute

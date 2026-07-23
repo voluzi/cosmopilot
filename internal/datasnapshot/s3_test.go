@@ -8,7 +8,6 @@ import (
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,125 +18,107 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/pkg/dataexporter"
 )
 
-func TestGCSCreateSnapshotAuthModes(t *testing.T) {
+func TestS3CreateSnapshotAuthAndStorageOptions(t *testing.T) {
 	tests := []struct {
-		name                 string
-		config               *appsv1.GcsExportConfig
-		wantServiceAccount   string
-		wantCredentialsEnv   bool
-		wantCredentialsVol   bool
-		wantCredentialsMount bool
+		name               string
+		config             *appsv1.S3ExportConfig
+		wantServiceAccount string
+		wantSecretEnvFrom  string
 	}{
 		{
-			name: "credentials secret",
-			config: &appsv1.GcsExportConfig{
+			name: "default AWS credential chain",
+			config: &appsv1.S3ExportConfig{
 				Bucket: "snapshots",
-				CredentialsSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "gcs-creds"},
-					Key:                  "credentials.json",
-				},
+				Region: "eu-west-1",
 			},
-			wantCredentialsEnv:   true,
-			wantCredentialsVol:   true,
-			wantCredentialsMount: true,
 		},
 		{
-			name: "workload identity service account",
-			config: &appsv1.GcsExportConfig{
-				Bucket:             "snapshots",
-				ServiceAccountName: ptrTo("snapshot-publisher"),
+			name: "access keys",
+			config: &appsv1.S3ExportConfig{
+				Bucket:            "snapshots",
+				Region:            "eu-west-1",
+				CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-credentials"},
 			},
-			wantServiceAccount: "snapshot-publisher",
+			wantSecretEnvFrom: "aws-credentials",
+		},
+		{
+			name: "IRSA",
+			config: &appsv1.S3ExportConfig{
+				Bucket:             "snapshots",
+				Region:             "eu-west-1",
+				ServiceAccountName: ptr.To("snapshot-exporter"),
+			},
+			wantServiceAccount: "snapshot-exporter",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{
-				Compression: ptr.To(appsv1.TarballCompression(dataexporter.CompressionZstd)),
-				GCS:         tt.config,
-			})
-			vs := &snapshotv1.VolumeSnapshot{
-				TypeMeta:   metav1.TypeMeta{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"},
-				ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"},
-				Status: &snapshotv1.VolumeSnapshotStatus{
-					RestoreSize: resource.NewQuantity(1024, resource.BinarySI),
-				},
+			export := &appsv1.ExportTarballConfig{
+				Compression: ptr.To(appsv1.TarballCompression(dataexporter.CompressionLz4)),
+				S3:          tt.config,
 			}
+			provider := newTestS3Provider(t, export)
+			vs := testVolumeSnapshot()
 
-			err := provider.CreateSnapshot(context.Background(), "snapshot", vs)
-			require.NoError(t, err)
+			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", vs))
 
-			job := getJob(t, provider, "snapshot-upload")
+			job := getS3Job(t, provider, "snapshot-upload")
 			assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
 			podSpec := job.Spec.Template.Spec
 			container := podSpec.Containers[0]
 			assert.Equal(t, tt.wantServiceAccount, podSpec.ServiceAccountName)
-			assert.Equal(t, tt.wantCredentialsVol, hasVolume(podSpec.Volumes, "credentials"))
-			assert.Equal(t, tt.wantCredentialsMount, hasVolumeMount(container.VolumeMounts, "credentials"))
-			assert.Equal(t, tt.wantCredentialsEnv, hasEnv(container.Env, "GOOGLE_APPLICATION_CREDENTIALS"))
-			assert.Equal(t, "zstd", envValue(container.Env, "COMPRESSION"))
+			assert.Equal(t, tt.wantSecretEnvFrom, secretEnvFromName(container.EnvFrom))
+			assert.Equal(t, []string{"s3", "upload", "data", "snapshots", "snapshot"}, container.Args)
+			assert.Equal(t, "eu-west-1", envValue(container.Env, "AWS_REGION"))
+			assert.Equal(t, "lz4", envValue(container.Env, "COMPRESSION"))
 		})
 	}
 }
 
-func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
-	tests := []struct {
-		name                 string
-		config               *appsv1.GcsExportConfig
-		wantServiceAccount   string
-		wantCredentialsEnv   bool
-		wantCredentialsVol   bool
-		wantCredentialsMount bool
-	}{
-		{
-			name: "credentials secret",
-			config: &appsv1.GcsExportConfig{
-				Bucket: "snapshots",
-				CredentialsSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "gcs-creds"},
-					Key:                  "credentials.json",
-				},
-			},
-			wantCredentialsEnv:   true,
-			wantCredentialsVol:   true,
-			wantCredentialsMount: true,
-		},
-		{
-			name: "workload identity service account",
-			config: &appsv1.GcsExportConfig{
-				Bucket:             "snapshots",
-				ServiceAccountName: ptrTo("snapshot-publisher"),
-			},
-			wantServiceAccount: "snapshot-publisher",
+func TestS3CreateSnapshotS3CompatibleOptions(t *testing.T) {
+	export := &appsv1.ExportTarballConfig{
+		S3: &appsv1.S3ExportConfig{
+			Bucket:         "snapshots",
+			Region:         "us-east-1",
+			Endpoint:       ptr.To("http://minio.storage.svc:9000"),
+			ForcePathStyle: ptr.To(true),
 		},
 	}
+	provider := newTestS3Provider(t, export)
+	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: tt.config})
-
-			status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
-			require.NoError(t, err)
-			assert.Equal(t, SnapshotActive, status)
-
-			job := getJob(t, provider, "snapshot-delete")
-			assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
-			podSpec := job.Spec.Template.Spec
-			container := podSpec.Containers[0]
-			assert.Equal(t, tt.wantServiceAccount, podSpec.ServiceAccountName)
-			assert.Equal(t, tt.wantCredentialsVol, hasVolume(podSpec.Volumes, "credentials"))
-			assert.Equal(t, tt.wantCredentialsMount, hasVolumeMount(container.VolumeMounts, "credentials"))
-			assert.Equal(t, tt.wantCredentialsEnv, hasEnv(container.Env, "GOOGLE_APPLICATION_CREDENTIALS"))
-			assert.Equal(t, "/app", container.WorkingDir)
-		})
-	}
+	container := getS3Job(t, provider, "snapshot-upload").Spec.Template.Spec.Containers[0]
+	assert.Equal(t, "http://minio.storage.svc:9000", envValue(container.Env, "S3_ENDPOINT"))
+	assert.Equal(t, "true", envValue(container.Env, "S3_FORCE_PATH_STYLE"))
 }
 
-func TestGCSDeleteSnapshotReportsTerminalStatus(t *testing.T) {
+func TestS3DeleteSnapshotUsesSameAuthentication(t *testing.T) {
+	export := &appsv1.ExportTarballConfig{
+		S3: &appsv1.S3ExportConfig{
+			Bucket:            "snapshots",
+			Region:            "eu-west-1",
+			CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-credentials"},
+		},
+	}
+	provider := newTestS3Provider(t, export)
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+
+	job := getS3Job(t, provider, "snapshot-delete")
+	assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
+	container := job.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, "aws-credentials", secretEnvFromName(container.EnvFrom))
+	assert.Equal(t, []string{"s3", "delete", "snapshots", "snapshot"}, container.Args)
+	assert.Equal(t, "/app", container.WorkingDir)
+}
+
+func TestS3DeleteSnapshotReportsTerminalStatus(t *testing.T) {
 	tests := []struct {
 		name       string
 		jobStatus  batchv1.JobStatus
@@ -161,12 +142,12 @@ func TestGCSDeleteSnapshotReportsTerminalStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+			provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 			status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
 			require.NoError(t, err)
 			assert.Equal(t, SnapshotActive, status)
 
-			job := getJob(t, provider, "snapshot-delete")
+			job := getS3Job(t, provider, "snapshot-delete")
 			job.Status = tt.jobStatus
 			_, err = provider.Client.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
 			require.NoError(t, err)
@@ -174,13 +155,13 @@ func TestGCSDeleteSnapshotReportsTerminalStatus(t *testing.T) {
 			status, err = provider.DeleteSnapshot(context.Background(), "snapshot")
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantStatus, status)
-			_ = getJob(t, provider, "snapshot-delete")
+			_ = getS3Job(t, provider, "snapshot-delete")
 		})
 	}
 }
 
-func TestGCSListSnapshotsIncludesDeletionJobs(t *testing.T) {
-	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+func TestS3ListSnapshotsIncludesDeletionJobs(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotActive, status)
@@ -190,8 +171,8 @@ func TestGCSListSnapshotsIncludesDeletionJobs(t *testing.T) {
 	assert.Equal(t, []string{"snapshot"}, names)
 }
 
-func TestGCSListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
-	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+func TestS3ListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot-delete", testVolumeSnapshot()))
 
 	names, err := provider.ListSnapshots(context.Background())
@@ -199,7 +180,7 @@ func TestGCSListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
 	assert.Equal(t, []string{"snapshot-delete"}, names)
 }
 
-func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
+func TestS3GetSnapshotStatusPreservesUploadResources(t *testing.T) {
 	tests := []struct {
 		name       string
 		createJob  bool
@@ -227,9 +208,9 @@ func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
-				Bucket:             "snapshots",
-				ServiceAccountName: ptr.To("snapshot-exporter"),
+			provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+				Bucket: "snapshots",
+				Region: "eu-west-1",
 			}})
 			if tt.createJob {
 				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
@@ -259,8 +240,8 @@ func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
 	}
 }
 
-func TestGCSCleanupSnapshotDeletesUploadResources(t *testing.T) {
-	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+func TestS3CleanupSnapshotDeletesUploadResources(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
 
 	require.NoError(t, provider.CleanupSnapshot(context.Background(), "snapshot"))
@@ -271,7 +252,7 @@ func TestGCSCleanupSnapshotDeletesUploadResources(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
-func TestGCSCreateSnapshotIsIdempotent(t *testing.T) {
+func TestS3CreateSnapshotIsIdempotent(t *testing.T) {
 	tests := []struct {
 		name      string
 		deletePVC bool
@@ -282,7 +263,7 @@ func TestGCSCreateSnapshotIsIdempotent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+			provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
 			if tt.deletePVC {
 				require.NoError(t, provider.Client.CoreV1().PersistentVolumeClaims("default").Delete(context.Background(), "snapshot-upload", metav1.DeleteOptions{}))
@@ -295,8 +276,8 @@ func TestGCSCreateSnapshotIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestGCSCreateSnapshotRejectsForeignPVCWithoutDeletingIt(t *testing.T) {
-	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+func TestS3CreateSnapshotRejectsForeignPVCWithoutDeletingIt(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
 	}, metav1.CreateOptions{})
@@ -309,8 +290,8 @@ func TestGCSCreateSnapshotRejectsForeignPVCWithoutDeletingIt(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestGCSCreateSnapshotRejectsForeignJob(t *testing.T) {
-	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+func TestS3CreateSnapshotRejectsForeignJob(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
 	}, metav1.CreateOptions{})
@@ -323,10 +304,10 @@ func TestGCSCreateSnapshotRejectsForeignJob(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestGCSCreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {
-	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
-		Bucket:             "snapshots",
-		ServiceAccountName: ptr.To("snapshot-exporter"),
+func TestS3CreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket: "snapshots",
+		Region: "eu-west-1",
 	}})
 	client := provider.Client.(*fake.Clientset)
 	client.PrependReactor("create", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
@@ -340,56 +321,49 @@ func TestGCSCreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
-func newTestGCSProvider(t *testing.T, cfg *appsv1.ExportTarballConfig) *GCS {
+func newTestS3Provider(t *testing.T, cfg *appsv1.ExportTarballConfig) *S3 {
 	t.Helper()
-
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, batchv1.AddToScheme(scheme))
-
 	owner := &corev1.ConfigMap{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"},
 	}
-
-	return NewGcsSnapshotProvider(fake.NewSimpleClientset(), scheme, owner, "", cfg).(*GCS)
+	return NewS3SnapshotProvider(fake.NewSimpleClientset(), scheme, owner, "", cfg).(*S3)
 }
 
-func getJob(t *testing.T, provider *GCS, name string) *batchv1.Job {
-	t.Helper()
+func testVolumeSnapshot() *snapshotv1.VolumeSnapshot {
+	return &snapshotv1.VolumeSnapshot{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"},
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"},
+		Status: &snapshotv1.VolumeSnapshotStatus{
+			RestoreSize: resource.NewQuantity(1024, resource.BinarySI),
+		},
+	}
+}
 
+func getS3Job(t *testing.T, provider *S3, name string) *batchv1.Job {
+	t.Helper()
 	job, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(context.Background(), name, metav1.GetOptions{})
 	require.NoError(t, err)
 	return job
 }
 
-func hasVolume(volumes []corev1.Volume, name string) bool {
-	for _, volume := range volumes {
-		if volume.Name == name {
-			return true
+func secretEnvFromName(sources []corev1.EnvFromSource) string {
+	for _, source := range sources {
+		if source.SecretRef != nil {
+			return source.SecretRef.Name
 		}
 	}
-	return false
+	return ""
 }
 
-func hasVolumeMount(mounts []corev1.VolumeMount, name string) bool {
-	for _, mount := range mounts {
-		if mount.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func hasEnv(envs []corev1.EnvVar, name string) bool {
+func envValue(envs []corev1.EnvVar, name string) string {
 	for _, env := range envs {
 		if env.Name == name {
-			return true
+			return env.Value
 		}
 	}
-	return false
-}
-
-func ptrTo[T any](v T) *T {
-	return &v
+	return ""
 }

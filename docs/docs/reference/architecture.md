@@ -95,9 +95,10 @@ added to the validator Pod. If `autoRenewToken` is enabled, the deprecated
 
 ### dataexporter (job)
 
-A CLI tool used to upload snapshot tarballs to external storage (Google Cloud
-Storage) and to delete them. It runs as a short-lived job during snapshot export
-rather than as a long-running process. See the
+A CLI tool used to stream snapshot tar archives to Google Cloud Storage, Amazon
+S3, and S3-compatible object stores, and to delete them. It supports uncompressed,
+gzip, zstd, and lz4 archives and runs as a short-lived job during snapshot export.
+See the
 [CLI reference](./cli#dataexporter).
 
 ## Custom resources

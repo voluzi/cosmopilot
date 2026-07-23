@@ -162,7 +162,7 @@ type ChainNodeSetStatus struct {
 	// Services. The controller initializes this once from Services already owned by the ChainNodeSet, so
 	// validateCosmosigner can grandfather legacy names on the no-webhook path without trusting the
 	// current, possibly edited spec. Both scopes are captured because a group OR a global route named
-	// "<x>-signer" materializes the colliding Service.
+	// `<x>-signer` materializes the colliding Service.
 	// +optional
 	LegacySignerServiceNames []string `json:"legacySignerServiceNames,omitempty"`
 
@@ -173,7 +173,7 @@ type ChainNodeSetStatus struct {
 
 	// LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope
 	// "group", instances > 0) ending in -cg/-signer/-seed, i.e. groups that already materialize child
-	// ChainNodes "<base>-<n>" under a now-reserved StatefulSet-child suffix. Unlike
+	// ChainNodes `<base>-<n>` under a now-reserved StatefulSet-child suffix. Unlike
 	// LegacySignerServiceNames this excludes global routes and zero-instance groups — neither creates
 	// such children — so validateGroupChildReservedNames grandfathers only genuinely child-bearing
 	// groups on the no-webhook path and never lets a later same-named group strand its children.

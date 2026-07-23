@@ -1,10 +1,6 @@
 package dataexporter
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,98 +100,11 @@ func TestGetDigitCount(t *testing.T) {
 	}
 }
 
-func TestCompressTarGz(t *testing.T) {
-	// Create a temp directory with test files
-	tmpDir := t.TempDir()
-
-	// Create test files
-	testContent := map[string]string{
-		"file1.txt":        "hello world",
-		"subdir/file2.txt": "nested content",
-	}
-
-	for relPath, content := range testContent {
-		fullPath := filepath.Join(tmpDir, relPath)
-		_ = os.MkdirAll(filepath.Dir(fullPath), 0755)
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-	}
-
-	// Compress
-	var buf bytes.Buffer
-	err := compressTarGz(tmpDir, &buf)
-	if err != nil {
-		t.Fatalf("compressTarGz() error = %v", err)
-	}
-
-	// Verify we got a valid gzip
-	gzReader, err := gzip.NewReader(&buf)
-	if err != nil {
-		t.Fatalf("failed to create gzip reader: %v", err)
-	}
-	defer gzReader.Close()
-
-	// Verify we got a valid tar
-	tarReader := tar.NewReader(gzReader)
-	foundFiles := make(map[string]string)
-
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("failed to read tar: %v", err)
-		}
-
-		content, err := io.ReadAll(tarReader)
-		if err != nil {
-			t.Fatalf("failed to read tar content: %v", err)
-		}
-		foundFiles[header.Name] = string(content)
-	}
-
-	// Verify all expected files are present
-	for relPath, expectedContent := range testContent {
-		actualContent, ok := foundFiles[relPath]
-		if !ok {
-			t.Errorf("missing file in archive: %s", relPath)
-			continue
-		}
-		if actualContent != expectedContent {
-			t.Errorf("file %s content = %q, want %q", relPath, actualContent, expectedContent)
-		}
-	}
-}
-
-func TestCompressTarGz_EmptyDir(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	var buf bytes.Buffer
-	err := compressTarGz(tmpDir, &buf)
-	if err != nil {
-		t.Fatalf("compressTarGz() error = %v", err)
-	}
-
-	// Should still produce valid gzip output
-	gzReader, err := gzip.NewReader(&buf)
-	if err != nil {
-		t.Fatalf("failed to create gzip reader: %v", err)
-	}
-	gzReader.Close()
-}
-
-func TestCompressTarGz_NonExistentDir(t *testing.T) {
-	var buf bytes.Buffer
-	err := compressTarGz("/nonexistent/dir", &buf)
-	if err == nil {
-		t.Error("expected error for non-existent directory")
-	}
-}
-
 func TestUploadOptions_Defaults(t *testing.T) {
 	opts := defaultUploadOptions()
+	if opts.Compression != CompressionGzip {
+		t.Errorf("default Compression = %s, want gzip", opts.Compression)
+	}
 
 	if opts.ChunkSize.String() != "250MB" {
 		t.Errorf("default ChunkSize = %s, want 250MB", opts.ChunkSize.String())
@@ -219,6 +128,11 @@ func TestUploadOptions_Defaults(t *testing.T) {
 
 func TestUploadOptions_WithFunctions(t *testing.T) {
 	opts := defaultUploadOptions()
+
+	WithCompression(CompressionLz4)(opts)
+	if opts.Compression != CompressionLz4 {
+		t.Errorf("WithCompression() Compression = %s, want lz4", opts.Compression)
+	}
 
 	WithChunkSize("100MB")(opts)
 	if opts.ChunkSize.String() != "100MB" {
@@ -248,6 +162,28 @@ func TestUploadOptions_WithFunctions(t *testing.T) {
 	WithConcurrentUploadJobs(20)(opts)
 	if opts.ConcurrentJobs != 20 {
 		t.Errorf("WithConcurrentUploadJobs() ConcurrentJobs = %d, want 20", opts.ConcurrentJobs)
+	}
+}
+
+func TestUploadOptions_InvalidSizesReturnValidationErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply UploadOption
+	}{
+		{name: "chunk size", apply: WithChunkSize("not-a-size")},
+		{name: "part size", apply: WithPartSize("not-a-size")},
+		{name: "size limit", apply: WithSizeLimit("not-a-size")},
+		{name: "buffer size", apply: WithBufferSize("not-a-size")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := defaultUploadOptions()
+			tt.apply(opts)
+			if err := validateUploadOptions(opts); err == nil {
+				t.Fatal("validateUploadOptions() expected an error")
+			}
+		})
 	}
 }
 
