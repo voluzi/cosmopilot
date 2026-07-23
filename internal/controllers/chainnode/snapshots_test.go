@@ -311,6 +311,67 @@ func TestFinishTarballExportCleansAfterSuccessfulUpdate(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
+func TestFinishTarballExportRetriesCleanupAfterUpload(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain", PvcSize: "1Gi", LatestHeight: 1},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:      "snapshot",
+		Namespace: "default",
+		Labels:    map[string]string{controllers.LabelChainNode: chainNode.Name},
+		Annotations: map[string]string{
+			controllers.AnnotationPvcSnapshotReady: "true",
+			controllers.AnnotationExportingTarball: "true",
+		},
+	}}
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	clientSet := fake.NewSimpleClientset(
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "chain-00010101000000-upload", Namespace: "default"}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "chain-00010101000000-upload", Namespace: "default"}},
+	)
+	deleteCalls := 0
+	clientSet.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deleteCalls++
+		if deleteCalls == 1 {
+			return true, nil, errors.New("delete failed")
+		}
+		return false, nil, nil
+	})
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	err := reconciler.finishTarballExport(context.Background(), chainNode, snapshot)
+	require.ErrorContains(t, err, "delete failed")
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+	assert.Equal(t, "uploaded", stored.Annotations[controllers.AnnotationExportingTarball])
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, false))
+	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+	assert.Equal(t, tarballFinished, stored.Annotations[controllers.AnnotationExportingTarball])
+	_, err = clientSet.BatchV1().Jobs("default").Get(context.Background(), "chain-00010101000000-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	_, err = clientSet.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "chain-00010101000000-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
 type updateFailingClient struct {
 	client.Client
 }

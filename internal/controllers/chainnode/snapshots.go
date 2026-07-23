@@ -229,9 +229,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				"Exporting tarball %s from snapshot", getTarballName(chainNode, &snapshot),
 			)
 
-		// If the exporting-tarball annotation is set to true, then the export was started. We need to check if it
-		// has finished, and if it is, we set the export-tarballl annotation to finished so that it won't be processed
-		// again
+		// A completed upload is persisted before cleanup so a controller restart cannot trigger another upload.
 		case chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
 			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(true) &&
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true):
@@ -249,6 +247,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				if err = r.finishTarballExport(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
+			}
+
+		case chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
+			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(true) &&
+			snapshot.Annotations[controllers.AnnotationExportingTarball] == tarballUploaded:
+			if err = r.finishTarballExport(ctx, chainNode, &snapshot); err != nil {
+				return err
 			}
 
 		// Default case is checking if snapshot has expired (time-based retention).
@@ -699,15 +704,18 @@ func tarballFailureAction(retry bool) string {
 }
 
 func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
-	snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
-	delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
-	if err := r.Update(ctx, snapshot); err != nil {
-		return err
+	if snapshot.Annotations[controllers.AnnotationExportingTarball] != tarballUploaded {
+		snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballUploaded
+		delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
+		if err := r.Update(ctx, snapshot); err != nil {
+			return err
+		}
 	}
 	if err := r.cleanUpTarballExport(ctx, chainNode, snapshot); err != nil {
-		log.FromContext(ctx).Error(err, "failed to clean up tarball export resources", "snapshot", snapshot.GetName())
+		return err
 	}
-	return nil
+	snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
+	return r.Update(ctx, snapshot)
 }
 
 func (r *Reconciler) cleanUpTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {

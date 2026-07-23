@@ -13,6 +13,7 @@ const (
 	configTomlFilename = "config.toml"
 	genesisLocation    = "data/genesis.json"
 	MnemonicKey        = "mnemonic"
+	tarballUploaded    = "uploaded"
 	tarballFinished    = "finished"
 	tarballFailed      = "failed"
 	upgradesConfigFile = "upgrades.json"
