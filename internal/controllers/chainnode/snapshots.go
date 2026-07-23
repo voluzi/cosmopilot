@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -245,8 +246,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			}
 			if ready {
 				logger.Info("finished tarball export", "snapshot", snapshot.GetName())
-				snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
-				if err = r.Update(ctx, &snapshot); err != nil {
+				if err = r.finishTarballExport(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
 			}
@@ -549,10 +549,14 @@ func getSnapshotName(chainNode *appsv1.ChainNode) string {
 }
 
 func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (datasnapshot.SnapshotProvider, error) {
+	clientSet := kubernetes.Interface(r.ClientSet)
+	if r.snapshotClientSet != nil {
+		clientSet = r.snapshotClientSet
+	}
 	switch {
 	case chainNode.Spec.Persistence.Snapshots.ExportTarball.GCS != nil:
 		return datasnapshot.NewGcsSnapshotProvider(
-			r.ClientSet,
+			clientSet,
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
@@ -561,7 +565,7 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 
 	case chainNode.Spec.Persistence.Snapshots.ExportTarball.S3 != nil:
 		return datasnapshot.NewS3SnapshotProvider(
-			r.ClientSet,
+			clientSet,
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
@@ -594,20 +598,30 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 
 	switch status {
 	case datasnapshot.SnapshotNotFound:
+		retry, updateErr := r.recordTarballExportFailure(ctx, snapshot)
+		if updateErr != nil {
+			return false, updateErr
+		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonTarballExportError,
-			"Tarball %s export job not found; retrying", getTarballName(chainNode, snapshot),
+			"Tarball %s export job not found; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
 		)
-		return false, r.resetTarballExportForRetry(ctx, snapshot)
+		r.cleanUpTarballExport(ctx, chainNode, snapshot)
+		return false, nil
 
 	case datasnapshot.SnapshotFailed:
+		retry, updateErr := r.recordTarballExportFailure(ctx, snapshot)
+		if updateErr != nil {
+			return false, updateErr
+		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonTarballExportError,
-			"Tarball %s export failed; retrying", getTarballName(chainNode, snapshot),
+			"Tarball %s export failed; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
 		)
-		return false, r.resetTarballExportForRetry(ctx, snapshot)
+		r.cleanUpTarballExport(ctx, chainNode, snapshot)
+		return false, nil
 
 	case datasnapshot.SnapshotSucceeded:
 		r.recorder.Eventf(chainNode,
@@ -622,9 +636,52 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 	}
 }
 
-func (r *Reconciler) resetTarballExportForRetry(ctx context.Context, snapshot *snapshotv1.VolumeSnapshot) error {
-	delete(snapshot.Annotations, controllers.AnnotationExportingTarball)
-	return r.Update(ctx, snapshot)
+func (r *Reconciler) recordTarballExportFailure(ctx context.Context, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
+	if snapshot.Annotations == nil {
+		snapshot.Annotations = make(map[string]string)
+	}
+	attempts, parseErr := strconv.Atoi(snapshot.Annotations[controllers.AnnotationTarballExportAttempts])
+	if parseErr != nil || attempts < 0 {
+		attempts = 0
+	}
+	attempts++
+	snapshot.Annotations[controllers.AnnotationTarballExportAttempts] = strconv.Itoa(attempts)
+	retry := attempts < tarballExportMaxAttempts
+	if retry {
+		delete(snapshot.Annotations, controllers.AnnotationExportingTarball)
+	} else {
+		snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFailed
+	}
+	return retry, r.Update(ctx, snapshot)
+}
+
+func tarballFailureAction(retry bool) string {
+	if retry {
+		return "retrying"
+	}
+	return "retry limit reached; remove the export annotations to retry"
+}
+
+func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
+	snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
+	delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
+	if err := r.Update(ctx, snapshot); err != nil {
+		return err
+	}
+	r.cleanUpTarballExport(ctx, chainNode, snapshot)
+	return nil
+}
+
+func (r *Reconciler) cleanUpTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) {
+	logger := log.FromContext(ctx)
+	exporter, err := r.getTarballExportProvider(chainNode)
+	if err != nil {
+		logger.Error(err, "failed to get tarball exporter for cleanup", "snapshot", snapshot.GetName())
+		return
+	}
+	if err = exporter.CleanupSnapshot(ctx, getTarballName(chainNode, snapshot)); err != nil {
+		logger.Error(err, "failed to clean up tarball export resources", "snapshot", snapshot.GetName())
+	}
 }
 
 func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {

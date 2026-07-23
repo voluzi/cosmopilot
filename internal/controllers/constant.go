@@ -29,6 +29,7 @@ const (
 	AnnotationSnapshotRetention       = "cosmopilot.voluzi.com/snapshot-retention"
 	AnnotationPvcSnapshotReady        = "cosmopilot.voluzi.com/snapshot-ready"
 	AnnotationExportingTarball        = "cosmopilot.voluzi.com/exporting-tarball"
+	AnnotationTarballExportAttempts   = "cosmopilot.voluzi.com/tarball-export-attempts"
 	AnnotationSnapshotIntegrityStatus = "cosmopilot.voluzi.com/snapshot-integrity-status"
 	AnnotationPodSpecHash             = "cosmopilot.voluzi.com/pod-spec-hash"
 	AnnotationVPAResources            = "cosmopilot.voluzi.com/vpa-resources"

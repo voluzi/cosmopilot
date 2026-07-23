@@ -68,6 +68,7 @@ func TestS3CreateSnapshotAuthAndStorageOptions(t *testing.T) {
 			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", vs))
 
 			job := getS3Job(t, provider, "snapshot-upload")
+			assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
 			podSpec := job.Spec.Template.Spec
 			container := podSpec.Containers[0]
 			assert.Equal(t, tt.wantServiceAccount, podSpec.ServiceAccountName)
@@ -113,13 +114,15 @@ func TestS3DeleteSnapshotUsesSameAuthentication(t *testing.T) {
 	assert.Equal(t, "/app", container.WorkingDir)
 }
 
-func TestS3GetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
+func TestS3GetSnapshotStatusPreservesUploadResources(t *testing.T) {
 	tests := []struct {
 		name       string
 		createJob  bool
+		jobStatus  batchv1.JobStatus
 		wantStatus SnapshotStatus
 	}{
-		{name: "failed job", createJob: true, wantStatus: SnapshotFailed},
+		{name: "failed job", createJob: true, jobStatus: batchv1.JobStatus{Failed: 1}, wantStatus: SnapshotFailed},
+		{name: "successful job", createJob: true, jobStatus: batchv1.JobStatus{Succeeded: 1}, wantStatus: SnapshotSucceeded},
 		{name: "missing job", wantStatus: SnapshotNotFound},
 	}
 
@@ -132,7 +135,7 @@ func TestS3GetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
 			if tt.createJob {
 				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
 					ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
-					Status:     batchv1.JobStatus{Failed: 1},
+					Status:     tt.jobStatus,
 				}, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
@@ -146,11 +149,76 @@ func TestS3GetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, status)
 
 			_, err = provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
-			assert.True(t, apierrors.IsNotFound(err))
+			if tt.createJob {
+				require.NoError(t, err)
+			} else {
+				assert.True(t, apierrors.IsNotFound(err))
+			}
 			_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
-			assert.True(t, apierrors.IsNotFound(err))
+			require.NoError(t, err)
 		})
 	}
+}
+
+func TestS3CleanupSnapshotDeletesUploadResources(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+
+	require.NoError(t, provider.CleanupSnapshot(context.Background(), "snapshot"))
+
+	_, err := provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestS3CreateSnapshotIsIdempotent(t *testing.T) {
+	tests := []struct {
+		name      string
+		deletePVC bool
+	}{
+		{name: "existing job and PVC"},
+		{name: "existing job with missing PVC", deletePVC: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+			if tt.deletePVC {
+				require.NoError(t, provider.Client.CoreV1().PersistentVolumeClaims("default").Delete(context.Background(), "snapshot-upload", metav1.DeleteOptions{}))
+			}
+
+			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+			_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestS3CreateSnapshotRejectsForeignPVCWithoutDeletingIt(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+	_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot())
+	require.ErrorContains(t, err, "not controlled by upload job")
+
+	_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestS3CreateSnapshotRejectsForeignJob(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+	_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot())
+	require.ErrorContains(t, err, "not controlled by snapshot owner")
 }
 
 func TestS3CreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {

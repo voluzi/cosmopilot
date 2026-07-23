@@ -107,8 +107,7 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: ptr.To[int32](180),
-			BackoffLimit:            ptr.To[int32](0),
+			BackoffLimit: ptr.To[int32](0),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -143,11 +142,6 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 	if err := controllerutil.SetControllerReference(provider.Owner, job, provider.Scheme); err != nil {
 		return err
 	}
-	createdJob, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{})
-	if err != nil {
-		return err
-	}
-
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-upload", name),
@@ -165,26 +159,14 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 			},
 		},
 	}
-	if err := controllerutil.SetControllerReference(createdJob, pvc, provider.Scheme); err != nil {
-		if cleanupErr := provider.cleanUp(ctx, name); cleanupErr != nil {
-			return fmt.Errorf("set PVC owner reference: %w; clean up upload job: %v", err, cleanupErr)
-		}
-		return err
-	}
-	_, err = provider.Client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
-	if err != nil {
-		if cleanupErr := provider.cleanUp(ctx, name); cleanupErr != nil {
-			return fmt.Errorf("create upload PVC: %w; clean up upload job: %v", err, cleanupErr)
-		}
-	}
-	return err
+	return ensureUploadResources(ctx, provider.Client, provider.Scheme, provider.Owner, job, pvc)
 }
 
 func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
 	job, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return SnapshotNotFound, provider.cleanUp(ctx, name)
+			return SnapshotNotFound, nil
 		}
 		return "", err
 	}
@@ -192,12 +174,16 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 	case job.Status.Active > 0:
 		return SnapshotActive, nil
 	case job.Status.Failed > 0:
-		return SnapshotFailed, provider.cleanUp(ctx, name)
+		return SnapshotFailed, nil
 	case job.Status.Succeeded >= 1:
-		return SnapshotSucceeded, provider.cleanUp(ctx, name)
+		return SnapshotSucceeded, nil
 	default:
 		return "", fmt.Errorf("could not determine job status")
 	}
+}
+
+func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
+	return provider.cleanUp(ctx, name)
 }
 
 func (provider *S3) DeleteSnapshot(ctx context.Context, name string) error {

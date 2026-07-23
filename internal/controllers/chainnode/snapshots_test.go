@@ -2,16 +2,24 @@ package chainnode
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
@@ -63,7 +71,7 @@ func TestGetTarballExportProvider(t *testing.T) {
 	}
 }
 
-func TestResetTarballExportForRetry(t *testing.T) {
+func TestRecordTarballExportFailureStopsAtRetryLimit(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
 	snapshot := &snapshotv1.VolumeSnapshot{
@@ -78,12 +86,126 @@ func TestResetTarballExportForRetry(t *testing.T) {
 	client := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
 	reconciler := &Reconciler{Client: client}
 
-	require.NoError(t, reconciler.resetTarballExportForRetry(context.Background(), snapshot))
+	for attempt := 1; attempt <= tarballExportMaxAttempts; attempt++ {
+		retry, err := reconciler.recordTarballExportFailure(context.Background(), snapshot)
+		require.NoError(t, err)
+		assert.Equal(t, attempt < tarballExportMaxAttempts, retry)
+
+		stored := &snapshotv1.VolumeSnapshot{}
+		require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+		assert.Equal(t, strconv.Itoa(attempt), stored.Annotations[controllers.AnnotationTarballExportAttempts])
+		if attempt < tarballExportMaxAttempts {
+			_, exporting := stored.Annotations[controllers.AnnotationExportingTarball]
+			assert.False(t, exporting)
+			stored.Annotations[controllers.AnnotationExportingTarball] = "true"
+			require.NoError(t, client.Update(context.Background(), stored))
+		} else {
+			assert.Equal(t, tarballFailed, stored.Annotations[controllers.AnnotationExportingTarball])
+		}
+		snapshot = stored
+	}
+}
+
+func TestFinishTarballExportPersistsBeforeCleanup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default",
+		Annotations: map[string]string{
+			controllers.AnnotationExportingTarball:      "true",
+			controllers.AnnotationTarballExportAttempts: "2",
+		},
+	}}
+	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	clientSet := fake.NewSimpleClientset(
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "-00010101000000-upload", Namespace: "default"}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "-00010101000000-upload", Namespace: "default"}},
+	)
+	reconciler := &Reconciler{
+		Client:            &updateFailingClient{Client: baseClient},
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	err := reconciler.finishTarballExport(context.Background(), chainNode, snapshot)
+	require.ErrorContains(t, err, "update failed")
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationExportingTarball])
+
+	_, err = clientSet.BatchV1().Jobs("default").Get(context.Background(), "-00010101000000-upload", metav1.GetOptions{})
+	require.NoError(t, err)
+	_, err = clientSet.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "-00010101000000-upload", metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestFinishTarballExportCleansAfterSuccessfulUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default",
+		Annotations: map[string]string{
+			controllers.AnnotationExportingTarball:      "true",
+			controllers.AnnotationTarballExportAttempts: "2",
+		},
+	}}
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	clientSet := fake.NewSimpleClientset(
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "-00010101000000-upload", Namespace: "default"}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "-00010101000000-upload", Namespace: "default"}},
+	)
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+	}
+
+	require.NoError(t, reconciler.finishTarballExport(context.Background(), chainNode, snapshot))
 
 	stored := &snapshotv1.VolumeSnapshot{}
-	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
-	_, exporting := stored.Annotations[controllers.AnnotationExportingTarball]
-	assert.False(t, exporting)
+	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+	assert.Equal(t, tarballFinished, stored.Annotations[controllers.AnnotationExportingTarball])
+	_, hasAttempts := stored.Annotations[controllers.AnnotationTarballExportAttempts]
+	assert.False(t, hasAttempts)
+	_, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "-00010101000000-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	_, err = clientSet.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "-00010101000000-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+type updateFailingClient struct {
+	client.Client
+}
+
+func (c *updateFailingClient) Update(context.Context, client.Object, ...client.UpdateOption) error {
+	return errors.New("update failed")
 }
 
 func TestIsSnapshotReady(t *testing.T) {

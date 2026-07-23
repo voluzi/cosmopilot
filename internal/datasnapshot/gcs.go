@@ -130,8 +130,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: ptr.To[int32](180),
-			BackoffLimit:            ptr.To[int32](0),
+			BackoffLimit: ptr.To[int32](0),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -199,11 +198,6 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 		return err
 	}
 
-	job, err = gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{})
-	if err != nil {
-		return err
-	}
-
 	// Create PVC from Snapshot
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -227,28 +221,14 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 		},
 	}
 
-	err = controllerutil.SetControllerReference(job, pvc, gcs.Scheme)
-	if err != nil {
-		if cleanupErr := gcs.cleanUp(ctx, name); cleanupErr != nil {
-			return fmt.Errorf("set PVC owner reference: %w; clean up upload job: %v", err, cleanupErr)
-		}
-		return err
-	}
-
-	_, err = gcs.Client.CoreV1().PersistentVolumeClaims(pvc.GetNamespace()).Create(ctx, pvc, metav1.CreateOptions{})
-	if err != nil {
-		if cleanupErr := gcs.cleanUp(ctx, name); cleanupErr != nil {
-			return fmt.Errorf("create upload PVC: %w; clean up upload job: %v", err, cleanupErr)
-		}
-	}
-	return err
+	return ensureUploadResources(ctx, gcs.Client, gcs.Scheme, gcs.Owner, job, pvc)
 }
 
 func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
 	job, err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return SnapshotNotFound, gcs.cleanUp(ctx, name)
+			return SnapshotNotFound, nil
 		}
 		return "", err
 	}
@@ -258,14 +238,18 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 		return SnapshotActive, nil
 
 	case job.Status.Failed > 0:
-		return SnapshotFailed, gcs.cleanUp(ctx, name)
+		return SnapshotFailed, nil
 
 	case job.Status.Succeeded >= 1:
-		return SnapshotSucceeded, gcs.cleanUp(ctx, name)
+		return SnapshotSucceeded, nil
 
 	default:
 		return "", fmt.Errorf("could not determine job status")
 	}
+}
+
+func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {
+	return gcs.cleanUp(ctx, name)
 }
 
 func (gcs *GCS) cleanUp(ctx context.Context, name string) error {

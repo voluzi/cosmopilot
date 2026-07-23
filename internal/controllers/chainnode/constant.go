@@ -14,7 +14,10 @@ const (
 	genesisLocation    = "data/genesis.json"
 	MnemonicKey        = "mnemonic"
 	tarballFinished    = "finished"
+	tarballFailed      = "failed"
 	upgradesConfigFile = "upgrades.json"
+
+	tarballExportMaxAttempts = 3
 
 	timeoutPodRunning              = 5 * time.Minute
 	timeoutPodDeleted              = 2 * time.Minute

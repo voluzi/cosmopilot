@@ -72,6 +72,7 @@ func TestGCSCreateSnapshotAuthModes(t *testing.T) {
 			require.NoError(t, err)
 
 			job := getJob(t, provider, "snapshot-upload")
+			assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
 			podSpec := job.Spec.Template.Spec
 			container := podSpec.Containers[0]
 			assert.Equal(t, tt.wantServiceAccount, podSpec.ServiceAccountName)
@@ -134,13 +135,15 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 	}
 }
 
-func TestGCSGetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
+func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
 	tests := []struct {
 		name       string
 		createJob  bool
+		jobStatus  batchv1.JobStatus
 		wantStatus SnapshotStatus
 	}{
-		{name: "failed job", createJob: true, wantStatus: SnapshotFailed},
+		{name: "failed job", createJob: true, jobStatus: batchv1.JobStatus{Failed: 1}, wantStatus: SnapshotFailed},
+		{name: "successful job", createJob: true, jobStatus: batchv1.JobStatus{Succeeded: 1}, wantStatus: SnapshotSucceeded},
 		{name: "missing job", wantStatus: SnapshotNotFound},
 	}
 
@@ -153,7 +156,7 @@ func TestGCSGetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
 			if tt.createJob {
 				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
 					ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
-					Status:     batchv1.JobStatus{Failed: 1},
+					Status:     tt.jobStatus,
 				}, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
@@ -167,11 +170,76 @@ func TestGCSGetSnapshotStatusCleansTerminalUploadResources(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, status)
 
 			_, err = provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
-			assert.True(t, apierrors.IsNotFound(err))
+			if tt.createJob {
+				require.NoError(t, err)
+			} else {
+				assert.True(t, apierrors.IsNotFound(err))
+			}
 			_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
-			assert.True(t, apierrors.IsNotFound(err))
+			require.NoError(t, err)
 		})
 	}
+}
+
+func TestGCSCleanupSnapshotDeletesUploadResources(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+
+	require.NoError(t, provider.CleanupSnapshot(context.Background(), "snapshot"))
+
+	_, err := provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestGCSCreateSnapshotIsIdempotent(t *testing.T) {
+	tests := []struct {
+		name      string
+		deletePVC bool
+	}{
+		{name: "existing job and PVC"},
+		{name: "existing job with missing PVC", deletePVC: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+			if tt.deletePVC {
+				require.NoError(t, provider.Client.CoreV1().PersistentVolumeClaims("default").Delete(context.Background(), "snapshot-upload", metav1.DeleteOptions{}))
+			}
+
+			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+			_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestGCSCreateSnapshotRejectsForeignPVCWithoutDeletingIt(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot())
+	require.ErrorContains(t, err, "not controlled by upload job")
+
+	_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestGCSCreateSnapshotRejectsForeignJob(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot())
+	require.ErrorContains(t, err, "not controlled by snapshot owner")
 }
 
 func TestGCSCreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {

@@ -45,6 +45,7 @@ type Reconciler struct {
 	client.Client
 	APIReader          client.Reader
 	ClientSet          *kubernetes.Clientset
+	snapshotClientSet  kubernetes.Interface
 	RestConfig         *rest.Config
 	Scheme             *runtime.Scheme
 	configCache        *ttlcache.Cache[string, map[string]interface{}]
