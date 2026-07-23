@@ -3,6 +3,7 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -186,7 +187,7 @@ func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
 	return provider.cleanUp(ctx, name)
 }
 
-func (provider *S3) DeleteSnapshot(ctx context.Context, name string) error {
+func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -198,8 +199,7 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) error {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: ptr.To[int32](60),
-			BackoffLimit:            ptr.To[int32](5),
+			BackoffLimit: ptr.To[int32](5),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -220,12 +220,24 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) error {
 		},
 	}
 	if err := controllerutil.SetControllerReference(provider.Owner, job, provider.Scheme); err != nil {
+		return "", err
+	}
+	job, _, err := ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, "delete")
+	if err != nil {
+		return "", err
+	}
+	if err = provider.cleanUp(ctx, name); err != nil {
+		return "", err
+	}
+	return snapshotJobStatus(job), nil
+}
+
+func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, name string) error {
+	err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-delete", name), metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
-	if _, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{}); err != nil {
-		return err
-	}
-	return provider.cleanUp(ctx, name)
+	return nil
 }
 
 func (provider *S3) cleanUp(ctx context.Context, name string) error {
@@ -247,15 +259,20 @@ func (provider *S3) ListSnapshots(ctx context.Context) ([]string, error) {
 	selector := labels.SelectorFromSet(map[string]string{
 		labelExporter: s3Exporter,
 		labelOwner:    provider.Owner.GetName(),
-		labelType:     typeUpload,
 	}).String()
 	list, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, len(list.Items))
-	for i, job := range list.Items {
-		names[i] = strings.TrimSuffix(job.Name, "-upload")
+	uniqueNames := make(map[string]struct{}, len(list.Items))
+	for _, job := range list.Items {
+		name := strings.TrimSuffix(strings.TrimSuffix(job.Name, "-upload"), "-delete")
+		uniqueNames[name] = struct{}{}
 	}
+	names := make([]string, 0, len(uniqueNames))
+	for name := range uniqueNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	return names, nil
 }

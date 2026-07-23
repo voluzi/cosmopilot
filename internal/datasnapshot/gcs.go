@@ -3,6 +3,7 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -276,7 +277,7 @@ func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
 	return nil
 }
 
-func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
+func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -288,8 +289,7 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: ptr.To[int32](60),
-			BackoffLimit:            ptr.To[int32](5),
+			BackoffLimit: ptr.To[int32](5),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -320,13 +320,25 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) error {
 
 	err := controllerutil.SetControllerReference(gcs.Owner, job, gcs.Scheme)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	if _, err = gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+	job, _, err = ensureSnapshotJob(ctx, gcs.Client, gcs.Owner, job, "delete")
+	if err != nil {
+		return "", err
+	}
+	if err = gcs.cleanUp(ctx, name); err != nil {
+		return "", err
+	}
+	return snapshotJobStatus(job), nil
+}
+
+func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, name string) error {
+	err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-delete", name), metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
-	return gcs.cleanUp(ctx, name)
+	return nil
 }
 
 func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
@@ -334,7 +346,6 @@ func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
 		LabelSelector: labels.SelectorFromSet(map[string]string{
 			labelExporter: gcsExporter,
 			labelOwner:    gcs.Owner.GetName(),
-			labelType:     typeUpload, // We only list uploading jobs since the deleting jobs are auto deleted
 		}).String(),
 	}
 	list, err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).List(ctx, listOptions)
@@ -342,9 +353,15 @@ func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	snapshotNames := make([]string, len(list.Items))
-	for i, job := range list.Items {
-		snapshotNames[i] = strings.TrimSuffix(job.GetName(), "-upload")
+	names := make(map[string]struct{}, len(list.Items))
+	for _, job := range list.Items {
+		name := strings.TrimSuffix(strings.TrimSuffix(job.GetName(), "-upload"), "-delete")
+		names[name] = struct{}{}
 	}
+	snapshotNames := make([]string, 0, len(names))
+	for name := range names {
+		snapshotNames = append(snapshotNames, name)
+	}
+	sort.Strings(snapshotNames)
 	return snapshotNames, nil
 }

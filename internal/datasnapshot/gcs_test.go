@@ -120,10 +120,12 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: tt.config})
 
-			err := provider.DeleteSnapshot(context.Background(), "snapshot")
+			status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
 			require.NoError(t, err)
+			assert.Equal(t, SnapshotActive, status)
 
 			job := getJob(t, provider, "snapshot-delete")
+			assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
 			podSpec := job.Spec.Template.Spec
 			container := podSpec.Containers[0]
 			assert.Equal(t, tt.wantServiceAccount, podSpec.ServiceAccountName)
@@ -133,6 +135,47 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 			assert.Equal(t, "/app", container.WorkingDir)
 		})
 	}
+}
+
+func TestGCSDeleteSnapshotReportsTerminalStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		jobStatus  batchv1.JobStatus
+		wantStatus SnapshotStatus
+	}{
+		{name: "failed", jobStatus: batchv1.JobStatus{Failed: 1}, wantStatus: SnapshotFailed},
+		{name: "succeeded", jobStatus: batchv1.JobStatus{Succeeded: 1}, wantStatus: SnapshotSucceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+			status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+			require.NoError(t, err)
+			assert.Equal(t, SnapshotActive, status)
+
+			job := getJob(t, provider, "snapshot-delete")
+			job.Status = tt.jobStatus
+			_, err = provider.Client.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			status, err = provider.DeleteSnapshot(context.Background(), "snapshot")
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, status)
+			_ = getJob(t, provider, "snapshot-delete")
+		})
+	}
+}
+
+func TestGCSListSnapshotsIncludesDeletionJobs(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+
+	names, err := provider.ListSnapshots(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"snapshot"}, names)
 }
 
 func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {

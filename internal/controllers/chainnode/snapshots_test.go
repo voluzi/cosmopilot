@@ -168,6 +168,53 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 	assert.Equal(t, "1", stored.Annotations[controllers.AnnotationTarballExportAttempts])
 }
 
+func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	clientSet := fake.NewSimpleClientset()
+	reconciler := &Reconciler{
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	deleted, err := reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
+	require.NoError(t, err)
+	assert.False(t, deleted)
+
+	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "-00010101000000-delete", metav1.GetOptions{})
+	require.NoError(t, err)
+	job.Status.Failed = 1
+	_, err = clientSet.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	deleted, err = reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
+	require.NoError(t, err)
+	assert.False(t, deleted)
+
+	job, err = clientSet.BatchV1().Jobs("default").Get(context.Background(), "-00010101000000-delete", metav1.GetOptions{})
+	require.NoError(t, err)
+	job.Status.Failed = 0
+	job.Status.Succeeded = 1
+	_, err = clientSet.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	deleted, err = reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+}
+
 func TestFinishTarballExportPersistsBeforeCleanup(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))

@@ -35,7 +35,8 @@ type SnapshotProvider interface {
 	CreateSnapshot(context.Context, string, *snapshotv1.VolumeSnapshot) error
 	GetSnapshotStatus(context.Context, string) (SnapshotStatus, error)
 	CleanupSnapshot(context.Context, string) error
-	DeleteSnapshot(context.Context, string) error
+	DeleteSnapshot(context.Context, string) (SnapshotStatus, error)
+	CleanupSnapshotDeletion(context.Context, string) error
 	ListSnapshots(ctx context.Context) ([]string, error)
 }
 
@@ -47,7 +48,7 @@ func ensureUploadResources(
 	job *batchv1.Job,
 	pvc *corev1.PersistentVolumeClaim,
 ) error {
-	actualJob, created, err := ensureUploadJob(ctx, client, owner, job)
+	actualJob, created, err := ensureSnapshotJob(ctx, client, owner, job, "upload")
 	if err != nil {
 		return err
 	}
@@ -61,11 +62,12 @@ func ensureUploadResources(
 	return nil
 }
 
-func ensureUploadJob(
+func ensureSnapshotJob(
 	ctx context.Context,
 	client kubernetes.Interface,
 	owner metav1.Object,
 	desired *batchv1.Job,
+	purpose string,
 ) (*batchv1.Job, bool, error) {
 	jobs := client.BatchV1().Jobs(desired.Namespace)
 	job, err := jobs.Create(ctx, desired, metav1.CreateOptions{})
@@ -78,17 +80,28 @@ func ensureUploadJob(
 
 	job, err = jobs.Get(ctx, desired.Name, metav1.GetOptions{})
 	if err != nil {
-		return nil, false, fmt.Errorf("get existing upload job: %w", err)
+		return nil, false, fmt.Errorf("get existing %s job: %w", purpose, err)
 	}
 	if !metav1.IsControlledBy(job, owner) {
-		return nil, false, fmt.Errorf("upload job %s/%s is not controlled by snapshot owner %s", job.Namespace, job.Name, owner.GetName())
+		return nil, false, fmt.Errorf("%s job %s/%s is not controlled by snapshot owner %s", purpose, job.Namespace, job.Name, owner.GetName())
 	}
 	for key, value := range desired.Labels {
 		if job.Labels[key] != value {
-			return nil, false, fmt.Errorf("upload job %s/%s has conflicting label %s", job.Namespace, job.Name, key)
+			return nil, false, fmt.Errorf("%s job %s/%s has conflicting label %s", purpose, job.Namespace, job.Name, key)
 		}
 	}
 	return job, false, nil
+}
+
+func snapshotJobStatus(job *batchv1.Job) SnapshotStatus {
+	switch {
+	case job.Status.Failed > 0:
+		return SnapshotFailed
+	case job.Status.Succeeded > 0:
+		return SnapshotSucceeded
+	default:
+		return SnapshotActive
+	}
 }
 
 func ensureUploadPVC(

@@ -106,12 +106,57 @@ func TestS3DeleteSnapshotUsesSameAuthentication(t *testing.T) {
 		},
 	}
 	provider := newTestS3Provider(t, export)
-	require.NoError(t, provider.DeleteSnapshot(context.Background(), "snapshot"))
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
 
-	container := getS3Job(t, provider, "snapshot-delete").Spec.Template.Spec.Containers[0]
+	job := getS3Job(t, provider, "snapshot-delete")
+	assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
+	container := job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, "aws-credentials", secretEnvFromName(container.EnvFrom))
 	assert.Equal(t, []string{"s3", "delete", "snapshots", "snapshot"}, container.Args)
 	assert.Equal(t, "/app", container.WorkingDir)
+}
+
+func TestS3DeleteSnapshotReportsTerminalStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		jobStatus  batchv1.JobStatus
+		wantStatus SnapshotStatus
+	}{
+		{name: "failed", jobStatus: batchv1.JobStatus{Failed: 1}, wantStatus: SnapshotFailed},
+		{name: "succeeded", jobStatus: batchv1.JobStatus{Succeeded: 1}, wantStatus: SnapshotSucceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+			status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+			require.NoError(t, err)
+			assert.Equal(t, SnapshotActive, status)
+
+			job := getS3Job(t, provider, "snapshot-delete")
+			job.Status = tt.jobStatus
+			_, err = provider.Client.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			status, err = provider.DeleteSnapshot(context.Background(), "snapshot")
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, status)
+			_ = getS3Job(t, provider, "snapshot-delete")
+		})
+	}
+}
+
+func TestS3ListSnapshotsIncludesDeletionJobs(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+
+	names, err := provider.ListSnapshots(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"snapshot"}, names)
 }
 
 func TestS3GetSnapshotStatusPreservesUploadResources(t *testing.T) {
