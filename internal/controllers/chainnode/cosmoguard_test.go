@@ -87,7 +87,7 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
 	sts := &k8sappsv1.StatefulSet{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
 
 	env := sts.Spec.Template.Spec.Containers[0].Env
 	found := false
@@ -101,15 +101,15 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	assert.True(t, found, "static upstream host must be injected")
 
 	svc := &corev1.Service{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, svc))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, svc))
 
 	// Headless peer Service + encryption Secret provisioned for the olric cluster.
 	peer := &corev1.Service{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-peer"}, peer))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-peer"}, peer))
 	assert.Equal(t, corev1.ClusterIPNone, peer.Spec.ClusterIP)
 
 	secret := &corev1.Secret{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-cluster"}, secret))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-cluster"}, secret))
 	assert.NotEmpty(t, secret.Data["encryptionKey"])
 }
 
@@ -124,7 +124,7 @@ func TestStandaloneGuardInheritsServiceAccount(t *testing.T) {
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
 	sts := &k8sappsv1.StatefulSet{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
 	assert.Equal(t, "node-sa", sts.Spec.Template.Spec.ServiceAccountName)
 }
 
@@ -139,7 +139,7 @@ func TestStandaloneGuardInheritsUserLabels(t *testing.T) {
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
 	sts := &k8sappsv1.StatefulSet{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
 	labels := sts.Spec.Template.Labels
 	assert.Equal(t, "payments", labels["team"], "user label propagated to guard pods")
 	assert.NotContains(t, labels, controllers.LabelChainID, "managed selector label must not reach guard pods")
@@ -164,12 +164,12 @@ func TestAPIServiceName(t *testing.T) {
 	// Guarded but guard not yet serving -> raw (make-before-break).
 	assert.Equal(t, "node-0", cosmoGuardTestReconciler(t).apiServiceName(ctx, standalone))
 	// Guarded and serving -> guard.
-	assert.Equal(t, "node-0-cosmoguard", cosmoGuardTestReconciler(t, servingGuard("node-0-cosmoguard")).apiServiceName(ctx, standalone))
+	assert.Equal(t, "node-0-cg", cosmoGuardTestReconciler(t, servingGuard("node-0-cg")).apiServiceName(ctx, standalone))
 
 	// Child with an individual ingress + serving guard -> its own guard.
 	child := guardedChainNode("chain-fullnodes-0", true)
 	child.Spec.Ingress = &appsv1.IngressConfig{Host: "0.rpc.example.com"}
-	assert.Equal(t, "chain-fullnodes-0-cosmoguard", cosmoGuardTestReconciler(t, servingGuard("chain-fullnodes-0-cosmoguard")).apiServiceName(ctx, child))
+	assert.Equal(t, "chain-fullnodes-0-cg", cosmoGuardTestReconciler(t, servingGuard("chain-fullnodes-0-cg")).apiServiceName(ctx, child))
 
 	// Child without an individual ingress -> raw (fronted by the group guard).
 	childNoIngress := guardedChainNode("chain-fullnodes-1", true)
@@ -198,7 +198,7 @@ func TestStandaloneStickyFlipViaGrpcIngress(t *testing.T) {
 					HTTP: &networkingv1.HTTPIngressRuleValue{
 						Paths: []networkingv1.HTTPIngressPath{{
 							Backend: networkingv1.IngressBackend{
-								Service: &networkingv1.IngressServiceBackend{Name: "node-0-cosmoguard"},
+								Service: &networkingv1.IngressServiceBackend{Name: "node-0-cg"},
 							},
 						}},
 					},
@@ -209,7 +209,7 @@ func TestStandaloneStickyFlipViaGrpcIngress(t *testing.T) {
 
 	// Guard not serving, but the gRPC Ingress already targets it -> sticky keeps routes on the guard.
 	r := cosmoGuardTestReconciler(t, grpcIng)
-	assert.Equal(t, "node-0-cosmoguard", r.apiServiceName(ctx, cn))
+	assert.Equal(t, "node-0-cg", r.apiServiceName(ctx, cn))
 }
 
 // guardIngress builds an Ingress named `name` whose single HTTP path points at `backend`.
@@ -239,7 +239,7 @@ func guardIngress(name, backend string) *networkingv1.Ingress {
 func TestStandaloneRouteTargetsGuardChecksBothTypes(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	cn.Spec.Gateway = &appsv1.GatewayConfig{Host: "rpc.example.com"} // migrated to Gateway
-	ing := guardIngress("node-0", "node-0-cosmoguard")               // old guarded Ingress still live
+	ing := guardIngress("node-0", "node-0-cg")               // old guarded Ingress still live
 
 	r := cosmoGuardTestReconciler(t, ing)
 	assert.True(t, r.standaloneRouteTargetsGuard(context.Background(), cn),
@@ -257,17 +257,17 @@ func TestFinalizeDefersUndeployWhileRouteTargetsGuard(t *testing.T) {
 
 	// Disable CosmoGuard, but a live Ingress still references the guard Service.
 	cn.Spec.Config.CosmoGuard.Enable = false
-	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cosmoguard")))
+	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cg")))
 
 	// Finalize must NOT delete the guard while that Ingress points at it.
 	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, true))
-	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{}),
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{}),
 		"guard must survive while a live route still targets it")
 
 	// Once the route no longer targets the guard, finalize tears it down.
-	require.NoError(t, r.Delete(ctx, guardIngress("node-0", "node-0-cosmoguard")))
+	require.NoError(t, r.Delete(ctx, guardIngress("node-0", "node-0-cg")))
 	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, true))
-	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "guard torn down once no route references it")
 }
 
@@ -281,11 +281,11 @@ func TestFinalizeStoppedPathTearsDownDespiteRoute(t *testing.T) {
 	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
 
 	cn.Spec.Config.CosmoGuard.Enable = false
-	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cosmoguard")))
+	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cg")))
 
 	// Stopped path: defer disabled -> tears down despite the stale route.
 	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, false))
-	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "stopped-path finalize tears down the guard regardless of stale routes")
 }
 
@@ -297,11 +297,11 @@ func TestDisableAutoscalingRemovesHPA(t *testing.T) {
 	r := cosmoGuardTestReconciler(t, cn)
 
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &autoscalingv2.HorizontalPodAutoscaler{}))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &autoscalingv2.HorizontalPodAutoscaler{}))
 
 	cn.Spec.Config.CosmoGuard.Autoscaling.Enable = false
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &autoscalingv2.HorizontalPodAutoscaler{})
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &autoscalingv2.HorizontalPodAutoscaler{})
 	assert.Error(t, err, "HPA should be removed when autoscaling is disabled")
 }
 
@@ -311,13 +311,13 @@ func TestFinalizeTearsDownGuardWhenNodeBecomesChild(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	r := cosmoGuardTestReconciler(t, cn)
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{}))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{}))
 
 	// The node joins a ChainNodeSet; ensure no longer manages a guard and finalize tears the old one down.
 	markChainNodeSetChild(cn)
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "standalone guard should be removed once the node is a ChainNodeSet child")
 }
 
@@ -331,14 +331,14 @@ func TestChildWithIndividualIngressGetsGuard(t *testing.T) {
 
 	// The child manages its own guard (created here) even though it's a ChainNodeSet member.
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, &k8sappsv1.StatefulSet{}))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cg"}, &k8sappsv1.StatefulSet{}))
 
 	// Removing the individual ingress tears the per-node guard back down.
 	cn.Spec.Ingress = nil
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(context.Background(), cn))
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cg"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "per-node guard should be removed once the individual ingress is gone")
 }
 
@@ -351,7 +351,7 @@ func TestNodeSetChildSkipsStandaloneGuard(t *testing.T) {
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
 	dep := &k8sappsv1.Deployment{}
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cosmoguard"}, dep)
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cg"}, dep)
 	assert.Error(t, err, "no standalone guard should be created for a nodeset child")
 }
 
@@ -395,17 +395,17 @@ func TestDisableGuardUndeploys(t *testing.T) {
 
 	// Confirm it was created first, then disable and reconcile again.
 	sts := &k8sappsv1.StatefulSet{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, sts))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
 
 	// Disable, then finalize (teardown runs after routes are retargeted, not in ensureCosmoGuard).
 	cn.Spec.Config.CosmoGuard.Enable = false
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard"}, &k8sappsv1.StatefulSet{})
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "guard statefulset should be removed when disabled")
-	err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-peer"}, &corev1.Service{})
+	err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-peer"}, &corev1.Service{})
 	assert.Error(t, err, "peer service should be removed when disabled")
-	err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cosmoguard-cluster"}, &corev1.Secret{})
+	err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-cluster"}, &corev1.Secret{})
 	assert.Error(t, err, "encryption secret should be removed when disabled")
 }

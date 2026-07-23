@@ -266,14 +266,19 @@ func TestValidateCosmosignerSignerNameCollisions(t *testing.T) {
 	legacyGroup := base([]NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}})
 	_, err := legacyGroup.Validate(legacyGroup.DeepCopy())
 	require.NoError(t, err, "an unchanged pre-existing reserved group name must remain updateable")
+	legacyBase := legacyGroup.Spec.Nodes[0].GetServiceName(legacyGroup)
 	legacyGroup.Status.LegacySignerServiceNamesInitialized = true
-	legacyGroup.Status.LegacySignerServiceNames = []string{legacyGroup.Spec.Nodes[0].GetServiceName(legacyGroup)}
+	legacyGroup.Status.LegacySignerServiceNames = []string{legacyBase}
+	legacyGroup.Status.LegacyReservedChildGroupNamesInitialized = true
+	legacyGroup.Status.LegacyReservedChildGroupNames = []string{legacyBase}
 	_, err = legacyGroup.Validate(nil)
 	require.NoError(t, err, "a reconciled legacy group must remain valid on the no-webhook path")
 
 	editedNoWebhookGroup := base([]NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}})
 	editedNoWebhookGroup.Status.LegacySignerServiceNamesInitialized = true
 	editedNoWebhookGroup.Status.LegacySignerServiceNames = []string{"cs-fullnodes"}
+	editedNoWebhookGroup.Status.LegacyReservedChildGroupNamesInitialized = true
+	editedNoWebhookGroup.Status.LegacyReservedChildGroupNames = []string{"cs-fullnodes"}
 	_, err = editedNoWebhookGroup.Validate(nil)
 	require.Error(t, err, "the current spec must not whitelist a newly introduced reserved group name")
 	assert.Contains(t, err.Error(), "standalone ChainNode cosmosigner Service")

@@ -26,13 +26,13 @@ import (
 
 // groupCosmoGuardName returns the name of the CosmoGuard Deployment/Service fronting a node group.
 func groupCosmoGuardName(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) string {
-	return fmt.Sprintf("%s-cosmoguard", group.GetServiceName(nodeSet))
+	return fmt.Sprintf("%s-cg", group.GetServiceName(nodeSet))
 }
 
 // groupCosmoGuardUpstreamName returns the name of the headless Service CosmoGuard uses to discover
-// the group's node pods.
+// the group's node pods. It derives from the guard base name so it can never drift from it.
 func groupCosmoGuardUpstreamName(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) string {
-	return fmt.Sprintf("%s-cosmoguard-upstream", group.GetServiceName(nodeSet))
+	return fmt.Sprintf("%s-upstream", groupCosmoGuardName(nodeSet, group))
 }
 
 func cosmoGuardRouteLabelKey(routeName string) string {

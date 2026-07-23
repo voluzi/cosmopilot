@@ -15,14 +15,14 @@ client traffic
 
 - On a **`ChainNodeSet`**, Cosmopilot deploys **one CosmoGuard StatefulSet per node group**, fronting every node in that group. It can run multiple replicas and be autoscaled with an HPA.
 - On a standalone **`ChainNode`**, Cosmopilot deploys a single CosmoGuard StatefulSet fronting that node.
-- The node's main and `-internal` Services keep serving the raw node ports. Guarded traffic is routed through the group/global Services (whose selectors are flipped to the guard once it is ready) and through the dedicated `<name>-cosmoguard` Service.
+- The node's main and `-internal` Services keep serving the raw node ports. Guarded traffic is routed through the group/global Services (whose selectors are flipped to the guard once it is ready) and through the dedicated `<name>-cg` Service.
 
 ### Shared cache (olric cluster)
 
 CosmoGuard runs as a StatefulSet so every replica joins one **embedded olric cache cluster** and shares a single distributed cache. A response cached by any replica is served from cache by all of them, so the backing nodes are shielded no matter how the load balancer spreads requests — this is the whole point of running multiple replicas in front of a group. Cosmopilot wires this automatically:
 
-- a **headless peer Service** (`<name>-cosmoguard-peer`) gives each replica stable DNS for olric's peer discovery;
-- gossip traffic is encrypted with a key Cosmopilot generates once into a **Secret** (`<name>-cosmoguard-cluster`) and mounts into every replica.
+- a **headless peer Service** (`<name>-cg-peer`) gives each replica stable DNS for olric's peer discovery;
+- gossip traffic is encrypted with a key Cosmopilot generates once into a **Secret** (`<name>-cg-cluster`) and mounts into every replica.
 
 You don't configure any of this — enabling CosmoGuard is enough.
 

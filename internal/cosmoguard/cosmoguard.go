@@ -95,7 +95,7 @@ func GenerateEncryptionKey() (string, error) {
 // Params carries everything needed to render a CosmoGuard deployment's resources. The owner
 // (ChainNode or ChainNodeSet controller) sets owner references and applies the returned objects.
 type Params struct {
-	// Name is the name of the CosmoGuard Deployment/Service (e.g. "<node>-cosmoguard").
+	// Name is the name of the CosmoGuard Deployment/Service (e.g. "<node>-cg").
 	Name      string
 	Namespace string
 

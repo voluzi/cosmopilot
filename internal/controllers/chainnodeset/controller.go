@@ -359,12 +359,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // .spec.genesis requirement when the current spec still describes an active genesis-initializing
 // validator, so a running configuration with no derivable genesis is rejected rather than accepted.
 func validateForReconcile(nodeSet *appsv1.ChainNodeSet) (admission.Warnings, error) {
-	// The reserved-name rule normally runs on the admission create path; on the no-webhook path it
-	// applies only while the object has never been reconciled (no chainID recorded), so legacy
-	// names keep working.
-	if err := appsv1.ValidateCosmosignerReservedNameNoWebhook(nodeSet.GetName(), nodeSet.Status.ChainID != ""); err != nil {
-		return nil, err
-	}
 	if nodeSet.Status.ChainID != "" {
 		if err := validateNoWebhookGenesisInitState(nodeSet); err != nil {
 			return nil, err

@@ -9,9 +9,11 @@ import (
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -23,50 +25,181 @@ import (
 )
 
 func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
-	if nodeSet.Status.LegacySignerServiceNamesInitialized {
+	signerDone := nodeSet.Status.LegacySignerServiceNamesInitialized
+	childDone := nodeSet.Status.LegacyReservedChildGroupNamesInitialized
+	svcCollDone := nodeSet.Status.LegacyServiceNameCollisionsInitialized
+	ingCollDone := nodeSet.Status.LegacyIngressNameCollisionsInitialized
+	if signerDone && childDone && svcCollDone && ingCollDone {
 		return false, nil
 	}
 
-	expected := map[string]string{}
-	for i := range nodeSet.Spec.Nodes {
-		expected[nodeSet.Spec.Nodes[i].GetServiceName(nodeSet)] = scopeGroup
-	}
-	for i := range nodeSet.Spec.Ingresses {
-		expected[nodeSet.Spec.Ingresses[i].GetName(nodeSet)] = scopeGlobal
-	}
-	for i := range nodeSet.Spec.GatewayRoutes {
-		expected[fmt.Sprintf("%s-global-%s", nodeSet.GetName(), nodeSet.Spec.GatewayRoutes[i].Name)] = scopeGlobal
-	}
-
+	// Every legacy set below is grandfathered off the SAME signal: whether a derived resource already
+	// exists as a live owned object. On a brand-new object's first reconcile validation runs before
+	// ensureServices/ensureIngresses create anything, so nothing is materialized and nothing is
+	// grandfathered — the no-webhook checks reject a collision or reserved name exactly as the admission
+	// webhook would. Only a genuinely pre-existing (already reconciled) object, whose derived resources
+	// already live in the cluster, is grandfathered so it keeps updating.
 	services := &corev1.ServiceList{}
 	if err := r.List(ctx, services, client.InNamespace(nodeSet.GetNamespace())); err != nil {
 		return false, err
 	}
-	names := map[string]struct{}{}
-	for i := range services.Items {
-		svc := &services.Items[i]
-		if !metav1.IsControlledBy(svc, nodeSet) {
-			continue
+
+	// Service/Ingress name-collision grandfather sets: a within-CR collision (a name two distinct owners in
+	// this spec both derive; see LegacyDerivedNameCollisions) is grandfathered only when the colliding
+	// resource is already materialized as a live owned object. Recording candidates straight from the spec
+	// would grandfather a brand-new object's own collision and defeat validateServiceNameCollisions /
+	// validateIngressNameCollisions on the no-webhook path (old is nil there); gating on live resources
+	// restricts grandfathering to collisions that genuinely predate this operator version.
+	if !svcCollDone || !ingCollDone {
+		svcCandidates, ingCandidates := nodeSet.LegacyDerivedNameCollisions()
+
+		// childUIDs are the ChainNodes this nodeSet controls. A per-child Service/Ingress counts as
+		// materialized only when owned by one of them; matching the controller ref's UID (not just its
+		// Kind) stops an unrelated ChainNode's identically-named resource in the same namespace from
+		// making a brand-new collision look legacy and bypassing the no-webhook checks.
+		childNodes := &appsv1.ChainNodeList{}
+		if err := r.List(ctx, childNodes, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+			return false, err
 		}
-		scope, derived := expected[svc.GetName()]
-		if !derived || svc.GetLabels()[controllers.LabelScope] != scope {
-			continue
+		childUIDs := map[types.UID]struct{}{}
+		for i := range childNodes.Items {
+			if metav1.IsControlledBy(&childNodes.Items[i], nodeSet) {
+				childUIDs[childNodes.Items[i].GetUID()] = struct{}{}
+			}
 		}
-		if strings.HasSuffix(svc.GetName(), "-signer") || strings.HasSuffix(svc.GetName(), "-signer-privval") {
-			names[svc.GetName()] = struct{}{}
+
+		if !svcCollDone {
+			live := map[string]struct{}{}
+			for i := range services.Items {
+				if ownedByNodeSetOrChild(&services.Items[i], nodeSet, childUIDs) {
+					live[services.Items[i].GetName()] = struct{}{}
+				}
+			}
+			nodeSet.Status.LegacyServiceNameCollisions = intersectSorted(svcCandidates, live)
+			nodeSet.Status.LegacyServiceNameCollisionsInitialized = true
+		}
+		if !ingCollDone {
+			ingresses := &networkingv1.IngressList{}
+			if err := r.List(ctx, ingresses, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+				return false, err
+			}
+			live := map[string]struct{}{}
+			for i := range ingresses.Items {
+				if ownedByNodeSetOrChild(&ingresses.Items[i], nodeSet, childUIDs) {
+					live[ingresses.Items[i].GetName()] = struct{}{}
+				}
+			}
+			nodeSet.Status.LegacyIngressNameCollisions = intersectSorted(ingCandidates, live)
+			nodeSet.Status.LegacyIngressNameCollisionsInitialized = true
 		}
 	}
 
-	nodeSet.Status.LegacySignerServiceNames = make([]string, 0, len(names))
-	for name := range names {
-		nodeSet.Status.LegacySignerServiceNames = append(nodeSet.Status.LegacySignerServiceNames, name)
+	if !signerDone || !childDone {
+		// expected maps every owned group/global base Service name to its scope label. activeGroupBases is
+		// the subset of scope-"group" bases whose group actually materializes child ChainNodes (instances
+		// > 0) — the only names that can strand a reserved "<base>-<n>" child.
+		expected := map[string]string{}
+		activeGroupBases := map[string]bool{}
+		for i := range nodeSet.Spec.Nodes {
+			base := nodeSet.Spec.Nodes[i].GetServiceName(nodeSet)
+			expected[base] = scopeGroup
+			if nodeSet.Spec.Nodes[i].GetInstances() > 0 {
+				activeGroupBases[base] = true
+			}
+		}
+		for i := range nodeSet.Spec.Ingresses {
+			expected[nodeSet.Spec.Ingresses[i].GetName(nodeSet)] = scopeGlobal
+		}
+		for i := range nodeSet.Spec.GatewayRoutes {
+			expected[fmt.Sprintf("%s-global-%s", nodeSet.GetName(), nodeSet.Spec.GatewayRoutes[i].Name)] = scopeGlobal
+		}
+
+		signerNames := map[string]struct{}{}
+		reservedChildNames := map[string]struct{}{}
+		for i := range services.Items {
+			svc := &services.Items[i]
+			if !metav1.IsControlledBy(svc, nodeSet) {
+				continue
+			}
+			name := svc.GetName()
+			scope, derived := expected[name]
+			if !derived || svc.GetLabels()[controllers.LabelScope] != scope {
+				continue
+			}
+			// validateCosmosigner grandfather set: any owned group/global Service literally named
+			// "<x>-signer"/"<x>-signer-privval" collides with a standalone ChainNode's signer Service,
+			// regardless of scope or instance count, so capture both scopes here.
+			if strings.HasSuffix(name, "-signer") || strings.HasSuffix(name, "-signer-privval") {
+				signerNames[name] = struct{}{}
+			}
+			// validateGroupChildReservedNames grandfather set: only a scope-"group" base with instances > 0
+			// materializes child ChainNodes "<base>-<n>", so restrict to active group bases. A global route
+			// or a zero-instance group ending in -cg/-signer/-seed never bears such children and must NOT be
+			// captured, otherwise a later same-named group would be wrongly grandfathered and strand its
+			// children. The suffix set must mirror ValidateReservedStatefulChildName's guarded bases
+			// (-signer/-cg/-seed) exactly, or an existing group of the un-mirrored shape stops reconciling on
+			// upgrade. (A guarded group's guard Service is scopeCosmoGuard, absent from `expected`, so it is
+			// never seen here — only a group literally named "<x>-cg"/"<x>-signer"/"<x>-seed".)
+			if scope == scopeGroup && activeGroupBases[name] &&
+				(strings.HasSuffix(name, "-cg") || strings.HasSuffix(name, "-signer") || strings.HasSuffix(name, "-seed")) {
+				reservedChildNames[name] = struct{}{}
+			}
+		}
+
+		if !signerDone {
+			nodeSet.Status.LegacySignerServiceNames = sortedKeys(signerNames)
+			nodeSet.Status.LegacySignerServiceNamesInitialized = true
+		}
+		if !childDone {
+			nodeSet.Status.LegacyReservedChildGroupNames = sortedKeys(reservedChildNames)
+			nodeSet.Status.LegacyReservedChildGroupNamesInitialized = true
+		}
 	}
-	sort.Strings(nodeSet.Status.LegacySignerServiceNames)
-	nodeSet.Status.LegacySignerServiceNamesInitialized = true
+
 	if err := r.Status().Update(ctx, nodeSet); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// ownedByNodeSetOrChild reports whether obj is a resource this nodeSet is responsible for: controlled
+// directly by the nodeSet (group/global/guard/cosmoseed/validator Services, global/dashboard Ingresses)
+// or by one of this nodeSet's child ChainNodes (its per-child main/-internal/-p2p/-cg/-cg-peer Services
+// and <child>/<child>-grpc Ingresses). childUIDs is the UID set of the ChainNodes this nodeSet controls;
+// matching the controller ref by UID rather than Kind ensures an unrelated ChainNode's identically-named
+// resource in the same namespace can't make a brand-new collision look pre-existing.
+func ownedByNodeSetOrChild(obj metav1.Object, nodeSet *appsv1.ChainNodeSet, childUIDs map[types.UID]struct{}) bool {
+	if metav1.IsControlledBy(obj, nodeSet) {
+		return true
+	}
+	ref := metav1.GetControllerOf(obj)
+	if ref == nil {
+		return false
+	}
+	_, ok := childUIDs[ref.UID]
+	return ok
+}
+
+// intersectSorted returns the members of candidates present in live, preserving candidates' order
+// (collidingDerivedNames already returns them sorted, so the result stays sorted).
+func intersectSorted(candidates []string, live map[string]struct{}) []string {
+	out := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		if _, ok := live[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// sortedKeys returns the keys of set as a sorted slice (nil-safe, empty set -> empty slice).
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guards cosmoGuardReconcile) error {
