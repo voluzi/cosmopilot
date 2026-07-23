@@ -598,6 +598,9 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 
 	switch status {
 	case datasnapshot.SnapshotNotFound:
+		if cleanupErr := r.cleanUpTarballExport(ctx, chainNode, snapshot); cleanupErr != nil {
+			return false, fmt.Errorf("clean up missing tarball export job: %w", cleanupErr)
+		}
 		retry, updateErr := r.recordTarballExportFailure(ctx, snapshot)
 		if updateErr != nil {
 			return false, updateErr
@@ -607,10 +610,12 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 			appsv1.ReasonTarballExportError,
 			"Tarball %s export job not found; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
 		)
-		r.cleanUpTarballExport(ctx, chainNode, snapshot)
 		return false, nil
 
 	case datasnapshot.SnapshotFailed:
+		if cleanupErr := r.cleanUpTarballExport(ctx, chainNode, snapshot); cleanupErr != nil {
+			return false, fmt.Errorf("clean up failed tarball export job: %w", cleanupErr)
+		}
 		retry, updateErr := r.recordTarballExportFailure(ctx, snapshot)
 		if updateErr != nil {
 			return false, updateErr
@@ -620,7 +625,6 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 			appsv1.ReasonTarballExportError,
 			"Tarball %s export failed; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
 		)
-		r.cleanUpTarballExport(ctx, chainNode, snapshot)
 		return false, nil
 
 	case datasnapshot.SnapshotSucceeded:
@@ -668,20 +672,18 @@ func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.
 	if err := r.Update(ctx, snapshot); err != nil {
 		return err
 	}
-	r.cleanUpTarballExport(ctx, chainNode, snapshot)
+	if err := r.cleanUpTarballExport(ctx, chainNode, snapshot); err != nil {
+		log.FromContext(ctx).Error(err, "failed to clean up tarball export resources", "snapshot", snapshot.GetName())
+	}
 	return nil
 }
 
-func (r *Reconciler) cleanUpTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) {
-	logger := log.FromContext(ctx)
+func (r *Reconciler) cleanUpTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
 	exporter, err := r.getTarballExportProvider(chainNode)
 	if err != nil {
-		logger.Error(err, "failed to get tarball exporter for cleanup", "snapshot", snapshot.GetName())
-		return
+		return err
 	}
-	if err = exporter.CleanupSnapshot(ctx, getTarballName(chainNode, snapshot)); err != nil {
-		logger.Error(err, "failed to clean up tarball export resources", "snapshot", snapshot.GetName())
-	}
+	return exporter.CleanupSnapshot(ctx, getTarballName(chainNode, snapshot))
 }
 
 func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {

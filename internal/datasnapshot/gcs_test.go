@@ -240,6 +240,9 @@ func TestGCSCreateSnapshotRejectsForeignJob(t *testing.T) {
 
 	err = provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot())
 	require.ErrorContains(t, err, "not controlled by snapshot owner")
+
+	_, err = provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	require.NoError(t, err)
 }
 
 func TestGCSCreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {
