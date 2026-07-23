@@ -60,7 +60,7 @@ func TestGuardInheritedLabelsStripsGuardDomain(t *testing.T) {
 		"team":                                 "payments",
 		"route.cosmoguard.voluzi.com/my-route": "true",
 		"cosmoguard.voluzi.com/managed-by":     "cosmoguard",
-		"cosmoguard.voluzi.com/instance":       "chain-fullnodes-cosmoguard",
+		"cosmoguard.voluzi.com/instance":       "chain-fullnodes-cg",
 		// An unrelated user label whose DNS prefix merely ends in the domain must be preserved.
 		"acme-cosmoguard.voluzi.com/tier": "frontend",
 	})

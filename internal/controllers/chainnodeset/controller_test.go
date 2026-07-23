@@ -714,7 +714,15 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
 		Spec: appsv1.ChainNodeSetSpec{
-			Nodes:         []appsv1.NodeGroupSpec{{Name: "fullnodes-signer", Instances: ptr.To(1)}},
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "fullnodes-signer", Instances: ptr.To(1)},
+				// A group literally named "<x>-cg": its base Service ends in the now-reserved "-cg"
+				// suffix and must be grandfathered too.
+				{Name: "sentries-cg", Instances: ptr.To(1)},
+				// A group whose base ends in "-seed" is also child-bearing under a reserved suffix and
+				// must be grandfathered, but must NOT land in the signer set.
+				{Name: "archive-seed", Instances: ptr.To(1)},
+			},
 			Ingresses:     []appsv1.GlobalIngressConfig{{Name: "rpc-signer"}},
 			GatewayRoutes: []appsv1.GlobalGatewayConfig{{Name: "grpc-signer-privval"}},
 		},
@@ -727,18 +735,22 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 		require.NoError(t, controllerutil.SetControllerReference(nodeSet, svc, r.Scheme))
 		return svc
 	}
-	legacyNames := []string{
-		"test-nodeset-fullnodes-signer",
-		"test-nodeset-global-grpc-signer-privval",
-		"test-nodeset-global-rpc-signer",
+	ownedDerived := []struct {
+		name  string
+		scope string
+	}{
+		{"test-nodeset-fullnodes-signer", scopeGroup},
+		{"test-nodeset-global-grpc-signer-privval", scopeGlobal},
+		{"test-nodeset-global-rpc-signer", scopeGlobal},
+		{"test-nodeset-sentries-cg", scopeGroup},
+		{"test-nodeset-archive-seed", scopeGroup},
 	}
-	for i, name := range legacyNames {
-		scope := scopeGlobal
-		if i == 0 {
-			scope = scopeGroup
-		}
-		require.NoError(t, r.Create(context.Background(), ownedService(name, scope)))
+	for _, s := range ownedDerived {
+		require.NoError(t, r.Create(context.Background(), ownedService(s.name, s.scope)))
 	}
+	// A guarded group's CosmoGuard client Service also ends in "-cg" but is scopeCosmoGuard and not a
+	// group base name, so it is not derived by the current spec and must not be grandfathered.
+	require.NoError(t, r.Create(context.Background(), ownedService("test-nodeset-fullnodes-signer-cg", scopeCosmoGuard)))
 	// Owned and correctly scoped is insufficient: this stale name is not derived by the current spec.
 	require.NoError(t, r.Create(context.Background(), ownedService("test-nodeset-unused-signer", scopeGroup)))
 	require.NoError(t, r.Create(context.Background(), &corev1.Service{ObjectMeta: metav1.ObjectMeta{
@@ -752,11 +764,101 @@ func TestInitializeLegacySignerServiceNamesUsesOwnedServices(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, initialized)
 	assert.True(t, nodeSet.Status.LegacySignerServiceNamesInitialized)
-	assert.Equal(t, legacyNames, nodeSet.Status.LegacySignerServiceNames)
+	// LegacySignerServiceNames grandfathers -signer/-signer-privval owned Services in any scope, for
+	// validateCosmosigner.
+	assert.Equal(t, []string{
+		"test-nodeset-fullnodes-signer",
+		"test-nodeset-global-grpc-signer-privval",
+		"test-nodeset-global-rpc-signer",
+	}, nodeSet.Status.LegacySignerServiceNames)
+	// LegacyReservedChildGroupNames grandfathers only scope-"group" bases with instances > 0 ending in
+	// -cg/-signer/-seed (the child-bearing groups), for validateGroupChildReservedNames — never the
+	// global -signer Services, which materialize no child ChainNodes.
+	assert.True(t, nodeSet.Status.LegacyReservedChildGroupNamesInitialized)
+	assert.Equal(t, []string{
+		"test-nodeset-archive-seed",
+		"test-nodeset-fullnodes-signer",
+		"test-nodeset-sentries-cg",
+	}, nodeSet.Status.LegacyReservedChildGroupNames)
 
 	initialized, err = r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
 	require.NoError(t, err)
 	assert.False(t, initialized)
+}
+
+// The no-webhook collision grandfather sets must record a within-CR collision only when the colliding
+// resource already exists as a live owned object — the "already reconciled" signal. Recording it straight
+// from the spec would grandfather a brand-new object's own collision and let it escape
+// validateServiceNameCollisions, whose no-webhook path (old == nil) trusts the recorded set.
+func TestInitializeLegacyCollisionsGatedOnLiveResources(t *testing.T) {
+	// Group "g" child-0 derives Services "test-nodeset-g-0" and "test-nodeset-g-0-internal"; group "g-0"
+	// derives the same two as its base — a within-CR collision between two distinct owners.
+	newNodeSet := func() *appsv1.ChainNodeSet {
+		return &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("nodeset-uid")},
+			Spec: appsv1.ChainNodeSetSpec{
+				Nodes: []appsv1.NodeGroupSpec{
+					{Name: "g", Instances: ptr.To(1)},
+					{Name: "g-0", Instances: ptr.To(1)},
+				},
+			},
+		}
+	}
+	collisionNames := []string{"test-nodeset-g-0", "test-nodeset-g-0-internal"}
+	// Sanity: the spec really derives exactly these collision candidates.
+	svcCandidates, _ := newNodeSet().LegacyDerivedNameCollisions()
+	require.Equal(t, collisionNames, svcCandidates)
+
+	t.Run("brand-new object grandfathers nothing", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		r := newValidatorTestReconciler(t, nodeSet)
+		_, err := r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.True(t, nodeSet.Status.LegacyServiceNameCollisionsInitialized)
+		assert.Empty(t, nodeSet.Status.LegacyServiceNameCollisions,
+			"a first reconcile has materialized no resources, so its own spec collision must not be grandfathered")
+	})
+
+	t.Run("pre-existing collision grandfathered from child-owned resources", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		r := newValidatorTestReconciler(t, nodeSet)
+		// A child ChainNode controlled by THIS nodeSet owns the colliding Services, so they are already live.
+		child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset-g-0", Namespace: "default", UID: types.UID("child-uid"),
+		}}
+		require.NoError(t, controllerutil.SetControllerReference(nodeSet, child, r.Scheme))
+		require.NoError(t, r.Create(context.Background(), child))
+		for _, name := range collisionNames {
+			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+			require.NoError(t, controllerutil.SetControllerReference(child, svc, r.Scheme))
+			require.NoError(t, r.Create(context.Background(), svc))
+		}
+		_, err := r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.Equal(t, collisionNames, nodeSet.Status.LegacyServiceNameCollisions,
+			"a collision already materialized as live owned (child ChainNode) resources is grandfathered")
+	})
+
+	t.Run("foreign ChainNode-owned resources do not grandfather", func(t *testing.T) {
+		nodeSet := newNodeSet()
+		r := newValidatorTestReconciler(t, nodeSet)
+		// A ChainNode NOT controlled by this nodeSet (a different nodeSet's child, or standalone) owns
+		// identically-named Services. Its UID is absent from this nodeSet's child set, so the collision must
+		// stay ungrandfathered and the no-webhook checks still reject it.
+		foreign := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset-g-0", Namespace: "default", UID: types.UID("foreign-uid"),
+		}}
+		require.NoError(t, r.Create(context.Background(), foreign))
+		for _, name := range collisionNames {
+			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+			require.NoError(t, controllerutil.SetControllerReference(foreign, svc, r.Scheme))
+			require.NoError(t, r.Create(context.Background(), svc))
+		}
+		_, err := r.initializeLegacySignerServiceNames(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.Empty(t, nodeSet.Status.LegacyServiceNameCollisions,
+			"resources owned by a ChainNode not controlled by this nodeSet must not be treated as legacy")
+	})
 }
 
 func TestEnsureServiceRefusesForeignOwner(t *testing.T) {

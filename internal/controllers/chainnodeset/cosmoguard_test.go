@@ -139,7 +139,7 @@ func TestGuardParamsUseDiscovery(t *testing.T) {
 	r := newValidatorTestReconciler(t, nodeSet)
 
 	p := r.groupCosmoGuardParams(nodeSet, group)
-	assert.Equal(t, "chain-fullnodes-cosmoguard-upstream.ns.svc.cluster.local", p.DiscoveryHost)
+	assert.Equal(t, "chain-fullnodes-cg-upstream.ns.svc.cluster.local", p.DiscoveryHost)
 	assert.Empty(t, p.UpstreamHost)
 	assert.Equal(t, "rules", p.ConfigMap.Name)
 }
@@ -169,7 +169,7 @@ func TestUpstreamServiceIsHeadless(t *testing.T) {
 func TestServiceSelectsGuard(t *testing.T) {
 	flipped := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "chain-fullnodes", Namespace: "ns"},
-		Spec:       corev1.ServiceSpec{Selector: cosmoguard.InstanceLabels("chain-fullnodes-cosmoguard")},
+		Spec:       corev1.ServiceSpec{Selector: cosmoguard.InstanceLabels("chain-fullnodes-cg")},
 	}
 	raw := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "chain-other", Namespace: "ns"},

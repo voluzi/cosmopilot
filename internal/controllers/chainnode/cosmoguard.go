@@ -34,7 +34,7 @@ func (r *Reconciler) guardPriorityClassName(chainNode *appsv1.ChainNode) string 
 // ChainNodeSet child with an individual ingress/gateway) AND that guard is serving, otherwise the
 // raw node Service. Gating on readiness keeps routes on the raw node until the guard has ready
 // endpoints (make-before-break), so enabling CosmoGuard doesn't rewrite a live route to a guard with
-// zero endpoints. A child fronted only by its group's guard never targets "<child>-cosmoguard".
+// zero endpoints. A child fronted only by its group's guard never targets "<child>-cg".
 func (r *Reconciler) apiServiceName(ctx context.Context, chainNode *appsv1.ChainNode) string {
 	if chainNode.UseInternal() {
 		return fmt.Sprintf("%s-internal", chainNode.GetName())

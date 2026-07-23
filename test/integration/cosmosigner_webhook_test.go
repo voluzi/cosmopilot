@@ -687,7 +687,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 	// ChainNodeSet in envtest blocks a reconcile worker for minutes (its validator can never run
 	// here), starving the other specs.
 
-	It("rejects creating a resource with the reserved -signer name suffix", func() {
+	It("rejects a standalone ChainNode with the reserved -signer name suffix", func() {
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "foo-signer", Namespace: ns.Name},
 			Spec: appsv1.ChainNodeSpec{
@@ -699,11 +699,13 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("reserved"))
 
+		// A ChainNodeSet never names a resource at its bare metadata.name — every derived name carries
+		// a group/signer/seed/ordinal segment — so a set named "bar-signer" has no self-collision and is
+		// accepted. The reserved-suffix rule applies to standalone ChainNode names only; a nodeset's
+		// concrete collisions are covered by the length / service-collision / group-child checks.
 		cs := newNodeSet(nil, []appsv1.NodeGroupSpec{{Name: "fullnodes"}}, nil)
 		cs.ObjectMeta = metav1.ObjectMeta{Name: "bar-signer", Namespace: ns.Name}
-		err = Framework().Client().Create(Framework().Context(), cs)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("reserved"))
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
 	})
 
 	It("rejects nodeGroups on a standalone ChainNode", func() {

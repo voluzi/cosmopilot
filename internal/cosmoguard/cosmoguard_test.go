@@ -16,7 +16,7 @@ import (
 
 func baseParams() Params {
 	return Params{
-		Name:      "chain-group-cosmoguard",
+		Name:      "chain-group-cg",
 		Namespace: "ns",
 		Image:     "ghcr.io/voluzi/cosmoguard:4.0.0",
 		Replicas:  2,
@@ -24,8 +24,8 @@ func baseParams() Params {
 			LocalObjectReference: corev1.LocalObjectReference{Name: "rules"},
 			Key:                  "cosmoguard.yaml",
 		},
-		PeerServiceName:     PeerServiceName("chain-group-cosmoguard"),
-		EncryptionKeySecret: EncryptionKeySecretName("chain-group-cosmoguard"),
+		PeerServiceName:     PeerServiceName("chain-group-cg"),
+		EncryptionKeySecret: EncryptionKeySecretName("chain-group-cg"),
 		Labels: map[string]string{
 			controllers.LabelChainNodeSet:      "chain",
 			controllers.LabelChainNodeSetGroup: "group",
@@ -75,10 +75,10 @@ func TestStatefulSet_StaticUpstream(t *testing.T) {
 
 func TestStatefulSet_DiscoveryUpstream(t *testing.T) {
 	p := baseParams()
-	p.DiscoveryHost = "chain-group-cosmoguard-upstream.ns.svc.cluster.local"
+	p.DiscoveryHost = "chain-group-cg-upstream.ns.svc.cluster.local"
 
 	env := envMap(p.StatefulSet().Spec.Template.Spec.Containers[0].Env)
-	assert.Equal(t, "chain-group-cosmoguard-upstream.ns.svc.cluster.local", env["COSMOGUARD_DISCOVERY_HOST"].Value)
+	assert.Equal(t, "chain-group-cg-upstream.ns.svc.cluster.local", env["COSMOGUARD_DISCOVERY_HOST"].Value)
 	assert.Equal(t, "dns", env["COSMOGUARD_DISCOVERY_TYPE"].Value)
 	assert.NotContains(t, env, "COSMOGUARD_NODE_HOST")
 }
@@ -132,7 +132,7 @@ func TestStatefulSet_ClusterConfig(t *testing.T) {
 	env := envMap(sts.Spec.Template.Spec.Containers[0].Env)
 	assert.Equal(t, "true", env["COSMOGUARD_CLUSTER_ENABLE"].Value)
 	assert.Equal(t, "dns", env["COSMOGUARD_CLUSTER_DISCOVERY_MODE"].Value)
-	assert.Equal(t, "chain-group-cosmoguard-peer.ns.svc.cluster.local", env["COSMOGUARD_CLUSTER_DISCOVERY_DNS_HOST"].Value)
+	assert.Equal(t, "chain-group-cg-peer.ns.svc.cluster.local", env["COSMOGUARD_CLUSTER_DISCOVERY_DNS_HOST"].Value)
 	require.NotNil(t, env["COSMOGUARD_CLUSTER_BIND_ADDR"].ValueFrom)
 	assert.Equal(t, "status.podIP", env["COSMOGUARD_CLUSTER_BIND_ADDR"].ValueFrom.FieldRef.FieldPath)
 	require.NotNil(t, env["COSMOGUARD_CLUSTER_ENCRYPTION_KEY"].ValueFrom)
@@ -142,7 +142,7 @@ func TestStatefulSet_ClusterConfig(t *testing.T) {
 
 func TestPeerService(t *testing.T) {
 	svc := baseParams().PeerService()
-	assert.Equal(t, PeerServiceName("chain-group-cosmoguard"), svc.Name)
+	assert.Equal(t, PeerServiceName("chain-group-cg"), svc.Name)
 	assert.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
 	assert.True(t, svc.Spec.PublishNotReadyAddresses)
 
@@ -176,7 +176,7 @@ func TestStatefulSet_PodSecurityContext(t *testing.T) {
 }
 
 func TestSelectsGuard(t *testing.T) {
-	assert.True(t, SelectsGuard(InstanceLabels("chain-group-cosmoguard")))
+	assert.True(t, SelectsGuard(InstanceLabels("chain-group-cg")))
 	assert.True(t, SelectsGuard(AppLabel()))
 	assert.False(t, SelectsGuard(map[string]string{"nodeset": "chain", "group": "fullnodes"}))
 	assert.False(t, SelectsGuard(nil))
@@ -184,12 +184,12 @@ func TestSelectsGuard(t *testing.T) {
 	// labeling) must NOT match the guard selector — selection is on the guard-private label domain.
 	assert.False(t, SelectsGuard(map[string]string{
 		"app.kubernetes.io/name":     "cosmoguard",
-		"app.kubernetes.io/instance": "chain-group-cosmoguard",
+		"app.kubernetes.io/instance": "chain-group-cg",
 	}))
 }
 
 func TestInstanceLabelsAreGuardPrivate(t *testing.T) {
-	sel := InstanceLabels("chain-group-cosmoguard")
+	sel := InstanceLabels("chain-group-cg")
 	// The selector must not key off the standard app.kubernetes.io labels (inheritable by node pods).
 	assert.NotContains(t, sel, "app.kubernetes.io/name")
 	assert.NotContains(t, sel, "app.kubernetes.io/instance")

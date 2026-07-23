@@ -301,7 +301,7 @@ func TestWithChainNodeSetLabelsStripsCosmoGuardDomain(t *testing.T) {
 			Labels: map[string]string{
 				"team":                             "payments",
 				"cosmoguard.voluzi.com/managed-by": "cosmoguard",
-				"cosmoguard.voluzi.com/instance":   "chain-fullnodes-cosmoguard",
+				"cosmoguard.voluzi.com/instance":   "chain-fullnodes-cg",
 				"route.cosmoguard.voluzi.com/r":    "true",
 			},
 		},

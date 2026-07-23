@@ -13,17 +13,17 @@ import (
 
 func TestValidateCosmosignerReservedNameRejectsStatefulSetChildren(t *testing.T) {
 	for _, name := range []string{"foo-signer-0", "foo-signer-12", "data-foo-signer-0"} {
-		if err := ValidateCosmosignerStatefulChildName(name, true); err == nil {
+		if err := ValidateReservedStatefulChildName(name, true); err == nil {
 			t.Fatalf("metadata.name %q must be reserved for a cosmosigner StatefulSet child", name)
 		}
 	}
 	for _, name := range []string{"foo-signer-canary", "foo-signer-00", "data-foo-signer-01", "foo-signer-2147483648"} {
-		if err := ValidateCosmosignerStatefulChildName(name, true); err != nil {
+		if err := ValidateReservedStatefulChildName(name, true); err != nil {
 			t.Fatalf("noncanonical child name %q must remain available, got %v", name, err)
 		}
 	}
-	if err := ValidateCosmosignerReservedName("foo-signer-0", true); err != nil {
-		t.Fatalf("the shared ChainNodeSet name rule must not reserve raw StatefulSet child names, got %v", err)
+	if err := ValidateReservedResourceName("foo-signer-0", true); err != nil {
+		t.Fatalf("the shared reserved-name rule must not reserve raw StatefulSet child names, got %v", err)
 	}
 }
 

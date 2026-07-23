@@ -2,7 +2,6 @@ package v1
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -540,62 +539,6 @@ func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *No
 // points at the recorded signer identity.
 func (nodeSet *ChainNodeSet) ValidatorGroupResolvesSigningIdentity(group string, cfg *NodeSetValidatorConfig, identity string) bool {
 	return identity != "" && nodeSet.validatorGroupSigningIdentity(group, cfg) == identity
-}
-
-// ValidateCosmosignerReservedNameNoWebhook applies the reserved-name rule on the no-webhook
-// reconcile path, where create cannot be distinguished from update. It enforces only while the
-// object has never been successfully reconciled (isEstablished == false, i.e. empty status), so a
-// pre-existing legacy resource with a reserved name keeps updating while a NEW no-webhook resource
-// named `foo-signer` is rejected before the controllers start fighting over derived names.
-func ValidateCosmosignerReservedNameNoWebhook(name string, isEstablished bool) error {
-	if isEstablished {
-		return nil
-	}
-	return ValidateCosmosignerReservedName(name, true)
-}
-
-// ValidateCosmosignerReservedName rejects creating a ChainNode/ChainNodeSet whose NAME collides
-// with the signer resource names another CR would derive. A CR named `foo` that enables cosmosigner
-// derives `foo-signer` (StatefulSet/ConfigMap/raft Service), `foo-signer-privval` (discovery
-// Service) and the one-shot key-management pods `foo-signer-import`/`foo-signer-pubkey`, while an
-// ordinary ChainNode's own Pod/Service/ConfigMap use the raw CR name. All suffixes are therefore
-// reserved:
-//   - a CR named `foo-signer` collides with signer-enabled `foo`'s StatefulSet/ConfigMap/Service;
-//   - a CR named `foo-signer-privval` (which does NOT end in "-signer") collides with
-//     signer-enabled `foo`'s discovery Service;
-//   - a ChainNode named `foo-signer-import`/`foo-signer-pubkey` would create its node Pod at the
-//     name of signer-enabled `foo`'s one-shot job pod, making the key import fail forever on the
-//     foreign pod.
-//
-// Only enforced on create (isCreate) so pre-existing CRs with such names keep updating; the
-// reconcilers' ownership guards remain the backstop for them.
-func ValidateCosmosignerReservedName(name string, isCreate bool) error {
-	if !isCreate {
-		return nil
-	}
-	for _, suffix := range []string{"-signer", "-signer-privval", "-signer-import", "-signer-pubkey"} {
-		if strings.HasSuffix(name, suffix) {
-			return fmt.Errorf("metadata.name %q is reserved: the \"-signer*\" suffixes collide with cosmosigner-managed resource names derived from other resources; choose a different name", name)
-		}
-	}
-	return nil
-}
-
-// ValidateCosmosignerStatefulChildName rejects a standalone ChainNode name that exactly matches a
-// signer's canonical StatefulSet pod or raft-state PVC name.
-func ValidateCosmosignerStatefulChildName(name string, isCreate bool) error {
-	if !isCreate {
-		return nil
-	}
-	lastDash := strings.LastIndexByte(name, '-')
-	if lastDash < 0 || !strings.HasSuffix(name[:lastDash], "-signer") {
-		return nil
-	}
-	ordinal, err := strconv.ParseInt(name[lastDash+1:], 10, 32)
-	if err != nil || ordinal < 0 || strconv.FormatInt(ordinal, 10) != name[lastDash+1:] {
-		return nil
-	}
-	return fmt.Errorf("metadata.name %q is reserved: it collides with a cosmosigner StatefulSet pod or raft-state PVC name; choose a different name", name)
 }
 
 // validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the
