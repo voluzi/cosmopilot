@@ -13,6 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
 // ApplyOwned creates or updates obj as a resource owned by owner. It refuses to overwrite a
@@ -77,6 +80,101 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	}
 	obj.SetResourceVersion(existing.GetResourceVersion())
 	return c.Update(ctx, obj)
+}
+
+// ApplyOwnedHTTPRoute creates or updates a dashboard HTTPRoute owned by owner. The returned bool is
+// true only after the configured parent reports the current route generation as accepted with all
+// references resolved. Gateway API may be optional in a cluster; a missing CRD returns false.
+func ApplyOwnedHTTPRoute(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, route *gwapiv1.HTTPRoute) (bool, error) {
+	if err := controllerutil.SetControllerReference(owner, route, scheme); err != nil {
+		return false, err
+	}
+
+	existing := &gwapiv1.HTTPRoute{}
+	err := c.Get(ctx, client.ObjectKeyFromObject(route), existing)
+	if err == nil && !metav1.IsControlledBy(existing, owner) {
+		return false, fmt.Errorf("cosmoguard resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", route.GetName())
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		if controllers.IsCRDNotInstalled(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	reconciled, err := controllers.EnsureHTTPRoute(ctx, c, route)
+	if err != nil || !reconciled {
+		return false, err
+	}
+
+	current := &gwapiv1.HTTPRoute{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(route), current); err != nil {
+		if controllers.IsCRDNotInstalled(err) || errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return httpRouteReady(current), nil
+}
+
+func httpRouteReady(route *gwapiv1.HTTPRoute) bool {
+	if len(route.Spec.ParentRefs) == 0 {
+		return false
+	}
+	for _, desired := range route.Spec.ParentRefs {
+		ready := false
+		for _, parent := range route.Status.Parents {
+			if parentReferencesEqual(route.GetNamespace(), desired, parent.ParentRef) && routeParentReady(route.GetGeneration(), parent.Conditions) {
+				ready = true
+				break
+			}
+		}
+		if !ready {
+			return false
+		}
+	}
+	return true
+}
+
+func parentReferencesEqual(namespace string, a, b gwapiv1.ParentReference) bool {
+	defaultGroup := gwapiv1.Group(gwapiv1.GroupName)
+	defaultKind := gwapiv1.Kind("Gateway")
+	defaultNamespace := gwapiv1.Namespace(namespace)
+	return valueOr(a.Group, defaultGroup) == valueOr(b.Group, defaultGroup) &&
+		valueOr(a.Kind, defaultKind) == valueOr(b.Kind, defaultKind) &&
+		valueOr(a.Namespace, defaultNamespace) == valueOr(b.Namespace, defaultNamespace) &&
+		a.Name == b.Name && optionalValuesEqual(a.SectionName, b.SectionName) && optionalValuesEqual(a.Port, b.Port)
+}
+
+func routeParentReady(generation int64, conditions []metav1.Condition) bool {
+	accepted := false
+	resolved := false
+	for _, condition := range conditions {
+		if condition.ObservedGeneration != generation || condition.Status != metav1.ConditionTrue {
+			continue
+		}
+		switch condition.Type {
+		case string(gwapiv1.RouteConditionAccepted):
+			accepted = true
+		case string(gwapiv1.RouteConditionResolvedRefs):
+			resolved = true
+		}
+	}
+	return accepted && resolved
+}
+
+func valueOr[T comparable](value *T, fallback T) T {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func optionalValuesEqual[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // IsServing reports whether the named CosmoGuard StatefulSet has at least one ready replica for its

@@ -27,6 +27,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmoGuardConfig](#cosmoguardconfig)
 * [CosmoGuardDashboardAuth](#cosmoguarddashboardauth)
 * [CosmoGuardDashboardConfig](#cosmoguarddashboardconfig)
+* [CosmoGuardDashboardGateway](#cosmoguarddashboardgateway)
 * [CosmoGuardDashboardIngress](#cosmoguarddashboardingress)
 * [CosmoseedConfig](#cosmoseedconfig)
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
@@ -368,6 +369,7 @@ GatewayRef identifies the Gateway resource routes should attach to.
 | ----- | ----------- | ------ | -------- |
 | name | Name of the Gateway resource. | string | true |
 | namespace | Namespace of the Gateway. Defaults to the resource's namespace. | *string | false |
+| sectionName | SectionName selects a specific listener on the Gateway. When omitted, the route may attach to every listener that accepts it. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -692,6 +694,19 @@ CosmoGuardDashboardConfig configures CosmoGuard's read-only web dashboard.
 | port | Port the dashboard listens on. Defaults to `8080`. | *int32 | false |
 | basicAuth | BasicAuth protects the dashboard with HTTP basic authentication using credentials sourced from a Secret. | *[CosmoGuardDashboardAuth](#cosmoguarddashboardauth) | false |
 | ingress | Ingress exposes the dashboard through an Ingress resource. | *[CosmoGuardDashboardIngress](#cosmoguarddashboardingress) | false |
+| gateway | Gateway exposes the dashboard through Gateway API HTTPRoutes. Mutually exclusive with Ingress. | *[CosmoGuardDashboardGateway](#cosmoguarddashboardgateway) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardGateway
+
+CosmoGuardDashboardGateway exposes the CosmoGuard dashboard through Gateway API HTTPRoutes.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| host | Host is the hostname to route dashboard traffic from. | string | true |
+| gateway | Gateway is the parent Gateway listener for dashboard traffic. | [GatewayRef](#gatewayref) | true |
+| httpRedirect | HTTPRedirect optionally creates a second HTTPRoute that redirects this host to HTTPS. It must select a different listener from Gateway. | *[GatewayRef](#gatewayref) | false |
 
 [Back to Custom Resources](#custom-resources)
 

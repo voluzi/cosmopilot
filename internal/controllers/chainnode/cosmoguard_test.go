@@ -11,12 +11,17 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -31,12 +36,43 @@ func cosmoGuardTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	require.NoError(t, autoscalingv2.AddToScheme(scheme))
 	require.NoError(t, networkingv1.AddToScheme(scheme))
 	require.NoError(t, policyv1.AddToScheme(scheme))
+	require.NoError(t, gwapiv1.Install(scheme))
 
 	return &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
 		Scheme: scheme,
 		opts:   &controllers.ControllerRunOptions{CosmoGuardImage: "ghcr.io/voluzi/cosmoguard:4.0.2"},
 	}
+}
+
+type gatewayUnavailableClient struct {
+	client.Client
+}
+
+func (c gatewayUnavailableClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*gwapiv1.HTTPRoute); ok {
+		return &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: gwapiv1.GroupVersion.Group, Kind: "HTTPRoute"}}
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func dashboardGatewayConfig(redirect bool) *appsv1.CosmoGuardDashboardConfig {
+	httpsSection := "https-dashboard"
+	httpSection := "http"
+	dashboard := &appsv1.CosmoGuardDashboardConfig{
+		Enable: true,
+		Gateway: &appsv1.CosmoGuardDashboardGateway{
+			Host: "guard.example.com",
+			Gateway: appsv1.GatewayRef{
+				Name:        "external",
+				SectionName: &httpsSection,
+			},
+		},
+	}
+	if redirect {
+		dashboard.Gateway.HTTPRedirect = &appsv1.GatewayRef{Name: "external", SectionName: &httpSection}
+	}
+	return dashboard
 }
 
 // markChainNodeSetChild makes a ChainNode look like a generated ChainNodeSet member: it stamps the
@@ -111,6 +147,122 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	secret := &corev1.Secret{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-cluster"}, secret))
 	assert.NotEmpty(t, secret.Data["encryptionKey"])
+}
+
+func TestStandaloneGuardCreatesDashboardHTTPRoutes(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+
+	backend := &gwapiv1.HTTPRoute{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, backend))
+	require.Len(t, backend.Spec.Rules, 1)
+	require.Len(t, backend.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, "node-0-cg", string(backend.Spec.Rules[0].BackendRefs[0].Name))
+	assert.True(t, metav1.IsControlledBy(backend, cn))
+
+	redirect := &gwapiv1.HTTPRoute{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard-http-redirect"}, redirect))
+	assert.True(t, metav1.IsControlledBy(redirect, cn))
+}
+
+func TestStandaloneDashboardGatewayPreservesIngressWhenGatewayAPIUnavailable(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(false)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	ingress := guardIngress("node-0-cg-dashboard", "node-0-cg")
+	require.NoError(t, controllerutil.SetControllerReference(cn, ingress, r.Scheme))
+	require.NoError(t, r.Create(ctx, ingress))
+	r.Client = gatewayUnavailableClient{Client: r.Client}
+
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{}))
+}
+
+func TestStandaloneDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(false)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	ingress := guardIngress("node-0-cg-dashboard", "node-0-cg")
+	require.NoError(t, controllerutil.SetControllerReference(cn, ingress, r.Scheme))
+	require.NoError(t, r.Create(ctx, ingress))
+
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{}))
+
+	route := &gwapiv1.HTTPRoute{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, route))
+	route.Status.Parents = []gwapiv1.RouteParentStatus{{
+		ParentRef:      route.Spec.ParentRefs[0],
+		ControllerName: "example.net/gateway-controller",
+		Conditions: []metav1.Condition{
+			{Type: string(gwapiv1.RouteConditionAccepted), Status: metav1.ConditionTrue, ObservedGeneration: route.Generation},
+			{Type: string(gwapiv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, ObservedGeneration: route.Generation},
+		},
+	}}
+	require.NoError(t, r.Update(ctx, route))
+
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	err := r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestStandaloneDashboardSwitchToIngressRemovesHTTPRoutes(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+
+	cn.Spec.Config.CosmoGuard.Dashboard = &appsv1.CosmoGuardDashboardConfig{
+		Enable:  true,
+		Ingress: &appsv1.CosmoGuardDashboardIngress{Host: "guard.example.com"},
+	}
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, &networkingv1.Ingress{}))
+	for _, name := range []string{"node-0-cg-dashboard", "node-0-cg-dashboard-http-redirect"} {
+		err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, &gwapiv1.HTTPRoute{})
+		assert.True(t, apierrors.IsNotFound(err), "HTTPRoute %s should be removed", name)
+	}
+}
+
+func TestStandaloneDashboardDisablingGatewayRemovesHTTPRoutes(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+
+	cn.Spec.Config.CosmoGuard.Dashboard.Enable = false
+	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+
+	for _, name := range []string{"node-0-cg-dashboard", "node-0-cg-dashboard-http-redirect"} {
+		err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, &gwapiv1.HTTPRoute{})
+		assert.True(t, apierrors.IsNotFound(err), "HTTPRoute %s should be removed", name)
+	}
+}
+
+func TestStandaloneDashboardRejectsForeignHTTPRoute(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(false)
+	foreign := guardedChainNode("other", false)
+	r := cosmoGuardTestReconciler(t, cn, foreign)
+
+	route := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "node-0-cg-dashboard", Namespace: "ns"}}
+	require.NoError(t, controllerutil.SetControllerReference(foreign, route, r.Scheme))
+	require.NoError(t, r.Create(ctx, route))
+
+	err := r.ensureCosmoGuard(ctx, cn)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "managed by another owner")
 }
 
 // TestStandaloneGuardInheritsServiceAccount verifies the standalone guard runs under the node's
@@ -239,7 +391,7 @@ func guardIngress(name, backend string) *networkingv1.Ingress {
 func TestStandaloneRouteTargetsGuardChecksBothTypes(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	cn.Spec.Gateway = &appsv1.GatewayConfig{Host: "rpc.example.com"} // migrated to Gateway
-	ing := guardIngress("node-0", "node-0-cg")               // old guarded Ingress still live
+	ing := guardIngress("node-0", "node-0-cg")                       // old guarded Ingress still live
 
 	r := cosmoGuardTestReconciler(t, ing)
 	assert.True(t, r.standaloneRouteTargetsGuard(context.Background(), cn),
@@ -390,6 +542,7 @@ func TestStandaloneGuardManagedUsesOwnerRef(t *testing.T) {
 // TestDisableGuardUndeploys verifies disabling CosmoGuard removes the previously-created guard.
 func TestDisableGuardUndeploys(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
 	r := cosmoGuardTestReconciler(t, cn)
 	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
 
@@ -408,4 +561,8 @@ func TestDisableGuardUndeploys(t *testing.T) {
 	assert.Error(t, err, "peer service should be removed when disabled")
 	err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-cluster"}, &corev1.Secret{})
 	assert.Error(t, err, "encryption secret should be removed when disabled")
+	for _, name := range []string{"node-0-cg-dashboard", "node-0-cg-dashboard-http-redirect"} {
+		err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: name}, &gwapiv1.HTTPRoute{})
+		assert.True(t, apierrors.IsNotFound(err), "dashboard HTTPRoute %s should be removed when disabled", name)
+	}
 }

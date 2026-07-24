@@ -538,7 +538,8 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
 	}
 
-	if auth := cfg.GetCosmoGuardDashboard().BasicAuth; auth != nil {
+	dashboard := cfg.GetCosmoGuardDashboard()
+	if auth := dashboard.BasicAuth; auth != nil {
 		if auth.Username.Name == "" || auth.Username.Key == "" {
 			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.username must reference both a Secret name and key")
 		}
@@ -546,7 +547,53 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.password must reference both a Secret name and key")
 		}
 	}
+	if dashboard.Ingress != nil && dashboard.Gateway != nil {
+		return fmt.Errorf("cosmoGuard.dashboard.ingress and cosmoGuard.dashboard.gateway are mutually exclusive")
+	}
+	if gateway := dashboard.Gateway; gateway != nil {
+		if strings.TrimSpace(gateway.Host) == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.host must not be empty")
+		}
+		if err := validateCosmoGuardDashboardGatewayRef("gateway", gateway.Gateway); err != nil {
+			return err
+		}
+		if gateway.HTTPRedirect != nil {
+			if gateway.Gateway.SectionName == nil || gateway.HTTPRedirect.SectionName == nil {
+				return fmt.Errorf("cosmoGuard.dashboard.gateway gateway and httpRedirect must both set sectionName")
+			}
+			if err := validateCosmoGuardDashboardGatewayRef("httpRedirect", *gateway.HTTPRedirect); err != nil {
+				return err
+			}
+			if gateway.Gateway.sameParent(*gateway.HTTPRedirect) {
+				return fmt.Errorf("cosmoGuard.dashboard.gateway.httpRedirect must select a different Gateway listener")
+			}
+		}
+	}
 	return nil
+}
+
+func validateCosmoGuardDashboardGatewayRef(path string, ref GatewayRef) error {
+	if strings.TrimSpace(ref.Name) == "" {
+		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.name must not be empty", path)
+	}
+	if ref.Namespace != nil && strings.TrimSpace(*ref.Namespace) == "" {
+		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.namespace must not be empty", path)
+	}
+	if ref.SectionName != nil && strings.TrimSpace(*ref.SectionName) == "" {
+		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.sectionName must not be empty", path)
+	}
+	return nil
+}
+
+func (g GatewayRef) sameParent(other GatewayRef) bool {
+	return g.Name == other.Name && optionalStringEqual(g.Namespace, other.Namespace) && optionalStringEqual(g.SectionName, other.SectionName)
+}
+
+func optionalStringEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (cfg *Config) GetHaltHeight() int64 {
@@ -606,14 +653,8 @@ func (exp *ExposeConfig) UsesGateway() bool {
 }
 
 func (exp *ExposeConfig) GetGatewayParentRef() gwapiv1.ParentReference {
-	ref := gwapiv1.ParentReference{
-		Name: gwapiv1.ObjectName(exp.Gateway.Name),
-		Port: ptr.To(gwapiv1.PortNumber(exp.GetGatewayPort())),
-	}
-	if exp.Gateway.Namespace != nil {
-		ns := gwapiv1.Namespace(*exp.Gateway.Namespace)
-		ref.Namespace = &ns
-	}
+	ref := exp.Gateway.GatewayRef.GetParentRef()
+	ref.Port = ptr.To(gwapiv1.PortNumber(exp.GetGatewayPort()))
 	return ref
 }
 

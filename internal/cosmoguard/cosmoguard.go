@@ -1,6 +1,6 @@
 // Package cosmoguard renders the Kubernetes resources for a clustered CosmoGuard deployment
-// (StatefulSet, client Service, headless peer Service, HorizontalPodAutoscaler and an optional
-// dashboard Ingress) that fronts one or more blockchain nodes.
+// (StatefulSet, client Service, headless peer Service, HorizontalPodAutoscaler and optional
+// dashboard routes) that fronts one or more blockchain nodes.
 //
 // CosmoGuard runs as a StatefulSet so its embedded olric cache cluster gets stable per-pod DNS:
 // every replica shares one distributed cache, so a request cached by one pod is served from cache
@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -199,6 +200,7 @@ type DashboardParams struct {
 	AuthUser     *corev1.SecretKeySelector
 	AuthPassword *corev1.SecretKeySelector
 	Ingress      *DashboardIngressParams
+	Gateway      *DashboardGatewayParams
 }
 
 // DashboardIngressParams configures an Ingress exposing the dashboard.
@@ -207,6 +209,13 @@ type DashboardIngressParams struct {
 	IngressClassName *string
 	Annotations      map[string]string
 	TLSSecretName    *string
+}
+
+// DashboardGatewayParams configures HTTPRoutes exposing the dashboard.
+type DashboardGatewayParams struct {
+	Host                  string
+	ParentRef             gwapiv1.ParentReference
+	HTTPRedirectParentRef *gwapiv1.ParentReference
 }
 
 // AutoscalingParams configures the HorizontalPodAutoscaler for a CosmoGuard Deployment.
@@ -606,6 +615,61 @@ func (p Params) DashboardIngress() *networkingv1.Ingress {
 		obj.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{ing.Host}, SecretName: *ing.TLSSecretName}}
 	}
 	return obj
+}
+
+// DashboardHTTPRoutes renders the dashboard backend route and its optional HTTP-to-HTTPS redirect.
+func (p Params) DashboardHTTPRoutes() []*gwapiv1.HTTPRoute {
+	if p.Dashboard == nil || p.Dashboard.Gateway == nil {
+		return nil
+	}
+	gateway := p.Dashboard.Gateway
+	hostname := gwapiv1.Hostname(gateway.Host)
+	port := gwapiv1.PortNumber(p.Dashboard.Port)
+	routes := []*gwapiv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      p.DashboardIngressName(),
+				Namespace: p.Namespace,
+				Labels:    p.podLabels(),
+			},
+			Spec: gwapiv1.HTTPRouteSpec{
+				CommonRouteSpec: gwapiv1.CommonRouteSpec{ParentRefs: []gwapiv1.ParentReference{gateway.ParentRef}},
+				Hostnames:       []gwapiv1.Hostname{hostname},
+				Rules: []gwapiv1.HTTPRouteRule{{
+					BackendRefs: []gwapiv1.HTTPBackendRef{{
+						BackendRef: gwapiv1.BackendRef{BackendObjectReference: gwapiv1.BackendObjectReference{
+							Name: gwapiv1.ObjectName(p.Name),
+							Port: &port,
+						}},
+					}},
+				}},
+			},
+		},
+	}
+	if gateway.HTTPRedirectParentRef == nil {
+		return routes
+	}
+	routes = append(routes, &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      p.DashboardIngressName() + "-http-redirect",
+			Namespace: p.Namespace,
+			Labels:    p.podLabels(),
+		},
+		Spec: gwapiv1.HTTPRouteSpec{
+			CommonRouteSpec: gwapiv1.CommonRouteSpec{ParentRefs: []gwapiv1.ParentReference{*gateway.HTTPRedirectParentRef}},
+			Hostnames:       []gwapiv1.Hostname{hostname},
+			Rules: []gwapiv1.HTTPRouteRule{{
+				Filters: []gwapiv1.HTTPRouteFilter{{
+					Type: gwapiv1.HTTPRouteFilterRequestRedirect,
+					RequestRedirect: &gwapiv1.HTTPRequestRedirectFilter{
+						Scheme:     ptr.To("https"),
+						StatusCode: ptr.To(301),
+					},
+				}},
+			}},
+		},
+	})
+	return routes
 }
 
 func resourceUtilizationMetric(name corev1.ResourceName, target *int32) autoscalingv2.MetricSpec {

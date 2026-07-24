@@ -81,6 +81,55 @@ func TestValidateCosmoGuardDashboardBasicAuth(t *testing.T) {
 	assert.NoError(t, withAuth(nil).ValidateCosmoGuardDashboard())
 }
 
+func TestValidateCosmoGuardDashboardExposure(t *testing.T) {
+	section := "https"
+	httpSection := "http"
+	gateway := func() *CosmoGuardDashboardGateway {
+		return &CosmoGuardDashboardGateway{
+			Host: "guard.example.com",
+			Gateway: GatewayRef{
+				Name:        "external",
+				SectionName: &section,
+			},
+		}
+	}
+	config := func(dashboard *CosmoGuardDashboardConfig) *Config {
+		return &Config{CosmoGuard: &CosmoGuardConfig{Enable: true, Dashboard: dashboard}}
+	}
+
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: gateway()}).ValidateCosmoGuardDashboard())
+
+	both := gateway()
+	err := config(&CosmoGuardDashboardConfig{
+		Enable:  true,
+		Ingress: &CosmoGuardDashboardIngress{Host: "guard.example.com"},
+		Gateway: both,
+	}).ValidateCosmoGuardDashboard()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+
+	missingHost := gateway()
+	missingHost.Host = ""
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: missingHost}).ValidateCosmoGuardDashboard())
+
+	missingGatewayName := gateway()
+	missingGatewayName.Gateway.Name = ""
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: missingGatewayName}).ValidateCosmoGuardDashboard())
+
+	redirectWithoutSections := gateway()
+	redirectWithoutSections.Gateway.SectionName = nil
+	redirectWithoutSections.HTTPRedirect = &GatewayRef{Name: "external"}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: redirectWithoutSections}).ValidateCosmoGuardDashboard())
+
+	validRedirect := gateway()
+	validRedirect.HTTPRedirect = &GatewayRef{Name: "external", SectionName: &httpSection}
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: validRedirect}).ValidateCosmoGuardDashboard())
+
+	sameListener := gateway()
+	sameListener.HTTPRedirect = &GatewayRef{Name: "external", SectionName: &section}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: sameListener}).ValidateCosmoGuardDashboard())
+}
+
 func autoscaledConfig(res *corev1.ResourceRequirements) *Config {
 	return &Config{
 		CosmoGuard: &CosmoGuardConfig{

@@ -767,11 +767,19 @@ type IndividualIngressConfig struct {
 // GatewayRef identifies the Gateway resource routes should attach to.
 type GatewayRef struct {
 	// Name of the Gateway resource.
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Namespace of the Gateway. Defaults to the resource's namespace.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
 	Namespace *string `json:"namespace,omitempty"`
+
+	// SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+	// every listener that accepts it.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	SectionName *string `json:"sectionName,omitempty"`
 }
 
 // GatewayConfig configures Gateway API HTTPRoute/GRPCRoute resources

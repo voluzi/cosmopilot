@@ -313,7 +313,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	if err := r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress); err != nil {
+	if err := r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress, guards.expectedRoutes); err != nil {
 		return ctrl.Result{}, err
 	}
 

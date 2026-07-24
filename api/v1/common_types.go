@@ -368,6 +368,7 @@ type CosmoGuardAutoscalingConfig struct {
 }
 
 // CosmoGuardDashboardConfig configures CosmoGuard's read-only web dashboard.
+// +kubebuilder:validation:XValidation:rule="!(has(self.ingress) && has(self.gateway))",message="ingress and gateway are mutually exclusive"
 type CosmoGuardDashboardConfig struct {
 	// Whether to enable the CosmoGuard dashboard.
 	Enable bool `json:"enable"`
@@ -386,6 +387,10 @@ type CosmoGuardDashboardConfig struct {
 	// Ingress exposes the dashboard through an Ingress resource.
 	// +optional
 	Ingress *CosmoGuardDashboardIngress `json:"ingress,omitempty"`
+
+	// Gateway exposes the dashboard through Gateway API HTTPRoutes. Mutually exclusive with Ingress.
+	// +optional
+	Gateway *CosmoGuardDashboardGateway `json:"gateway,omitempty"`
 }
 
 // CosmoGuardDashboardAuth references Secret keys holding basic-auth credentials for the dashboard.
@@ -414,6 +419,21 @@ type CosmoGuardDashboardIngress struct {
 	// TLS enables TLS for the dashboard Ingress using the given secret name for the certificate.
 	// +optional
 	TLSSecretName *string `json:"tlsSecretName,omitempty"`
+}
+
+// CosmoGuardDashboardGateway exposes the CosmoGuard dashboard through Gateway API HTTPRoutes.
+type CosmoGuardDashboardGateway struct {
+	// Host is the hostname to route dashboard traffic from.
+	// +kubebuilder:validation:MinLength=1
+	Host string `json:"host"`
+
+	// Gateway is the parent Gateway listener for dashboard traffic.
+	Gateway GatewayRef `json:"gateway"`
+
+	// HTTPRedirect optionally creates a second HTTPRoute that redirects this host to HTTPS. It must
+	// select a different listener from Gateway.
+	// +optional
+	HTTPRedirect *GatewayRef `json:"httpRedirect,omitempty"`
 }
 
 // SidecarSpec allows configuring additional containers to run alongside the node.

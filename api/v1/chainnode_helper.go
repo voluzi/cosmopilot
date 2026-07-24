@@ -516,12 +516,5 @@ func (chainNode *ChainNode) CosmoGuardName() string {
 }
 
 func (chainNode *ChainNode) GetGatewayParentRef() gwapiv1.ParentReference {
-	ref := gwapiv1.ParentReference{
-		Name: gwapiv1.ObjectName(chainNode.Spec.Gateway.Gateway.Name),
-	}
-	if chainNode.Spec.Gateway.Gateway.Namespace != nil {
-		ns := gwapiv1.Namespace(*chainNode.Spec.Gateway.Gateway.Namespace)
-		ref.Namespace = &ns
-	}
-	return ref
+	return chainNode.Spec.Gateway.Gateway.GetParentRef()
 }

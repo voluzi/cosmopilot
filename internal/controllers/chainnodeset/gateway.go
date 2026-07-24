@@ -259,15 +259,7 @@ func (r *Reconciler) listChainNodeSetGatewayRoutes(ctx context.Context, nodeSet 
 
 func (r *Reconciler) getCosmoseedHTTPRoute(nodeSet *appsv1.ChainNodeSet) (*gwapiv1.HTTPRoute, error) {
 	gw := nodeSet.Spec.Cosmoseed.Gateway
-	var namespace *gwapiv1.Namespace
-	if gw.Gateway.Namespace != nil {
-		ns := gwapiv1.Namespace(*gw.Gateway.Namespace)
-		namespace = &ns
-	}
-	parentRef := gwapiv1.ParentReference{
-		Name:      gwapiv1.ObjectName(gw.Gateway.Name),
-		Namespace: namespace,
-	}
+	parentRef := gw.Gateway.GetParentRef()
 	hostname := gwapiv1.Hostname(gw.Host)
 	svcName := fmt.Sprintf("%s-seed", nodeSet.GetName())
 	port := gwapiv1.PortNumber(cosmoseedHttpPort)

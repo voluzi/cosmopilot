@@ -189,10 +189,12 @@ spec:
                         properties:
                           name:
                             description: Name of the Gateway resource.
+                            minLength: 1
                             type: string
                           namespace:
                             description: Namespace of the Gateway. Defaults to the
                               resource's namespace.
+                            minLength: 1
                             type: string
                           port:
                             default: 26656
@@ -207,6 +209,12 @@ spec:
                               The Gateway must be configured with a matching TCP listener for each port.
                             format: int32
                             type: integer
+                          sectionName:
+                            description: |-
+                              SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                              every listener that accepts it.
+                            minLength: 1
+                            type: string
                         required:
                         - name
                         type: object
@@ -237,10 +245,18 @@ spec:
                         properties:
                           name:
                             description: Name of the Gateway resource.
+                            minLength: 1
                             type: string
                           namespace:
                             description: Namespace of the Gateway. Defaults to the
                               resource's namespace.
+                            minLength: 1
+                            type: string
+                          sectionName:
+                            description: |-
+                              SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                              every listener that accepts it.
+                            minLength: 1
                             type: string
                         required:
                         - name
@@ -683,10 +699,18 @@ spec:
                       properties:
                         name:
                           description: Name of the Gateway resource.
+                          minLength: 1
                           type: string
                         namespace:
                           description: Namespace of the Gateway. Defaults to the resource's
                             namespace.
+                          minLength: 1
+                          type: string
+                        sectionName:
+                          description: |-
+                            SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                            every listener that accepts it.
+                          minLength: 1
                           type: string
                       required:
                       - name
@@ -1969,6 +1993,65 @@ spec:
                                 enable:
                                   description: Whether to enable the CosmoGuard dashboard.
                                   type: boolean
+                                gateway:
+                                  description: Gateway exposes the dashboard through
+                                    Gateway API HTTPRoutes. Mutually exclusive with
+                                    Ingress.
+                                  properties:
+                                    gateway:
+                                      description: Gateway is the parent Gateway listener
+                                        for dashboard traffic.
+                                      properties:
+                                        name:
+                                          description: Name of the Gateway resource.
+                                          minLength: 1
+                                          type: string
+                                        namespace:
+                                          description: Namespace of the Gateway. Defaults
+                                            to the resource's namespace.
+                                          minLength: 1
+                                          type: string
+                                        sectionName:
+                                          description: |-
+                                            SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                            every listener that accepts it.
+                                          minLength: 1
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                    host:
+                                      description: Host is the hostname to route dashboard
+                                        traffic from.
+                                      minLength: 1
+                                      type: string
+                                    httpRedirect:
+                                      description: |-
+                                        HTTPRedirect optionally creates a second HTTPRoute that redirects this host to HTTPS. It must
+                                        select a different listener from Gateway.
+                                      properties:
+                                        name:
+                                          description: Name of the Gateway resource.
+                                          minLength: 1
+                                          type: string
+                                        namespace:
+                                          description: Namespace of the Gateway. Defaults
+                                            to the resource's namespace.
+                                          minLength: 1
+                                          type: string
+                                        sectionName:
+                                          description: |-
+                                            SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                            every listener that accepts it.
+                                          minLength: 1
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                  required:
+                                  - gateway
+                                  - host
+                                  type: object
                                 ingress:
                                   description: Ingress exposes the dashboard through
                                     an Ingress resource.
@@ -2006,6 +2089,9 @@ spec:
                               required:
                               - enable
                               type: object
+                              x-kubernetes-validations:
+                              - message: ingress and gateway are mutually exclusive
+                                rule: '!(has(self.ingress) && has(self.gateway))'
                             enable:
                               description: Whether to enable CosmoGuard on this node
                                 or group.
@@ -3789,10 +3875,12 @@ spec:
                           properties:
                             name:
                               description: Name of the Gateway resource.
+                              minLength: 1
                               type: string
                             namespace:
                               description: Namespace of the Gateway. Defaults to the
                                 resource's namespace.
+                              minLength: 1
                               type: string
                             port:
                               default: 26656
@@ -3807,6 +3895,12 @@ spec:
                                 The Gateway must be configured with a matching TCP listener for each port.
                               format: int32
                               type: integer
+                            sectionName:
+                              description: |-
+                                SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                every listener that accepts it.
+                              minLength: 1
+                              type: string
                           required:
                           - name
                           type: object
@@ -3860,10 +3954,18 @@ spec:
                           properties:
                             name:
                               description: Name of the Gateway resource.
+                              minLength: 1
                               type: string
                             namespace:
                               description: Namespace of the Gateway. Defaults to the
                                 resource's namespace.
+                              minLength: 1
+                              type: string
+                            sectionName:
+                              description: |-
+                                SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                every listener that accepts it.
+                              minLength: 1
                               type: string
                           required:
                           - name
@@ -6868,6 +6970,65 @@ spec:
                                       description: Whether to enable the CosmoGuard
                                         dashboard.
                                       type: boolean
+                                    gateway:
+                                      description: Gateway exposes the dashboard through
+                                        Gateway API HTTPRoutes. Mutually exclusive
+                                        with Ingress.
+                                      properties:
+                                        gateway:
+                                          description: Gateway is the parent Gateway
+                                            listener for dashboard traffic.
+                                          properties:
+                                            name:
+                                              description: Name of the Gateway resource.
+                                              minLength: 1
+                                              type: string
+                                            namespace:
+                                              description: Namespace of the Gateway.
+                                                Defaults to the resource's namespace.
+                                              minLength: 1
+                                              type: string
+                                            sectionName:
+                                              description: |-
+                                                SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                                every listener that accepts it.
+                                              minLength: 1
+                                              type: string
+                                          required:
+                                          - name
+                                          type: object
+                                        host:
+                                          description: Host is the hostname to route
+                                            dashboard traffic from.
+                                          minLength: 1
+                                          type: string
+                                        httpRedirect:
+                                          description: |-
+                                            HTTPRedirect optionally creates a second HTTPRoute that redirects this host to HTTPS. It must
+                                            select a different listener from Gateway.
+                                          properties:
+                                            name:
+                                              description: Name of the Gateway resource.
+                                              minLength: 1
+                                              type: string
+                                            namespace:
+                                              description: Namespace of the Gateway.
+                                                Defaults to the resource's namespace.
+                                              minLength: 1
+                                              type: string
+                                            sectionName:
+                                              description: |-
+                                                SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                                every listener that accepts it.
+                                              minLength: 1
+                                              type: string
+                                          required:
+                                          - name
+                                          type: object
+                                      required:
+                                      - gateway
+                                      - host
+                                      type: object
                                     ingress:
                                       description: Ingress exposes the dashboard through
                                         an Ingress resource.
@@ -6905,6 +7066,9 @@ spec:
                                   required:
                                   - enable
                                   type: object
+                                  x-kubernetes-validations:
+                                  - message: ingress and gateway are mutually exclusive
+                                    rule: '!(has(self.ingress) && has(self.gateway))'
                                 enable:
                                   description: Whether to enable CosmoGuard on this
                                     node or group.
@@ -12523,6 +12687,65 @@ spec:
                               enable:
                                 description: Whether to enable the CosmoGuard dashboard.
                                 type: boolean
+                              gateway:
+                                description: Gateway exposes the dashboard through
+                                  Gateway API HTTPRoutes. Mutually exclusive with
+                                  Ingress.
+                                properties:
+                                  gateway:
+                                    description: Gateway is the parent Gateway listener
+                                      for dashboard traffic.
+                                    properties:
+                                      name:
+                                        description: Name of the Gateway resource.
+                                        minLength: 1
+                                        type: string
+                                      namespace:
+                                        description: Namespace of the Gateway. Defaults
+                                          to the resource's namespace.
+                                        minLength: 1
+                                        type: string
+                                      sectionName:
+                                        description: |-
+                                          SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                          every listener that accepts it.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  host:
+                                    description: Host is the hostname to route dashboard
+                                      traffic from.
+                                    minLength: 1
+                                    type: string
+                                  httpRedirect:
+                                    description: |-
+                                      HTTPRedirect optionally creates a second HTTPRoute that redirects this host to HTTPS. It must
+                                      select a different listener from Gateway.
+                                    properties:
+                                      name:
+                                        description: Name of the Gateway resource.
+                                        minLength: 1
+                                        type: string
+                                      namespace:
+                                        description: Namespace of the Gateway. Defaults
+                                          to the resource's namespace.
+                                        minLength: 1
+                                        type: string
+                                      sectionName:
+                                        description: |-
+                                          SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+                                          every listener that accepts it.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                required:
+                                - gateway
+                                - host
+                                type: object
                               ingress:
                                 description: Ingress exposes the dashboard through
                                   an Ingress resource.
@@ -12560,6 +12783,9 @@ spec:
                             required:
                             - enable
                             type: object
+                            x-kubernetes-validations:
+                            - message: ingress and gateway are mutually exclusive
+                              rule: '!(has(self.ingress) && has(self.gateway))'
                           enable:
                             description: Whether to enable CosmoGuard on this node
                               or group.

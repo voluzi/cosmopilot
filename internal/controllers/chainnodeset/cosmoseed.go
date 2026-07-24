@@ -943,19 +943,11 @@ func (r *Reconciler) getCosmoseedIngress(nodeSet *v1.ChainNodeSet) (*netv1.Ingre
 func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcName string, index int) (*gwapiv1a2.TCPRoute, error) {
 	port := gwapiv1.PortNumber(cosmoseedP2pPort)
 	gwRef := nodeSet.Spec.Cosmoseed.Expose.Gateway
-	var namespace *gwapiv1.Namespace
-	if gwRef.Namespace != nil {
-		ns := gwapiv1.Namespace(*gwRef.Namespace)
-		namespace = &ns
-	}
 	// Each seed instance attaches to a distinct Gateway listener at base+index so multiple
 	// seeds can coexist on a single Gateway (L4 routes have no SNI to disambiguate).
 	listenerPort := nodeSet.Spec.Cosmoseed.Expose.GetGatewayPort() + int32(index)
-	parentRef := gwapiv1.ParentReference{
-		Name:      gwapiv1.ObjectName(gwRef.Name),
-		Namespace: namespace,
-		Port:      ptr.To(gwapiv1.PortNumber(listenerPort)),
-	}
+	parentRef := gwRef.GatewayRef.GetParentRef()
+	parentRef.Port = ptr.To(gwapiv1.PortNumber(listenerPort))
 
 	route := &gwapiv1a2.TCPRoute{
 		ObjectMeta: metav1.ObjectMeta{

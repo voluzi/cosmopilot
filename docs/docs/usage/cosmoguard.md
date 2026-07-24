@@ -119,7 +119,8 @@ When autoscaling is enabled the HPA owns the replica count (the `replicas` field
 
 ## Dashboard
 
-CosmoGuard ships a read-only web dashboard. Expose it (opt-in, off by default):
+CosmoGuard ships a read-only web dashboard. Enable it and optionally expose it through either an
+Ingress or Gateway API HTTPRoutes (opt-in, off by default):
 
 ```yaml
 config:
@@ -143,6 +144,35 @@ config:
         ingressClassName: nginx
         tlsSecretName: cosmoguard-dashboard-tls
 ```
+
+For Gateway API, select the HTTPS listener for the dashboard route and optionally a separate HTTP
+listener for an HTTP-to-HTTPS redirect:
+
+```yaml
+config:
+  cosmoGuard:
+    enable: true
+    config:
+      name: cosmoguard-config
+      key: cosmoguard.yaml
+    dashboard:
+      enable: true
+      gateway:
+        host: cosmoguard.example.com
+        gateway:
+          name: external
+          namespace: gateway-system     # Optional: defaults to the node's namespace.
+          sectionName: https-dashboard
+        httpRedirect:                   # Optional: creates a 301 redirect to HTTPS.
+          name: external
+          namespace: gateway-system
+          sectionName: http
+```
+
+`ingress` and `gateway` are mutually exclusive. When `httpRedirect` is configured, both parent
+references must set `sectionName` and select different listeners. Cosmopilot owns the dashboard
+route resources and performs Ingress/Gateway changes make-before-break; if Gateway API CRDs are not
+installed, it preserves an existing dashboard Ingress instead of removing the working exposure.
 
 ## Customizing Rules
 
