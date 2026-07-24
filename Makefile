@@ -87,7 +87,7 @@ docs: crd-to-markdown ## Generate markdown docs of CRD spec.
 
 .PHONY: test.unit
 test.unit: manifests generate fmt vet ## Run unit tests.
-	go test ./api/... ./cmd/... ./internal/... ./pkg/... -coverprofile cover.out
+	go test ./api/... ./cmd/... ./helm/... ./internal/... ./pkg/... -coverprofile cover.out
 
 .PHONY: test.integration
 test.integration: FOCUS?=
