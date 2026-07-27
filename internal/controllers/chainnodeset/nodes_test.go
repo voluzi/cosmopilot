@@ -224,3 +224,56 @@ func TestGetNodeSpecStampsValidatorFalseLabel(t *testing.T) {
 	assert.Equal(t, controllers.StringValueFalse, node.Labels[controllers.LabelChainNodeSetValidator],
 		"regular node must be stamped validator=false even when the parent has a user validator=true label")
 }
+
+// TestGetNodeSpecStripsDashboardExposureFromChildren verifies a generated child does not inherit the
+// group's dashboard Ingress/Gateway. The group's single dashboard host is published once by the
+// group guard; a child that manages its own guard (one declaring individual routes) would otherwise
+// publish a competing backend for that same host, leaving route precedence to pick a winner.
+// The rest of the dashboard config is inherited so the child's own dashboard still runs.
+func TestGetNodeSpecStripsDashboardExposureFromChildren(t *testing.T) {
+	httpsSection := "https-dashboard"
+	group := appsv1.NodeGroupSpec{
+		Name:      "fullnodes",
+		Instances: ptr.To(2),
+		Config: &appsv1.Config{
+			CosmoGuard: &appsv1.CosmoGuardConfig{
+				Enable: true,
+				Dashboard: &appsv1.CosmoGuardDashboardConfig{
+					Enable: true,
+					Port:   ptr.To[int32](9100),
+					Ingress: &appsv1.CosmoGuardDashboardIngress{
+						Host: "guard.example.com",
+					},
+					Gateway: &appsv1.CosmoGuardDashboardGateway{
+						Host:    "guard.example.com",
+						Gateway: appsv1.GatewayRef{Name: "external", SectionName: &httpsSection},
+					},
+				},
+			},
+		},
+	}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "chain", Namespace: "default", UID: types.UID("u")},
+		Spec:       appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{group}},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	node, err := r.getNodeSpec(nodeSet, nodeSet.Spec.Nodes[0], 0)
+	require.NoError(t, err)
+
+	childDashboard := node.Spec.Config.GetCosmoGuardDashboard()
+	require.NotNil(t, childDashboard, "the dashboard itself is still inherited")
+	assert.Nil(t, childDashboard.Ingress, "child must not inherit the group dashboard Ingress")
+	assert.Nil(t, childDashboard.Gateway, "child must not inherit the group dashboard Gateway")
+	assert.True(t, childDashboard.Enable, "the dashboard still runs on the child's own guard")
+	require.NotNil(t, childDashboard.Port)
+	assert.Equal(t, int32(9100), *childDashboard.Port, "port is inherited unchanged")
+
+	// The group's own spec must be untouched — the strip works on a copy, so the ChainNodeSet
+	// controller still renders the group guard's dashboard exposure from it.
+	assert.NotNil(t, nodeSet.Spec.Nodes[0].Config.GetCosmoGuardDashboard().Ingress,
+		"stripping the child copy must not mutate the group config")
+	assert.NotNil(t, nodeSet.Spec.Nodes[0].Config.GetCosmoGuardDashboard().Gateway,
+		"stripping the child copy must not mutate the group config")
+}
