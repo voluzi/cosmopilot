@@ -255,6 +255,9 @@ func TestGroupDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t *test
 	require.NoError(t, err)
 	require.NoError(t, r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress, guards.expectedRoutes))
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{}))
+	// Route acceptance arrives as an HTTPRoute STATUS update, which no watch here admits, so the
+	// pending flag is what makes Reconcile re-check sooner than the reconcile period.
+	assert.True(t, guards.routesPending, "an unaccepted route must request a prompt re-check")
 
 	route := &gwapiv1.HTTPRoute{}
 	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-cg-dashboard"}, route))
@@ -273,6 +276,7 @@ func TestGroupDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t *test
 	require.NoError(t, r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress, guards.expectedRoutes))
 	err = r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{})
 	assert.True(t, apierrors.IsNotFound(err))
+	assert.False(t, guards.routesPending, "an accepted route falls back to the normal reconcile period")
 }
 
 func TestGroupDashboardSwitchToIngressRemovesHTTPRoutes(t *testing.T) {

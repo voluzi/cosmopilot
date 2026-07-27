@@ -369,7 +369,7 @@ GatewayRef identifies the Gateway resource routes should attach to.
 | ----- | ----------- | ------ | -------- |
 | name | Name of the Gateway resource. | string | true |
 | namespace | Namespace of the Gateway. Defaults to the resource's namespace. | *string | false |
-| sectionName | SectionName selects a specific listener on the Gateway. When omitted, the route may attach to every listener that accepts it. | *string | false |
+| sectionName | SectionName selects a specific listener on the Gateway. When omitted, the route may attach to every listener that accepts it.\n\nFor P2P exposure (expose.gateway) this cannot be set when more than one instance is served: each instance attaches to a distinct listener at port base+index, which a single listener name cannot address. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 

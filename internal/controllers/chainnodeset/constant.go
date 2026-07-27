@@ -31,6 +31,12 @@ const (
 
 	timeoutWaitServiceIP = 5 * time.Minute
 
+	// dashboardRouteCheckPeriod is how soon to re-check a dashboard HTTPRoute that has not yet been
+	// accepted by its parent Gateway. Acceptance arrives as an HTTPRoute STATUS update, which no
+	// watch here admits, so this keeps the make-before-break cutover from waiting out the full
+	// reconcile period with the superseded Ingress still live.
+	dashboardRouteCheckPeriod = 5 * time.Second
+
 	// mnemonicKey and privKeyFilename mirror the keys used by the ChainNode controller for the
 	// account mnemonic and priv_validator_key.json secrets, so the secrets pre-created here for
 	// genesis validators are reused as-is by the ChainNode controllers.

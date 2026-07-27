@@ -529,7 +529,7 @@ var cosmoGuardReservedPorts = map[int32]string{
 // 18545/18546) is reserved unconditionally in cosmoGuardReservedPorts, because an EVM route retargets to
 // the guard Service by port number regardless of a group's evmEnabled. Returns nil when the dashboard is
 // disabled.
-func (cfg *Config) ValidateCosmoGuardDashboard() error {
+func (cfg *Config) ValidateCosmoGuardDashboard(namespace string) error {
 	if !cfg.CosmoGuardDashboardEnabled() {
 		return nil
 	}
@@ -551,8 +551,8 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 		return fmt.Errorf("cosmoGuard.dashboard.ingress and cosmoGuard.dashboard.gateway are mutually exclusive")
 	}
 	if gateway := dashboard.Gateway; gateway != nil {
-		if strings.TrimSpace(gateway.Host) == "" {
-			return fmt.Errorf("cosmoGuard.dashboard.gateway.host must not be empty")
+		if err := validateGatewayHostname(gateway.Host); err != nil {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.host %w", err)
 		}
 		if err := validateCosmoGuardDashboardGatewayRef("gateway", gateway.Gateway); err != nil {
 			return err
@@ -564,10 +564,31 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 			if err := validateCosmoGuardDashboardGatewayRef("httpRedirect", *gateway.HTTPRedirect); err != nil {
 				return err
 			}
-			if gateway.Gateway.sameParent(*gateway.HTTPRedirect) {
+			if gateway.Gateway.sameParent(*gateway.HTTPRedirect, namespace) {
 				return fmt.Errorf("cosmoGuard.dashboard.gateway.httpRedirect must select a different Gateway listener")
 			}
 		}
+	}
+	return nil
+}
+
+// validateGatewayHostname checks a value against the Gateway API Hostname grammar: a DNS1123
+// subdomain, optionally with a single leading "*." wildcard label. Gateway API rejects anything
+// else, so a host that only passes an emptiness check (e.g. "Guard Example") would be admitted by
+// the webhook and then rejected when the rendered HTTPRoute reaches the API server.
+func validateGatewayHostname(host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if strings.HasPrefix(host, "*.") {
+		if errs := validation.IsWildcardDNS1123Subdomain(host); len(errs) > 0 {
+			return fmt.Errorf("%q is not a valid wildcard hostname: %s", host, strings.Join(errs, "; "))
+		}
+		return nil
+	}
+	if errs := validation.IsDNS1123Subdomain(host); len(errs) > 0 {
+		return fmt.Errorf("%q is not a valid hostname: %s", host, strings.Join(errs, "; "))
 	}
 	return nil
 }
@@ -585,8 +606,21 @@ func validateCosmoGuardDashboardGatewayRef(path string, ref GatewayRef) error {
 	return nil
 }
 
-func (g GatewayRef) sameParent(other GatewayRef) bool {
-	return g.Name == other.Name && optionalStringEqual(g.Namespace, other.Namespace) && optionalStringEqual(g.SectionName, other.SectionName)
+// sameParent reports whether two Gateway references select the same listener. An omitted
+// ParentReference.namespace defaults to the route's namespace, so both sides are resolved against
+// defaultNamespace first — otherwise {name: gw} and {name: gw, namespace: <route ns>} would compare
+// as different listeners and a same-listener redirect would be admitted.
+func (g GatewayRef) sameParent(other GatewayRef, defaultNamespace string) bool {
+	return g.Name == other.Name &&
+		valueOrDefault(g.Namespace, defaultNamespace) == valueOrDefault(other.Namespace, defaultNamespace) &&
+		optionalStringEqual(g.SectionName, other.SectionName)
+}
+
+func valueOrDefault(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func optionalStringEqual(a, b *string) bool {
@@ -656,6 +690,21 @@ func (exp *ExposeConfig) GetGatewayParentRef() gwapiv1.ParentReference {
 	ref := exp.Gateway.GatewayRef.GetParentRef()
 	ref.Port = ptr.To(gwapiv1.PortNumber(exp.GetGatewayPort()))
 	return ref
+}
+
+// ValidateP2PGatewayExpose rejects a Gateway-based P2P expose config that pins a sectionName while
+// serving more than one instance. Each instance attaches to a distinct listener at base port +
+// index, but a sectionName names ONE listener — every generated TCPRoute would carry the same
+// listener name with a different required port, so all but one instance would fail to attach and
+// silently lose P2P exposure.
+func (exp *ExposeConfig) ValidateP2PGatewayExpose(path string, instances int) error {
+	if exp == nil || exp.Gateway == nil || instances <= 1 {
+		return nil
+	}
+	if exp.Gateway.SectionName != nil {
+		return fmt.Errorf("%s.gateway.sectionName cannot be used with %d instances: each instance attaches to a distinct listener at port %d+index, which a single sectionName cannot name", path, instances, exp.GetGatewayPort())
+	}
+	return nil
 }
 
 func (exp *ExposeConfig) GetGatewayPort() int32 {

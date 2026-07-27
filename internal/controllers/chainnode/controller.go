@@ -314,7 +314,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Reconcile the standalone CosmoGuard deployment (after services so its upstream internal Service
 	// exists). Skipped for ChainNodeSet children, whose guard is managed per-group by the set.
 	logger.V(1).Info("ensure cosmoguard")
-	if err = r.ensureCosmoGuard(ctx, chainNode); err != nil {
+	dashboardRoutesPending, err := r.ensureCosmoGuard(ctx, chainNode)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -418,6 +419,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	logger.Info("finishing reconcile")
+	if dashboardRoutesPending {
+		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
+	}
 	return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
 }
 

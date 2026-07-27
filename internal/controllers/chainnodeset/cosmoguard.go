@@ -220,6 +220,11 @@ type cosmoGuardReconcile struct {
 	expected        map[string]bool
 	expectedIngress map[string]bool
 	expectedRoutes  map[string]bool
+	// routesPending is true while a desired dashboard HTTPRoute has not yet been accepted by its
+	// parent Gateway. Acceptance is reported as an HTTPRoute STATUS update, which no watch here
+	// admits (Gateway API CRDs are optional, so the controller cannot Own HTTPRoute), so the caller
+	// requeues sooner than the reconcile period to keep the make-before-break cutover responsive.
+	routesPending bool
 }
 
 // ensureCosmoGuards reconciles the per-group CosmoGuard deployments and reports, per group, whether
@@ -235,6 +240,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 	expected := map[string]bool{}
 	expectedIngress := map[string]bool{}
 	expectedRoutes := map[string]bool{}
+	routesPending := false
 
 	for _, group := range nodeSet.Spec.Nodes {
 		cfg := group.GetServiceConfig()
@@ -324,6 +330,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		}
 		if len(dashboardRoutes) > 0 && !routesReady {
 			expectedIngress[params.DashboardIngressName()] = true
+			routesPending = true
 		}
 
 		if hpa := params.HPA(); hpa != nil {
@@ -369,6 +376,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		expected:        expected,
 		expectedIngress: expectedIngress,
 		expectedRoutes:  expectedRoutes,
+		routesPending:   routesPending,
 	}, nil
 }
 

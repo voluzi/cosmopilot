@@ -339,6 +339,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		nodeSet.Status.AppVersion = nodeSet.GetLastUpgradeVersion()
 		return ctrl.Result{}, r.updatePhase(ctx, nodeSet, appsv1.PhaseChainNodeSetRunning)
 	}
+	if guards.routesPending {
+		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
+	}
 	return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 }
 

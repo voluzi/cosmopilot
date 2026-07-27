@@ -241,11 +241,14 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 	return p
 }
 
-func (r *Reconciler) reconcileCosmoGuardDashboard(ctx context.Context, chainNode *appsv1.ChainNode, params cosmoguard.Params) error {
+// reconcileCosmoGuardDashboard applies the dashboard's Ingress and/or HTTPRoutes. The returned bool
+// is true while a desired route has not yet been accepted by its parent Gateway, so the caller can
+// re-check soon instead of leaving the old exposure live for a full reconcile period.
+func (r *Reconciler) reconcileCosmoGuardDashboard(ctx context.Context, chainNode *appsv1.ChainNode, params cosmoguard.Params) (bool, error) {
 	ingress := params.DashboardIngress()
 	if ingress != nil {
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, ingress); err != nil {
-			return fmt.Errorf("failed to apply cosmoguard dashboard ingress for %s: %w", chainNode.GetName(), err)
+			return false, fmt.Errorf("failed to apply cosmoguard dashboard ingress for %s: %w", chainNode.GetName(), err)
 		}
 	}
 
@@ -255,7 +258,7 @@ func (r *Reconciler) reconcileCosmoGuardDashboard(ctx context.Context, chainNode
 		desiredRoutes[route.GetName()] = true
 		ready, err := cosmoguard.ApplyOwnedHTTPRoute(ctx, r.Client, r.Scheme, chainNode, route)
 		if err != nil {
-			return fmt.Errorf("failed to apply cosmoguard dashboard httproute for %s: %w", chainNode.GetName(), err)
+			return false, fmt.Errorf("failed to apply cosmoguard dashboard httproute for %s: %w", chainNode.GetName(), err)
 		}
 		if !ready {
 			routesReady = false
@@ -263,7 +266,7 @@ func (r *Reconciler) reconcileCosmoGuardDashboard(ctx context.Context, chainNode
 	}
 
 	if len(desiredRoutes) > 0 && !routesReady {
-		return nil
+		return true, nil
 	}
 
 	for _, name := range []string{params.DashboardIngressName(), params.DashboardIngressName() + "-http-redirect"} {
@@ -271,16 +274,16 @@ func (r *Reconciler) reconcileCosmoGuardDashboard(ctx context.Context, chainNode
 			continue
 		}
 		if err := cosmoguard.DeleteOwned(ctx, r.Client, chainNode, chainNode.GetNamespace(), name, &gwapiv1.HTTPRoute{}); err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	if ingress == nil {
 		if err := cosmoguard.DeleteOwned(ctx, r.Client, chainNode, chainNode.GetNamespace(), params.DashboardIngressName(), &networkingv1.Ingress{}); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return false, nil
 }
 
 // standaloneGuardManaged reports whether this ChainNode should have its own standalone CosmoGuard.
@@ -325,8 +328,10 @@ func (r *Reconciler) finalizeCosmoGuard(ctx context.Context, chainNode *appsv1.C
 
 // ensureCosmoGuard reconciles the standalone CosmoGuard deployment for a ChainNode. It only
 // creates/updates resources; teardown (disabled, or the node became a ChainNodeSet child) is handled
-// by finalizeCosmoGuard after routes are retargeted.
-func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.ChainNode) error {
+// by finalizeCosmoGuard after routes are retargeted. The returned bool is true while a dashboard
+// HTTPRoute is still waiting for its parent Gateway to accept it, so the caller requeues promptly
+// rather than holding the old exposure for a full reconcile period.
+func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	if !r.standaloneGuardManaged(chainNode) {
@@ -338,26 +343,26 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 
 	if chainNode.Spec.Config.GetCosmoGuardConfig() == nil {
 		logger.Info("cosmoguard enabled without a config ConfigMap; skipping")
-		return nil
+		return false, nil
 	}
 
 	params := r.cosmoGuardParams(chainNode)
 
 	if err := r.ensureCosmoGuardSecret(ctx, chainNode, cosmoguard.EncryptionKeySecretName(chainNode.CosmoGuardName())); err != nil {
-		return fmt.Errorf("failed to ensure cosmoguard secret for %s: %w", chainNode.GetName(), err)
+		return false, fmt.Errorf("failed to ensure cosmoguard secret for %s: %w", chainNode.GetName(), err)
 	}
 	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.PeerService()); err != nil {
-		return fmt.Errorf("failed to apply cosmoguard peer service for %s: %w", chainNode.GetName(), err)
+		return false, fmt.Errorf("failed to apply cosmoguard peer service for %s: %w", chainNode.GetName(), err)
 	}
 	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.StatefulSet()); err != nil {
-		return fmt.Errorf("failed to apply cosmoguard statefulset for %s: %w", chainNode.GetName(), err)
+		return false, fmt.Errorf("failed to apply cosmoguard statefulset for %s: %w", chainNode.GetName(), err)
 	}
 	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.Service()); err != nil {
-		return fmt.Errorf("failed to apply cosmoguard service for %s: %w", chainNode.GetName(), err)
+		return false, fmt.Errorf("failed to apply cosmoguard service for %s: %w", chainNode.GetName(), err)
 	}
 	if pdb := params.PDB(); pdb != nil {
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, pdb); err != nil {
-			return fmt.Errorf("failed to apply cosmoguard pdb for %s: %w", chainNode.GetName(), err)
+			return false, fmt.Errorf("failed to apply cosmoguard pdb for %s: %w", chainNode.GetName(), err)
 		}
 	} else {
 		stale := &policyv1.PodDisruptionBudget{}
@@ -365,16 +370,16 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 		if err == nil {
 			if metav1.IsControlledBy(stale, chainNode) {
 				if err := client.IgnoreNotFound(r.Delete(ctx, stale)); err != nil {
-					return err
+					return false, err
 				}
 			}
 		} else if !apierrors.IsNotFound(err) {
-			return err
+			return false, err
 		}
 	}
 	if hpa := params.HPA(); hpa != nil {
 		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, hpa); err != nil {
-			return fmt.Errorf("failed to apply cosmoguard hpa for %s: %w", chainNode.GetName(), err)
+			return false, fmt.Errorf("failed to apply cosmoguard hpa for %s: %w", chainNode.GetName(), err)
 		}
 	} else {
 		// Autoscaling was disabled: remove any HPA we previously created so it stops driving the
@@ -384,17 +389,13 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 		if err == nil {
 			if metav1.IsControlledBy(stale, chainNode) {
 				if err := client.IgnoreNotFound(r.Delete(ctx, stale)); err != nil {
-					return err
+					return false, err
 				}
 			}
 		} else if !apierrors.IsNotFound(err) {
-			return err
+			return false, err
 		}
 	}
 
-	if err := r.reconcileCosmoGuardDashboard(ctx, chainNode, params); err != nil {
-		return err
-	}
-
-	return nil
+	return r.reconcileCosmoGuardDashboard(ctx, chainNode, params)
 }

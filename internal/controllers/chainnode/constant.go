@@ -46,6 +46,12 @@ const (
 
 	snapshotCheckPeriod        = 15 * time.Second
 	pvcDeletionWaitPeriod      = 15 * time.Second
+	// dashboardRouteCheckPeriod is how soon to re-check a dashboard HTTPRoute that has not yet been
+	// accepted by its parent Gateway. Route acceptance is reported by the Gateway controller as a
+	// STATUS update, which no watch here admits (Gateway API CRDs are optional, so the controller
+	// cannot Own HTTPRoute), so without this the make-before-break cutover would wait out the full
+	// reconcile period with the old Ingress still live.
+	dashboardRouteCheckPeriod = 5 * time.Second
 	initDataCheckPeriod        = 30 * time.Second
 	initDataRetryPeriod        = 10 * time.Second
 	initDataUnknownPhasePeriod = 10 * time.Second

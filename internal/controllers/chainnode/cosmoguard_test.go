@@ -27,6 +27,13 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
+// ensureGuard drops ensureCosmoGuard's route-pending flag for the tests that only assert on the
+// error. Tests that care about the flag call ensureCosmoGuard directly.
+func ensureGuard(r *Reconciler, ctx context.Context, cn *appsv1.ChainNode) error {
+	_, err := r.ensureCosmoGuard(ctx, cn)
+	return err
+}
+
 func cosmoGuardTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -120,7 +127,7 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 
 	sts := &k8sappsv1.StatefulSet{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
@@ -154,7 +161,7 @@ func TestStandaloneGuardCreatesDashboardHTTPRoutes(t *testing.T) {
 	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 
 	backend := &gwapiv1.HTTPRoute{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, backend))
@@ -179,7 +186,7 @@ func TestStandaloneDashboardGatewayPreservesIngressWhenGatewayAPIUnavailable(t *
 	require.NoError(t, r.Create(ctx, ingress))
 	r.Client = gatewayUnavailableClient{Client: r.Client}
 
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{}))
 }
 
@@ -193,7 +200,7 @@ func TestStandaloneDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t 
 	require.NoError(t, controllerutil.SetControllerReference(cn, ingress, r.Scheme))
 	require.NoError(t, r.Create(ctx, ingress))
 
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{}))
 
 	route := &gwapiv1.HTTPRoute{}
@@ -208,9 +215,40 @@ func TestStandaloneDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t 
 	}}
 	require.NoError(t, r.Update(ctx, route))
 
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 	err := r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{})
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+// TestStandaloneDashboardReportsPendingRoutesForRequeue verifies ensureCosmoGuard reports an
+// unaccepted dashboard route so Reconcile re-checks soon. Route acceptance arrives as an HTTPRoute
+// STATUS update, which no watch here admits, so without this signal the superseded Ingress would
+// stay live for a full reconcile period after the Gateway accepts the route.
+func TestStandaloneDashboardReportsPendingRoutesForRequeue(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(false)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	pending, err := r.ensureCosmoGuard(ctx, cn)
+	require.NoError(t, err)
+	assert.True(t, pending, "an unaccepted route must request a prompt re-check")
+
+	route := &gwapiv1.HTTPRoute{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, route))
+	route.Status.Parents = []gwapiv1.RouteParentStatus{{
+		ParentRef:      route.Spec.ParentRefs[0],
+		ControllerName: "example.net/gateway-controller",
+		Conditions: []metav1.Condition{
+			{Type: string(gwapiv1.RouteConditionAccepted), Status: metav1.ConditionTrue, ObservedGeneration: route.Generation},
+			{Type: string(gwapiv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, ObservedGeneration: route.Generation},
+		},
+	}}
+	require.NoError(t, r.Update(ctx, route))
+
+	pending, err = r.ensureCosmoGuard(ctx, cn)
+	require.NoError(t, err)
+	assert.False(t, pending, "an accepted route falls back to the normal reconcile period")
 }
 
 func TestStandaloneDashboardSwitchToIngressRemovesHTTPRoutes(t *testing.T) {
@@ -218,13 +256,13 @@ func TestStandaloneDashboardSwitchToIngressRemovesHTTPRoutes(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
 	r := cosmoGuardTestReconciler(t, cn)
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 
 	cn.Spec.Config.CosmoGuard.Dashboard = &appsv1.CosmoGuardDashboardConfig{
 		Enable:  true,
 		Ingress: &appsv1.CosmoGuardDashboardIngress{Host: "guard.example.com"},
 	}
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 
 	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, &networkingv1.Ingress{}))
 	for _, name := range []string{"node-0-cg-dashboard", "node-0-cg-dashboard-http-redirect"} {
@@ -238,10 +276,10 @@ func TestStandaloneDashboardDisablingGatewayRemovesHTTPRoutes(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
 	r := cosmoGuardTestReconciler(t, cn)
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 
 	cn.Spec.Config.CosmoGuard.Dashboard.Enable = false
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 
 	for _, name := range []string{"node-0-cg-dashboard", "node-0-cg-dashboard-http-redirect"} {
 		err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, &gwapiv1.HTTPRoute{})
@@ -260,7 +298,7 @@ func TestStandaloneDashboardRejectsForeignHTTPRoute(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(foreign, route, r.Scheme))
 	require.NoError(t, r.Create(ctx, route))
 
-	err := r.ensureCosmoGuard(ctx, cn)
+	err := ensureGuard(r, ctx, cn)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "managed by another owner")
 }
@@ -273,7 +311,7 @@ func TestStandaloneGuardInheritsServiceAccount(t *testing.T) {
 	cn.Spec.Config.ServiceAccountName = ptr.To("node-sa")
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 
 	sts := &k8sappsv1.StatefulSet{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
@@ -288,7 +326,7 @@ func TestStandaloneGuardInheritsUserLabels(t *testing.T) {
 	cn.Labels[controllers.LabelChainID] = "c1" // managed selector -> stripped
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 
 	sts := &k8sappsv1.StatefulSet{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
@@ -405,7 +443,7 @@ func TestFinalizeDefersUndeployWhileRouteTargetsGuard(t *testing.T) {
 	ctx := context.Background()
 	cn := guardedChainNode("node-0", false)
 	r := cosmoGuardTestReconciler(t, cn)
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 
 	// Disable CosmoGuard, but a live Ingress still references the guard Service.
 	cn.Spec.Config.CosmoGuard.Enable = false
@@ -430,7 +468,7 @@ func TestFinalizeStoppedPathTearsDownDespiteRoute(t *testing.T) {
 	ctx := context.Background()
 	cn := guardedChainNode("node-0", false)
 	r := cosmoGuardTestReconciler(t, cn)
-	require.NoError(t, r.ensureCosmoGuard(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
 
 	cn.Spec.Config.CosmoGuard.Enable = false
 	require.NoError(t, r.Create(ctx, guardIngress("node-0", "node-0-cg")))
@@ -448,11 +486,11 @@ func TestDisableAutoscalingRemovesHPA(t *testing.T) {
 	cn.Spec.Config.CosmoGuard.Autoscaling = &appsv1.CosmoGuardAutoscalingConfig{Enable: true, MaxReplicas: 5}
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &autoscalingv2.HorizontalPodAutoscaler{}))
 
 	cn.Spec.Config.CosmoGuard.Autoscaling.Enable = false
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &autoscalingv2.HorizontalPodAutoscaler{})
 	assert.Error(t, err, "HPA should be removed when autoscaling is disabled")
 }
@@ -462,12 +500,12 @@ func TestDisableAutoscalingRemovesHPA(t *testing.T) {
 func TestFinalizeTearsDownGuardWhenNodeBecomesChild(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	r := cosmoGuardTestReconciler(t, cn)
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{}))
 
 	// The node joins a ChainNodeSet; ensure no longer manages a guard and finalize tears the old one down.
 	markChainNodeSetChild(cn)
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})
 	assert.Error(t, err, "standalone guard should be removed once the node is a ChainNodeSet child")
@@ -482,12 +520,12 @@ func TestChildWithIndividualIngressGetsGuard(t *testing.T) {
 	r := cosmoGuardTestReconciler(t, cn)
 
 	// The child manages its own guard (created here) even though it's a ChainNodeSet member.
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cg"}, &k8sappsv1.StatefulSet{}))
 
 	// Removing the individual ingress tears the per-node guard back down.
 	cn.Spec.Ingress = nil
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(context.Background(), cn))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cg"}, &k8sappsv1.StatefulSet{})
@@ -500,7 +538,7 @@ func TestNodeSetChildSkipsStandaloneGuard(t *testing.T) {
 	cn := guardedChainNode("chain-fullnodes-0", true)
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 
 	dep := &k8sappsv1.Deployment{}
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cg"}, dep)
@@ -544,7 +582,7 @@ func TestDisableGuardUndeploys(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
 	r := cosmoGuardTestReconciler(t, cn)
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 
 	// Confirm it was created first, then disable and reconcile again.
 	sts := &k8sappsv1.StatefulSet{}
@@ -552,7 +590,7 @@ func TestDisableGuardUndeploys(t *testing.T) {
 
 	// Disable, then finalize (teardown runs after routes are retargeted, not in ensureCosmoGuard).
 	cn.Spec.Config.CosmoGuard.Enable = false
-	require.NoError(t, r.ensureCosmoGuard(context.Background(), cn))
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})

@@ -777,6 +777,10 @@ type GatewayRef struct {
 
 	// SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
 	// every listener that accepts it.
+	//
+	// For P2P exposure (expose.gateway) this cannot be set when more than one instance is served:
+	// each instance attaches to a distinct listener at port base+index, which a single listener name
+	// cannot address.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	SectionName *string `json:"sectionName,omitempty"`
