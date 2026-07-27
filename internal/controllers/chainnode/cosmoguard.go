@@ -289,14 +289,14 @@ func (r *Reconciler) reconcileCosmoGuardDashboard(ctx context.Context, chainNode
 		}
 	}
 
+	// A non-empty desiredRoutes implies params.Dashboard is set: the routes come from
+	// DashboardHTTPRoutes, which returns nil without it.
 	if len(desiredRoutes) > 0 && !routesReady {
 		// The superseded Ingress stays live until the route is accepted, but the guard Service was
 		// already reconciled to the desired dashboard port above. Repoint the retained Ingress so a
 		// migration that also changes the port leaves a working fallback rather than a 503.
-		if params.Dashboard != nil {
-			if err := cosmoguard.RepointDashboardIngressPort(ctx, r.Client, chainNode, chainNode.GetNamespace(), params.DashboardIngressName(), params.Dashboard.Port); err != nil {
-				return false, fmt.Errorf("failed to repoint cosmoguard dashboard ingress for %s: %w", chainNode.GetName(), err)
-			}
+		if err := cosmoguard.RepointDashboardIngressPort(ctx, r.Client, chainNode, chainNode.GetNamespace(), params.DashboardIngressName(), params.Dashboard.Port); err != nil {
+			return false, fmt.Errorf("failed to repoint cosmoguard dashboard ingress for %s: %w", chainNode.GetName(), err)
 		}
 		return routesPending, nil
 	}
