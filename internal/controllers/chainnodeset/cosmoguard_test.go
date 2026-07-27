@@ -237,6 +237,53 @@ func TestGroupDashboardGatewayPreservesIngressWhenGatewayAPIUnavailable(t *testi
 	assert.False(t, guards.routesPending, "an unavailable Gateway API must not trigger the short retry period")
 }
 
+// TestGroupRetainedDashboardIngressFollowsPortChange verifies the group's retained fallback Ingress
+// is repointed when a Gateway migration also changes the dashboard port. The guard Service is
+// reconciled to the new port in the same pass, so an Ingress left on the old numeric port would 503.
+func TestGroupRetainedDashboardIngressFollowsPortChange(t *testing.T) {
+	ctx := context.Background()
+	nodeSet, group := guardedNodeSet()
+	group.Config.CosmoGuard.Dashboard = nodeSetDashboardGatewayConfig(false)
+	group.Config.CosmoGuard.Dashboard.Port = ptr.To[int32](9100)
+	nodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{group}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "chain-fullnodes-cg-dashboard",
+			Namespace: "ns",
+			Labels:    map[string]string{controllers.LabelScope: scopeCosmoGuard},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: "chain-fullnodes-cg",
+									Port: networkingv1.ServiceBackendPort{Number: 8080},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, ingress, r.Scheme))
+	require.NoError(t, r.Create(ctx, ingress))
+
+	guards, err := r.ensureCosmoGuards(ctx, nodeSet)
+	require.NoError(t, err)
+	require.True(t, guards.routesPending, "route is not accepted yet, so the Ingress is retained")
+
+	live := &networkingv1.Ingress{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), live))
+	assert.Equal(t, int32(9100), live.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port.Number,
+		"retained fallback Ingress must follow the guard Service's current dashboard port")
+}
+
 func TestGroupDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t *testing.T) {
 	ctx := context.Background()
 	nodeSet, group := guardedNodeSet()

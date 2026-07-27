@@ -558,14 +558,20 @@ func (cfg *Config) ValidateCosmoGuardDashboard(namespace string) error {
 			return err
 		}
 		if gateway.HTTPRedirect != nil {
-			if gateway.Gateway.SectionName == nil || gateway.HTTPRedirect.SectionName == nil {
-				return fmt.Errorf("cosmoGuard.dashboard.gateway gateway and httpRedirect must both set sectionName")
-			}
 			if err := validateCosmoGuardDashboardGatewayRef("httpRedirect", *gateway.HTTPRedirect); err != nil {
 				return err
 			}
-			if gateway.Gateway.sameParent(*gateway.HTTPRedirect, namespace) {
-				return fmt.Errorf("cosmoGuard.dashboard.gateway.httpRedirect must select a different Gateway listener")
+			// Two references to the SAME Gateway must each name a listener: without a sectionName a
+			// route may attach to every listener that accepts it, so the backend and the redirect
+			// would both land on the HTTP and HTTPS listeners and compete for the same host. Distinct
+			// Gateways are already unambiguous, so a sectionless pair is fine there.
+			if gateway.Gateway.sameGateway(*gateway.HTTPRedirect, namespace) {
+				if gateway.Gateway.SectionName == nil || gateway.HTTPRedirect.SectionName == nil {
+					return fmt.Errorf("cosmoGuard.dashboard.gateway gateway and httpRedirect must both set sectionName when they reference the same Gateway")
+				}
+				if gateway.Gateway.sameParent(*gateway.HTTPRedirect, namespace) {
+					return fmt.Errorf("cosmoGuard.dashboard.gateway.httpRedirect must select a different Gateway listener")
+				}
 			}
 		}
 	}
@@ -628,14 +634,19 @@ func validateCosmoGuardDashboardGatewayRef(path string, ref GatewayRef) error {
 	return nil
 }
 
-// sameParent reports whether two Gateway references select the same listener. An omitted
-// ParentReference.namespace defaults to the route's namespace, so both sides are resolved against
-// defaultNamespace first — otherwise {name: gw} and {name: gw, namespace: <route ns>} would compare
-// as different listeners and a same-listener redirect would be admitted.
-func (g GatewayRef) sameParent(other GatewayRef, defaultNamespace string) bool {
+// sameGateway reports whether two references point at the same Gateway object, ignoring the
+// listener. An omitted ParentReference.namespace defaults to the route's namespace, so both sides
+// are resolved against defaultNamespace first.
+func (g GatewayRef) sameGateway(other GatewayRef, defaultNamespace string) bool {
 	return g.Name == other.Name &&
-		valueOrDefault(g.Namespace, defaultNamespace) == valueOrDefault(other.Namespace, defaultNamespace) &&
-		optionalStringEqual(g.SectionName, other.SectionName)
+		valueOrDefault(g.Namespace, defaultNamespace) == valueOrDefault(other.Namespace, defaultNamespace)
+}
+
+// sameParent reports whether two Gateway references select the same listener — the same Gateway AND
+// the same section. Namespace defaulting is handled by sameGateway, so {name: gw} and
+// {name: gw, namespace: <route ns>} are correctly treated as one listener rather than two.
+func (g GatewayRef) sameParent(other GatewayRef, defaultNamespace string) bool {
+	return g.sameGateway(other, defaultNamespace) && optionalStringEqual(g.SectionName, other.SectionName)
 }
 
 func valueOrDefault(value *string, fallback string) string {

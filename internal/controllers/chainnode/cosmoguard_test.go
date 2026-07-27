@@ -256,6 +256,44 @@ func TestChildGuardDoesNotPublishInheritedDashboardExposure(t *testing.T) {
 	require.NoError(t, rs.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, &gwapiv1.HTTPRoute{}))
 }
 
+// TestRetainedDashboardIngressFollowsPortChange verifies that when an Ingress-to-Gateway migration
+// also changes the dashboard port, the Ingress kept alive while the route is pending is repointed at
+// the new port. The guard Service is reconciled to the new port in the same pass, so leaving the
+// Ingress on the old numeric port would make the fallback 503 — worse than the gap it prevents.
+func TestRetainedDashboardIngressFollowsPortChange(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(false)
+	cn.Spec.Config.CosmoGuard.Dashboard.Port = ptr.To[int32](9100)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	// A live dashboard Ingress from the pre-migration Ingress mode, on the OLD port.
+	ingress := guardIngress("node-0-cg-dashboard", "node-0-cg")
+	ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port = networkingv1.ServiceBackendPort{Number: 8080}
+	require.NoError(t, controllerutil.SetControllerReference(cn, ingress, r.Scheme))
+	require.NoError(t, r.Create(ctx, ingress))
+
+	pending, err := r.ensureCosmoGuard(ctx, cn)
+	require.NoError(t, err)
+	require.True(t, pending, "route is not accepted yet, so the Ingress is retained")
+
+	live := &networkingv1.Ingress{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), live))
+	assert.Equal(t, int32(9100), live.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port.Number,
+		"retained fallback Ingress must follow the guard Service's current dashboard port")
+
+	// The guard Service publishes that port, so the repointed Ingress resolves.
+	svc := &corev1.Service{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, svc))
+	found := false
+	for _, p := range svc.Spec.Ports {
+		if p.Port == 9100 {
+			found = true
+		}
+	}
+	assert.True(t, found, "guard Service exposes the new dashboard port")
+}
+
 // TestStandaloneDashboardReportsPendingRoutesForRequeue verifies ensureCosmoGuard reports an
 // unaccepted dashboard route so Reconcile re-checks soon. Route acceptance arrives as an HTTPRoute
 // STATUS update, which no watch here admits, so without this signal the superseded Ingress would

@@ -8,6 +8,7 @@ import (
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -145,6 +146,56 @@ func ApplyOwnedHTTPRoute(ctx context.Context, c client.Client, scheme *runtime.S
 		return RouteAccepted, nil
 	}
 	return RoutePending, nil
+}
+
+// RepointDashboardIngressPort updates a retained dashboard Ingress so its Service backend port
+// matches the guard's current dashboard port.
+//
+// During an Ingress-to-Gateway migration the Ingress is deliberately kept serving until the
+// replacement HTTPRoute is accepted. But the guard Service and StatefulSet are reconciled to the
+// desired spec earlier in the same pass, so if the dashboard PORT changed alongside the migration,
+// the Service no longer publishes the old port and the retained Ingress would point at a port that
+// does not exist — a fallback that 503s, which is worse than the exposure gap it exists to avoid.
+// Rewriting just the backend port keeps it usable until the route takes over.
+//
+// The Ingress is left untouched when it is absent or owned by someone else.
+func RepointDashboardIngressPort(ctx context.Context, c client.Client, owner client.Object, namespace, name string, port int32) error {
+	ingress := &networkingv1.Ingress{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, ingress); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !metav1.IsControlledBy(ingress, owner) {
+		return nil
+	}
+
+	changed := false
+	for i := range ingress.Spec.Rules {
+		http := ingress.Spec.Rules[i].HTTP
+		if http == nil {
+			continue
+		}
+		for j := range http.Paths {
+			svc := http.Paths[j].Backend.Service
+			// A named backend port resolves through the Service, which renames nothing across a port
+			// change, so only numeric backends can go stale.
+			if svc == nil || svc.Port.Name != "" || svc.Port.Number == port {
+				continue
+			}
+			svc.Port.Number = port
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+
+	if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(ingress); err != nil {
+		return err
+	}
+	return c.Update(ctx, ingress)
 }
 
 func httpRouteReady(route *gwapiv1.HTTPRoute) bool {

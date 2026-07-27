@@ -119,7 +119,28 @@ func TestValidateCosmoGuardDashboardExposure(t *testing.T) {
 	redirectWithoutSections := gateway()
 	redirectWithoutSections.Gateway.SectionName = nil
 	redirectWithoutSections.HTTPRedirect = &GatewayRef{Name: "external"}
-	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: redirectWithoutSections}).ValidateCosmoGuardDashboard("default"))
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: redirectWithoutSections}).ValidateCosmoGuardDashboard("default"),
+		"same Gateway with no sections could attach both routes to both listeners")
+
+	// Distinct Gateways are unambiguous without sectionName: neither route can attach to the other's
+	// listener, so requiring a section there would reject a valid split-Gateway setup.
+	separateGateways := gateway()
+	separateGateways.Gateway = GatewayRef{Name: "https-gateway"}
+	separateGateways.HTTPRedirect = &GatewayRef{Name: "http-gateway"}
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: separateGateways}).ValidateCosmoGuardDashboard("default"),
+		"sectionless redirect across distinct Gateways is unambiguous")
+
+	// Same Gateway name in different namespaces is also two distinct Gateways.
+	crossNamespace := gateway()
+	crossNamespace.Gateway = GatewayRef{Name: "external"}
+	crossNamespace.HTTPRedirect = &GatewayRef{Name: "external", Namespace: ptr.To("edge")}
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: crossNamespace}).ValidateCosmoGuardDashboard("default"))
+
+	// ...but only one side naming a section on the SAME Gateway is still ambiguous.
+	halfSectioned := gateway()
+	halfSectioned.HTTPRedirect = &GatewayRef{Name: "external"}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: halfSectioned}).ValidateCosmoGuardDashboard("default"),
+		"a sectionless redirect on the same Gateway may attach to the backend's listener")
 
 	validRedirect := gateway()
 	validRedirect.HTTPRedirect = &GatewayRef{Name: "external", SectionName: &httpSection}

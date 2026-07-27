@@ -337,7 +337,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if nodeSet.Status.Phase != appsv1.PhaseChainNodeSetRunning || nodeSet.GetLastUpgradeVersion() != nodeSet.Status.AppVersion {
 		log.FromContext(ctx).Info("updating .status.appVersion", "version", nodeSet.GetLastUpgradeVersion())
 		nodeSet.Status.AppVersion = nodeSet.GetLastUpgradeVersion()
-		return ctrl.Result{}, r.updatePhase(ctx, nodeSet, appsv1.PhaseChainNodeSetRunning)
+		if err := r.updatePhase(ctx, nodeSet, appsv1.PhaseChainNodeSetRunning); err != nil {
+			return ctrl.Result{}, err
+		}
+		// The status write triggers no reconcile of its own (the predicate filters status-only
+		// updates), so a pending dashboard route would otherwise be stranded on this path: nothing
+		// watches HTTPRoutes (Gateway API CRDs are optional, so the controller cannot Own them) and
+		// acceptance arrives as a status update. Keep the short re-check here too.
+		if guards.routesPending {
+			return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
+		}
+		return ctrl.Result{}, nil
 	}
 	if guards.routesPending {
 		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
