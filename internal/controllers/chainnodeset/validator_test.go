@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -32,8 +34,10 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, autoscalingv2.AddToScheme(scheme))
 	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, networkingv1.AddToScheme(scheme))
+	require.NoError(t, gwapiv1.Install(scheme))
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).

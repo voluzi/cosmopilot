@@ -20,37 +20,37 @@ func TestValidateCosmoGuardDashboard(t *testing.T) {
 		}}
 	}
 
-	assert.NoError(t, dash(false, ptr.To[int32](26657)).ValidateCosmoGuardDashboard(), "disabled dashboard is never invalid")
-	assert.NoError(t, dash(true, nil).ValidateCosmoGuardDashboard(), "default port 8080 does not collide")
-	assert.NoError(t, dash(true, ptr.To[int32](8090)).ValidateCosmoGuardDashboard(), "non-colliding explicit port ok")
+	assert.NoError(t, dash(false, ptr.To[int32](26657)).ValidateCosmoGuardDashboard("default"), "disabled dashboard is never invalid")
+	assert.NoError(t, dash(true, nil).ValidateCosmoGuardDashboard("default"), "default port 8080 does not collide")
+	assert.NoError(t, dash(true, ptr.To[int32](8090)).ValidateCosmoGuardDashboard("default"), "non-colliding explicit port ok")
 
-	err := dash(true, ptr.To[int32](26657)).ValidateCosmoGuardDashboard()
+	err := dash(true, ptr.To[int32](26657)).ValidateCosmoGuardDashboard("default")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "collides")
-	assert.Error(t, dash(true, ptr.To[int32](9001)).ValidateCosmoGuardDashboard(), "metrics port collision rejected")
-	assert.Error(t, dash(true, ptr.To[int32](9090)).ValidateCosmoGuardDashboard(), "gRPC port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](9001)).ValidateCosmoGuardDashboard("default"), "metrics port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](9090)).ValidateCosmoGuardDashboard("default"), "gRPC port collision rejected")
 	// Always-bound olric cluster listener ports must be rejected too (container-level collision).
-	assert.Error(t, dash(true, ptr.To[int32](3320)).ValidateCosmoGuardDashboard(), "cluster bind port collision rejected")
-	assert.Error(t, dash(true, ptr.To[int32](3322)).ValidateCosmoGuardDashboard(), "cluster gossip port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](3320)).ValidateCosmoGuardDashboard("default"), "cluster bind port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](3322)).ValidateCosmoGuardDashboard("default"), "cluster gossip port collision rejected")
 
 	// The guard's own API listener container ports must be rejected (container binds them too).
-	assert.Error(t, dash(true, ptr.To[int32](16657)).ValidateCosmoGuardDashboard(), "RPC listener port collision rejected")
-	assert.Error(t, dash(true, ptr.To[int32](11317)).ValidateCosmoGuardDashboard(), "LCD listener port collision rejected")
-	assert.Error(t, dash(true, ptr.To[int32](19090)).ValidateCosmoGuardDashboard(), "gRPC listener port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](16657)).ValidateCosmoGuardDashboard("default"), "RPC listener port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](11317)).ValidateCosmoGuardDashboard("default"), "LCD listener port collision rejected")
+	assert.Error(t, dash(true, ptr.To[int32](19090)).ValidateCosmoGuardDashboard("default"), "gRPC listener port collision rejected")
 
 	// The public EVM Service ports are reserved even without EVM: an EVM route (individual/group/global)
 	// retargets to the guard Service by port number, so a dashboard bound to 8545/8546 would be served on
 	// the external EVM hostname. Regression for S2n5O.
-	assert.Error(t, dash(true, ptr.To[int32](8545)).ValidateCosmoGuardDashboard(), "8545 EVM RPC Service port reserved even without EVM")
-	assert.Error(t, dash(true, ptr.To[int32](8546)).ValidateCosmoGuardDashboard(), "8546 EVM RPC WS Service port reserved even without EVM")
+	assert.Error(t, dash(true, ptr.To[int32](8545)).ValidateCosmoGuardDashboard("default"), "8545 EVM RPC Service port reserved even without EVM")
+	assert.Error(t, dash(true, ptr.To[int32](8546)).ValidateCosmoGuardDashboard("default"), "8546 EVM RPC WS Service port reserved even without EVM")
 	evm := dash(true, ptr.To[int32](8545))
 	evm.EvmEnabled = ptr.To(true)
-	assert.Error(t, evm.ValidateCosmoGuardDashboard(), "8545 collides with EVM enabled too")
+	assert.Error(t, evm.ValidateCosmoGuardDashboard("default"), "8545 collides with EVM enabled too")
 
 	// The EVM LISTENER ports are reserved even without EVM: a flipped global route Service targets them
 	// regardless of the group's evmEnabled, so a dashboard there would receive misrouted EVM traffic.
-	assert.Error(t, dash(true, ptr.To[int32](18545)).ValidateCosmoGuardDashboard(), "18545 EVM listener reserved even without EVM")
-	assert.Error(t, dash(true, ptr.To[int32](18546)).ValidateCosmoGuardDashboard(), "18546 EVM listener reserved even without EVM")
+	assert.Error(t, dash(true, ptr.To[int32](18545)).ValidateCosmoGuardDashboard("default"), "18545 EVM listener reserved even without EVM")
+	assert.Error(t, dash(true, ptr.To[int32](18546)).ValidateCosmoGuardDashboard("default"), "18546 EVM listener reserved even without EVM")
 }
 
 // TestValidateCosmoGuardDashboardBasicAuth verifies basic-auth selectors must reference both a Secret
@@ -67,18 +67,177 @@ func TestValidateCosmoGuardDashboardBasicAuth(t *testing.T) {
 	}
 
 	// Both selectors fully specified -> ok.
-	assert.NoError(t, withAuth(&CosmoGuardDashboardAuth{Username: sel("creds", "user"), Password: sel("creds", "pass")}).ValidateCosmoGuardDashboard())
+	assert.NoError(t, withAuth(&CosmoGuardDashboardAuth{Username: sel("creds", "user"), Password: sel("creds", "pass")}).ValidateCosmoGuardDashboard("default"))
 
 	// Missing Secret name (only key set) -> rejected.
-	err := withAuth(&CosmoGuardDashboardAuth{Username: sel("", "user"), Password: sel("creds", "pass")}).ValidateCosmoGuardDashboard()
+	err := withAuth(&CosmoGuardDashboardAuth{Username: sel("", "user"), Password: sel("creds", "pass")}).ValidateCosmoGuardDashboard("default")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "username")
 
 	// Missing key on the password selector -> rejected.
-	assert.Error(t, withAuth(&CosmoGuardDashboardAuth{Username: sel("creds", "user"), Password: sel("creds", "")}).ValidateCosmoGuardDashboard())
+	assert.Error(t, withAuth(&CosmoGuardDashboardAuth{Username: sel("creds", "user"), Password: sel("creds", "")}).ValidateCosmoGuardDashboard("default"))
 
 	// No basic auth (no-auth internal dashboard) -> ok.
-	assert.NoError(t, withAuth(nil).ValidateCosmoGuardDashboard())
+	assert.NoError(t, withAuth(nil).ValidateCosmoGuardDashboard("default"))
+}
+
+func TestValidateCosmoGuardDashboardExposure(t *testing.T) {
+	section := "https"
+	httpSection := "http"
+	gateway := func() *CosmoGuardDashboardGateway {
+		return &CosmoGuardDashboardGateway{
+			Host: "guard.example.com",
+			Gateway: GatewayRef{
+				Name:        "external",
+				SectionName: &section,
+			},
+		}
+	}
+	config := func(dashboard *CosmoGuardDashboardConfig) *Config {
+		return &Config{CosmoGuard: &CosmoGuardConfig{Enable: true, Dashboard: dashboard}}
+	}
+
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: gateway()}).ValidateCosmoGuardDashboard("default"))
+
+	both := gateway()
+	err := config(&CosmoGuardDashboardConfig{
+		Enable:  true,
+		Ingress: &CosmoGuardDashboardIngress{Host: "guard.example.com"},
+		Gateway: both,
+	}).ValidateCosmoGuardDashboard("default")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+
+	missingHost := gateway()
+	missingHost.Host = ""
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: missingHost}).ValidateCosmoGuardDashboard("default"))
+
+	missingGatewayName := gateway()
+	missingGatewayName.Gateway.Name = ""
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: missingGatewayName}).ValidateCosmoGuardDashboard("default"))
+
+	redirectWithoutSections := gateway()
+	redirectWithoutSections.Gateway.SectionName = nil
+	redirectWithoutSections.HTTPRedirect = &GatewayRef{Name: "external"}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: redirectWithoutSections}).ValidateCosmoGuardDashboard("default"),
+		"same Gateway with no sections could attach both routes to both listeners")
+
+	// Distinct Gateways are unambiguous without sectionName: neither route can attach to the other's
+	// listener, so requiring a section there would reject a valid split-Gateway setup.
+	separateGateways := gateway()
+	separateGateways.Gateway = GatewayRef{Name: "https-gateway"}
+	separateGateways.HTTPRedirect = &GatewayRef{Name: "http-gateway"}
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: separateGateways}).ValidateCosmoGuardDashboard("default"),
+		"sectionless redirect across distinct Gateways is unambiguous")
+
+	// Same Gateway name in different namespaces is also two distinct Gateways.
+	crossNamespace := gateway()
+	crossNamespace.Gateway = GatewayRef{Name: "external"}
+	crossNamespace.HTTPRedirect = &GatewayRef{Name: "external", Namespace: ptr.To("edge")}
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: crossNamespace}).ValidateCosmoGuardDashboard("default"))
+
+	// ...but only one side naming a section on the SAME Gateway is still ambiguous.
+	halfSectioned := gateway()
+	halfSectioned.HTTPRedirect = &GatewayRef{Name: "external"}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: halfSectioned}).ValidateCosmoGuardDashboard("default"),
+		"a sectionless redirect on the same Gateway may attach to the backend's listener")
+
+	validRedirect := gateway()
+	validRedirect.HTTPRedirect = &GatewayRef{Name: "external", SectionName: &httpSection}
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: validRedirect}).ValidateCosmoGuardDashboard("default"))
+
+	sameListener := gateway()
+	sameListener.HTTPRedirect = &GatewayRef{Name: "external", SectionName: &section}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: sameListener}).ValidateCosmoGuardDashboard("default"))
+
+	// An omitted ParentReference.namespace defaults to the route's namespace, so a redirect that
+	// spells out the dashboard's own namespace still selects the same listener as a namespace-less
+	// backend ref and must be rejected.
+	defaultedNamespace := gateway()
+	defaultedNamespace.HTTPRedirect = &GatewayRef{Name: "external", Namespace: ptr.To("default"), SectionName: &section}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: defaultedNamespace}).ValidateCosmoGuardDashboard("default"),
+		"redirect naming the resource namespace explicitly targets the same listener")
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: defaultedNamespace}).ValidateCosmoGuardDashboard("other"),
+		"a genuinely different namespace is a different listener")
+
+	// Hosts that only pass an emptiness check would be rejected later by Gateway API validation.
+	badHost := gateway()
+	badHost.Host = "Guard Example"
+	err = config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badHost}).ValidateCosmoGuardDashboard("default")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a valid hostname")
+
+	wildcard := gateway()
+	wildcard.Host = "*.example.com"
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: wildcard}).ValidateCosmoGuardDashboard("default"),
+		"wildcard hostnames are valid Gateway API hostnames")
+
+	badWildcard := gateway()
+	badWildcard.Host = "*.*.example.com"
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badWildcard}).ValidateCosmoGuardDashboard("default"),
+		"only a single leading wildcard label is allowed")
+
+	// The renderer copies the host into spec.hostnames verbatim, so a padded value must be rejected
+	// rather than validated as its trimmed form and then rejected by the API server.
+	padded := gateway()
+	padded.Host = " guard.example.com "
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: padded}).ValidateCosmoGuardDashboard("default"),
+		"surrounding whitespace is not silently trimmed")
+
+	// Gateway references are copied into the ParentReference verbatim, so they must satisfy the
+	// Gateway API grammars: ObjectName/SectionName are DNS1123 subdomains, Namespace a DNS1123 label.
+	badRefName := gateway()
+	badRefName.Gateway.Name = "bad gateway"
+	err = config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRefName}).ValidateCosmoGuardDashboard("default")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a valid Gateway name")
+
+	badRefNamespace := gateway()
+	badRefNamespace.Gateway.Namespace = ptr.To("Not_A_Namespace")
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRefNamespace}).ValidateCosmoGuardDashboard("default"))
+
+	badRefSection := gateway()
+	badRefSection.Gateway.SectionName = ptr.To("https listener")
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRefSection}).ValidateCosmoGuardDashboard("default"))
+
+	// A namespace is a DNS1123 label, so dots are invalid there even though they are fine in a
+	// sectionName (a subdomain).
+	dottedNamespace := gateway()
+	dottedNamespace.Gateway.Namespace = ptr.To("gateway.system")
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: dottedNamespace}).ValidateCosmoGuardDashboard("default"))
+
+	dottedSection := gateway()
+	dottedSection.Gateway.SectionName = ptr.To("https.dashboard")
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: dottedSection}).ValidateCosmoGuardDashboard("default"))
+
+	// The redirect reference is validated with the same grammars.
+	badRedirect := gateway()
+	badRedirect.HTTPRedirect = &GatewayRef{Name: "bad gateway", SectionName: &httpSection}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRedirect}).ValidateCosmoGuardDashboard("default"))
+}
+
+// TestValidateP2PGatewayExpose verifies a Gateway-based P2P expose config cannot pin a single
+// sectionName while serving multiple instances: each instance attaches to a distinct listener at
+// port base+index, so all but one route would fail to attach and lose P2P exposure.
+func TestValidateP2PGatewayExpose(t *testing.T) {
+	section := "p2p"
+	expose := func(sectionName *string) *ExposeConfig {
+		return &ExposeConfig{Gateway: &ExposeGatewayConfig{
+			GatewayRef: GatewayRef{Name: "external", SectionName: sectionName},
+			Port:       ptr.To[int32](30000),
+		}}
+	}
+
+	assert.NoError(t, expose(&section).ValidateP2PGatewayExpose(".spec.cosmoseed.expose", 1), "one instance uses one listener")
+	assert.NoError(t, expose(nil).ValidateP2PGatewayExpose(".spec.cosmoseed.expose", 3), "no sectionName attaches by port")
+
+	err := expose(&section).ValidateP2PGatewayExpose(".spec.cosmoseed.expose", 3)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sectionName")
+
+	var nilExpose *ExposeConfig
+	assert.NoError(t, nilExpose.ValidateP2PGatewayExpose(".spec.cosmoseed.expose", 3))
+	assert.NoError(t, (&ExposeConfig{}).ValidateP2PGatewayExpose(".spec.cosmoseed.expose", 3), "Service-mode expose is unaffected")
 }
 
 func autoscaledConfig(res *corev1.ResourceRequirements) *Config {

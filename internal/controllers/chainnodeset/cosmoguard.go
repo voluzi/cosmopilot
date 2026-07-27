@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
@@ -139,6 +140,16 @@ func buildDashboardParams(cfg *appsv1.Config) *cosmoguard.DashboardParams {
 			TLSSecretName:    d.Ingress.TLSSecretName,
 		}
 	}
+	if d.Gateway != nil {
+		dp.Gateway = &cosmoguard.DashboardGatewayParams{
+			Host:      d.Gateway.Host,
+			ParentRef: d.Gateway.Gateway.GetParentRef(),
+		}
+		if d.Gateway.HTTPRedirect != nil {
+			ref := d.Gateway.HTTPRedirect.GetParentRef()
+			dp.Gateway.HTTPRedirectParentRef = &ref
+		}
+	}
 	return dp
 }
 
@@ -208,6 +219,12 @@ type cosmoGuardReconcile struct {
 	fullyReady      map[string]bool
 	expected        map[string]bool
 	expectedIngress map[string]bool
+	expectedRoutes  map[string]bool
+	// routesPending is true while a desired dashboard HTTPRoute has not yet been accepted by its
+	// parent Gateway. Acceptance is reported as an HTTPRoute STATUS update, which no watch here
+	// admits (Gateway API CRDs are optional, so the controller cannot Own HTTPRoute), so the caller
+	// requeues sooner than the reconcile period to keep the make-before-break cutover responsive.
+	routesPending bool
 }
 
 // ensureCosmoGuards reconciles the per-group CosmoGuard deployments and reports, per group, whether
@@ -222,6 +239,8 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 	fullyReady := map[string]bool{}
 	expected := map[string]bool{}
 	expectedIngress := map[string]bool{}
+	expectedRoutes := map[string]bool{}
+	routesPending := false
 
 	for _, group := range nodeSet.Spec.Nodes {
 		cfg := group.GetServiceConfig()
@@ -296,6 +315,38 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 			expectedIngress[ing.GetName()] = true
 		}
 
+		dashboardRoutes := params.DashboardHTTPRoutes()
+		routesReady := true
+		// Only a route awaiting acceptance warrants a short re-check. Missing Gateway API CRDs make
+		// every route unavailable permanently, so polling would spin forever without ever converging.
+		groupRoutesPending := false
+		for _, route := range dashboardRoutes {
+			withCosmoGuardScope(route)
+			expectedRoutes[route.GetName()] = true
+			state, err := cosmoguard.ApplyOwnedHTTPRoute(ctx, r.Client, r.Scheme, nodeSet, route)
+			if err != nil {
+				return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard dashboard httproute for group %s: %w", group.Name, err)
+			}
+			if !state.Ready() {
+				routesReady = false
+			}
+			if state == cosmoguard.RoutePending {
+				groupRoutesPending = true
+			}
+		}
+		// A non-empty dashboardRoutes implies params.Dashboard is set: the routes come from
+		// DashboardHTTPRoutes, which returns nil without it.
+		if len(dashboardRoutes) > 0 && !routesReady {
+			expectedIngress[params.DashboardIngressName()] = true
+			routesPending = routesPending || groupRoutesPending
+			// The superseded Ingress stays live until the route is accepted, but the guard Service was
+			// already reconciled to the desired dashboard port above. Repoint the retained Ingress so a
+			// migration that also changes the port leaves a working fallback rather than a 503.
+			if err := cosmoguard.RepointDashboardIngressPort(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.DashboardIngressName(), params.Dashboard.Port); err != nil {
+				return cosmoGuardReconcile{}, fmt.Errorf("failed to repoint cosmoguard dashboard ingress for group %s: %w", group.Name, err)
+			}
+		}
+
 		if hpa := params.HPA(); hpa != nil {
 			withCosmoGuardScope(hpa)
 			if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, hpa); err != nil {
@@ -333,7 +384,14 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		fullyReady[group.Name] = fully
 	}
 
-	return cosmoGuardReconcile{ready: ready, fullyReady: fullyReady, expected: expected, expectedIngress: expectedIngress}, nil
+	return cosmoGuardReconcile{
+		ready:           ready,
+		fullyReady:      fullyReady,
+		expected:        expected,
+		expectedIngress: expectedIngress,
+		expectedRoutes:  expectedRoutes,
+		routesPending:   routesPending,
+	}, nil
 }
 
 // serviceSelectsGuard reports whether the named Service currently selects CosmoGuard pods (i.e. it
@@ -409,9 +467,9 @@ func (r *Reconciler) ensureCosmoGuardSecret(ctx context.Context, nodeSet *appsv1
 
 // cleanupStaleCosmoGuards deletes guard resources whose group no longer enables CosmoGuard (or was
 // removed). It lists by the cosmoguard scope label and owner, deleting StatefulSets, Services (guard
-// + headless upstream + peer), Secrets, HPAs and dashboard Ingresses that are not in the expected
-// set. Auxiliary resources are matched by stripping their suffix back to the guard name.
-func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv1.ChainNodeSet, expected, expectedIngress map[string]bool) error {
+// + headless upstream + peer), Secrets, HPAs and dashboard exposure resources that are not in the
+// expected set. Auxiliary resources are matched by stripping their suffix back to the guard name.
+func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv1.ChainNodeSet, expected, expectedIngress, expectedRoutes map[string]bool) error {
 	logger := log.FromContext(ctx)
 	sel := client.MatchingLabels{controllers.LabelScope: scopeCosmoGuard}
 	ns := client.InNamespace(nodeSet.GetNamespace())
@@ -428,6 +486,24 @@ func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv
 		logger.Info("deleting stale cosmoguard dashboard ingress", "name", in.GetName())
 		if err := client.IgnoreNotFound(r.Delete(ctx, in)); err != nil {
 			return err
+		}
+	}
+
+	routes := &gwapiv1.HTTPRouteList{}
+	if err := r.List(ctx, routes, ns, sel); err != nil {
+		if !controllers.IsCRDNotInstalled(err) {
+			return err
+		}
+	} else {
+		for i := range routes.Items {
+			route := &routes.Items[i]
+			if !metav1.IsControlledBy(route, nodeSet) || expectedRoutes[route.GetName()] {
+				continue
+			}
+			logger.Info("deleting stale cosmoguard dashboard httproute", "name", route.GetName())
+			if err := r.Delete(ctx, route); err != nil && !apierrors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+				return err
+			}
 		}
 	}
 

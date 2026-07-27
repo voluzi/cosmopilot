@@ -325,7 +325,7 @@ func (r *Reconciler) getNodeSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNo
 		Spec: appsv1.ChainNodeSpec{
 			Genesis:                       genesisConfig,
 			App:                           nodeSet.GetAppSpecWithUpgrades(),
-			Config:                        group.Config,
+			Config:                        configForChild(group.Config),
 			Persistence:                   group.Persistence.DeepCopy(),
 			Peers:                         group.Peers,
 			Expose:                        exposeForInstance(group.Expose, index),
@@ -554,5 +554,31 @@ func exposeForInstance(src *appsv1.ExposeConfig, index int) *appsv1.ExposeConfig
 	base := out.GetGatewayPort()
 	port := base + int32(index)
 	out.Gateway.Port = &port
+	return out
+}
+
+// configForChild returns the Config a generated child ChainNode should carry.
+//
+// The group's dashboard EXPOSURE (its Ingress/Gateway) belongs to the group's shared guard, which the
+// ChainNodeSet reconciles once. A child that manages its own guard — one declaring individual
+// ingress/gateway routes — would otherwise inherit the very same single host and publish a competing
+// backend for it, so N children plus the group guard would all claim one hostname and route
+// precedence would pick an arbitrary winner. Strip just the exposure here, at the point where the
+// child spec is derived: the child's dashboard still runs on its own guard port, it simply is not
+// published externally.
+//
+// The rest of the dashboard config (enable, port, basicAuth) is inherited unchanged.
+func configForChild(src *appsv1.Config) *appsv1.Config {
+	if src == nil || !src.CosmoGuardDashboardEnabled() {
+		return src
+	}
+	dashboard := src.GetCosmoGuardDashboard()
+	if dashboard.Ingress == nil && dashboard.Gateway == nil {
+		return src
+	}
+	out := src.DeepCopy()
+	childDashboard := out.GetCosmoGuardDashboard()
+	childDashboard.Ingress = nil
+	childDashboard.Gateway = nil
 	return out
 }

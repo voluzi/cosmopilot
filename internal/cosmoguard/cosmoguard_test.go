@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
@@ -109,6 +110,54 @@ func TestStatefulSet_EVMAndDashboard(t *testing.T) {
 	}
 	assert.True(t, portNames[controllers.CosmoGuardEvmRpcPortName])
 	assert.True(t, portNames["dashboard"])
+}
+
+func TestDashboardHTTPRoutes(t *testing.T) {
+	httpsSection := gwapiv1.SectionName("https-dashboard")
+	httpSection := gwapiv1.SectionName("http")
+	p := baseParams()
+	p.Dashboard = &DashboardParams{
+		Port: 8080,
+		Gateway: &DashboardGatewayParams{
+			Host: "guard.example.com",
+			ParentRef: gwapiv1.ParentReference{
+				Name:        "external",
+				SectionName: &httpsSection,
+			},
+			HTTPRedirectParentRef: &gwapiv1.ParentReference{
+				Name:        "external",
+				SectionName: &httpSection,
+			},
+		},
+	}
+
+	routes := p.DashboardHTTPRoutes()
+	require.Len(t, routes, 2)
+
+	backend := routes[0]
+	assert.Equal(t, "chain-group-cg-dashboard", backend.Name)
+	assert.Equal(t, []gwapiv1.Hostname{"guard.example.com"}, backend.Spec.Hostnames)
+	require.Len(t, backend.Spec.ParentRefs, 1)
+	assert.Equal(t, httpsSection, *backend.Spec.ParentRefs[0].SectionName)
+	require.Len(t, backend.Spec.Rules, 1)
+	require.Len(t, backend.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, "chain-group-cg", string(backend.Spec.Rules[0].BackendRefs[0].Name))
+	require.NotNil(t, backend.Spec.Rules[0].BackendRefs[0].Port)
+	assert.Equal(t, gwapiv1.PortNumber(8080), *backend.Spec.Rules[0].BackendRefs[0].Port)
+
+	redirect := routes[1]
+	assert.Equal(t, "chain-group-cg-dashboard-http-redirect", redirect.Name)
+	require.Len(t, redirect.Spec.ParentRefs, 1)
+	assert.Equal(t, httpSection, *redirect.Spec.ParentRefs[0].SectionName)
+	require.Len(t, redirect.Spec.Rules, 1)
+	require.Len(t, redirect.Spec.Rules[0].Filters, 1)
+	filter := redirect.Spec.Rules[0].Filters[0]
+	assert.Equal(t, gwapiv1.HTTPRouteFilterRequestRedirect, filter.Type)
+	require.NotNil(t, filter.RequestRedirect)
+	require.NotNil(t, filter.RequestRedirect.Scheme)
+	assert.Equal(t, "https", *filter.RequestRedirect.Scheme)
+	require.NotNil(t, filter.RequestRedirect.StatusCode)
+	assert.Equal(t, 301, *filter.RequestRedirect.StatusCode)
 }
 
 func TestStatefulSet_AutoscalingLeavesReplicasUnset(t *testing.T) {

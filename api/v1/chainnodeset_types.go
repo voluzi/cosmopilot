@@ -764,14 +764,32 @@ type IndividualIngressConfig struct {
 	Host string `json:"host"`
 }
 
-// GatewayRef identifies the Gateway resource routes should attach to.
+// GatewayRef identifies the Gateway resource routes should attach to. Each field is copied verbatim
+// into a Gateway API ParentReference, so all three carry that API's grammar: ObjectName and
+// SectionName are RFC 1123 subdomains, Namespace an RFC 1123 label. Enforcing it here rejects a
+// malformed reference at admission rather than letting the rendered route be refused by the API
+// server, which leaves reconciliation unable to converge.
 type GatewayRef struct {
 	// Name of the Gateway resource.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 
 	// Namespace of the Gateway. Defaults to the resource's namespace.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Namespace *string `json:"namespace,omitempty"`
+
+	// SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
+	// every listener that accepts it.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	SectionName *string `json:"sectionName,omitempty"`
 }
 
 // GatewayConfig configures Gateway API HTTPRoute/GRPCRoute resources

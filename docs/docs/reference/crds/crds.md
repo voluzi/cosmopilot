@@ -27,6 +27,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmoGuardConfig](#cosmoguardconfig)
 * [CosmoGuardDashboardAuth](#cosmoguarddashboardauth)
 * [CosmoGuardDashboardConfig](#cosmoguarddashboardconfig)
+* [CosmoGuardDashboardGateway](#cosmoguarddashboardgateway)
 * [CosmoGuardDashboardIngress](#cosmoguarddashboardingress)
 * [CosmoseedConfig](#cosmoseedconfig)
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
@@ -362,12 +363,13 @@ GatewayConfig configures Gateway API HTTPRoute/GRPCRoute resources for exposing 
 
 #### GatewayRef
 
-GatewayRef identifies the Gateway resource routes should attach to.
+GatewayRef identifies the Gateway resource routes should attach to. Each field is copied verbatim into a Gateway API ParentReference, so all three carry that API's grammar: ObjectName and SectionName are RFC 1123 subdomains, Namespace an RFC 1123 label. Enforcing it here rejects a malformed reference at admission rather than letting the rendered route be refused by the API server, which leaves reconciliation unable to converge.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | name | Name of the Gateway resource. | string | true |
 | namespace | Namespace of the Gateway. Defaults to the resource's namespace. | *string | false |
+| sectionName | SectionName selects a specific listener on the Gateway. When omitted, the route may attach to every listener that accepts it. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -692,6 +694,19 @@ CosmoGuardDashboardConfig configures CosmoGuard's read-only web dashboard.
 | port | Port the dashboard listens on. Defaults to `8080`. | *int32 | false |
 | basicAuth | BasicAuth protects the dashboard with HTTP basic authentication using credentials sourced from a Secret. | *[CosmoGuardDashboardAuth](#cosmoguarddashboardauth) | false |
 | ingress | Ingress exposes the dashboard through an Ingress resource. | *[CosmoGuardDashboardIngress](#cosmoguarddashboardingress) | false |
+| gateway | Gateway exposes the dashboard through Gateway API HTTPRoutes. Mutually exclusive with Ingress. | *[CosmoGuardDashboardGateway](#cosmoguarddashboardgateway) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardGateway
+
+CosmoGuardDashboardGateway exposes the CosmoGuard dashboard through Gateway API HTTPRoutes.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| host | Host is the hostname to route dashboard traffic from. | string | true |
+| gateway | Gateway is the parent Gateway listener for dashboard traffic. | [GatewayRef](#gatewayref) | true |
+| httpRedirect | HTTPRedirect optionally creates a second HTTPRoute that redirects this host to HTTPS. It must select a different listener from Gateway. | *[GatewayRef](#gatewayref) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -760,7 +775,7 @@ ExposeGatewayConfig configures P2P exposure through a Gateway API TCPRoute.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| port | Port is the external port on the Gateway listener for P2P traffic. This is the port that peers will use to connect. Defaults to 26656.\n\nWhen this config is applied to a group of nodes with more than one instance (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is treated as the BASE port and each instance attaches to a distinct listener: instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i. The Gateway must be configured with a matching TCP listener for each port. | *int32 | false |
+| port | Port is the external port on the Gateway listener for P2P traffic. This is the port that peers will use to connect. Defaults to 26656.\n\nWhen this config is applied to a group of nodes with more than one instance (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is treated as the BASE port and each instance attaches to a distinct listener: instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i. The Gateway must be configured with a matching TCP listener for each port. Because those listeners differ per instance, sectionName cannot be set in the multi-instance case: a single listener name cannot address them all. | *int32 | false |
 
 [Back to Custom Resources](#custom-resources)
 

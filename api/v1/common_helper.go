@@ -529,7 +529,7 @@ var cosmoGuardReservedPorts = map[int32]string{
 // 18545/18546) is reserved unconditionally in cosmoGuardReservedPorts, because an EVM route retargets to
 // the guard Service by port number regardless of a group's evmEnabled. Returns nil when the dashboard is
 // disabled.
-func (cfg *Config) ValidateCosmoGuardDashboard() error {
+func (cfg *Config) ValidateCosmoGuardDashboard(namespace string) error {
 	if !cfg.CosmoGuardDashboardEnabled() {
 		return nil
 	}
@@ -538,7 +538,8 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 		return fmt.Errorf("cosmoGuard.dashboard.port %d collides with the guard's %s port; choose a different port", port, name)
 	}
 
-	if auth := cfg.GetCosmoGuardDashboard().BasicAuth; auth != nil {
+	dashboard := cfg.GetCosmoGuardDashboard()
+	if auth := dashboard.BasicAuth; auth != nil {
 		if auth.Username.Name == "" || auth.Username.Key == "" {
 			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.username must reference both a Secret name and key")
 		}
@@ -546,7 +547,120 @@ func (cfg *Config) ValidateCosmoGuardDashboard() error {
 			return fmt.Errorf("cosmoGuard.dashboard.basicAuth.password must reference both a Secret name and key")
 		}
 	}
+	if dashboard.Ingress != nil && dashboard.Gateway != nil {
+		return fmt.Errorf("cosmoGuard.dashboard.ingress and cosmoGuard.dashboard.gateway are mutually exclusive")
+	}
+	if gateway := dashboard.Gateway; gateway != nil {
+		if err := validateGatewayHostname(gateway.Host); err != nil {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.host %w", err)
+		}
+		if err := validateCosmoGuardDashboardGatewayRef("gateway", gateway.Gateway); err != nil {
+			return err
+		}
+		if gateway.HTTPRedirect != nil {
+			if err := validateCosmoGuardDashboardGatewayRef("httpRedirect", *gateway.HTTPRedirect); err != nil {
+				return err
+			}
+			// Two references to the SAME Gateway must each name a listener: without a sectionName a
+			// route may attach to every listener that accepts it, so the backend and the redirect
+			// would both land on the HTTP and HTTPS listeners and compete for the same host. Distinct
+			// Gateways are already unambiguous, so a sectionless pair is fine there.
+			if gateway.Gateway.sameGateway(*gateway.HTTPRedirect, namespace) {
+				if gateway.Gateway.SectionName == nil || gateway.HTTPRedirect.SectionName == nil {
+					return fmt.Errorf("cosmoGuard.dashboard.gateway gateway and httpRedirect must both set sectionName when they reference the same Gateway")
+				}
+				if gateway.Gateway.sameParent(*gateway.HTTPRedirect, namespace) {
+					return fmt.Errorf("cosmoGuard.dashboard.gateway.httpRedirect must select a different Gateway listener")
+				}
+			}
+		}
+	}
 	return nil
+}
+
+// validateGatewayHostname checks a value against the Gateway API Hostname grammar: a DNS1123
+// subdomain, optionally with a single leading "*." wildcard label. Gateway API rejects anything
+// else, so a host that only passes an emptiness check (e.g. "Guard Example") would be admitted by
+// the webhook and then rejected when the rendered HTTPRoute reaches the API server.
+//
+// The value is checked verbatim, NOT trimmed: the renderer copies the configured string into
+// spec.hostnames as-is, so accepting " guard.example.com " here would admit a route the API server
+// then rejects, leaving the dashboard pending indefinitely.
+func validateGatewayHostname(host string) error {
+	if host == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if strings.HasPrefix(host, "*.") {
+		if errs := validation.IsWildcardDNS1123Subdomain(host); len(errs) > 0 {
+			return fmt.Errorf("%q is not a valid wildcard hostname: %s", host, strings.Join(errs, "; "))
+		}
+		return nil
+	}
+	if errs := validation.IsDNS1123Subdomain(host); len(errs) > 0 {
+		return fmt.Errorf("%q is not a valid hostname: %s", host, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// validateCosmoGuardDashboardGatewayRef checks a Gateway reference against the Gateway API grammars
+// its fields are copied into: ObjectName (a DNS1123 subdomain) for the Gateway name, Namespace (a
+// DNS1123 label) and SectionName (a DNS1123 subdomain) for the listener. Values are checked
+// verbatim, since they are copied into the ParentReference unmodified — a non-empty but malformed
+// name like "bad gateway" cannot identify a Gateway, so the route would never attach and the
+// dashboard transition would stay pending.
+func validateCosmoGuardDashboardGatewayRef(path string, ref GatewayRef) error {
+	if ref.Name == "" {
+		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.name must not be empty", path)
+	}
+	if errs := validation.IsDNS1123Subdomain(ref.Name); len(errs) > 0 {
+		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.name %q is not a valid Gateway name: %s", path, ref.Name, strings.Join(errs, "; "))
+	}
+	if ref.Namespace != nil {
+		if *ref.Namespace == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.namespace must not be empty", path)
+		}
+		if errs := validation.IsDNS1123Label(*ref.Namespace); len(errs) > 0 {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.namespace %q is not a valid namespace: %s", path, *ref.Namespace, strings.Join(errs, "; "))
+		}
+	}
+	if ref.SectionName != nil {
+		if *ref.SectionName == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.sectionName must not be empty", path)
+		}
+		if errs := validation.IsDNS1123Subdomain(*ref.SectionName); len(errs) > 0 {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.sectionName %q is not a valid listener name: %s", path, *ref.SectionName, strings.Join(errs, "; "))
+		}
+	}
+	return nil
+}
+
+// sameGateway reports whether two references point at the same Gateway object, ignoring the
+// listener. An omitted ParentReference.namespace defaults to the route's namespace, so both sides
+// are resolved against defaultNamespace first.
+func (g GatewayRef) sameGateway(other GatewayRef, defaultNamespace string) bool {
+	return g.Name == other.Name &&
+		valueOrDefault(g.Namespace, defaultNamespace) == valueOrDefault(other.Namespace, defaultNamespace)
+}
+
+// sameParent reports whether two Gateway references select the same listener — the same Gateway AND
+// the same section. Namespace defaulting is handled by sameGateway, so {name: gw} and
+// {name: gw, namespace: <route ns>} are correctly treated as one listener rather than two.
+func (g GatewayRef) sameParent(other GatewayRef, defaultNamespace string) bool {
+	return g.sameGateway(other, defaultNamespace) && optionalStringEqual(g.SectionName, other.SectionName)
+}
+
+func valueOrDefault(value *string, fallback string) string {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func optionalStringEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (cfg *Config) GetHaltHeight() int64 {
@@ -606,15 +720,24 @@ func (exp *ExposeConfig) UsesGateway() bool {
 }
 
 func (exp *ExposeConfig) GetGatewayParentRef() gwapiv1.ParentReference {
-	ref := gwapiv1.ParentReference{
-		Name: gwapiv1.ObjectName(exp.Gateway.Name),
-		Port: ptr.To(gwapiv1.PortNumber(exp.GetGatewayPort())),
-	}
-	if exp.Gateway.Namespace != nil {
-		ns := gwapiv1.Namespace(*exp.Gateway.Namespace)
-		ref.Namespace = &ns
-	}
+	ref := exp.Gateway.GatewayRef.GetParentRef()
+	ref.Port = ptr.To(gwapiv1.PortNumber(exp.GetGatewayPort()))
 	return ref
+}
+
+// ValidateP2PGatewayExpose rejects a Gateway-based P2P expose config that pins a sectionName while
+// serving more than one instance. Each instance attaches to a distinct listener at base port +
+// index, but a sectionName names ONE listener — every generated TCPRoute would carry the same
+// listener name with a different required port, so all but one instance would fail to attach and
+// silently lose P2P exposure.
+func (exp *ExposeConfig) ValidateP2PGatewayExpose(path string, instances int) error {
+	if exp == nil || exp.Gateway == nil || instances <= 1 {
+		return nil
+	}
+	if exp.Gateway.SectionName != nil {
+		return fmt.Errorf("%s.gateway.sectionName cannot be used with %d instances: each instance attaches to a distinct listener at port %d+index, which a single sectionName cannot name", path, instances, exp.GetGatewayPort())
+	}
+	return nil
 }
 
 func (exp *ExposeConfig) GetGatewayPort() int32 {

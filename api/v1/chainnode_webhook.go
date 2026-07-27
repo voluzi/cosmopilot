@@ -108,7 +108,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	}
 
 	// The CosmoGuard dashboard port must not collide with a port the guard Service already exposes.
-	if err := chainNode.Spec.Config.ValidateCosmoGuardDashboard(); err != nil {
+	if err := chainNode.Spec.Config.ValidateCosmoGuardDashboard(chainNode.GetNamespace()); err != nil {
 		return nil, fmt.Errorf(".spec.config.%w", err)
 	}
 

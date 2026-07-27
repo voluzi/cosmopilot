@@ -534,12 +534,19 @@ func (gg *GlobalGatewayConfig) CreateServicesOnly() bool {
 }
 
 func (gg *GlobalGatewayConfig) GetGatewayParentRef() gwapiv1.ParentReference {
-	ref := gwapiv1.ParentReference{
-		Name: gwapiv1.ObjectName(gg.Gateway.Name),
-	}
-	if gg.Gateway.Namespace != nil {
-		ns := gwapiv1.Namespace(*gg.Gateway.Namespace)
+	return gg.Gateway.GetParentRef()
+}
+
+// GetParentRef converts the API's compact Gateway reference into a Gateway API parent reference.
+func (g GatewayRef) GetParentRef() gwapiv1.ParentReference {
+	ref := gwapiv1.ParentReference{Name: gwapiv1.ObjectName(g.Name)}
+	if g.Namespace != nil {
+		ns := gwapiv1.Namespace(*g.Namespace)
 		ref.Namespace = &ns
+	}
+	if g.SectionName != nil {
+		section := gwapiv1.SectionName(*g.SectionName)
+		ref.SectionName = &section
 	}
 	return ref
 }

@@ -439,7 +439,7 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 		Spec: appsv1.ChainNodeSpec{
 			Genesis:     genesisConfig,
 			App:         nodeSet.GetAppSpecWithUpgrades(),
-			Config:      cfg.Config,
+			Config:      configForChild(cfg.Config),
 			Persistence: cfg.Persistence,
 			Validator: &appsv1.ValidatorConfig{
 				PrivateKeySecret: cfg.PrivateKeySecret,

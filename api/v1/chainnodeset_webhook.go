@@ -198,8 +198,12 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		seenGroupNames[group.Name] = i
 
 		// The CosmoGuard dashboard port must not collide with a port the guard Service already exposes.
-		if err := group.GetServiceConfig().ValidateCosmoGuardDashboard(); err != nil {
+		if err := group.GetServiceConfig().ValidateCosmoGuardDashboard(nodeSet.GetNamespace()); err != nil {
 			return nil, fmt.Errorf(".spec.nodes[%d] %w", i, err)
+		}
+
+		if err := group.Expose.ValidateP2PGatewayExpose(fmt.Sprintf(".spec.nodes[%d].expose", i), group.GetInstances()); err != nil {
+			return nil, err
 		}
 
 		// Validate persistence size
@@ -498,6 +502,12 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			if !ok || ng.Validator == nil || ng.Validator.Init == nil {
 				return nil, fmt.Errorf("genesis-initializing validator group %q cannot be removed or converted after genesis has been created: its validators are part of the immutable genesis validator set", og.Name)
 			}
+		}
+	}
+
+	if nodeSet.Spec.Cosmoseed.IsEnabled() {
+		if err := nodeSet.Spec.Cosmoseed.Expose.ValidateP2PGatewayExpose(".spec.cosmoseed.expose", nodeSet.Spec.Cosmoseed.GetInstances()); err != nil {
+			return nil, err
 		}
 	}
 
