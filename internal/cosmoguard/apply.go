@@ -82,39 +82,69 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	return c.Update(ctx, obj)
 }
 
-// ApplyOwnedHTTPRoute creates or updates a dashboard HTTPRoute owned by owner. The returned bool is
-// true only after the configured parent reports the current route generation as accepted with all
-// references resolved. Gateway API may be optional in a cluster; a missing CRD returns false.
-func ApplyOwnedHTTPRoute(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, route *gwapiv1.HTTPRoute) (bool, error) {
+// RouteState reports the outcome of applying a dashboard HTTPRoute.
+type RouteState int
+
+const (
+	// RouteUnavailable means the Gateway API CRDs are not installed, so no route was applied. This
+	// is a permanent property of the cluster, not a transient wait — callers must keep the legacy
+	// Ingress serving and must NOT poll for a status that will never arrive.
+	RouteUnavailable RouteState = iota
+	// RoutePending means the route was applied but its parent has not yet reported the current
+	// generation as accepted with references resolved. Acceptance arrives as a status update, which
+	// no watch admits, so callers re-check shortly.
+	RoutePending
+	// RouteAccepted means every configured parent accepted the current route generation.
+	RouteAccepted
+)
+
+// Ready reports whether the route is serving, i.e. accepted by every configured parent.
+func (s RouteState) Ready() bool { return s == RouteAccepted }
+
+// ApplyOwnedHTTPRoute creates or updates a dashboard HTTPRoute owned by owner, reporting whether the
+// configured parent has accepted the current route generation. Gateway API may be optional in a
+// cluster; a missing CRD yields RouteUnavailable rather than RoutePending, so callers can keep the
+// legacy Ingress without polling for an acceptance that can never arrive.
+func ApplyOwnedHTTPRoute(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, route *gwapiv1.HTTPRoute) (RouteState, error) {
 	if err := controllerutil.SetControllerReference(owner, route, scheme); err != nil {
-		return false, err
+		return RouteUnavailable, err
 	}
 
 	existing := &gwapiv1.HTTPRoute{}
 	err := c.Get(ctx, client.ObjectKeyFromObject(route), existing)
 	if err == nil && !metav1.IsControlledBy(existing, owner) {
-		return false, fmt.Errorf("cosmoguard resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", route.GetName())
+		return RouteUnavailable, fmt.Errorf("cosmoguard resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", route.GetName())
 	}
 	if err != nil && !errors.IsNotFound(err) {
 		if controllers.IsCRDNotInstalled(err) {
-			return false, nil
+			return RouteUnavailable, nil
 		}
-		return false, err
+		return RouteUnavailable, err
 	}
 
 	reconciled, err := controllers.EnsureHTTPRoute(ctx, c, route)
-	if err != nil || !reconciled {
-		return false, err
+	if err != nil {
+		return RouteUnavailable, err
+	}
+	if !reconciled {
+		// EnsureHTTPRoute reports not-reconciled only when the Gateway API CRDs are missing.
+		return RouteUnavailable, nil
 	}
 
 	current := &gwapiv1.HTTPRoute{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(route), current); err != nil {
-		if controllers.IsCRDNotInstalled(err) || errors.IsNotFound(err) {
-			return false, nil
+		if controllers.IsCRDNotInstalled(err) {
+			return RouteUnavailable, nil
 		}
-		return false, err
+		if errors.IsNotFound(err) {
+			return RoutePending, nil
+		}
+		return RouteUnavailable, err
 	}
-	return httpRouteReady(current), nil
+	if httpRouteReady(current) {
+		return RouteAccepted, nil
+	}
+	return RoutePending, nil
 }
 
 func httpRouteReady(route *gwapiv1.HTTPRoute) bool {

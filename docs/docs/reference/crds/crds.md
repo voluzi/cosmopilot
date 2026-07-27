@@ -369,7 +369,7 @@ GatewayRef identifies the Gateway resource routes should attach to.
 | ----- | ----------- | ------ | -------- |
 | name | Name of the Gateway resource. | string | true |
 | namespace | Namespace of the Gateway. Defaults to the resource's namespace. | *string | false |
-| sectionName | SectionName selects a specific listener on the Gateway. When omitted, the route may attach to every listener that accepts it.\n\nFor P2P exposure (expose.gateway) this cannot be set when more than one instance is served: each instance attaches to a distinct listener at port base+index, which a single listener name cannot address. | *string | false |
+| sectionName | SectionName selects a specific listener on the Gateway. When omitted, the route may attach to every listener that accepts it. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -775,7 +775,7 @@ ExposeGatewayConfig configures P2P exposure through a Gateway API TCPRoute.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| port | Port is the external port on the Gateway listener for P2P traffic. This is the port that peers will use to connect. Defaults to 26656.\n\nWhen this config is applied to a group of nodes with more than one instance (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is treated as the BASE port and each instance attaches to a distinct listener: instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i. The Gateway must be configured with a matching TCP listener for each port. | *int32 | false |
+| port | Port is the external port on the Gateway listener for P2P traffic. This is the port that peers will use to connect. Defaults to 26656.\n\nWhen this config is applied to a group of nodes with more than one instance (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is treated as the BASE port and each instance attaches to a distinct listener: instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i. The Gateway must be configured with a matching TCP listener for each port. Because those listeners differ per instance, sectionName cannot be set in the multi-instance case: a single listener name cannot address them all. | *int32 | false |
 
 [Back to Custom Resources](#custom-resources)
 

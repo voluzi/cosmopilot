@@ -155,6 +155,44 @@ func TestValidateCosmoGuardDashboardExposure(t *testing.T) {
 	badWildcard.Host = "*.*.example.com"
 	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badWildcard}).ValidateCosmoGuardDashboard("default"),
 		"only a single leading wildcard label is allowed")
+
+	// The renderer copies the host into spec.hostnames verbatim, so a padded value must be rejected
+	// rather than validated as its trimmed form and then rejected by the API server.
+	padded := gateway()
+	padded.Host = " guard.example.com "
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: padded}).ValidateCosmoGuardDashboard("default"),
+		"surrounding whitespace is not silently trimmed")
+
+	// Gateway references are copied into the ParentReference verbatim, so they must satisfy the
+	// Gateway API grammars: ObjectName/SectionName are DNS1123 subdomains, Namespace a DNS1123 label.
+	badRefName := gateway()
+	badRefName.Gateway.Name = "bad gateway"
+	err = config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRefName}).ValidateCosmoGuardDashboard("default")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a valid Gateway name")
+
+	badRefNamespace := gateway()
+	badRefNamespace.Gateway.Namespace = ptr.To("Not_A_Namespace")
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRefNamespace}).ValidateCosmoGuardDashboard("default"))
+
+	badRefSection := gateway()
+	badRefSection.Gateway.SectionName = ptr.To("https listener")
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRefSection}).ValidateCosmoGuardDashboard("default"))
+
+	// A namespace is a DNS1123 label, so dots are invalid there even though they are fine in a
+	// sectionName (a subdomain).
+	dottedNamespace := gateway()
+	dottedNamespace.Gateway.Namespace = ptr.To("gateway.system")
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: dottedNamespace}).ValidateCosmoGuardDashboard("default"))
+
+	dottedSection := gateway()
+	dottedSection.Gateway.SectionName = ptr.To("https.dashboard")
+	assert.NoError(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: dottedSection}).ValidateCosmoGuardDashboard("default"))
+
+	// The redirect reference is validated with the same grammars.
+	badRedirect := gateway()
+	badRedirect.HTTPRedirect = &GatewayRef{Name: "bad gateway", SectionName: &httpSection}
+	assert.Error(t, config(&CosmoGuardDashboardConfig{Enable: true, Gateway: badRedirect}).ValidateCosmoGuardDashboard("default"))
 }
 
 // TestValidateP2PGatewayExpose verifies a Gateway-based P2P expose config cannot pin a single

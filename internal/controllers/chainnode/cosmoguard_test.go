@@ -186,8 +186,12 @@ func TestStandaloneDashboardGatewayPreservesIngressWhenGatewayAPIUnavailable(t *
 	require.NoError(t, r.Create(ctx, ingress))
 	r.Client = gatewayUnavailableClient{Client: r.Client}
 
-	require.NoError(t, ensureGuard(r, ctx, cn))
+	pending, err := r.ensureCosmoGuard(ctx, cn)
+	require.NoError(t, err)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{}))
+	// Missing CRDs are permanent, not a status we are waiting on: requeueing every few seconds would
+	// spin forever without ever converging, so such a cluster keeps the normal reconcile cadence.
+	assert.False(t, pending, "an unavailable Gateway API must not trigger the short retry period")
 }
 
 func TestStandaloneDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t *testing.T) {
@@ -218,6 +222,38 @@ func TestStandaloneDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t 
 	require.NoError(t, ensureGuard(r, ctx, cn))
 	err := r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{})
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+// TestChildGuardDoesNotPublishInheritedDashboardExposure verifies a ChainNodeSet child's per-node
+// guard does not publish the dashboard host it inherited from the group Config. Every child inherits
+// the same single host, and the ChainNodeSet controller already exposes the group guard's dashboard
+// on it — publishing from each child too would put N+1 backends behind one hostname and let
+// route precedence pick an arbitrary one.
+func TestChildGuardDoesNotPublishInheritedDashboardExposure(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("chain-fullnodes-0", true)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "0.rpc.example.com"} // gives the child its own guard
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	pending, err := r.ensureCosmoGuard(ctx, cn)
+	require.NoError(t, err)
+	assert.False(t, pending, "no route is desired, so nothing is pending")
+
+	// The child's guard exists, but publishes neither an HTTPRoute nor an Ingress on the group host.
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "chain-fullnodes-0-cg"}, &k8sappsv1.StatefulSet{}))
+	for _, name := range []string{"chain-fullnodes-0-cg-dashboard", "chain-fullnodes-0-cg-dashboard-http-redirect"} {
+		err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, &gwapiv1.HTTPRoute{})
+		assert.True(t, apierrors.IsNotFound(err), "child must not publish %s on the inherited group host", name)
+	}
+
+	// The same config on a standalone node (no ChainNodeSet owner) does publish it.
+	standalone := guardedChainNode("node-0", false)
+	standalone.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
+	rs := cosmoGuardTestReconciler(t, standalone)
+	_, err = rs.ensureCosmoGuard(ctx, standalone)
+	require.NoError(t, err)
+	require.NoError(t, rs.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, &gwapiv1.HTTPRoute{}))
 }
 
 // TestStandaloneDashboardReportsPendingRoutesForRequeue verifies ensureCosmoGuard reports an

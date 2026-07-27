@@ -217,22 +217,29 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 			dp.AuthUser = &d.BasicAuth.Username
 			dp.AuthPassword = &d.BasicAuth.Password
 		}
-		if d.Ingress != nil {
-			dp.Ingress = &cosmoguard.DashboardIngressParams{
-				Host:             d.Ingress.Host,
-				IngressClassName: d.Ingress.IngressClassName,
-				Annotations:      d.Ingress.Annotations,
-				TLSSecretName:    d.Ingress.TLSSecretName,
+		// A ChainNodeSet child inherits its group's Config verbatim, including the single dashboard
+		// host. Publishing it from each child's standalone guard would put N+1 backends (every child
+		// plus the group guard, whose dashboard the ChainNodeSet controller exposes) behind one
+		// hostname, and Gateway/Ingress precedence would route it to an arbitrary one. The child's
+		// dashboard still runs on its guard port; only the external exposure is left to the group.
+		if !chainNode.IsControlledByChainNodeSet() {
+			if d.Ingress != nil {
+				dp.Ingress = &cosmoguard.DashboardIngressParams{
+					Host:             d.Ingress.Host,
+					IngressClassName: d.Ingress.IngressClassName,
+					Annotations:      d.Ingress.Annotations,
+					TLSSecretName:    d.Ingress.TLSSecretName,
+				}
 			}
-		}
-		if d.Gateway != nil {
-			dp.Gateway = &cosmoguard.DashboardGatewayParams{
-				Host:      d.Gateway.Host,
-				ParentRef: d.Gateway.Gateway.GetParentRef(),
-			}
-			if d.Gateway.HTTPRedirect != nil {
-				ref := d.Gateway.HTTPRedirect.GetParentRef()
-				dp.Gateway.HTTPRedirectParentRef = &ref
+			if d.Gateway != nil {
+				dp.Gateway = &cosmoguard.DashboardGatewayParams{
+					Host:      d.Gateway.Host,
+					ParentRef: d.Gateway.Gateway.GetParentRef(),
+				}
+				if d.Gateway.HTTPRedirect != nil {
+					ref := d.Gateway.HTTPRedirect.GetParentRef()
+					dp.Gateway.HTTPRedirectParentRef = &ref
+				}
 			}
 		}
 		p.Dashboard = dp
@@ -254,19 +261,25 @@ func (r *Reconciler) reconcileCosmoGuardDashboard(ctx context.Context, chainNode
 
 	desiredRoutes := map[string]bool{}
 	routesReady := true
+	// Only a route awaiting acceptance warrants a short re-check. Missing Gateway API CRDs make every
+	// route unavailable permanently, so polling would spin forever without ever converging.
+	routesPending := false
 	for _, route := range params.DashboardHTTPRoutes() {
 		desiredRoutes[route.GetName()] = true
-		ready, err := cosmoguard.ApplyOwnedHTTPRoute(ctx, r.Client, r.Scheme, chainNode, route)
+		state, err := cosmoguard.ApplyOwnedHTTPRoute(ctx, r.Client, r.Scheme, chainNode, route)
 		if err != nil {
 			return false, fmt.Errorf("failed to apply cosmoguard dashboard httproute for %s: %w", chainNode.GetName(), err)
 		}
-		if !ready {
+		if !state.Ready() {
 			routesReady = false
+		}
+		if state == cosmoguard.RoutePending {
+			routesPending = true
 		}
 	}
 
 	if len(desiredRoutes) > 0 && !routesReady {
-		return true, nil
+		return routesPending, nil
 	}
 
 	for _, name := range []string{params.DashboardIngressName(), params.DashboardIngressName() + "-http-redirect"} {

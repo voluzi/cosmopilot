@@ -317,20 +317,26 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 
 		dashboardRoutes := params.DashboardHTTPRoutes()
 		routesReady := true
+		// Only a route awaiting acceptance warrants a short re-check. Missing Gateway API CRDs make
+		// every route unavailable permanently, so polling would spin forever without ever converging.
+		groupRoutesPending := false
 		for _, route := range dashboardRoutes {
 			withCosmoGuardScope(route)
 			expectedRoutes[route.GetName()] = true
-			ready, err := cosmoguard.ApplyOwnedHTTPRoute(ctx, r.Client, r.Scheme, nodeSet, route)
+			state, err := cosmoguard.ApplyOwnedHTTPRoute(ctx, r.Client, r.Scheme, nodeSet, route)
 			if err != nil {
 				return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard dashboard httproute for group %s: %w", group.Name, err)
 			}
-			if !ready {
+			if !state.Ready() {
 				routesReady = false
+			}
+			if state == cosmoguard.RoutePending {
+				groupRoutesPending = true
 			}
 		}
 		if len(dashboardRoutes) > 0 && !routesReady {
 			expectedIngress[params.DashboardIngressName()] = true
-			routesPending = true
+			routesPending = routesPending || groupRoutesPending
 		}
 
 		if hpa := params.HPA(); hpa != nil {

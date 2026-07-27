@@ -232,6 +232,9 @@ func TestGroupDashboardGatewayPreservesIngressWhenGatewayAPIUnavailable(t *testi
 	require.NoError(t, err)
 	require.NoError(t, r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress, guards.expectedRoutes))
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ingress), &networkingv1.Ingress{}))
+	// Missing CRDs are permanent, not a status we are waiting on: requeueing every few seconds would
+	// spin forever without ever converging, so such a cluster keeps the normal reconcile cadence.
+	assert.False(t, guards.routesPending, "an unavailable Gateway API must not trigger the short retry period")
 }
 
 func TestGroupDashboardGatewayWaitsForAcceptedRouteBeforeDeletingIngress(t *testing.T) {

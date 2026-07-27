@@ -576,8 +576,11 @@ func (cfg *Config) ValidateCosmoGuardDashboard(namespace string) error {
 // subdomain, optionally with a single leading "*." wildcard label. Gateway API rejects anything
 // else, so a host that only passes an emptiness check (e.g. "Guard Example") would be admitted by
 // the webhook and then rejected when the rendered HTTPRoute reaches the API server.
+//
+// The value is checked verbatim, NOT trimmed: the renderer copies the configured string into
+// spec.hostnames as-is, so accepting " guard.example.com " here would admit a route the API server
+// then rejects, leaving the dashboard pending indefinitely.
 func validateGatewayHostname(host string) error {
-	host = strings.TrimSpace(host)
 	if host == "" {
 		return fmt.Errorf("must not be empty")
 	}
@@ -593,15 +596,34 @@ func validateGatewayHostname(host string) error {
 	return nil
 }
 
+// validateCosmoGuardDashboardGatewayRef checks a Gateway reference against the Gateway API grammars
+// its fields are copied into: ObjectName (a DNS1123 subdomain) for the Gateway name, Namespace (a
+// DNS1123 label) and SectionName (a DNS1123 subdomain) for the listener. Values are checked
+// verbatim, since they are copied into the ParentReference unmodified — a non-empty but malformed
+// name like "bad gateway" cannot identify a Gateway, so the route would never attach and the
+// dashboard transition would stay pending.
 func validateCosmoGuardDashboardGatewayRef(path string, ref GatewayRef) error {
-	if strings.TrimSpace(ref.Name) == "" {
+	if ref.Name == "" {
 		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.name must not be empty", path)
 	}
-	if ref.Namespace != nil && strings.TrimSpace(*ref.Namespace) == "" {
-		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.namespace must not be empty", path)
+	if errs := validation.IsDNS1123Subdomain(ref.Name); len(errs) > 0 {
+		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.name %q is not a valid Gateway name: %s", path, ref.Name, strings.Join(errs, "; "))
 	}
-	if ref.SectionName != nil && strings.TrimSpace(*ref.SectionName) == "" {
-		return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.sectionName must not be empty", path)
+	if ref.Namespace != nil {
+		if *ref.Namespace == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.namespace must not be empty", path)
+		}
+		if errs := validation.IsDNS1123Label(*ref.Namespace); len(errs) > 0 {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.namespace %q is not a valid namespace: %s", path, *ref.Namespace, strings.Join(errs, "; "))
+		}
+	}
+	if ref.SectionName != nil {
+		if *ref.SectionName == "" {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.sectionName must not be empty", path)
+		}
+		if errs := validation.IsDNS1123Subdomain(*ref.SectionName); len(errs) > 0 {
+			return fmt.Errorf("cosmoGuard.dashboard.gateway.%s.sectionName %q is not a valid listener name: %s", path, *ref.SectionName, strings.Join(errs, "; "))
+		}
 	}
 	return nil
 }
