@@ -458,6 +458,45 @@ func guardIngress(name, backend string) *networkingv1.Ingress {
 	}
 }
 
+// TestDashboardRouteDoesNotTriggerStickyAPIFlip verifies the guard's own dashboard HTTPRoute is not
+// mistaken for a flipped API route. The dashboard route also backs onto the guard Service (on the
+// dashboard port) and is applied unconditionally rather than gated on guard readiness, so counting it
+// would retarget live RPC/LCD/gRPC traffic to a guard with no ready endpoints.
+func TestDashboardRouteDoesNotTriggerStickyAPIFlip(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Gateway = &appsv1.GatewayConfig{Host: "rpc.example.com"}
+	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	// Applies the dashboard routes; the guard StatefulSet has no ready replicas in the fake client.
+	_, err := r.ensureCosmoGuard(ctx, cn)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg-dashboard"}, &gwapiv1.HTTPRoute{}))
+
+	assert.False(t, r.standaloneRouteTargetsGuard(ctx, cn),
+		"a dashboard route must not count as evidence the API routes were flipped")
+	assert.Equal(t, "node-0", r.apiServiceName(ctx, cn),
+		"API routes must stay on the raw node Service until the guard is serving")
+
+	// A genuine API route onto the guard does keep the flip sticky.
+	apiRoute := &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-0-rpc", Namespace: "ns"},
+		Spec: gwapiv1.HTTPRouteSpec{
+			Rules: []gwapiv1.HTTPRouteRule{{
+				BackendRefs: []gwapiv1.HTTPBackendRef{{
+					BackendRef: gwapiv1.BackendRef{BackendObjectReference: gwapiv1.BackendObjectReference{
+						Name: gwapiv1.ObjectName("node-0-cg"),
+					}},
+				}},
+			}},
+		},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(cn, apiRoute, r.Scheme))
+	require.NoError(t, r.Create(ctx, apiRoute))
+	assert.True(t, r.standaloneRouteTargetsGuard(ctx, cn), "a real API route still keeps the flip sticky")
+}
+
 // TestStandaloneRouteTargetsGuardChecksBothTypes verifies the sticky check inspects the old route type
 // during an Ingress<->Gateway migration: a node whose Spec now points at Gateway but whose live guarded
 // backend is still on the old Ingress is recognized as targeting the guard (so the flip stays sticky and

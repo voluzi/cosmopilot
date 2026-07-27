@@ -363,7 +363,7 @@ GatewayConfig configures Gateway API HTTPRoute/GRPCRoute resources for exposing 
 
 #### GatewayRef
 
-GatewayRef identifies the Gateway resource routes should attach to.
+GatewayRef identifies the Gateway resource routes should attach to.\n\nEach field is copied verbatim into a Gateway API ParentReference, so all three carry that API's grammar: ObjectName and SectionName are RFC 1123 subdomains, Namespace an RFC 1123 label. Enforcing it here rejects a malformed reference at admission rather than letting the rendered route be refused by the API server, which leaves reconciliation unable to converge.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |

@@ -189,12 +189,16 @@ spec:
                         properties:
                           name:
                             description: Name of the Gateway resource.
+                            maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                             type: string
                           namespace:
                             description: Namespace of the Gateway. Defaults to the
                               resource's namespace.
+                            maxLength: 63
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                             type: string
                           port:
                             default: 26656
@@ -215,7 +219,9 @@ spec:
                             description: |-
                               SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                               every listener that accepts it.
+                            maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                             type: string
                         required:
                         - name
@@ -247,18 +253,24 @@ spec:
                         properties:
                           name:
                             description: Name of the Gateway resource.
+                            maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                             type: string
                           namespace:
                             description: Namespace of the Gateway. Defaults to the
                               resource's namespace.
+                            maxLength: 63
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                             type: string
                           sectionName:
                             description: |-
                               SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                               every listener that accepts it.
+                            maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                             type: string
                         required:
                         - name
@@ -701,18 +713,24 @@ spec:
                       properties:
                         name:
                           description: Name of the Gateway resource.
+                          maxLength: 253
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                           type: string
                         namespace:
                           description: Namespace of the Gateway. Defaults to the resource's
                             namespace.
+                          maxLength: 63
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         sectionName:
                           description: |-
                             SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                             every listener that accepts it.
+                          maxLength: 253
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                           type: string
                       required:
                       - name
@@ -2006,18 +2024,24 @@ spec:
                                       properties:
                                         name:
                                           description: Name of the Gateway resource.
+                                          maxLength: 253
                                           minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                           type: string
                                         namespace:
                                           description: Namespace of the Gateway. Defaults
                                             to the resource's namespace.
+                                          maxLength: 63
                                           minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                           type: string
                                         sectionName:
                                           description: |-
                                             SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                             every listener that accepts it.
+                                          maxLength: 253
                                           minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                           type: string
                                       required:
                                       - name
@@ -2034,18 +2058,24 @@ spec:
                                       properties:
                                         name:
                                           description: Name of the Gateway resource.
+                                          maxLength: 253
                                           minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                           type: string
                                         namespace:
                                           description: Namespace of the Gateway. Defaults
                                             to the resource's namespace.
+                                          maxLength: 63
                                           minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                           type: string
                                         sectionName:
                                           description: |-
                                             SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                             every listener that accepts it.
+                                          maxLength: 253
                                           minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                           type: string
                                       required:
                                       - name
@@ -3877,12 +3907,16 @@ spec:
                           properties:
                             name:
                               description: Name of the Gateway resource.
+                              maxLength: 253
                               minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                               type: string
                             namespace:
                               description: Namespace of the Gateway. Defaults to the
                                 resource's namespace.
+                              maxLength: 63
                               minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                               type: string
                             port:
                               default: 26656
@@ -3903,7 +3937,9 @@ spec:
                               description: |-
                                 SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                 every listener that accepts it.
+                              maxLength: 253
                               minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                               type: string
                           required:
                           - name
@@ -3958,18 +3994,24 @@ spec:
                           properties:
                             name:
                               description: Name of the Gateway resource.
+                              maxLength: 253
                               minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                               type: string
                             namespace:
                               description: Namespace of the Gateway. Defaults to the
                                 resource's namespace.
+                              maxLength: 63
                               minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                               type: string
                             sectionName:
                               description: |-
                                 SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                 every listener that accepts it.
+                              maxLength: 253
                               minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                               type: string
                           required:
                           - name
@@ -6985,18 +7027,24 @@ spec:
                                           properties:
                                             name:
                                               description: Name of the Gateway resource.
+                                              maxLength: 253
                                               minLength: 1
+                                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                               type: string
                                             namespace:
                                               description: Namespace of the Gateway.
                                                 Defaults to the resource's namespace.
+                                              maxLength: 63
                                               minLength: 1
+                                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                               type: string
                                             sectionName:
                                               description: |-
                                                 SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                                 every listener that accepts it.
+                                              maxLength: 253
                                               minLength: 1
+                                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                               type: string
                                           required:
                                           - name
@@ -7013,18 +7061,24 @@ spec:
                                           properties:
                                             name:
                                               description: Name of the Gateway resource.
+                                              maxLength: 253
                                               minLength: 1
+                                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                               type: string
                                             namespace:
                                               description: Namespace of the Gateway.
                                                 Defaults to the resource's namespace.
+                                              maxLength: 63
                                               minLength: 1
+                                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                               type: string
                                             sectionName:
                                               description: |-
                                                 SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                                 every listener that accepts it.
+                                              maxLength: 253
                                               minLength: 1
+                                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                               type: string
                                           required:
                                           - name
@@ -12702,18 +12756,24 @@ spec:
                                     properties:
                                       name:
                                         description: Name of the Gateway resource.
+                                        maxLength: 253
                                         minLength: 1
+                                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                         type: string
                                       namespace:
                                         description: Namespace of the Gateway. Defaults
                                           to the resource's namespace.
+                                        maxLength: 63
                                         minLength: 1
+                                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                         type: string
                                       sectionName:
                                         description: |-
                                           SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                           every listener that accepts it.
+                                        maxLength: 253
                                         minLength: 1
+                                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                         type: string
                                     required:
                                     - name
@@ -12730,18 +12790,24 @@ spec:
                                     properties:
                                       name:
                                         description: Name of the Gateway resource.
+                                        maxLength: 253
                                         minLength: 1
+                                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                         type: string
                                       namespace:
                                         description: Namespace of the Gateway. Defaults
                                           to the resource's namespace.
+                                        maxLength: 63
                                         minLength: 1
+                                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                         type: string
                                       sectionName:
                                         description: |-
                                           SectionName selects a specific listener on the Gateway. When omitted, the route may attach to
                                           every listener that accepts it.
+                                        maxLength: 253
                                         minLength: 1
+                                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                                         type: string
                                     required:
                                     - name

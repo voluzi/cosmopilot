@@ -61,14 +61,25 @@ func (r *Reconciler) standaloneRouteTargetsGuard(ctx context.Context, chainNode 
 	return r.gatewayRoutesTargetGuard(ctx, chainNode, guard) || r.ingressRoutesTargetGuard(ctx, chainNode, guard)
 }
 
-// gatewayRoutesTargetGuard reports whether any HTTPRoute/GRPCRoute owned by this node points at its
-// guard Service. Missing Gateway API CRDs make the List error out, which is treated as "no match".
+// gatewayRoutesTargetGuard reports whether any API HTTPRoute/GRPCRoute owned by this node points at
+// its guard Service. Missing Gateway API CRDs make the List error out, which is treated as "no match".
+//
+// The guard's own dashboard routes are excluded. They also carry the guard Service as their backend,
+// but on the dashboard port, and they are applied unconditionally — not gated on guard readiness the
+// way the API routes are. Counting one as evidence of a flip would make apiServiceName retarget live
+// RPC/LCD/gRPC traffic to a guard that is not serving yet, dropping requests that the raw-backend
+// fallback exists to preserve.
 func (r *Reconciler) gatewayRoutesTargetGuard(ctx context.Context, chainNode *appsv1.ChainNode, guard string) bool {
+	dashboard := guard + "-dashboard"
+	isDashboardRoute := func(name string) bool {
+		return name == dashboard || name == dashboard+"-http-redirect"
+	}
+
 	httpRoutes := &gwapiv1.HTTPRouteList{}
 	if err := r.List(ctx, httpRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
 		for i := range httpRoutes.Items {
 			rt := &httpRoutes.Items[i]
-			if !metav1.IsControlledBy(rt, chainNode) {
+			if !metav1.IsControlledBy(rt, chainNode) || isDashboardRoute(rt.GetName()) {
 				continue
 			}
 			for _, rule := range rt.Spec.Rules {
