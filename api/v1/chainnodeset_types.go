@@ -764,12 +764,11 @@ type IndividualIngressConfig struct {
 	Host string `json:"host"`
 }
 
-// GatewayRef identifies the Gateway resource routes should attach to.
-//
-// Each field is copied verbatim into a Gateway API ParentReference, so all three carry that API's
-// grammar: ObjectName and SectionName are RFC 1123 subdomains, Namespace an RFC 1123 label. Enforcing
-// it here rejects a malformed reference at admission rather than letting the rendered route be
-// refused by the API server, which leaves reconciliation unable to converge.
+// GatewayRef identifies the Gateway resource routes should attach to. Each field is copied verbatim
+// into a Gateway API ParentReference, so all three carry that API's grammar: ObjectName and
+// SectionName are RFC 1123 subdomains, Namespace an RFC 1123 label. Enforcing it here rejects a
+// malformed reference at admission rather than letting the rendered route be refused by the API
+// server, which leaves reconciliation unable to converge.
 type GatewayRef struct {
 	// Name of the Gateway resource.
 	// +kubebuilder:validation:MinLength=1
