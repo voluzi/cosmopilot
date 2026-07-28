@@ -937,12 +937,14 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 			retire = append(retire, entry)
 			continue
 		}
-		done, err := r.deleteOrphanedTarball(ctx, chainNode, entry)
+		done, jobExists, err := r.deleteOrphanedTarball(ctx, chainNode, entry)
 		if err != nil {
-			// Keep the record: it is the only pointer left to the object. Hold the retry too — a retained
-			// delete Job keeps being polled, and each poll runs the provider cleanup that removes
-			// "<name>-upload", which would be the retry's own Job.
-			deleting[entry.Snapshot] = struct{}{}
+			// Keep the record: it is the only pointer left to the object. Hold the retry only when a
+			// delete Job actually exists — that Job's cleanup would remove the retry's "<name>-upload".
+			// A config error leaves nothing to clobber, and gating on it would freeze snapshots forever.
+			if jobExists {
+				deleting[entry.Snapshot] = struct{}{}
+			}
 			logger.Error(err, "failed deleting orphaned tarball", "snapshot", entry.Snapshot, "tarball", entry.Name)
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeWarning,
@@ -955,10 +957,12 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 			retire = append(retire, entry)
 			continue
 		}
-		// Delete Job still running. It shares the tarball name with the retry, and DeleteSnapshot's own
-		// cleanup removes "<name>-upload" — which would be the retry's Job. Hold the retry until this
-		// finishes rather than letting it be torn down mid-flight and recorded as a failure.
-		deleting[entry.Snapshot] = struct{}{}
+		if jobExists {
+			// Delete Job still running. It shares the tarball name with the retry, and DeleteSnapshot's own
+			// cleanup removes "<name>-upload" — which would be the retry's Job. Hold the retry until this
+			// finishes rather than letting it be torn down mid-flight and recorded as a failure.
+			deleting[entry.Snapshot] = struct{}{}
+		}
 	}
 	if len(retire) == 0 {
 		return len(deleting) > 0, nil
@@ -968,36 +972,57 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 
 // deleteOrphanedTarball runs a delete Job against the recorded destination, reporting whether the
 // object is gone. Cleanup of the Job happens once it succeeds.
-func (r *Reconciler) deleteOrphanedTarball(ctx context.Context, chainNode *appsv1.ChainNode, entry appsv1.ExportedTarball) (bool, error) {
+// deleteOrphanedTarball runs a delete Job against the recorded destination.
+//
+// It reports (done, jobExists, err). jobExists is what gates the retry: it is true only once a delete
+// Job is actually present, because that Job shares the tarball name and its provider cleanup removes
+// "<name>-upload" — the retry's own Job. Errors raised before any Job exists (a removed export config,
+// unreachable credentials) must NOT gate anything: nothing can clobber the retry, and blocking on them
+// would let one unreachable record freeze snapshots for the node indefinitely.
+func (r *Reconciler) deleteOrphanedTarball(ctx context.Context, chainNode *appsv1.ChainNode, entry appsv1.ExportedTarball) (done, jobExists bool, err error) {
 	cfg, err := configForDestination(chainNode.Spec.Persistence.Snapshots.ExportTarball, &entry)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	exporter, err := r.tarballProviderFor(chainNode, cfg)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	status, err := exporter.DeleteSnapshot(ctx, entry.Name)
 	if err != nil {
-		return false, err
+		// DeleteSnapshot creates the Job, so a failure here may or may not have left one behind. Check
+		// rather than assume: guessing either way is a freeze or a clobbered retry.
+		return false, r.deleteJobExists(ctx, chainNode, entry), err
 	}
 	switch status {
 	case datasnapshot.SnapshotSucceeded:
 		if err = exporter.CleanupSnapshotDeletion(ctx, entry.Name); err != nil {
-			return false, err
+			return false, true, err
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeNormal,
 			appsv1.ReasonTarballDeleted,
 			"Deleted orphaned tarball %s from %s bucket %q", entry.Name, entry.Provider, entry.Bucket,
 		)
-		return true, nil
+		return true, false, nil
 	case datasnapshot.SnapshotFailed:
-		return false, fmt.Errorf("delete job for tarball %s failed", entry.Name)
+		// Retained for inspection, and re-polled every pass — each poll runs the cleanup that would
+		// remove the retry's upload Job.
+		return false, true, fmt.Errorf("delete job for tarball %s failed", entry.Name)
 	default:
 		// Still running; try again on the next reconcile.
-		return false, nil
+		return false, true, nil
 	}
+}
+
+// deleteJobExists reports whether a delete Job for this tarball is present.
+func (r *Reconciler) deleteJobExists(ctx context.Context, chainNode *appsv1.ChainNode, entry appsv1.ExportedTarball) bool {
+	clientSet := kubernetes.Interface(r.ClientSet)
+	if r.snapshotClientSet != nil {
+		clientSet = r.snapshotClientSet
+	}
+	_, err := clientSet.BatchV1().Jobs(chainNode.GetNamespace()).Get(ctx, fmt.Sprintf("%s-delete", entry.Name), metav1.GetOptions{})
+	return err == nil
 }
 
 // supersedeFailedTarballRecord marks the destination of a conclusively failed upload as superseded when

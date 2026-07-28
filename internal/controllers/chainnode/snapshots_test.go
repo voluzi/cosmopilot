@@ -1735,3 +1735,49 @@ func TestOrphanRecordsReconciledAfterSnapshotsDisabled(t *testing.T) {
 	assert.Empty(t, stored.Status.ExportedTarballs,
 		"records must be reconciled even when snapshots are disabled")
 }
+
+// TestUnreachableRecordDoesNotFreezeSnapshots is the regression for the retry-hold gate. Errors raised
+// before any delete Job exists — a removed export config, unreachable credentials — must not gate
+// reconciliation: there is no Job that could clobber a retry, and holding on them would let one
+// unreachable record block every future snapshot for the node.
+func TestUnreachableRecordDoesNotFreezeSnapshots(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	// Spec exports to GCS; a record points at S3, which the spec can no longer authenticate against.
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{
+				DeleteOnExpire: ptr.To(true),
+				GCS:            &appsv1.GcsExportConfig{Bucket: "snapshots"},
+			},
+		}}},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{{
+			Snapshot: "gone", Name: "unreachable", Provider: "s3", Bucket: "old-bucket",
+		}}},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	yield, err := reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil)
+	require.NoError(t, err, "an unreachable record must not fail the reconcile")
+	assert.False(t, yield, "a config error creates no delete Job, so nothing can clobber a retry")
+
+	// The record survives — it is still the only pointer to the object — but it does not gate progress.
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 1)
+}
