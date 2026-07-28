@@ -207,6 +207,52 @@ func TestS3DeleteRemovesAllObjectsWithPrefix(t *testing.T) {
 	}
 }
 
+// TestS3DeleteBatchesAgainstAmazonS3 keeps request volume bounded where batching is accepted: a small
+// partSize splits a large snapshot into very many objects, and one DeleteObject per key would cost
+// three orders of magnitude more requests than batches of 1000 — long enough to be throttled and to
+// block snapshot expiration.
+func TestS3DeleteBatchesAgainstAmazonS3(t *testing.T) {
+	client := newFakeS3Client()
+	for i := range 2500 {
+		client.listedObjects = append(client.listedObjects,
+			types.Object{Key: aws.String(fmt.Sprintf("snapshot-part-%08d.tar.lz4", i))})
+	}
+	exporter := newS3Exporter(client) // no custom endpoint: Amazon S3
+
+	if err := exporter.Delete("snapshots", "snapshot"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if len(client.deletedKeys) != 2500 {
+		t.Fatalf("deleted keys = %d, want 2500", len(client.deletedKeys))
+	}
+	if client.singleCalls != 0 {
+		t.Fatalf("per-object calls = %d, want 0 against Amazon S3", client.singleCalls)
+	}
+	if client.batchCalls != 3 {
+		t.Fatalf("batch calls = %d, want 3 (2500 keys in batches of 1000)", client.batchCalls)
+	}
+}
+
+func TestS3DeleteUsesPerObjectAgainstCustomEndpoint(t *testing.T) {
+	client := newFakeS3Client()
+	client.listedObjects = []types.Object{
+		{Key: aws.String("snapshot.tar.zst")},
+		{Key: aws.String("snapshot-part-00000000.tar.lz4")},
+	}
+	exporter := newS3Exporter(client)
+	exporter.perObjectDelete = true
+
+	if err := exporter.Delete("snapshots", "snapshot"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if client.batchCalls != 0 {
+		t.Fatalf("batch calls = %d, want 0 against an S3-compatible endpoint", client.batchCalls)
+	}
+	if client.singleCalls != 2 {
+		t.Fatalf("per-object calls = %d, want 2", client.singleCalls)
+	}
+}
+
 // TestS3DeleteSendsNoChecksumHeaderAgainstCustomEndpoint exercises a real SDK client against an
 // httptest server and asserts on the bytes actually put on the wire.
 //
@@ -297,6 +343,8 @@ type fakeS3Client struct {
 	completed     map[string][]byte
 	listedObjects []types.Object
 	deletedKeys   []string
+	batchCalls    int
+	singleCalls   int
 	uploadErr     error
 	deleteErr     error
 	abortCount    int
@@ -370,12 +418,26 @@ func (f *fakeS3Client) ListObjectsV2(_ context.Context, _ *s3.ListObjectsV2Input
 	return &s3.ListObjectsV2Output{Contents: f.listedObjects}, nil
 }
 
+func (f *fakeS3Client) DeleteObjects(_ context.Context, input *s3.DeleteObjectsInput, _ ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	f.batchCalls++
+	for _, object := range input.Delete.Objects {
+		f.deletedKeys = append(f.deletedKeys, aws.ToString(object.Key))
+	}
+	return &s3.DeleteObjectsOutput{}, nil
+}
+
 func (f *fakeS3Client) DeleteObject(_ context.Context, input *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
+	f.singleCalls++
 	f.deletedKeys = append(f.deletedKeys, aws.ToString(input.Key))
 	return &s3.DeleteObjectOutput{}, nil
 }

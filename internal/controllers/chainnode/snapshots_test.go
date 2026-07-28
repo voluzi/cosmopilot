@@ -299,13 +299,18 @@ func TestTarballDeleteProviderTargetsRecordedDestination(t *testing.T) {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, batchv1.AddToScheme(scheme))
 
-	// The node now exports to GCS, but this tarball was uploaded to MinIO before the switch.
+	// The tarball went to a different bucket on the same S3 store, before the bucket was changed.
 	chainNode := &appsv1.ChainNode{
 		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
 		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
-			Frequency:     "24h",
-			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"}},
+			Frequency: "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+				Bucket:            "new-bucket",
+				Region:            "eu-west-1",
+				Endpoint:          ptr.To("http://minio:9000"),
+				CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-credentials"},
+			}},
 		}}},
 	}
 	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
@@ -325,9 +330,12 @@ func TestTarballDeleteProviderTargetsRecordedDestination(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, relocated, "a destination that differs from the spec must be reported as relocated")
 	s3Provider, ok := provider.(*datasnapshot.S3)
-	require.True(t, ok, "expected the recorded S3 destination, not the configured GCS one")
+	require.True(t, ok)
+	// Bucket comes from the record; everything security-relevant comes from the spec.
 	assert.Equal(t, "old-bucket", s3Provider.Config.Bucket)
 	assert.Equal(t, "http://minio:9000", ptr.Deref(s3Provider.Config.Endpoint, ""))
+	require.NotNil(t, s3Provider.Config.CredentialsSecret)
+	assert.Equal(t, "aws-credentials", s3Provider.Config.CredentialsSecret.Name)
 }
 
 func TestTarballDeleteProviderUsesSpecWhenDestinationMatchesOrIsAbsent(t *testing.T) {
@@ -378,7 +386,12 @@ func TestTarballDeleteProviderUsesSpecWhenDestinationMatchesOrIsAbsent(t *testin
 	}
 }
 
-func TestFinishTarballExportRecordsDestination(t *testing.T) {
+// TestExportTarballRecordsDestinationAtUploadStart pins that the destination is stamped by the config
+// that creates the Job. Recording at completion instead would attribute the upload to whatever the spec
+// says by then: status is looked up by the shared Job name, so after a mid-upload provider change the
+// new provider can observe the old one's Job succeeding, and deletion would target a store the tarball
+// was never written to — finding nothing and reporting success while the real object is orphaned.
+func TestExportTarballRecordsDestinationAtUploadStart(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
@@ -410,13 +423,86 @@ func TestFinishTarballExportRecordsDestination(t *testing.T) {
 		recorder:          record.NewFakeRecorder(10),
 	}
 
-	require.NoError(t, reconciler.finishTarballExport(context.Background(), chainNode, snapshot))
+	require.NoError(t, reconciler.recordTarballDestination(context.Background(), chainNode, snapshot))
 
 	stored := &snapshotv1.VolumeSnapshot{}
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
 	var destination tarballDestination
 	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controllers.AnnotationTarballDestination]), &destination))
-	assert.Equal(t, tarballDestination{Provider: "s3", Bucket: "snapshots", Endpoint: "http://minio:9000"}, destination)
+	assert.Equal(t, "s3", destination.Provider)
+	assert.Equal(t, "snapshots", destination.Bucket)
+	assert.Equal(t, "http://minio:9000", destination.Endpoint)
+	// The record carries no credentials: it is user-writable, so it must never decide where secrets go.
+	assert.NotContains(t, stored.Annotations[controllers.AnnotationTarballDestination], "credentialsSecret")
+	assert.NotContains(t, stored.Annotations[controllers.AnnotationTarballDestination], "region")
+}
+
+// TestConfigForDestinationIgnoresUntrustedEndpoint is the security regression for the delete path.
+// The destination annotation lives on the VolumeSnapshot and is writable by anyone with access to that
+// object. If a forged endpoint were honoured, the delete Job would carry the operator's S3 credentials
+// to a host of the attacker's choosing. Connection settings must always come from the ChainNode spec.
+func TestConfigForDestinationIgnoresUntrustedEndpoint(t *testing.T) {
+	configured := &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:            "snapshots",
+		Region:            "eu-west-1",
+		Endpoint:          ptr.To("http://minio.internal:9000"),
+		CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-credentials"},
+	}}
+	// A tampered record pointing at an attacker-controlled host.
+	forged := tarballDestination{
+		Provider: "s3",
+		Bucket:   "snapshots",
+		Endpoint: "http://attacker.example.com",
+	}
+
+	cfg, err := configForDestination(configured, forged)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.S3)
+	assert.Equal(t, "http://minio.internal:9000", ptr.Deref(cfg.S3.Endpoint, ""),
+		"the endpoint must come from the spec, never from the user-writable annotation")
+	assert.Equal(t, "eu-west-1", cfg.S3.Region)
+	require.NotNil(t, cfg.S3.CredentialsSecret)
+	assert.Equal(t, "aws-credentials", cfg.S3.CredentialsSecret.Name)
+}
+
+// TestConfigForDestinationFailsLoudlyWithoutSpecCredentials: when the spec no longer describes the
+// provider that holds the tarball there is no safe way to authenticate, so this must error rather than
+// build a credential-less Job that silently finds nothing and reports success.
+func TestConfigForDestinationFailsLoudlyWithoutSpecCredentials(t *testing.T) {
+	configured := &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "new", Region: "eu-west-1"}}
+	destination := tarballDestination{Provider: "gcs", Bucket: "old"}
+
+	_, err := configForDestination(configured, destination)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no gcs configuration")
+}
+
+// TestDeletedTarballNameUsesRecordedName: the name embeds exportTarball.suffix, so editing the suffix
+// after upload would otherwise make deletion ask for an object that was never written.
+func TestDeletedTarballNameUsesRecordedName(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{
+				Suffix: ptr.To("new-suffix"),
+				GCS:    &appsv1.GcsExportConfig{Bucket: "snapshots"},
+			},
+		}}},
+		Status: appsv1.ChainNodeStatus{ChainID: "cosmoshub-4"},
+	}
+
+	recorded := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default",
+		Annotations: map[string]string{
+			controllers.AnnotationTarballDestination: `{"provider":"gcs","bucket":"snapshots","name":"cosmoshub-4-20260728102446-old-suffix"}`,
+		},
+	}}
+	assert.Equal(t, "cosmoshub-4-20260728102446-old-suffix", deletedTarballName(chainNode, recorded))
+
+	// Snapshots recorded before the name was captured keep the previous behaviour.
+	legacy := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	assert.Equal(t, getTarballName(chainNode, legacy), deletedTarballName(chainNode, legacy))
 }
 
 func TestFinishTarballExportPersistsBeforeCleanup(t *testing.T) {
