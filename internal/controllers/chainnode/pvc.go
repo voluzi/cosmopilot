@@ -323,9 +323,13 @@ func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.Cha
 
 	if err = r.updatePvcDataHeight(ctx, chainNode, pvc); err != nil {
 		// data-height is advisory metadata. The snapshot flow annotates this same PVC, so write conflicts
-		// are expected; failing here would skip everything after PVC reconciliation, including the
-		// snapshot state machine. Log it and let the next reconcile retry.
-		logger.Error(err, "failed to update PVC data height annotation", "pvc", pvc.GetName())
+		// are expected; returning the error would abort the reconcile over cosmetic metadata.
+		//
+		// Stop before the resize rather than falling through: the local pvc still holds the resource
+		// version that just lost, so resizing it would conflict again and abort anyway. Both writes are
+		// retried on the next reconcile against a fresh copy.
+		logger.Error(err, "failed to update PVC data height annotation; deferring PVC writes to next reconcile", "pvc", pvc.GetName())
+		return nil
 	}
 
 	switch pvc.Spec.Resources.Requests.Storage().Cmp(expectedStorageSize) {
@@ -368,7 +372,9 @@ func (r *Reconciler) updatePvcDataHeight(ctx context.Context, chainNode *appsv1.
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &corev1.PersistentVolumeClaim{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(pvc), fresh); err != nil {
+		// Read uncached: the cache may still serve the pre-conflict resource version, in which case every
+		// retry would resend the same stale version and exhaust without ever converging.
+		if err := r.reservationReader().Get(ctx, client.ObjectKeyFromObject(pvc), fresh); err != nil {
 			return err
 		}
 		if fresh.Annotations == nil {

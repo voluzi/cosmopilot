@@ -30,7 +30,8 @@ func TestUpdatePvcDataHeightRetriesOnConflict(t *testing.T) {
 	}}
 	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 	conflicting := &conflictOnceClient{Client: baseClient}
-	reconciler := &Reconciler{Client: conflicting, Scheme: scheme}
+	// APIReader mirrors production: retry reads bypass the cache so each attempt sees the current version.
+	reconciler := &Reconciler{Client: conflicting, APIReader: baseClient, Scheme: scheme}
 
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
@@ -67,6 +68,36 @@ func TestUpdatePvcDataHeightSurfacesExhaustedConflicts(t *testing.T) {
 	err := reconciler.updatePvcDataHeight(context.Background(), chainNode, pvc)
 	require.Error(t, err)
 	assert.True(t, apierrors.IsConflict(err))
+}
+
+// TestUpdatePvcDataHeightLeavesCallerCopyStaleOnFailure documents why ensurePvcUpdates returns early
+// when this fails: the caller's PVC still holds the resource version that just lost, so any further
+// write in the same pass (notably the resize) would conflict again and abort the reconcile — the very
+// failure this path exists to prevent.
+func TestUpdatePvcDataHeightLeavesCallerCopyStaleOnFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:        "node",
+		Namespace:   "default",
+		Annotations: map[string]string{controllers.AnnotationDataHeight: "100"},
+	}}
+	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+	reconciler := &Reconciler{
+		Client:    &pvcUpdateFailingClient{Client: baseClient},
+		APIReader: baseClient,
+		Scheme:    scheme,
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Status:     appsv1.ChainNodeStatus{LatestHeight: 200},
+	}
+
+	before := pvc.DeepCopy()
+	require.Error(t, reconciler.updatePvcDataHeight(context.Background(), chainNode, pvc))
+	assert.Equal(t, before.ResourceVersion, pvc.ResourceVersion,
+		"a failed write must not refresh the caller's copy, so callers must not keep writing to it")
 }
 
 // conflictOnceClient rejects the first Update with a conflict, mimicking a concurrent write to the PVC.
