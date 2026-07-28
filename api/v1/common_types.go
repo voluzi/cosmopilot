@@ -1222,6 +1222,27 @@ type Upgrade struct {
 	Source UpgradeSource `json:"source"`
 }
 
+// ExportedTarball records where a snapshot tarball was written, so it can be deleted from that store
+// even after `.spec.persistence.snapshots.exportTarball` changes. Written by the controller only.
+type ExportedTarball struct {
+	// Snapshot is the name of the VolumeSnapshot this tarball was exported from.
+	Snapshot string `json:"snapshot"`
+
+	// Name is the object name used at upload time. It embeds the export suffix in force back then, so a
+	// later suffix change cannot make deletion ask for an object that was never written.
+	Name string `json:"name"`
+
+	// Provider is the object store the tarball was written to (`gcs` or `s3`).
+	Provider string `json:"provider"`
+
+	// Bucket is the bucket the tarball was written to.
+	Bucket string `json:"bucket"`
+
+	// Endpoint is the custom S3 endpoint in use at upload time, if any. Empty for Amazon S3 and GCS.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
 // CreateValidatorConfig holds configuration for cosmopilot to submit a create-validator transaction.
 type CreateValidatorConfig struct {
 	// Name of the secret containing the mnemonic of the account to be used by

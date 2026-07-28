@@ -295,6 +295,15 @@ type ChainNodeStatus struct {
 	// +optional
 	CosmosignerKeyImported string `json:"cosmosignerKeyImported,omitempty"`
 
+	// ExportedTarballs records where each exported snapshot tarball was actually written, so deletion
+	// targets the store that holds it rather than whatever .spec.persistence.snapshots.exportTarball
+	// currently points at. Entries are added when an upload starts and removed once the tarball is
+	// deleted. Recorded in status rather than on the VolumeSnapshot so that a user who can write the
+	// snapshot object cannot redirect a deletion Job — which runs with the operator's credentials — at
+	// objects of their choosing. Not meant to be set by hand.
+	// +optional
+	ExportedTarballs []ExportedTarball `json:"exportedTarballs,omitempty"`
+
 	// CosmosignerReplicas records the raft replica count the managed signer was rolled out with,
 	// captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path
 	// reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale,

@@ -6258,6 +6258,46 @@ spec:
               dataUsage:
                 description: Usage percentage of data volume.
                 type: string
+              exportedTarballs:
+                description: |-
+                  ExportedTarballs records where each exported snapshot tarball was actually written, so deletion
+                  targets the store that holds it rather than whatever .spec.persistence.snapshots.exportTarball
+                  currently points at. Entries are added when an upload starts and removed once the tarball is
+                  deleted. Recorded in status rather than on the VolumeSnapshot so that a user who can write the
+                  snapshot object cannot redirect a deletion Job — which runs with the operator's credentials — at
+                  objects of their choosing. Not meant to be set by hand.
+                items:
+                  description: |-
+                    ExportedTarball records where a snapshot tarball was written, so it can be deleted from that store
+                    even after `.spec.persistence.snapshots.exportTarball` changes. Written by the controller only.
+                  properties:
+                    bucket:
+                      description: Bucket is the bucket the tarball was written to.
+                      type: string
+                    endpoint:
+                      description: Endpoint is the custom S3 endpoint in use at upload
+                        time, if any. Empty for Amazon S3 and GCS.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the object name used at upload time. It embeds the export suffix in force back then, so a
+                        later suffix change cannot make deletion ask for an object that was never written.
+                      type: string
+                    provider:
+                      description: Provider is the object store the tarball was written
+                        to (`gcs` or `s3`).
+                      type: string
+                    snapshot:
+                      description: Snapshot is the name of the VolumeSnapshot this
+                        tarball was exported from.
+                      type: string
+                  required:
+                  - bucket
+                  - name
+                  - provider
+                  - snapshot
+                  type: object
+                type: array
               genesisSigningDigest:
                 description: |-
                   GenesisSigningDigest is a controller-internal fingerprint of the genesis-initializing validator's

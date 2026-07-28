@@ -2,7 +2,6 @@ package chainnode
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"testing"
@@ -313,11 +312,13 @@ func TestTarballDeleteProviderTargetsRecordedDestination(t *testing.T) {
 			}},
 		}}},
 	}
-	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
-		Name: "snapshot", Namespace: "default",
-		Annotations: map[string]string{
-			controllers.AnnotationTarballDestination: `{"provider":"s3","bucket":"old-bucket","endpoint":"http://minio:9000"}`,
-		},
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	chainNode.Status.ExportedTarballs = []appsv1.ExportedTarball{{
+		Snapshot: "snapshot",
+		Name:     "cosmoshub-4-20260728102446",
+		Provider: "s3",
+		Bucket:   "old-bucket",
+		Endpoint: "http://minio:9000",
 	}}
 	reconciler := &Reconciler{
 		snapshotClientSet: fake.NewSimpleClientset(),
@@ -359,23 +360,26 @@ func TestTarballDeleteProviderUsesSpecWhenDestinationMatchesOrIsAbsent(t *testin
 	}
 
 	tests := []struct {
-		name        string
-		annotations map[string]string
+		name     string
+		recorded []appsv1.ExportedTarball
 	}{
 		{
-			name:        "recorded destination matches the spec",
-			annotations: map[string]string{controllers.AnnotationTarballDestination: `{"provider":"gcs","bucket":"snapshots"}`},
+			name: "recorded destination matches the spec",
+			recorded: []appsv1.ExportedTarball{{
+				Snapshot: "snapshot", Name: "tarball", Provider: "gcs", Bucket: "snapshots",
+			}},
 		},
 		{
-			// Snapshots taken before this annotation existed must keep working.
-			name:        "no recorded destination",
-			annotations: nil,
+			// Snapshots exported before this record existed must keep working.
+			name:     "no recorded destination",
+			recorded: nil,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			chainNode.Status.ExportedTarballs = tt.recorded
 			snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
-				Name: "snapshot", Namespace: "default", Annotations: tt.annotations,
+				Name: "snapshot", Namespace: "default",
 			}}
 			provider, relocated, err := reconciler.tarballDeleteProvider(chainNode, snapshot)
 			require.NoError(t, err)
@@ -414,7 +418,11 @@ func TestExportTarballRecordsDestinationAtUploadStart(t *testing.T) {
 		Name: "snapshot", Namespace: "default",
 		Annotations: map[string]string{controllers.AnnotationExportingTarball: "true"},
 	}}
-	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(snapshot, chainNode).
+		WithStatusSubresource(chainNode).
+		Build()
 	reconciler := &Reconciler{
 		Client:            baseClient,
 		snapshotClientSet: fake.NewSimpleClientset(),
@@ -425,41 +433,50 @@ func TestExportTarballRecordsDestinationAtUploadStart(t *testing.T) {
 
 	require.NoError(t, reconciler.recordTarballDestination(context.Background(), chainNode, snapshot))
 
-	stored := &snapshotv1.VolumeSnapshot{}
-	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
-	var destination tarballDestination
-	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controllers.AnnotationTarballDestination]), &destination))
-	assert.Equal(t, "s3", destination.Provider)
-	assert.Equal(t, "snapshots", destination.Bucket)
-	assert.Equal(t, "http://minio:9000", destination.Endpoint)
-	// The record carries no credentials: it is user-writable, so it must never decide where secrets go.
-	assert.NotContains(t, stored.Annotations[controllers.AnnotationTarballDestination], "credentialsSecret")
-	assert.NotContains(t, stored.Annotations[controllers.AnnotationTarballDestination], "region")
+	// The record lives in controller-owned status, never on the user-writable VolumeSnapshot.
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 1)
+	entry := stored.Status.ExportedTarballs[0]
+	assert.Equal(t, "snapshot", entry.Snapshot)
+	assert.Equal(t, "s3", entry.Provider)
+	assert.Equal(t, "snapshots", entry.Bucket)
+	assert.Equal(t, "http://minio:9000", entry.Endpoint)
+	assert.NotEmpty(t, entry.Name, "the object name must be pinned so a later suffix change cannot orphan it")
+
+	storedSnapshot := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, storedSnapshot))
+	assert.NotContains(t, storedSnapshot.Annotations, "cosmopilot.voluzi.com/tarball-destination")
 }
 
-// TestConfigForDestinationIgnoresUntrustedEndpoint is the security regression for the delete path.
-// The destination annotation lives on the VolumeSnapshot and is writable by anyone with access to that
-// object. If a forged endpoint were honoured, the delete Job would carry the operator's S3 credentials
-// to a host of the attacker's choosing. Connection settings must always come from the ChainNode spec.
-func TestConfigForDestinationIgnoresUntrustedEndpoint(t *testing.T) {
+// TestConfigForDestinationUsesRecordedLocationAndSpecCredentials is the security regression for the
+// delete path. The record now lives in ChainNode.status, which only the controller writes, so bucket
+// and endpoint can be honoured; credentials still come from the spec, since that is the only place
+// they exist. Previously this lived in a VolumeSnapshot annotation, where a forged endpoint could send
+// the operator's credentials to a host of the attacker's choosing.
+func TestConfigForDestinationUsesRecordedLocationAndSpecCredentials(t *testing.T) {
 	configured := &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
-		Bucket:            "snapshots",
+		Bucket:            "new-bucket",
 		Region:            "eu-west-1",
-		Endpoint:          ptr.To("http://minio.internal:9000"),
+		Endpoint:          ptr.To("http://minio-new:9000"),
 		CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-credentials"},
 	}}
-	// A tampered record pointing at an attacker-controlled host.
-	forged := tarballDestination{
+	recorded := &appsv1.ExportedTarball{
+		Snapshot: "snapshot",
+		Name:     "cosmoshub-4-20260728102446",
 		Provider: "s3",
-		Bucket:   "snapshots",
-		Endpoint: "http://attacker.example.com",
+		Bucket:   "old-bucket",
+		Endpoint: "http://minio-old:9000",
 	}
 
-	cfg, err := configForDestination(configured, forged)
+	cfg, err := configForDestination(configured, recorded)
 	require.NoError(t, err)
 	require.NotNil(t, cfg.S3)
-	assert.Equal(t, "http://minio.internal:9000", ptr.Deref(cfg.S3.Endpoint, ""),
-		"the endpoint must come from the spec, never from the user-writable annotation")
+	// Location from the controller-written record, so an endpoint change still deletes the real object
+	// instead of finding nothing in the new store and reporting success.
+	assert.Equal(t, "old-bucket", cfg.S3.Bucket)
+	assert.Equal(t, "http://minio-old:9000", ptr.Deref(cfg.S3.Endpoint, ""))
+	// Credentials from the spec.
 	assert.Equal(t, "eu-west-1", cfg.S3.Region)
 	require.NotNil(t, cfg.S3.CredentialsSecret)
 	assert.Equal(t, "aws-credentials", cfg.S3.CredentialsSecret.Name)
@@ -470,9 +487,9 @@ func TestConfigForDestinationIgnoresUntrustedEndpoint(t *testing.T) {
 // build a credential-less Job that silently finds nothing and reports success.
 func TestConfigForDestinationFailsLoudlyWithoutSpecCredentials(t *testing.T) {
 	configured := &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "new", Region: "eu-west-1"}}
-	destination := tarballDestination{Provider: "gcs", Bucket: "old"}
+	recorded := &appsv1.ExportedTarball{Snapshot: "snapshot", Provider: "gcs", Bucket: "old"}
 
-	_, err := configForDestination(configured, destination)
+	_, err := configForDestination(configured, recorded)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "no gcs configuration")
 }
@@ -489,19 +506,22 @@ func TestDeletedTarballNameUsesRecordedName(t *testing.T) {
 				GCS:    &appsv1.GcsExportConfig{Bucket: "snapshots"},
 			},
 		}}},
-		Status: appsv1.ChainNodeStatus{ChainID: "cosmoshub-4"},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: "cosmoshub-4",
+			ExportedTarballs: []appsv1.ExportedTarball{{
+				Snapshot: "snapshot",
+				Name:     "cosmoshub-4-20260728102446-old-suffix",
+				Provider: "gcs",
+				Bucket:   "snapshots",
+			}},
+		},
 	}
 
-	recorded := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
-		Name: "snapshot", Namespace: "default",
-		Annotations: map[string]string{
-			controllers.AnnotationTarballDestination: `{"provider":"gcs","bucket":"snapshots","name":"cosmoshub-4-20260728102446-old-suffix"}`,
-		},
-	}}
+	recorded := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
 	assert.Equal(t, "cosmoshub-4-20260728102446-old-suffix", deletedTarballName(chainNode, recorded))
 
-	// Snapshots recorded before the name was captured keep the previous behaviour.
-	legacy := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	// Snapshots exported before the name was recorded keep the previous behaviour.
+	legacy := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "other-snapshot", Namespace: "default"}}
 	assert.Equal(t, getTarballName(chainNode, legacy), deletedTarballName(chainNode, legacy))
 }
 
@@ -1181,4 +1201,61 @@ func TestValidateSnapshotsConfigMutualExclusion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestForgedSnapshotAnnotationCannotRedirectDeletion is the P0 regression. A user who can write the
+// VolumeSnapshot but not the ChainNode must not be able to steer a deletion Job — which runs with the
+// operator's cloud credentials — at a bucket, endpoint or object name of their choosing.
+func TestForgedSnapshotAnnotationCannotRedirectDeletion(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+				Bucket:   "snapshots",
+				Region:   "eu-west-1",
+				Endpoint: ptr.To("http://minio.internal:9000"),
+			}},
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: "cosmoshub-4",
+			ExportedTarballs: []appsv1.ExportedTarball{{
+				Snapshot: "snapshot",
+				Name:     "cosmoshub-4-20260728102446",
+				Provider: "s3",
+				Bucket:   "snapshots",
+				Endpoint: "http://minio.internal:9000",
+			}},
+		},
+	}
+	// Every field an attacker could reach on the object they can write.
+	forged := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default",
+		Annotations: map[string]string{
+			"cosmopilot.voluzi.com/tarball-destination": `{"provider":"s3","bucket":"victim-bucket","endpoint":"http://attacker.example.com","name":"victim-object"}`,
+		},
+	}}
+	reconciler := &Reconciler{
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	provider, relocated, err := reconciler.tarballDeleteProvider(chainNode, forged)
+	require.NoError(t, err)
+	assert.False(t, relocated)
+	s3Provider, ok := provider.(*datasnapshot.S3)
+	require.True(t, ok)
+	assert.Equal(t, "snapshots", s3Provider.Config.Bucket, "bucket must come from controller-written status")
+	assert.Equal(t, "http://minio.internal:9000", ptr.Deref(s3Provider.Config.Endpoint, ""),
+		"endpoint must come from the spec, never from the snapshot annotation")
+	assert.Equal(t, "cosmoshub-4-20260728102446", deletedTarballName(chainNode, forged),
+		"object name must come from controller-written status")
 }
