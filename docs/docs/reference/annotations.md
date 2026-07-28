@@ -28,11 +28,23 @@ with a node.
 | `cosmopilot.voluzi.com/snapshot-retention` | VolumeSnapshot | Retention marker for the snapshot. |
 | `cosmopilot.voluzi.com/snapshot-integrity-status` | VolumeSnapshot | Result of the snapshot integrity check. |
 | `cosmopilot.voluzi.com/exporting-tarball` | Node | A snapshot tarball export is in progress. |
-| `cosmopilot.voluzi.com/tarball-destination` | VolumeSnapshot | Where the tarball was uploaded (provider, bucket and endpoint). Deletion targets this destination, so changing `exportTarball` does not orphan objects already written to the previous store. |
 | `cosmopilot.voluzi.com/vpa-resources` | Pod | Resources currently applied by the vertical autoscaling logic. |
 | `cosmopilot.voluzi.com/last-cpu-scale` | Pod | Timestamp of the last CPU scaling action. |
 | `cosmopilot.voluzi.com/last-memory-scale` | Pod | Timestamp of the last memory scaling action. |
 | `cosmopilot.voluzi.com/oom-recovery-history` | Pod | History used to recover from out-of-memory events. |
+
+:::note Exported tarballs are tracked in status, not in an annotation
+
+Where each snapshot tarball was uploaded is recorded in `ChainNode.status.exportedTarballs`
+(provider, bucket, endpoint and the object name used at upload time). Deletion targets that
+recorded destination, so changing `.spec.persistence.snapshots.exportTarball` does not orphan
+objects already written to the previous store.
+
+It lives in status rather than on the `VolumeSnapshot` deliberately: status is written only by the
+operator, so a user with write access to the snapshot object cannot redirect a deletion Job — which
+runs with the operator's cloud credentials — at objects of their choosing.
+
+:::
 
 ### Standard Kubernetes annotations
 

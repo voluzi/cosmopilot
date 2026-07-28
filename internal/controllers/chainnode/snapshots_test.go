@@ -1226,11 +1226,13 @@ func TestForgedSnapshotAnnotationCannotRedirectDeletion(t *testing.T) {
 		Status: appsv1.ChainNodeStatus{
 			ChainID: "cosmoshub-4",
 			ExportedTarballs: []appsv1.ExportedTarball{{
-				Snapshot: "snapshot",
-				Name:     "cosmoshub-4-20260728102446",
-				Provider: "s3",
-				Bucket:   "snapshots",
-				Endpoint: "http://minio.internal:9000",
+				Snapshot:       "snapshot",
+				Name:           "cosmoshub-4-20260728102446",
+				Provider:       "s3",
+				Bucket:         "snapshots",
+				Endpoint:       "http://minio.internal:9000",
+				Region:         "eu-west-1",
+				ForcePathStyle: ptr.To(false),
 			}},
 		},
 	}
@@ -1258,4 +1260,109 @@ func TestForgedSnapshotAnnotationCannotRedirectDeletion(t *testing.T) {
 		"endpoint must come from the spec, never from the snapshot annotation")
 	assert.Equal(t, "cosmoshub-4-20260728102446", deletedTarballName(chainNode, forged),
 		"object name must come from controller-written status")
+}
+
+// TestExportDestinationTracksS3Routing: forcePathStyle and region are part of reaching a store. A
+// MinIO-style endpoint served with path-style URLs is typically unreachable with virtual-host
+// addressing, so a change there must count as a different location and the delete Job must keep using
+// the upload-time settings.
+func TestExportDestinationTracksS3Routing(t *testing.T) {
+	pathStyle, ok := exportDestination(&appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:         "snapshots",
+		Region:         "eu-west-1",
+		Endpoint:       ptr.To("http://minio:9000"),
+		ForcePathStyle: ptr.To(true),
+	}})
+	require.True(t, ok)
+	virtualHost, ok := exportDestination(&appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:         "snapshots",
+		Region:         "eu-west-1",
+		Endpoint:       ptr.To("http://minio:9000"),
+		ForcePathStyle: ptr.To(false),
+	}})
+	require.True(t, ok)
+
+	assert.False(t, sameLocation(pathStyle, virtualHost),
+		"an addressing-mode change must not read as the same location")
+
+	// The delete config restores the upload-time routing rather than the current spec's.
+	cfg, err := configForDestination(&appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:         "snapshots",
+		Region:         "us-east-1",
+		Endpoint:       ptr.To("http://minio:9000"),
+		ForcePathStyle: ptr.To(false),
+	}}, &appsv1.ExportedTarball{
+		Snapshot: "snapshot", Provider: "s3", Bucket: "snapshots",
+		Endpoint: "http://minio:9000", Region: "eu-west-1", ForcePathStyle: ptr.To(true),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg.S3)
+	assert.True(t, ptr.Deref(cfg.S3.ForcePathStyle, false))
+	assert.Equal(t, "eu-west-1", cfg.S3.Region)
+}
+
+// TestRecordTarballDestinationKeepsFirstRecord: a retry after an export-config change must not repoint
+// an existing record. The original upload Job may already have succeeded against the old store, so
+// rewriting the record before that is known would aim deletion at the wrong place.
+func TestRecordTarballDestinationKeepsFirstRecord(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"}},
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			ChainID: "cosmoshub-4",
+			ExportedTarballs: []appsv1.ExportedTarball{{
+				Snapshot: "snapshot", Name: "original", Provider: "s3", Bucket: "old-bucket",
+			}},
+		},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode, snapshot).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{Client: baseClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+
+	require.NoError(t, reconciler.recordTarballDestination(context.Background(), chainNode, snapshot))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 1)
+	assert.Equal(t, "old-bucket", stored.Status.ExportedTarballs[0].Bucket, "the first record must win")
+	assert.Equal(t, "original", stored.Status.ExportedTarballs[0].Name)
+}
+
+// TestPruneTarballDestinationsDropsRecordsForMissingSnapshots: with deleteOnExpire=false the only
+// deletion-driven cleanup never runs, so records must be retired when their VolumeSnapshot disappears
+// or status grows until it hits the object size limit and blocks every later update.
+func TestPruneTarballDestinationsDropsRecordsForMissingSnapshots(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{
+			{Snapshot: "live", Provider: "gcs", Bucket: "snapshots"},
+			{Snapshot: "deleted", Provider: "gcs", Bucket: "snapshots"},
+		}},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{Client: baseClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+
+	live := []snapshotv1.VolumeSnapshot{{ObjectMeta: metav1.ObjectMeta{Name: "live", Namespace: "default"}}}
+	require.NoError(t, reconciler.pruneTarballDestinations(context.Background(), chainNode, live))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 1)
+	assert.Equal(t, "live", stored.Status.ExportedTarballs[0].Snapshot)
 }

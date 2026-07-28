@@ -66,6 +66,14 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		}
 	}
 
+	// Drop destination records whose VolumeSnapshot no longer exists. Deletion-driven cleanup only runs
+	// when the tarball itself is deleted, so with the default deleteOnExpire=false (or after a manual
+	// snapshot deletion) records would otherwise accumulate forever and eventually push status past the
+	// object size limit, blocking every later status update and export.
+	if err = r.pruneTarballDestinations(ctx, chainNode, snapshots); err != nil {
+		return err
+	}
+
 	// Grab list of possible tarball names to make sure we delete any possible dangling jobs
 	tarballNames := make([]string, 0)
 
@@ -647,16 +655,37 @@ func deletedTarballName(chainNode *appsv1.ChainNode, snapshot *snapshotv1.Volume
 	return getTarballName(chainNode, snapshot)
 }
 
-// exportDestination describes where the configured export target currently points.
-func exportDestination(cfg *appsv1.ExportTarballConfig) (provider, bucket, endpoint string, ok bool) {
+// exportDestination describes where the configured export target currently points, in the same shape
+// as a recorded entry so the two can be compared directly. Snapshot is left blank; the caller fills it.
+func exportDestination(cfg *appsv1.ExportTarballConfig) (appsv1.ExportedTarball, bool) {
 	switch {
 	case cfg.GCS != nil:
-		return "gcs", cfg.GCS.Bucket, "", true
+		return appsv1.ExportedTarball{Provider: "gcs", Bucket: cfg.GCS.Bucket}, true
 	case cfg.S3 != nil:
-		return "s3", cfg.S3.Bucket, ptr.Deref(cfg.S3.Endpoint, ""), true
+		return appsv1.ExportedTarball{
+			Provider: "s3",
+			Bucket:   cfg.S3.Bucket,
+			Endpoint: ptr.Deref(cfg.S3.Endpoint, ""),
+			Region:   cfg.S3.Region,
+			// Resolve the effective value rather than storing the raw pointer, so a spec that spells out
+			// the current default does not read as a change.
+			ForcePathStyle: ptr.To(cfg.S3.ShouldForcePathStyle()),
+		}, true
 	default:
-		return "", "", "", false
+		return appsv1.ExportedTarball{}, false
 	}
+}
+
+// sameLocation reports whether two records point at the same object store, including the routing
+// settings needed to reach it. forcePathStyle and region matter: a MinIO-style endpoint reached with
+// path-style URLs is typically unreachable with virtual-host addressing, so a change there means the
+// delete Job must keep using the upload-time settings rather than the current ones.
+func sameLocation(a, b appsv1.ExportedTarball) bool {
+	return a.Provider == b.Provider &&
+		a.Bucket == b.Bucket &&
+		a.Endpoint == b.Endpoint &&
+		a.Region == b.Region &&
+		ptr.Deref(a.ForcePathStyle, false) == ptr.Deref(b.ForcePathStyle, false)
 }
 
 // tarballDeleteProvider resolves the exporter used to delete a tarball, preferring the destination
@@ -673,8 +702,8 @@ func (r *Reconciler) tarballDeleteProvider(chainNode *appsv1.ChainNode, snapshot
 		return provider, false, err
 	}
 
-	provider, bucket, endpoint, ok := exportDestination(configured)
-	if ok && provider == recorded.Provider && bucket == recorded.Bucket && endpoint == recorded.Endpoint {
+	current, ok := exportDestination(configured)
+	if ok && sameLocation(current, *recorded) {
 		exporter, err := r.tarballProviderFor(chainNode, configured)
 		return exporter, false, err
 	}
@@ -718,6 +747,14 @@ func configForDestination(configured *appsv1.ExportTarballConfig, recorded *apps
 		} else {
 			cfg.S3.Endpoint = ptr.To(recorded.Endpoint)
 		}
+		// Routing must match the upload: a store reached with path-style URLs is usually unreachable
+		// with virtual-host addressing, and the signing region is part of reaching it.
+		if recorded.Region != "" {
+			cfg.S3.Region = recorded.Region
+		}
+		if recorded.ForcePathStyle != nil {
+			cfg.S3.ForcePathStyle = recorded.ForcePathStyle
+		}
 	default:
 		return nil, fmt.Errorf("unknown recorded tarball provider %q", recorded.Provider)
 	}
@@ -742,20 +779,20 @@ func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainN
 // recordTarballDestination stamps where this upload is being written, into controller-owned status, so
 // deletion can target that store rather than whatever exportTarball currently points at.
 func (r *Reconciler) recordTarballDestination(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
-	provider, bucket, endpoint, ok := exportDestination(chainNode.Spec.Persistence.Snapshots.ExportTarball)
+	entry, ok := exportDestination(chainNode.Spec.Persistence.Snapshots.ExportTarball)
 	if !ok {
 		return nil
 	}
+	entry.Snapshot = snapshot.GetName()
 	// Pin the object name too: it embeds exportTarball.suffix, so editing the suffix later would make
 	// deletion ask for a name that was never written and leave the real tarball behind.
-	entry := appsv1.ExportedTarball{
-		Snapshot: snapshot.GetName(),
-		Name:     getTarballName(chainNode, snapshot),
-		Provider: provider,
-		Bucket:   bucket,
-		Endpoint: endpoint,
-	}
-	if existing := recordedTarball(chainNode, snapshot); existing != nil && *existing == entry {
+	entry.Name = getTarballName(chainNode, snapshot)
+
+	// The first record wins. A retry after an export-config change must not repoint an existing record:
+	// the original upload Job may have already succeeded against the old store, and rewriting the record
+	// before that is known would aim deletion at the wrong place and orphan the real object. The record
+	// is cleared with the tarball, so a genuine re-export starts from a clean slate.
+	if existing := recordedTarball(chainNode, snapshot); existing != nil {
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -763,22 +800,64 @@ func (r *Reconciler) recordTarballDestination(ctx context.Context, chainNode *ap
 		if err := r.Get(ctx, client.ObjectKeyFromObject(chainNode), fresh); err != nil {
 			return err
 		}
-		replaced := false
 		for i := range fresh.Status.ExportedTarballs {
 			if fresh.Status.ExportedTarballs[i].Snapshot == entry.Snapshot {
-				fresh.Status.ExportedTarballs[i] = entry
-				replaced = true
-				break
+				// Another reconcile recorded it first; leave that record alone.
+				return nil
 			}
 		}
-		if !replaced {
-			fresh.Status.ExportedTarballs = append(fresh.Status.ExportedTarballs, entry)
-		}
+		fresh.Status.ExportedTarballs = append(fresh.Status.ExportedTarballs, entry)
 		if err := r.Status().Update(ctx, fresh); err != nil {
 			return err
 		}
-		chainNode.ResourceVersion = fresh.ResourceVersion
-		chainNode.Status = fresh.Status
+		// Copy status only. Attaching fresh.ResourceVersion to the caller's copy would let a later
+		// r.Update() of a stale .spec succeed instead of conflicting, silently reverting a concurrent
+		// spec edit.
+		chainNode.Status.ExportedTarballs = fresh.Status.ExportedTarballs
+		return nil
+	})
+}
+
+// pruneTarballDestinations removes records for VolumeSnapshots that no longer exist, bounding the size
+// of status by the number of live snapshots rather than by everything ever exported.
+func (r *Reconciler) pruneTarballDestinations(ctx context.Context, chainNode *appsv1.ChainNode, snapshots []snapshotv1.VolumeSnapshot) error {
+	if len(chainNode.Status.ExportedTarballs) == 0 {
+		return nil
+	}
+	live := make(map[string]struct{}, len(snapshots))
+	for i := range snapshots {
+		live[snapshots[i].GetName()] = struct{}{}
+	}
+	stale := false
+	for _, entry := range chainNode.Status.ExportedTarballs {
+		if _, ok := live[entry.Snapshot]; !ok {
+			stale = true
+			break
+		}
+	}
+	if !stale {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &appsv1.ChainNode{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(chainNode), fresh); err != nil {
+			return err
+		}
+		kept := make([]appsv1.ExportedTarball, 0, len(fresh.Status.ExportedTarballs))
+		for _, entry := range fresh.Status.ExportedTarballs {
+			if _, ok := live[entry.Snapshot]; ok {
+				kept = append(kept, entry)
+			}
+		}
+		if len(kept) == len(fresh.Status.ExportedTarballs) {
+			return nil
+		}
+		fresh.Status.ExportedTarballs = kept
+		if err := r.Status().Update(ctx, fresh); err != nil {
+			return err
+		}
+		// Status only; see recordTarballDestination for why the resource version is not copied.
+		chainNode.Status.ExportedTarballs = fresh.Status.ExportedTarballs
 		return nil
 	})
 }
@@ -804,8 +883,8 @@ func (r *Reconciler) forgetTarballDestination(ctx context.Context, chainNode *ap
 		if err := r.Status().Update(ctx, fresh); err != nil {
 			return err
 		}
-		chainNode.ResourceVersion = fresh.ResourceVersion
-		chainNode.Status = fresh.Status
+		// Status only; see recordTarballDestination for why the resource version is not copied.
+		chainNode.Status.ExportedTarballs = fresh.Status.ExportedTarballs
 		return nil
 	})
 }

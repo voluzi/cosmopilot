@@ -1241,6 +1241,16 @@ type ExportedTarball struct {
 	// Endpoint is the custom S3 endpoint in use at upload time, if any. Empty for Amazon S3 and GCS.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+
+	// Region is the S3 signing region in use at upload time. Empty for GCS.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// ForcePathStyle is the S3 addressing mode in use at upload time. A store reached with path-style
+	// URLs is often unreachable with virtual-host addressing (and vice versa), so the delete Job must
+	// use the mode the upload used rather than whatever the spec says now. Empty for GCS.
+	// +optional
+	ForcePathStyle *bool `json:"forcePathStyle,omitempty"`
 }
 
 // CreateValidatorConfig holds configuration for cosmopilot to submit a create-validator transaction.

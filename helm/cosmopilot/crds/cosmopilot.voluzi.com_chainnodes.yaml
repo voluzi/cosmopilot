@@ -6278,6 +6278,12 @@ spec:
                       description: Endpoint is the custom S3 endpoint in use at upload
                         time, if any. Empty for Amazon S3 and GCS.
                       type: string
+                    forcePathStyle:
+                      description: |-
+                        ForcePathStyle is the S3 addressing mode in use at upload time. A store reached with path-style
+                        URLs is often unreachable with virtual-host addressing (and vice versa), so the delete Job must
+                        use the mode the upload used rather than whatever the spec says now. Empty for GCS.
+                      type: boolean
                     name:
                       description: |-
                         Name is the object name used at upload time. It embeds the export suffix in force back then, so a
@@ -6286,6 +6292,10 @@ spec:
                     provider:
                       description: Provider is the object store the tarball was written
                         to (`gcs` or `s3`).
+                      type: string
+                    region:
+                      description: Region is the S3 signing region in use at upload
+                        time. Empty for GCS.
                       type: string
                     snapshot:
                       description: Snapshot is the name of the VolumeSnapshot this
