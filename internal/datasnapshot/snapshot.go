@@ -107,6 +107,35 @@ func ensureSnapshotJob(
 	return job, false, nil
 }
 
+// uploadJobStatus reports the status of an existing upload Job, rejecting one that belongs to a
+// different exporter. Polling looks the Job up by name, and the name does not encode the provider, so
+// without this check an in-flight upload started by the previous provider would be read as progress
+// towards the newly configured one — and its success would mark the export finished even though
+// nothing was written to the new destination.
+//
+// The stale Job is removed so the next reconcile starts a real upload against the current provider.
+func uploadJobStatus(
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, name, exporter string,
+) (SnapshotStatus, error) {
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return SnapshotNotFound, nil
+		}
+		return "", err
+	}
+	if job.Labels[labelExporter] != exporter {
+		if err = deleteSnapshotJob(ctx, client, job); err != nil {
+			return "", fmt.Errorf("delete stale upload job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		return "", fmt.Errorf("upload job %s/%s belongs to exporter %q, not %q: %w",
+			job.Namespace, job.Name, job.Labels[labelExporter], exporter, ErrStaleJobReplaced)
+	}
+	return snapshotJobStatus(job), nil
+}
+
 func deleteSnapshotJob(ctx context.Context, client kubernetes.Interface, job *batchv1.Job) error {
 	propagation := metav1.DeletePropagationForeground
 	err := client.BatchV1().Jobs(job.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{

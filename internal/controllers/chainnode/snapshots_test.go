@@ -129,7 +129,11 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
 	clientSet := fake.NewSimpleClientset(
 		&batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: "-00010101000000-upload", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "-00010101000000-upload",
+				Namespace: "default",
+				Labels:    map[string]string{"exporter": "gcs-exporter"},
+			},
 			Status: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{
 				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
 			}}},

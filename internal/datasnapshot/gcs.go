@@ -226,15 +226,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 }
 
 func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	job, err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return SnapshotNotFound, nil
-		}
-		return "", err
-	}
-
-	return snapshotJobStatus(job), nil
+	return uploadJobStatus(ctx, gcs.Client, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), gcsExporter)
 }
 
 func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {

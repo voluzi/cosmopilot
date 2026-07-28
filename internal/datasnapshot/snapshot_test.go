@@ -85,6 +85,58 @@ func TestEnsureSnapshotJobReplacesJobWithUnconvergeableLabels(t *testing.T) {
 	assert.Equal(t, "gcs-exporter", job.Labels[labelExporter])
 }
 
+// TestUploadJobStatusRejectsOtherExportersJob covers the polling path. Upload Jobs are looked up by
+// name, and the name does not encode the provider, so a Job left in flight by the previous exporter
+// would otherwise be read as progress towards the newly configured one — and its success would mark the
+// export finished with nothing written to the new destination.
+func TestUploadJobStatusRejectsOtherExportersJob(t *testing.T) {
+	client := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-upload",
+			Namespace: "default",
+			UID:       "stale-uid",
+			Labels:    map[string]string{labelExporter: "s3-exporter", labelType: typeUpload},
+		},
+		// The old provider's Job completed successfully — the case that would be misreported.
+		Status: batchv1.JobStatus{
+			Succeeded:  1,
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+		},
+	})
+
+	_, err := uploadJobStatus(context.Background(), client, "default", "snapshot-upload", "gcs-exporter")
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	assert.ErrorContains(t, err, "s3-exporter")
+
+	// Removed, so the next reconcile starts a real upload against the configured provider.
+	_, err = client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestUploadJobStatusReportsMatchingExportersJob(t *testing.T) {
+	client := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-upload",
+			Namespace: "default",
+			Labels:    map[string]string{labelExporter: "gcs-exporter", labelType: typeUpload},
+		},
+		Status: batchv1.JobStatus{
+			Succeeded:  1,
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+		},
+	})
+
+	status, err := uploadJobStatus(context.Background(), client, "default", "snapshot-upload", "gcs-exporter")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotSucceeded, status)
+}
+
+func TestUploadJobStatusReportsMissingJob(t *testing.T) {
+	status, err := uploadJobStatus(context.Background(), fake.NewSimpleClientset(), "default", "snapshot-upload", "gcs-exporter")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotNotFound, status)
+}
+
 func TestEnsureSnapshotJobKeepsJobWithMatchingLabels(t *testing.T) {
 	owner := testJobOwner()
 	existing := desiredDeleteJob(owner, "s3-exporter")
