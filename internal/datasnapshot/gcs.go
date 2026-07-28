@@ -226,7 +226,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 }
 
 func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	return uploadJobStatus(ctx, gcs.Client, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), gcsExporter)
+	return uploadJobStatus(ctx, gcs.Client, gcs.Owner, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), gcsExporter)
 }
 
 func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {

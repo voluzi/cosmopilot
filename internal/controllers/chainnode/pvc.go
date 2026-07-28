@@ -322,12 +322,16 @@ func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.Cha
 	}
 
 	if err = r.updatePvcDataHeight(ctx, chainNode, pvc); err != nil {
-		// data-height is advisory metadata. The snapshot flow annotates this same PVC, so write conflicts
-		// are expected; returning the error would abort the reconcile over cosmetic metadata.
+		// Only exhausted optimistic-concurrency conflicts are tolerated here. data-height is advisory
+		// metadata and the snapshot flow annotates this same PVC, so conflicts are expected and must not
+		// abort the reconcile over cosmetic metadata.
 		//
 		// Stop before the resize rather than falling through: the local pvc still holds the resource
 		// version that just lost, so resizing it would conflict again and abort anyway. Both writes are
 		// retried on the next reconcile against a fresh copy.
+		if !errors.IsConflict(err) {
+			return fmt.Errorf("failed to update PVC %s data height annotation: %w", pvc.GetName(), err)
+		}
 		logger.Error(err, "failed to update PVC data height annotation; deferring PVC writes to next reconcile", "pvc", pvc.GetName())
 		return nil
 	}

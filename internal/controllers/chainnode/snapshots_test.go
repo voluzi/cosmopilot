@@ -133,6 +133,13 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 				Name:      "-00010101000000-upload",
 				Namespace: "default",
 				Labels:    map[string]string{"exporter": "gcs-exporter"},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: appsv1.GroupVersion.String(),
+					Kind:       "ChainNode",
+					Name:       "node",
+					UID:        "node-uid",
+					Controller: ptr.To(true),
+				}},
 			},
 			Status: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{
 				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,

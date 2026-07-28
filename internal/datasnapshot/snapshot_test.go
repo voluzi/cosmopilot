@@ -90,12 +90,14 @@ func TestEnsureSnapshotJobReplacesJobWithUnconvergeableLabels(t *testing.T) {
 // would otherwise be read as progress towards the newly configured one — and its success would mark the
 // export finished with nothing written to the new destination.
 func TestUploadJobStatusRejectsOtherExportersJob(t *testing.T) {
+	owner := testJobOwner()
 	client := fake.NewSimpleClientset(&batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-upload",
-			Namespace: "default",
-			UID:       "stale-uid",
-			Labels:    map[string]string{labelExporter: "s3-exporter", labelType: typeUpload},
+			Name:            "snapshot-upload",
+			Namespace:       "default",
+			UID:             "stale-uid",
+			Labels:          map[string]string{labelExporter: "s3-exporter", labelType: typeUpload},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
 		},
 		// The old provider's Job completed successfully — the case that would be misreported.
 		Status: batchv1.JobStatus{
@@ -104,7 +106,7 @@ func TestUploadJobStatusRejectsOtherExportersJob(t *testing.T) {
 		},
 	})
 
-	_, err := uploadJobStatus(context.Background(), client, "default", "snapshot-upload", "gcs-exporter")
+	_, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-upload", "gcs-exporter")
 	require.ErrorIs(t, err, ErrStaleJobReplaced)
 	assert.ErrorContains(t, err, "s3-exporter")
 
@@ -113,12 +115,64 @@ func TestUploadJobStatusRejectsOtherExportersJob(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
-func TestUploadJobStatusReportsMatchingExportersJob(t *testing.T) {
+// TestUploadJobStatusNeverDeletesAnotherOwnersJob guards a cross-node hazard: tarball names derive from
+// chain ID plus a second-resolution timestamp, so two ChainNodes in one namespace can collide on the
+// Job name. Deleting on an exporter mismatch alone would let one node terminate another's live export.
+func TestUploadJobStatusNeverDeletesAnotherOwnersJob(t *testing.T) {
+	owner := testJobOwner()
+	stranger := &corev1.ConfigMap{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "other-node", Namespace: "default", UID: "other-uid"},
+	}
 	client := fake.NewSimpleClientset(&batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "snapshot-upload",
 			Namespace: "default",
-			Labels:    map[string]string{labelExporter: "gcs-exporter", labelType: typeUpload},
+			UID:       "other-job-uid",
+			// A different exporter AND a different owner: the mismatch must not authorise a delete.
+			Labels:          map[string]string{labelExporter: "s3-exporter", labelType: typeUpload},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(stranger)},
+		},
+	})
+
+	_, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-upload", "gcs-exporter")
+	require.ErrorContains(t, err, "not controlled by snapshot owner")
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
+
+	_, err = client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	require.NoError(t, err, "another owner's export job must survive")
+}
+
+func TestUploadJobStatusReportsDeleteFailureOfStaleJob(t *testing.T) {
+	owner := testJobOwner()
+	client := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "snapshot-upload",
+			Namespace:       "default",
+			UID:             "stale-uid",
+			Labels:          map[string]string{labelExporter: "s3-exporter", labelType: typeUpload},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+		},
+	})
+	client.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("delete refused")
+	})
+
+	// A failed delete must surface, not be masked as the sentinel: the caller would otherwise treat the
+	// stale Job as replaced when it is still there.
+	_, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-upload", "gcs-exporter")
+	require.ErrorContains(t, err, "delete refused")
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
+}
+
+func TestUploadJobStatusReportsMatchingExportersJob(t *testing.T) {
+	owner := testJobOwner()
+	client := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "snapshot-upload",
+			Namespace:       "default",
+			Labels:          map[string]string{labelExporter: "gcs-exporter", labelType: typeUpload},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
 		},
 		Status: batchv1.JobStatus{
 			Succeeded:  1,
@@ -126,13 +180,13 @@ func TestUploadJobStatusReportsMatchingExportersJob(t *testing.T) {
 		},
 	})
 
-	status, err := uploadJobStatus(context.Background(), client, "default", "snapshot-upload", "gcs-exporter")
+	status, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-upload", "gcs-exporter")
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotSucceeded, status)
 }
 
 func TestUploadJobStatusReportsMissingJob(t *testing.T) {
-	status, err := uploadJobStatus(context.Background(), fake.NewSimpleClientset(), "default", "snapshot-upload", "gcs-exporter")
+	status, err := uploadJobStatus(context.Background(), fake.NewSimpleClientset(), testJobOwner(), "default", "snapshot-upload", "gcs-exporter")
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotNotFound, status)
 }
@@ -178,11 +232,17 @@ func testJobOwner() *corev1.ConfigMap {
 }
 
 func ownerReferenceTo(owner *corev1.ConfigMap) metav1.OwnerReference {
+	return ownerReferenceToObject(owner)
+}
+
+// ownerReferenceToObject builds the controller reference the providers set on the Jobs they create, so
+// fixtures pass the ownership guard that protects another node's Jobs from deletion.
+func ownerReferenceToObject(owner metav1.Object) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion: "v1",
 		Kind:       "ConfigMap",
-		Name:       owner.Name,
-		UID:        owner.UID,
+		Name:       owner.GetName(),
+		UID:        owner.GetUID(),
 		Controller: ptr.To(true),
 	}
 }

@@ -117,6 +117,7 @@ func ensureSnapshotJob(
 func uploadJobStatus(
 	ctx context.Context,
 	client kubernetes.Interface,
+	owner metav1.Object,
 	namespace, name, exporter string,
 ) (SnapshotStatus, error) {
 	job, err := client.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -125,6 +126,13 @@ func uploadJobStatus(
 			return SnapshotNotFound, nil
 		}
 		return "", err
+	}
+	// Tarball names derive from chain ID and a second-resolution timestamp, so two ChainNodes in one
+	// namespace can collide on this Job name. Never delete a Job this node does not own — that would
+	// terminate another node's active export. Mirrors the ownership guard in ensureSnapshotJob.
+	if !metav1.IsControlledBy(job, owner) {
+		return "", fmt.Errorf("upload job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
 	}
 	if job.Labels[labelExporter] != exporter {
 		if err = deleteSnapshotJob(ctx, client, job); err != nil {

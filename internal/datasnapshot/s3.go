@@ -164,7 +164,7 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 }
 
 func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	return uploadJobStatus(ctx, provider.Client, provider.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), s3Exporter)
+	return uploadJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), s3Exporter)
 }
 
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {

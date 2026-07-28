@@ -156,6 +156,52 @@ func (c *staleReadClient) Get(ctx context.Context, key client.ObjectKey, obj cli
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
+// TestUpdatePvcDataHeightPropagatesNonConflictErrors pins the distinction ensurePvcUpdates relies on:
+// only exhausted optimistic-concurrency conflicts are tolerable there. A timeout or an authorization
+// failure must stay a real error so controller-runtime applies its own retry/backoff, rather than being
+// silently converted to success.
+func TestUpdatePvcDataHeightPropagatesNonConflictErrors(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:        "node",
+		Namespace:   "default",
+		Annotations: map[string]string{controllers.AnnotationDataHeight: "100"},
+	}}
+	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+	reconciler := &Reconciler{
+		Client:    &pvcForbiddenClient{Client: baseClient},
+		APIReader: baseClient,
+		Scheme:    scheme,
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Status:     appsv1.ChainNodeStatus{LatestHeight: 200},
+	}
+
+	err := reconciler.updatePvcDataHeight(context.Background(), chainNode, pvc)
+	require.Error(t, err)
+	assert.False(t, apierrors.IsConflict(err), "a non-conflict failure must not masquerade as a conflict")
+	assert.True(t, apierrors.IsForbidden(err))
+}
+
+// pvcForbiddenClient rejects PVC writes with a non-conflict error.
+type pvcForbiddenClient struct {
+	client.Client
+}
+
+func (c *pvcForbiddenClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+		return apierrors.NewForbidden(
+			schema.GroupResource{Resource: "persistentvolumeclaims"},
+			obj.GetName(),
+			assert.AnError,
+		)
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
 // conflictOnceClient rejects the first Update with a conflict, mimicking a concurrent write to the PVC.
 type conflictOnceClient struct {
 	client.Client

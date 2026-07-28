@@ -234,9 +234,10 @@ func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
 			if tt.createJob {
 				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "snapshot-upload",
-						Namespace: "default",
-						Labels:    map[string]string{labelExporter: gcsExporter},
+						Name:            "snapshot-upload",
+						Namespace:       "default",
+						Labels:          map[string]string{labelExporter: gcsExporter},
+						OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
 					},
 					Status: tt.jobStatus,
 				}, metav1.CreateOptions{})

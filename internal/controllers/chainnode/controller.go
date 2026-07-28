@@ -303,6 +303,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			appsv1.ReasonSnapshotJobReplaced,
 			"Replaced stale snapshot job: %v", err,
 		)
+		// Requeue now rather than waiting a full reconcile period: Jobs are not watched, so nothing else
+		// would wake the controller, and the snapshot stays stuck in its exporting state until it does.
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// If the node will be down during snapshot, most methods below will fail.
