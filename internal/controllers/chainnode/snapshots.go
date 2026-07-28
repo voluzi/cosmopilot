@@ -66,11 +66,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		}
 	}
 
-	// Drop destination records whose VolumeSnapshot no longer exists. Deletion-driven cleanup only runs
-	// when the tarball itself is deleted, so with the default deleteOnExpire=false (or after a manual
-	// snapshot deletion) records would otherwise accumulate forever and eventually push status past the
-	// object size limit, blocking every later status update and export.
-	if err = r.pruneTarballDestinations(ctx, chainNode, snapshots); err != nil {
+	// Handle tarballs whose VolumeSnapshot is gone. Their record is the only remaining pointer to the
+	// object, so deletion runs through it before it is retired.
+	if err = r.reconcileOrphanedTarballs(ctx, chainNode, snapshots); err != nil {
 		return err
 	}
 
@@ -818,25 +816,96 @@ func (r *Reconciler) recordTarballDestination(ctx context.Context, chainNode *ap
 	})
 }
 
-// pruneTarballDestinations removes records for VolumeSnapshots that no longer exist, bounding the size
-// of status by the number of live snapshots rather than by everything ever exported.
-func (r *Reconciler) pruneTarballDestinations(ctx context.Context, chainNode *appsv1.ChainNode, snapshots []snapshotv1.VolumeSnapshot) error {
+// reconcileOrphanedTarballs handles records whose VolumeSnapshot is gone — expired without
+// deleteOnExpire, or deleted by hand. The record is the only remaining pointer to the object, and the
+// dangling-Job sweep below cannot help: it lists Jobs through the *currently configured* exporter, so
+// after a provider change it never sees a tarball left in the old store.
+//
+// When deletion is configured, each orphan is deleted through its own recorded destination and the
+// record is dropped only once that succeeds. Otherwise the tarball is meant to outlive its snapshot,
+// so the record is retired immediately — keeping it would grow status until it hit the object size
+// limit and blocked every later status update and export.
+func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *appsv1.ChainNode, snapshots []snapshotv1.VolumeSnapshot) error {
 	if len(chainNode.Status.ExportedTarballs) == 0 {
 		return nil
 	}
+	logger := log.FromContext(ctx)
 	live := make(map[string]struct{}, len(snapshots))
 	for i := range snapshots {
 		live[snapshots[i].GetName()] = struct{}{}
 	}
-	stale := false
+	deleteTarballs := chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
+		chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+
+	retire := make([]string, 0)
 	for _, entry := range chainNode.Status.ExportedTarballs {
-		if _, ok := live[entry.Snapshot]; !ok {
-			stale = true
-			break
+		if _, ok := live[entry.Snapshot]; ok {
+			continue
+		}
+		if !deleteTarballs {
+			retire = append(retire, entry.Snapshot)
+			continue
+		}
+		done, err := r.deleteOrphanedTarball(ctx, chainNode, entry)
+		if err != nil {
+			// Keep the record: it is the only pointer left to the object.
+			logger.Error(err, "failed deleting orphaned tarball", "snapshot", entry.Snapshot, "tarball", entry.Name)
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeWarning,
+				appsv1.ReasonTarballDeleteError,
+				"Failed deleting orphaned tarball %s from %s bucket %q: %v", entry.Name, entry.Provider, entry.Bucket, err,
+			)
+			continue
+		}
+		if done {
+			retire = append(retire, entry.Snapshot)
 		}
 	}
-	if !stale {
+	return r.retireTarballRecords(ctx, chainNode, retire)
+}
+
+// deleteOrphanedTarball runs a delete Job against the recorded destination, reporting whether the
+// object is gone. Cleanup of the Job happens once it succeeds.
+func (r *Reconciler) deleteOrphanedTarball(ctx context.Context, chainNode *appsv1.ChainNode, entry appsv1.ExportedTarball) (bool, error) {
+	cfg, err := configForDestination(chainNode.Spec.Persistence.Snapshots.ExportTarball, &entry)
+	if err != nil {
+		return false, err
+	}
+	exporter, err := r.tarballProviderFor(chainNode, cfg)
+	if err != nil {
+		return false, err
+	}
+	status, err := exporter.DeleteSnapshot(ctx, entry.Name)
+	if err != nil {
+		return false, err
+	}
+	switch status {
+	case datasnapshot.SnapshotSucceeded:
+		if err = exporter.CleanupSnapshotDeletion(ctx, entry.Name); err != nil {
+			return false, err
+		}
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeNormal,
+			appsv1.ReasonTarballDeleted,
+			"Deleted orphaned tarball %s from %s bucket %q", entry.Name, entry.Provider, entry.Bucket,
+		)
+		return true, nil
+	case datasnapshot.SnapshotFailed:
+		return false, fmt.Errorf("delete job for tarball %s failed", entry.Name)
+	default:
+		// Still running; try again on the next reconcile.
+		return false, nil
+	}
+}
+
+// retireTarballRecords drops the named snapshots' records from status.
+func (r *Reconciler) retireTarballRecords(ctx context.Context, chainNode *appsv1.ChainNode, snapshots []string) error {
+	if len(snapshots) == 0 {
 		return nil
+	}
+	drop := make(map[string]struct{}, len(snapshots))
+	for _, name := range snapshots {
+		drop[name] = struct{}{}
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &appsv1.ChainNode{}
@@ -845,7 +914,7 @@ func (r *Reconciler) pruneTarballDestinations(ctx context.Context, chainNode *ap
 		}
 		kept := make([]appsv1.ExportedTarball, 0, len(fresh.Status.ExportedTarballs))
 		for _, entry := range fresh.Status.ExportedTarballs {
-			if _, ok := live[entry.Snapshot]; ok {
+			if _, ok := drop[entry.Snapshot]; !ok {
 				kept = append(kept, entry)
 			}
 		}

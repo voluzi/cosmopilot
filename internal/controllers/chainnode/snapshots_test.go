@@ -1338,10 +1338,10 @@ func TestRecordTarballDestinationKeepsFirstRecord(t *testing.T) {
 	assert.Equal(t, "original", stored.Status.ExportedTarballs[0].Name)
 }
 
-// TestPruneTarballDestinationsDropsRecordsForMissingSnapshots: with deleteOnExpire=false the only
-// deletion-driven cleanup never runs, so records must be retired when their VolumeSnapshot disappears
-// or status grows until it hits the object size limit and blocks every later update.
-func TestPruneTarballDestinationsDropsRecordsForMissingSnapshots(t *testing.T) {
+// TestOrphanedTarballRecordsAreRetiredWhenDeletionIsOff: with deleteOnExpire=false the tarball is
+// meant to outlive its snapshot, so the record is retired immediately. Keeping it would grow status
+// until it hit the object size limit and blocked every later status update and export.
+func TestOrphanedTarballRecordsAreRetiredWhenDeletionIsOff(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
@@ -1349,20 +1349,89 @@ func TestPruneTarballDestinationsDropsRecordsForMissingSnapshots(t *testing.T) {
 	chainNode := &appsv1.ChainNode{
 		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
 		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{
-			{Snapshot: "live", Provider: "gcs", Bucket: "snapshots"},
-			{Snapshot: "deleted", Provider: "gcs", Bucket: "snapshots"},
+			{Snapshot: "live", Name: "live-tarball", Provider: "gcs", Bucket: "snapshots"},
+			{Snapshot: "deleted", Name: "deleted-tarball", Provider: "gcs", Bucket: "snapshots"},
 		}},
 	}
 	baseClient := fakeclient.NewClientBuilder().
 		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
-	reconciler := &Reconciler{Client: baseClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
 
 	live := []snapshotv1.VolumeSnapshot{{ObjectMeta: metav1.ObjectMeta{Name: "live", Namespace: "default"}}}
-	require.NoError(t, reconciler.pruneTarballDestinations(context.Background(), chainNode, live))
+	require.NoError(t, reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, live))
 
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 	require.Len(t, stored.Status.ExportedTarballs, 1)
 	assert.Equal(t, "live", stored.Status.ExportedTarballs[0].Snapshot)
+}
+
+// TestOrphanedTarballIsDeletedThroughItsRecordedDestination: the dangling-Job sweep lists Jobs through
+// the *currently configured* exporter, so after a provider change a tarball left in the old store is
+// invisible to it. The record is the only pointer left, so deletion must run through it — and the
+// record must survive until that deletion succeeds.
+func TestOrphanedTarballIsDeletedThroughItsRecordedDestination(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	// Spec exports to S3 now; the orphan was written to a different bucket on the same store.
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{
+				DeleteOnExpire: ptr.To(true),
+				S3:             &appsv1.S3ExportConfig{Bucket: "new-bucket", Region: "eu-west-1"},
+			},
+		}}},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{{
+			Snapshot: "deleted", Name: "orphan-tarball", Provider: "s3", Bucket: "old-bucket", Region: "eu-west-1",
+		}}},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	clientSet := fake.NewSimpleClientset()
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	// First pass creates the delete Job against the recorded bucket and keeps the record.
+	require.NoError(t, reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil))
+	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+	require.NoError(t, err, "a delete job must target the recorded tarball name")
+	assert.Contains(t, job.Spec.Template.Spec.Containers[0].Args, "old-bucket",
+		"deletion must target the recorded bucket, not the configured one")
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 1, "the record must survive until deletion succeeds")
+
+	// Once the Job completes the record is retired.
+	job.Status.Succeeded = 1
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	_, err = clientSet.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil))
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	assert.Empty(t, stored.Status.ExportedTarballs)
 }
