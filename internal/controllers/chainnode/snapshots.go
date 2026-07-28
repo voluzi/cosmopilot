@@ -69,16 +69,21 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 
 	// Handle tarballs whose VolumeSnapshot is gone. Their record is the only remaining pointer to the
 	// object, so deletion runs through it before it is retired.
-	mutated, err := r.reconcileOrphanedTarballs(ctx, chainNode, snapshots)
+	yieldReconcile, err := r.reconcileOrphanedTarballs(ctx, chainNode, snapshots)
 	if err != nil {
 		return err
 	}
-	if mutated {
-		// That status write advanced the object's resource version at the API server while this copy
-		// keeps its own (deliberately, so a stale .spec cannot be written back). Carrying on would let a
-		// later full Update of chainNode conflict *after* a snapshot's ready annotation had already been
-		// persisted, and the retry would skip the ready branch — leaving snapshotting-pvc set forever and
-		// blocking every future snapshot. Pick the rest up on the next pass, from a fresh object.
+	if yieldReconcile {
+		// Two reasons to stop here, both requiring a fresh start next pass:
+		//
+		// A status write advanced the object's resource version at the API server while this copy keeps
+		// its own (deliberately, so a stale .spec cannot be written back). Carrying on would let a later
+		// full Update of chainNode conflict *after* a snapshot's ready annotation had been persisted, and
+		// the retry would skip the ready branch — leaving snapshotting-pvc set forever.
+		//
+		// Or a superseded tarball's delete Job is still running. It shares its name with the pending
+		// retry, and its cleanup removes "<name>-upload", so starting the retry now would have its Job
+		// deleted underneath it and be recorded as another failure.
 		return nil
 	}
 
@@ -864,8 +869,9 @@ func (r *Reconciler) recordTarballDestination(ctx context.Context, chainNode *ap
 // record is dropped only once that succeeds. Otherwise the tarball is meant to outlive its snapshot,
 // so the record is retired immediately — keeping it would grow status until it hit the object size
 // limit and blocked every later status update and export.
-// Reports whether it mutated status, so the caller can stop rather than continue with an object whose
-// resource version is now behind the API server's.
+// Reports whether the caller should yield this reconcile pass: either status was mutated (so this
+// object's resource version is behind the API server's) or a superseded deletion is still running and
+// its retry must not start yet.
 func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *appsv1.ChainNode, snapshots []snapshotv1.VolumeSnapshot) (bool, error) {
 	if len(chainNode.Status.ExportedTarballs) == 0 {
 		return false, nil
@@ -889,15 +895,18 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 		chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
 
 	retire := make([]appsv1.ExportedTarball, 0)
+	// Snapshots whose superseded deletion is still in flight; their retry must wait.
+	deleting := make(map[string]struct{})
 	for _, entry := range chainNode.Status.ExportedTarballs {
 		// Two kinds of leftover: a record whose snapshot is gone, and a superseded record whose snapshot
 		// is alive but whose tarball now lives elsewhere. Both point at data nothing else can find.
 		if stillLive(&entry) && !entry.Superseded {
 			continue
 		}
-		if !deleteTarballs {
-			// Superseded entries describe a failed attempt, so there is nothing to preserve regardless of
-			// the retention setting; a live snapshot's own tarball is meant to outlive it.
+		// A superseded entry describes a failed attempt, which can still have left real data behind — the
+		// uploaders write parts before a concurrent chunk failure is noticed. Nothing else points at those
+		// objects, so they are always cleaned up, whatever the retention setting says about live tarballs.
+		if !deleteTarballs && !entry.Superseded {
 			retire = append(retire, entry)
 			continue
 		}
@@ -914,10 +923,15 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 		}
 		if done {
 			retire = append(retire, entry)
+			continue
 		}
+		// Delete Job still running. It shares the tarball name with the retry, and DeleteSnapshot's own
+		// cleanup removes "<name>-upload" — which would be the retry's Job. Hold the retry until this
+		// finishes rather than letting it be torn down mid-flight and recorded as a failure.
+		deleting[entry.Snapshot] = struct{}{}
 	}
 	if len(retire) == 0 {
-		return false, nil
+		return len(deleting) > 0, nil
 	}
 	return true, r.retireTarballRecords(ctx, chainNode, retire)
 }
@@ -996,6 +1010,30 @@ func (r *Reconciler) supersedeFailedTarballRecord(ctx context.Context, chainNode
 	})
 }
 
+// recordKey identifies a single destination record: which snapshot it belongs to, and which object at
+// which store it points at.
+type recordKey struct {
+	snapshot   string
+	uid        types.UID
+	name       string
+	provider   string
+	bucket     string
+	endpoint   string
+	superseded bool
+}
+
+func keyForRecord(entry appsv1.ExportedTarball) recordKey {
+	return recordKey{
+		snapshot:   entry.Snapshot,
+		uid:        entry.SnapshotUID,
+		name:       entry.Name,
+		provider:   entry.Provider,
+		bucket:     entry.Bucket,
+		endpoint:   entry.Endpoint,
+		superseded: entry.Superseded,
+	}
+}
+
 // retireTarballRecords drops the given records from status. Entries are matched on snapshot name *and*
 // superseded flag, so retiring a superseded leftover never removes the live record for the same
 // snapshot (or the other way round).
@@ -1003,14 +1041,12 @@ func (r *Reconciler) retireTarballRecords(ctx context.Context, chainNode *appsv1
 	if len(entries) == 0 {
 		return nil
 	}
-	type recordKey struct {
-		snapshot   string
-		uid        types.UID
-		superseded bool
-	}
+	// Keyed by the object a record points at, not just by snapshot: several superseded records can exist
+	// for one snapshot (one per failed attempt at a different store), and retiring one must not discard
+	// the others — their objects would then be untracked and unreachable by cleanup.
 	drop := make(map[recordKey]struct{}, len(entries))
 	for _, entry := range entries {
-		drop[recordKey{entry.Snapshot, entry.SnapshotUID, entry.Superseded}] = struct{}{}
+		drop[keyForRecord(entry)] = struct{}{}
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &appsv1.ChainNode{}
@@ -1019,7 +1055,7 @@ func (r *Reconciler) retireTarballRecords(ctx context.Context, chainNode *appsv1
 		}
 		kept := make([]appsv1.ExportedTarball, 0, len(fresh.Status.ExportedTarballs))
 		for _, entry := range fresh.Status.ExportedTarballs {
-			if _, ok := drop[recordKey{entry.Snapshot, entry.SnapshotUID, entry.Superseded}]; !ok {
+			if _, ok := drop[keyForRecord(entry)]; !ok {
 				kept = append(kept, entry)
 			}
 		}
@@ -1039,28 +1075,14 @@ func (r *Reconciler) retireTarballRecords(ctx context.Context, chainNode *appsv1
 // forgetTarballDestination drops the record once the tarball is gone, so status does not grow without
 // bound as snapshots are rotated.
 func (r *Reconciler) forgetTarballDestination(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
-	if recordedTarball(chainNode, snapshot) == nil {
+	// Retire only this snapshot's live record. Filtering by name would also take the record of a
+	// same-named predecessor whose tarball is still out there, and any superseded entry still waiting
+	// for its own cleanup — orphaning both.
+	live := recordedTarball(chainNode, snapshot)
+	if live == nil {
 		return nil
 	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		fresh := &appsv1.ChainNode{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(chainNode), fresh); err != nil {
-			return err
-		}
-		kept := fresh.Status.ExportedTarballs[:0]
-		for _, entry := range fresh.Status.ExportedTarballs {
-			if entry.Snapshot != snapshot.GetName() {
-				kept = append(kept, entry)
-			}
-		}
-		fresh.Status.ExportedTarballs = kept
-		if err := r.Status().Update(ctx, fresh); err != nil {
-			return err
-		}
-		// Status only; see recordTarballDestination for why the resource version is not copied.
-		chainNode.Status.ExportedTarballs = fresh.Status.ExportedTarballs
-		return nil
-	})
+	return r.retireTarballRecords(ctx, chainNode, []appsv1.ExportedTarball{*live})
 }
 
 func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {

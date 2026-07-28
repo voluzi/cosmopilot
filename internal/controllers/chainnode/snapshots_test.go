@@ -1575,6 +1575,8 @@ func TestSupersededRecordsAreCleanedUpWhileSnapshotLives(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
 
 	chainNode := &appsv1.ChainNode{
 		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
@@ -1590,9 +1592,10 @@ func TestSupersededRecordsAreCleanedUpWhileSnapshotLives(t *testing.T) {
 	}
 	baseClient := fakeclient.NewClientBuilder().
 		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	clientSet := fake.NewSimpleClientset()
 	reconciler := &Reconciler{
 		Client:            baseClient,
-		snapshotClientSet: fake.NewSimpleClientset(),
+		snapshotClientSet: clientSet,
 		Scheme:            scheme,
 		opts:              &controllers.ControllerRunOptions{},
 		recorder:          record.NewFakeRecorder(10),
@@ -1601,13 +1604,84 @@ func TestSupersededRecordsAreCleanedUpWhileSnapshotLives(t *testing.T) {
 	live := []snapshotv1.VolumeSnapshot{{ObjectMeta: metav1.ObjectMeta{
 		Name: "snapshot", Namespace: "default", UID: "uid",
 	}}}
-	mutated, err := reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, live)
+	// A superseded attempt can have left partial objects, so it is deleted rather than merely dropped —
+	// even with deleteOnExpire unset, which only governs the live tarball.
+	yield, err := reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, live)
 	require.NoError(t, err)
-	assert.True(t, mutated, "a status write must be reported so the caller stops using the stale object")
+	assert.True(t, yield, "an in-flight superseded deletion must make the caller yield the pass")
+
+	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "failed-delete", metav1.GetOptions{})
+	require.NoError(t, err, "the superseded attempt's objects must be deleted, not silently forgotten")
+	assert.Contains(t, job.Spec.Template.Spec.Containers[0].Args, "old-bucket")
 
 	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 2, "records survive until their deletion succeeds")
+
+	// Once the delete Job completes, only the superseded record is retired.
+	job.Status.Succeeded = 1
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	_, err = clientSet.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	_, err = reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, live)
+	require.NoError(t, err)
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 	require.Len(t, stored.Status.ExportedTarballs, 1, "only the superseded record should be retired")
 	assert.Equal(t, "retry", stored.Status.ExportedTarballs[0].Name)
 	assert.False(t, stored.Status.ExportedTarballs[0].Superseded)
+}
+
+// TestRetiringOneRecordKeepsOtherDestinations: several superseded records can exist for one snapshot,
+// one per failed attempt at a different store. Retiring one must not discard the others — their objects
+// would become untracked and unreachable by cleanup. Likewise, forgetting a snapshot's live record must
+// not take a same-named predecessor's record with it.
+func TestRetiringOneRecordKeepsOtherDestinations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{
+			// Two failed attempts at different stores, plus the live record, all for one snapshot.
+			{Snapshot: "snap", SnapshotUID: "uid", Name: "t", Provider: "s3", Bucket: "bucket-a", Superseded: true},
+			{Snapshot: "snap", SnapshotUID: "uid", Name: "t", Provider: "s3", Bucket: "bucket-b", Superseded: true},
+			{Snapshot: "snap", SnapshotUID: "uid", Name: "t", Provider: "gcs", Bucket: "bucket-c"},
+			// A same-named predecessor whose tarball is still out there.
+			{Snapshot: "snap", SnapshotUID: "older-uid", Name: "old-t", Provider: "gcs", Bucket: "bucket-d"},
+		}},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{Client: baseClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+
+	// Retire only the first failed attempt.
+	require.NoError(t, reconciler.retireTarballRecords(context.Background(), chainNode,
+		[]appsv1.ExportedTarball{chainNode.Status.ExportedTarballs[0]}))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 3)
+	buckets := make([]string, 0, 3)
+	for _, entry := range stored.Status.ExportedTarballs {
+		buckets = append(buckets, entry.Bucket)
+	}
+	assert.Equal(t, []string{"bucket-b", "bucket-c", "bucket-d"}, buckets,
+		"the other failed destination and the predecessor's record must survive")
+
+	// Forgetting the live record must leave the remaining failed attempt and the predecessor alone.
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snap", Namespace: "default", UID: "uid",
+	}}
+	require.NoError(t, reconciler.forgetTarballDestination(context.Background(), stored, snapshot))
+
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 2)
+	remaining := make([]string, 0, 2)
+	for _, entry := range stored.Status.ExportedTarballs {
+		remaining = append(remaining, entry.Bucket)
+	}
+	assert.Equal(t, []string{"bucket-b", "bucket-d"}, remaining)
 }
