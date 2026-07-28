@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"testing"
@@ -290,6 +291,132 @@ func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {
 	deleted, err = reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
 	require.NoError(t, err)
 	assert.True(t, deleted)
+}
+
+func TestTarballDeleteProviderTargetsRecordedDestination(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	// The node now exports to GCS, but this tarball was uploaded to MinIO before the switch.
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default",
+		Annotations: map[string]string{
+			controllers.AnnotationTarballDestination: `{"provider":"s3","bucket":"old-bucket","endpoint":"http://minio:9000"}`,
+		},
+	}}
+	reconciler := &Reconciler{
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	provider, relocated, err := reconciler.tarballDeleteProvider(chainNode, snapshot)
+	require.NoError(t, err)
+	assert.True(t, relocated, "a destination that differs from the spec must be reported as relocated")
+	s3Provider, ok := provider.(*datasnapshot.S3)
+	require.True(t, ok, "expected the recorded S3 destination, not the configured GCS one")
+	assert.Equal(t, "old-bucket", s3Provider.Config.Bucket)
+	assert.Equal(t, "http://minio:9000", ptr.Deref(s3Provider.Config.Endpoint, ""))
+}
+
+func TestTarballDeleteProviderUsesSpecWhenDestinationMatchesOrIsAbsent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	reconciler := &Reconciler{
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	tests := []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			name:        "recorded destination matches the spec",
+			annotations: map[string]string{controllers.AnnotationTarballDestination: `{"provider":"gcs","bucket":"snapshots"}`},
+		},
+		{
+			// Snapshots taken before this annotation existed must keep working.
+			name:        "no recorded destination",
+			annotations: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+				Name: "snapshot", Namespace: "default", Annotations: tt.annotations,
+			}}
+			provider, relocated, err := reconciler.tarballDeleteProvider(chainNode, snapshot)
+			require.NoError(t, err)
+			assert.False(t, relocated)
+			_, ok := provider.(*datasnapshot.GCS)
+			assert.True(t, ok)
+		})
+	}
+}
+
+func TestFinishTarballExportRecordsDestination(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+				Bucket:   "snapshots",
+				Region:   "eu-west-1",
+				Endpoint: ptr.To("http://minio:9000"),
+			}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default",
+		Annotations: map[string]string{controllers.AnnotationExportingTarball: "true"},
+	}}
+	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	require.NoError(t, reconciler.finishTarballExport(context.Background(), chainNode, snapshot))
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+	var destination tarballDestination
+	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controllers.AnnotationTarballDestination]), &destination))
+	assert.Equal(t, tarballDestination{Provider: "s3", Bucket: "snapshots", Endpoint: "http://minio:9000"}, destination)
 }
 
 func TestFinishTarballExportPersistsBeforeCleanup(t *testing.T) {

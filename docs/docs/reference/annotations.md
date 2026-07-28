@@ -28,6 +28,7 @@ with a node.
 | `cosmopilot.voluzi.com/snapshot-retention` | VolumeSnapshot | Retention marker for the snapshot. |
 | `cosmopilot.voluzi.com/snapshot-integrity-status` | VolumeSnapshot | Result of the snapshot integrity check. |
 | `cosmopilot.voluzi.com/exporting-tarball` | Node | A snapshot tarball export is in progress. |
+| `cosmopilot.voluzi.com/tarball-destination` | VolumeSnapshot | Where the tarball was uploaded (provider, bucket and endpoint). Deletion targets this destination, so changing `exportTarball` does not orphan objects already written to the previous store. |
 | `cosmopilot.voluzi.com/vpa-resources` | Pod | Resources currently applied by the vertical autoscaling logic. |
 | `cosmopilot.voluzi.com/last-cpu-scale` | Pod | Timestamp of the last CPU scaling action. |
 | `cosmopilot.voluzi.com/last-memory-scale` | Pod | Timestamp of the last memory scaling action. |

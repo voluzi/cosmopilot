@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"sort"
@@ -587,32 +588,121 @@ func getSnapshotName(chainNode *appsv1.ChainNode) string {
 }
 
 func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (datasnapshot.SnapshotProvider, error) {
+	return r.tarballProviderFor(chainNode, chainNode.Spec.Persistence.Snapshots.ExportTarball)
+}
+
+func (r *Reconciler) tarballProviderFor(chainNode *appsv1.ChainNode, cfg *appsv1.ExportTarballConfig) (datasnapshot.SnapshotProvider, error) {
 	clientSet := kubernetes.Interface(r.ClientSet)
 	if r.snapshotClientSet != nil {
 		clientSet = r.snapshotClientSet
 	}
 	switch {
-	case chainNode.Spec.Persistence.Snapshots.ExportTarball.GCS != nil:
+	case cfg.GCS != nil:
 		return datasnapshot.NewGcsSnapshotProvider(
 			clientSet,
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
-			chainNode.Spec.Persistence.Snapshots.ExportTarball,
+			cfg,
 		), nil
 
-	case chainNode.Spec.Persistence.Snapshots.ExportTarball.S3 != nil:
+	case cfg.S3 != nil:
 		return datasnapshot.NewS3SnapshotProvider(
 			clientSet,
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
-			chainNode.Spec.Persistence.Snapshots.ExportTarball,
+			cfg,
 		), nil
 
 	default:
 		return nil, fmt.Errorf("no upload target defined")
 	}
+}
+
+// tarballDestination records where a tarball was actually written, so deletion can target that store
+// rather than whatever `exportTarball` currently points at. Without it, changing the export provider
+// aims every pending deletion at the wrong store, where "no objects found" reads as success while the
+// original objects are silently orphaned.
+type tarballDestination struct {
+	Provider string `json:"provider"`
+	Bucket   string `json:"bucket"`
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
+func exportDestination(cfg *appsv1.ExportTarballConfig) (tarballDestination, bool) {
+	switch {
+	case cfg.GCS != nil:
+		return tarballDestination{Provider: "gcs", Bucket: cfg.GCS.Bucket}, true
+	case cfg.S3 != nil:
+		return tarballDestination{Provider: "s3", Bucket: cfg.S3.Bucket, Endpoint: ptr.Deref(cfg.S3.Endpoint, "")}, true
+	default:
+		return tarballDestination{}, false
+	}
+}
+
+// tarballDeleteProvider resolves the exporter used to delete a tarball, preferring the destination
+// recorded at upload time over the current spec. Snapshots taken before this annotation existed have
+// no record, so they fall back to the configured provider — the previous behaviour.
+//
+// The returned bool reports whether the recorded destination differs from the configured one, so the
+// caller can warn rather than silently treat a cross-store miss as a successful deletion.
+func (r *Reconciler) tarballDeleteProvider(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (datasnapshot.SnapshotProvider, bool, error) {
+	configured := chainNode.Spec.Persistence.Snapshots.ExportTarball
+	recorded := snapshot.Annotations[controllers.AnnotationTarballDestination]
+	if recorded == "" {
+		provider, err := r.tarballProviderFor(chainNode, configured)
+		return provider, false, err
+	}
+
+	var destination tarballDestination
+	if err := json.Unmarshal([]byte(recorded), &destination); err != nil {
+		return nil, false, fmt.Errorf("parse recorded tarball destination %q: %w", recorded, err)
+	}
+	current, ok := exportDestination(configured)
+	if ok && current == destination {
+		provider, err := r.tarballProviderFor(chainNode, configured)
+		return provider, false, err
+	}
+
+	// The tarball lives somewhere the spec no longer points at. Rebuild a config for the recorded store,
+	// carrying over the credentials/tuning of the matching provider block when it is still present.
+	cfg, err := configForDestination(configured, destination)
+	if err != nil {
+		return nil, true, err
+	}
+	provider, err := r.tarballProviderFor(chainNode, cfg)
+	return provider, true, err
+}
+
+func configForDestination(configured *appsv1.ExportTarballConfig, destination tarballDestination) (*appsv1.ExportTarballConfig, error) {
+	cfg := configured.DeepCopy()
+	cfg.GCS = nil
+	cfg.S3 = nil
+	switch destination.Provider {
+	case "gcs":
+		if configured.GCS != nil {
+			cfg.GCS = configured.GCS.DeepCopy()
+		} else {
+			cfg.GCS = &appsv1.GcsExportConfig{}
+		}
+		cfg.GCS.Bucket = destination.Bucket
+	case "s3":
+		if configured.S3 != nil {
+			cfg.S3 = configured.S3.DeepCopy()
+		} else {
+			cfg.S3 = &appsv1.S3ExportConfig{}
+		}
+		cfg.S3.Bucket = destination.Bucket
+		if destination.Endpoint == "" {
+			cfg.S3.Endpoint = nil
+		} else {
+			cfg.S3.Endpoint = ptr.To(destination.Endpoint)
+		}
+	default:
+		return nil, fmt.Errorf("unknown recorded tarball provider %q", destination.Provider)
+	}
+	return cfg, nil
 }
 
 func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
@@ -733,6 +823,15 @@ func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.
 	if snapshot.Annotations[controllers.AnnotationExportingTarball] != tarballUploaded {
 		snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballUploaded
 		delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
+		// Stamp the destination in the same write that marks the upload done, so a tarball is never
+		// recorded as uploaded without a record of where it went.
+		if destination, ok := exportDestination(chainNode.Spec.Persistence.Snapshots.ExportTarball); ok {
+			encoded, err := json.Marshal(destination)
+			if err != nil {
+				return err
+			}
+			snapshot.Annotations[controllers.AnnotationTarballDestination] = string(encoded)
+		}
 		if err := r.Update(ctx, snapshot); err != nil {
 			return err
 		}
@@ -752,31 +851,58 @@ func (r *Reconciler) cleanUpTarballExport(ctx context.Context, chainNode *appsv1
 	return exporter.CleanupSnapshot(ctx, getTarballName(chainNode, snapshot))
 }
 
-func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (datasnapshot.SnapshotStatus, error) {
-	exporter, err := r.getTarballExportProvider(chainNode)
+func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (datasnapshot.SnapshotStatus, bool, error) {
+	exporter, relocated, err := r.tarballDeleteProvider(chainNode, snapshot)
 	if err != nil {
-		return "", err
+		return "", relocated, err
 	}
-	return exporter.DeleteSnapshot(ctx, getTarballName(chainNode, snapshot))
+	status, err := exporter.DeleteSnapshot(ctx, getTarballName(chainNode, snapshot))
+	return status, relocated, err
 }
 
 func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
-	status, err := r.deleteTarball(ctx, chainNode, snapshot)
+	status, relocated, err := r.deleteTarball(ctx, chainNode, snapshot)
 	if err != nil {
 		return false, err
 	}
-	if status == datasnapshot.SnapshotFailed {
-		r.recorder.Eventf(chainNode,
-			corev1.EventTypeWarning,
-			appsv1.ReasonTarballDeleteError,
-			"Failed deleting tarball %s; delete Job retained for inspection", getTarballName(chainNode, snapshot),
-		)
+	switch status {
+	case datasnapshot.SnapshotFailed:
+		// A delete aimed at a store the spec no longer points at is the likeliest failure here: the
+		// credentials or endpoint may be gone. Name the destination so the leak is actionable instead of
+		// looking like a generic delete error.
+		if relocated {
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeWarning,
+				appsv1.ReasonTarballDeleteError,
+				"Failed deleting tarball %s from its recorded destination %s; the object may be orphaned there",
+				getTarballName(chainNode, snapshot),
+				snapshot.Annotations[controllers.AnnotationTarballDestination],
+			)
+		} else {
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeWarning,
+				appsv1.ReasonTarballDeleteError,
+				"Failed deleting tarball %s; delete Job retained for inspection", getTarballName(chainNode, snapshot),
+			)
+		}
+	case datasnapshot.SnapshotSucceeded:
+		if relocated {
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeNormal,
+				appsv1.ReasonTarballDeleted,
+				"Deleted tarball %s from its recorded destination %s, which differs from the configured export target",
+				getTarballName(chainNode, snapshot),
+				snapshot.Annotations[controllers.AnnotationTarballDestination],
+			)
+		}
 	}
 	return status == datasnapshot.SnapshotSucceeded, nil
 }
 
 func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) {
-	exporter, err := r.getTarballExportProvider(chainNode)
+	// Resolve the same provider the delete Job was created with, so cleanup targets that Job rather than
+	// one named for the currently configured exporter.
+	exporter, _, err := r.tarballDeleteProvider(chainNode, snapshot)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to get tarball exporter for delete Job cleanup", "snapshot", snapshot.GetName())
 		return
