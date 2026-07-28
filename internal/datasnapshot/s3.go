@@ -164,14 +164,7 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 }
 
 func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	job, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return SnapshotNotFound, nil
-		}
-		return "", err
-	}
-	return snapshotJobStatus(job), nil
+	return uploadJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), s3Exporter)
 }
 
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {

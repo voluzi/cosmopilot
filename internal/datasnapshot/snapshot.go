@@ -2,6 +2,7 @@ package datasnapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -31,6 +32,12 @@ const (
 	typeUpload = "upload"
 	typeDelete = "delete"
 )
+
+// ErrStaleJobReplaced reports that an existing snapshot Job was deleted because its labels could not
+// converge to the desired ones — the exporter label encodes the export provider, so a Job left behind
+// by a previous provider never matches again. Callers should requeue instead of failing the reconcile:
+// the replacement Job is created once the stale one is gone.
+var ErrStaleJobReplaced = errors.New("stale snapshot job deleted; it will be recreated")
 
 type SnapshotProvider interface {
 	CreateSnapshot(context.Context, string, *snapshotv1.VolumeSnapshot) error
@@ -88,10 +95,65 @@ func ensureSnapshotJob(
 	}
 	for key, value := range desired.Labels {
 		if job.Labels[key] != value {
-			return nil, false, fmt.Errorf("%s job %s/%s has conflicting label %s", purpose, job.Namespace, job.Name, key)
+			// Labels are set at creation and never updated, so a mismatch can never converge — it means
+			// the Job was created for a different desired state (e.g. another export provider). Exports
+			// and deletions are idempotent, so drop the stale Job and let the next reconcile recreate it.
+			if err = deleteSnapshotJob(ctx, client, job); err != nil {
+				return nil, false, fmt.Errorf("delete stale %s job %s/%s: %w", purpose, job.Namespace, job.Name, err)
+			}
+			return nil, false, fmt.Errorf("%s job %s/%s had conflicting label %s: %w", purpose, job.Namespace, job.Name, key, ErrStaleJobReplaced)
 		}
 	}
 	return job, false, nil
+}
+
+// uploadJobStatus reports the status of an existing upload Job, rejecting one that belongs to a
+// different exporter. Polling looks the Job up by name, and the name does not encode the provider, so
+// without this check an in-flight upload started by the previous provider would be read as progress
+// towards the newly configured one — and its success would mark the export finished even though
+// nothing was written to the new destination.
+//
+// The stale Job is removed so the next reconcile starts a real upload against the current provider.
+func uploadJobStatus(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	namespace, name, exporter string,
+) (SnapshotStatus, error) {
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return SnapshotNotFound, nil
+		}
+		return "", err
+	}
+	// Tarball names derive from chain ID and a second-resolution timestamp, so two ChainNodes in one
+	// namespace can collide on this Job name. Never delete a Job this node does not own — that would
+	// terminate another node's active export. Mirrors the ownership guard in ensureSnapshotJob.
+	if !metav1.IsControlledBy(job, owner) {
+		return "", fmt.Errorf("upload job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
+	}
+	if job.Labels[labelExporter] != exporter {
+		if err = deleteSnapshotJob(ctx, client, job); err != nil {
+			return "", fmt.Errorf("delete stale upload job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		return "", fmt.Errorf("upload job %s/%s belongs to exporter %q, not %q: %w",
+			job.Namespace, job.Name, job.Labels[labelExporter], exporter, ErrStaleJobReplaced)
+	}
+	return snapshotJobStatus(job), nil
+}
+
+func deleteSnapshotJob(ctx context.Context, client kubernetes.Interface, job *batchv1.Job) error {
+	propagation := metav1.DeletePropagationForeground
+	err := client.BatchV1().Jobs(job.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{
+		PropagationPolicy: &propagation,
+		Preconditions:     &metav1.Preconditions{UID: &job.UID},
+	})
+	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return err
+	}
+	return nil
 }
 
 func snapshotJobStatus(job *batchv1.Job) SnapshotStatus {

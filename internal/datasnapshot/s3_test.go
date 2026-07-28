@@ -214,8 +214,13 @@ func TestS3GetSnapshotStatusPreservesUploadResources(t *testing.T) {
 			}})
 			if tt.createJob {
 				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
-					ObjectMeta: metav1.ObjectMeta{Name: "snapshot-upload", Namespace: "default"},
-					Status:     tt.jobStatus,
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "snapshot-upload",
+						Namespace:       "default",
+						Labels:          map[string]string{labelExporter: s3Exporter},
+						OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
+					},
+					Status: tt.jobStatus,
 				}, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}

@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -320,12 +321,19 @@ func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.Cha
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
 	}
 
-	dataHeight := strconv.FormatInt(chainNode.Status.LatestHeight, 10)
-	if pvc.Annotations[controllers.AnnotationDataHeight] != dataHeight {
-		pvc.Annotations[controllers.AnnotationDataHeight] = dataHeight
-		if err = r.Update(ctx, pvc); err != nil {
+	if err = r.updatePvcDataHeight(ctx, chainNode, pvc); err != nil {
+		// Only exhausted optimistic-concurrency conflicts are tolerated here. data-height is advisory
+		// metadata and the snapshot flow annotates this same PVC, so conflicts are expected and must not
+		// abort the reconcile over cosmetic metadata.
+		//
+		// Stop before the resize rather than falling through: the local pvc still holds the resource
+		// version that just lost, so resizing it would conflict again and abort anyway. Both writes are
+		// retried on the next reconcile against a fresh copy.
+		if !errors.IsConflict(err) {
 			return fmt.Errorf("failed to update PVC %s data height annotation: %w", pvc.GetName(), err)
 		}
+		logger.Error(err, "failed to update PVC data height annotation; deferring PVC writes to next reconcile", "pvc", pvc.GetName())
+		return nil
 	}
 
 	switch pvc.Spec.Resources.Requests.Storage().Cmp(expectedStorageSize) {
@@ -356,6 +364,41 @@ func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.Cha
 		}
 		return nil
 	}
+}
+
+// updatePvcDataHeight records the current data height on the PVC, retrying on optimistic-concurrency
+// conflicts against a freshly read copy. On success, pvc is refreshed so later writes in this reconcile
+// carry an up-to-date resource version.
+func (r *Reconciler) updatePvcDataHeight(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {
+	dataHeight := strconv.FormatInt(chainNode.Status.LatestHeight, 10)
+	if pvc.Annotations[controllers.AnnotationDataHeight] == dataHeight {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &corev1.PersistentVolumeClaim{}
+		// Read uncached: the cache may still serve the pre-conflict resource version, in which case every
+		// retry would resend the same stale version and exhaust without ever converging.
+		if err := r.reservationReader().Get(ctx, client.ObjectKeyFromObject(pvc), fresh); err != nil {
+			return err
+		}
+		// Same name does not mean same volume: the PVC may have been deleted and recreated since the
+		// cached lookup earlier in this reconcile. Stamping the old volume's height onto the replacement
+		// would make a freshly initialized volume claim the previous chain height, which is later adopted
+		// as PVC state. Bail out and let the next reconcile start from the real object.
+		if pvc.UID != "" && fresh.UID != pvc.UID {
+			return fmt.Errorf("PVC %s was replaced (uid %s != %s); skipping data height annotation",
+				pvc.GetName(), fresh.UID, pvc.UID)
+		}
+		if fresh.Annotations == nil {
+			fresh.Annotations = make(map[string]string)
+		}
+		fresh.Annotations[controllers.AnnotationDataHeight] = dataHeight
+		if err := r.Update(ctx, fresh); err != nil {
+			return err
+		}
+		fresh.DeepCopyInto(pvc)
+		return nil
+	})
 }
 
 func (r *Reconciler) getStorageSize(ctx context.Context, chainNode *appsv1.ChainNode) (resource.Quantity, error) {

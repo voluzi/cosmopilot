@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -630,6 +631,15 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 
 	status, err := exporter.GetSnapshotStatus(ctx, getTarballName(chainNode, snapshot))
 	if err != nil {
+		// The upload Job belonged to a previous exporter and was deleted. Clear the export state instead
+		// of letting the next poll see the intentionally removed Job as SnapshotNotFound and charge it as
+		// another failed attempt — that could exhaust the retry limit and permanently mark the export
+		// failed without ever starting one for the newly configured provider.
+		if stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) {
+			if resetErr := r.resetTarballExport(ctx, snapshot); resetErr != nil {
+				return false, resetErr
+			}
+		}
 		return false, err
 	}
 
@@ -694,6 +704,22 @@ func (r *Reconciler) recordTarballExportFailure(ctx context.Context, snapshot *s
 		snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFailed
 	}
 	return retry, r.Update(ctx, snapshot)
+}
+
+// resetTarballExport clears the export markers so the next reconcile starts a fresh upload against the
+// currently configured provider, without the attempt counter carried over from the replaced Job.
+func (r *Reconciler) resetTarballExport(ctx context.Context, snapshot *snapshotv1.VolumeSnapshot) error {
+	if snapshot.Annotations == nil {
+		return nil
+	}
+	_, exporting := snapshot.Annotations[controllers.AnnotationExportingTarball]
+	_, attempts := snapshot.Annotations[controllers.AnnotationTarballExportAttempts]
+	if !exporting && !attempts {
+		return nil
+	}
+	delete(snapshot.Annotations, controllers.AnnotationExportingTarball)
+	delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
+	return r.Update(ctx, snapshot)
 }
 
 func tarballFailureAction(retry bool) string {
