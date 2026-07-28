@@ -381,6 +381,14 @@ func (r *Reconciler) updatePvcDataHeight(ctx context.Context, chainNode *appsv1.
 		if err := r.reservationReader().Get(ctx, client.ObjectKeyFromObject(pvc), fresh); err != nil {
 			return err
 		}
+		// Same name does not mean same volume: the PVC may have been deleted and recreated since the
+		// cached lookup earlier in this reconcile. Stamping the old volume's height onto the replacement
+		// would make a freshly initialized volume claim the previous chain height, which is later adopted
+		// as PVC state. Bail out and let the next reconcile start from the real object.
+		if pvc.UID != "" && fresh.UID != pvc.UID {
+			return fmt.Errorf("PVC %s was replaced (uid %s != %s); skipping data height annotation",
+				pvc.GetName(), fresh.UID, pvc.UID)
+		}
 		if fresh.Annotations == nil {
 			fresh.Annotations = make(map[string]string)
 		}

@@ -156,6 +156,46 @@ func (c *staleReadClient) Get(ctx context.Context, key client.ObjectKey, obj cli
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
+// TestUpdatePvcDataHeightRejectsReplacedPvc guards against writing the old volume's height onto a
+// different volume: a PVC deleted and recreated under the same name between the cached lookup and this
+// step would otherwise be stamped with the previous chain height, which is later adopted as PVC state
+// and would make a freshly initialized volume look like it already held the old chain data.
+func TestUpdatePvcDataHeightRejectsReplacedPvc(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	// What the API server holds now: a different volume that happens to reuse the name.
+	replacement := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:        "node",
+		Namespace:   "default",
+		UID:         "new-pvc-uid",
+		Annotations: map[string]string{controllers.AnnotationDataHeight: "0"},
+	}}
+	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(replacement).Build()
+	reconciler := &Reconciler{Client: baseClient, APIReader: baseClient, Scheme: scheme}
+
+	// What the caller is still holding from earlier in the reconcile: the deleted volume.
+	stale := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:        "node",
+		Namespace:   "default",
+		UID:         "old-pvc-uid",
+		Annotations: map[string]string{controllers.AnnotationDataHeight: "100"},
+	}}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Status:     appsv1.ChainNodeStatus{LatestHeight: 200},
+	}
+
+	err := reconciler.updatePvcDataHeight(context.Background(), chainNode, stale)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "was replaced")
+
+	stored := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	assert.Equal(t, "0", stored.Annotations[controllers.AnnotationDataHeight],
+		"the replacement volume must not inherit the old volume's height")
+}
+
 // TestUpdatePvcDataHeightPropagatesNonConflictErrors pins the distinction ensurePvcUpdates relies on:
 // only exhausted optimistic-concurrency conflicts are tolerable there. A timeout or an authorization
 // failure must stay a real error so controller-runtime applies its own retry/backoff, rather than being

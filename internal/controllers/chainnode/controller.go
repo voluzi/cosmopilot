@@ -291,6 +291,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Ensure snapshots are taken if enabled and check if they are ready
 	logger.V(1).Info("ensure volume snapshots if applicable")
+	staleSnapshotJobReplaced := false
 	if err = r.ensureVolumeSnapshots(ctx, chainNode, nodePodReady); err != nil {
 		// A stale export/delete Job was dropped and will be recreated on the next pass. Keep it out of the
 		// reconcile error path so an unrelated subsystem cannot freeze the whole ChainNode.
@@ -303,9 +304,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			appsv1.ReasonSnapshotJobReplaced,
 			"Replaced stale snapshot job: %v", err,
 		)
-		// Requeue now rather than waiting a full reconcile period: Jobs are not watched, so nothing else
-		// would wake the controller, and the snapshot stays stuck in its exporting state until it does.
-		return ctrl.Result{Requeue: true}, nil
+		// Note it and carry on. Returning here would freeze genesis, services, config and the pod behind
+		// snapshot cleanup — the very failure mode this path exists to prevent — and foreground deletion
+		// can stay pending for a while behind the upload pod, its PVC or a finalizer.
+		staleSnapshotJobReplaced = true
 	}
 
 	// If the node will be down during snapshot, most methods below will fail.
@@ -434,6 +436,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	logger.Info("finishing reconcile")
+	if staleSnapshotJobReplaced {
+		// Come back promptly to recreate the replaced Job: Jobs are not watched, so nothing else would
+		// wake the controller before the full reconcile period elapses.
+		return ctrl.Result{Requeue: true}, nil
+	}
 	if dashboardRoutesPending {
 		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
 	}

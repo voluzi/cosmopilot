@@ -107,6 +107,70 @@ func TestRecordTarballExportFailureStopsAtRetryLimit(t *testing.T) {
 	}
 }
 
+// TestStaleUploadJobReplacementDoesNotChargeFailedAttempt covers a provider switch on a snapshot that
+// has already burned attempts. Deleting the mismatched Job must clear the export markers: otherwise the
+// next poll sees the intentionally removed Job as SnapshotNotFound, charges another failure, hits the
+// retry limit, and permanently marks the export failed without ever starting one for the new provider.
+func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			// Now exporting to GCS...
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default",
+		Annotations: map[string]string{
+			controllers.AnnotationExportingTarball:      "true",
+			controllers.AnnotationTarballExportAttempts: strconv.Itoa(tarballExportMaxAttempts - 1),
+		},
+	}}
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	// ...but the in-flight upload Job belongs to the previous S3 exporter.
+	clientSet := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "-00010101000000-upload",
+			Namespace: "default",
+			UID:       "stale-uid",
+			Labels:    map[string]string{"exporter": "s3-exporter"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.GroupVersion.String(),
+				Kind:       "ChainNode",
+				Name:       "node",
+				UID:        "node-uid",
+				Controller: ptr.To(true),
+			}},
+		},
+	})
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
+	assert.False(t, ready)
+	require.ErrorIs(t, err, datasnapshot.ErrStaleJobReplaced)
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
+	_, exporting := stored.Annotations[controllers.AnnotationExportingTarball]
+	assert.False(t, exporting, "export state must be cleared so a fresh upload starts")
+	_, attempts := stored.Annotations[controllers.AnnotationTarballExportAttempts]
+	assert.False(t, attempts, "the intentional deletion must not count as a failed attempt")
+}
+
 func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
