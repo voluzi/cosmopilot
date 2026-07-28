@@ -2,6 +2,7 @@ package datasnapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -31,6 +32,12 @@ const (
 	typeUpload = "upload"
 	typeDelete = "delete"
 )
+
+// ErrStaleJobReplaced reports that an existing snapshot Job was deleted because its labels could not
+// converge to the desired ones — the exporter label encodes the export provider, so a Job left behind
+// by a previous provider never matches again. Callers should requeue instead of failing the reconcile:
+// the replacement Job is created once the stale one is gone.
+var ErrStaleJobReplaced = errors.New("stale snapshot job deleted; it will be recreated")
 
 type SnapshotProvider interface {
 	CreateSnapshot(context.Context, string, *snapshotv1.VolumeSnapshot) error
@@ -88,10 +95,28 @@ func ensureSnapshotJob(
 	}
 	for key, value := range desired.Labels {
 		if job.Labels[key] != value {
-			return nil, false, fmt.Errorf("%s job %s/%s has conflicting label %s", purpose, job.Namespace, job.Name, key)
+			// Labels are set at creation and never updated, so a mismatch can never converge — it means
+			// the Job was created for a different desired state (e.g. another export provider). Exports
+			// and deletions are idempotent, so drop the stale Job and let the next reconcile recreate it.
+			if err = deleteSnapshotJob(ctx, client, job); err != nil {
+				return nil, false, fmt.Errorf("delete stale %s job %s/%s: %w", purpose, job.Namespace, job.Name, err)
+			}
+			return nil, false, fmt.Errorf("%s job %s/%s had conflicting label %s: %w", purpose, job.Namespace, job.Name, key, ErrStaleJobReplaced)
 		}
 	}
 	return job, false, nil
+}
+
+func deleteSnapshotJob(ctx context.Context, client kubernetes.Interface, job *batchv1.Job) error {
+	propagation := metav1.DeletePropagationForeground
+	err := client.BatchV1().Jobs(job.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{
+		PropagationPolicy: &propagation,
+		Preconditions:     &metav1.Preconditions{UID: &job.UID},
+	})
+	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return err
+	}
+	return nil
 }
 
 func snapshotJobStatus(job *batchv1.Job) SnapshotStatus {

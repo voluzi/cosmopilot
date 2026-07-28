@@ -49,6 +49,7 @@ const (
 	ReasonTarballDeleted             = "TarballDeleted"
 	ReasonTarballExportError         = "TarballExportError"
 	ReasonTarballDeleteError         = "TarballDeleteError"
+	ReasonSnapshotJobReplaced        = "SnapshotJobReplaced"
 	ReasonSnapshotIntegrityStart     = "IntegrityCheckStart"
 	ReasonUpgradeCompleted           = "UpgradeCompleted"
 	ReasonUpgradeFailed              = "UpgradeFailed"

@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	stderrors "errors"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -22,6 +23,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/datasnapshot"
 	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
@@ -290,7 +292,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Ensure snapshots are taken if enabled and check if they are ready
 	logger.V(1).Info("ensure volume snapshots if applicable")
 	if err = r.ensureVolumeSnapshots(ctx, chainNode, nodePodReady); err != nil {
-		return ctrl.Result{}, err
+		// A stale export/delete Job was dropped and will be recreated on the next pass. Keep it out of the
+		// reconcile error path so an unrelated subsystem cannot freeze the whole ChainNode.
+		if !stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) {
+			return ctrl.Result{}, err
+		}
+		logger.Info("replaced stale snapshot job", "reason", err.Error())
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonSnapshotJobReplaced,
+			"Replaced stale snapshot job: %v", err,
+		)
 	}
 
 	// If the node will be down during snapshot, most methods below will fail.

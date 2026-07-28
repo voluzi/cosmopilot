@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -320,12 +321,11 @@ func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.Cha
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
 	}
 
-	dataHeight := strconv.FormatInt(chainNode.Status.LatestHeight, 10)
-	if pvc.Annotations[controllers.AnnotationDataHeight] != dataHeight {
-		pvc.Annotations[controllers.AnnotationDataHeight] = dataHeight
-		if err = r.Update(ctx, pvc); err != nil {
-			return fmt.Errorf("failed to update PVC %s data height annotation: %w", pvc.GetName(), err)
-		}
+	if err = r.updatePvcDataHeight(ctx, chainNode, pvc); err != nil {
+		// data-height is advisory metadata. The snapshot flow annotates this same PVC, so write conflicts
+		// are expected; failing here would skip everything after PVC reconciliation, including the
+		// snapshot state machine. Log it and let the next reconcile retry.
+		logger.Error(err, "failed to update PVC data height annotation", "pvc", pvc.GetName())
 	}
 
 	switch pvc.Spec.Resources.Requests.Storage().Cmp(expectedStorageSize) {
@@ -356,6 +356,31 @@ func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.Cha
 		}
 		return nil
 	}
+}
+
+// updatePvcDataHeight records the current data height on the PVC, retrying on optimistic-concurrency
+// conflicts against a freshly read copy. On success, pvc is refreshed so later writes in this reconcile
+// carry an up-to-date resource version.
+func (r *Reconciler) updatePvcDataHeight(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {
+	dataHeight := strconv.FormatInt(chainNode.Status.LatestHeight, 10)
+	if pvc.Annotations[controllers.AnnotationDataHeight] == dataHeight {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &corev1.PersistentVolumeClaim{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(pvc), fresh); err != nil {
+			return err
+		}
+		if fresh.Annotations == nil {
+			fresh.Annotations = make(map[string]string)
+		}
+		fresh.Annotations[controllers.AnnotationDataHeight] = dataHeight
+		if err := r.Update(ctx, fresh); err != nil {
+			return err
+		}
+		fresh.DeepCopyInto(pvc)
+		return nil
+	})
 }
 
 func (r *Reconciler) getStorageSize(ctx context.Context, chainNode *appsv1.ChainNode) (resource.Quantity, error) {
