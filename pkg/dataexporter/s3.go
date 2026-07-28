@@ -28,7 +28,6 @@ const (
 	s3MaximumChunkSize  = 5 * 1024 * 1024 * 1024
 	s3MaximumObjectSize = 5 * datasize.TB
 	s3MaximumParts      = 10000
-	s3DeleteBatchSize   = 1000
 	s3MaximumBufferSize = 64 * 1024 * 1024
 )
 
@@ -45,7 +44,7 @@ type s3API interface {
 	CompleteMultipartUpload(context.Context, *s3.CompleteMultipartUploadInput, ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
 	AbortMultipartUpload(context.Context, *s3.AbortMultipartUploadInput, ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
 	ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
-	DeleteObjects(context.Context, *s3.DeleteObjectsInput, ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
+	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 }
 
 // S3Exporter implements Exporter for Amazon S3 and compatible object stores.
@@ -446,7 +445,7 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 	}
 	ctx := context.Background()
 	var continuationToken *string
-	objectIDs := make([]types.ObjectIdentifier, 0)
+	keys := make([]string, 0)
 	for {
 		output, err := exporter.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(bucket),
@@ -458,7 +457,7 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 		}
 		for _, object := range output.Contents {
 			if isArchiveObjectName(name, aws.ToString(object.Key)) {
-				objectIDs = append(objectIDs, types.ObjectIdentifier{Key: object.Key})
+				keys = append(keys, aws.ToString(object.Key))
 			}
 		}
 		if !aws.ToBool(output.IsTruncated) {
@@ -466,32 +465,31 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 		}
 		continuationToken = output.NextContinuationToken
 	}
-	if len(objectIDs) == 0 {
+	if len(keys) == 0 {
 		log.Warnf("no objects found with prefix: %s", name)
 		return nil
 	}
 
+	// Deliberately per-object rather than the multi-object DeleteObjects API. DeleteObjects is modelled
+	// with RequireChecksum, so the SDK always sends x-amz-checksum-crc32 and ignores
+	// RequestChecksumCalculation. Amazon S3 accepts that, but S3-compatible stores such as MinIO require
+	// the legacy Content-MD5 and reject the request with 400 MissingContentMD5. DeleteObject sends no
+	// body and therefore no integrity header, so it works everywhere. An archive is at most a handful of
+	// objects, so the extra round trips are irrelevant.
 	semaphore := make(chan struct{}, options.ConcurrentJobs)
-	errCh := make(chan error, (len(objectIDs)+s3DeleteBatchSize-1)/s3DeleteBatchSize)
+	errCh := make(chan error, len(keys))
 	var wg sync.WaitGroup
-	for start := 0; start < len(objectIDs); start += s3DeleteBatchSize {
-		end := min(start+s3DeleteBatchSize, len(objectIDs))
-		batch := append([]types.ObjectIdentifier(nil), objectIDs[start:end]...)
+	for _, key := range keys {
 		semaphore <- struct{}{}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-semaphore }()
-			output, err := exporter.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			if _, err := exporter.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 				Bucket: aws.String(bucket),
-				Delete: &types.Delete{Objects: batch, Quiet: aws.Bool(true)},
-			})
-			if err != nil {
-				errCh <- fmt.Errorf("delete S3 objects with prefix %q: %w", name, err)
-				return
-			}
-			if len(output.Errors) > 0 {
-				errCh <- fmt.Errorf("delete S3 objects with prefix %q: %s", name, formatS3DeleteErrors(output.Errors))
+				Key:    aws.String(key),
+			}); err != nil {
+				errCh <- fmt.Errorf("delete S3 object %q: %w", key, err)
 			}
 		}()
 	}
@@ -502,12 +500,4 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 		deleteErrors = append(deleteErrors, err)
 	}
 	return errors.Join(deleteErrors...)
-}
-
-func formatS3DeleteErrors(deleteErrors []types.Error) string {
-	messages := make([]string, 0, len(deleteErrors))
-	for _, deleteErr := range deleteErrors {
-		messages = append(messages, fmt.Sprintf("%s: %s", aws.ToString(deleteErr.Key), aws.ToString(deleteErr.Message)))
-	}
-	return fmt.Sprint(messages)
 }
