@@ -190,7 +190,7 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 		Name: "snapshot", Namespace: "default",
 		Annotations: map[string]string{controllers.AnnotationExportingTarball: "true"},
 	}}
-	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot, chainNode).WithStatusSubresource(chainNode).Build()
 	clientSet := fake.NewSimpleClientset(
 		&batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1434,4 +1434,100 @@ func TestOrphanedTarballIsDeletedThroughItsRecordedDestination(t *testing.T) {
 	require.NoError(t, reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil))
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 	assert.Empty(t, stored.Status.ExportedTarballs)
+}
+
+// TestFailedUploadReleasesRecordForRetry: the record is otherwise immutable, so a retry after a bucket
+// or endpoint change would keep pointing at the old store — deletion would find nothing there, report
+// success, and orphan the retry's tarball. A conclusively failed upload that will be retried therefore
+// releases its record so the retry can record its own destination.
+func TestFailedUploadReleasesRecordForRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	newChainNode := func(attempts string) (*appsv1.ChainNode, *snapshotv1.VolumeSnapshot) {
+		node := &appsv1.ChainNode{
+			TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+			ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+			Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+				Frequency:     "24h",
+				ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"}},
+			}}},
+			Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{{
+				Snapshot: "snapshot", Name: "old-tarball", Provider: "gcs", Bucket: "old-bucket",
+			}}},
+		}
+		snap := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+			Name: "snapshot", Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationExportingTarball:      "true",
+				controllers.AnnotationTarballExportAttempts: attempts,
+			},
+		}}
+		return node, snap
+	}
+
+	failedJob := func() *batchv1.Job {
+		return &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "-00010101000000-upload",
+				Namespace: "default",
+				Labels:    map[string]string{"exporter": "gcs-exporter"},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode",
+					Name: "node", UID: "node-uid", Controller: ptr.To(true),
+				}},
+			},
+			Status: batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+			}}},
+		}
+	}
+
+	t.Run("retryable failure releases the record", func(t *testing.T) {
+		chainNode, snapshot := newChainNode("0")
+		controllerClient := fakeclient.NewClientBuilder().
+			WithScheme(scheme).WithObjects(snapshot, chainNode).WithStatusSubresource(chainNode).Build()
+		reconciler := &Reconciler{
+			Client:            controllerClient,
+			snapshotClientSet: fake.NewSimpleClientset(failedJob()),
+			Scheme:            scheme,
+			opts:              &controllers.ControllerRunOptions{},
+			recorder:          record.NewFakeRecorder(10),
+		}
+
+		ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
+		require.NoError(t, err)
+		assert.False(t, ready)
+
+		stored := &appsv1.ChainNode{}
+		require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+		assert.Empty(t, stored.Status.ExportedTarballs, "the retry must be free to record its own destination")
+	})
+
+	t.Run("exhausted retries keep the record", func(t *testing.T) {
+		chainNode, snapshot := newChainNode(strconv.Itoa(tarballExportMaxAttempts - 1))
+		controllerClient := fakeclient.NewClientBuilder().
+			WithScheme(scheme).WithObjects(snapshot, chainNode).WithStatusSubresource(chainNode).Build()
+		reconciler := &Reconciler{
+			Client:            controllerClient,
+			snapshotClientSet: fake.NewSimpleClientset(failedJob()),
+			Scheme:            scheme,
+			opts:              &controllers.ControllerRunOptions{},
+			recorder:          record.NewFakeRecorder(10),
+		}
+
+		ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
+		require.NoError(t, err)
+		assert.False(t, ready)
+
+		stored := &appsv1.ChainNode{}
+		require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+		// No further upload will run, and a failed Job can have left partial objects behind: the record
+		// is what makes them discoverable for orphan cleanup.
+		require.Len(t, stored.Status.ExportedTarballs, 1)
+		assert.Equal(t, "old-bucket", stored.Status.ExportedTarballs[0].Bucket)
+	})
 }

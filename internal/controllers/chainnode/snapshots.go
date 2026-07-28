@@ -931,6 +931,22 @@ func (r *Reconciler) retireTarballRecords(ctx context.Context, chainNode *appsv1
 	})
 }
 
+// releaseFailedTarballRecord retires the destination record of a conclusively failed upload, but only
+// when the export will be retried. The record is otherwise immutable (see recordTarballDestination), so
+// a retry after a bucket or endpoint change would keep pointing at the old store: deletion would then
+// find nothing there, report success, and leave the retry's tarball orphaned. Clearing it lets the
+// retry record its own destination.
+//
+// When the retry limit has been reached there is no further upload, so the record is kept: a failed Job
+// can still have left partial objects at that destination, and the record is what makes them
+// discoverable for orphan cleanup.
+func (r *Reconciler) releaseFailedTarballRecord(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot, willRetry bool) error {
+	if !willRetry {
+		return nil
+	}
+	return r.retireTarballRecords(ctx, chainNode, []string{snapshot.GetName()})
+}
+
 // forgetTarballDestination drops the record once the tarball is gone, so status does not grow without
 // bound as snapshots are rotated.
 func (r *Reconciler) forgetTarballDestination(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
@@ -987,6 +1003,9 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		if updateErr != nil {
 			return false, updateErr
 		}
+		if err = r.releaseFailedTarballRecord(ctx, chainNode, snapshot, retry); err != nil {
+			return false, err
+		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonTarballExportError,
@@ -1001,6 +1020,9 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		retry, updateErr := r.recordTarballExportFailure(ctx, snapshot)
 		if updateErr != nil {
 			return false, updateErr
+		}
+		if err = r.releaseFailedTarballRecord(ctx, chainNode, snapshot, retry); err != nil {
+			return false, err
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
