@@ -4,6 +4,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/voluzi/cosmopilot/v2/internal/tmkms"
 )
@@ -1228,6 +1229,12 @@ type ExportedTarball struct {
 	// Snapshot is the name of the VolumeSnapshot this tarball was exported from.
 	Snapshot string `json:"snapshot"`
 
+	// SnapshotUID identifies that exact VolumeSnapshot. A snapshot deleted and recreated under the same
+	// name is a different object with its own tarball, so the name alone would let the new snapshot
+	// inherit the old record and have its tarball orphaned when the old object is deleted.
+	// +optional
+	SnapshotUID types.UID `json:"snapshotUID,omitempty"`
+
 	// Name is the object name used at upload time. It embeds the export suffix in force back then, so a
 	// later suffix change cannot make deletion ask for an object that was never written.
 	Name string `json:"name"`
@@ -1251,6 +1258,12 @@ type ExportedTarball struct {
 	// use the mode the upload used rather than whatever the spec says now. Empty for GCS.
 	// +optional
 	ForcePathStyle *bool `json:"forcePathStyle,omitempty"`
+
+	// Superseded marks a destination that is no longer where this snapshot's tarball lives — a failed
+	// upload whose retry was aimed at a different store. The entry is retained only so whatever the
+	// failed attempt left behind can still be cleaned up; it is never used to locate the live tarball.
+	// +optional
+	Superseded bool `json:"superseded,omitempty"`
 }
 
 // CreateValidatorConfig holds configuration for cosmopilot to submit a create-validator transaction.

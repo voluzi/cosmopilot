@@ -6301,6 +6301,18 @@ spec:
                       description: Snapshot is the name of the VolumeSnapshot this
                         tarball was exported from.
                       type: string
+                    snapshotUID:
+                      description: |-
+                        SnapshotUID identifies that exact VolumeSnapshot. A snapshot deleted and recreated under the same
+                        name is a different object with its own tarball, so the name alone would let the new snapshot
+                        inherit the old record and have its tarball orphaned when the old object is deleted.
+                      type: string
+                    superseded:
+                      description: |-
+                        Superseded marks a destination that is no longer where this snapshot's tarball lives — a failed
+                        upload whose retry was aimed at a different store. The entry is retained only so whatever the
+                        failed attempt left behind can still be cleaned up; it is never used to locate the live tarball.
+                      type: boolean
                   required:
                   - bucket
                   - name

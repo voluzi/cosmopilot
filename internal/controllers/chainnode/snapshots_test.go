@@ -1369,7 +1369,8 @@ func TestOrphanedTarballRecordsAreRetiredWhenDeletionIsOff(t *testing.T) {
 	}
 
 	live := []snapshotv1.VolumeSnapshot{{ObjectMeta: metav1.ObjectMeta{Name: "live", Namespace: "default"}}}
-	require.NoError(t, reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, live))
+	_, err := reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, live)
+	require.NoError(t, err)
 
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
@@ -1415,7 +1416,8 @@ func TestOrphanedTarballIsDeletedThroughItsRecordedDestination(t *testing.T) {
 	}
 
 	// First pass creates the delete Job against the recorded bucket and keeps the record.
-	require.NoError(t, reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil))
+	_, err := reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil)
+	require.NoError(t, err)
 	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
 	require.NoError(t, err, "a delete job must target the recorded tarball name")
 	assert.Contains(t, job.Spec.Template.Spec.Containers[0].Args, "old-bucket",
@@ -1431,16 +1433,17 @@ func TestOrphanedTarballIsDeletedThroughItsRecordedDestination(t *testing.T) {
 	_, err = clientSet.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
-	require.NoError(t, reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil))
+	_, err = reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, nil)
+	require.NoError(t, err)
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 	assert.Empty(t, stored.Status.ExportedTarballs)
 }
 
-// TestFailedUploadReleasesRecordForRetry: the record is otherwise immutable, so a retry after a bucket
-// or endpoint change would keep pointing at the old store — deletion would find nothing there, report
-// success, and orphan the retry's tarball. A conclusively failed upload that will be retried therefore
-// releases its record so the retry can record its own destination.
-func TestFailedUploadReleasesRecordForRetry(t *testing.T) {
+// TestFailedUploadSupersedesRecordForRetry: neither keeping nor dropping the record is safe. Keeping it
+// live would point deletion at the old store after a retry to a different target, orphaning the retry's
+// tarball; dropping it would discard the only pointer to whatever the failed attempt left behind. The
+// record is therefore marked superseded — invisible to lookups, still visible to orphan cleanup.
+func TestFailedUploadSupersedesRecordForRetry(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
@@ -1504,7 +1507,11 @@ func TestFailedUploadReleasesRecordForRetry(t *testing.T) {
 
 		stored := &appsv1.ChainNode{}
 		require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
-		assert.Empty(t, stored.Status.ExportedTarballs, "the retry must be free to record its own destination")
+		require.Len(t, stored.Status.ExportedTarballs, 1)
+		assert.True(t, stored.Status.ExportedTarballs[0].Superseded,
+			"the old destination must stay cleanable but stop being the live record")
+		// Invisible to lookups, so the retry is free to record its own destination.
+		assert.Nil(t, recordedTarball(stored, snapshot))
 	})
 
 	t.Run("exhausted retries keep the record", func(t *testing.T) {
@@ -1529,5 +1536,78 @@ func TestFailedUploadReleasesRecordForRetry(t *testing.T) {
 		// is what makes them discoverable for orphan cleanup.
 		require.Len(t, stored.Status.ExportedTarballs, 1)
 		assert.Equal(t, "old-bucket", stored.Status.ExportedTarballs[0].Bucket)
+		assert.False(t, stored.Status.ExportedTarballs[0].Superseded,
+			"with no retry left the record still describes the only place the data could be")
 	})
+}
+
+// TestRecordsAreBoundToSnapshotIdentity: a VolumeSnapshot deleted and recreated under the same name is
+// a different object with its own tarball. Matching on name alone would let the new snapshot inherit
+// the old record, so expiry would delete the object the old record names and orphan the new tarball.
+func TestRecordsAreBoundToSnapshotIdentity(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{{
+			Snapshot: "snapshot", SnapshotUID: "old-uid", Name: "old-tarball", Provider: "gcs", Bucket: "snapshots",
+		}}},
+	}
+
+	recreated := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default", UID: "new-uid",
+	}}
+	assert.Nil(t, recordedTarball(chainNode, recreated),
+		"a recreated snapshot must not inherit the previous object's record")
+
+	original := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default", UID: "old-uid",
+	}}
+	require.NotNil(t, recordedTarball(chainNode, original))
+
+	// Records written before UIDs were captured still match on name.
+	chainNode.Status.ExportedTarballs[0].SnapshotUID = ""
+	assert.NotNil(t, recordedTarball(chainNode, recreated))
+}
+
+// TestSupersededRecordsAreCleanedUpWhileSnapshotLives: a superseded record points at a store the
+// snapshot's tarball no longer lives in, so nothing else will ever find it. Orphan cleanup must reach
+// it even though its VolumeSnapshot is still alive — and must not take the live record with it.
+func TestSupersededRecordsAreCleanedUpWhileSnapshotLives(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"}},
+		}}},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{
+			{Snapshot: "snapshot", SnapshotUID: "uid", Name: "failed", Provider: "gcs", Bucket: "old-bucket", Superseded: true},
+			{Snapshot: "snapshot", SnapshotUID: "uid", Name: "retry", Provider: "gcs", Bucket: "new-bucket"},
+		}},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	live := []snapshotv1.VolumeSnapshot{{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default", UID: "uid",
+	}}}
+	mutated, err := reconciler.reconcileOrphanedTarballs(context.Background(), chainNode, live)
+	require.NoError(t, err)
+	assert.True(t, mutated, "a status write must be reported so the caller stops using the stale object")
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 1, "only the superseded record should be retired")
+	assert.Equal(t, "retry", stored.Status.ExportedTarballs[0].Name)
+	assert.False(t, stored.Status.ExportedTarballs[0].Superseded)
 }
