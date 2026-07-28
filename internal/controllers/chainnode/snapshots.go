@@ -31,6 +31,12 @@ import (
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
+// errYieldReconcile signals that a status write has moved the ChainNode on at the API server, so this
+// pass must stop rather than continue with a stale resource version. Any later full Update of the
+// caller's copy would conflict — and, on the snapshot path, would do so *after* a ready annotation had
+// been persisted, leaving snapshotting-pvc set forever and blocking all future snapshots.
+var errYieldReconcile = stderrors.New("chainnode status changed; yielding reconcile")
+
 type SnapshotIntegrityStatus string
 
 const (
@@ -269,6 +275,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true):
 			ready, err := r.isTarballReady(ctx, chainNode, &snapshot)
 			if err != nil {
+				// A recorded failure already wrote status; stop before another snapshot in this same pass
+				// persists its ready annotation and then loses the ChainNode update to a conflict.
+				if stderrors.Is(err, errYieldReconcile) {
+					return nil
+				}
 				r.recorder.Eventf(chainNode,
 					corev1.EventTypeWarning,
 					appsv1.ReasonTarballExportError,
@@ -857,12 +868,18 @@ func (r *Reconciler) recordTarballDestination(ctx context.Context, chainNode *ap
 	// deletion ask for a name that was never written and leave the real tarball behind.
 	entry.Name = getTarballName(chainNode, snapshot)
 
-	// The first record wins. A retry after an export-config change must not repoint an existing record:
-	// the original upload Job may have already succeeded against the old store, and rewriting the record
-	// before that is known would aim deletion at the wrong place and orphan the real object. The record
-	// is cleared with the tarball, so a genuine re-export starts from a clean slate.
+	// The first record wins: the original upload may already have succeeded against the old store, and
+	// repointing the record before that is known would aim deletion at the wrong place.
+	//
+	// Unless no upload Job ever existed for it. The controller can exit between committing this record
+	// and creating the Job, and that record then has no owning upload — pinning a later retry to a
+	// destination nothing was ever written to. Supersede it instead, so the retry records its own while
+	// the stale entry stays cleanable.
 	if existing := recordedTarball(chainNode, snapshot); existing != nil {
-		return nil
+		if r.uploadJobExists(ctx, chainNode, existing.Name) {
+			return nil
+		}
+		return r.supersedeFailedTarballRecord(ctx, chainNode, snapshot)
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &appsv1.ChainNode{}
@@ -1017,11 +1034,27 @@ func (r *Reconciler) deleteOrphanedTarball(ctx context.Context, chainNode *appsv
 
 // deleteJobExists reports whether a delete Job for this tarball is present.
 func (r *Reconciler) deleteJobExists(ctx context.Context, chainNode *appsv1.ChainNode, entry appsv1.ExportedTarball) bool {
-	clientSet := kubernetes.Interface(r.ClientSet)
-	if r.snapshotClientSet != nil {
-		clientSet = r.snapshotClientSet
+	clientSet := r.snapshotClientSet
+	if clientSet == nil {
+		if r.ClientSet == nil {
+			return false
+		}
+		clientSet = r.ClientSet
 	}
 	_, err := clientSet.BatchV1().Jobs(chainNode.GetNamespace()).Get(ctx, fmt.Sprintf("%s-delete", entry.Name), metav1.GetOptions{})
+	return err == nil
+}
+
+// uploadJobExists reports whether an upload Job for this tarball name is present.
+func (r *Reconciler) uploadJobExists(ctx context.Context, chainNode *appsv1.ChainNode, name string) bool {
+	clientSet := r.snapshotClientSet
+	if clientSet == nil {
+		if r.ClientSet == nil {
+			return false
+		}
+		clientSet = r.ClientSet
+	}
+	_, err := clientSet.BatchV1().Jobs(chainNode.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
 	return err == nil
 }
 
@@ -1180,7 +1213,7 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 			appsv1.ReasonTarballExportError,
 			"Tarball %s export job not found; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
 		)
-		return false, nil
+		return false, errYieldReconcile
 
 	case datasnapshot.SnapshotFailed:
 		if cleanupErr := r.cleanUpTarballExport(ctx, chainNode, snapshot); cleanupErr != nil {
@@ -1198,7 +1231,7 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 			appsv1.ReasonTarballExportError,
 			"Tarball %s export failed; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
 		)
-		return false, nil
+		return false, errYieldReconcile
 
 	case datasnapshot.SnapshotSucceeded:
 		r.recorder.Eventf(chainNode,

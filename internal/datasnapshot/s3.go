@@ -177,9 +177,10 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotSt
 			Name:      fmt.Sprintf("%s-delete", name),
 			Namespace: provider.Owner.GetNamespace(),
 			Labels: map[string]string{
-				labelExporter: s3Exporter,
-				labelOwner:    provider.Owner.GetName(),
-				labelType:     typeDelete,
+				labelExporter:    s3Exporter,
+				labelOwner:       provider.Owner.GetName(),
+				labelType:        typeDelete,
+				labelDestination: destinationLabel(provider.Config.Bucket, ptr.Deref(provider.Config.Endpoint, "")),
 			},
 		},
 		Spec: batchv1.JobSpec{

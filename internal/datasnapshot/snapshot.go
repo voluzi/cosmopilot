@@ -2,6 +2,8 @@ package datasnapshot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,6 +30,10 @@ const (
 	labelExporter = "exporter"
 	labelOwner    = "owner"
 	labelType     = "type"
+	// labelDestination distinguishes Jobs that share a name but target different stores. The name alone
+	// does not encode bucket or endpoint, so without it ensureSnapshotJob would reuse a Job aimed at a
+	// different destination — reporting success after finding nothing there while the real objects stay.
+	labelDestination = "destination"
 
 	typeUpload = "upload"
 	typeDelete = "delete"
@@ -142,6 +148,12 @@ func uploadJobStatus(
 			job.Namespace, job.Name, job.Labels[labelExporter], exporter, ErrStaleJobReplaced)
 	}
 	return snapshotJobStatus(job), nil
+}
+
+// destinationLabel is a short, DNS-label-safe digest of the store a Job targets.
+func destinationLabel(bucket, endpoint string) string {
+	sum := sha256.Sum256([]byte(bucket + "\x00" + endpoint))
+	return hex.EncodeToString(sum[:8])
 }
 
 func deleteSnapshotJob(ctx context.Context, client kubernetes.Interface, job *batchv1.Job) error {

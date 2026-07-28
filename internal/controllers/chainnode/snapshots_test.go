@@ -238,7 +238,8 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 
 	ready, err = reconciler.isTarballReady(context.Background(), chainNode, stored)
 	assert.False(t, ready)
-	require.NoError(t, err)
+	// Recording the failure supersedes the destination record, which writes status and yields the pass.
+	require.ErrorIs(t, err, errYieldReconcile)
 	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
 	_, exporting := stored.Annotations[controllers.AnnotationExportingTarball]
 	assert.False(t, exporting)
@@ -1502,7 +1503,8 @@ func TestFailedUploadSupersedesRecordForRetry(t *testing.T) {
 		}
 
 		ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
-		require.NoError(t, err)
+		// Superseding writes status, so the pass yields.
+		require.ErrorIs(t, err, errYieldReconcile)
 		assert.False(t, ready)
 
 		stored := &appsv1.ChainNode{}
@@ -1527,7 +1529,7 @@ func TestFailedUploadSupersedesRecordForRetry(t *testing.T) {
 		}
 
 		ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
-		require.NoError(t, err)
+		require.ErrorIs(t, err, errYieldReconcile)
 		assert.False(t, ready)
 
 		stored := &appsv1.ChainNode{}
@@ -1780,4 +1782,48 @@ func TestUnreachableRecordDoesNotFreezeSnapshots(t *testing.T) {
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 	require.Len(t, stored.Status.ExportedTarballs, 1)
+}
+
+// TestRecordWithoutUploadJobIsSuperseded: the controller can exit between committing a destination
+// record and creating the upload Job. That record owns nothing, so pinning a later retry to it would
+// associate a successful upload with a store nothing was ever written to.
+func TestRecordWithoutUploadJobIsSuperseded(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"}},
+		}}},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{{
+			Snapshot: "snapshot", SnapshotUID: "uid", Name: "never-uploaded",
+			Provider: "gcs", Bucket: "old-bucket",
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: "default", UID: "uid",
+	}}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode, snapshot).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(), // no upload Job exists
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	require.NoError(t, reconciler.recordTarballDestination(context.Background(), chainNode, snapshot))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	require.Len(t, stored.Status.ExportedTarballs, 1)
+	assert.True(t, stored.Status.ExportedTarballs[0].Superseded,
+		"a record with no owning upload Job must not pin a retry")
 }

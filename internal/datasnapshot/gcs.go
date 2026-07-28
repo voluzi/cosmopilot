@@ -263,9 +263,10 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus
 			Name:      fmt.Sprintf("%s-delete", name),
 			Namespace: gcs.Owner.GetNamespace(),
 			Labels: map[string]string{
-				labelExporter: gcsExporter,
-				labelOwner:    gcs.Owner.GetName(),
-				labelType:     typeDelete,
+				labelExporter:    gcsExporter,
+				labelOwner:       gcs.Owner.GetName(),
+				labelType:        typeDelete,
+				labelDestination: destinationLabel(gcs.Config.Bucket, ""),
 			},
 		},
 		Spec: batchv1.JobSpec{
