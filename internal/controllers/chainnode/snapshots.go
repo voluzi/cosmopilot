@@ -44,8 +44,19 @@ const (
 func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode, nodePodReady bool) error {
 	logger := log.FromContext(ctx)
 
+	// Records outlive the feature that created them: disabling snapshots (or losing the prerequisites
+	// below) must not strand them, or their objects stay unreachable and status keeps growing. Run this
+	// before the prerequisite check, against whatever snapshots still exist.
 	if !chainNode.SnapshotsEnabled() || chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0 {
-		return nil
+		if len(chainNode.Status.ExportedTarballs) == 0 {
+			return nil
+		}
+		snapshots, err := r.listNodeSnapshots(ctx, chainNode)
+		if err != nil {
+			return err
+		}
+		_, err = r.reconcileOrphanedTarballs(ctx, chainNode, snapshots)
+		return err
 	}
 
 	// Get list of snapshots
@@ -310,12 +321,18 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						"Deleted expired PVC snapshot %s", snapshot.GetName(),
 					)
 					if deleteTarball {
-						r.cleanUpTarballDeletion(ctx, chainNode, &snapshot)
+						forgotten := r.cleanUpTarballDeletion(ctx, chainNode, &snapshot)
 						r.recorder.Eventf(chainNode,
 							corev1.EventTypeNormal,
 							appsv1.ReasonTarballDeleted,
 							"Deleted expired tarball %s", getTarballName(chainNode, &snapshot),
 						)
+						if forgotten {
+							// That status write moved the object on at the API server. Continuing would let
+							// startNewSnapshot below create a VolumeSnapshot whose in-progress annotation then
+							// fails to persist, so later passes would keep creating more.
+							return nil
+						}
 					}
 				}
 			}
@@ -363,12 +380,16 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				"Deleted PVC snapshot %s (exceeded retain count of %d)", snapshot.GetName(), *retainCount,
 			)
 			if deleteTarball {
-				r.cleanUpTarballDeletion(ctx, chainNode, &snapshot)
+				forgotten := r.cleanUpTarballDeletion(ctx, chainNode, &snapshot)
 				r.recorder.Eventf(chainNode,
 					corev1.EventTypeNormal,
 					appsv1.ReasonTarballDeleted,
 					"Deleted tarball %s (exceeded retain count)", getTarballName(chainNode, &snapshot),
 				)
+				if forgotten {
+					// See above: yield rather than reach startNewSnapshot with a stale resource version.
+					return nil
+				}
 			}
 		}
 	}
@@ -757,6 +778,12 @@ func (r *Reconciler) tarballDeleteProvider(chainNode *appsv1.ChainNode, snapshot
 // usable credentials for that provider. Otherwise this errors: the delete Job fails loudly and the
 // caller reports a possible orphan, rather than running credential-less and reporting success.
 func configForDestination(configured *appsv1.ExportTarballConfig, recorded *appsv1.ExportedTarball) (*appsv1.ExportTarballConfig, error) {
+	// Credentials only exist in the spec, so without it there is no way to reach the store — and
+	// DeepCopy on a nil receiver would return nil and panic on the next field write.
+	if configured == nil {
+		return nil, fmt.Errorf("tarball %q was uploaded to %s bucket %q but .spec.persistence.snapshots.exportTarball is no longer set, so it cannot be reached",
+			recorded.Name, recorded.Provider, recorded.Bucket)
+	}
 	cfg := configured.DeepCopy()
 	cfg.GCS = nil
 	cfg.S3 = nil
@@ -809,7 +836,7 @@ func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainN
 		// live would make it win over a retry aimed at a different store (records are immutable), and
 		// deletion would then target the wrong place. Supersede rather than drop it, since a failure
 		// partway through creation can still have left objects behind.
-		if supersedeErr := r.supersedeFailedTarballRecord(ctx, chainNode, snapshot, true); supersedeErr != nil {
+		if supersedeErr := r.supersedeFailedTarballRecord(ctx, chainNode, snapshot); supersedeErr != nil {
 			return fmt.Errorf("%w; supersede tarball destination record: %v", err, supersedeErr)
 		}
 		return err
@@ -912,7 +939,10 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 		}
 		done, err := r.deleteOrphanedTarball(ctx, chainNode, entry)
 		if err != nil {
-			// Keep the record: it is the only pointer left to the object.
+			// Keep the record: it is the only pointer left to the object. Hold the retry too — a retained
+			// delete Job keeps being polled, and each poll runs the provider cleanup that removes
+			// "<name>-upload", which would be the retry's own Job.
+			deleting[entry.Snapshot] = struct{}{}
 			logger.Error(err, "failed deleting orphaned tarball", "snapshot", entry.Snapshot, "tarball", entry.Name)
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeWarning,
@@ -979,10 +1009,13 @@ func (r *Reconciler) deleteOrphanedTarball(ctx context.Context, chainNode *appsv
 // upload, or an object that landed just as the Job was declared failed. Marking it superseded keeps the
 // old destination cleanable while freeing the retry to record its own.
 //
-// When the retry limit has been reached there is no further upload, so the record stays live: it still
-// describes the only place this snapshot's data could be.
-func (r *Reconciler) supersedeFailedTarballRecord(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot, willRetry bool) error {
-	if !willRetry || recordedTarball(chainNode, snapshot) == nil {
+// This applies to an exhausted retry limit too. tarballFailureAction tells the operator to clear the
+// export annotations and retry by hand, and they may change bucket, endpoint, provider or suffix first;
+// leaving the old record live would make it win over that manual retry (records are first-wins) and
+// silently orphan whatever the retry uploads. Superseding loses nothing: the entry is still cleaned up,
+// just no longer treated as this snapshot's live tarball.
+func (r *Reconciler) supersedeFailedTarballRecord(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
+	if recordedTarball(chainNode, snapshot) == nil {
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1074,15 +1107,15 @@ func (r *Reconciler) retireTarballRecords(ctx context.Context, chainNode *appsv1
 
 // forgetTarballDestination drops the record once the tarball is gone, so status does not grow without
 // bound as snapshots are rotated.
-func (r *Reconciler) forgetTarballDestination(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
+func (r *Reconciler) forgetTarballDestination(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
 	// Retire only this snapshot's live record. Filtering by name would also take the record of a
 	// same-named predecessor whose tarball is still out there, and any superseded entry still waiting
 	// for its own cleanup — orphaning both.
 	live := recordedTarball(chainNode, snapshot)
 	if live == nil {
-		return nil
+		return false, nil
 	}
-	return r.retireTarballRecords(ctx, chainNode, []appsv1.ExportedTarball{*live})
+	return true, r.retireTarballRecords(ctx, chainNode, []appsv1.ExportedTarball{*live})
 }
 
 func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
@@ -1114,7 +1147,7 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		if updateErr != nil {
 			return false, updateErr
 		}
-		if err = r.supersedeFailedTarballRecord(ctx, chainNode, snapshot, retry); err != nil {
+		if err = r.supersedeFailedTarballRecord(ctx, chainNode, snapshot); err != nil {
 			return false, err
 		}
 		r.recorder.Eventf(chainNode,
@@ -1132,7 +1165,7 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		if updateErr != nil {
 			return false, updateErr
 		}
-		if err = r.supersedeFailedTarballRecord(ctx, chainNode, snapshot, retry); err != nil {
+		if err = r.supersedeFailedTarballRecord(ctx, chainNode, snapshot); err != nil {
 			return false, err
 		}
 		r.recorder.Eventf(chainNode,
@@ -1269,21 +1302,25 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 	return status == datasnapshot.SnapshotSucceeded, nil
 }
 
-func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) {
+// Reports whether it mutated status, so the caller yields rather than continuing with an object whose
+// resource version is behind the API server's.
+func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {
 	// Resolve the same provider the delete Job was created with, so cleanup targets that Job rather than
 	// one named for the currently configured exporter.
 	exporter, _, err := r.tarballDeleteProvider(chainNode, snapshot)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to get tarball exporter for delete Job cleanup", "snapshot", snapshot.GetName())
-		return
+		return false
 	}
 	if err = exporter.CleanupSnapshotDeletion(ctx, deletedTarballName(chainNode, snapshot)); err != nil {
 		log.FromContext(ctx).Error(err, "failed to clean up tarball delete Job", "snapshot", snapshot.GetName())
 	}
 	// The tarball is gone, so drop its record: status must not accumulate an entry per rotated snapshot.
-	if err = r.forgetTarballDestination(ctx, chainNode, snapshot); err != nil {
+	forgotten, err := r.forgetTarballDestination(ctx, chainNode, snapshot)
+	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to forget tarball destination", "snapshot", snapshot.GetName())
 	}
+	return forgotten
 }
 
 // describeRecordedTarball renders the recorded destination for events, so an orphaned object is

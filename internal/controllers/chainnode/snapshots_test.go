@@ -1514,7 +1514,7 @@ func TestFailedUploadSupersedesRecordForRetry(t *testing.T) {
 		assert.Nil(t, recordedTarball(stored, snapshot))
 	})
 
-	t.Run("exhausted retries keep the record", func(t *testing.T) {
+	t.Run("exhausted retries also supersede, for the manual retry", func(t *testing.T) {
 		chainNode, snapshot := newChainNode(strconv.Itoa(tarballExportMaxAttempts - 1))
 		controllerClient := fakeclient.NewClientBuilder().
 			WithScheme(scheme).WithObjects(snapshot, chainNode).WithStatusSubresource(chainNode).Build()
@@ -1532,12 +1532,13 @@ func TestFailedUploadSupersedesRecordForRetry(t *testing.T) {
 
 		stored := &appsv1.ChainNode{}
 		require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
-		// No further upload will run, and a failed Job can have left partial objects behind: the record
-		// is what makes them discoverable for orphan cleanup.
+		// The operator is told to clear the annotations and retry by hand, and may change bucket or
+		// provider first. A live record would win over that retry (first-wins) and orphan it. The entry is
+		// still cleaned up either way — it just stops being treated as this snapshot's live tarball.
 		require.Len(t, stored.Status.ExportedTarballs, 1)
 		assert.Equal(t, "old-bucket", stored.Status.ExportedTarballs[0].Bucket)
-		assert.False(t, stored.Status.ExportedTarballs[0].Superseded,
-			"with no retry left the record still describes the only place the data could be")
+		assert.True(t, stored.Status.ExportedTarballs[0].Superseded,
+			"a manual retry must not inherit the failed attempt's destination")
 	})
 }
 
@@ -1675,7 +1676,8 @@ func TestRetiringOneRecordKeepsOtherDestinations(t *testing.T) {
 	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
 		Name: "snap", Namespace: "default", UID: "uid",
 	}}
-	require.NoError(t, reconciler.forgetTarballDestination(context.Background(), stored, snapshot))
+	_, forgetErr := reconciler.forgetTarballDestination(context.Background(), stored, snapshot)
+	require.NoError(t, forgetErr)
 
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 	require.Len(t, stored.Status.ExportedTarballs, 2)
@@ -1684,4 +1686,52 @@ func TestRetiringOneRecordKeepsOtherDestinations(t *testing.T) {
 		remaining = append(remaining, entry.Bucket)
 	}
 	assert.Equal(t, []string{"bucket-b", "bucket-d"}, remaining)
+}
+
+// TestConfigForDestinationHandlesRemovedExportConfig: removing exportTarball while records remain must
+// produce an actionable error, not a nil-pointer panic that wedges reconciliation for the ChainNode.
+func TestConfigForDestinationHandlesRemovedExportConfig(t *testing.T) {
+	recorded := &appsv1.ExportedTarball{
+		Snapshot: "snap", Name: "tarball", Provider: "s3", Bucket: "bucket",
+	}
+
+	cfg, err := configForDestination(nil, recorded)
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.ErrorContains(t, err, "no longer set")
+}
+
+// TestOrphanRecordsReconciledAfterSnapshotsDisabled: records outlive the feature that created them.
+// Gating their cleanup behind SnapshotsEnabled would strand both the entries and the objects they are
+// the only pointer to.
+func TestOrphanRecordsReconciledAfterSnapshotsDisabled(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	// Snapshots are disabled entirely, but a record remains.
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec:       appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{}},
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{{
+			Snapshot: "gone", Name: "tarball", Provider: "gcs", Bucket: "snapshots",
+		}}},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	assert.Empty(t, stored.Status.ExportedTarballs,
+		"records must be reconciled even when snapshots are disabled")
 }
