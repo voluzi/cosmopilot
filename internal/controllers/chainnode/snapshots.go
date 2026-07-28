@@ -879,7 +879,13 @@ func (r *Reconciler) recordTarballDestination(ctx context.Context, chainNode *ap
 		if r.uploadJobExists(ctx, chainNode, existing.Name) {
 			return nil
 		}
-		return r.supersedeFailedTarballRecord(ctx, chainNode, snapshot)
+		// Supersede, then fall through to record the replacement in the same pass. The caller creates the
+		// upload Job immediately after this returns, and the exporting annotation stops this function
+		// running again — so leaving without a live record would let a later bucket or endpoint change
+		// send deletion to the wrong store and orphan whatever this upload writes.
+		if err := r.supersedeFailedTarballRecord(ctx, chainNode, snapshot); err != nil {
+			return err
+		}
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &appsv1.ChainNode{}
@@ -935,7 +941,10 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 		}
 		return false
 	}
-	deleteTarballs := chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
+	// This runs before the snapshot prerequisites, so persistence/snapshots may be gone entirely — the
+	// records outlive the spec that created them. Nil-check rather than dereference.
+	deleteTarballs := chainNode.Spec.Persistence != nil &&
+		chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
 		chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
 
 	retire := make([]appsv1.ExportedTarball, 0)
@@ -997,7 +1006,11 @@ func (r *Reconciler) reconcileOrphanedTarballs(ctx context.Context, chainNode *a
 // unreachable credentials) must NOT gate anything: nothing can clobber the retry, and blocking on them
 // would let one unreachable record freeze snapshots for the node indefinitely.
 func (r *Reconciler) deleteOrphanedTarball(ctx context.Context, chainNode *appsv1.ChainNode, entry appsv1.ExportedTarball) (done, jobExists bool, err error) {
-	cfg, err := configForDestination(chainNode.Spec.Persistence.Snapshots.ExportTarball, &entry)
+	var configured *appsv1.ExportTarballConfig
+	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil {
+		configured = chainNode.Spec.Persistence.Snapshots.ExportTarball
+	}
+	cfg, err := configForDestination(configured, &entry)
 	if err != nil {
 		return false, false, err
 	}
@@ -1032,21 +1045,23 @@ func (r *Reconciler) deleteOrphanedTarball(ctx context.Context, chainNode *appsv
 	}
 }
 
-// deleteJobExists reports whether a delete Job for this tarball is present.
+// deleteJobExists reports whether a delete Job for this tarball, owned by this node, is present.
 func (r *Reconciler) deleteJobExists(ctx context.Context, chainNode *appsv1.ChainNode, entry appsv1.ExportedTarball) bool {
-	clientSet := r.snapshotClientSet
-	if clientSet == nil {
-		if r.ClientSet == nil {
-			return false
-		}
-		clientSet = r.ClientSet
-	}
-	_, err := clientSet.BatchV1().Jobs(chainNode.GetNamespace()).Get(ctx, fmt.Sprintf("%s-delete", entry.Name), metav1.GetOptions{})
-	return err == nil
+	return r.ownsSnapshotJob(ctx, chainNode, fmt.Sprintf("%s-delete", entry.Name))
 }
 
-// uploadJobExists reports whether an upload Job for this tarball name is present.
+// uploadJobExists reports whether an upload Job for this tarball name, owned by this node, is present.
 func (r *Reconciler) uploadJobExists(ctx context.Context, chainNode *appsv1.ChainNode, name string) bool {
+	return r.ownsSnapshotJob(ctx, chainNode, fmt.Sprintf("%s-upload", name))
+}
+
+// ownsSnapshotJob reports whether a Job of this name exists AND is controlled by this ChainNode.
+//
+// Tarball names derive from chain ID and a second-resolution timestamp, so two ChainNodes in one
+// namespace can collide. A foreign Job must not count: ensureSnapshotJob rejects it anyway, so treating
+// it as ours would gate this node's retries on a Job it can neither use nor clean up — and a foreign
+// failed Job, retained for inspection, would block this node's snapshots indefinitely.
+func (r *Reconciler) ownsSnapshotJob(ctx context.Context, chainNode *appsv1.ChainNode, name string) bool {
 	clientSet := r.snapshotClientSet
 	if clientSet == nil {
 		if r.ClientSet == nil {
@@ -1054,8 +1069,11 @@ func (r *Reconciler) uploadJobExists(ctx context.Context, chainNode *appsv1.Chai
 		}
 		clientSet = r.ClientSet
 	}
-	_, err := clientSet.BatchV1().Jobs(chainNode.GetNamespace()).Get(ctx, fmt.Sprintf("%s-upload", name), metav1.GetOptions{})
-	return err == nil
+	job, err := clientSet.BatchV1().Jobs(chainNode.GetNamespace()).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return metav1.IsControlledBy(job, chainNode)
 }
 
 // supersedeFailedTarballRecord marks the destination of a conclusively failed upload as superseded when

@@ -1328,7 +1328,22 @@ func TestRecordTarballDestinationKeepsFirstRecord(t *testing.T) {
 	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
 	baseClient := fakeclient.NewClientBuilder().
 		WithScheme(scheme).WithObjects(chainNode, snapshot).WithStatusSubresource(chainNode).Build()
-	reconciler := &Reconciler{Client: baseClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+	// The record has an owning upload Job, which is what makes it authoritative: that upload may already
+	// have succeeded against the old store.
+	reconciler := &Reconciler{
+		Client: baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(&batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "original-upload", Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode",
+					Name: "node", UID: "node-uid", Controller: ptr.To(true),
+				}},
+			},
+		}),
+		Scheme: scheme,
+		opts:   &controllers.ControllerRunOptions{},
+	}
 
 	require.NoError(t, reconciler.recordTarballDestination(context.Background(), chainNode, snapshot))
 
@@ -1337,6 +1352,7 @@ func TestRecordTarballDestinationKeepsFirstRecord(t *testing.T) {
 	require.Len(t, stored.Status.ExportedTarballs, 1)
 	assert.Equal(t, "old-bucket", stored.Status.ExportedTarballs[0].Bucket, "the first record must win")
 	assert.Equal(t, "original", stored.Status.ExportedTarballs[0].Name)
+	assert.False(t, stored.Status.ExportedTarballs[0].Superseded)
 }
 
 // TestOrphanedTarballRecordsAreRetiredWhenDeletionIsOff: with deleteOnExpire=false the tarball is
@@ -1823,7 +1839,86 @@ func TestRecordWithoutUploadJobIsSuperseded(t *testing.T) {
 
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
-	require.Len(t, stored.Status.ExportedTarballs, 1)
-	assert.True(t, stored.Status.ExportedTarballs[0].Superseded,
-		"a record with no owning upload Job must not pin a retry")
+	require.Len(t, stored.Status.ExportedTarballs, 2)
+
+	// The ownerless record is superseded so it cannot pin the retry, but stays cleanable.
+	assert.Equal(t, "old-bucket", stored.Status.ExportedTarballs[0].Bucket)
+	assert.True(t, stored.Status.ExportedTarballs[0].Superseded)
+
+	// And the replacement is recorded live in the same pass: the caller creates the upload Job right
+	// after this returns, so leaving without a live record would let a later target change orphan it.
+	assert.Equal(t, "new-bucket", stored.Status.ExportedTarballs[1].Bucket)
+	assert.False(t, stored.Status.ExportedTarballs[1].Superseded)
+	require.NotNil(t, recordedTarball(stored, snapshot))
+	assert.Equal(t, "new-bucket", recordedTarball(stored, snapshot).Bucket)
+}
+
+// TestForeignDeleteJobDoesNotGateRetries: tarball names derive from chain ID and a second-resolution
+// timestamp, so two ChainNodes in one namespace can collide. A Job owned by the other node must not
+// gate this one — ensureSnapshotJob rejects it anyway, so gating on it would block this node's
+// snapshots indefinitely if the foreign Job failed and was retained for inspection.
+func TestForeignDeleteJobDoesNotGateRetries(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+	}
+	// Same tarball name, owned by a different ChainNode in the same namespace.
+	foreign := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "shared-name-delete", Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode",
+			Name: "other-node", UID: "other-uid", Controller: ptr.To(true),
+		}},
+	}}
+	reconciler := &Reconciler{
+		snapshotClientSet: fake.NewSimpleClientset(foreign),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+	}
+
+	entry := appsv1.ExportedTarball{Snapshot: "snap", Name: "shared-name", Provider: "gcs", Bucket: "b"}
+	assert.False(t, reconciler.deleteJobExists(context.Background(), chainNode, entry),
+		"another node's delete Job must not gate this node's retries")
+	assert.False(t, reconciler.uploadJobExists(context.Background(), chainNode, "shared-name"),
+		"another node's upload Job must not make a record look owned")
+}
+
+// TestOrphanCleanupSurvivesRemovedPersistence: records outlive the spec that created them, and orphan
+// cleanup deliberately runs before the snapshot prerequisites — so it must tolerate .spec.persistence
+// being removed entirely rather than panicking on every pass.
+func TestOrphanCleanupSurvivesRemovedPersistence(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec:       appsv1.ChainNodeSpec{}, // persistence removed entirely
+		Status: appsv1.ChainNodeStatus{ExportedTarballs: []appsv1.ExportedTarball{{
+			Snapshot: "gone", Name: "tarball", Provider: "gcs", Bucket: "snapshots",
+		}}},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).WithObjects(chainNode).WithStatusSubresource(chainNode).Build()
+	reconciler := &Reconciler{
+		Client:            baseClient,
+		snapshotClientSet: fake.NewSimpleClientset(),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	require.NotPanics(t, func() {
+		require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+	})
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, baseClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+	assert.Empty(t, stored.Status.ExportedTarballs)
 }
