@@ -112,6 +112,54 @@ func TestGetValidatorSpecGroupValidators(t *testing.T) {
 	assert.NotEqual(t, v0.Name, v1.Name)
 }
 
+// TestGetValidatorSpecUsesValidatorScopedFields pins the documented contract that a validator group
+// is configured from .validator.<field>, never from its group-level namesake. A group-level value is
+// reported as misplaced at admission; the controller must not quietly consume it instead.
+func TestGetValidatorSpecUsesValidatorScopedFields(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-nodeset",
+			Namespace: "default",
+			UID:       types.UID("test-uid"),
+		},
+		Spec: appsv1.ChainNodeSetSpec{
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{
+				{
+					Name:      "validators",
+					Instances: ptr.To(1),
+					// Group level: must not reach the validator ChainNode.
+					Persistence:     &appsv1.Persistence{Size: ptr.To("50Gi"), StorageClassName: ptr.To("local-path")},
+					OverrideVersion: ptr.To("v0.0.0-group"),
+					Validator: &appsv1.NodeSetValidatorConfig{
+						Persistence:     &appsv1.Persistence{Size: ptr.To("10Gi"), StorageClassName: ptr.To("nas-iscsi")},
+						OverrideVersion: ptr.To("v1.2.3-validator"),
+					},
+				},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+
+	r := newValidatorTestReconciler(t, nodeSet)
+	group := nodeSet.Spec.Nodes[0]
+
+	validator, err := r.getValidatorSpec(nodeSet, group.Name, 0, group.Validator)
+	require.NoError(t, err)
+
+	require.NotNil(t, validator.Spec.Persistence)
+	require.NotNil(t, validator.Spec.Persistence.Size)
+	assert.Equal(t, "10Gi", *validator.Spec.Persistence.Size)
+	require.NotNil(t, validator.Spec.Persistence.StorageClassName)
+	assert.Equal(t, "nas-iscsi", *validator.Spec.Persistence.StorageClassName)
+
+	require.NotNil(t, validator.Spec.OverrideVersion)
+	assert.Equal(t, "v1.2.3-validator", *validator.Spec.OverrideVersion)
+
+	// The misplaced group-level values are surfaced to the user at admission instead.
+	assert.Equal(t, []string{"persistence", "overrideVersion"}, group.MisplacedValidatorScopedFields())
+}
+
 // TestDeriveGroupValidatorConfigInitWithMultipleInstances verifies the per-instance
 // validator config derivation for a genesis-initializing group with multiple instances:
 // instance 0 keeps Init and records the other validators in Init.GenesisValidators (so they

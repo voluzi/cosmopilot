@@ -116,6 +116,17 @@ nodes:
 - **Genesis (`init`) validator groups are immutable after the genesis is created** — you cannot add, remove, scale, or change their keys. Use a `createValidator` group to grow a running validator set.
 - **Backward compatible.** The singleton `.spec.validator` continues to work unchanged and is equivalent to a one-instance validator group that keeps the legacy ChainNode name `<nodeset>-validator`.
 
+### Where to put each setting
+
+A validator group's pods are built from its `validator` block, so most pod-shaping settings move under `nodes[].validator.*`. Setting them at group level is a no-op — Cosmopilot reports it as an admission warning (visible in `kubectl apply` output, and logged when webhooks are disabled), but the value is never applied.
+
+| Setting | Validator group | Regular group |
+|---|---|---|
+| `config`, `persistence`, `resources`, `nodeSelector`, `affinity`, `stateSyncRestore`, `stateSyncResources`, `vpa`, `pdb`, `overrideVersion` | `nodes[].validator.*` | `nodes[].*` |
+| `instances`, `peers`, `expose`, `individualIngresses`, `individualGatewayRoutes`, `snapshotNodeIndex`, `cosmosigner` | `nodes[].*` | `nodes[].*` |
+| `ignoreGroupOnDisruptionChecks` | no effect — validator pods coordinate disruptions chain-wide | `nodes[].*` |
+| `inheritValidatorGasPrice` | no effect — a validator group is the gas-price source | `nodes[].*` |
+
 ## Initializing a New Network
 
 Please refer to [Initializing a New Network](../usage/initializing-new-network) page for information about setting up new networks.

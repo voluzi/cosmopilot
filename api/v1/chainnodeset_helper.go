@@ -7,6 +7,7 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/voluzi/cosmoseed/pkg/cosmoseed"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -183,6 +184,76 @@ func (group *NodeGroupSpec) ShouldIgnoreGroupLabelOnDisruptions() bool {
 		return *group.IgnoreGroupOnDisruptionChecks
 	}
 	return false
+}
+
+// MisplacedValidatorScopedFields returns the JSON names of group-level fields that are set on a
+// validator group but never consulted for it: every instance of a validator group is reconciled
+// from .validator.<field> instead (see getValidatorSpecWithBlockedSignerTargets and the validator
+// PDB in ensurePodDisruptionBudgets). Returns nil for regular groups, where all of these apply.
+func (group *NodeGroupSpec) MisplacedValidatorScopedFields() []string {
+	if group == nil || group.Validator == nil {
+		return nil
+	}
+
+	var fields []string
+	if group.Config != nil {
+		fields = append(fields, "config")
+	}
+	if group.Persistence != nil {
+		fields = append(fields, "persistence")
+	}
+	if !isEmptyResourceRequirements(group.Resources) {
+		fields = append(fields, "resources")
+	}
+	if len(group.NodeSelector) > 0 {
+		fields = append(fields, "nodeSelector")
+	}
+	if group.Affinity != nil {
+		fields = append(fields, "affinity")
+	}
+	if group.StateSyncRestore != nil {
+		fields = append(fields, "stateSyncRestore")
+	}
+	if !isEmptyResourceRequirements(group.StateSyncResources) {
+		fields = append(fields, "stateSyncResources")
+	}
+	if group.VPA != nil {
+		fields = append(fields, "vpa")
+	}
+	if group.PDB != nil {
+		fields = append(fields, "pdb")
+	}
+	if group.OverrideVersion != nil {
+		fields = append(fields, "overrideVersion")
+	}
+	return fields
+}
+
+// IneffectiveValidatorGroupFlags returns the JSON names of group-level flags explicitly set on a
+// validator group that have no effect there and no .validator.<field> counterpart:
+//
+//   - ignoreGroupOnDisruptionChecks: validator pods already coordinate disruptions chain-wide
+//     ({chain-id, validator}), ignoring nodeset and group labels entirely.
+//   - inheritValidatorGasPrice: a validator group is itself the gas-price source.
+func (group *NodeGroupSpec) IneffectiveValidatorGroupFlags() []string {
+	if group == nil || group.Validator == nil {
+		return nil
+	}
+
+	var flags []string
+	if group.IgnoreGroupOnDisruptionChecks != nil {
+		flags = append(flags, "ignoreGroupOnDisruptionChecks")
+	}
+	if group.InheritValidatorGasPrice != nil {
+		flags = append(flags, "inheritValidatorGasPrice")
+	}
+	return flags
+}
+
+// isEmptyResourceRequirements reports whether a ResourceRequirements value carries no user
+// configuration. It is a non-pointer field, so "unset" cannot be distinguished by nil.
+func isEmptyResourceRequirements(r corev1.ResourceRequirements) bool {
+	return len(r.Requests) == 0 && len(r.Limits) == 0 && len(r.Claims) == 0
 }
 
 // Validator methods
