@@ -1,6 +1,9 @@
 package integration
 
 import (
+	"strings"
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -264,6 +267,60 @@ var _ = Describe("ChainNodeSet", func() {
 					}
 					return current.Status.Instances
 				}).Should(Equal(3))
+			}),
+		)
+
+		It("should track ready instances in status",
+			WithNamespace(func(ns *corev1.Namespace) {
+				chainNodeSet := &appsv1.ChainNodeSet{
+					ObjectMeta: metav1.ObjectMeta{
+						GenerateName: ChainNodeSetPrefix,
+						Namespace:    ns.Name,
+					},
+					Spec: appsv1.ChainNodeSetSpec{
+						App:     DefaultChainNodeSetTestApp,
+						Nodes:   []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(2)}},
+						Genesis: NewGenesisConfigWithChainID("test-chain"),
+					},
+				}
+
+				err := Framework().Client().Create(Framework().Context(), chainNodeSet)
+				Expect(err).NotTo(HaveOccurred())
+
+				WaitForChainNodeCount(ns.Name, 2)
+
+				// No pod ever runs in envtest, so the ChainNode controller keeps driving its children
+				// back to InitializingData. Re-assert the desired phases on every poll so the parent
+				// reconcile observes them, instead of racing a single one-shot patch. Writes that lose
+				// to a concurrent controller update are ignored — the next poll re-applies them.
+				readyInstancesWithPhases := func(phases map[string]appsv1.ChainNodePhase) func() int {
+					return func() int {
+						for _, node := range GetChainNodes(ns.Name) {
+							phase, ok := phases[node.Name[strings.LastIndex(node.Name, "-")+1:]]
+							if !ok {
+								continue
+							}
+							node.Status.Phase = phase
+							_ = Framework().Client().Status().Update(Framework().Context(), &node)
+						}
+						current := &appsv1.ChainNodeSet{}
+						if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(chainNodeSet), current); err != nil {
+							return -1
+						}
+						return current.Status.ReadyInstances
+					}
+				}
+
+				Eventually(readyInstancesWithPhases(map[string]appsv1.ChainNodePhase{
+					"0": appsv1.PhaseChainNodeRunning,
+					"1": appsv1.PhaseChainNodeRunning,
+				}), time.Minute).Should(Equal(2))
+
+				// A single degraded child must be visible on the parent.
+				Eventually(readyInstancesWithPhases(map[string]appsv1.ChainNodePhase{
+					"0": appsv1.PhaseChainNodeError,
+					"1": appsv1.PhaseChainNodeRunning,
+				}), time.Minute).Should(Equal(1))
 			}),
 		)
 	})

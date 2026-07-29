@@ -85,6 +85,176 @@ func TestEnsureNodesInstanceCount(t *testing.T) {
 	}
 }
 
+// TestEnsureNodesReadyInstances verifies that .status.readyInstances counts only children whose
+// phase is Running, Syncing or Snapshotting, so a degraded nodeset is visible from the CR alone.
+func TestEnsureNodesReadyInstances(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	mkNodeIn := func(namespace, group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
+		labels := map[string]string{
+			controllers.LabelChainNodeSet:      "test-nodeset",
+			controllers.LabelChainNodeSetGroup: group,
+		}
+		if validator {
+			labels[controllers.LabelChainNodeSetValidator] = controllers.StringValueTrue
+		}
+		return &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("test-nodeset-%s-%d", group, index),
+				Namespace: namespace,
+				Labels:    labels,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: appsv1.GroupVersion.String(),
+					Kind:       "ChainNodeSet",
+					Name:       "test-nodeset",
+					UID:        types.UID("u"),
+					Controller: ptr.To(true),
+				}},
+			},
+			Status: appsv1.ChainNodeStatus{Phase: phase},
+		}
+	}
+	mkNode := func(group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
+		return mkNodeIn("default", group, index, phase, validator)
+	}
+	// A standalone ChainNode that merely carries the user-settable nodeset label. It has no group
+	// label, so the deleted-group cleanup leaves it alone and it survives to the counting loop.
+	unowned := func(node *appsv1.ChainNode) *appsv1.ChainNode {
+		node.OwnerReferences = nil
+		delete(node.Labels, controllers.LabelChainNodeSetGroup)
+		return node
+	}
+	// A ChainNode needs a finalizer for the fake client to keep it around with a deletion timestamp.
+	terminating := func(node *appsv1.ChainNode) *appsv1.ChainNode {
+		node.Finalizers = []string{"cosmopilot.voluzi.com/test"}
+		node.DeletionTimestamp = ptr.To(metav1.Now())
+		return node
+	}
+	stopsForSnapshots := func(node *appsv1.ChainNode) *appsv1.ChainNode {
+		node.Spec.Persistence = &appsv1.Persistence{
+			Snapshots: &appsv1.VolumeSnapshotsConfig{StopNode: ptr.To(true)},
+		}
+		return node
+	}
+
+	tests := []struct {
+		name      string
+		nodes     []appsv1.NodeGroupSpec
+		children  []*appsv1.ChainNode
+		wantReady int
+	}{
+		{
+			name:  "degraded validator group is not fully ready",
+			nodes: []appsv1.NodeGroupSpec{{Name: "validators", Instances: ptr.To(3), Validator: &appsv1.NodeSetValidatorConfig{}}},
+			children: []*appsv1.ChainNode{
+				mkNode("validators", 0, appsv1.PhaseChainNodeRunning, true),
+				mkNode("validators", 1, appsv1.PhaseChainNodeRestarting, true),
+				mkNode("validators", 2, appsv1.PhaseChainNodeError, true),
+			},
+			wantReady: 1,
+		},
+		{
+			name:  "syncing and snapshotting nodes count as ready",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(3)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeSyncing, false),
+				mkNode("fullnodes", 1, appsv1.PhaseChainNodeSnapshotting, false),
+				mkNode("fullnodes", 2, appsv1.PhaseChainNodeRunning, false),
+			},
+			wantReady: 3,
+		},
+		{
+			name:  "nodes that have not reported a phase are not ready",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(2)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
+				mkNode("fullnodes", 1, "", false),
+			},
+			wantReady: 1,
+		},
+		{
+			// The manager cache is cluster-wide, so an identically named ChainNodeSet in another
+			// namespace must not contribute to this one's readiness.
+			name:  "ready nodes of a same-named nodeset in another namespace are not counted",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeError, false),
+				mkNodeIn("other", "fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
+			},
+			wantReady: 0,
+		},
+		{
+			// The nodeset label is user-settable, so a standalone ChainNode wearing it must not be
+			// counted as an instance of this nodeset.
+			name:  "same-named-label nodes not controlled by this nodeset are not counted",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeError, false),
+				unowned(mkNode("standalone", 0, appsv1.PhaseChainNodeRunning, false)),
+			},
+			wantReady: 0,
+		},
+		{
+			// A node deleted by a scale-down keeps its last phase until finalizers complete, but is
+			// already excluded from .status.instances — counting it could report ready > instances.
+			name:  "children being deleted are not counted",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
+				terminating(mkNode("fullnodes", 1, appsv1.PhaseChainNodeRunning, false)),
+			},
+			wantReady: 1,
+		},
+		{
+			// With stopNode the pod is deleted for the duration of the snapshot, so the node holds
+			// the Snapshotting phase while being down.
+			name: "snapshotting nodes that stop for the snapshot are not ready",
+			nodes: []appsv1.NodeGroupSpec{
+				{Name: "stopping", Instances: ptr.To(1), Persistence: &appsv1.Persistence{
+					Snapshots: &appsv1.VolumeSnapshotsConfig{StopNode: ptr.To(true)},
+				}},
+				{Name: "serving", Instances: ptr.To(1)},
+			},
+			children: []*appsv1.ChainNode{
+				stopsForSnapshots(mkNode("stopping", 0, appsv1.PhaseChainNodeSnapshotting, false)),
+				mkNode("serving", 0, appsv1.PhaseChainNodeSnapshotting, false),
+			},
+			wantReady: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
+				Spec: appsv1.ChainNodeSetSpec{
+					Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+					Nodes:   tt.nodes,
+				},
+				Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+			}
+
+			builder := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNodeSet{}, &appsv1.ChainNode{}).
+				WithObjects(nodeSet)
+			for _, child := range tt.children {
+				builder = builder.WithObjects(child)
+			}
+			r := &Reconciler{Client: builder.Build(), Scheme: scheme, recorder: record.NewFakeRecorder(100)}
+
+			require.NoError(t, r.ensureNodes(context.Background(), nodeSet))
+			assert.Equal(t, tt.wantReady, nodeSet.Status.ReadyInstances)
+
+			// The count must also be persisted, not just set on the in-memory object.
+			persisted := &appsv1.ChainNodeSet{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, persisted))
+			assert.Equal(t, tt.wantReady, persisted.Status.ReadyInstances)
+		})
+	}
+}
+
 // TestEnsureNodesRemovesStaleRegularNodesOnValidatorPromotion verifies that when a group is
 // changed from a regular group to a validator group, the old regular ChainNodes that are no
 // longer desired are removed, while the validator ChainNode (labelled validator=true, reconciled

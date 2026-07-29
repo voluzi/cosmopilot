@@ -138,6 +138,25 @@ func (chainNode *ChainNode) IsValidator() bool {
 	return chainNode.Spec.Validator != nil
 }
 
+// IsReady reports whether this node is serving: it is running, catching up, or momentarily busy
+// taking a snapshot. Every other phase (including the empty phase of a node that has not reported
+// yet) means it is not usable.
+//
+// Snapshotting is only serving when the node keeps running through the snapshot. With
+// .persistence.snapshots.stopNode the pod is deliberately deleted for the duration, so the node is
+// down while holding that phase.
+func (chainNode *ChainNode) IsReady() bool {
+	switch chainNode.Status.Phase {
+	case PhaseChainNodeRunning, PhaseChainNodeSyncing:
+		return true
+	case PhaseChainNodeSnapshotting:
+		return chainNode.Spec.Persistence == nil ||
+			!chainNode.Spec.Persistence.Snapshots.ShouldStopNode()
+	default:
+		return false
+	}
+}
+
 func (chainNode *ChainNode) ShouldInitGenesis() bool {
 	return chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
 }

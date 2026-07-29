@@ -115,14 +115,73 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 		}
 	}
 
-	// Assign the instance count before the comparison so a validator-only change (which does not
+	readyInstances, err := r.countReadyNodes(ctx, nodeSet)
+	if err != nil {
+		return err
+	}
+
+	// Assign the instance counts before the comparison so a validator-only change (which does not
 	// touch node status here) is still detected and persisted.
 	nodeSet.Status.Instances = totalInstances
+	nodeSet.Status.ReadyInstances = readyInstances
 	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {
-		log.FromContext(ctx).Info("updating .status.instances", "instances", totalInstances)
+		log.FromContext(ctx).Info("updating .status.instances",
+			"instances", totalInstances,
+			"readyInstances", readyInstances,
+		)
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
+}
+
+// countReadyNodes counts the ChainNodes of this nodeset that are currently serving. It reads
+// uncached: the caller has just created and deleted children, and the manager's cache would still
+// answer from the pre-mutation state, persisting a count that contradicts .status.instances.
+// Only children this nodeset actually controls are counted, and children being deleted are skipped
+// — they keep their last phase until finalizers complete, and they are already excluded from
+// .status.instances, so counting them could report more ready instances than desired for as long as
+// finalization is blocked.
+func (r *Reconciler) countReadyNodes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (int, error) {
+	chainNodeList := &appsv1.ChainNodeList{}
+	if err := r.uncachedReader().List(ctx, chainNodeList, &client.ListOptions{
+		Namespace:     nodeSet.GetNamespace(),
+		LabelSelector: labels.SelectorFromSet(map[string]string{controllers.LabelChainNodeSet: nodeSet.GetName()}),
+	}); err != nil {
+		return 0, err
+	}
+
+	ready := 0
+	for _, node := range chainNodeList.Items {
+		// The nodeset label is user-settable, so a standalone ChainNode carrying it would otherwise
+		// be counted. Every child this nodeset creates gets a controller reference.
+		if !metav1.IsControlledBy(&node, nodeSet) {
+			continue
+		}
+		if node.GetDeletionTimestamp() != nil {
+			continue
+		}
+		if node.IsReady() {
+			ready++
+		}
+	}
+	return ready, nil
+}
+
+// updateReadyInstances refreshes .status.readyInstances on its own. Reconcile returns early on
+// several paths that never reach ensureNodes (a cosmosigner rollout, migration or teardown that is
+// still converging), and those waits can last minutes. Without this the count would freeze at
+// whatever it was when the wait started, which is exactly when a child is most likely to break.
+func (r *Reconciler) updateReadyInstances(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	ready, err := r.countReadyNodes(ctx, nodeSet)
+	if err != nil {
+		return err
+	}
+	if nodeSet.Status.ReadyInstances == ready {
+		return nil
+	}
+	log.FromContext(ctx).Info("updating .status.readyInstances", "readyInstances", ready)
+	nodeSet.Status.ReadyInstances = ready
+	return r.Status().Update(ctx, nodeSet)
 }
 
 func (r *Reconciler) listNodeSetNodes(ctx context.Context, nodeSet *appsv1.ChainNodeSet, l ...string) (*appsv1.ChainNodeList, error) {
@@ -135,8 +194,11 @@ func (r *Reconciler) listNodeSetNodes(ctx context.Context, nodeSet *appsv1.Chain
 		selectorMap[l[i]] = l[i+1]
 	}
 
+	// The manager caches cluster-wide, so the nodeset label alone would also match identically named
+	// ChainNodeSets in other namespaces.
 	chainNodeList := &appsv1.ChainNodeList{}
 	return chainNodeList, r.List(ctx, chainNodeList, &client.ListOptions{
+		Namespace:     nodeSet.GetNamespace(),
 		LabelSelector: labels.SelectorFromSet(selectorMap),
 	})
 }
@@ -263,9 +325,10 @@ func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait
 	switch wait {
 	case waitRunningOrSyncing:
 		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {
-			return cn.Status.Phase == appsv1.PhaseChainNodeRunning ||
-				cn.Status.Phase == appsv1.PhaseChainNodeSyncing ||
-				cn.Status.Phase == appsv1.PhaseChainNodeSnapshotting
+			// A stop-node snapshot is not serving, but it is a bounded, self-clearing state, so this
+			// wait accepts it rather than blocking the whole reconcile until it finishes. Readiness
+			// accounting is stricter — see ChainNode.IsReady.
+			return cn.IsReady() || cn.Status.Phase == appsv1.PhaseChainNodeSnapshotting
 		})
 	case waitGenesisReady:
 		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {

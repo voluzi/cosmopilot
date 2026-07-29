@@ -30,6 +30,9 @@ spec:
     - jsonPath: .status.instances
       name: Instances
       type: integer
+    - jsonPath: .status.readyInstances
+      name: Ready
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -17324,6 +17327,14 @@ spec:
                   Public key of the first validator in spec order (legacy alias). See .status.validators
                   for the full list.
                 type: string
+              readyInstances:
+                description: |-
+                  Indicates how many of the ChainNode instances on this ChainNodeSet are currently serving,
+                  i.e. their phase is Running or Syncing, or Snapshotting without stopping the node. A value
+                  below .status.instances means the nodeset is degraded even while .status.phase is Running.
+                  Always serialized (no omitempty) so that a total outage reads as an explicit 0 instead of an
+                  absent field.
+                type: integer
               seeds:
                 description: Status of seed nodes (cosmoseed)
                 items:

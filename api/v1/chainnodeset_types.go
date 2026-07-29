@@ -37,6 +37,7 @@ type ChainNodeSetList struct {
 //+kubebuilder:printcolumn:name="ChainID",type=string,JSONPath=`.status.chainID`
 //+kubebuilder:printcolumn:name="LatestHeight",type=integer,JSONPath=`.status.latestHeight`
 //+kubebuilder:printcolumn:name="Instances",type=integer,JSONPath=`.status.instances`
+//+kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyInstances`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // ChainNodeSet is the Schema for the chainnodesets API.
@@ -109,6 +110,14 @@ type ChainNodeSetStatus struct {
 	// Indicates the total number of ChainNode instances on this ChainNodeSet.
 	// +optional
 	Instances int `json:"instances,omitempty"`
+
+	// Indicates how many of the ChainNode instances on this ChainNodeSet are currently serving,
+	// i.e. their phase is Running or Syncing, or Snapshotting without stopping the node. A value
+	// below .status.instances means the nodeset is degraded even while .status.phase is Running.
+	// Always serialized (no omitempty) so that a total outage reads as an explicit 0 instead of an
+	// absent field.
+	// +optional
+	ReadyInstances int `json:"readyInstances"`
 
 	// The application version currently deployed.
 	// +optional
