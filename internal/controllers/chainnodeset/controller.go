@@ -273,12 +273,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if hasRetargetingCosmosignerMigration(nodeSet) {
-		ready, err := r.reconcileCosmosignerRetargeting(ctx, nodeSet, blockedSignerTargets)
+		wait, err := r.reconcileCosmosignerRetargeting(ctx, nodeSet, blockedSignerTargets)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if !ready {
-			logger.Info("waiting for cosmosigner targets to converge while signer is stopped")
+		if !wait.done() {
+			// A break-before-make retargeting runs with the signer stopped and can last minutes. Name
+			// the step being waited on so a healthy migration is not mistaken for a stalled one, and
+			// emit it as an event too — the operator watching `kubectl describe` sees no signer pod
+			// and no discovery endpoints during this window.
+			logger.Info("waiting for cosmosigner targets to converge while signer is stopped",
+				"step", wait.step, "reason", wait.message())
+			r.recorder.Event(nodeSet, corev1.EventTypeNormal, appsv1.ReasonCosmosignerRetargeting, wait.message())
 			return r.requeueWaiting(ctx, nodeSet)
 		}
 	}

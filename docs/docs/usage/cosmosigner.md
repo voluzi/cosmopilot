@@ -358,6 +358,32 @@ deployment.
 Replica-count and state-storage changes remain unsupported because they require an explicit raft
 membership or PVC migration.
 
+### What a migration looks like while it runs
+
+A migration in a `ChainNodeSet` retargets its nodes with the signer stopped, so for a few minutes the
+signer pod is gone and `kubectl get endpoints <signer>-privval` returns `not found`. **This is the
+expected shape of a healthy migration, not a failure.** The discovery Service is deleted on purpose,
+so stale endpoints cannot reconnect the recreated signer to its previous targets.
+
+The longest step is usually target-pod recreation: picking up the new discovery label changes the pod
+spec, so each target is recreated rather than patched in place (patching a still-running pod would
+expose it to the new signer while the old one is live). Cosmopilot names the step it is waiting on in
+both its logs and `CosmosignerRetargeting` events on the `ChainNodeSet`:
+
+```shell
+kubectl describe chainnodeset <name> | grep CosmosignerRetargeting
+```
+
+```
+Normal  CosmosignerRetargeting  waiting for 2 target pod(s) to be recreated with their new signer
+                                discovery label: cp-nodes-validators-0, cp-nodes-validators-1
+```
+
+During the same window the targeted nodes themselves restart while they wait for the signer to dial
+in. A node that logs `can't get pubkey: endpoint connection timed out` and restarts before the signer
+is up is expected: the node and signer rendezvous by retrying, and the pair converges once both are
+running.
+
 ## Consensus-key reservations
 
 Before importing a key, retargeting nodes, or creating signer pods, Cosmopilot atomically creates a
