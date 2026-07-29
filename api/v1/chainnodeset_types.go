@@ -395,11 +395,15 @@ type NodeGroupSpec struct {
 	Instances *int `json:"instances,omitempty"`
 
 	// Specific configurations for these nodes.
+	// Ignored when this group has a `validator` block; use `.validator.config` instead.
 	// +optional
 	Config *Config `json:"config,omitempty"`
 
 	// Validator config for this node group. When set, every instance in this group is reconciled as a validator
-	// with its own consensus key and account secrets.
+	// with its own consensus key and account secrets. A validator group is configured entirely from this block:
+	// group-level `config`, `persistence`, `resources`, `nodeSelector`, `affinity`, `stateSyncRestore`,
+	// `stateSyncResources`, `vpa`, `pdb` and `overrideVersion` are ignored in favour of their `.validator.*`
+	// counterparts. Setting one of them at group level produces an admission warning.
 	// +optional
 	Validator *NodeSetValidatorConfig `json:"validator,omitempty"`
 
@@ -414,6 +418,7 @@ type NodeGroupSpec struct {
 
 	// Configures PVC for persisting data. Automated data snapshots can also be configured in
 	// this section.
+	// Ignored when this group has a `validator` block; use `.validator.persistence` instead.
 	// +optional
 	Persistence *Persistence `json:"persistence,omitempty"`
 
@@ -447,43 +452,53 @@ type NodeGroupSpec struct {
 	IndividualGatewayRoutes *GatewayConfig `json:"individualGatewayRoutes,omitempty"`
 
 	// Compute Resources required by the app container.
+	// Ignored when this group has a `validator` block; use `.validator.resources` instead.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Selector which must be true for the pod to fit on a node.
 	// Selector which must match a node's labels for the pod to be scheduled on that node.
+	// Ignored when this group has a `validator` block; use `.validator.nodeSelector` instead.
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// If specified, the pod's scheduling constraints.
+	// Ignored when this group has a `validator` block; use `.validator.affinity` instead.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// Configures these nodes to find state-sync snapshots on the network and restore from it.
 	// This is disabled by default.
+	// Ignored when this group has a `validator` block; use `.validator.stateSyncRestore` instead.
 	// +optional
 	StateSyncRestore *bool `json:"stateSyncRestore,omitempty"`
 
 	// Compute Resources to be used while the node is state-syncing.
+	// Ignored when this group has a `validator` block; use `.validator.stateSyncResources` instead.
 	// +optional
 	StateSyncResources corev1.ResourceRequirements `json:"stateSyncResources,omitempty"`
 
 	// Whether these nodes should inherit gas price from validator (if there is not configured on this ChainNodeSet)
 	// Defaults to `true`.
+	// Has no effect when this group has a `validator` block: a validator group is itself the gas-price source.
 	// +optional
 	InheritValidatorGasPrice *bool `json:"inheritValidatorGasPrice,omitempty"`
 
 	// Whether ChainNodeSet group label should be ignored on pod disruption checks.
 	// This is useful to ensure no downtime globally or per global ingress, instead of just per group.
 	// Defaults to `false`.
+	// Has no effect when this group has a `validator` block: validator pods already coordinate
+	// disruptions chain-wide, across every nodeset and group.
 	// +optional
 	IgnoreGroupOnDisruptionChecks *bool `json:"ignoreGroupOnDisruptionChecks,omitempty"`
 
 	// Vertical Pod Autoscaling configuration for this node.
+	// Ignored when this group has a `validator` block; use `.validator.vpa` instead.
 	// +optional
 	VPA *VerticalAutoscalingConfig `json:"vpa,omitempty"`
 
 	// Pod Disruption Budget configuration for this group.
+	// Ignored when this group has a `validator` block; use `.validator.pdb` instead.
 	// +optional
 	PDB *PdbConfig `json:"pdb,omitempty"`
 
@@ -498,6 +513,7 @@ type NodeGroupSpec struct {
 	// NOTE: when this is set, cosmopilot will not upgrade the nodes, nor will set the version
 	// based on upgrade history. For unsetting this, you will have to do it here and individually
 	// per ChainNode
+	// Ignored when this group has a `validator` block; use `.validator.overrideVersion` instead.
 	// +optional
 	OverrideVersion *string `json:"overrideVersion,omitempty"`
 }

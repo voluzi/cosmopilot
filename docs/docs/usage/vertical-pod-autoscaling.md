@@ -4,6 +4,8 @@ Vertical Pod Autoscaling (VPA) automatically adjusts CPU and memory requests bas
 
 `Cosmopilot` can configure VPA for a `ChainNode` or the validator within a `ChainNodeSet`.
 
+In a `ChainNodeSet`, place it under `.spec.nodes[].vpa` for a regular node group, and under `.spec.nodes[].validator.vpa` for a node group that has a `validator` block — a group-level `vpa` is ignored there.
+
 ## Example
 
 ```yaml

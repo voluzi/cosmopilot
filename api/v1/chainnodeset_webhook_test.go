@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -1829,4 +1830,126 @@ func TestGenesisSigningMaterialChangedIncludesChainID(t *testing.T) {
 
 	assert.False(t, genesisSigningMaterialChanged(base, sameChainID, defaultKey), "same chain ID should not be flagged as changed")
 	assert.True(t, genesisSigningMaterialChanged(base, diffChainID, defaultKey), "changed chain ID should be detected")
+}
+
+func TestChainNodeSetValidateWarnsOnMisplacedValidatorGroupFields(t *testing.T) {
+	nodeSetWith := func(groups ...NodeGroupSpec) *ChainNodeSet {
+		return &ChainNodeSet{Spec: ChainNodeSetSpec{
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes:   groups,
+		}}
+	}
+
+	t.Run("group-level fields on a validator group are reported", func(t *testing.T) {
+		nodeSet := nodeSetWith(NodeGroupSpec{
+			Name:            "validators",
+			Instances:       ptr.To(2),
+			Validator:       &NodeSetValidatorConfig{},
+			Persistence:     &Persistence{Size: ptr.To("10Gi")},
+			PDB:             &PdbConfig{Enabled: true},
+			OverrideVersion: ptr.To("v1.2.3"),
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			},
+		})
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			".spec.nodes[0].persistence is ignored because this group has a validator block; set .spec.nodes[0].validator.persistence instead",
+			".spec.nodes[0].resources is ignored because this group has a validator block; set .spec.nodes[0].validator.resources instead",
+			".spec.nodes[0].pdb is ignored because this group has a validator block; set .spec.nodes[0].validator.pdb instead",
+			".spec.nodes[0].overrideVersion is ignored because this group has a validator block; set .spec.nodes[0].validator.overrideVersion instead",
+		}, []string(warnings))
+	})
+
+	t.Run("the same fields on a regular group are not reported", func(t *testing.T) {
+		nodeSet := nodeSetWith(NodeGroupSpec{
+			Name:            "fullnodes",
+			Instances:       ptr.To(2),
+			Persistence:     &Persistence{Size: ptr.To("10Gi")},
+			PDB:             &PdbConfig{Enabled: true},
+			OverrideVersion: ptr.To("v1.2.3"),
+		})
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
+	})
+
+	t.Run("fields placed under validator are not reported", func(t *testing.T) {
+		nodeSet := nodeSetWith(NodeGroupSpec{
+			Name:      "validators",
+			Instances: ptr.To(2),
+			Validator: &NodeSetValidatorConfig{
+				Persistence: &Persistence{Size: ptr.To("10Gi")},
+				PDB:         &PdbConfig{Enabled: true},
+			},
+		})
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
+	})
+
+	t.Run("empty resources and node selector are not reported", func(t *testing.T) {
+		nodeSet := nodeSetWith(NodeGroupSpec{
+			Name:               "validators",
+			Instances:          ptr.To(1),
+			Validator:          &NodeSetValidatorConfig{},
+			Resources:          corev1.ResourceRequirements{},
+			StateSyncResources: corev1.ResourceRequirements{},
+			NodeSelector:       map[string]string{},
+		})
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
+	})
+
+	t.Run("flags without a validator counterpart are reported as no-ops", func(t *testing.T) {
+		nodeSet := nodeSetWith(NodeGroupSpec{
+			Name:                          "validators",
+			Instances:                     ptr.To(1),
+			Validator:                     &NodeSetValidatorConfig{},
+			IgnoreGroupOnDisruptionChecks: ptr.To(true),
+			InheritValidatorGasPrice:      ptr.To(false),
+		})
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			".spec.nodes[0].ignoreGroupOnDisruptionChecks has no effect on a validator group",
+			".spec.nodes[0].inheritValidatorGasPrice has no effect on a validator group",
+		}, []string(warnings))
+	})
+
+	t.Run("reported after tmKMS deprecation warnings", func(t *testing.T) {
+		nodeSet := nodeSetWith(NodeGroupSpec{
+			Name:      "validators",
+			Instances: ptr.To(1),
+			Validator: &NodeSetValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{
+				Hashicorp: &TmKmsHashicorpProvider{Address: "https://vault:8200", Key: "group-key"},
+			}}},
+			PDB: &PdbConfig{Enabled: true},
+		})
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			".spec.nodes[0].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[0].cosmosigner",
+			".spec.nodes[0].pdb is ignored because this group has a validator block; set .spec.nodes[0].validator.pdb instead",
+		}, []string(warnings))
+	})
+
+	t.Run("indexes are reported per group", func(t *testing.T) {
+		nodeSet := nodeSetWith(
+			NodeGroupSpec{Name: "fullnodes", Instances: ptr.To(1), Persistence: &Persistence{Size: ptr.To("10Gi")}},
+			NodeGroupSpec{
+				Name:         "validators",
+				Instances:    ptr.To(1),
+				Validator:    &NodeSetValidatorConfig{},
+				NodeSelector: map[string]string{"role": "validator"},
+			},
+		)
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			".spec.nodes[1].nodeSelector is ignored because this group has a validator block; set .spec.nodes[1].validator.nodeSelector instead",
+		}, []string(warnings))
+	})
 }

@@ -8,7 +8,8 @@ Persistence settings can be configured in the following locations:
 - For `ChainNode`: Configure under `.spec.persistence`.
 - For `ChainNodeSet`: 
   - Configure persistence for specific groups under `.spec.nodes[].persistence`.
-  - For the validator node (if present), configure under `.spec.validator.persistence`.
+  - For a node group that has a `validator` block, configure under `.spec.nodes[].validator.persistence`. The group-level `.spec.nodes[].persistence` is ignored on such a group (Cosmopilot emits an admission warning when you set it there) — the validator PVCs would silently fall back to the cluster defaults.
+  - For the legacy singleton validator node (if present), configure under `.spec.validator.persistence`.
 
 For example:
 - **ChainNode**:
@@ -22,6 +23,9 @@ spec:
   nodes:
     - name: fullnodes
       persistence: {...}
+    - name: validators
+      validator:
+        persistence: {...}
   validator:
     persistence: {...}
 ```

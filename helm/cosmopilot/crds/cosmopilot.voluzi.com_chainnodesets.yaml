@@ -953,7 +953,9 @@ spec:
                   description: NodeGroupSpec sets chainnode configurations for a group.
                   properties:
                     affinity:
-                      description: If specified, the pod's scheduling constraints.
+                      description: |-
+                        If specified, the pod's scheduling constraints.
+                        Ignored when this group has a `validator` block; use `.validator.affinity` instead.
                       properties:
                         nodeAffinity:
                           description: Describes node affinity scheduling rules for
@@ -1873,7 +1875,9 @@ spec:
                           type: object
                       type: object
                     config:
-                      description: Specific configurations for these nodes.
+                      description: |-
+                        Specific configurations for these nodes.
+                        Ignored when this group has a `validator` block; use `.validator.config` instead.
                       properties:
                         blockThreshold:
                           default: 0s
@@ -3970,6 +3974,8 @@ spec:
                         Whether ChainNodeSet group label should be ignored on pod disruption checks.
                         This is useful to ensure no downtime globally or per global ingress, instead of just per group.
                         Defaults to `false`.
+                        Has no effect when this group has a `validator` block: validator pods already coordinate
+                        disruptions chain-wide, across every nodeset and group.
                       type: boolean
                     individualGatewayRoutes:
                       description: |-
@@ -4153,6 +4159,7 @@ spec:
                       description: |-
                         Whether these nodes should inherit gas price from validator (if there is not configured on this ChainNodeSet)
                         Defaults to `true`.
+                        Has no effect when this group has a `validator` block: a validator group is itself the gas-price source.
                       type: boolean
                     instances:
                       default: 1
@@ -4169,6 +4176,7 @@ spec:
                       description: |-
                         Selector which must be true for the pod to fit on a node.
                         Selector which must match a node's labels for the pod to be scheduled on that node.
+                        Ignored when this group has a `validator` block; use `.validator.nodeSelector` instead.
                       type: object
                     overrideVersion:
                       description: |-
@@ -4176,9 +4184,12 @@ spec:
                         NOTE: when this is set, cosmopilot will not upgrade the nodes, nor will set the version
                         based on upgrade history. For unsetting this, you will have to do it here and individually
                         per ChainNode
+                        Ignored when this group has a `validator` block; use `.validator.overrideVersion` instead.
                       type: string
                     pdb:
-                      description: Pod Disruption Budget configuration for this group.
+                      description: |-
+                        Pod Disruption Budget configuration for this group.
+                        Ignored when this group has a `validator` block; use `.validator.pdb` instead.
                       properties:
                         enabled:
                           description: Enabled specifies whether to deploy a Pod Disruption
@@ -4227,6 +4238,7 @@ spec:
                       description: |-
                         Configures PVC for persisting data. Automated data snapshots can also be configured in
                         this section.
+                        Ignored when this group has a `validator` block; use `.validator.persistence` instead.
                       properties:
                         additionalInitCommands:
                           description: |-
@@ -5802,7 +5814,9 @@ spec:
                           type: string
                       type: object
                     resources:
-                      description: Compute Resources required by the app container.
+                      description: |-
+                        Compute Resources required by the app container.
+                        Ignored when this group has a `validator` block; use `.validator.resources` instead.
                       properties:
                         claims:
                           description: |-
@@ -5868,8 +5882,9 @@ spec:
                       minimum: 0
                       type: integer
                     stateSyncResources:
-                      description: Compute Resources to be used while the node is
-                        state-syncing.
+                      description: |-
+                        Compute Resources to be used while the node is state-syncing.
+                        Ignored when this group has a `validator` block; use `.validator.stateSyncResources` instead.
                       properties:
                         claims:
                           description: |-
@@ -5931,11 +5946,15 @@ spec:
                       description: |-
                         Configures these nodes to find state-sync snapshots on the network and restore from it.
                         This is disabled by default.
+                        Ignored when this group has a `validator` block; use `.validator.stateSyncRestore` instead.
                       type: boolean
                     validator:
                       description: |-
                         Validator config for this node group. When set, every instance in this group is reconciled as a validator
-                        with its own consensus key and account secrets.
+                        with its own consensus key and account secrets. A validator group is configured entirely from this block:
+                        group-level `config`, `persistence`, `resources`, `nodeSelector`, `affinity`, `stateSyncRestore`,
+                        `stateSyncResources`, `vpa`, `pdb` and `overrideVersion` are ignored in favour of their `.validator.*`
+                        counterparts. Setting one of them at group level produces an admission warning.
                       properties:
                         accountHDPath:
                           default: m/44'/118'/0'/0/0
@@ -11382,8 +11401,9 @@ spec:
                           type: object
                       type: object
                     vpa:
-                      description: Vertical Pod Autoscaling configuration for this
-                        node.
+                      description: |-
+                        Vertical Pod Autoscaling configuration for this node.
+                        Ignored when this group has a `validator` block; use `.validator.vpa` instead.
                       properties:
                         cpu:
                           description: CPU resource autoscaling configuration.

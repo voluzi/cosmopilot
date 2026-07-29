@@ -66,6 +66,27 @@ func (nodeSet *ChainNodeSet) tmKMSDeprecationWarnings() admission.Warnings {
 	return warnings
 }
 
+// validatorGroupMisplacedFieldWarnings surfaces group-level settings that a validator group
+// silently ignores. Without them a misplaced .spec.nodes[i].pdb or .persistence is a no-op with no
+// signal anywhere — the operator believes the validator is configured when it is not. These are
+// warnings rather than errors: the misconfiguration is inert, and rejecting it would make existing
+// objects uneditable and abort reconcile on the DisableWebhooks path.
+func (nodeSet *ChainNodeSet) validatorGroupMisplacedFieldWarnings() admission.Warnings {
+	warnings := admission.Warnings{}
+	for i, group := range nodeSet.Spec.Nodes {
+		for _, field := range group.MisplacedValidatorScopedFields() {
+			warnings = append(warnings, fmt.Sprintf(
+				".spec.nodes[%d].%s is ignored because this group has a validator block; set .spec.nodes[%d].validator.%s instead",
+				i, field, i, field))
+		}
+		for _, flag := range group.IneffectiveValidatorGroupFlags() {
+			warnings = append(warnings, fmt.Sprintf(
+				".spec.nodes[%d].%s has no effect on a validator group", i, flag))
+		}
+	}
+	return warnings
+}
+
 func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, error) {
 	// Count validators and how many of them initialize a new genesis.
 	initValidators := 0
@@ -541,7 +562,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		}
 	}
 
-	return nodeSet.tmKMSDeprecationWarnings(), nil
+	return append(nodeSet.tmKMSDeprecationWarnings(), nodeSet.validatorGroupMisplacedFieldWarnings()...), nil
 }
 
 // validateCosmosigner validates every managed cosmosigner a ChainNodeSet runs: the top-level
