@@ -91,7 +91,7 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 
-	mkNode := func(group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
+	mkNodeIn := func(namespace, group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
 		labels := map[string]string{
 			controllers.LabelChainNodeSet:      "test-nodeset",
 			controllers.LabelChainNodeSetGroup: group,
@@ -102,11 +102,14 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 		return &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("test-nodeset-%s-%d", group, index),
-				Namespace: "default",
+				Namespace: namespace,
 				Labels:    labels,
 			},
 			Status: appsv1.ChainNodeStatus{Phase: phase},
 		}
+	}
+	mkNode := func(group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
+		return mkNodeIn("default", group, index, phase, validator)
 	}
 
 	tests := []struct {
@@ -143,6 +146,17 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 				mkNode("fullnodes", 1, "", false),
 			},
 			wantReady: 1,
+		},
+		{
+			// The manager cache is cluster-wide, so an identically named ChainNodeSet in another
+			// namespace must not contribute to this one's readiness.
+			name:  "ready nodes of a same-named nodeset in another namespace are not counted",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeError, false),
+				mkNodeIn("other", "fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
+			},
+			wantReady: 0,
 		},
 	}
 

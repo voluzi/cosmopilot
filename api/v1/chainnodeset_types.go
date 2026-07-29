@@ -113,9 +113,10 @@ type ChainNodeSetStatus struct {
 
 	// Indicates how many of the ChainNode instances on this ChainNodeSet are currently ready, i.e.
 	// their phase is Running, Syncing or Snapshotting. A value below .status.instances means the
-	// nodeset is degraded even while .status.phase is Running.
+	// nodeset is degraded even while .status.phase is Running. Always serialized (no omitempty) so
+	// that a total outage reads as an explicit 0 instead of an absent field.
 	// +optional
-	ReadyInstances int `json:"readyInstances,omitempty"`
+	ReadyInstances int `json:"readyInstances"`
 
 	// The application version currently deployed.
 	// +optional

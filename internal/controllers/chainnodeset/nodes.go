@@ -152,8 +152,11 @@ func (r *Reconciler) listNodeSetNodes(ctx context.Context, nodeSet *appsv1.Chain
 		selectorMap[l[i]] = l[i+1]
 	}
 
+	// The manager caches cluster-wide, so the nodeset label alone would also match identically named
+	// ChainNodeSets in other namespaces.
 	chainNodeList := &appsv1.ChainNodeList{}
 	return chainNodeList, r.List(ctx, chainNodeList, &client.ListOptions{
+		Namespace:     nodeSet.GetNamespace(),
 		LabelSelector: labels.SelectorFromSet(selectorMap),
 	})
 }
