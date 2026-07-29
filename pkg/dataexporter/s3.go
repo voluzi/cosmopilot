@@ -92,7 +92,12 @@ func NewS3Exporter(ctx context.Context, cfg S3Config) (*S3Exporter, error) {
 	})
 	exporter := newS3Exporter(client)
 	// A custom endpoint means an S3-compatible store, which may reject checksummed batch deletes.
-	exporter.perObjectDelete = cfg.Endpoint != ""
+	//
+	// Read the endpoint back off the constructed client rather than off cfg: the SDK also resolves
+	// AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL and shared-config endpoint_url, and it does so onto the
+	// service client's options, not onto aws.Config. Checking our own field alone would leave batch
+	// deletes enabled against a store configured entirely through the SDK's own mechanisms.
+	exporter.perObjectDelete = aws.ToString(client.Options().BaseEndpoint) != ""
 	return exporter, nil
 }
 

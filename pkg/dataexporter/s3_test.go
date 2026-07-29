@@ -326,6 +326,8 @@ func TestS3DeleteReportsPerObjectFailures(t *testing.T) {
 	}
 	client.deleteErr = errors.New("access denied")
 	exporter := newS3Exporter(client)
+	// Exercise the per-object path this test is named for; the default is batched.
+	exporter.perObjectDelete = true
 
 	err := exporter.Delete("snapshots", "snapshot")
 	if err == nil {
@@ -333,6 +335,11 @@ func TestS3DeleteReportsPerObjectFailures(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "access denied") {
 		t.Fatalf("Delete() error = %v, want it to mention the underlying failure", err)
+	}
+	// Pin the per-object wrapper: the batched path reports "objects with prefix" instead, so this also
+	// catches the exporter silently falling back to batching.
+	if !strings.Contains(err.Error(), `delete S3 object "snapshot.tar.zst"`) {
+		t.Fatalf("Delete() error = %v, want the per-object wrapper naming the key", err)
 	}
 }
 
@@ -479,4 +486,38 @@ func (f *fakeS3Client) multipartBodiesAreFiles() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.diskBacked
+}
+
+// TestNewS3ExporterDetectsEndpointFromAWSConfigChain: a compatible store can be pointed at via the
+// SDK's own AWS_ENDPOINT_URL_S3 / AWS_ENDPOINT_URL / shared-config endpoint_url rather than our
+// Endpoint field. Deciding on our field alone would leave batch deletes on, reproducing the
+// MissingContentMD5 failure this change exists to fix.
+func TestNewS3ExporterDetectsEndpointFromAWSConfigChain(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_ENDPOINT_URL_S3", "http://minio.storage.svc:9000")
+
+	// Note: no Endpoint set on our own config.
+	exporter, err := NewS3Exporter(context.Background(), S3Config{Region: "us-east-1"})
+	if err != nil {
+		t.Fatalf("NewS3Exporter() error = %v", err)
+	}
+	if !exporter.perObjectDelete {
+		t.Fatal("an endpoint resolved through the AWS config chain must still select per-object deletes")
+	}
+}
+
+func TestNewS3ExporterUsesBatchedDeletesAgainstAmazonS3(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	exporter, err := NewS3Exporter(context.Background(), S3Config{Region: "us-east-1"})
+	if err != nil {
+		t.Fatalf("NewS3Exporter() error = %v", err)
+	}
+	if exporter.perObjectDelete {
+		t.Fatal("Amazon S3 accepts batched deletes; per-object would cost one request per object")
+	}
 }
