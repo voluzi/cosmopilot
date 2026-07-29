@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -197,9 +198,141 @@ func TestS3DeleteRemovesAllObjectsWithPrefix(t *testing.T) {
 	if err := exporter.Delete("snapshots", "snapshot"); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
-	want := []string{"snapshot.tar.zst", "snapshot-part-00000000.tar.lz4", "snapshot-part-00000001.tar.lz4"}
-	if fmt.Sprint(client.deletedKeys) != fmt.Sprint(want) {
-		t.Fatalf("deleted keys = %v, want %v", client.deletedKeys, want)
+	// Deletions run concurrently, so compare as a set.
+	want := []string{"snapshot-part-00000000.tar.lz4", "snapshot-part-00000001.tar.lz4", "snapshot.tar.zst"}
+	got := append([]string(nil), client.deletedKeys...)
+	sort.Strings(got)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("deleted keys = %v, want %v", got, want)
+	}
+}
+
+// TestS3DeleteBatchesAgainstAmazonS3 keeps request volume bounded where batching is accepted: a small
+// partSize splits a large snapshot into very many objects, and one DeleteObject per key would cost
+// three orders of magnitude more requests than batches of 1000 — long enough to be throttled and to
+// block snapshot expiration.
+func TestS3DeleteBatchesAgainstAmazonS3(t *testing.T) {
+	client := newFakeS3Client()
+	for i := range 2500 {
+		client.listedObjects = append(client.listedObjects,
+			types.Object{Key: aws.String(fmt.Sprintf("snapshot-part-%08d.tar.lz4", i))})
+	}
+	exporter := newS3Exporter(client) // no custom endpoint: Amazon S3
+
+	if err := exporter.Delete("snapshots", "snapshot"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if len(client.deletedKeys) != 2500 {
+		t.Fatalf("deleted keys = %d, want 2500", len(client.deletedKeys))
+	}
+	if client.singleCalls != 0 {
+		t.Fatalf("per-object calls = %d, want 0 against Amazon S3", client.singleCalls)
+	}
+	if client.batchCalls != 3 {
+		t.Fatalf("batch calls = %d, want 3 (2500 keys in batches of 1000)", client.batchCalls)
+	}
+}
+
+func TestS3DeleteUsesPerObjectAgainstCustomEndpoint(t *testing.T) {
+	client := newFakeS3Client()
+	client.listedObjects = []types.Object{
+		{Key: aws.String("snapshot.tar.zst")},
+		{Key: aws.String("snapshot-part-00000000.tar.lz4")},
+	}
+	exporter := newS3Exporter(client)
+	exporter.perObjectDelete = true
+
+	if err := exporter.Delete("snapshots", "snapshot"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if client.batchCalls != 0 {
+		t.Fatalf("batch calls = %d, want 0 against an S3-compatible endpoint", client.batchCalls)
+	}
+	if client.singleCalls != 2 {
+		t.Fatalf("per-object calls = %d, want 2", client.singleCalls)
+	}
+}
+
+// TestS3DeleteSendsNoChecksumHeaderAgainstCustomEndpoint exercises a real SDK client against an
+// httptest server and asserts on the bytes actually put on the wire.
+//
+// The multi-object DeleteObjects API is modelled with RequireChecksum, so the SDK sends
+// x-amz-checksum-crc32 and ignores RequestChecksumCalculation entirely. Amazon S3 accepts that, but
+// MinIO and other S3-compatible stores require the legacy Content-MD5 and reject it with 400
+// MissingContentMD5. Deleting per object sends no body, hence no integrity header at all.
+//
+// A fake s3API cannot catch this: the header is added by SDK middleware, below the interface.
+func TestS3DeleteSendsNoChecksumHeaderAgainstCustomEndpoint(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	var mu sync.Mutex
+	var deleteRequests []*http.Request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.Method == http.MethodDelete {
+			mu.Lock()
+			deleteRequests = append(deleteRequests, r.Clone(context.Background()))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// MinIO rejects a POST ?delete carrying a CRC32 checksum instead of Content-MD5.
+		if r.URL.Query().Has("delete") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`<Error><Code>MissingContentMD5</Code>` +
+				`<Message>Missing required header for this request: Content-Md5.</Message></Error>`))
+			return
+		}
+		_, _ = w.Write([]byte("<ListBucketResult><IsTruncated>false</IsTruncated>" +
+			"<Contents><Key>cosmoshub-1.tar.gz</Key></Contents></ListBucketResult>"))
+	}))
+	defer server.Close()
+
+	exporter, err := NewS3Exporter(context.Background(), S3Config{
+		Region:         "us-east-1",
+		Endpoint:       server.URL,
+		ForcePathStyle: true,
+	})
+	if err != nil {
+		t.Fatalf("NewS3Exporter() error = %v", err)
+	}
+	if err := exporter.Delete("snapshots", "cosmoshub-1"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleteRequests) != 1 {
+		t.Fatalf("per-object DELETE requests = %d, want 1", len(deleteRequests))
+	}
+	request := deleteRequests[0]
+	if got := request.URL.Path; got != "/snapshots/cosmoshub-1.tar.gz" {
+		t.Fatalf("delete path = %q, want /snapshots/cosmoshub-1.tar.gz", got)
+	}
+	for _, header := range []string{"X-Amz-Checksum-Crc32", "X-Amz-Sdk-Checksum-Algorithm"} {
+		if value := request.Header.Get(header); value != "" {
+			t.Fatalf("delete request carried %s=%q; S3-compatible stores reject checksummed deletes", header, value)
+		}
+	}
+}
+
+func TestS3DeleteReportsPerObjectFailures(t *testing.T) {
+	client := newFakeS3Client()
+	client.listedObjects = []types.Object{
+		{Key: aws.String("snapshot.tar.zst")},
+		{Key: aws.String("snapshot-part-00000000.tar.lz4")},
+	}
+	client.deleteErr = errors.New("access denied")
+	exporter := newS3Exporter(client)
+
+	err := exporter.Delete("snapshots", "snapshot")
+	if err == nil {
+		t.Fatal("Delete() expected an error")
+	}
+	if !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("Delete() error = %v, want it to mention the underlying failure", err)
 	}
 }
 
@@ -210,7 +343,10 @@ type fakeS3Client struct {
 	completed     map[string][]byte
 	listedObjects []types.Object
 	deletedKeys   []string
+	batchCalls    int
+	singleCalls   int
 	uploadErr     error
+	deleteErr     error
 	abortCount    int
 	nextUploadID  int
 	diskBacked    bool
@@ -283,10 +419,27 @@ func (f *fakeS3Client) ListObjectsV2(_ context.Context, _ *s3.ListObjectsV2Input
 }
 
 func (f *fakeS3Client) DeleteObjects(_ context.Context, input *s3.DeleteObjectsInput, _ ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	f.batchCalls++
 	for _, object := range input.Delete.Objects {
 		f.deletedKeys = append(f.deletedKeys, aws.ToString(object.Key))
 	}
 	return &s3.DeleteObjectsOutput{}, nil
+}
+
+func (f *fakeS3Client) DeleteObject(_ context.Context, input *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	f.singleCalls++
+	f.deletedKeys = append(f.deletedKeys, aws.ToString(input.Key))
+	return &s3.DeleteObjectOutput{}, nil
 }
 
 func (f *fakeS3Client) completedObject(name string) ([]byte, bool) {

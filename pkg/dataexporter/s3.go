@@ -45,12 +45,19 @@ type s3API interface {
 	CompleteMultipartUpload(context.Context, *s3.CompleteMultipartUploadInput, ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
 	AbortMultipartUpload(context.Context, *s3.AbortMultipartUploadInput, ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error)
 	ListObjectsV2(context.Context, *s3.ListObjectsV2Input, ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 	DeleteObjects(context.Context, *s3.DeleteObjectsInput, ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
 }
 
 // S3Exporter implements Exporter for Amazon S3 and compatible object stores.
 type S3Exporter struct {
 	client s3API
+	// perObjectDelete forces one DeleteObject per key instead of batched DeleteObjects. DeleteObjects is
+	// modelled with RequireChecksum, so the SDK always sends x-amz-checksum-crc32 and ignores
+	// RequestChecksumCalculation; Amazon S3 accepts that but S3-compatible stores such as MinIO require
+	// the legacy Content-MD5 and reject the request with 400 MissingContentMD5. Batching stays on for
+	// Amazon S3, where an archive split into many parts would otherwise cost one request per part.
+	perObjectDelete bool
 }
 
 // NewS3Exporter creates an exporter using the AWS SDK default credential chain.
@@ -83,7 +90,10 @@ func NewS3Exporter(ctx context.Context, cfg S3Config) (*S3Exporter, error) {
 			options.BaseEndpoint = aws.String(cfg.Endpoint)
 		}
 	})
-	return newS3Exporter(client), nil
+	exporter := newS3Exporter(client)
+	// A custom endpoint means an S3-compatible store, which may reject checksummed batch deletes.
+	exporter.perObjectDelete = cfg.Endpoint != ""
+	return exporter, nil
 }
 
 func newS3Exporter(client s3API) *S3Exporter {
@@ -446,7 +456,7 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 	}
 	ctx := context.Background()
 	var continuationToken *string
-	objectIDs := make([]types.ObjectIdentifier, 0)
+	keys := make([]string, 0)
 	for {
 		output, err := exporter.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(bucket),
@@ -458,7 +468,7 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 		}
 		for _, object := range output.Contents {
 			if isArchiveObjectName(name, aws.ToString(object.Key)) {
-				objectIDs = append(objectIDs, types.ObjectIdentifier{Key: object.Key})
+				keys = append(keys, aws.ToString(object.Key))
 			}
 		}
 		if !aws.ToBool(output.IsTruncated) {
@@ -466,17 +476,29 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 		}
 		continuationToken = output.NextContinuationToken
 	}
-	if len(objectIDs) == 0 {
+	if len(keys) == 0 {
 		log.Warnf("no objects found with prefix: %s", name)
 		return nil
 	}
 
-	semaphore := make(chan struct{}, options.ConcurrentJobs)
-	errCh := make(chan error, (len(objectIDs)+s3DeleteBatchSize-1)/s3DeleteBatchSize)
+	// A small partSize splits a large snapshot into very many objects, so batch wherever the store
+	// accepts it: one request per 1000 keys instead of one per key.
+	if !exporter.perObjectDelete {
+		return exporter.deleteBatched(ctx, bucket, name, keys, options.ConcurrentJobs)
+	}
+	return exporter.deletePerObject(ctx, bucket, keys, options.ConcurrentJobs)
+}
+
+func (exporter *S3Exporter) deleteBatched(ctx context.Context, bucket, name string, keys []string, concurrency int) error {
+	semaphore := make(chan struct{}, concurrency)
+	errCh := make(chan error, (len(keys)+s3DeleteBatchSize-1)/s3DeleteBatchSize)
 	var wg sync.WaitGroup
-	for start := 0; start < len(objectIDs); start += s3DeleteBatchSize {
-		end := min(start+s3DeleteBatchSize, len(objectIDs))
-		batch := append([]types.ObjectIdentifier(nil), objectIDs[start:end]...)
+	for start := 0; start < len(keys); start += s3DeleteBatchSize {
+		end := min(start+s3DeleteBatchSize, len(keys))
+		batch := make([]types.ObjectIdentifier, 0, end-start)
+		for _, key := range keys[start:end] {
+			batch = append(batch, types.ObjectIdentifier{Key: aws.String(key)})
+		}
 		semaphore <- struct{}{}
 		wg.Add(1)
 		go func() {
@@ -492,6 +514,35 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 			}
 			if len(output.Errors) > 0 {
 				errCh <- fmt.Errorf("delete S3 objects with prefix %q: %s", name, formatS3DeleteErrors(output.Errors))
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	var deleteErrors []error
+	for err := range errCh {
+		deleteErrors = append(deleteErrors, err)
+	}
+	return errors.Join(deleteErrors...)
+}
+
+// deletePerObject issues one DeleteObject per key. DeleteObject sends no body and therefore no
+// integrity header, so it is accepted by stores that reject the checksummed batch API.
+func (exporter *S3Exporter) deletePerObject(ctx context.Context, bucket string, keys []string, concurrency int) error {
+	semaphore := make(chan struct{}, concurrency)
+	errCh := make(chan error, len(keys))
+	var wg sync.WaitGroup
+	for _, key := range keys {
+		semaphore <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+			if _, err := exporter.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			}); err != nil {
+				errCh <- fmt.Errorf("delete S3 object %q: %w", key, err)
 			}
 		}()
 	}
