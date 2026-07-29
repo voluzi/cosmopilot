@@ -115,17 +115,9 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 		}
 	}
 
-	// Re-list children: the list taken at the top of this function predates the creations and
-	// deletions performed above, so counting from it would report a stale readiness.
-	currentNodes, err := r.listNodeSetNodes(ctx, nodeSet)
+	readyInstances, err := r.countReadyNodes(ctx, nodeSet)
 	if err != nil {
 		return err
-	}
-	readyInstances := 0
-	for _, node := range currentNodes.Items {
-		if node.IsReady() {
-			readyInstances++
-		}
 	}
 
 	// Assign the instance counts before the comparison so a validator-only change (which does not
@@ -140,6 +132,50 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
+}
+
+// countReadyNodes counts the ChainNodes of this nodeset that are currently serving. It reads
+// uncached: the caller has just created and deleted children, and the manager's cache would still
+// answer from the pre-mutation state, persisting a count that contradicts .status.instances.
+// Children being deleted are skipped — they keep their last phase until finalizers complete, and
+// they are already excluded from .status.instances, so counting them could report more ready
+// instances than desired for as long as finalization is blocked.
+func (r *Reconciler) countReadyNodes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (int, error) {
+	chainNodeList := &appsv1.ChainNodeList{}
+	if err := r.uncachedReader().List(ctx, chainNodeList, &client.ListOptions{
+		Namespace:     nodeSet.GetNamespace(),
+		LabelSelector: labels.SelectorFromSet(map[string]string{controllers.LabelChainNodeSet: nodeSet.GetName()}),
+	}); err != nil {
+		return 0, err
+	}
+
+	ready := 0
+	for _, node := range chainNodeList.Items {
+		if node.GetDeletionTimestamp() != nil {
+			continue
+		}
+		if node.IsReady() {
+			ready++
+		}
+	}
+	return ready, nil
+}
+
+// updateReadyInstances refreshes .status.readyInstances on its own. Reconcile returns early on
+// several paths that never reach ensureNodes (a cosmosigner rollout, migration or teardown that is
+// still converging), and those waits can last minutes. Without this the count would freeze at
+// whatever it was when the wait started, which is exactly when a child is most likely to break.
+func (r *Reconciler) updateReadyInstances(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	ready, err := r.countReadyNodes(ctx, nodeSet)
+	if err != nil {
+		return err
+	}
+	if nodeSet.Status.ReadyInstances == ready {
+		return nil
+	}
+	log.FromContext(ctx).Info("updating .status.readyInstances", "readyInstances", ready)
+	nodeSet.Status.ReadyInstances = ready
+	return r.Status().Update(ctx, nodeSet)
 }
 
 func (r *Reconciler) listNodeSetNodes(ctx context.Context, nodeSet *appsv1.ChainNodeSet, l ...string) (*appsv1.ChainNodeList, error) {
@@ -283,7 +319,10 @@ func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait
 	switch wait {
 	case waitRunningOrSyncing:
 		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {
-			return cn.IsReady()
+			// A stop-node snapshot is not serving, but it is a bounded, self-clearing state, so this
+			// wait accepts it rather than blocking the whole reconcile until it finishes. Readiness
+			// accounting is stricter — see ChainNode.IsReady.
+			return cn.IsReady() || cn.Status.Phase == appsv1.PhaseChainNodeSnapshotting
 		})
 	case waitGenesisReady:
 		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {

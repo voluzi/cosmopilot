@@ -53,11 +53,24 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 	return r, nil
 }
 
-func (r *Reconciler) reservationReader() client.Reader {
+// uncachedReader returns a reader that bypasses the manager cache, for reads that must observe
+// writes made earlier in the same reconcile. Falls back to the cached client in tests that do not
+// wire an APIReader.
+func (r *Reconciler) uncachedReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
 	}
 	return r.Client
+}
+
+// requeueWaiting is the return used by the reconcile paths that stop early to wait for a signer
+// rollout, migration or teardown to converge. Those waits skip ensureNodes entirely and can last
+// minutes, so readiness is refreshed here to keep .status.readyInstances honest meanwhile.
+func (r *Reconciler) requeueWaiting(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (ctrl.Result, error) {
+	if err := r.updateReadyInstances(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 }
 
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets,verbs=get;list;watch;create;update;patch;delete
@@ -206,13 +219,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	} else if pending {
 		logger.Info("waiting for break-before-make cosmosigner migration")
-		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+		return r.requeueWaiting(ctx, nodeSet)
 	}
 	blockedSignerTargets, ready, err := r.prepareCosmosignerImports(ctx, nodeSet, preparedCosmosigners)
 	if err != nil {
 		return ctrl.Result{}, err
 	} else if !ready {
-		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+		return r.requeueWaiting(ctx, nodeSet)
 	}
 
 	// Tear down any managed signer the spec no longer desires before children are reconciled, and wait
@@ -222,7 +235,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	} else if !tornDown {
 		logger.Info("waiting for cosmosigner teardown before reconciling children")
-		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+		return r.requeueWaiting(ctx, nodeSet)
 	}
 
 	// Validators that initialize a new genesis must run before ensureGenesis: they produce the
@@ -266,7 +279,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		if !ready {
 			logger.Info("waiting for cosmosigner targets to converge while signer is stopped")
-			return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+			return r.requeueWaiting(ctx, nodeSet)
 		}
 	}
 
@@ -276,7 +289,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	} else if !ready {
 		logger.Info("waiting for cosmosigner rollout before reconciling children")
-		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
+		return r.requeueWaiting(ctx, nodeSet)
 	}
 
 	// Once a genesis is available (chainID known), reconcile validators that consume an external

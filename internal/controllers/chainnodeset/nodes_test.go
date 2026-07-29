@@ -111,6 +111,18 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 	mkNode := func(group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
 		return mkNodeIn("default", group, index, phase, validator)
 	}
+	// A ChainNode needs a finalizer for the fake client to keep it around with a deletion timestamp.
+	terminating := func(node *appsv1.ChainNode) *appsv1.ChainNode {
+		node.Finalizers = []string{"cosmopilot.voluzi.com/test"}
+		node.DeletionTimestamp = ptr.To(metav1.Now())
+		return node
+	}
+	stopsForSnapshots := func(node *appsv1.ChainNode) *appsv1.ChainNode {
+		node.Spec.Persistence = &appsv1.Persistence{
+			Snapshots: &appsv1.VolumeSnapshotsConfig{StopNode: ptr.To(true)},
+		}
+		return node
+	}
 
 	tests := []struct {
 		name      string
@@ -157,6 +169,33 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 				mkNodeIn("other", "fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
 			},
 			wantReady: 0,
+		},
+		{
+			// A node deleted by a scale-down keeps its last phase until finalizers complete, but is
+			// already excluded from .status.instances — counting it could report ready > instances.
+			name:  "children being deleted are not counted",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
+				terminating(mkNode("fullnodes", 1, appsv1.PhaseChainNodeRunning, false)),
+			},
+			wantReady: 1,
+		},
+		{
+			// With stopNode the pod is deleted for the duration of the snapshot, so the node holds
+			// the Snapshotting phase while being down.
+			name: "snapshotting nodes that stop for the snapshot are not ready",
+			nodes: []appsv1.NodeGroupSpec{
+				{Name: "stopping", Instances: ptr.To(1), Persistence: &appsv1.Persistence{
+					Snapshots: &appsv1.VolumeSnapshotsConfig{StopNode: ptr.To(true)},
+				}},
+				{Name: "serving", Instances: ptr.To(1)},
+			},
+			children: []*appsv1.ChainNode{
+				stopsForSnapshots(mkNode("stopping", 0, appsv1.PhaseChainNodeSnapshotting, false)),
+				mkNode("serving", 0, appsv1.PhaseChainNodeSnapshotting, false),
+			},
+			wantReady: 1,
 		},
 	}
 

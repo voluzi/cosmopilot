@@ -56,3 +56,44 @@ func TestValidatorConfigGetAccountSecretName(t *testing.T) {
 		})
 	}
 }
+
+func TestChainNodeIsReady(t *testing.T) {
+	stopsForSnapshots := &Persistence{Snapshots: &VolumeSnapshotsConfig{StopNode: ptr.To(true)}}
+
+	tests := []struct {
+		name        string
+		phase       ChainNodePhase
+		persistence *Persistence
+		want        bool
+	}{
+		{name: "running", phase: PhaseChainNodeRunning, want: true},
+		{name: "syncing", phase: PhaseChainNodeSyncing, want: true},
+		{name: "snapshotting while still serving", phase: PhaseChainNodeSnapshotting, want: true},
+		{
+			name:        "snapshotting with stopNode is down",
+			phase:       PhaseChainNodeSnapshotting,
+			persistence: stopsForSnapshots,
+			want:        false,
+		},
+		{
+			name:        "running with stopNode configured but no snapshot in progress",
+			phase:       PhaseChainNodeRunning,
+			persistence: stopsForSnapshots,
+			want:        true,
+		},
+		{name: "error", phase: PhaseChainNodeError, want: false},
+		{name: "restarting", phase: PhaseChainNodeRestarting, want: false},
+		{name: "stopped", phase: PhaseChainNodeStopped, want: false},
+		{name: "no phase reported yet", phase: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &ChainNode{
+				Spec:   ChainNodeSpec{Persistence: tt.persistence},
+				Status: ChainNodeStatus{Phase: tt.phase},
+			}
+			assert.Equal(t, tt.want, node.IsReady())
+		})
+	}
+}
