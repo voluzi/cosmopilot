@@ -138,6 +138,18 @@ func (chainNode *ChainNode) IsValidator() bool {
 	return chainNode.Spec.Validator != nil
 }
 
+// IsReady reports whether this node is serving: it is running, catching up, or momentarily busy
+// taking a snapshot. Every other phase (including the empty phase of a node that has not reported
+// yet) means it is not usable.
+func (chainNode *ChainNode) IsReady() bool {
+	switch chainNode.Status.Phase {
+	case PhaseChainNodeRunning, PhaseChainNodeSyncing, PhaseChainNodeSnapshotting:
+		return true
+	default:
+		return false
+	}
+}
+
 func (chainNode *ChainNode) ShouldInitGenesis() bool {
 	return chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
 }

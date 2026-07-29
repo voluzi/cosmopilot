@@ -115,11 +115,28 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 		}
 	}
 
-	// Assign the instance count before the comparison so a validator-only change (which does not
+	// Re-list children: the list taken at the top of this function predates the creations and
+	// deletions performed above, so counting from it would report a stale readiness.
+	currentNodes, err := r.listNodeSetNodes(ctx, nodeSet)
+	if err != nil {
+		return err
+	}
+	readyInstances := 0
+	for _, node := range currentNodes.Items {
+		if node.IsReady() {
+			readyInstances++
+		}
+	}
+
+	// Assign the instance counts before the comparison so a validator-only change (which does not
 	// touch node status here) is still detected and persisted.
 	nodeSet.Status.Instances = totalInstances
+	nodeSet.Status.ReadyInstances = readyInstances
 	if !reflect.DeepEqual(nodeSet.Status, nodeSetCopy.Status) {
-		log.FromContext(ctx).Info("updating .status.instances", "instances", totalInstances)
+		log.FromContext(ctx).Info("updating .status.instances",
+			"instances", totalInstances,
+			"readyInstances", readyInstances,
+		)
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
@@ -263,9 +280,7 @@ func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait
 	switch wait {
 	case waitRunningOrSyncing:
 		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {
-			return cn.Status.Phase == appsv1.PhaseChainNodeRunning ||
-				cn.Status.Phase == appsv1.PhaseChainNodeSyncing ||
-				cn.Status.Phase == appsv1.PhaseChainNodeSnapshotting
+			return cn.IsReady()
 		})
 	case waitGenesisReady:
 		return r.waitChainNode(node, func(cn *appsv1.ChainNode) bool {

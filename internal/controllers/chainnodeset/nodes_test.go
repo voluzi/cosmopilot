@@ -85,6 +85,98 @@ func TestEnsureNodesInstanceCount(t *testing.T) {
 	}
 }
 
+// TestEnsureNodesReadyInstances verifies that .status.readyInstances counts only children whose
+// phase is Running, Syncing or Snapshotting, so a degraded nodeset is visible from the CR alone.
+func TestEnsureNodesReadyInstances(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	mkNode := func(group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
+		labels := map[string]string{
+			controllers.LabelChainNodeSet:      "test-nodeset",
+			controllers.LabelChainNodeSetGroup: group,
+		}
+		if validator {
+			labels[controllers.LabelChainNodeSetValidator] = controllers.StringValueTrue
+		}
+		return &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("test-nodeset-%s-%d", group, index),
+				Namespace: "default",
+				Labels:    labels,
+			},
+			Status: appsv1.ChainNodeStatus{Phase: phase},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		nodes     []appsv1.NodeGroupSpec
+		children  []*appsv1.ChainNode
+		wantReady int
+	}{
+		{
+			name:  "degraded validator group is not fully ready",
+			nodes: []appsv1.NodeGroupSpec{{Name: "validators", Instances: ptr.To(3), Validator: &appsv1.NodeSetValidatorConfig{}}},
+			children: []*appsv1.ChainNode{
+				mkNode("validators", 0, appsv1.PhaseChainNodeRunning, true),
+				mkNode("validators", 1, appsv1.PhaseChainNodeRestarting, true),
+				mkNode("validators", 2, appsv1.PhaseChainNodeError, true),
+			},
+			wantReady: 1,
+		},
+		{
+			name:  "syncing and snapshotting nodes count as ready",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(3)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeSyncing, false),
+				mkNode("fullnodes", 1, appsv1.PhaseChainNodeSnapshotting, false),
+				mkNode("fullnodes", 2, appsv1.PhaseChainNodeRunning, false),
+			},
+			wantReady: 3,
+		},
+		{
+			name:  "nodes that have not reported a phase are not ready",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(2)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
+				mkNode("fullnodes", 1, "", false),
+			},
+			wantReady: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("u")},
+				Spec: appsv1.ChainNodeSetSpec{
+					Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+					Nodes:   tt.nodes,
+				},
+				Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+			}
+
+			builder := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNodeSet{}, &appsv1.ChainNode{}).
+				WithObjects(nodeSet)
+			for _, child := range tt.children {
+				builder = builder.WithObjects(child)
+			}
+			r := &Reconciler{Client: builder.Build(), Scheme: scheme, recorder: record.NewFakeRecorder(100)}
+
+			require.NoError(t, r.ensureNodes(context.Background(), nodeSet))
+			assert.Equal(t, tt.wantReady, nodeSet.Status.ReadyInstances)
+
+			// The count must also be persisted, not just set on the in-memory object.
+			persisted := &appsv1.ChainNodeSet{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, persisted))
+			assert.Equal(t, tt.wantReady, persisted.Status.ReadyInstances)
+		})
+	}
+}
+
 // TestEnsureNodesRemovesStaleRegularNodesOnValidatorPromotion verifies that when a group is
 // changed from a regular group to a validator group, the old regular ChainNodes that are no
 // longer desired are removed, while the validator ChainNode (labelled validator=true, reconciled

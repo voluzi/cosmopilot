@@ -347,7 +347,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if guards.routesPending {
 			return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
 		}
-		return ctrl.Result{}, nil
+		// Keep the periodic requeue on this path too: child ChainNode status changes are filtered by
+		// the predicate, so .status.readyInstances (and latestHeight) would otherwise go stale until
+		// an unrelated event arrives.
+		return ctrl.Result{RequeueAfter: appsv1.DefaultReconcilePeriod}, nil
 	}
 	if guards.routesPending {
 		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
