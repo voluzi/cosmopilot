@@ -137,9 +137,10 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 // countReadyNodes counts the ChainNodes of this nodeset that are currently serving. It reads
 // uncached: the caller has just created and deleted children, and the manager's cache would still
 // answer from the pre-mutation state, persisting a count that contradicts .status.instances.
-// Children being deleted are skipped — they keep their last phase until finalizers complete, and
-// they are already excluded from .status.instances, so counting them could report more ready
-// instances than desired for as long as finalization is blocked.
+// Only children this nodeset actually controls are counted, and children being deleted are skipped
+// — they keep their last phase until finalizers complete, and they are already excluded from
+// .status.instances, so counting them could report more ready instances than desired for as long as
+// finalization is blocked.
 func (r *Reconciler) countReadyNodes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (int, error) {
 	chainNodeList := &appsv1.ChainNodeList{}
 	if err := r.uncachedReader().List(ctx, chainNodeList, &client.ListOptions{
@@ -151,6 +152,11 @@ func (r *Reconciler) countReadyNodes(ctx context.Context, nodeSet *appsv1.ChainN
 
 	ready := 0
 	for _, node := range chainNodeList.Items {
+		// The nodeset label is user-settable, so a standalone ChainNode carrying it would otherwise
+		// be counted. Every child this nodeset creates gets a controller reference.
+		if !metav1.IsControlledBy(&node, nodeSet) {
+			continue
+		}
 		if node.GetDeletionTimestamp() != nil {
 			continue
 		}

@@ -104,12 +104,26 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 				Name:      fmt.Sprintf("test-nodeset-%s-%d", group, index),
 				Namespace: namespace,
 				Labels:    labels,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: appsv1.GroupVersion.String(),
+					Kind:       "ChainNodeSet",
+					Name:       "test-nodeset",
+					UID:        types.UID("u"),
+					Controller: ptr.To(true),
+				}},
 			},
 			Status: appsv1.ChainNodeStatus{Phase: phase},
 		}
 	}
 	mkNode := func(group string, index int, phase appsv1.ChainNodePhase, validator bool) *appsv1.ChainNode {
 		return mkNodeIn("default", group, index, phase, validator)
+	}
+	// A standalone ChainNode that merely carries the user-settable nodeset label. It has no group
+	// label, so the deleted-group cleanup leaves it alone and it survives to the counting loop.
+	unowned := func(node *appsv1.ChainNode) *appsv1.ChainNode {
+		node.OwnerReferences = nil
+		delete(node.Labels, controllers.LabelChainNodeSetGroup)
+		return node
 	}
 	// A ChainNode needs a finalizer for the fake client to keep it around with a deletion timestamp.
 	terminating := func(node *appsv1.ChainNode) *appsv1.ChainNode {
@@ -167,6 +181,17 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 			children: []*appsv1.ChainNode{
 				mkNode("fullnodes", 0, appsv1.PhaseChainNodeError, false),
 				mkNodeIn("other", "fullnodes", 0, appsv1.PhaseChainNodeRunning, false),
+			},
+			wantReady: 0,
+		},
+		{
+			// The nodeset label is user-settable, so a standalone ChainNode wearing it must not be
+			// counted as an instance of this nodeset.
+			name:  "same-named-label nodes not controlled by this nodeset are not counted",
+			nodes: []appsv1.NodeGroupSpec{{Name: "fullnodes", Instances: ptr.To(1)}},
+			children: []*appsv1.ChainNode{
+				mkNode("fullnodes", 0, appsv1.PhaseChainNodeError, false),
+				unowned(mkNode("standalone", 0, appsv1.PhaseChainNodeRunning, false)),
 			},
 			wantReady: 0,
 		},
