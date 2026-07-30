@@ -776,10 +776,12 @@ func TestReconcileCosmosignerRetargetingSkipsOnlyBlockedSigner(t *testing.T) {
 	require.False(t, blockedNode.Spec.RemoteSignerTarget)
 }
 
-// TestReconcileCosmosignerRetargetingReportsPendingTargetPods verifies the long pole of a
-// break-before-make migration — target pods awaiting recreation with their new discovery label — is
-// reported by name. That window runs with the signer stopped and no discovery endpoints, so without
-// naming the pods it is indistinguishable from a stalled migration.
+// TestReconcileCosmosignerRetargetingReportsPendingTargetPods verifies that target pods still
+// carrying the wrong discovery label are reported by name. This is the slow step of a
+// break-before-make migration whenever the pod spec changed too (a node switching between local and
+// remote signing), since those pods are recreated rather than patched. The window runs with the
+// signer stopped and no discovery endpoints, so without naming the pods it is indistinguishable from
+// a stalled migration.
 func TestReconcileCosmosignerRetargetingReportsPendingTargetPods(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},

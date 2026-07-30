@@ -365,10 +365,19 @@ signer pod is gone and `kubectl get endpoints <signer>-privval` returns `not fou
 expected shape of a healthy migration, not a failure.** The discovery Service is deleted on purpose,
 so stale endpoints cannot reconnect the recreated signer to its previous targets.
 
-The longest step is usually target-pod recreation: picking up the new discovery label changes the pod
-spec, so each target is recreated rather than patched in place (patching a still-running pod would
-expose it to the new signer while the old one is live). Cosmopilot names the step it is waiting on in
-both its logs and `CosmosignerRetargeting` events on the `ChainNodeSet`:
+How long this takes depends on what changed. Most migrations — image, resources, log level,
+credentials — keep the same targets, so the discovery labels already match and this phase passes
+straight through. When only the target label changes, Cosmopilot patches it onto the running pod
+in place, with no restart.
+
+Target pods are **recreated** only when the pod spec changes too — most visibly when a node switches
+between local and remote signing, which adds or removes `priv_validator_laddr` and the local key
+mount. In that case the label is applied together with the new spec rather than patched onto the
+running pod, so a pod still on the previous signing path is never exposed to the new signer while the
+old one is live. That is the case where this phase takes minutes rather than seconds.
+
+Cosmopilot names the step it is waiting on in both its logs and `CosmosignerRetargeting` events on the
+`ChainNodeSet`:
 
 ```shell
 kubectl describe chainnodeset <name> | grep CosmosignerRetargeting

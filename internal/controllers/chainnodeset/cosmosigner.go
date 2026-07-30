@@ -915,8 +915,10 @@ func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSe
 	}); err != nil {
 		return retargetingWait{step: retargetingStepTargetPods}, err
 	}
-	// Collect every lagging pod rather than returning on the first one: relabelling requires a pod
-	// recreation each, so this is the long pole of the migration and the operator wants the full list.
+	// Collect every lagging pod rather than returning on the first one. A label-only change is patched
+	// in place and converges at once, but when the pod spec also changed (a node switching between
+	// local and remote signing) each target is recreated instead — that is the slow case, and the
+	// operator wants the full list rather than one name at a time.
 	var pending []string
 	for i := range pods.Items {
 		pod := &pods.Items[i]
