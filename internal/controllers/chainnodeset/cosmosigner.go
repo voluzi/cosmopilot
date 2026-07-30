@@ -852,14 +852,14 @@ func (w retargetingWait) message() string {
 	case retargetingStepDiscoveryEndpoints:
 		return fmt.Sprintf("waiting for the %s-privval discovery endpoints to flush before the signer is recreated", w.signer)
 	case retargetingStepTargetPods:
-		named := w.pods
-		suffix := ""
-		if len(named) > retargetingMaxNamedPods {
-			named = named[:retargetingMaxNamedPods]
-			suffix = fmt.Sprintf(" and %d more", len(w.pods)-retargetingMaxNamedPods)
-		}
-		return fmt.Sprintf("waiting for %d target pod(s) to be recreated with their new signer discovery "+
-			"label: %s%s", len(w.pods), strings.Join(named, ", "), suffix)
+		// "pick up" rather than "be recreated": a pod whose spec is otherwise unchanged is relabelled
+		// in place with no restart, and only a pod whose spec also changed is recreated. Promising
+		// recreation would imply downtime that most migrations do not incur.
+		return fmt.Sprintf("waiting for %d target pod(s) to pick up their new signer discovery "+
+			"label: %s", len(w.pods), w.namedList())
+	case retargetingStepBlockedKey:
+		return fmt.Sprintf("retargeting is complete but %d signer(s) cannot be recreated until their key "+
+			"material is available: %s", len(w.pods), w.namedList())
 	case retargetingStepPhaseAdvance:
 		return "recording retargeting completion before the signer is recreated"
 	default:
@@ -867,16 +867,44 @@ func (w retargetingWait) message() string {
 	}
 }
 
+// namedList renders w.pods, capping how many names are spelled out.
+func (w retargetingWait) namedList() string {
+	named := w.pods
+	if len(named) > retargetingMaxNamedPods {
+		return strings.Join(named[:retargetingMaxNamedPods], ", ") +
+			fmt.Sprintf(" and %d more", len(named)-retargetingMaxNamedPods)
+	}
+	return strings.Join(named, ", ")
+}
+
 const (
 	retargetingStepDiscoveryService   = "DiscoveryServiceRemoval"
 	retargetingStepDiscoveryEndpoints = "DiscoveryEndpointsFlush"
-	retargetingStepTargetPods         = "TargetPodRecreation"
+	retargetingStepTargetPods         = "TargetLabelConvergence"
+	retargetingStepBlockedKey         = "SignerKeyUnavailable"
 	retargetingStepPhaseAdvance       = "PhaseAdvance"
 
 	// retargetingMaxNamedPods caps how many pod names a wait message spells out, so a large nodeset
 	// does not produce an unreadable event. Events are truncated by the API server at 1KiB.
 	retargetingMaxNamedPods = 10
 )
+
+// blockedRetargetingSigners returns the sorted names of signers still in the retargeting phase whose
+// key material is not yet provable, so the wait can name them instead of reporting phase progress.
+func blockedRetargetingSigners(nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) []string {
+	var names []string
+	for i := range nodeSet.Status.Cosmosigners {
+		status := &nodeSet.Status.Cosmosigners[i]
+		if status.Migration == nil || status.Migration.Phase != appsv1.CosmosignerMigrationRetargeting {
+			continue
+		}
+		if _, isBlocked := blocked[status.Name]; isBlocked {
+			names = append(names, status.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
 
 func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) (retargetingWait, error) {
 	for _, s := range nodeSet.ResolveCosmosigners() {
@@ -952,10 +980,11 @@ func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSe
 		}
 		return retargetingWait{step: retargetingStepPhaseAdvance}, nil
 	}
-	if hasRetargetingCosmosignerMigration(nodeSet) {
-		// Every remaining retargeting migration belongs to a blocked signer: it stays in this phase
-		// until its key material is provable, which is reported on the blocked-signer path.
-		return retargetingWait{step: retargetingStepPhaseAdvance}, nil
+	if names := blockedRetargetingSigners(nodeSet, blocked); len(names) > 0 {
+		// Every remaining retargeting migration belongs to a blocked signer, which stays in this phase
+		// until its key material is provable. That can require operator action (a missing source
+		// Secret never appears on its own), so it must not be reported as transient phase progress.
+		return retargetingWait{step: retargetingStepBlockedKey, pods: names}, nil
 	}
 	return retargetingWait{}, nil
 }

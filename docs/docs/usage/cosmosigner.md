@@ -402,9 +402,12 @@ same time and find each other by retrying, so before they converge you will typi
   its remote signer at startup and exits if the signer has not dialed in yet;
 - the signer log `resolve target nodes … no such host` until the targeted pods have DNS records.
 
-Both are retried and clear on their own. Cosmosigner re-resolves its targets as soon as a connection
-drops rather than only on a fixed interval, so a node that is replaced with a new pod IP is picked up
-in about a second — the pair normally converges within a few seconds.
+Both are retried and clear on their own. How quickly depends on the signer image: Cosmosigner **0.2.1
+and newer** re-resolves its targets as soon as a connection drops, so a node replaced with a new pod
+IP is picked up in about a second and the pair converges within a few seconds. On **0.2.0** — still
+the default `cosmosignerImage` — re-resolution only happens on the fixed reconcile interval, so a node
+that churns during rendezvous can restart several times and take a few minutes to settle. The rollout
+is healthy either way; only how long it looks unsettled differs.
 
 **A genesis-initializing validator group additionally shows one pod recreation:** create → `Error` →
 recreate. This is deliberate and is the safety mechanism working, not a defect. Such a validator

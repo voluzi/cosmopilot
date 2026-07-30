@@ -830,7 +830,7 @@ func TestReconcileCosmosignerRetargetingReportsPendingTargetPods(t *testing.T) {
 	require.Equal(t, retargetingStepTargetPods, wait.step)
 	// Sorted, so the message is stable across reconciles rather than reordering on every pass.
 	require.Equal(t, []string{"test-nodeset-moving-0", "test-nodeset-moving-1"}, wait.pods)
-	assert.Contains(t, wait.message(), "waiting for 2 target pod(s) to be recreated")
+	assert.Contains(t, wait.message(), "waiting for 2 target pod(s) to pick up their new signer discovery label")
 	assert.Contains(t, wait.message(), "test-nodeset-moving-0, test-nodeset-moving-1")
 
 	// The migration must not advance while targets lag.
@@ -899,6 +899,18 @@ func TestRetargetingWaitMessage(t *testing.T) {
 	assert.Contains(t,
 		retargetingWait{step: retargetingStepPhaseAdvance}.message(),
 		"recording retargeting completion")
+
+	// A blocked signer's key wait can require operator action, so it must not read as phase progress.
+	blockedMsg := retargetingWait{step: retargetingStepBlockedKey, pods: []string{"signer-a"}}.message()
+	assert.Contains(t, blockedMsg, "cannot be recreated until their key material is available")
+	assert.Contains(t, blockedMsg, "signer-a")
+	assert.NotContains(t, blockedMsg, "recording retargeting completion")
+
+	// A pod awaiting the label must not be described as being recreated: a pod whose spec is
+	// otherwise unchanged is relabelled in place, so promising recreation implies downtime.
+	labelMsg := retargetingWait{step: retargetingStepTargetPods, pods: []string{"pod-0"}}.message()
+	assert.Contains(t, labelMsg, "pick up their new signer discovery label")
+	assert.NotContains(t, labelMsg, "recreated")
 
 	many := make([]string, 0, retargetingMaxNamedPods+3)
 	for i := 0; i < retargetingMaxNamedPods+3; i++ {
