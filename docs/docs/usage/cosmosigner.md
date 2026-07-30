@@ -206,7 +206,8 @@ cosmosigner:
       certificateSecret: { name: vault-ca, key: ca.crt }   # optional CA
       # uploadGenerated: true    # testnets only: import the validator's generated key into Vault.
       #                          # Requires targeting a validator (init/create-validator) so the
-      #                          # imported key matches the one registered on-chain. Defaults to false.
+      #                          # imported key matches the one registered on-chain. Defaults to
+      #                          # false, but is implied when the target initializes a new genesis.
 ```
 
 Cosmosigner renews renewable and periodic Vault tokens itself at half their current TTL. No
@@ -223,6 +224,14 @@ startup; use a new Secret name when those values rotate so Cosmopilot performs b
 `keyVersion` is pinned into every public-key lookup and signing request. Rotating the Vault Transit
 key therefore does not silently change the validator identity on restart. Deliberately moving to a
 new version is a managed signer migration and must match the key the chain expects.
+
+:::note[Genesis init implies `uploadGenerated`]
+When the signer targets a validator that initializes a new genesis (`validator.init`),
+`uploadGenerated` is treated as `true` even if you leave it unset. A fresh genesis always generates
+its consensus key locally, so a pre-provisioned Vault key can never be used there — the generated key
+must be imported for the signer to hold it. The `keyVersion: 1` requirement below therefore applies
+to every genesis-initializing validator, not only to the explicit opt-in.
+:::
 
 `uploadGenerated` creates version 1 of a previously unused Transit `keyName`; set `keyVersion: 1`.
 After a completed import, the source Secret is immutable for that target. To import different key

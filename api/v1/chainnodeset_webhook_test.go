@@ -153,7 +153,7 @@ func TestChainNodeSetValidateGenesis(t *testing.T) {
 				},
 			},
 			wantErr:     true,
-			errContains: ".spec.genesis is required when a validator does not initialize a new genesis",
+			errContains: ".spec.genesis is required when a validator does not initialize a new genesis with .spec.validator.init; to run multiple validators in a generated genesis, set instances on the single genesis-initializing validator group instead of adding another validator group",
 		},
 		{
 			name: "genesis present with non-init validators is allowed",
@@ -174,7 +174,7 @@ func TestChainNodeSetValidateGenesis(t *testing.T) {
 				},
 			},
 			wantErr:     true,
-			errContains: "only one ChainNodeSet validator can initialize genesis",
+			errContains: "only one ChainNodeSet validator can initialize genesis; to run multiple genesis validators, set instances on that single validator group",
 		},
 	}
 
@@ -1951,5 +1951,89 @@ func TestChainNodeSetValidateWarnsOnMisplacedValidatorGroupFields(t *testing.T) 
 		require.Equal(t, []string{
 			".spec.nodes[1].nodeSelector is ignored because this group has a validator block; set .spec.nodes[1].validator.nodeSelector instead",
 		}, []string(warnings))
+	})
+}
+
+// TestChainNodeSetValidateWarnsOnGenesisSignerCollapse covers the sharp edge where the same manifest
+// means two different things: a multi-instance validator group is N genesis validators on its own,
+// but ONE validator once a cosmosigner targets it. Only .validator.init groups are reported — there
+// the collapse lands in the immutable genesis validator set — while the documented HA layout (a
+// signer over a multi-instance group without init) stays silent.
+func TestChainNodeSetValidateWarnsOnGenesisSignerCollapse(t *testing.T) {
+	initConfig := &GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1unibi"}, StakeAmount: "1unibi"}
+	signer := func() *Cosmosigner {
+		return &Cosmosigner{Backend: CosmosignerBackend{Vault: &CosmosignerVaultBackend{
+			Address: "https://vault:8200", KeyName: "validator",
+			TokenSecret: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token",
+			},
+		}}}
+	}
+	collapseWarning := ".spec.nodes[0] initializes genesis with 3 instances and a cosmosigner, so it adds ONE validator to the immutable genesis set, not 3; remove the cosmosigner if each instance should be its own genesis validator"
+
+	t.Run("a group-level signer on a multi-instance init group is reported", func(t *testing.T) {
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{{
+			Name:        "validators",
+			Instances:   ptr.To(3),
+			Validator:   &NodeSetValidatorConfig{Init: initConfig},
+			Cosmosigner: signer(),
+		}}}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{collapseWarning}, []string(warnings))
+	})
+
+	t.Run("a top-level signer targeting the group is reported", func(t *testing.T) {
+		topLevel := signer()
+		topLevel.NodeGroups = []string{"validators"}
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
+			Cosmosigner: topLevel,
+			Nodes: []NodeGroupSpec{{
+				Name:      "validators",
+				Instances: ptr.To(3),
+				Validator: &NodeSetValidatorConfig{Init: initConfig},
+			}},
+		}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{collapseWarning}, []string(warnings))
+	})
+
+	t.Run("the documented HA layout without init is not reported", func(t *testing.T) {
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []NodeGroupSpec{{
+				Name:        "validators",
+				Instances:   ptr.To(3),
+				Validator:   &NodeSetValidatorConfig{},
+				Cosmosigner: signer(),
+			}},
+		}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
+	})
+
+	t.Run("a single-instance init group with a signer is not reported", func(t *testing.T) {
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{{
+			Name:        "validators",
+			Instances:   ptr.To(1),
+			Validator:   &NodeSetValidatorConfig{Init: initConfig},
+			Cosmosigner: signer(),
+		}}}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
+	})
+
+	t.Run("a multi-instance init group without a signer is not reported", func(t *testing.T) {
+		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{{
+			Name:      "validators",
+			Instances: ptr.To(3),
+			Validator: &NodeSetValidatorConfig{Init: initConfig},
+		}}}}
+		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
 	})
 }

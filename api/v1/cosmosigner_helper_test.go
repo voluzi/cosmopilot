@@ -27,6 +27,37 @@ func TestCosmosignerGetImagePrecedence(t *testing.T) {
 	}
 }
 
+// TestVaultUploadsGeneratedAutoDefaultsForInitTargets pins the auto-default: a genesis-initializing
+// validator always generates its consensus key locally, so the Vault backend must import it even
+// when uploadGenerated is left unset. Without an init target the field is the only thing that
+// enables the import, and a non-Vault backend never imports at all.
+func TestVaultUploadsGeneratedAutoDefaultsForInitTargets(t *testing.T) {
+	vault := func(uploadGenerated bool) *Cosmosigner {
+		return &Cosmosigner{Backend: CosmosignerBackend{Vault: &CosmosignerVaultBackend{
+			Address: "https://vault:8200", KeyName: "validator",
+			TokenSecret: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token",
+			},
+			UploadGenerated: uploadGenerated,
+		}}}
+	}
+
+	if !vault(false).VaultUploadsGenerated(true) {
+		t.Fatal("a genesis-initializing target must import its generated key even with uploadGenerated unset")
+	}
+	if vault(false).VaultUploadsGenerated(false) {
+		t.Fatal("without an init target, uploadGenerated=false must not import a generated key")
+	}
+	if !vault(true).VaultUploadsGenerated(false) {
+		t.Fatal("an explicit uploadGenerated=true must import a generated key")
+	}
+
+	software := &Cosmosigner{Backend: CosmosignerBackend{Software: &CosmosignerSoftwareBackend{}}}
+	if software.VaultUploadsGenerated(true) {
+		t.Fatal("a non-Vault backend must never report a Vault import")
+	}
+}
+
 func TestVaultVersionOneMatchesTmKMSIdentity(t *testing.T) {
 	token := &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"}
 	tmkms := &ChainNode{
