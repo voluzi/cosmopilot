@@ -390,7 +390,7 @@ A fresh deploy shows a similar pattern, for a different reason. Nodes and their 
 same time and find each other by retrying, so before they converge you will typically see:
 
 - the node restart once or twice with `can't get pubkey: endpoint connection timed out` — it blocks on
-  its remote signer at startup and exits if the signer has not dialled in yet;
+  its remote signer at startup and exits if the signer has not dialed in yet;
 - the signer log `resolve target nodes … no such host` until the targeted pods have DNS records.
 
 Both are retried and clear on their own. Cosmosigner re-resolves its targets as soon as a connection
@@ -406,8 +406,9 @@ recreated rather than patched.
 
 That recreation is what makes the switch safe: the local-key pod is deleted and gone before the
 signer-targeted pod is created, so the consensus key is never live in two places at once. Marking the
-pod as signer-targeted any earlier would label a pod that still holds a local key. Sentry groups and
-validators against an existing genesis are targeted from creation and show no such recreation.
+pod as signer-targeted any earlier would label a pod that still holds a local key. By contrast,
+sentry groups and validators against an existing genesis are targeted from creation and show no such
+recreation.
 
 ## Consensus-key reservations
 

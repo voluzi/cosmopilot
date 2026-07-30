@@ -847,10 +847,10 @@ func (w retargetingWait) message() string {
 	case "":
 		return "cosmosigner retargeting converged"
 	case retargetingStepDiscoveryService:
-		return fmt.Sprintf("waiting for the %s discovery Service to be removed so stale endpoints "+
+		return fmt.Sprintf("waiting for the %s-privval discovery Service to be removed so stale endpoints "+
 			"cannot reconnect the recreated signer to its previous targets", w.signer)
 	case retargetingStepDiscoveryEndpoints:
-		return fmt.Sprintf("waiting for the %s discovery endpoints to flush before the signer is recreated", w.signer)
+		return fmt.Sprintf("waiting for the %s-privval discovery endpoints to flush before the signer is recreated", w.signer)
 	case retargetingStepTargetPods:
 		named := w.pods
 		suffix := ""
@@ -887,13 +887,18 @@ func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSe
 		if _, isBlocked := blocked[s.Name]; isBlocked {
 			continue
 		}
-		gone, err := cosmosigner.DeleteDiscoveryService(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), nodeSet.CosmosignerResourceName(s))
+		// Report the stable resource name, not the logical signer name: a manifest-placement
+		// migration reuses the existing signer, so ResourceName can differ from s.Name — and the
+		// Service being waited on is <ResourceName>-privval. Naming s.Name would point operators at
+		// a Service that does not exist.
+		resourceName := nodeSet.CosmosignerResourceName(s)
+		gone, err := cosmosigner.DeleteDiscoveryService(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName)
 		if err != nil || !gone {
-			return retargetingWait{step: retargetingStepDiscoveryService, signer: s.Name}, err
+			return retargetingWait{step: retargetingStepDiscoveryService, signer: resourceName}, err
 		}
-		endpointsGone, err := cosmosigner.DiscoveryEndpointsGone(ctx, r.Client, nodeSet.GetNamespace(), nodeSet.CosmosignerResourceName(s))
+		endpointsGone, err := cosmosigner.DiscoveryEndpointsGone(ctx, r.Client, nodeSet.GetNamespace(), resourceName)
 		if err != nil || !endpointsGone {
-			return retargetingWait{step: retargetingStepDiscoveryEndpoints, signer: s.Name}, err
+			return retargetingWait{step: retargetingStepDiscoveryEndpoints, signer: resourceName}, err
 		}
 	}
 

@@ -835,6 +835,53 @@ func TestReconcileCosmosignerRetargetingReportsPendingTargetPods(t *testing.T) {
 	assert.Equal(t, appsv1.CosmosignerMigrationRetargeting, nodeSet.GetCosmosignerStatus(signer.Name).Migration.Phase)
 }
 
+// TestReconcileCosmosignerRetargetingReportsStableResourceName verifies the discovery waits name the
+// signer's STABLE resource name rather than its logical name. A manifest-placement migration reuses
+// the existing signer, so status.ResourceName can differ from the resolved signer name — and the
+// Service actually being waited on is <ResourceName>-privval. Reporting the logical name would point
+// operators at a Service that does not exist.
+func TestReconcileCosmosignerRetargetingReportsStableResourceName(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			App:     appsv1.AppSpec{Image: "image", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "moving", Instances: ptr.To(1),
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("moving-key")},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	const stableName = "legacy-signer-name"
+	require.NotEqual(t, stableName, signer.Name)
+
+	status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	status.ResourceName = stableName
+	status.Migration = &appsv1.CosmosignerMigrationStatus{
+		DesiredDigest: signer.Digest(), Phase: appsv1.CosmosignerMigrationRetargeting,
+	}
+
+	// A lingering EndpointSlice for the stable name's discovery Service keeps the wait on the
+	// endpoint-flush step, which is one of the two steps that must report the stable name.
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name:      stableName + "-privval-abc",
+		Namespace: nodeSet.Namespace,
+		Labels:    map[string]string{discoveryv1.LabelServiceName: stableName + "-privval"},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, slice)
+
+	wait, err := r.reconcileCosmosignerRetargeting(context.Background(), nodeSet, blockedSignerTargets{})
+	require.NoError(t, err)
+	require.False(t, wait.done())
+	assert.Equal(t, stableName, wait.signer, "wait must report the stable resource name")
+	assert.Contains(t, wait.message(), stableName+"-privval")
+	assert.NotContains(t, wait.message(), signer.Name+"-privval")
+}
+
 // TestRetargetingWaitMessage covers the operator-facing rendering of each wait step, including the
 // cap that keeps a large nodeset from producing an unreadable event.
 func TestRetargetingWaitMessage(t *testing.T) {
@@ -843,10 +890,10 @@ func TestRetargetingWaitMessage(t *testing.T) {
 
 	assert.Contains(t,
 		retargetingWait{step: retargetingStepDiscoveryService, signer: "signer-a"}.message(),
-		"waiting for the signer-a discovery Service to be removed")
+		"waiting for the signer-a-privval discovery Service to be removed")
 	assert.Contains(t,
 		retargetingWait{step: retargetingStepDiscoveryEndpoints, signer: "signer-a"}.message(),
-		"waiting for the signer-a discovery endpoints to flush")
+		"waiting for the signer-a-privval discovery endpoints to flush")
 	assert.Contains(t,
 		retargetingWait{step: retargetingStepPhaseAdvance}.message(),
 		"recording retargeting completion")
