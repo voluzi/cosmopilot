@@ -46,6 +46,12 @@ See the [Nibiru Testnet Multi Validator](../examples/nibiru/testnet-multi-valida
 
 :::info
 Because each instance must sign with its own key, a multi-instance validator group cannot set a shared `privateKeySecret`, `tmKMS`, or `init.accountMnemonicSecret`. The group name `validator` is reserved for the legacy `.spec.validator`; use any other name.
+
+Every validator that Cosmopilot *runs* for this chain must live in this one group: only one validator may initialize the genesis, and adding a second validator group without `init` is rejected because it would have no genesis to consume. Raise `instances` rather than declaring more groups. (Validators whose keys are provisioned outside the group can still be written into the genesis with `validator.init.genesisValidators` — Cosmopilot adds each entry's account and gentx to the initial validator set without running a node for it.)
+:::
+
+:::warning[A `cosmosigner` makes this one validator]
+Attaching a [cosmosigner](../usage/cosmosigner) to a multi-instance validator group makes it **one** validator with redundant signing endpoints — the genesis then contains a single `gen_tx`, not one per instance. Cosmopilot emits an admission warning for this combination, because the genesis validator set is fixed once created. Leave the signer off if every instance should be its own genesis validator.
 :::
 
 :::warning[Immutable after creation]
