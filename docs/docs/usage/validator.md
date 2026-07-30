@@ -89,10 +89,12 @@ nodes:
 See [Initializing a New Network → Multiple Genesis Validators](../usage/initializing-new-network#multiple-genesis-validators) and the [Nibiru Testnet Multi Validator](../examples/nibiru/testnet-multi-validator) example.
 
 :::warning[Use `instances`, not several groups]
-On a chain you are initializing yourself, **all genesis validators must live in one group**. Only one
+On a chain you are initializing yourself, **every validator Cosmopilot runs lives in one group**. Only one
 validator may carry `validator.init`, and a validator group without `init` requires an external
 `.spec.genesis` — so the intuitive "one group initializes the genesis, other validator groups join
 it" layout is rejected by both rules at once. Scale the single init group with `instances` instead.
+Genesis validators that Cosmopilot does not run — keys provisioned elsewhere, or ones needing their
+own stake, assets or moniker — go in that group's `validator.init.genesisValidators` list.
 Separate validator groups are for chains whose genesis already exists — there each group either
 carries a consensus key the genesis already lists ([Existing Consensus Key](#existing-consensus-key))
 or joins with `createValidator` (below).
