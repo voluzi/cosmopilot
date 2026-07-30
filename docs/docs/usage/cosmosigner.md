@@ -15,7 +15,7 @@ wires everything for you.
 
 :::tip[Image]
 The signer image defaults to the operator-wide `cosmosignerImage` Helm value
-(`ghcr.io/voluzi/cosmosigner:0.2.0`), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
+(`ghcr.io/voluzi/cosmosigner:0.2.1`), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
 operator flag — see [Configuration](../getting-started/configuration.md#cosmosignerimage). Set
 `.spec.cosmosigner.image` to pin or override the image for one specific signer only. Cosmopilot's
 managed signing path requires Cosmosigner 0.2.0 or newer for Vault key-version pinning and startup
@@ -402,12 +402,14 @@ same time and find each other by retrying, so before they converge you will typi
   its remote signer at startup and exits if the signer has not dialed in yet;
 - the signer log `resolve target nodes … no such host` until the targeted pods have DNS records.
 
-Both are retried and clear on their own. How quickly depends on the signer image: Cosmosigner **0.2.1
-and newer** re-resolves its targets as soon as a connection drops, so a node replaced with a new pod
-IP is picked up in about a second and the pair converges within a few seconds. On **0.2.0** — still
-the default `cosmosignerImage` — re-resolution only happens on the fixed reconcile interval, so a node
-that churns during rendezvous can restart several times and take a few minutes to settle. The rollout
-is healthy either way; only how long it looks unsettled differs.
+Both are retried and clear on their own. Cosmosigner re-resolves its targets as soon as a connection
+drops, rather than only on its reconcile interval, so a node replaced with a new pod IP is picked up in
+about a second and the pair normally converges within a few seconds.
+
+That behaviour needs **Cosmosigner 0.2.1 or newer**, which is the default `cosmosignerImage`. If you
+have pinned `.spec.cosmosigner.image` to 0.2.0 or earlier, re-resolution happens only on the fixed
+interval, so a node that churns during rendezvous can restart several times and take a few minutes to
+settle. The rollout is healthy either way; only how long it looks unsettled differs.
 
 **A genesis-initializing validator group additionally shows one pod recreation:** create → `Error` →
 recreate. This is deliberate and is the safety mechanism working, not a defect. Such a validator
