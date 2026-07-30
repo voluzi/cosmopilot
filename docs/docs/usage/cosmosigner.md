@@ -384,6 +384,31 @@ in. A node that logs `can't get pubkey: endpoint connection timed out` and resta
 is up is expected: the node and signer rendezvous by retrying, and the pair converges once both are
 running.
 
+### What a first rollout looks like
+
+A fresh deploy shows a similar pattern, for a different reason. Nodes and their signer start at the
+same time and find each other by retrying, so before they converge you will typically see:
+
+- the node restart once or twice with `can't get pubkey: endpoint connection timed out` — it blocks on
+  its remote signer at startup and exits if the signer has not dialled in yet;
+- the signer log `resolve target nodes … no such host` until the targeted pods have DNS records.
+
+Both are retried and clear on their own. Cosmosigner re-resolves its targets as soon as a connection
+drops rather than only on a fixed interval, so a node that is replaced with a new pod IP is picked up
+in about a second — the pair normally converges within a few seconds.
+
+**A genesis-initializing validator group additionally shows one pod recreation:** create → `Error` →
+recreate. This is deliberate and is the safety mechanism working, not a defect. Such a validator
+generates its consensus key itself during bootstrap, so the key does not exist when the pod is first
+created and the signer cannot yet hold it. The pod therefore starts on its **local** signing path, and
+only once the key exists does Cosmopilot switch it to the signer — a change of pod spec, so the pod is
+recreated rather than patched.
+
+That recreation is what makes the switch safe: the local-key pod is deleted and gone before the
+signer-targeted pod is created, so the consensus key is never live in two places at once. Marking the
+pod as signer-targeted any earlier would label a pod that still holds a local key. Sentry groups and
+validators against an existing genesis are targeted from creation and show no such recreation.
+
 ## Consensus-key reservations
 
 Before importing a key, retargeting nodes, or creating signer pods, Cosmopilot atomically creates a
