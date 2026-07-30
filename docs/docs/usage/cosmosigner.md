@@ -406,7 +406,7 @@ Both are retried and clear on their own. Cosmosigner re-resolves its targets as 
 drops, rather than only on its reconcile interval, so a node replaced with a new pod IP is picked up in
 about a second and the pair normally converges within a few seconds.
 
-That behaviour needs **Cosmosigner 0.2.1 or newer**, which is the default `cosmosignerImage`. If you
+That behavior needs **Cosmosigner 0.2.1 or newer**, which is the default `cosmosignerImage`. If you
 have pinned `.spec.cosmosigner.image` to 0.2.0 or earlier, re-resolution happens only on the fixed
 interval, so a node that churns during rendezvous can restart several times and take a few minutes to
 settle. The rollout is healthy either way; only how long it looks unsettled differs.
