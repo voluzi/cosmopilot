@@ -2,6 +2,7 @@ package chainnodeset
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -760,9 +761,10 @@ func TestReconcileCosmosignerRetargetingSkipsOnlyBlockedSigner(t *testing.T) {
 	require.NoError(t, controllerutil.SetControllerReference(nodeSet, discovery, testScheme(t)))
 	r := newValidatorTestReconciler(t, nodeSet, discovery)
 
-	ready, err := r.reconcileCosmosignerRetargeting(context.Background(), nodeSet, blockedSignerTargets{blocked.Name: {}})
+	wait, err := r.reconcileCosmosignerRetargeting(context.Background(), nodeSet, blockedSignerTargets{blocked.Name: {}})
 	require.NoError(t, err)
-	require.False(t, ready)
+	require.False(t, wait.done())
+	require.Equal(t, retargetingStepPhaseAdvance, wait.step)
 	require.Equal(t, appsv1.CosmosignerMigrationRecreating, nodeSet.GetCosmosignerStatus(moving.Name).Migration.Phase)
 	require.Error(t, r.Get(context.Background(), types.NamespacedName{Namespace: discovery.Namespace, Name: discovery.Name}, &corev1.Service{}))
 
@@ -772,6 +774,152 @@ func TestReconcileCosmosignerRetargetingSkipsOnlyBlockedSigner(t *testing.T) {
 	blockedNode := &appsv1.ChainNode{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-blocked-0"}, blockedNode))
 	require.False(t, blockedNode.Spec.RemoteSignerTarget)
+}
+
+// TestReconcileCosmosignerRetargetingReportsPendingTargetPods verifies that target pods still
+// carrying the wrong discovery label are reported by name. This is the slow step of a
+// break-before-make migration whenever the pod spec changed too (a node switching between local and
+// remote signing), since those pods are recreated rather than patched. The window runs with the
+// signer stopped and no discovery endpoints, so without naming the pods it is indistinguishable from
+// a stalled migration.
+func TestReconcileCosmosignerRetargetingReportsPendingTargetPods(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			App:     appsv1.AppSpec{Image: "image", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{
+				{
+					Name: "moving", Instances: ptr.To(2),
+					Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+						Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("moving-key")},
+					}},
+				},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.EnsureCosmosignerStatus(signer.Name).Migration = &appsv1.CosmosignerMigrationStatus{
+		DesiredDigest: signer.Digest(), Phase: appsv1.CosmosignerMigrationRetargeting,
+	}
+
+	// Two target pods still carry no discovery label; a third already carries the desired one.
+	targetPod := func(name, signerLabel string) *corev1.Pod {
+		labels := map[string]string{
+			controllers.LabelChainNodeSet:      nodeSet.GetName(),
+			controllers.LabelChainNodeSetGroup: "moving",
+		}
+		if signerLabel != "" {
+			labels[controllers.LabelCosmosignerTarget] = signerLabel
+		}
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: nodeSet.Namespace, Labels: labels,
+		}}
+	}
+	resourceName := nodeSet.CosmosignerResourceName(signer)
+	r := newValidatorTestReconciler(t, nodeSet,
+		targetPod("test-nodeset-moving-1", ""),
+		targetPod("test-nodeset-moving-0", ""),
+		targetPod("test-nodeset-moving-2", resourceName),
+	)
+
+	wait, err := r.reconcileCosmosignerRetargeting(context.Background(), nodeSet, blockedSignerTargets{})
+	require.NoError(t, err)
+	require.False(t, wait.done())
+	require.Equal(t, retargetingStepTargetPods, wait.step)
+	// Sorted, so the message is stable across reconciles rather than reordering on every pass.
+	require.Equal(t, []string{"test-nodeset-moving-0", "test-nodeset-moving-1"}, wait.pods)
+	assert.Contains(t, wait.message(), "waiting for 2 target pod(s) to pick up their new signer discovery label")
+	assert.Contains(t, wait.message(), "test-nodeset-moving-0, test-nodeset-moving-1")
+
+	// The migration must not advance while targets lag.
+	assert.Equal(t, appsv1.CosmosignerMigrationRetargeting, nodeSet.GetCosmosignerStatus(signer.Name).Migration.Phase)
+}
+
+// TestReconcileCosmosignerRetargetingReportsStableResourceName verifies the discovery waits name the
+// signer's STABLE resource name rather than its logical name. A manifest-placement migration reuses
+// the existing signer, so status.ResourceName can differ from the resolved signer name — and the
+// Service actually being waited on is <ResourceName>-privval. Reporting the logical name would point
+// operators at a Service that does not exist.
+func TestReconcileCosmosignerRetargetingReportsStableResourceName(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			App:     appsv1.AppSpec{Image: "image", App: "appd", Version: ptr.To("1.0.0")},
+			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name: "moving", Instances: ptr.To(1),
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("moving-key")},
+				}},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	const stableName = "legacy-signer-name"
+	require.NotEqual(t, stableName, signer.Name)
+
+	status := nodeSet.EnsureCosmosignerStatus(signer.Name)
+	status.ResourceName = stableName
+	status.Migration = &appsv1.CosmosignerMigrationStatus{
+		DesiredDigest: signer.Digest(), Phase: appsv1.CosmosignerMigrationRetargeting,
+	}
+
+	// A lingering EndpointSlice for the stable name's discovery Service keeps the wait on the
+	// endpoint-flush step, which is one of the two steps that must report the stable name.
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name:      stableName + "-privval-abc",
+		Namespace: nodeSet.Namespace,
+		Labels:    map[string]string{discoveryv1.LabelServiceName: stableName + "-privval"},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, slice)
+
+	wait, err := r.reconcileCosmosignerRetargeting(context.Background(), nodeSet, blockedSignerTargets{})
+	require.NoError(t, err)
+	require.False(t, wait.done())
+	assert.Equal(t, stableName, wait.signer, "wait must report the stable resource name")
+	assert.Contains(t, wait.message(), stableName+"-privval")
+	assert.NotContains(t, wait.message(), signer.Name+"-privval")
+}
+
+// TestRetargetingWaitMessage covers the operator-facing rendering of each wait step, including the
+// cap that keeps a large nodeset from producing an unreadable event.
+func TestRetargetingWaitMessage(t *testing.T) {
+	assert.True(t, retargetingWait{}.done())
+	assert.False(t, retargetingWait{step: retargetingStepTargetPods}.done())
+
+	assert.Contains(t,
+		retargetingWait{step: retargetingStepDiscoveryService, signer: "signer-a"}.message(),
+		"waiting for the signer-a-privval discovery Service to be removed")
+	assert.Contains(t,
+		retargetingWait{step: retargetingStepDiscoveryEndpoints, signer: "signer-a"}.message(),
+		"waiting for the signer-a-privval discovery endpoints to flush")
+	assert.Contains(t,
+		retargetingWait{step: retargetingStepPhaseAdvance}.message(),
+		"recording retargeting completion")
+
+	// A blocked signer's key wait can require operator action, so it must not read as phase progress.
+	blockedMsg := retargetingWait{step: retargetingStepBlockedKey, pods: []string{"signer-a"}}.message()
+	assert.Contains(t, blockedMsg, "cannot be recreated until their key material is available")
+	assert.Contains(t, blockedMsg, "signer-a")
+	assert.NotContains(t, blockedMsg, "recording retargeting completion")
+
+	// A pod awaiting the label must not be described as being recreated: a pod whose spec is
+	// otherwise unchanged is relabelled in place, so promising recreation implies downtime.
+	labelMsg := retargetingWait{step: retargetingStepTargetPods, pods: []string{"pod-0"}}.message()
+	assert.Contains(t, labelMsg, "pick up their new signer discovery label")
+	assert.NotContains(t, labelMsg, "recreated")
+
+	many := make([]string, 0, retargetingMaxNamedPods+3)
+	for i := 0; i < retargetingMaxNamedPods+3; i++ {
+		many = append(many, fmt.Sprintf("pod-%02d", i))
+	}
+	msg := retargetingWait{step: retargetingStepTargetPods, pods: many}.message()
+	assert.Contains(t, msg, fmt.Sprintf("waiting for %d target pod(s)", len(many)))
+	assert.Contains(t, msg, "and 3 more")
+	assert.NotContains(t, msg, "pod-12")
 }
 
 // resolveSingleSigner returns the sole resolved signer of a ChainNodeSet, failing if there is not

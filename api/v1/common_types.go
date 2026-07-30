@@ -61,6 +61,7 @@ const (
 	ReasonVPAScaleDown               = "VPAScaleDown"
 	ReasonVPAEmergencyScaleUp        = "VPAEmergencyScaleUp"
 	ReasonVPAOOMRecoveryLimitReached = "VPAOOMRecoveryLimitReached"
+	ReasonCosmosignerRetargeting     = "CosmosignerRetargeting"
 )
 
 // SdkVersion specifies the cosmos-sdk version used by this application.

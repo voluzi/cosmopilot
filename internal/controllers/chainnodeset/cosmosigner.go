@@ -826,7 +826,87 @@ func hasRetargetingCosmosignerMigration(nodeSet *appsv1.ChainNodeSet) bool {
 	return false
 }
 
-func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) (bool, error) {
+// retargetingWait describes why a break-before-make retargeting has not converged yet. The whole
+// window runs with the signer stopped and can last minutes, so a bare "not ready" reads as a stall:
+// the operator sees no signer, no discovery endpoints, and no progress. Naming the step being
+// waited on — and the specific pods still to be recreated — makes a healthy migration legible.
+type retargetingWait struct {
+	// step is a short phase name, empty once retargeting has converged.
+	step string
+	// signer is the signer whose migration is being waited on, when the wait is signer-specific.
+	signer string
+	// pods are the target pods that have not yet been recreated with their new discovery label.
+	pods []string
+}
+
+func (w retargetingWait) done() bool { return w.step == "" }
+
+// message renders the wait as an operator-facing sentence naming the expected wait.
+func (w retargetingWait) message() string {
+	switch w.step {
+	case "":
+		return "cosmosigner retargeting converged"
+	case retargetingStepDiscoveryService:
+		return fmt.Sprintf("waiting for the %s-privval discovery Service to be removed so stale endpoints "+
+			"cannot reconnect the recreated signer to its previous targets", w.signer)
+	case retargetingStepDiscoveryEndpoints:
+		return fmt.Sprintf("waiting for the %s-privval discovery endpoints to flush before the signer is recreated", w.signer)
+	case retargetingStepTargetPods:
+		// "pick up" rather than "be recreated": a pod whose spec is otherwise unchanged is relabelled
+		// in place with no restart, and only a pod whose spec also changed is recreated. Promising
+		// recreation would imply downtime that most migrations do not incur.
+		return fmt.Sprintf("waiting for %d target pod(s) to pick up their new signer discovery "+
+			"label: %s", len(w.pods), w.namedList())
+	case retargetingStepBlockedKey:
+		return fmt.Sprintf("retargeting is complete but %d signer(s) cannot be recreated until their key "+
+			"material is available: %s", len(w.pods), w.namedList())
+	case retargetingStepPhaseAdvance:
+		return "recording retargeting completion before the signer is recreated"
+	default:
+		return fmt.Sprintf("waiting for cosmosigner retargeting step %q", w.step)
+	}
+}
+
+// namedList renders w.pods, capping how many names are spelled out.
+func (w retargetingWait) namedList() string {
+	named := w.pods
+	if len(named) > retargetingMaxNamedPods {
+		return strings.Join(named[:retargetingMaxNamedPods], ", ") +
+			fmt.Sprintf(" and %d more", len(named)-retargetingMaxNamedPods)
+	}
+	return strings.Join(named, ", ")
+}
+
+const (
+	retargetingStepDiscoveryService   = "DiscoveryServiceRemoval"
+	retargetingStepDiscoveryEndpoints = "DiscoveryEndpointsFlush"
+	retargetingStepTargetPods         = "TargetLabelConvergence"
+	retargetingStepBlockedKey         = "SignerKeyUnavailable"
+	retargetingStepPhaseAdvance       = "PhaseAdvance"
+
+	// retargetingMaxNamedPods caps how many pod names a wait message spells out, so a large nodeset
+	// does not produce an unreadable event. Events are truncated by the API server at 1KiB.
+	retargetingMaxNamedPods = 10
+)
+
+// blockedRetargetingSigners returns the sorted names of signers still in the retargeting phase whose
+// key material is not yet provable, so the wait can name them instead of reporting phase progress.
+func blockedRetargetingSigners(nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) []string {
+	var names []string
+	for i := range nodeSet.Status.Cosmosigners {
+		status := &nodeSet.Status.Cosmosigners[i]
+		if status.Migration == nil || status.Migration.Phase != appsv1.CosmosignerMigrationRetargeting {
+			continue
+		}
+		if _, isBlocked := blocked[status.Name]; isBlocked {
+			names = append(names, status.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) (retargetingWait, error) {
 	for _, s := range nodeSet.ResolveCosmosigners() {
 		st := nodeSet.GetCosmosignerStatus(s.Name)
 		if st == nil || st.Migration == nil || st.Migration.Phase != appsv1.CosmosignerMigrationRetargeting {
@@ -835,37 +915,51 @@ func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSe
 		if _, isBlocked := blocked[s.Name]; isBlocked {
 			continue
 		}
-		gone, err := cosmosigner.DeleteDiscoveryService(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), nodeSet.CosmosignerResourceName(s))
+		// Report the stable resource name, not the logical signer name: a manifest-placement
+		// migration reuses the existing signer, so ResourceName can differ from s.Name — and the
+		// Service being waited on is <ResourceName>-privval. Naming s.Name would point operators at
+		// a Service that does not exist.
+		resourceName := nodeSet.CosmosignerResourceName(s)
+		gone, err := cosmosigner.DeleteDiscoveryService(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName)
 		if err != nil || !gone {
-			return false, err
+			return retargetingWait{step: retargetingStepDiscoveryService, signer: resourceName}, err
 		}
-		endpointsGone, err := cosmosigner.DiscoveryEndpointsGone(ctx, r.Client, nodeSet.GetNamespace(), nodeSet.CosmosignerResourceName(s))
+		endpointsGone, err := cosmosigner.DiscoveryEndpointsGone(ctx, r.Client, nodeSet.GetNamespace(), resourceName)
 		if err != nil || !endpointsGone {
-			return false, err
+			return retargetingWait{step: retargetingStepDiscoveryEndpoints, signer: resourceName}, err
 		}
 	}
 
 	if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, blocked); err != nil {
-		return false, err
+		return retargetingWait{step: retargetingStepTargetPods}, err
 	}
 	if err := r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, blocked); err != nil {
-		return false, err
+		return retargetingWait{step: retargetingStepTargetPods}, err
 	}
 
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
 	}); err != nil {
-		return false, err
+		return retargetingWait{step: retargetingStepTargetPods}, err
 	}
+	// Collect every lagging pod rather than returning on the first one. A label-only change is patched
+	// in place and converges at once, but when the pod spec also changed (a node switching between
+	// local and remote signing) each target is recreated instead — that is the slow case, and the
+	// operator wants the full list rather than one name at a time.
+	var pending []string
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		group := pod.GetLabels()[controllers.LabelChainNodeSetGroup]
 		want, targeted := signerNameForNodeWithBlockedTargets(nodeSet, group, blocked)
 		got := pod.GetLabels()[controllers.LabelCosmosignerTarget]
 		if (targeted && got != want) || (!targeted && got != "") {
-			return false, nil
+			pending = append(pending, pod.GetName())
 		}
+	}
+	if len(pending) > 0 {
+		sort.Strings(pending)
+		return retargetingWait{step: retargetingStepTargetPods, pods: pending}, nil
 	}
 
 	changed := false
@@ -882,11 +976,17 @@ func (r *Reconciler) reconcileCosmosignerRetargeting(ctx context.Context, nodeSe
 	}
 	if changed {
 		if err := r.Status().Update(ctx, nodeSet); err != nil {
-			return false, err
+			return retargetingWait{step: retargetingStepPhaseAdvance}, err
 		}
-		return false, nil
+		return retargetingWait{step: retargetingStepPhaseAdvance}, nil
 	}
-	return !hasRetargetingCosmosignerMigration(nodeSet), nil
+	if names := blockedRetargetingSigners(nodeSet, blocked); len(names) > 0 {
+		// Every remaining retargeting migration belongs to a blocked signer, which stays in this phase
+		// until its key material is provable. That can require operator action (a missing source
+		// Secret never appears on its own), so it must not be reported as transient phase progress.
+		return retargetingWait{step: retargetingStepBlockedKey, pods: names}, nil
+	}
+	return retargetingWait{}, nil
 }
 
 func (r *Reconciler) cosmosignerPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) (string, error) {

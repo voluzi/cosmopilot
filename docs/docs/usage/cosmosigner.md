@@ -15,7 +15,7 @@ wires everything for you.
 
 :::tip[Image]
 The signer image defaults to the operator-wide `cosmosignerImage` Helm value
-(`ghcr.io/voluzi/cosmosigner:0.2.0`), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
+(`ghcr.io/voluzi/cosmosigner:0.2.1`), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
 operator flag — see [Configuration](../getting-started/configuration.md#cosmosignerimage). Set
 `.spec.cosmosigner.image` to pin or override the image for one specific signer only. Cosmopilot's
 managed signing path requires Cosmosigner 0.2.0 or newer for Vault key-version pinning and startup
@@ -357,6 +357,72 @@ deployment.
 
 Replica-count and state-storage changes remain unsupported because they require an explicit raft
 membership or PVC migration.
+
+### What a migration looks like while it runs
+
+A migration in a `ChainNodeSet` retargets its nodes with the signer stopped, so for a few minutes the
+signer pod is gone and `kubectl get endpoints <signer>-privval` returns `not found`. **This is the
+expected shape of a healthy migration, not a failure.** The discovery Service is deleted on purpose,
+so stale endpoints cannot reconnect the recreated signer to its previous targets.
+
+How long this takes depends on what changed. Most migrations — image, resources, log level,
+credentials — keep the same targets, so the discovery labels already match and this phase passes
+straight through. When only the target label changes, Cosmopilot patches it onto the running pod
+in place, with no restart.
+
+Target pods are **recreated** only when the pod spec changes too — most visibly when a node switches
+between local and remote signing, which adds or removes `priv_validator_laddr` and the local key
+mount. In that case the label is applied together with the new spec rather than patched onto the
+running pod, so a pod still on the previous signing path is never exposed to the new signer while the
+old one is live. That is the case where this phase takes minutes rather than seconds.
+
+Cosmopilot names the step it is waiting on in both its logs and `CosmosignerRetargeting` events on the
+`ChainNodeSet`:
+
+```shell
+kubectl describe chainnodeset <name> | grep CosmosignerRetargeting
+```
+
+```
+Normal  CosmosignerRetargeting  waiting for 2 target pod(s) to pick up their new signer discovery
+                                label: cp-nodes-validators-0, cp-nodes-validators-1
+```
+
+During the same window the targeted nodes themselves restart while they wait for the signer to dial
+in. A node that logs `can't get pubkey: endpoint connection timed out` and restarts before the signer
+is up is expected: the node and signer rendezvous by retrying, and the pair converges once both are
+running.
+
+### What a first rollout looks like
+
+A fresh deploy shows a similar pattern, for a different reason. Nodes and their signer start at the
+same time and find each other by retrying, so before they converge you will typically see:
+
+- the node restart once or twice with `can't get pubkey: endpoint connection timed out` — it blocks on
+  its remote signer at startup and exits if the signer has not dialed in yet;
+- the signer log `resolve target nodes … no such host` until the targeted pods have DNS records.
+
+Both are retried and clear on their own. Cosmosigner re-resolves its targets as soon as a connection
+drops, rather than only on its reconcile interval, so a node replaced with a new pod IP is picked up in
+about a second and the pair normally converges within a few seconds.
+
+That behavior needs **Cosmosigner 0.2.1 or newer**, which is the default `cosmosignerImage`. If you
+have pinned `.spec.cosmosigner.image` to 0.2.0 or earlier, re-resolution happens only on the fixed
+interval, so a node that churns during rendezvous can restart several times and take a few minutes to
+settle. The rollout is healthy either way; only how long it looks unsettled differs.
+
+**A genesis-initializing validator group additionally shows one pod recreation:** create → `Error` →
+recreate. This is deliberate and is the safety mechanism working, not a defect. Such a validator
+generates its consensus key itself during bootstrap, so the key does not exist when the pod is first
+created and the signer cannot yet hold it. The pod therefore starts on its **local** signing path, and
+only once the key exists does Cosmopilot switch it to the signer — a change of pod spec, so the pod is
+recreated rather than patched.
+
+That recreation is what makes the switch safe: the local-key pod is deleted and gone before the
+signer-targeted pod is created, so the consensus key is never live in two places at once. Marking the
+pod as signer-targeted any earlier would label a pod that still holds a local key. By contrast,
+sentry groups and validators against an existing genesis are targeted from creation and show no such
+recreation.
 
 ## Consensus-key reservations
 
