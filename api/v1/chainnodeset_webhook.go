@@ -95,8 +95,15 @@ func (nodeSet *ChainNodeSet) validatorGroupMisplacedFieldWarnings() admission.Wa
 // documented HA layout), but it is only reported for .validator.init groups: there the collapse is
 // baked into the immutable genesis validator set, so admission is the last point at which it can be
 // corrected. Non-init groups are silent — an HA signer over a running validator is reversible.
-func (nodeSet *ChainNodeSet) genesisSignerCollapseWarnings() admission.Warnings {
+//
+// Once the genesis exists the remedy is gone: dropping the signer from such a group is rejected
+// below, because it would change which instances are genesis validators. The warning is therefore
+// only emitted while the genesis can still be shaped.
+func (nodeSet *ChainNodeSet) genesisSignerCollapseWarnings(genesisAlreadyCreated bool) admission.Warnings {
 	warnings := admission.Warnings{}
+	if genesisAlreadyCreated {
+		return warnings
+	}
 	for i, group := range nodeSet.Spec.Nodes {
 		if group.Validator == nil || group.Validator.Init == nil || group.GetInstances() <= 1 {
 			continue
@@ -162,7 +169,14 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		case initValidators == 0:
 			return nil, fmt.Errorf(".spec.genesis is required except when initializing new genesis with .spec.validator.init")
 		case nonInitValidators > 0:
-			return nil, fmt.Errorf(".spec.genesis is required when a validator does not initialize a new genesis with .spec.validator.init; to run multiple validators in a generated genesis, set instances on the single genesis-initializing validator group instead of adding another validator group")
+			// Point at the alternative that actually applies: multiple validators in a generated genesis
+			// are expressed as instances on one init group. The legacy singleton .spec.validator has no
+			// instances field, so that shape must move into a node group before it can be scaled.
+			remedy := "to run multiple validators in a generated genesis, set instances on the single genesis-initializing validator group instead of adding another validator group"
+			if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
+				remedy = "to run multiple validators in a generated genesis, move .spec.validator into a .spec.nodes[] validator group and set instances on it, instead of adding another validator group"
+			}
+			return nil, fmt.Errorf(".spec.genesis is required when a validator does not initialize a new genesis with .spec.validator.init; %s", remedy)
 		}
 	}
 
@@ -378,7 +392,12 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	}
 
 	if initValidators > 1 {
-		return nil, fmt.Errorf("only one ChainNodeSet validator can initialize genesis; to run multiple genesis validators, set instances on that single validator group")
+		// Same remedy split as the .spec.genesis rejection above: only a node group can be scaled.
+		remedy := "to run multiple genesis validators, set instances on that single validator group"
+		if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
+			remedy = "to run multiple genesis validators, keep a single .spec.nodes[] validator group and set instances on it"
+		}
+		return nil, fmt.Errorf("only one ChainNodeSet validator can initialize genesis; %s", remedy)
 	}
 
 	// Validate the managed cosmosigner deployment and its target resolution.
@@ -587,7 +606,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	}
 
 	warnings := append(nodeSet.tmKMSDeprecationWarnings(), nodeSet.validatorGroupMisplacedFieldWarnings()...)
-	return append(warnings, nodeSet.genesisSignerCollapseWarnings()...), nil
+	return append(warnings, nodeSet.genesisSignerCollapseWarnings(genesisAlreadyCreated)...), nil
 }
 
 // validateCosmosigner validates every managed cosmosigner a ChainNodeSet runs: the top-level

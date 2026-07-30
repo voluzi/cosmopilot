@@ -93,8 +93,9 @@ On a chain you are initializing yourself, **all genesis validators must live in 
 validator may carry `validator.init`, and a validator group without `init` requires an external
 `.spec.genesis` — so the intuitive "one group initializes the genesis, other validator groups join
 it" layout is rejected by both rules at once. Scale the single init group with `instances` instead.
-Separate validator groups are for chains whose genesis already exists, where each group joins with
-`createValidator` (below).
+Separate validator groups are for chains whose genesis already exists — there each group either
+carries a consensus key the genesis already lists ([Existing Consensus Key](#existing-consensus-key))
+or joins with `createValidator` (below).
 :::
 
 ### Validators on a running chain

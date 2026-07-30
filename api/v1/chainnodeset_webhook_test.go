@@ -153,7 +153,7 @@ func TestChainNodeSetValidateGenesis(t *testing.T) {
 				},
 			},
 			wantErr:     true,
-			errContains: ".spec.genesis is required when a validator does not initialize a new genesis with .spec.validator.init; to run multiple validators in a generated genesis, set instances on the single genesis-initializing validator group instead of adding another validator group",
+			errContains: ".spec.genesis is required when a validator does not initialize a new genesis with .spec.validator.init; to run multiple validators in a generated genesis, move .spec.validator into a .spec.nodes[] validator group and set instances on it, instead of adding another validator group",
 		},
 		{
 			name: "genesis present with non-init validators is allowed",
@@ -171,6 +171,30 @@ func TestChainNodeSetValidateGenesis(t *testing.T) {
 				Validator: &NodeSetValidatorConfig{Init: initConfig},
 				Nodes: []NodeGroupSpec{
 					{Name: "validators", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{Init: initConfig}},
+				},
+			},
+			wantErr:     true,
+			errContains: "only one ChainNodeSet validator can initialize genesis; to run multiple genesis validators, keep a single .spec.nodes[] validator group and set instances on it",
+		},
+		{
+			// The singleton .spec.validator has no instances field, so the remedy above only applies
+			// when the initializer is already a node group.
+			name: "genesis missing with a group initializer points at that group's instances",
+			spec: ChainNodeSetSpec{
+				Nodes: []NodeGroupSpec{
+					{Name: "genesis-validators", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{Init: initConfig}},
+					{Name: "joiners", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{}},
+				},
+			},
+			wantErr:     true,
+			errContains: ".spec.genesis is required when a validator does not initialize a new genesis with .spec.validator.init; to run multiple validators in a generated genesis, set instances on the single genesis-initializing validator group instead of adding another validator group",
+		},
+		{
+			name: "more than one init group is rejected without mentioning .spec.validator",
+			spec: ChainNodeSetSpec{
+				Nodes: []NodeGroupSpec{
+					{Name: "validators-a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{Init: initConfig}},
+					{Name: "validators-b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{Init: initConfig}},
 				},
 			},
 			wantErr:     true,
@@ -2033,6 +2057,24 @@ func TestChainNodeSetValidateWarnsOnGenesisSignerCollapse(t *testing.T) {
 			Validator: &NodeSetValidatorConfig{Init: initConfig},
 		}}}}
 		warnings, err := nodeSet.Validate(nil)
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
+	})
+
+	// Once the genesis exists the validator set is fixed and dropping the signer is rejected outright,
+	// so repeating the warning would only offer a remedy the webhook forbids.
+	t.Run("an established genesis is not reported", func(t *testing.T) {
+		group := NodeGroupSpec{
+			Name:        "validators",
+			Instances:   ptr.To(3),
+			Validator:   &NodeSetValidatorConfig{Init: initConfig},
+			Cosmosigner: signer(),
+		}
+		established := &ChainNodeSet{
+			Spec:   ChainNodeSetSpec{Nodes: []NodeGroupSpec{group}},
+			Status: ChainNodeSetStatus{ChainID: initConfig.ChainID},
+		}
+		warnings, err := established.Validate(established.DeepCopy())
 		require.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
