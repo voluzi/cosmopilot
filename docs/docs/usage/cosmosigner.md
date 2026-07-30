@@ -384,8 +384,8 @@ kubectl describe chainnodeset <name> | grep CosmosignerRetargeting
 ```
 
 ```
-Normal  CosmosignerRetargeting  waiting for 2 target pod(s) to be recreated with their new signer
-                                discovery label: cp-nodes-validators-0, cp-nodes-validators-1
+Normal  CosmosignerRetargeting  waiting for 2 target pod(s) to pick up their new signer discovery
+                                label: cp-nodes-validators-0, cp-nodes-validators-1
 ```
 
 During the same window the targeted nodes themselves restart while they wait for the signer to dial
