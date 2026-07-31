@@ -82,16 +82,21 @@ func TestS3CreateSnapshotAuthAndStorageOptions(t *testing.T) {
 
 func TestS3JobsUseConfiguredDataExporterImage(t *testing.T) {
 	const image = "registry.example.com/dataexporter:custom"
+	pullSecrets := []corev1.LocalObjectReference{{Name: "registry-creds"}}
 	provider := newTestS3ProviderWithImage(t, &appsv1.ExportTarballConfig{
 		S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"},
-	}, image)
+	}, image, pullSecrets)
 
 	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
-	assert.Equal(t, image, getS3Job(t, provider, "snapshot-upload").Spec.Template.Spec.Containers[0].Image)
+	uploadPod := getS3Job(t, provider, "snapshot-upload").Spec.Template.Spec
+	assert.Equal(t, image, uploadPod.Containers[0].Image)
+	assert.Equal(t, pullSecrets, uploadPod.ImagePullSecrets)
 
 	_, err := provider.DeleteSnapshot(context.Background(), "snapshot")
 	require.NoError(t, err)
-	assert.Equal(t, image, getS3Job(t, provider, "snapshot-delete").Spec.Template.Spec.Containers[0].Image)
+	deletePod := getS3Job(t, provider, "snapshot-delete").Spec.Template.Spec
+	assert.Equal(t, image, deletePod.Containers[0].Image)
+	assert.Equal(t, pullSecrets, deletePod.ImagePullSecrets)
 }
 
 func TestS3CreateSnapshotS3CompatibleOptions(t *testing.T) {
@@ -341,10 +346,10 @@ func TestS3CreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {
 }
 
 func newTestS3Provider(t *testing.T, cfg *appsv1.ExportTarballConfig) *S3 {
-	return newTestS3ProviderWithImage(t, cfg, "ghcr.io/voluzi/dataexporter:test")
+	return newTestS3ProviderWithImage(t, cfg, "ghcr.io/voluzi/dataexporter:test", nil)
 }
 
-func newTestS3ProviderWithImage(t *testing.T, cfg *appsv1.ExportTarballConfig, image string) *S3 {
+func newTestS3ProviderWithImage(t *testing.T, cfg *appsv1.ExportTarballConfig, image string, pullSecrets []corev1.LocalObjectReference) *S3 {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -353,7 +358,7 @@ func newTestS3ProviderWithImage(t *testing.T, cfg *appsv1.ExportTarballConfig, i
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"},
 	}
-	return NewS3SnapshotProvider(fake.NewSimpleClientset(), scheme, owner, "", image, cfg).(*S3)
+	return NewS3SnapshotProvider(fake.NewSimpleClientset(), scheme, owner, "", image, pullSecrets, cfg).(*S3)
 }
 
 func testVolumeSnapshot() *snapshotv1.VolumeSnapshot {

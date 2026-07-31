@@ -23,3 +23,8 @@ func TestGetDataExporterImage(t *testing.T) {
 		})
 	}
 }
+
+func TestGetDataExporterImageWithNilOptions(t *testing.T) {
+	var opts *ControllerRunOptions
+	assert.Equal(t, DefaultDataExporterImage, opts.GetDataExporterImage())
+}

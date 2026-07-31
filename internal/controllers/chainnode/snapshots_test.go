@@ -113,6 +113,9 @@ func TestGetTarballExportProviderUsesConfiguredDataExporterImage(t *testing.T) {
 					UID:       "node-uid",
 				},
 				Spec: appsv1.ChainNodeSpec{
+					Config: &appsv1.Config{
+						ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registry-creds"}},
+					},
 					Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
 						Frequency:     "24h",
 						ExportTarball: tt.export,
@@ -134,6 +137,7 @@ func TestGetTarballExportProviderUsesConfiguredDataExporterImage(t *testing.T) {
 			job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
 			require.NoError(t, err)
 			assert.Equal(t, image, job.Spec.Template.Spec.Containers[0].Image)
+			assert.Equal(t, node.Spec.Config.ImagePullSecrets, job.Spec.Template.Spec.ImagePullSecrets)
 		})
 	}
 }

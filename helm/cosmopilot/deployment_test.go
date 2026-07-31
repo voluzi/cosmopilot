@@ -61,7 +61,7 @@ func TestDeploymentConfiguresDataExporterImage(t *testing.T) {
 		t.Fatalf("parse deployment template: %v", err)
 	}
 
-	const image = "registry.example.com/dataexporter:custom"
+	const image = "true"
 	data := map[string]any{
 		"Release": map[string]any{"Name": "test", "Namespace": "default"},
 		"Chart":   map[string]any{"AppVersion": "3.0.0-beta.7"},
@@ -96,8 +96,8 @@ func TestDeploymentConfiguresDataExporterImage(t *testing.T) {
 				Spec struct {
 					Containers []struct {
 						Env []struct {
-							Name  string `yaml:"name"`
-							Value string `yaml:"value"`
+							Name  string    `yaml:"name"`
+							Value yaml.Node `yaml:"value"`
 						} `yaml:"env"`
 					} `yaml:"containers"`
 				} `yaml:"spec"`
@@ -110,8 +110,8 @@ func TestDeploymentConfiguresDataExporterImage(t *testing.T) {
 
 	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
 		if env.Name == "DATA_EXPORTER_IMAGE" {
-			if env.Value != image {
-				t.Errorf("DATA_EXPORTER_IMAGE = %q, want %q", env.Value, image)
+			if env.Value.Tag != "!!str" || env.Value.Value != image {
+				t.Errorf("DATA_EXPORTER_IMAGE = %s %q, want !!str %q", env.Value.Tag, env.Value.Value, image)
 			}
 			return
 		}
