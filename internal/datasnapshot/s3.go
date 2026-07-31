@@ -26,28 +26,33 @@ const s3Exporter = "s3-exporter"
 
 // S3 manages snapshot export Jobs targeting Amazon S3 or compatible object stores.
 type S3 struct {
-	Client        kubernetes.Interface
-	Scheme        *runtime.Scheme
-	Owner         metav1.Object
-	priorityClass string
-	Config        *appsv1.S3ExportConfig
-	ExportConfig  *appsv1.ExportTarballConfig
+	Client            kubernetes.Interface
+	Scheme            *runtime.Scheme
+	Owner             metav1.Object
+	priorityClass     string
+	dataExporterImage string
+	imagePullSecrets  []corev1.LocalObjectReference
+	Config            *appsv1.S3ExportConfig
+	ExportConfig      *appsv1.ExportTarballConfig
 }
 
 func NewS3SnapshotProvider(
 	client kubernetes.Interface,
 	scheme *runtime.Scheme,
 	owner metav1.Object,
-	priorityClass string,
+	priorityClass, dataExporterImage string,
+	imagePullSecrets []corev1.LocalObjectReference,
 	cfg *appsv1.ExportTarballConfig,
 ) SnapshotProvider {
 	return &S3{
-		Client:        client,
-		Scheme:        scheme,
-		Owner:         owner,
-		priorityClass: priorityClass,
-		Config:        cfg.S3,
-		ExportConfig:  cfg,
+		Client:            client,
+		Scheme:            scheme,
+		Owner:             owner,
+		priorityClass:     priorityClass,
+		dataExporterImage: dataExporterImage,
+		imagePullSecrets:  imagePullSecrets,
+		Config:            cfg.S3,
+		ExportConfig:      cfg,
 	}
 }
 
@@ -114,6 +119,7 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 					RestartPolicy:      corev1.RestartPolicyNever,
 					PriorityClassName:  provider.priorityClass,
 					ServiceAccountName: provider.serviceAccountName(),
+					ImagePullSecrets:   provider.imagePullSecrets,
 					Volumes: []corev1.Volume{{
 						Name: "data",
 						VolumeSource: corev1.VolumeSource{
@@ -124,7 +130,7 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 					}},
 					Containers: []corev1.Container{{
 						Name:            "dataexporter",
-						Image:           "ghcr.io/voluzi/dataexporter:latest",
+						Image:           provider.dataExporterImage,
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"s3", "upload", "data", provider.Config.Bucket, name},
@@ -189,9 +195,10 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotSt
 					RestartPolicy:      corev1.RestartPolicyNever,
 					PriorityClassName:  provider.priorityClass,
 					ServiceAccountName: provider.serviceAccountName(),
+					ImagePullSecrets:   provider.imagePullSecrets,
 					Containers: []corev1.Container{{
 						Name:            "dataexporter",
-						Image:           "ghcr.io/voluzi/dataexporter:latest",
+						Image:           provider.dataExporterImage,
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"s3", "delete", provider.Config.Bucket, name},

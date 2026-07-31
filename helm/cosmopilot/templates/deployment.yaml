@@ -61,6 +61,8 @@ spec:
               value: {{ .Values.cosmoseedImage }}
             - name: COSMOSIGNER_IMAGE
               value: {{ .Values.cosmosignerImage }}
+            - name: DATA_EXPORTER_IMAGE
+              value: {{ .Values.dataExporterImage | quote }}
             - name: WORKER_NAME
               value: {{ .Values.workerName }}
             - name: WORKER_COUNT

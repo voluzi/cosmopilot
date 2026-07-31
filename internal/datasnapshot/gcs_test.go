@@ -84,6 +84,25 @@ func TestGCSCreateSnapshotAuthModes(t *testing.T) {
 	}
 }
 
+func TestGCSJobsUseConfiguredDataExporterImage(t *testing.T) {
+	const image = "registry.example.com/dataexporter:custom"
+	pullSecrets := []corev1.LocalObjectReference{{Name: "registry-creds"}}
+	provider := newTestGCSProviderWithImage(t, &appsv1.ExportTarballConfig{
+		GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"},
+	}, image, pullSecrets)
+
+	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+	uploadPod := getJob(t, provider, "snapshot-upload").Spec.Template.Spec
+	assert.Equal(t, image, uploadPod.Containers[0].Image)
+	assert.Equal(t, pullSecrets, uploadPod.ImagePullSecrets)
+
+	_, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	deletePod := getJob(t, provider, "snapshot-delete").Spec.Template.Spec
+	assert.Equal(t, image, deletePod.Containers[0].Image)
+	assert.Equal(t, pullSecrets, deletePod.ImagePullSecrets)
+}
+
 func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 	tests := []struct {
 		name                 string
@@ -346,6 +365,10 @@ func TestGCSCreateSnapshotCleansJobWhenPVCCreationFails(t *testing.T) {
 }
 
 func newTestGCSProvider(t *testing.T, cfg *appsv1.ExportTarballConfig) *GCS {
+	return newTestGCSProviderWithImage(t, cfg, "ghcr.io/voluzi/dataexporter:test", nil)
+}
+
+func newTestGCSProviderWithImage(t *testing.T, cfg *appsv1.ExportTarballConfig, image string, pullSecrets []corev1.LocalObjectReference) *GCS {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -357,7 +380,7 @@ func newTestGCSProvider(t *testing.T, cfg *appsv1.ExportTarballConfig) *GCS {
 		ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"},
 	}
 
-	return NewGcsSnapshotProvider(fake.NewSimpleClientset(), scheme, owner, "", cfg).(*GCS)
+	return NewGcsSnapshotProvider(fake.NewSimpleClientset(), scheme, owner, "", image, pullSecrets, cfg).(*GCS)
 }
 
 func getJob(t *testing.T, provider *GCS, name string) *batchv1.Job {

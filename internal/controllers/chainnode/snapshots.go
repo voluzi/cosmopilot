@@ -591,6 +591,10 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 	if r.snapshotClientSet != nil {
 		clientSet = r.snapshotClientSet
 	}
+	var imagePullSecrets []corev1.LocalObjectReference
+	if chainNode.Spec.Config != nil {
+		imagePullSecrets = chainNode.Spec.Config.ImagePullSecrets
+	}
 	switch {
 	case chainNode.Spec.Persistence.Snapshots.ExportTarball.GCS != nil:
 		return datasnapshot.NewGcsSnapshotProvider(
@@ -598,6 +602,8 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
+			r.opts.GetDataExporterImage(),
+			imagePullSecrets,
 			chainNode.Spec.Persistence.Snapshots.ExportTarball,
 		), nil
 
@@ -607,6 +613,8 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
+			r.opts.GetDataExporterImage(),
+			imagePullSecrets,
 			chainNode.Spec.Persistence.Snapshots.ExportTarball,
 		), nil
 

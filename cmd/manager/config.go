@@ -7,6 +7,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/pkg/environ"
 )
 
@@ -47,6 +48,11 @@ func init() {
 	flag.StringVar(&runOpts.CosmosignerImage, "cosmosigner-image",
 		environ.GetString("COSMOSIGNER_IMAGE", ""),
 		"default image to be used in cosmosigner deployments when enabled; overridden per-resource by .spec.cosmosigner.image.",
+	)
+
+	flag.StringVar(&runOpts.DataExporterImage, "dataexporter-image",
+		environ.GetString("DATA_EXPORTER_IMAGE", controllers.DefaultDataExporterImage),
+		"dataexporter image to be used by snapshot tarball upload and deletion jobs.",
 	)
 
 	flag.StringVar(&runOpts.WorkerName, "worker-name",
