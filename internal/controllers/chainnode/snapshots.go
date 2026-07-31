@@ -598,6 +598,7 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
+			r.opts.GetDataExporterImage(),
 			chainNode.Spec.Persistence.Snapshots.ExportTarball,
 		), nil
 
@@ -607,6 +608,7 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 			r.Scheme,
 			chainNode,
 			r.opts.GetDefaultPriorityClassName(),
+			r.opts.GetDataExporterImage(),
 			chainNode.Spec.Persistence.Snapshots.ExportTarball,
 		), nil
 

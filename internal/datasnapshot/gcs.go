@@ -27,22 +27,24 @@ const (
 )
 
 type GCS struct {
-	Client        kubernetes.Interface
-	Scheme        *runtime.Scheme
-	Owner         metav1.Object
-	priorityClass string
-	Config        *appsv1.GcsExportConfig
-	ExportConfig  *appsv1.ExportTarballConfig
+	Client            kubernetes.Interface
+	Scheme            *runtime.Scheme
+	Owner             metav1.Object
+	priorityClass     string
+	dataExporterImage string
+	Config            *appsv1.GcsExportConfig
+	ExportConfig      *appsv1.ExportTarballConfig
 }
 
-func NewGcsSnapshotProvider(client kubernetes.Interface, scheme *runtime.Scheme, owner metav1.Object, priorityClass string, cfg *appsv1.ExportTarballConfig) SnapshotProvider {
+func NewGcsSnapshotProvider(client kubernetes.Interface, scheme *runtime.Scheme, owner metav1.Object, priorityClass, dataExporterImage string, cfg *appsv1.ExportTarballConfig) SnapshotProvider {
 	return &GCS{
-		Client:        client,
-		Config:        cfg.GCS,
-		ExportConfig:  cfg,
-		Owner:         owner,
-		Scheme:        scheme,
-		priorityClass: priorityClass,
+		Client:            client,
+		Config:            cfg.GCS,
+		ExportConfig:      cfg,
+		Owner:             owner,
+		Scheme:            scheme,
+		priorityClass:     priorityClass,
+		dataExporterImage: dataExporterImage,
 	}
 }
 
@@ -150,7 +152,7 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 					Containers: []corev1.Container{
 						{
 							Name:            "dataexporter",
-							Image:           "ghcr.io/voluzi/dataexporter:latest",
+							Image:           gcs.dataExporterImage,
 							ImagePullPolicy: corev1.PullAlways,
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
@@ -279,7 +281,7 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus
 					Containers: []corev1.Container{
 						{
 							Name:            "dataexporter",
-							Image:           "ghcr.io/voluzi/dataexporter:latest",
+							Image:           gcs.dataExporterImage,
 							ImagePullPolicy: corev1.PullAlways,
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args:            []string{"gcs", "delete", gcs.Config.Bucket, name},

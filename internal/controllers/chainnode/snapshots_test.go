@@ -13,6 +13,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -68,6 +69,71 @@ func TestGetTarballExportProvider(t *testing.T) {
 			provider, err := reconciler.getTarballExportProvider(node)
 			require.NoError(t, err)
 			tt.assertType(t, provider)
+		})
+	}
+}
+
+func TestGetTarballExportProviderUsesConfiguredDataExporterImage(t *testing.T) {
+	const image = "registry.example.com/dataexporter:custom"
+	tests := []struct {
+		name   string
+		export *appsv1.ExportTarballConfig
+	}{
+		{
+			name: "GCS",
+			export: &appsv1.ExportTarballConfig{
+				GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"},
+			},
+		},
+		{
+			name: "S3",
+			export: &appsv1.ExportTarballConfig{
+				S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			clientSet := fake.NewSimpleClientset()
+			reconciler := &Reconciler{
+				Scheme:            scheme,
+				snapshotClientSet: clientSet,
+				opts:              &controllers.ControllerRunOptions{DataExporterImage: image},
+			}
+			node := &appsv1.ChainNode{
+				TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "node",
+					Namespace: "default",
+					UID:       "node-uid",
+				},
+				Spec: appsv1.ChainNodeSpec{
+					Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+						Frequency:     "24h",
+						ExportTarball: tt.export,
+					}},
+				},
+			}
+			provider, err := reconciler.getTarballExportProvider(node)
+			require.NoError(t, err)
+
+			snapshot := &snapshotv1.VolumeSnapshot{
+				TypeMeta:   metav1.TypeMeta{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"},
+				ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"},
+				Status: &snapshotv1.VolumeSnapshotStatus{
+					RestoreSize: resource.NewQuantity(1024, resource.BinarySI),
+				},
+			}
+			require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", snapshot))
+
+			job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, image, job.Spec.Template.Spec.Containers[0].Image)
 		})
 	}
 }
