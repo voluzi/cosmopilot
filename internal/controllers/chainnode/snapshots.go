@@ -57,8 +57,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		return snapshots[i].CreationTimestamp.Before(&snapshots[j].CreationTimestamp)
 	})
 
-	// Fix snapshotting status in case there are no snapshots for this node
-	if len(snapshots) == 0 && volumeSnapshotInProgress(chainNode) {
+	// Repair the snapshotting annotation from the actual snapshot state. Completed
+	// and deleting snapshots must not block future snapshots, while any live
+	// non-ready snapshot remains active. VolumeSnapshot status errors are not
+	// terminal: the CSI snapshot controller keeps retrying and clears the error on
+	// success, so they must not trigger a concurrent snapshot.
+	if volumeSnapshotInProgress(chainNode) && !hasActiveVolumeSnapshot(snapshots) {
+		logger.Info("clearing stale pvc snapshot in-progress annotation")
 		setSnapshotInProgress(chainNode, false)
 		if err = r.Update(ctx, chainNode); err != nil {
 			return err
@@ -489,6 +494,16 @@ func shouldSnapshot(chainNode *appsv1.ChainNode, nodePodReady bool) bool {
 
 func isSnapshotReady(snapshot *snapshotv1.VolumeSnapshot) bool {
 	return snapshot != nil && snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse
+}
+
+func hasActiveVolumeSnapshot(snapshots []snapshotv1.VolumeSnapshot) bool {
+	for i := range snapshots {
+		snapshot := &snapshots[i]
+		if snapshot.DeletionTimestamp.IsZero() && !isSnapshotReady(snapshot) {
+			return true
+		}
+	}
+	return false
 }
 
 func isSnapshotExpired(snapshot *snapshotv1.VolumeSnapshot) (bool, error) {

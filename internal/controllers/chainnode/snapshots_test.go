@@ -667,6 +667,169 @@ func TestIsSnapshotExpired(t *testing.T) {
 	}
 }
 
+func TestEnsureVolumeSnapshotsRepairsSnapshotInProgressAnnotation(t *testing.T) {
+	now := metav1.Now()
+	tests := []struct {
+		name             string
+		snapshots        []snapshotv1.VolumeSnapshot
+		wantSnapshotting string
+	}{
+		{
+			name: "retained ready snapshot does not keep stale annotation",
+			snapshots: []snapshotv1.VolumeSnapshot{{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node-ready",
+					Namespace:         "default",
+					CreationTimestamp: now,
+					Annotations: map[string]string{
+						controllers.AnnotationPvcSnapshotReady: "true",
+					},
+				},
+				Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+			}},
+			wantSnapshotting: "false",
+		},
+		{
+			name: "pending snapshot alongside retained ready snapshot keeps annotation",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node-ready",
+						Namespace:         "default",
+						CreationTimestamp: now,
+						Annotations: map[string]string{
+							controllers.AnnotationPvcSnapshotReady: "true",
+						},
+					},
+					Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node-pending",
+						Namespace:         "default",
+						CreationTimestamp: now,
+						Annotations: map[string]string{
+							controllers.AnnotationPvcSnapshotReady: "false",
+						},
+					},
+					Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(false)},
+				},
+			},
+			wantSnapshotting: "true",
+		},
+		{
+			name: "snapshot error alongside retained ready snapshot keeps annotation while CSI retries",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node-ready",
+						Namespace:         "default",
+						CreationTimestamp: now,
+						Annotations: map[string]string{
+							controllers.AnnotationPvcSnapshotReady: "true",
+						},
+					},
+					Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node-failed",
+						Namespace:         "default",
+						CreationTimestamp: now,
+						Annotations: map[string]string{
+							controllers.AnnotationPvcSnapshotReady: "false",
+						},
+					},
+					Status: &snapshotv1.VolumeSnapshotStatus{
+						ReadyToUse: ptr.To(false),
+						Error:      &snapshotv1.VolumeSnapshotError{Message: ptr.To("snapshot failed")},
+					},
+				},
+			},
+			wantSnapshotting: "true",
+		},
+		{
+			name: "deleting snapshot alongside retained ready snapshot does not keep stale annotation",
+			snapshots: []snapshotv1.VolumeSnapshot{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node-ready",
+						Namespace:         "default",
+						CreationTimestamp: now,
+						Annotations: map[string]string{
+							controllers.AnnotationPvcSnapshotReady: "true",
+						},
+					},
+					Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node-deleting",
+						Namespace:         "default",
+						CreationTimestamp: now,
+						DeletionTimestamp: &now,
+						Finalizers:        []string{"snapshot.storage.kubernetes.io/volumesnapshot-bound-protection"},
+						Annotations: map[string]string{
+							controllers.AnnotationPvcSnapshotReady: "false",
+						},
+					},
+					Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(false)},
+				},
+			},
+			wantSnapshotting: "false",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+			chainNode := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node",
+					Namespace:         "default",
+					CreationTimestamp: now,
+					Annotations: map[string]string{
+						controllers.AnnotationPvcSnapshotInProgress: "true",
+						controllers.AnnotationLastPvcSnapshot:       now.UTC().Format(timeLayout),
+					},
+				},
+				Spec: appsv1.ChainNodeSpec{
+					Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{Frequency: "24h"}},
+				},
+				Status: appsv1.ChainNodeStatus{
+					Phase:        appsv1.PhaseChainNodeSnapshotting,
+					PvcSize:      "1Gi",
+					LatestHeight: 1,
+				},
+			}
+			objects := make([]client.Object, 0, len(tt.snapshots)+1)
+			objects = append(objects, chainNode)
+			for i := range tt.snapshots {
+				tt.snapshots[i].Labels = map[string]string{controllers.LabelChainNode: chainNode.Name}
+				objects = append(objects, &tt.snapshots[i])
+			}
+
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+			reconciler := &Reconciler{
+				Client:   controllerClient,
+				recorder: record.NewFakeRecorder(10),
+			}
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			stored := &appsv1.ChainNode{}
+			require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
+			assert.Equal(t, tt.wantSnapshotting, stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
+		})
+	}
+}
+
 func TestVolumeSnapshotInProgress(t *testing.T) {
 	tests := []struct {
 		name      string
