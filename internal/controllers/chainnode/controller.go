@@ -298,12 +298,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if !stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) {
 			return ctrl.Result{}, err
 		}
+		// The snapshot path records the success event where the stale Job deletion is confirmed.
 		logger.Info("replaced stale snapshot job", "reason", err.Error())
-		r.recorder.Eventf(chainNode,
-			corev1.EventTypeWarning,
-			appsv1.ReasonSnapshotJobReplaced,
-			"Replaced stale snapshot job: %v", err,
-		)
 		// Note it and carry on. Returning here would freeze genesis, services, config and the pod behind
 		// snapshot cleanup — the very failure mode this path exists to prevent — and foreground deletion
 		// can stay pending for a while behind the upload pod, its PVC or a finalizer.

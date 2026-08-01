@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -194,7 +196,13 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
 			Frequency: "24h",
 			// Now exporting to GCS...
-			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
+				Bucket: "snapshots",
+				CredentialsSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "desired-gcs-credentials"},
+					Key:                  "credentials.json",
+				},
+			}},
 		}}},
 	}
 	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
@@ -210,7 +218,7 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "-00010101000000-upload",
 			Namespace: "default",
-			UID:       "stale-uid",
+			UID:       types.UID(strings.Repeat("u", 300)),
 			Labels:    map[string]string{"exporter": "s3-exporter"},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: appsv1.GroupVersion.String(),
@@ -221,12 +229,13 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 			}},
 		},
 	})
+	recorder := record.NewFakeRecorder(10)
 	reconciler := &Reconciler{
 		Client:            controllerClient,
 		snapshotClientSet: clientSet,
 		Scheme:            scheme,
 		opts:              &controllers.ControllerRunOptions{},
-		recorder:          record.NewFakeRecorder(10),
+		recorder:          recorder,
 	}
 
 	ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
@@ -239,6 +248,188 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 	assert.False(t, exporting, "export state must be cleared so a fresh upload starts")
 	_, attempts := stored.Annotations[controllers.AnnotationTarballExportAttempts]
 	assert.False(t, attempts, "the intentional deletion must not count as a failed attempt")
+
+	event := requireRecordedEvent(t, recorder)
+	assert.Contains(t, event, "Normal "+appsv1.ReasonSnapshotJobReplaced)
+	assert.Contains(t, event, "Replaced stale upload Job default/-00010101000000-upload")
+	assert.Contains(t, event, "s3-exporter")
+	assert.Contains(t, event, "gcs-exporter")
+	assert.NotContains(t, event, "desired-gcs-credentials")
+	assert.NotContains(t, event, "credentials.json")
+	message := strings.TrimPrefix(event, "Normal "+appsv1.ReasonSnapshotJobReplaced+" ")
+	assert.LessOrEqual(t, len(message), 256)
+}
+
+func TestStaleDeleteJobReplacementEmitsEvent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	clientSet := fake.NewSimpleClientset(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "-00010101000000-delete",
+		Namespace: "default",
+		UID:       "stale-delete-uid",
+		Labels: map[string]string{
+			"exporter": "s3-exporter",
+			"owner":    "node",
+			"type":     "delete",
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(),
+			Kind:       "ChainNode",
+			Name:       "node",
+			UID:        "node-uid",
+			Controller: ptr.To(true),
+		}},
+	}})
+	deleteCalls := 0
+	clientSet.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deleteCalls++
+		resource := batchv1.SchemeGroupVersion.WithResource("jobs")
+		stored, err := clientSet.Tracker().Get(resource, "default", "-00010101000000-delete")
+		if err != nil {
+			return true, nil, err
+		}
+		terminating := stored.(*batchv1.Job).DeepCopy()
+		deletionTimestamp := metav1.Now()
+		terminating.DeletionTimestamp = &deletionTimestamp
+		if err = clientSet.Tracker().Update(resource, terminating, "default"); err != nil {
+			return true, nil, err
+		}
+		return true, nil, nil
+	})
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          recorder,
+	}
+
+	deleted, err := reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
+	assert.False(t, deleted)
+	require.ErrorIs(t, err, datasnapshot.ErrStaleJobReplaced)
+
+	event := requireRecordedEvent(t, recorder)
+	assert.Contains(t, event, "Normal "+appsv1.ReasonSnapshotJobReplaced)
+	assert.Contains(t, event, "Replaced stale delete Job default/-00010101000000-delete")
+	assert.Contains(t, event, "stale-delete-uid")
+	assert.Contains(t, event, "s3-exporter")
+	assert.Contains(t, event, "gcs-exporter")
+	assert.Equal(t, 1, deleteCalls)
+
+	deleted, err = reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
+	assert.False(t, deleted)
+	require.ErrorIs(t, err, datasnapshot.ErrStaleJobReplaced)
+	var replacement *datasnapshot.StaleJobReplacedError
+	assert.False(t, errors.As(err, &replacement), "waiting for a terminating Job must not report another successful replacement")
+	assert.Equal(t, 1, deleteCalls)
+	assertNoRecordedEvent(t, recorder)
+}
+
+func TestStaleDeleteJobReplacementDoesNotEmitEventWhenUIDPreconditionConflicts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	clientSet := fake.NewSimpleClientset(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "-00010101000000-delete",
+		Namespace: "default",
+		UID:       "stale-delete-uid",
+		Labels: map[string]string{
+			"exporter": "s3-exporter",
+			"owner":    "node",
+			"type":     "delete",
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(),
+			Kind:       "ChainNode",
+			Name:       "node",
+			UID:        "node-uid",
+			Controller: ptr.To(true),
+		}},
+	}})
+	clientSet.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Group: batchv1.GroupName, Resource: "jobs"},
+			"-00010101000000-delete",
+			errors.New("UID precondition did not match"),
+		)
+	})
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          recorder,
+	}
+
+	deleted, err := reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
+	assert.False(t, deleted)
+	require.True(t, apierrors.IsConflict(err))
+	assertNoRecordedEvent(t, recorder)
+}
+
+func TestStaleDeleteJobReplacementEventReportsActualNonExporterLabelMismatch(t *testing.T) {
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{recorder: recorder}
+	reconciler.recordSnapshotJobReplacement(&appsv1.ChainNode{}, &datasnapshot.StaleJobReplacedError{
+		Purpose:          "delete",
+		Namespace:        "default",
+		Name:             "snapshot-work",
+		UID:              "stale-delete-uid",
+		ConflictingLabel: "owner",
+		PreviousValue:    "previous-node",
+		DesiredValue:     "node",
+	})
+
+	event := requireRecordedEvent(t, recorder)
+	assert.Contains(t, event, "Replaced stale delete Job default/snapshot-work")
+	assert.Contains(t, event, "conflicting label \"owner\"")
+	assert.Contains(t, event, "previous value \"previous-node\"")
+	assert.Contains(t, event, "desired value \"node\"")
+	assert.NotContains(t, event, "desired provider")
+	assert.NotContains(t, event, "previous provider")
+}
+
+func requireRecordedEvent(t *testing.T, recorder *record.FakeRecorder) string {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		return event
+	default:
+		t.Fatal("expected Kubernetes event")
+		return ""
+	}
+}
+
+func assertNoRecordedEvent(t *testing.T, recorder *record.FakeRecorder) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("unexpected Kubernetes event: %s", event)
+	default:
+	}
 }
 
 func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
