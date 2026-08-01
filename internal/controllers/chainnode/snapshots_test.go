@@ -1140,6 +1140,120 @@ func TestEnsureVolumeSnapshotsKeepsNewestReadySnapshotTimestamp(t *testing.T) {
 	assert.Equal(t, newerAt.Format(timeLayout), stored.Annotations[controllers.AnnotationLastPvcSnapshot])
 }
 
+func TestEnsureVolumeSnapshotsDoesNotRewriteSecondPrecisionTimestamp(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+	completedAt := time.Date(2026, time.August, 1, 19, 14, 25, 987654321, time.UTC)
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotInProgress: "false",
+				controllers.AnnotationLastPvcSnapshot:       completedAt.Format(timeLayout),
+			},
+		},
+		Spec:   appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{Frequency: "24h"}}},
+		Status: appsv1.ChainNodeStatus{Phase: appsv1.PhaseChainNodeRunning, PvcSize: "1Gi", LatestHeight: 1},
+	}
+	ready := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-ready", Namespace: "default", CreationTimestamp: metav1.NewTime(completedAt),
+			Labels:      map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{controllers.AnnotationPvcSnapshotReady: "true"},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, ready).
+		Build()
+	countingClient := &countingUpdateClient{Client: baseClient}
+	reconciler := &Reconciler{Client: countingClient, recorder: record.NewFakeRecorder(10)}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+	assert.Zero(t, countingClient.updates, "matching second-resolution timestamps must not trigger a metadata write")
+}
+
+func TestEnsureVolumeSnapshotsRepairsSyncingPhaseForStopNodeSnapshot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotInProgress: "false",
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			StopNode:  ptr.To(true),
+		}}},
+		Status: appsv1.ChainNodeStatus{Phase: appsv1.PhaseChainNodeSyncing, PvcSize: "1Gi", LatestHeight: 1},
+	}
+	pending := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-pending", Namespace: "default",
+			Labels:      map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{controllers.AnnotationPvcSnapshotReady: "false"},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(false)},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, pending).
+		Build()
+	reconciler := &Reconciler{Client: controllerClient, recorder: record.NewFakeRecorder(10)}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, stored.Status.Phase)
+}
+
+func TestEnsureVolumeSnapshotsClearsProgressWhenSnapshotsDisabled(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotInProgress: "true",
+			},
+		},
+		Status: appsv1.ChainNodeStatus{Phase: appsv1.PhaseChainNodeSnapshotting},
+	}
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(chainNode).Build()
+	reconciler := &Reconciler{Client: controllerClient, recorder: record.NewFakeRecorder(10)}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
+	assert.Equal(t, "false", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
+}
+
+type countingUpdateClient struct {
+	client.Client
+	updates int
+}
+
+func (c *countingUpdateClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	c.updates++
+	return c.Client.Update(ctx, obj, opts...)
+}
+
 func TestVolumeSnapshotInProgress(t *testing.T) {
 	tests := []struct {
 		name      string

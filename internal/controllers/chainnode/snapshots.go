@@ -42,7 +42,19 @@ const (
 func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode, nodePodReady bool) error {
 	logger := log.FromContext(ctx)
 
-	if !chainNode.SnapshotsEnabled() || chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0 {
+	if !chainNode.SnapshotsEnabled() {
+		// Snapshot configuration can be removed while a snapshot annotation is
+		// still persisted. Do not let obsolete configuration pin setNodePhase in
+		// Snapshotting forever; with snapshots disabled there is no snapshot state
+		// for this controller to continue reconciling.
+		if volumeSnapshotInProgress(chainNode) {
+			logger.Info("clearing pvc snapshot in-progress annotation because snapshots are disabled")
+			setSnapshotInProgress(chainNode, false)
+			return r.Update(ctx, chainNode)
+		}
+		return nil
+	}
+	if chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0 {
 		return nil
 	}
 
@@ -67,10 +79,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	timestampNeedsRepair := latestCompletedSnapshot.After(getLastSnapshotTime(chainNode))
 	annotationNeedsRepair := volumeSnapshotInProgress(chainNode) != activeSnapshot
 	desiredPhase := chainNode.Status.Phase
-	// Only recover Snapshotting from a serving phase. Stopped and synchronization
-	// phases have higher priority, and clearing snapshot state must not advertise
-	// Running before normal pod reconciliation has proved the node is serving.
-	phaseNeedsRepair := activeSnapshot && desiredPhase == appsv1.PhaseChainNodeRunning
+	// Recover Snapshotting from a serving phase. Syncing normally remains higher
+	// priority for online snapshots, but a stop-node snapshot has deleted the pod
+	// and must be non-serving while active. Stopped and StateSyncing remain higher
+	// priority, and clearing snapshot state must not advertise Running before
+	// normal pod reconciliation has proved the node is serving.
+	phaseNeedsRepair := activeSnapshot && (desiredPhase == appsv1.PhaseChainNodeRunning ||
+		(desiredPhase == appsv1.PhaseChainNodeSyncing && chainNode.Spec.Persistence.Snapshots.ShouldStopNode()))
 	if phaseNeedsRepair {
 		desiredPhase = appsv1.PhaseChainNodeSnapshotting
 	}
@@ -541,8 +556,9 @@ func hasActiveVolumeSnapshot(snapshots []snapshotv1.VolumeSnapshot) bool {
 func latestReadySnapshotTime(snapshots []snapshotv1.VolumeSnapshot) time.Time {
 	var latest time.Time
 	for i := range snapshots {
-		if isSnapshotReady(&snapshots[i]) && snapshots[i].CreationTimestamp.Time.After(latest) {
-			latest = snapshots[i].CreationTimestamp.Time
+		completedAt := snapshots[i].CreationTimestamp.Time.UTC().Truncate(time.Second)
+		if isSnapshotReady(&snapshots[i]) && completedAt.After(latest) {
+			latest = completedAt
 		}
 	}
 	return latest
