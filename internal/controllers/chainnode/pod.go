@@ -1101,6 +1101,7 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 		if chainNode.Status.Phase != appsv1.PhaseChainNodeSnapshotting {
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSnapshotting)
 		}
+		return nil
 	}
 
 	c, err := r.getChainNodeClient(chainNode)

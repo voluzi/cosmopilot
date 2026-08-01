@@ -63,6 +63,8 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	// terminal: the CSI snapshot controller keeps retrying and clears the error on
 	// success, so they must not trigger a concurrent snapshot.
 	activeSnapshot := hasActiveVolumeSnapshot(snapshots)
+	latestCompletedSnapshot := latestReadySnapshotTime(snapshots)
+	timestampNeedsRepair := latestCompletedSnapshot.After(getLastSnapshotTime(chainNode))
 	annotationNeedsRepair := volumeSnapshotInProgress(chainNode) != activeSnapshot
 	desiredPhase := chainNode.Status.Phase
 	phaseNeedsRepair := false
@@ -76,6 +78,12 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	if annotationNeedsRepair {
 		logger.Info("repairing pvc snapshot in-progress annotation", "active", activeSnapshot)
 		setSnapshotInProgress(chainNode, activeSnapshot)
+	}
+	if timestampNeedsRepair {
+		logger.Info("repairing last pvc snapshot timestamp", "timestamp", latestCompletedSnapshot)
+		setSnapshotTime(chainNode, latestCompletedSnapshot)
+	}
+	if annotationNeedsRepair || timestampNeedsRepair {
 		if err = r.Update(ctx, chainNode); err != nil {
 			return err
 		}
@@ -117,8 +125,10 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				return err
 			}
 
-			// Update ChainNode status
-			setSnapshotInProgress(chainNode, false)
+			// Update ChainNode state. A second pending snapshot can exist after
+			// recovery from a partially persisted reconcile, so preserve the
+			// aggregate active state rather than clearing it unconditionally.
+			setSnapshotInProgress(chainNode, activeSnapshot)
 			setSnapshotTime(chainNode, snapshot.CreationTimestamp.Time)
 			if err = r.Update(ctx, chainNode); err != nil {
 				return err
@@ -428,9 +438,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 }
 
 func (r *Reconciler) listNodeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode) ([]snapshotv1.VolumeSnapshot, error) {
-	listOption := client.MatchingLabels{controllers.LabelChainNode: chainNode.GetName()}
 	list := &snapshotv1.VolumeSnapshotList{}
-	if err := r.List(ctx, list, listOption); err != nil {
+	if err := r.List(ctx, list,
+		client.InNamespace(chainNode.GetNamespace()),
+		client.MatchingLabels{controllers.LabelChainNode: chainNode.GetName()},
+	); err != nil {
 		return nil, err
 	}
 	return list.Items, nil
@@ -523,6 +535,16 @@ func hasActiveVolumeSnapshot(snapshots []snapshotv1.VolumeSnapshot) bool {
 		}
 	}
 	return false
+}
+
+func latestReadySnapshotTime(snapshots []snapshotv1.VolumeSnapshot) time.Time {
+	var latest time.Time
+	for i := range snapshots {
+		if isSnapshotReady(&snapshots[i]) && snapshots[i].CreationTimestamp.Time.After(latest) {
+			latest = snapshots[i].CreationTimestamp.Time
+		}
+	}
+	return latest
 }
 
 func isSnapshotExpired(snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
