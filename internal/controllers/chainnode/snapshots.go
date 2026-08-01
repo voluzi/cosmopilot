@@ -42,7 +42,19 @@ const (
 func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode, nodePodReady bool) error {
 	logger := log.FromContext(ctx)
 
-	if !chainNode.SnapshotsEnabled() || chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0 {
+	if !chainNode.SnapshotsEnabled() {
+		// Snapshot configuration can be removed while a snapshot annotation is
+		// still persisted. Do not let obsolete configuration pin setNodePhase in
+		// Snapshotting forever; with snapshots disabled there is no snapshot state
+		// for this controller to continue reconciling.
+		if volumeSnapshotInProgress(chainNode) {
+			logger.Info("clearing pvc snapshot in-progress annotation because snapshots are disabled")
+			setSnapshotInProgress(chainNode, false)
+			return r.Update(ctx, chainNode)
+		}
+		return nil
+	}
+	if chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0 {
 		return nil
 	}
 
@@ -57,10 +69,44 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		return snapshots[i].CreationTimestamp.Before(&snapshots[j].CreationTimestamp)
 	})
 
-	// Fix snapshotting status in case there are no snapshots for this node
-	if len(snapshots) == 0 && volumeSnapshotInProgress(chainNode) {
-		setSnapshotInProgress(chainNode, false)
+	// Repair the snapshotting annotation from the actual snapshot state. Completed
+	// and deleting snapshots must not block future snapshots, while any live
+	// non-ready snapshot remains active. VolumeSnapshot status errors are not
+	// terminal: the CSI snapshot controller keeps retrying and clears the error on
+	// success, so they must not trigger a concurrent snapshot.
+	activeSnapshot := hasActiveVolumeSnapshot(snapshots)
+	latestCompletedSnapshot := latestReadySnapshotTime(snapshots)
+	timestampNeedsRepair := latestCompletedSnapshot.After(getLastSnapshotTime(chainNode))
+	annotationNeedsRepair := volumeSnapshotInProgress(chainNode) != activeSnapshot
+	desiredPhase := chainNode.Status.Phase
+	// Recover Snapshotting from a serving phase. Syncing normally remains higher
+	// priority for online snapshots, but a stop-node snapshot has deleted the pod
+	// and must be non-serving while active. Stopped and StateSyncing remain higher
+	// priority, and clearing snapshot state must not advertise Running before
+	// normal pod reconciliation has proved the node is serving.
+	phaseNeedsRepair := activeSnapshot && (desiredPhase == appsv1.PhaseChainNodeRunning ||
+		(desiredPhase == appsv1.PhaseChainNodeSyncing && chainNode.Spec.Persistence.Snapshots.ShouldStopNode()))
+	if phaseNeedsRepair {
+		desiredPhase = appsv1.PhaseChainNodeSnapshotting
+	}
+	if annotationNeedsRepair {
+		logger.Info("repairing pvc snapshot in-progress annotation", "active", activeSnapshot)
+		setSnapshotInProgress(chainNode, activeSnapshot)
+	}
+	if timestampNeedsRepair {
+		logger.Info("repairing last pvc snapshot timestamp", "timestamp", latestCompletedSnapshot)
+		setSnapshotTime(chainNode, latestCompletedSnapshot)
+	}
+	if annotationNeedsRepair || timestampNeedsRepair {
 		if err = r.Update(ctx, chainNode); err != nil {
+			return err
+		}
+	}
+	if phaseNeedsRepair {
+		// Update may refresh status from the status subresource, so restore the
+		// derived phase before persisting it through the status client.
+		chainNode.Status.Phase = desiredPhase
+		if err = r.Status().Update(ctx, chainNode); err != nil {
 			return err
 		}
 	}
@@ -93,9 +139,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				return err
 			}
 
-			// Update ChainNode status
-			setSnapshotInProgress(chainNode, false)
-			setSnapshotTime(chainNode, snapshot.CreationTimestamp.Time)
+			// Update ChainNode state. A second pending snapshot can exist after
+			// recovery from a partially persisted reconcile, so preserve the
+			// aggregate active state rather than clearing it unconditionally.
+			setSnapshotInProgress(chainNode, activeSnapshot)
+			// The loop is oldest-first; never let an older newly-processed snapshot
+			// move cadence behind a newer ReadyToUse snapshot found above.
+			setSnapshotTime(chainNode, latestCompletedSnapshot)
 			if err = r.Update(ctx, chainNode); err != nil {
 				return err
 			}
@@ -404,9 +454,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 }
 
 func (r *Reconciler) listNodeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode) ([]snapshotv1.VolumeSnapshot, error) {
-	listOption := client.MatchingLabels{controllers.LabelChainNode: chainNode.GetName()}
 	list := &snapshotv1.VolumeSnapshotList{}
-	if err := r.List(ctx, list, listOption); err != nil {
+	if err := r.List(ctx, list,
+		client.InNamespace(chainNode.GetNamespace()),
+		client.MatchingLabels{controllers.LabelChainNode: chainNode.GetName()},
+	); err != nil {
 		return nil, err
 	}
 	return list.Items, nil
@@ -491,6 +543,27 @@ func isSnapshotReady(snapshot *snapshotv1.VolumeSnapshot) bool {
 	return snapshot != nil && snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse
 }
 
+func hasActiveVolumeSnapshot(snapshots []snapshotv1.VolumeSnapshot) bool {
+	for i := range snapshots {
+		snapshot := &snapshots[i]
+		if snapshot.DeletionTimestamp.IsZero() && !isSnapshotReady(snapshot) {
+			return true
+		}
+	}
+	return false
+}
+
+func latestReadySnapshotTime(snapshots []snapshotv1.VolumeSnapshot) time.Time {
+	var latest time.Time
+	for i := range snapshots {
+		completedAt := snapshots[i].CreationTimestamp.Time.UTC().Truncate(time.Second)
+		if isSnapshotReady(&snapshots[i]) && completedAt.After(latest) {
+			latest = completedAt
+		}
+	}
+	return latest
+}
+
 func isSnapshotExpired(snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
 	retention, ok := snapshot.Annotations[controllers.AnnotationSnapshotRetention]
 	if !ok {
@@ -549,11 +622,6 @@ func setSnapshotInProgress(chainNode *appsv1.ChainNode, snapshotting bool) {
 		chainNode.ObjectMeta.Annotations = make(map[string]string)
 	}
 	chainNode.ObjectMeta.Annotations[controllers.AnnotationPvcSnapshotInProgress] = strconv.FormatBool(snapshotting)
-	if snapshotting {
-		chainNode.Status.Phase = appsv1.PhaseChainNodeSnapshotting
-	} else {
-		chainNode.Status.Phase = appsv1.PhaseChainNodeRunning
-	}
 }
 
 func setSnapshotTime(chainNode *appsv1.ChainNode, ts time.Time) {
