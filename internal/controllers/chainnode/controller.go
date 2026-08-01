@@ -292,22 +292,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Ensure snapshots are taken if enabled and check if they are ready
 	logger.V(1).Info("ensure volume snapshots if applicable")
 	staleSnapshotJobReplaced := false
+	staleSnapshotJobTerminating := false
 	if err = r.ensureVolumeSnapshots(ctx, chainNode, nodePodReady); err != nil {
 		// A stale export/delete Job was dropped and will be recreated on the next pass. Keep it out of the
 		// reconcile error path so an unrelated subsystem cannot freeze the whole ChainNode.
-		if !stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) {
+		switch {
+		case stderrors.Is(err, datasnapshot.ErrStaleJobReplaced):
+			// The snapshot path records the success event where the stale Job deletion is confirmed.
+			logger.Info("replaced stale snapshot job", "reason", err.Error())
+			staleSnapshotJobReplaced = true
+		case stderrors.Is(err, datasnapshot.ErrStaleJobTerminating):
+			logger.Info("waiting for stale snapshot job deletion", "reason", err.Error())
+			staleSnapshotJobTerminating = true
+		default:
 			return ctrl.Result{}, err
 		}
-		logger.Info("replaced stale snapshot job", "reason", err.Error())
-		r.recorder.Eventf(chainNode,
-			corev1.EventTypeWarning,
-			appsv1.ReasonSnapshotJobReplaced,
-			"Replaced stale snapshot job: %v", err,
-		)
-		// Note it and carry on. Returning here would freeze genesis, services, config and the pod behind
-		// snapshot cleanup — the very failure mode this path exists to prevent — and foreground deletion
-		// can stay pending for a while behind the upload pod, its PVC or a finalizer.
-		staleSnapshotJobReplaced = true
+		// Carry on so snapshot cleanup cannot freeze genesis, services, config or the node pod.
 	}
 
 	// If the node will be down during snapshot, most methods below will fail.
@@ -440,6 +440,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// Come back promptly to recreate the replaced Job: Jobs are not watched, so nothing else would
 		// wake the controller before the full reconcile period elapses.
 		return ctrl.Result{Requeue: true}, nil
+	}
+	if staleSnapshotJobTerminating {
+		// Foreground deletion may wait on pods, PVCs or finalizers. Poll at the normal snapshot cadence
+		// instead of immediately hot-looping full ChainNode reconciliation.
+		return ctrl.Result{RequeueAfter: snapshotCheckPeriod}, nil
 	}
 	if dashboardRoutesPending {
 		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil

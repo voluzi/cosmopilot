@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
@@ -62,7 +63,7 @@ func TestEnsureSnapshotJobReplacesJobWithUnconvergeableLabels(t *testing.T) {
 	owner := testJobOwner()
 	client := fake.NewSimpleClientset(&batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            "snapshot-delete",
+			Name:            "snapshot-work",
 			Namespace:       "default",
 			UID:             "stale-uid",
 			Labels:          map[string]string{labelExporter: "s3-exporter", labelOwner: "owner", labelType: typeDelete},
@@ -71,18 +72,78 @@ func TestEnsureSnapshotJobReplacesJobWithUnconvergeableLabels(t *testing.T) {
 	})
 
 	desired := desiredDeleteJob(owner, "gcs-exporter")
+	desired.Name = "snapshot-work"
 	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
 	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, typeDelete, replacement.Purpose)
 	assert.ErrorContains(t, err, labelExporter)
 
 	// The stale Job is gone, so the next reconcile creates the desired one instead of erroring forever.
-	_, err = client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
+	_, err = client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-work", metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err))
 
 	job, created, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
 	require.NoError(t, err)
 	assert.True(t, created)
 	assert.Equal(t, "gcs-exporter", job.Labels[labelExporter])
+}
+
+func TestEnsureSnapshotJobReportsActualNonExporterLabelMismatch(t *testing.T) {
+	owner := testJobOwner()
+	client := fake.NewSimpleClientset(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "snapshot-work",
+		Namespace: "default",
+		UID:       "stale-uid",
+		Labels: map[string]string{
+			labelExporter: "gcs-exporter",
+			labelOwner:    "previous-owner",
+			labelType:     typeDelete,
+		},
+		OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+	}})
+	desired := desiredDeleteJob(owner, "gcs-exporter")
+	desired.Name = "snapshot-work"
+
+	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, typeDelete)
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, typeDelete, replacement.Purpose)
+	assert.Equal(t, labelOwner, replacement.ConflictingLabel)
+	assert.Equal(t, "previous-owner", replacement.PreviousValue)
+	assert.Equal(t, owner.Name, replacement.DesiredValue)
+	assert.ErrorContains(t, err, labelOwner)
+	assert.ErrorContains(t, err, "previous-owner")
+	assert.ErrorContains(t, err, owner.Name)
+}
+
+func TestEnsureSnapshotJobWaitsForTerminatingOwnedJob(t *testing.T) {
+	owner := testJobOwner()
+	deletionTimestamp := metav1.Now()
+	client := fake.NewSimpleClientset(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:              "snapshot-work",
+		Namespace:         "default",
+		UID:               "stale-uid",
+		DeletionTimestamp: &deletionTimestamp,
+		Labels:            map[string]string{labelExporter: "s3-exporter", labelOwner: owner.Name, labelType: typeDelete},
+		OwnerReferences:   []metav1.OwnerReference{ownerReferenceTo(owner)},
+	}})
+	deleteCalls := 0
+	client.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deleteCalls++
+		return false, nil, nil
+	})
+	desired := desiredDeleteJob(owner, "gcs-exporter")
+	desired.Name = "snapshot-work"
+
+	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, typeDelete)
+	require.ErrorIs(t, err, ErrStaleJobTerminating)
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	assert.False(t, errors.As(err, &replacement), "a terminating Job was not replaced during this call")
+	assert.Zero(t, deleteCalls)
 }
 
 // TestUploadJobStatusRejectsOtherExportersJob covers the polling path. Upload Jobs are looked up by
@@ -93,7 +154,7 @@ func TestUploadJobStatusRejectsOtherExportersJob(t *testing.T) {
 	owner := testJobOwner()
 	client := fake.NewSimpleClientset(&batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            "snapshot-upload",
+			Name:            "snapshot-work",
 			Namespace:       "default",
 			UID:             "stale-uid",
 			Labels:          map[string]string{labelExporter: "s3-exporter", labelType: typeUpload},
@@ -106,13 +167,58 @@ func TestUploadJobStatusRejectsOtherExportersJob(t *testing.T) {
 		},
 	})
 
-	_, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-upload", "gcs-exporter")
+	_, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-work", "gcs-exporter")
 	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, typeUpload, replacement.Purpose)
 	assert.ErrorContains(t, err, "s3-exporter")
 
 	// Removed, so the next reconcile starts a real upload against the configured provider.
-	_, err = client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	_, err = client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-work", metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestUploadJobStatusWaitsForTerminatingOwnedJob(t *testing.T) {
+	owner := testJobOwner()
+	deletionTimestamp := metav1.Now()
+	client := fake.NewSimpleClientset(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:              "snapshot-work",
+		Namespace:         "default",
+		UID:               "stale-uid",
+		DeletionTimestamp: &deletionTimestamp,
+		Labels:            map[string]string{labelExporter: "s3-exporter", labelType: typeUpload},
+		OwnerReferences:   []metav1.OwnerReference{ownerReferenceTo(owner)},
+	}})
+	deleteCalls := 0
+	client.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deleteCalls++
+		return false, nil, nil
+	})
+
+	_, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-work", "gcs-exporter")
+	require.ErrorIs(t, err, ErrStaleJobTerminating)
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	assert.False(t, errors.As(err, &replacement), "a terminating Job was not replaced during this call")
+	assert.Zero(t, deleteCalls)
+}
+
+func TestUploadJobStatusDoesNotTreatCurrentExporterTerminationAsReplacement(t *testing.T) {
+	owner := testJobOwner()
+	deletionTimestamp := metav1.Now()
+	client := fake.NewSimpleClientset(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:              "snapshot-work",
+		Namespace:         "default",
+		UID:               "current-uid",
+		DeletionTimestamp: &deletionTimestamp,
+		Labels:            map[string]string{labelExporter: "gcs-exporter", labelType: typeUpload},
+		OwnerReferences:   []metav1.OwnerReference{ownerReferenceTo(owner)},
+	}})
+
+	status, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-work", "gcs-exporter")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
 }
 
 // TestUploadJobStatusNeverDeletesAnotherOwnersJob guards a cross-node hazard: tarball names derive from
@@ -221,6 +327,32 @@ func TestEnsureSnapshotJobReportsDeleteFailureOfStaleJob(t *testing.T) {
 
 	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desiredDeleteJob(owner, "gcs-exporter"), "delete")
 	require.ErrorContains(t, err, "delete refused")
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
+}
+
+func TestEnsureSnapshotJobReportsUIDPreconditionConflict(t *testing.T) {
+	owner := testJobOwner()
+	client := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "snapshot-work",
+			Namespace:       "default",
+			UID:             "stale-uid",
+			Labels:          map[string]string{labelExporter: "s3-exporter", labelOwner: owner.Name, labelType: typeDelete},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+		},
+	})
+	client.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Group: batchv1.GroupName, Resource: "jobs"},
+			"snapshot-work",
+			errors.New("UID precondition did not match"),
+		)
+	})
+	desired := desiredDeleteJob(owner, "gcs-exporter")
+	desired.Name = "snapshot-work"
+
+	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, typeDelete)
+	require.True(t, apierrors.IsConflict(err))
 	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
 }
 

@@ -286,11 +286,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true):
 			ready, err := r.isTarballReady(ctx, chainNode, &snapshot)
 			if err != nil {
-				r.recorder.Eventf(chainNode,
-					corev1.EventTypeWarning,
-					appsv1.ReasonTarballExportError,
-					"Error on tarball export %v", err,
-				)
+				r.recordTarballExportError(chainNode, err)
 				return err
 			}
 			if ready {
@@ -414,7 +410,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		for _, snapshot := range tarballSnapshots {
 			if !utils.SliceContains[string](tarballNames, snapshot) {
 				logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshot)
-				status, deleteErr := exporter.DeleteSnapshot(ctx, snapshot)
+				status, deleteErr := r.deleteTarballWithProvider(ctx, chainNode, exporter, snapshot)
 				if deleteErr != nil {
 					return deleteErr
 				}
@@ -696,7 +692,9 @@ func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainN
 	if err != nil {
 		return err
 	}
-	return exporter.CreateSnapshot(ctx, getTarballName(chainNode, snapshot), snapshot)
+	err = exporter.CreateSnapshot(ctx, getTarballName(chainNode, snapshot), snapshot)
+	r.recordSnapshotJobReplacement(chainNode, err)
+	return err
 }
 
 func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
@@ -707,6 +705,7 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 
 	status, err := exporter.GetSnapshotStatus(ctx, getTarballName(chainNode, snapshot))
 	if err != nil {
+		r.recordSnapshotJobReplacement(chainNode, err)
 		// The upload Job belonged to a previous exporter and was deleted. Clear the export state instead
 		// of letting the next poll see the intentionally removed Job as SnapshotNotFound and charge it as
 		// another failed attempt — that could exhaust the retry limit and permanently mark the export
@@ -833,7 +832,62 @@ func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainN
 	if err != nil {
 		return "", err
 	}
-	return exporter.DeleteSnapshot(ctx, getTarballName(chainNode, snapshot))
+	return r.deleteTarballWithProvider(ctx, chainNode, exporter, getTarballName(chainNode, snapshot))
+}
+
+func (r *Reconciler) deleteTarballWithProvider(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	exporter datasnapshot.SnapshotProvider,
+	name string,
+) (datasnapshot.SnapshotStatus, error) {
+	status, err := exporter.DeleteSnapshot(ctx, name)
+	r.recordSnapshotJobReplacement(chainNode, err)
+	return status, err
+}
+
+func (r *Reconciler) recordTarballExportError(chainNode *appsv1.ChainNode, err error) {
+	if stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) || stderrors.Is(err, datasnapshot.ErrStaleJobTerminating) {
+		return
+	}
+	r.recorder.Eventf(chainNode,
+		corev1.EventTypeWarning,
+		appsv1.ReasonTarballExportError,
+		"Error on tarball export %v", err,
+	)
+}
+
+func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, err error) {
+	var replacement *datasnapshot.StaleJobReplacedError
+	if !stderrors.As(err, &replacement) {
+		return
+	}
+	message := controllers.FormatEventMessage(
+		"Replaced stale %s Job %s/%s UID %s with conflicting label %q; previous value %q; desired value %q",
+		replacement.Purpose,
+		replacement.Namespace,
+		replacement.Name,
+		replacement.UID,
+		replacement.ConflictingLabel,
+		replacement.PreviousValue,
+		replacement.DesiredValue,
+	)
+	if replacement.ProviderSwitch() {
+		message = controllers.FormatEventMessage(
+			"Replaced stale %s Job %s/%s UID %s for desired provider %q; previous provider %q",
+			replacement.Purpose,
+			replacement.Namespace,
+			replacement.Name,
+			replacement.UID,
+			replacement.DesiredValue,
+			replacement.PreviousValue,
+		)
+	}
+	r.recorder.Event(chainNode,
+		corev1.EventTypeNormal,
+		appsv1.ReasonSnapshotJobReplaced,
+		message,
+	)
 }
 
 func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {

@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -33,11 +34,43 @@ const (
 	typeDelete = "delete"
 )
 
-// ErrStaleJobReplaced reports that an existing snapshot Job was deleted because its labels could not
-// converge to the desired ones — the exporter label encodes the export provider, so a Job left behind
-// by a previous provider never matches again. Callers should requeue instead of failing the reconcile:
-// the replacement Job is created once the stale one is gone.
+// ErrStaleJobReplaced reports that an existing snapshot Job is being deleted because it cannot
+// converge to the desired state. Callers should requeue instead of failing the reconcile; the
+// replacement Job is created once the stale one is gone.
 var ErrStaleJobReplaced = errors.New("stale snapshot job deleted; it will be recreated")
+
+// ErrStaleJobTerminating reports that a previously replaced stale Job still exists with a deletion
+// timestamp. Callers should use a delayed requeue while foreground deletion finishes.
+var ErrStaleJobTerminating = errors.New("stale snapshot job is still terminating")
+
+// StaleJobReplacedError describes a stale Job whose deletion was successfully requested.
+type StaleJobReplacedError struct {
+	Purpose          string
+	Namespace        string
+	Name             string
+	UID              types.UID
+	ConflictingLabel string
+	PreviousValue    string
+	DesiredValue     string
+}
+
+func (err *StaleJobReplacedError) Error() string {
+	if err.ProviderSwitch() {
+		return fmt.Sprintf("%s job %s/%s (UID %s) for exporter %q replaced by desired exporter %q: %v",
+			err.Purpose, err.Namespace, err.Name, err.UID, err.PreviousValue, err.DesiredValue, ErrStaleJobReplaced)
+	}
+	return fmt.Sprintf("%s job %s/%s (UID %s) had conflicting label %q: previous value %q, desired value %q: %v",
+		err.Purpose, err.Namespace, err.Name, err.UID, err.ConflictingLabel, err.PreviousValue, err.DesiredValue, ErrStaleJobReplaced)
+}
+
+func (err *StaleJobReplacedError) Unwrap() error {
+	return ErrStaleJobReplaced
+}
+
+// ProviderSwitch reports whether the exporter label caused the replacement.
+func (err *StaleJobReplacedError) ProviderSwitch() bool {
+	return err.ConflictingLabel == labelExporter
+}
 
 type SnapshotProvider interface {
 	CreateSnapshot(context.Context, string, *snapshotv1.VolumeSnapshot) error
@@ -95,13 +128,24 @@ func ensureSnapshotJob(
 	}
 	for key, value := range desired.Labels {
 		if job.Labels[key] != value {
+			if job.DeletionTimestamp != nil {
+				return nil, false, fmt.Errorf("stale %s job %s/%s is terminating: %w", purpose, job.Namespace, job.Name, ErrStaleJobTerminating)
+			}
 			// Labels are set at creation and never updated, so a mismatch can never converge — it means
 			// the Job was created for a different desired state (e.g. another export provider). Exports
 			// and deletions are idempotent, so drop the stale Job and let the next reconcile recreate it.
 			if err = deleteSnapshotJob(ctx, client, job); err != nil {
 				return nil, false, fmt.Errorf("delete stale %s job %s/%s: %w", purpose, job.Namespace, job.Name, err)
 			}
-			return nil, false, fmt.Errorf("%s job %s/%s had conflicting label %s: %w", purpose, job.Namespace, job.Name, key, ErrStaleJobReplaced)
+			return nil, false, &StaleJobReplacedError{
+				Purpose:          purpose,
+				Namespace:        job.Namespace,
+				Name:             job.Name,
+				UID:              job.UID,
+				ConflictingLabel: key,
+				PreviousValue:    job.Labels[key],
+				DesiredValue:     value,
+			}
 		}
 	}
 	return job, false, nil
@@ -135,11 +179,21 @@ func uploadJobStatus(
 			job.Namespace, job.Name, owner.GetName())
 	}
 	if job.Labels[labelExporter] != exporter {
+		if job.DeletionTimestamp != nil {
+			return "", fmt.Errorf("stale upload job %s/%s is terminating: %w", job.Namespace, job.Name, ErrStaleJobTerminating)
+		}
 		if err = deleteSnapshotJob(ctx, client, job); err != nil {
 			return "", fmt.Errorf("delete stale upload job %s/%s: %w", job.Namespace, job.Name, err)
 		}
-		return "", fmt.Errorf("upload job %s/%s belongs to exporter %q, not %q: %w",
-			job.Namespace, job.Name, job.Labels[labelExporter], exporter, ErrStaleJobReplaced)
+		return "", &StaleJobReplacedError{
+			Purpose:          typeUpload,
+			Namespace:        job.Namespace,
+			Name:             job.Name,
+			UID:              job.UID,
+			ConflictingLabel: labelExporter,
+			PreviousValue:    job.Labels[labelExporter],
+			DesiredValue:     exporter,
+		}
 	}
 	return snapshotJobStatus(job), nil
 }
@@ -150,7 +204,7 @@ func deleteSnapshotJob(ctx context.Context, client kubernetes.Interface, job *ba
 		PropagationPolicy: &propagation,
 		Preconditions:     &metav1.Preconditions{UID: &job.UID},
 	})
-	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
