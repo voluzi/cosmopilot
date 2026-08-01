@@ -218,7 +218,7 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "-00010101000000-upload",
 			Namespace: "default",
-			UID:       types.UID(strings.Repeat("u", 300)),
+			UID:       "11111111-2222-3333-4444-555555555555",
 			Labels:    map[string]string{"exporter": "s3-exporter"},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: appsv1.GroupVersion.String(),
@@ -252,10 +252,45 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 	event := requireRecordedEvent(t, recorder)
 	assert.Contains(t, event, "Normal "+appsv1.ReasonSnapshotJobReplaced)
 	assert.Contains(t, event, "Replaced stale upload Job default/-00010101000000-upload")
+	assert.Contains(t, event, "11111111-2222-3333-4444-555555555555")
 	assert.Contains(t, event, "s3-exporter")
 	assert.Contains(t, event, "gcs-exporter")
 	assert.NotContains(t, event, "desired-gcs-credentials")
 	assert.NotContains(t, event, "credentials.json")
+	message := strings.TrimPrefix(event, "Normal "+appsv1.ReasonSnapshotJobReplaced+" ")
+	assert.LessOrEqual(t, len(message), 256)
+}
+
+func TestTarballExportReplacementDoesNotEmitWarningEvent(t *testing.T) {
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{recorder: recorder}
+	replacement := &datasnapshot.StaleJobReplacedError{
+		Purpose: "upload",
+		Name:    "snapshot-upload",
+		UID:     "11111111-2222-3333-4444-555555555555",
+	}
+
+	reconciler.recordTarballExportError(&appsv1.ChainNode{}, replacement)
+
+	assertNoRecordedEvent(t, recorder)
+}
+
+func TestSnapshotJobReplacementEventPreservesUIDBeforeTruncation(t *testing.T) {
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{recorder: recorder}
+	uid := types.UID("11111111-2222-3333-4444-555555555555")
+	reconciler.recordSnapshotJobReplacement(&appsv1.ChainNode{}, &datasnapshot.StaleJobReplacedError{
+		Purpose:          "upload",
+		Namespace:        strings.Repeat("n", 63),
+		Name:             strings.Repeat("j", 63),
+		UID:              uid,
+		ConflictingLabel: "exporter",
+		PreviousValue:    strings.Repeat("previous-provider-", 20),
+		DesiredValue:     strings.Repeat("desired-provider-", 20),
+	})
+
+	event := requireRecordedEvent(t, recorder)
+	assert.Contains(t, event, string(uid))
 	message := strings.TrimPrefix(event, "Normal "+appsv1.ReasonSnapshotJobReplaced+" ")
 	assert.LessOrEqual(t, len(message), 256)
 }

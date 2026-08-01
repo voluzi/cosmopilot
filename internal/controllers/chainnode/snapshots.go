@@ -286,11 +286,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true):
 			ready, err := r.isTarballReady(ctx, chainNode, &snapshot)
 			if err != nil {
-				r.recorder.Eventf(chainNode,
-					corev1.EventTypeWarning,
-					appsv1.ReasonTarballExportError,
-					"Error on tarball export %v", err,
-				)
+				r.recordTarballExportError(chainNode, err)
 				return err
 			}
 			if ready {
@@ -850,30 +846,41 @@ func (r *Reconciler) deleteTarballWithProvider(
 	return status, err
 }
 
+func (r *Reconciler) recordTarballExportError(chainNode *appsv1.ChainNode, err error) {
+	if stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) {
+		return
+	}
+	r.recorder.Eventf(chainNode,
+		corev1.EventTypeWarning,
+		appsv1.ReasonTarballExportError,
+		"Error on tarball export %v", err,
+	)
+}
+
 func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, err error) {
 	var replacement *datasnapshot.StaleJobReplacedError
 	if !stderrors.As(err, &replacement) {
 		return
 	}
 	message := controllers.FormatEventMessage(
-		"Replaced stale %s Job %s/%s with conflicting label %q; previous value %q; desired value %q; UID %s",
+		"Replaced stale %s Job %s/%s UID %s with conflicting label %q; previous value %q; desired value %q",
 		replacement.Purpose,
 		replacement.Namespace,
 		replacement.Name,
+		replacement.UID,
 		replacement.ConflictingLabel,
 		replacement.PreviousValue,
 		replacement.DesiredValue,
-		replacement.UID,
 	)
 	if replacement.ProviderSwitch() {
 		message = controllers.FormatEventMessage(
-			"Replaced stale %s Job %s/%s for desired provider %q; previous provider %q; UID %s",
+			"Replaced stale %s Job %s/%s UID %s for desired provider %q; previous provider %q",
 			replacement.Purpose,
 			replacement.Namespace,
 			replacement.Name,
+			replacement.UID,
 			replacement.DesiredValue,
 			replacement.PreviousValue,
-			replacement.UID,
 		)
 	}
 	r.recorder.Event(chainNode,
