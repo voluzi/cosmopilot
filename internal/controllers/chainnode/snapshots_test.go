@@ -3,6 +3,7 @@ package chainnode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -271,6 +272,7 @@ func TestTarballExportReplacementDoesNotEmitWarningEvent(t *testing.T) {
 	}
 
 	reconciler.recordTarballExportError(&appsv1.ChainNode{}, replacement)
+	reconciler.recordTarballExportError(&appsv1.ChainNode{}, fmt.Errorf("waiting for delete: %w", datasnapshot.ErrStaleJobTerminating))
 
 	assertNoRecordedEvent(t, recorder)
 }

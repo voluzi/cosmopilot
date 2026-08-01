@@ -847,7 +847,7 @@ func (r *Reconciler) deleteTarballWithProvider(
 }
 
 func (r *Reconciler) recordTarballExportError(chainNode *appsv1.ChainNode, err error) {
-	if stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) {
+	if stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) || stderrors.Is(err, datasnapshot.ErrStaleJobTerminating) {
 		return
 	}
 	r.recorder.Eventf(chainNode,
