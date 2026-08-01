@@ -62,10 +62,29 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	// non-ready snapshot remains active. VolumeSnapshot status errors are not
 	// terminal: the CSI snapshot controller keeps retrying and clears the error on
 	// success, so they must not trigger a concurrent snapshot.
-	if volumeSnapshotInProgress(chainNode) && !hasActiveVolumeSnapshot(snapshots) {
-		logger.Info("clearing stale pvc snapshot in-progress annotation")
-		setSnapshotInProgress(chainNode, false)
+	activeSnapshot := hasActiveVolumeSnapshot(snapshots)
+	annotationNeedsRepair := volumeSnapshotInProgress(chainNode) != activeSnapshot
+	desiredPhase := chainNode.Status.Phase
+	phaseNeedsRepair := false
+	if activeSnapshot && desiredPhase != appsv1.PhaseChainNodeSnapshotting {
+		desiredPhase = appsv1.PhaseChainNodeSnapshotting
+		phaseNeedsRepair = true
+	} else if !activeSnapshot && desiredPhase == appsv1.PhaseChainNodeSnapshotting {
+		desiredPhase = appsv1.PhaseChainNodeRunning
+		phaseNeedsRepair = true
+	}
+	if annotationNeedsRepair {
+		logger.Info("repairing pvc snapshot in-progress annotation", "active", activeSnapshot)
+		setSnapshotInProgress(chainNode, activeSnapshot)
 		if err = r.Update(ctx, chainNode); err != nil {
+			return err
+		}
+	}
+	if phaseNeedsRepair {
+		// Update may refresh status from the status subresource, so restore the
+		// derived phase before persisting it through the status client.
+		chainNode.Status.Phase = desiredPhase
+		if err = r.Status().Update(ctx, chainNode); err != nil {
 			return err
 		}
 	}

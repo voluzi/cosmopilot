@@ -481,7 +481,11 @@ func TestFinishTarballExportRetriesCleanupAfterUpload(t *testing.T) {
 			controllers.AnnotationExportingTarball: "true",
 		},
 	}}
-	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, snapshot).
+		Build()
 	clientSet := fake.NewSimpleClientset(
 		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "chain-00010101000000-upload", Namespace: "default"}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "chain-00010101000000-upload", Namespace: "default"}},
@@ -814,6 +818,7 @@ func TestEnsureVolumeSnapshotsRepairsSnapshotInProgressAnnotation(t *testing.T) 
 
 			controllerClient := fakeclient.NewClientBuilder().
 				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
 				WithObjects(objects...).
 				Build()
 			reconciler := &Reconciler{
@@ -828,6 +833,100 @@ func TestEnsureVolumeSnapshotsRepairsSnapshotInProgressAnnotation(t *testing.T) 
 			assert.Equal(t, tt.wantSnapshotting, stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
 		})
 	}
+}
+
+func TestEnsureVolumeSnapshotsRepairsFalseAnnotationFromActiveSnapshot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+	now := metav1.Now()
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotInProgress: "false",
+				controllers.AnnotationLastPvcSnapshot:       now.Add(-25 * time.Hour).UTC().Format(timeLayout),
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{
+			Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{Frequency: "24h"}},
+		},
+		Status: appsv1.ChainNodeStatus{
+			Phase:        appsv1.PhaseChainNodeRunning,
+			PvcSize:      "1Gi",
+			LatestHeight: 1,
+		},
+	}
+	pendingSnapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-pending",
+			Namespace:         "default",
+			CreationTimestamp: now,
+			Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "false",
+			},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(false)},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, pendingSnapshot).
+		Build()
+	reconciler := &Reconciler{Client: controllerClient, recorder: record.NewFakeRecorder(10)}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, stored.Status.Phase)
+
+	snapshots := &snapshotv1.VolumeSnapshotList{}
+	require.NoError(t, controllerClient.List(context.Background(), snapshots, client.MatchingLabels{controllers.LabelChainNode: chainNode.Name}))
+	assert.Len(t, snapshots.Items, 1, "an active snapshot must prevent scheduling another snapshot")
+}
+
+func TestEnsureVolumeSnapshotsClearingStaleAnnotationPersistsRunningPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+	now := metav1.Now()
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotInProgress: "true",
+				controllers.AnnotationLastPvcSnapshot:       now.UTC().Format(timeLayout),
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{
+			Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{Frequency: "24h"}},
+		},
+		Status: appsv1.ChainNodeStatus{
+			Phase:        appsv1.PhaseChainNodeSnapshotting,
+			PvcSize:      "1Gi",
+			LatestHeight: 1,
+		},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode).
+		Build()
+	reconciler := &Reconciler{Client: controllerClient, recorder: record.NewFakeRecorder(10)}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
+	assert.Equal(t, "false", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
+	assert.Equal(t, appsv1.PhaseChainNodeRunning, stored.Status.Phase)
 }
 
 func TestVolumeSnapshotInProgress(t *testing.T) {
