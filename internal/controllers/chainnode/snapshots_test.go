@@ -890,7 +890,7 @@ func TestEnsureVolumeSnapshotsRepairsFalseAnnotationFromActiveSnapshot(t *testin
 	assert.Len(t, snapshots.Items, 1, "an active snapshot must prevent scheduling another snapshot")
 }
 
-func TestEnsureVolumeSnapshotsClearingStaleAnnotationPersistsRunningPhase(t *testing.T) {
+func TestEnsureVolumeSnapshotsClearingStaleAnnotationKeepsSnapshottingUntilPodReconcile(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
@@ -926,7 +926,52 @@ func TestEnsureVolumeSnapshotsClearingStaleAnnotationPersistsRunningPhase(t *tes
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
 	assert.Equal(t, "false", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
-	assert.Equal(t, appsv1.PhaseChainNodeRunning, stored.Status.Phase)
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, stored.Status.Phase)
+}
+
+func TestEnsureVolumeSnapshotsClearingStaleAnnotationPreservesSyncingPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+	now := metav1.Now()
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotInProgress: "true",
+				controllers.AnnotationLastPvcSnapshot:       now.Add(-25 * time.Hour).UTC().Format(timeLayout),
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:           "24h",
+			DisableWhileSyncing: ptr.To(true),
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			Phase:        appsv1.PhaseChainNodeSyncing,
+			PvcSize:      "1Gi",
+			LatestHeight: 1,
+		},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode).
+		Build()
+	reconciler := &Reconciler{Client: controllerClient, recorder: record.NewFakeRecorder(10)}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
+	assert.Equal(t, "false", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
+	assert.Equal(t, appsv1.PhaseChainNodeSyncing, stored.Status.Phase)
+	assert.Equal(t, appsv1.PhaseChainNodeSyncing, chainNode.Status.Phase)
+
+	snapshots := &snapshotv1.VolumeSnapshotList{}
+	require.NoError(t, controllerClient.List(context.Background(), snapshots, client.InNamespace(chainNode.Namespace)))
+	assert.Empty(t, snapshots.Items, "clearing stale state must not bypass disableWhileSyncing")
 }
 
 func TestListNodeSnapshotsScopesResultsToNamespace(t *testing.T) {
@@ -1053,6 +1098,48 @@ func TestEnsureVolumeSnapshotsRepairsTimestampFromAlreadyAnnotatedReadySnapshot(
 	assert.Len(t, snapshots.Items, 1, "repairing the completion timestamp must prevent an immediate replacement snapshot")
 }
 
+func TestEnsureVolumeSnapshotsKeepsNewestReadySnapshotTimestamp(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+	olderAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	newerAt := olderAt.Add(time.Hour)
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec:       appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{Frequency: "24h"}}},
+		Status:     appsv1.ChainNodeStatus{Phase: appsv1.PhaseChainNodeRunning, PvcSize: "1Gi", LatestHeight: 1},
+	}
+	olderReady := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-older", Namespace: "default", CreationTimestamp: metav1.NewTime(olderAt),
+			Labels:      map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{controllers.AnnotationPvcSnapshotReady: "false"},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	newerReady := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-newer", Namespace: "default", CreationTimestamp: metav1.NewTime(newerAt),
+			Labels:      map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{controllers.AnnotationPvcSnapshotReady: "true"},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, olderReady, newerReady).
+		Build()
+	reconciler := &Reconciler{Client: controllerClient, recorder: record.NewFakeRecorder(10)}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(chainNode), stored))
+	assert.Equal(t, newerAt.Format(timeLayout), stored.Annotations[controllers.AnnotationLastPvcSnapshot])
+}
+
 func TestVolumeSnapshotInProgress(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1131,34 +1218,31 @@ func TestSetSnapshotInProgress(t *testing.T) {
 		{
 			name: "start snapshotting",
 			chainNode: &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{},
-				},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+				Status:     appsv1.ChainNodeStatus{Phase: appsv1.PhaseChainNodeSyncing},
 			},
 			snapshotting: true,
-			wantPhase:    appsv1.PhaseChainNodeSnapshotting,
+			wantPhase:    appsv1.PhaseChainNodeSyncing,
 			wantValue:    "true",
 		},
 		{
 			name: "stop snapshotting",
 			chainNode: &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{},
-				},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+				Status:     appsv1.ChainNodeStatus{Phase: appsv1.PhaseChainNodeSnapshotting},
 			},
 			snapshotting: false,
-			wantPhase:    appsv1.PhaseChainNodeRunning,
+			wantPhase:    appsv1.PhaseChainNodeSnapshotting,
 			wantValue:    "false",
 		},
 		{
 			name: "start with nil annotations",
 			chainNode: &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: nil,
-				},
+				ObjectMeta: metav1.ObjectMeta{Annotations: nil},
+				Status:     appsv1.ChainNodeStatus{Phase: appsv1.PhaseChainNodeStopped},
 			},
 			snapshotting: true,
-			wantPhase:    appsv1.PhaseChainNodeSnapshotting,
+			wantPhase:    appsv1.PhaseChainNodeStopped,
 			wantValue:    "true",
 		},
 	}

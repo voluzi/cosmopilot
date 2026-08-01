@@ -67,13 +67,12 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	timestampNeedsRepair := latestCompletedSnapshot.After(getLastSnapshotTime(chainNode))
 	annotationNeedsRepair := volumeSnapshotInProgress(chainNode) != activeSnapshot
 	desiredPhase := chainNode.Status.Phase
-	phaseNeedsRepair := false
-	if activeSnapshot && desiredPhase != appsv1.PhaseChainNodeSnapshotting {
+	// Only recover Snapshotting from a serving phase. Stopped and synchronization
+	// phases have higher priority, and clearing snapshot state must not advertise
+	// Running before normal pod reconciliation has proved the node is serving.
+	phaseNeedsRepair := activeSnapshot && desiredPhase == appsv1.PhaseChainNodeRunning
+	if phaseNeedsRepair {
 		desiredPhase = appsv1.PhaseChainNodeSnapshotting
-		phaseNeedsRepair = true
-	} else if !activeSnapshot && desiredPhase == appsv1.PhaseChainNodeSnapshotting {
-		desiredPhase = appsv1.PhaseChainNodeRunning
-		phaseNeedsRepair = true
 	}
 	if annotationNeedsRepair {
 		logger.Info("repairing pvc snapshot in-progress annotation", "active", activeSnapshot)
@@ -129,7 +128,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			// recovery from a partially persisted reconcile, so preserve the
 			// aggregate active state rather than clearing it unconditionally.
 			setSnapshotInProgress(chainNode, activeSnapshot)
-			setSnapshotTime(chainNode, snapshot.CreationTimestamp.Time)
+			// The loop is oldest-first; never let an older newly-processed snapshot
+			// move cadence behind a newer ReadyToUse snapshot found above.
+			setSnapshotTime(chainNode, latestCompletedSnapshot)
 			if err = r.Update(ctx, chainNode); err != nil {
 				return err
 			}
@@ -605,11 +606,6 @@ func setSnapshotInProgress(chainNode *appsv1.ChainNode, snapshotting bool) {
 		chainNode.ObjectMeta.Annotations = make(map[string]string)
 	}
 	chainNode.ObjectMeta.Annotations[controllers.AnnotationPvcSnapshotInProgress] = strconv.FormatBool(snapshotting)
-	if snapshotting {
-		chainNode.Status.Phase = appsv1.PhaseChainNodeSnapshotting
-	} else {
-		chainNode.Status.Phase = appsv1.PhaseChainNodeRunning
-	}
 }
 
 func setSnapshotTime(chainNode *appsv1.ChainNode, ts time.Time) {
