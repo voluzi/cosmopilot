@@ -327,11 +327,7 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus
 }
 
 func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, name string) error {
-	err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-delete", name), metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	return nil
+	return cleanupSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, name, gcsExporter)
 }
 
 func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {

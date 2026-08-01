@@ -179,6 +179,40 @@ func TestS3DeleteSnapshotReportsTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestS3CleanupSnapshotDeletionUsesForegroundUIDPrecondition(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket: "snapshots",
+		Region: "eu-west-1",
+	}})
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "snapshot-delete",
+			Namespace:       "default",
+			UID:             "s3-delete-uid",
+			Labels:          map[string]string{labelExporter: s3Exporter, labelType: typeDelete},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
+		},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		}}},
+	}
+	_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), job, metav1.CreateOptions{})
+	require.NoError(t, err)
+	client := provider.Client.(*fake.Clientset)
+	actionCount := len(client.Actions())
+
+	require.NoError(t, provider.CleanupSnapshotDeletion(context.Background(), "snapshot"))
+
+	deleteAction := requireJobDeleteAction(t, client.Actions()[actionCount:])
+	assert.Equal(t, job.Name, deleteAction.GetName())
+	options := deleteAction.GetDeleteOptions()
+	require.NotNil(t, options.PropagationPolicy)
+	assert.Equal(t, metav1.DeletePropagationForeground, *options.PropagationPolicy)
+	require.NotNil(t, options.Preconditions)
+	require.NotNil(t, options.Preconditions.UID)
+	assert.Equal(t, job.UID, *options.Preconditions.UID)
+}
+
 func TestS3ListSnapshotsIncludesDeletionJobs(t *testing.T) {
 	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")

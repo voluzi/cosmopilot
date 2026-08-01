@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -356,6 +357,117 @@ func TestEnsureSnapshotJobReportsUIDPreconditionConflict(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
 }
 
+func TestCleanupSnapshotDeletionJobTreatsNotFoundAsSuccess(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	owner := testJobOwner()
+
+	require.NoError(t, cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter))
+	for _, action := range client.Actions() {
+		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
+	}
+}
+
+func TestCleanupSnapshotDeletionJobWaitsForTerminatingJob(t *testing.T) {
+	owner := testJobOwner()
+	job := desiredDeleteJob(owner, gcsExporter)
+	job.UID = "existing-job-uid"
+	job.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	client := fake.NewSimpleClientset(job)
+
+	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+	require.ErrorIs(t, err, ErrStaleJobTerminating)
+
+	for _, action := range client.Actions() {
+		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
+	}
+}
+
+func TestCleanupSnapshotDeletionJobRejectsForeignJobs(t *testing.T) {
+	owner := testJobOwner()
+	foreignOwner := &corev1.ConfigMap{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "other-owner", Namespace: "default", UID: "other-owner-uid"},
+	}
+	tests := []struct {
+		name        string
+		mutate      func(*batchv1.Job)
+		wantMessage string
+	}{
+		{
+			name: "foreign owner",
+			mutate: func(job *batchv1.Job) {
+				job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
+			},
+			wantMessage: "not controlled by snapshot owner",
+		},
+		{
+			name: "wrong exporter",
+			mutate: func(job *batchv1.Job) {
+				job.Labels[labelExporter] = s3Exporter
+			},
+			wantMessage: `has exporter label "s3-exporter", expected "gcs-exporter"`,
+		},
+		{
+			name: "wrong type",
+			mutate: func(job *batchv1.Job) {
+				job.Labels[labelType] = typeUpload
+			},
+			wantMessage: `has type label "upload", expected "delete"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := desiredDeleteJob(owner, gcsExporter)
+			job.UID = "existing-job-uid"
+			tt.mutate(job)
+			client := fake.NewSimpleClientset(job)
+
+			err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+			require.ErrorContains(t, err, tt.wantMessage)
+
+			_, err = client.BatchV1().Jobs("default").Get(context.Background(), job.Name, metav1.GetOptions{})
+			require.NoError(t, err, "foreign or mislabeled Job must survive")
+			for _, action := range client.Actions() {
+				assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
+			}
+		})
+	}
+}
+
+func TestCleanupSnapshotDeletionJobReportsGetFailure(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("get", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("get refused")
+	})
+
+	err := cleanupSnapshotDeletionJob(context.Background(), client, testJobOwner(), "snapshot", gcsExporter)
+	require.ErrorContains(t, err, "get snapshot deletion job default/snapshot-delete")
+	require.ErrorContains(t, err, "get refused")
+}
+
+func TestCleanupSnapshotDeletionJobReportsUIDPreconditionConflict(t *testing.T) {
+	owner := testJobOwner()
+	job := desiredDeleteJob(owner, gcsExporter)
+	job.UID = "existing-job-uid"
+	client := fake.NewSimpleClientset(job)
+	client.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Group: batchv1.GroupName, Resource: "jobs"},
+			job.Name,
+			errors.New("UID precondition did not match"),
+		)
+	})
+
+	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+	require.True(t, apierrors.IsConflict(err))
+	require.ErrorContains(t, err, "delete snapshot deletion job default/snapshot-delete")
+	require.ErrorContains(t, err, "UID precondition did not match")
+
+	_, err = client.BatchV1().Jobs("default").Get(context.Background(), job.Name, metav1.GetOptions{})
+	require.NoError(t, err, "replacement Job must survive a UID precondition conflict")
+}
+
 func testJobOwner() *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
@@ -388,4 +500,17 @@ func desiredDeleteJob(owner *corev1.ConfigMap, exporter string) *batchv1.Job {
 			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
 		},
 	}
+}
+
+func requireJobDeleteAction(t *testing.T, actions []k8stesting.Action) k8stesting.DeleteAction {
+	t.Helper()
+	for _, action := range actions {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "jobs" {
+			deleteAction, ok := action.(k8stesting.DeleteAction)
+			require.True(t, ok)
+			return deleteAction
+		}
+	}
+	require.FailNow(t, "job delete action not found")
+	return nil
 }
