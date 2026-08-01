@@ -39,6 +39,10 @@ const (
 // replacement Job is created once the stale one is gone.
 var ErrStaleJobReplaced = errors.New("stale snapshot job deleted; it will be recreated")
 
+// ErrStaleJobTerminating reports that a previously replaced stale Job still exists with a deletion
+// timestamp. Callers should use a delayed requeue while foreground deletion finishes.
+var ErrStaleJobTerminating = errors.New("stale snapshot job is still terminating")
+
 // StaleJobReplacedError describes a stale Job whose deletion was successfully requested.
 type StaleJobReplacedError struct {
 	Purpose          string
@@ -125,7 +129,7 @@ func ensureSnapshotJob(
 	for key, value := range desired.Labels {
 		if job.Labels[key] != value {
 			if job.DeletionTimestamp != nil {
-				return nil, false, fmt.Errorf("stale %s job %s/%s is terminating: %w", purpose, job.Namespace, job.Name, ErrStaleJobReplaced)
+				return nil, false, fmt.Errorf("stale %s job %s/%s is terminating: %w", purpose, job.Namespace, job.Name, ErrStaleJobTerminating)
 			}
 			// Labels are set at creation and never updated, so a mismatch can never converge — it means
 			// the Job was created for a different desired state (e.g. another export provider). Exports
@@ -176,7 +180,7 @@ func uploadJobStatus(
 	}
 	if job.Labels[labelExporter] != exporter {
 		if job.DeletionTimestamp != nil {
-			return "", fmt.Errorf("stale upload job %s/%s is terminating: %w", job.Namespace, job.Name, ErrStaleJobReplaced)
+			return "", fmt.Errorf("stale upload job %s/%s is terminating: %w", job.Namespace, job.Name, ErrStaleJobTerminating)
 		}
 		if err = deleteSnapshotJob(ctx, client, job); err != nil {
 			return "", fmt.Errorf("delete stale upload job %s/%s: %w", job.Namespace, job.Name, err)

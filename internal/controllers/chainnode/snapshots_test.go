@@ -365,7 +365,8 @@ func TestStaleDeleteJobReplacementEmitsEvent(t *testing.T) {
 
 	deleted, err = reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
 	assert.False(t, deleted)
-	require.ErrorIs(t, err, datasnapshot.ErrStaleJobReplaced)
+	require.ErrorIs(t, err, datasnapshot.ErrStaleJobTerminating)
+	assert.NotErrorIs(t, err, datasnapshot.ErrStaleJobReplaced)
 	var replacement *datasnapshot.StaleJobReplacedError
 	assert.False(t, errors.As(err, &replacement), "waiting for a terminating Job must not report another successful replacement")
 	assert.Equal(t, 1, deleteCalls)

@@ -139,7 +139,8 @@ func TestEnsureSnapshotJobWaitsForTerminatingOwnedJob(t *testing.T) {
 	desired.Name = "snapshot-work"
 
 	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, typeDelete)
-	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	require.ErrorIs(t, err, ErrStaleJobTerminating)
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
 	var replacement *StaleJobReplacedError
 	assert.False(t, errors.As(err, &replacement), "a terminating Job was not replaced during this call")
 	assert.Zero(t, deleteCalls)
@@ -196,7 +197,8 @@ func TestUploadJobStatusWaitsForTerminatingOwnedJob(t *testing.T) {
 	})
 
 	_, err := uploadJobStatus(context.Background(), client, owner, "default", "snapshot-work", "gcs-exporter")
-	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	require.ErrorIs(t, err, ErrStaleJobTerminating)
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
 	var replacement *StaleJobReplacedError
 	assert.False(t, errors.As(err, &replacement), "a terminating Job was not replaced during this call")
 	assert.Zero(t, deleteCalls)
