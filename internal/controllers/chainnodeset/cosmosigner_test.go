@@ -366,6 +366,40 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 	}
 }
 
+func TestEnsureRollingOutCosmosignerTargetsRecreatesMissingTarget(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmosigner: &appsv1.Cosmosigner{
+				NodeGroups: []string{"targets"},
+				Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+					PrivateKeySecret: ptr.To("sentry-key"),
+				}},
+			},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "targets", Instances: ptr.To(1)}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name: signer.Name,
+		Migration: &appsv1.CosmosignerMigrationStatus{
+			Phase: appsv1.CosmosignerMigrationRollingOut,
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	require.NoError(t, r.ensureRollingOutCosmosignerTargets(context.Background(), nodeSet, nil))
+
+	target := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{
+		Namespace: nodeSet.Namespace,
+		Name:      "test-nodeset-targets-0",
+	}, target))
+	assert.True(t, target.Spec.RemoteSignerTarget)
+	assert.Equal(t, signer.Name, target.Labels[controllers.LabelCosmosignerTarget])
+}
+
 func TestReconcileCosmosignerMigrationsCoversRuntimeAndKeyDrift(t *testing.T) {
 	for _, tc := range []struct {
 		name          string

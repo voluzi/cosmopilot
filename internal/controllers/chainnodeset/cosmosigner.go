@@ -826,6 +826,31 @@ func hasRetargetingCosmosignerMigration(nodeSet *appsv1.ChainNodeSet) bool {
 	return false
 }
 
+func hasRollingOutCosmosignerMigration(nodeSet *appsv1.ChainNodeSet) bool {
+	for i := range nodeSet.Status.Cosmosigners {
+		migration := nodeSet.Status.Cosmosigners[i].Migration
+		if migration != nil && migration.Phase == appsv1.CosmosignerMigrationRollingOut {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureRollingOutCosmosignerTargets repairs desired children before the migration health gate.
+// A target deleted during RollingOut must be recreated so it can become healthy and let the
+// migration finish; the normal child reconciliation is otherwise reached only after that gate.
+func (r *Reconciler) ensureRollingOutCosmosignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
+	if !hasRollingOutCosmosignerMigration(nodeSet) {
+		return nil
+	}
+	if nodeSet.Status.ChainID != "" {
+		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, blocked); err != nil {
+			return err
+		}
+	}
+	return r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, blocked)
+}
+
 // retargetingWait describes why a break-before-make retargeting has not converged yet. The whole
 // window runs with the signer stopped and can last minutes, so a bare "not ready" reads as a stall:
 // the operator sees no signer, no discovery endpoints, and no progress. Naming the step being
