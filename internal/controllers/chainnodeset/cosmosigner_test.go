@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -169,6 +170,200 @@ func TestReconcileCosmosignerMigrationsAdvancesRecreationToRollout(t *testing.T)
 	require.NoError(t, err)
 	require.True(t, pending)
 	require.Equal(t, appsv1.CosmosignerMigrationRollingOut, nodeSet.Status.Cosmosigners[0].Migration.Phase)
+}
+
+func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
+	tests := []struct {
+		name             string
+		targetPhases     []appsv1.ChainNodePhase
+		unrelatedPhase   appsv1.ChainNodePhase
+		mutateTarget     func(*appsv1.ChainNode)
+		wantPending      []string
+		wantMigration    bool
+		wantPendingEvent bool
+	}{
+		{
+			name:             "failed and pending targets",
+			targetPhases:     []appsv1.ChainNodePhase{appsv1.PhaseChainNodeError, ""},
+			wantPending:      []string{"test-nodeset-targets-0", "test-nodeset-targets-1"},
+			wantMigration:    true,
+			wantPendingEvent: true,
+		},
+		{
+			name:          "all targets ready",
+			targetPhases:  []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
+			wantMigration: false,
+		},
+		{
+			name:         "ready target on wrong signer path",
+			targetPhases: []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
+			mutateTarget: func(target *appsv1.ChainNode) {
+				target.Labels[controllers.LabelCosmosignerTarget] = "other-signer"
+			},
+			wantPending:      []string{"test-nodeset-targets-0", "test-nodeset-targets-1"},
+			wantMigration:    true,
+			wantPendingEvent: true,
+		},
+		{
+			name:         "ready target with remote signer disabled",
+			targetPhases: []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
+			mutateTarget: func(target *appsv1.ChainNode) {
+				target.Spec.RemoteSignerTarget = false
+			},
+			wantPending:      []string{"test-nodeset-targets-0", "test-nodeset-targets-1"},
+			wantMigration:    true,
+			wantPendingEvent: true,
+		},
+		{
+			name:           "unrelated non-target failure",
+			targetPhases:   []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
+			unrelatedPhase: appsv1.PhaseChainNodeError,
+			wantMigration:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+				Spec: appsv1.ChainNodeSetSpec{
+					Cosmosigner: &appsv1.Cosmosigner{
+						NodeGroups: []string{"targets"},
+						Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{
+							PrivateKeySecret: ptr.To("sentry-key"),
+						}},
+					},
+					Nodes: []appsv1.NodeGroupSpec{
+						{Name: "targets", Instances: ptr.To(2)},
+						{Name: "other", Instances: ptr.To(1)},
+					},
+				},
+				Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+			}
+			signer := resolveSingleSigner(t, nodeSet)
+			params := cosmosigner.Params{
+				Name:              signer.Name,
+				Namespace:         nodeSet.Namespace,
+				OwnerUID:          nodeSet.UID,
+				ChainID:           nodeSet.Status.ChainID,
+				Image:             "cosmosigner:test",
+				Replicas:          1,
+				ExpectedPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+				StateStorageSize:  "1Gi",
+				Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{
+					SecretName: "sentry-key",
+				}},
+				Labels: map[string]string{controllers.LabelChainNodeSet: nodeSet.Name},
+				TargetSelector: map[string]string{
+					controllers.LabelChainNodeSet:      nodeSet.Name,
+					controllers.LabelCosmosignerTarget: signer.Name,
+				},
+			}
+			desiredDigest, err := params.LifecycleDigest(signer.Digest())
+			require.NoError(t, err)
+			nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+				Name:             signer.Name,
+				AppliedDigest:    "old-digest",
+				PublicKey:        params.ExpectedPublicKey,
+				Replicas:         ptr.To(int32(1)),
+				StateStorageSize: params.StateStorageSize,
+				Migration: &appsv1.CosmosignerMigrationStatus{
+					DesiredDigest:    desiredDigest,
+					DesiredPublicKey: params.ExpectedPublicKey,
+					Phase:            appsv1.CosmosignerMigrationRollingOut,
+				},
+			}}
+
+			configYAML, err := params.ConfigYAML()
+			require.NoError(t, err)
+			sts, err := params.StatefulSet(configYAML)
+			require.NoError(t, err)
+			cosmosigner.SetLifecycleDigest(sts, desiredDigest)
+			sts.Generation = 1
+			sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1}
+
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "data-" + signer.Name + "-0", Namespace: nodeSet.Namespace,
+					Labels:     map[string]string{"cosmopilot.voluzi.com/cosmosigner-owner": string(nodeSet.UID)},
+					Finalizers: []string{cosmosigner.RetainedStateFinalizer},
+				},
+				Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "signer-state-0"},
+				Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+			}
+
+			objects := []client.Object{nodeSet, sts, pvc}
+			for i, phase := range tt.targetPhases {
+				name := fmt.Sprintf("%s-targets-%d", nodeSet.Name, i)
+				target := &appsv1.ChainNode{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: name, Namespace: nodeSet.Namespace,
+						Labels: map[string]string{
+							controllers.LabelChainNodeSet:      nodeSet.Name,
+							controllers.LabelChainNodeSetGroup: "targets",
+							controllers.LabelCosmosignerTarget: signer.Name,
+						},
+					},
+					Spec:   appsv1.ChainNodeSpec{RemoteSignerTarget: true},
+					Status: appsv1.ChainNodeStatus{Phase: phase},
+				}
+				if tt.mutateTarget != nil {
+					tt.mutateTarget(target)
+				}
+				require.NoError(t, controllerutil.SetControllerReference(nodeSet, target, testScheme(t)))
+				objects = append(objects, target)
+			}
+			if tt.unrelatedPhase != "" {
+				unrelated := &appsv1.ChainNode{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-nodeset-other-0", Namespace: nodeSet.Namespace,
+						Labels: map[string]string{
+							controllers.LabelChainNodeSet:      nodeSet.Name,
+							controllers.LabelChainNodeSetGroup: "other",
+						},
+					},
+					Status: appsv1.ChainNodeStatus{Phase: tt.unrelatedPhase},
+				}
+				require.NoError(t, controllerutil.SetControllerReference(nodeSet, unrelated, testScheme(t)))
+				objects = append(objects, unrelated)
+			}
+			require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+
+			r := newValidatorTestReconciler(t, objects...)
+			recorder := record.NewFakeRecorder(10)
+			r.recorder = recorder
+
+			changed, err := r.reconcileSigner(context.Background(), nodeSet, signer, params)
+			require.NoError(t, err)
+			assert.Equal(t, !tt.wantMigration, changed)
+			if tt.wantMigration {
+				require.NotNil(t, nodeSet.Status.Cosmosigners[0].Migration)
+				assert.Equal(t, "old-digest", nodeSet.Status.Cosmosigners[0].AppliedDigest)
+			} else {
+				assert.Nil(t, nodeSet.Status.Cosmosigners[0].Migration)
+				assert.Equal(t, desiredDigest, nodeSet.Status.Cosmosigners[0].AppliedDigest)
+			}
+			rolloutsReady, err := r.prepareCosmosignerRollouts(context.Background(), nodeSet, nil,
+				map[string]cosmosigner.Params{signer.Name: params})
+			require.NoError(t, err)
+			assert.Equal(t, !tt.wantMigration, rolloutsReady)
+
+			select {
+			case event := <-recorder.Events:
+				if !tt.wantPendingEvent {
+					t.Fatalf("unexpected event: %s", event)
+				}
+				assert.Contains(t, event, "CosmosignerMigrationPending")
+				for _, name := range tt.wantPending {
+					assert.Contains(t, event, name)
+				}
+			default:
+				if tt.wantPendingEvent {
+					t.Fatal("expected pending-target migration event")
+				}
+			}
+		})
+	}
 }
 
 func TestReconcileCosmosignerMigrationsCoversRuntimeAndKeyDrift(t *testing.T) {

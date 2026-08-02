@@ -1437,8 +1437,89 @@ func (r *Reconciler) prepareCosmosignerRollouts(ctx context.Context, nodeSet *ap
 		if !rolledOut {
 			return false, nil
 		}
+		if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.Migration != nil &&
+			st.Migration.Phase == appsv1.CosmosignerMigrationRollingOut {
+			return false, nil
+		}
 	}
 	return true, nil
+}
+
+type cosmosignerMigrationTargetWait struct {
+	signer  string
+	targets []string
+}
+
+func (w cosmosignerMigrationTargetWait) done() bool { return len(w.targets) == 0 }
+
+func (w cosmosignerMigrationTargetWait) message() string {
+	return fmt.Sprintf("cosmosigner %q is rolled out; waiting for %d target ChainNode(s) to become healthy on the new remote-signer path: %s",
+		w.signer, len(w.targets), retargetingWait{pods: w.targets}.namedList())
+}
+
+func desiredCosmosignerTargetNodeNames(nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) ([]string, error) {
+	if len(signer.TargetGroups) == 0 {
+		return nil, fmt.Errorf("cosmosigner %q has no desired target groups", signer.Name)
+	}
+
+	var names []string
+	for _, targetGroup := range signer.TargetGroups {
+		if targetGroup == appsv1.ReservedValidatorGroupName {
+			if nodeSet.Spec.Validator == nil {
+				return nil, fmt.Errorf("cosmosigner %q targets missing validator group %q", signer.Name, targetGroup)
+			}
+			names = append(names, validatorNodeName(nodeSet, targetGroup, 0))
+			continue
+		}
+
+		found := false
+		for i := range nodeSet.Spec.Nodes {
+			group := &nodeSet.Spec.Nodes[i]
+			if group.Name != targetGroup {
+				continue
+			}
+			found = true
+			instances := group.GetInstances()
+			if instances < 1 {
+				return nil, fmt.Errorf("cosmosigner %q targets group %q with no desired ChainNodes", signer.Name, targetGroup)
+			}
+			for index := 0; index < instances; index++ {
+				names = append(names, validatorNodeName(nodeSet, targetGroup, index))
+			}
+			break
+		}
+		if !found {
+			return nil, fmt.Errorf("cosmosigner %q targets missing node group %q", signer.Name, targetGroup)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func (r *Reconciler) cosmosignerMigrationTargetWait(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) (cosmosignerMigrationTargetWait, error) {
+	wait := cosmosignerMigrationTargetWait{signer: nodeSet.CosmosignerResourceName(signer)}
+	names, err := desiredCosmosignerTargetNodeNames(nodeSet, signer)
+	if err != nil {
+		return wait, err
+	}
+
+	for _, name := range names {
+		node := &appsv1.ChainNode{}
+		err := r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, node)
+		if errors.IsNotFound(err) {
+			wait.targets = append(wait.targets, name)
+			continue
+		}
+		if err != nil {
+			return wait, err
+		}
+		if !metav1.IsControlledBy(node, nodeSet) || !node.GetDeletionTimestamp().IsZero() ||
+			!node.Spec.RemoteSignerTarget ||
+			node.GetLabels()[controllers.LabelCosmosignerTarget] != wait.signer || !node.IsReady() {
+			wait.targets = append(wait.targets, name)
+		}
+	}
+	return wait, nil
 }
 
 // initCosmosignerLocks persists a status entry and the raft-membership/PVC-template locks for every
@@ -1597,6 +1678,20 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 			}
 			if !marked {
 				return changed, nil
+			}
+			// First rollouts happen before child targeting; only a persisted migration can wait for
+			// already-retargeted ChainNodes to recover on the replacement signing path.
+			if st.Migration != nil && st.Migration.Phase == appsv1.CosmosignerMigrationRollingOut {
+				wait, err := r.cosmosignerMigrationTargetWait(ctx, nodeSet, s)
+				if err != nil {
+					return false, err
+				}
+				if !wait.done() {
+					if r.recorder != nil {
+						r.recorder.Event(nodeSet, corev1.EventTypeWarning, appsv1.ReasonCosmosignerMigrationPending, wait.message())
+					}
+					return changed, nil
+				}
 			}
 			if needApplied {
 				publicKey := ""
