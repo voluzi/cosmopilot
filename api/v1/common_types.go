@@ -64,6 +64,9 @@ const (
 	ReasonCosmosignerRetargeting     = "CosmosignerRetargeting"
 )
 
+// ReasonCosmosignerMigrationPending reports a rolled-out signer waiting for its target ChainNodes.
+const ReasonCosmosignerMigrationPending = "CosmosignerMigrationPending"
+
 // SdkVersion specifies the cosmos-sdk version used by this application.
 // +kubebuilder:validation:Enum=v0.45;v0.47;v0.50;v0.53
 type SdkVersion string

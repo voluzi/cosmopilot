@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -826,6 +827,43 @@ func hasRetargetingCosmosignerMigration(nodeSet *appsv1.ChainNodeSet) bool {
 	return false
 }
 
+func rollingOutCosmosignerBlockedTargets(nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) (blockedSignerTargets, bool) {
+	result := blockedSignerTargets{}
+	for name := range blocked {
+		result[name] = struct{}{}
+	}
+	hasRollingOut := false
+	for _, signer := range nodeSet.ResolveCosmosigners() {
+		status := nodeSet.GetCosmosignerStatus(signer.Name)
+		if status != nil && status.Migration != nil && status.Migration.Phase == appsv1.CosmosignerMigrationRollingOut {
+			hasRollingOut = true
+			continue
+		}
+		// This pre-gate pass exists only to repair targets whose signer is already live. Keep newly
+		// added signers behind the normal rollout gate; existing signers retain their current targets.
+		if status == nil || status.AppliedDigest == "" {
+			result[signer.Name] = struct{}{}
+		}
+	}
+	return result, hasRollingOut
+}
+
+// ensureRollingOutCosmosignerTargets repairs desired children before the migration health gate.
+// A target deleted during RollingOut must be recreated so it can become healthy and let the
+// migration finish; signers that are not yet live remain blocked from this early reconciliation.
+func (r *Reconciler) ensureRollingOutCosmosignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
+	rollingBlocked, hasRollingOut := rollingOutCosmosignerBlockedTargets(nodeSet, blocked)
+	if !hasRollingOut {
+		return nil
+	}
+	if nodeSet.Status.ChainID != "" {
+		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, rollingBlocked); err != nil {
+			return err
+		}
+	}
+	return r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, rollingBlocked)
+}
+
 // retargetingWait describes why a break-before-make retargeting has not converged yet. The whole
 // window runs with the signer stopped and can last minutes, so a bare "not ready" reads as a stall:
 // the operator sees no signer, no discovery endpoints, and no progress. Naming the step being
@@ -1437,8 +1475,134 @@ func (r *Reconciler) prepareCosmosignerRollouts(ctx context.Context, nodeSet *ap
 		if !rolledOut {
 			return false, nil
 		}
+		if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.Migration != nil &&
+			st.Migration.Phase == appsv1.CosmosignerMigrationRollingOut {
+			return false, nil
+		}
 	}
 	return true, nil
+}
+
+type cosmosignerMigrationTargetWait struct {
+	signer  string
+	targets []string
+}
+
+func (w cosmosignerMigrationTargetWait) done() bool { return len(w.targets) == 0 }
+
+func (w cosmosignerMigrationTargetWait) message() string {
+	return fmt.Sprintf("cosmosigner %q is rolled out; waiting for %d target ChainNode(s) to become healthy on the new remote-signer path: %s",
+		w.signer, len(w.targets), retargetingWait{pods: w.targets}.namedList())
+}
+
+func desiredCosmosignerTargetNodeNames(nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) ([]string, error) {
+	if len(signer.TargetGroups) == 0 {
+		return nil, fmt.Errorf("cosmosigner %q has no desired target groups", signer.Name)
+	}
+
+	var names []string
+	for _, targetGroup := range signer.TargetGroups {
+		if targetGroup == appsv1.ReservedValidatorGroupName {
+			if nodeSet.Spec.Validator == nil {
+				return nil, fmt.Errorf("cosmosigner %q targets missing validator group %q", signer.Name, targetGroup)
+			}
+			names = append(names, validatorNodeName(nodeSet, targetGroup, 0))
+			continue
+		}
+
+		found := false
+		for i := range nodeSet.Spec.Nodes {
+			group := &nodeSet.Spec.Nodes[i]
+			if group.Name != targetGroup {
+				continue
+			}
+			found = true
+			instances := group.GetInstances()
+			if instances < 1 {
+				return nil, fmt.Errorf("cosmosigner %q targets group %q with no desired ChainNodes", signer.Name, targetGroup)
+			}
+			for index := 0; index < instances; index++ {
+				names = append(names, validatorNodeName(nodeSet, targetGroup, index))
+			}
+			break
+		}
+		if !found {
+			return nil, fmt.Errorf("cosmosigner %q targets missing node group %q", signer.Name, targetGroup)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func (r *Reconciler) cosmosignerMigrationTargetWait(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, rolloutToken string) (cosmosignerMigrationTargetWait, error) {
+	wait := cosmosignerMigrationTargetWait{signer: nodeSet.CosmosignerResourceName(signer)}
+	names, err := desiredCosmosignerTargetNodeNames(nodeSet, signer)
+	if err != nil {
+		return wait, err
+	}
+
+	for _, name := range names {
+		node := &appsv1.ChainNode{}
+		err := r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, node)
+		if errors.IsNotFound(err) {
+			wait.targets = append(wait.targets, name)
+			continue
+		}
+		if err != nil {
+			return wait, err
+		}
+		if !metav1.IsControlledBy(node, nodeSet) || !node.GetDeletionTimestamp().IsZero() ||
+			!node.Spec.RemoteSignerTarget ||
+			node.GetLabels()[controllers.LabelCosmosignerTarget] != wait.signer || !node.IsReady() {
+			wait.targets = append(wait.targets, name)
+			continue
+		}
+		if node.GetAnnotations()[controllers.AnnotationCosmosignerRollout] != rolloutToken {
+			modifiedNode := node.DeepCopy()
+			if modifiedNode.Annotations == nil {
+				modifiedNode.Annotations = map[string]string{}
+			}
+			modifiedNode.Annotations[controllers.AnnotationCosmosignerRollout] = rolloutToken
+			if err := r.Patch(ctx, modifiedNode, client.MergeFrom(node)); err != nil {
+				return wait, err
+			}
+			wait.targets = append(wait.targets, name)
+			continue
+		}
+
+		// ChainNode status has no observed generation. The live Pod annotations are written only after
+		// the ChainNode controller has reconciled the current desired pod spec/config and successfully
+		// probed the node for this signer rollout.
+		pod := &corev1.Pod{}
+		err = r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: node.GetNamespace(), Name: node.GetName()}, pod)
+		if errors.IsNotFound(err) {
+			wait.targets = append(wait.targets, name)
+			continue
+		}
+		if err != nil {
+			return wait, err
+		}
+		if !metav1.IsControlledBy(pod, node) || !pod.GetDeletionTimestamp().IsZero() ||
+			pod.GetAnnotations()[controllers.AnnotationChainNodeGeneration] != strconv.FormatInt(node.GetGeneration(), 10) ||
+			pod.GetAnnotations()[controllers.AnnotationCosmosignerRollout] != rolloutToken ||
+			pod.GetLabels()[controllers.LabelCosmosignerTarget] != wait.signer || !cosmosignerMigrationTargetPodReady(pod) {
+			wait.targets = append(wait.targets, name)
+		}
+	}
+	return wait, nil
+}
+
+func cosmosignerMigrationTargetPodReady(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for i := range pod.Status.Conditions {
+		condition := &pod.Status.Conditions[i]
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // initCosmosignerLocks persists a status entry and the raft-membership/PVC-template locks for every
@@ -1597,6 +1761,25 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 			}
 			if !marked {
 				return changed, nil
+			}
+			// First rollouts happen before child targeting; only a persisted migration can wait for
+			// already-retargeted ChainNodes to recover on the replacement signing path.
+			if st.Migration != nil && st.Migration.Phase == appsv1.CosmosignerMigrationRollingOut {
+				if st.Migration.RolloutObservedAt == nil {
+					now := metav1.Now()
+					st.Migration.RolloutObservedAt = &now
+					return true, nil
+				}
+				wait, err := r.cosmosignerMigrationTargetWait(ctx, nodeSet, s, st.Migration.RolloutObservedAt.UTC().Format(time.RFC3339Nano))
+				if err != nil {
+					return false, err
+				}
+				if !wait.done() {
+					if r.recorder != nil {
+						r.recorder.Event(nodeSet, corev1.EventTypeWarning, appsv1.ReasonCosmosignerMigrationPending, wait.message())
+					}
+					return changed, nil
+				}
 			}
 			if needApplied {
 				publicKey := ""

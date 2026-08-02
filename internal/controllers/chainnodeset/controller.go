@@ -289,6 +289,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// Repair children already retargeted by a rolling migration before its health gate. Otherwise a
+	// target deleted during the rollout cannot be recreated because the gate returns before the normal
+	// child reconciliation below.
+	if err := r.ensureRollingOutCosmosignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Apply and roll out signers before publishing their target marker to existing children. Targets
 	// blocked for key bootstrap remain on their local path until that key has been generated/imported.
 	if ready, err := r.prepareCosmosignerRollouts(ctx, nodeSet, blockedSignerTargets, preparedCosmosigners); err != nil {

@@ -52,3 +52,15 @@ func TestGenerationChangedPredicateKeepsMainPodsEndingInJobSuffixes(t *testing.T
 		})
 	}
 }
+
+func TestGenerationChangedPredicateAllowsCosmosignerRolloutRequest(t *testing.T) {
+	p := GenerationChangedPredicate{}
+	oldNode := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator", Generation: 1,
+		Annotations: map[string]string{"cosmopilot.voluzi.com/cosmosigner-rollout": "old"},
+	}}
+	newNode := oldNode.DeepCopy()
+	newNode.Annotations["cosmopilot.voluzi.com/cosmosigner-rollout"] = "new"
+
+	require.True(t, p.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode}))
+}

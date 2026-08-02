@@ -32,6 +32,8 @@ const (
 	AnnotationTarballExportAttempts   = "cosmopilot.voluzi.com/tarball-export-attempts"
 	AnnotationSnapshotIntegrityStatus = "cosmopilot.voluzi.com/snapshot-integrity-status"
 	AnnotationPodSpecHash             = "cosmopilot.voluzi.com/pod-spec-hash"
+	AnnotationChainNodeGeneration     = "cosmopilot.voluzi.com/chainnode-generation"
+	AnnotationCosmosignerRollout      = "cosmopilot.voluzi.com/cosmosigner-rollout"
 	AnnotationVPAResources            = "cosmopilot.voluzi.com/vpa-resources"
 	AnnotationVPALastCPUScale         = "cosmopilot.voluzi.com/last-cpu-scale"
 	AnnotationVPALastMemoryScale      = "cosmopilot.voluzi.com/last-memory-scale"
