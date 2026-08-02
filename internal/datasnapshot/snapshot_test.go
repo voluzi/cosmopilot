@@ -298,10 +298,12 @@ func TestUploadJobStatusReportsMissingJob(t *testing.T) {
 	assert.Equal(t, SnapshotNotFound, status)
 }
 
-func TestDeletionJobStatusReportsMissingJobWithoutCreatingIt(t *testing.T) {
+func TestReconcileSnapshotDeletionJobReportsMissingJobWithoutCreatingIt(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
-	status, err := deletionJobStatus(context.Background(), client, testJobOwner(), "default", "snapshot-delete", gcsExporter)
+	status, err := reconcileSnapshotDeletionJob(context.Background(), client, testJobOwner(), SnapshotJob{
+		Name: "snapshot", Purpose: SnapshotJobDelete,
+	}, gcsExporter)
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotNotFound, status)
 	for _, action := range client.Actions() {
@@ -327,6 +329,25 @@ func TestSnapshotJobsFromJobsRetainsUploadIdentityAlongsidePreferredDeletionJob(
 		Purpose: SnapshotJobDelete,
 		Upload:  &SnapshotJobIdentity{UID: "upload-uid", Terminating: true},
 	}}, snapshotJobsFromJobs(jobs))
+}
+
+func TestSnapshotJobsFromJobsRetainsRecordedUploadIdentityAfterUploadJobIsGone(t *testing.T) {
+	job := batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot-delete",
+		UID:  "delete-uid",
+		Labels: map[string]string{
+			labelType:             typeDelete,
+			labelCleanupUploadUID: "upload-uid",
+			labelCleanupPVCUID:    "pvc-uid",
+		},
+	}}
+
+	assert.Equal(t, []SnapshotJob{{
+		Name:    "snapshot",
+		UID:     "delete-uid",
+		Purpose: SnapshotJobDelete,
+		Upload:  &SnapshotJobIdentity{UID: "upload-uid", PVCUID: "pvc-uid"},
+	}}, snapshotJobsFromJobs([]batchv1.Job{job}))
 }
 
 func TestSnapshotJobsFromJobsCarriesTerminatingUploadIdentity(t *testing.T) {
@@ -429,17 +450,166 @@ func TestGetSnapshotUploadResourcesRejectsChangedIdentityOrOwnership(t *testing.
 			}
 			client := fake.NewSimpleClientset(job, pvc)
 
-			_, _, err := getSnapshotUploadResources(context.Background(), client, owner, SnapshotJob{
-				Name:    "snapshot",
-				UID:     "listed-job-uid",
-				Purpose: SnapshotJobUpload,
-			}, gcsExporter)
+			_, _, err := getSnapshotUploadResources(
+				context.Background(),
+				client,
+				owner,
+				"snapshot",
+				SnapshotJobIdentity{UID: "listed-job-uid", PVCUID: "listed-pvc-uid"},
+				gcsExporter,
+			)
 			require.ErrorContains(t, err, tt.wantError)
 			for _, action := range client.Actions() {
 				assert.NotEqual(t, "delete", action.GetVerb())
 			}
 		})
 	}
+}
+
+func TestReconcileSnapshotDeletionJobRejectsChangedDeletionOrCleanupIdentity(t *testing.T) {
+	owner := testJobOwner()
+	foreignOwner := &corev1.ConfigMap{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: "default", UID: "foreign-owner-uid"},
+	}
+	tests := []struct {
+		name      string
+		mutate    func(*batchv1.Job)
+		wantError string
+	}{
+		{name: "delete UID", mutate: func(job *batchv1.Job) { job.UID = "replacement-delete-uid" }, wantError: "UID"},
+		{name: "delete owner", mutate: func(job *batchv1.Job) {
+			job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
+		}, wantError: "not controlled by snapshot owner"},
+		{name: "delete provider", mutate: func(job *batchv1.Job) { job.Labels[labelExporter] = s3Exporter }, wantError: labelExporter},
+		{name: "delete owner label", mutate: func(job *batchv1.Job) { job.Labels[labelOwner] = foreignOwner.Name }, wantError: labelOwner},
+		{name: "delete type", mutate: func(job *batchv1.Job) { job.Labels[labelType] = typeUpload }, wantError: labelType},
+		{name: "cleanup provider", mutate: func(job *batchv1.Job) { job.Labels[labelCleanupExporter] = s3Exporter }, wantError: labelCleanupExporter},
+		{name: "cleanup owner", mutate: func(job *batchv1.Job) { job.Labels[labelCleanupOwner] = foreignOwner.Name }, wantError: labelCleanupOwner},
+		{name: "cleanup type", mutate: func(job *batchv1.Job) { job.Labels[labelCleanupType] = typeDelete }, wantError: labelCleanupType},
+		{name: "upload UID", mutate: func(job *batchv1.Job) { job.Labels[labelCleanupUploadUID] = "replacement-upload-uid" }, wantError: "records upload UID"},
+		{name: "PVC UID", mutate: func(job *batchv1.Job) { job.Labels[labelCleanupPVCUID] = "replacement-pvc-uid" }, wantError: "records upload PVC UID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := desiredDeleteJob(owner, gcsExporter)
+			job.UID = "listed-delete-uid"
+			setSnapshotDeletionUploadIdentity(job, owner, gcsExporter, SnapshotJobIdentity{
+				UID: "listed-upload-uid", PVCUID: "listed-pvc-uid",
+			})
+			expected := snapshotJobFromJob(job)
+			tt.mutate(job)
+			client := fake.NewSimpleClientset(job)
+
+			_, err := reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+			require.ErrorContains(t, err, tt.wantError)
+			for _, action := range client.Actions() {
+				assert.NotContains(t, []string{"delete", "update"}, action.GetVerb())
+			}
+		})
+	}
+}
+
+func TestReconcileSnapshotDeletionJobKeepsSuspendedMarkerForSameNameUploadReplacement(t *testing.T) {
+	owner := testJobOwner()
+	deletionJob := desiredDeleteJob(owner, gcsExporter)
+	deletionJob.UID = "delete-uid"
+	setSnapshotDeletionUploadIdentity(deletionJob, owner, gcsExporter, SnapshotJobIdentity{
+		UID: "original-upload-uid", PVCUID: "original-pvc-uid",
+	})
+	replacementJob, replacementPVC := testOrphanUploadResources(owner, gcsExporter)
+	replacementJob.UID = "replacement-upload-uid"
+	replacementPVC.UID = "replacement-pvc-uid"
+	replacementPVC.OwnerReferences[0].UID = replacementJob.UID
+	client := fake.NewSimpleClientset(deletionJob, replacementJob, replacementPVC)
+
+	_, err := reconcileSnapshotDeletionJob(
+		context.Background(), client, owner, snapshotJobFromJob(deletionJob), gcsExporter,
+	)
+	require.ErrorContains(t, err, "UID")
+
+	storedDeletion, err := client.BatchV1().Jobs("default").Get(context.Background(), deletionJob.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, storedDeletion.Spec.Suspend)
+	assert.True(t, *storedDeletion.Spec.Suspend)
+	storedReplacement, err := client.BatchV1().Jobs("default").Get(context.Background(), replacementJob.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, replacementJob.UID, storedReplacement.UID)
+	for _, action := range client.Actions() {
+		assert.NotContains(t, []string{"delete", "update"}, action.GetVerb())
+	}
+}
+
+func TestReconcileSnapshotDeletionJobRetriesActivationAfterCrash(t *testing.T) {
+	owner := testJobOwner()
+	deletionJob := desiredDeleteJob(owner, gcsExporter)
+	deletionJob.UID = "delete-uid"
+	setSnapshotDeletionUploadIdentity(deletionJob, owner, gcsExporter, SnapshotJobIdentity{UID: "upload-uid"})
+	client := fake.NewSimpleClientset(deletionJob)
+	crashErr := errors.New("controller crashed before activation was persisted")
+	updateCalls := 0
+	client.PrependReactor("update", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+		updateCalls++
+		if updateCalls == 1 {
+			return true, nil, crashErr
+		}
+		return false, nil, nil
+	})
+	expected := snapshotJobFromJob(deletionJob)
+
+	_, err := reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+	require.ErrorIs(t, err, crashErr)
+	stored, err := client.BatchV1().Jobs("default").Get(context.Background(), deletionJob.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, stored.Spec.Suspend)
+	assert.True(t, *stored.Spec.Suspend)
+
+	status, err := reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	stored, err = client.BatchV1().Jobs("default").Get(context.Background(), deletionJob.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, stored.Spec.Suspend)
+	assert.False(t, *stored.Spec.Suspend)
+	assert.Equal(t, 2, updateCalls)
+}
+
+func TestReconcileSnapshotDeletionJobRecoversWhenActivationResponseIsLost(t *testing.T) {
+	owner := testJobOwner()
+	deletionJob := desiredDeleteJob(owner, gcsExporter)
+	deletionJob.UID = "delete-uid"
+	setSnapshotDeletionUploadIdentity(deletionJob, owner, gcsExporter, SnapshotJobIdentity{UID: "upload-uid"})
+	client := fake.NewSimpleClientset(deletionJob)
+	crashErr := errors.New("controller crashed after activation was persisted")
+	updateCalls := 0
+	client.PrependReactor("update", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		updateCalls++
+		if updateCalls != 1 {
+			return false, nil, nil
+		}
+		updateAction, ok := action.(k8stesting.UpdateAction)
+		require.True(t, ok)
+		updated, ok := updateAction.GetObject().(*batchv1.Job)
+		require.True(t, ok)
+		require.NoError(t, client.Tracker().Update(
+			batchv1.SchemeGroupVersion.WithResource("jobs"), updated.DeepCopy(), updated.Namespace,
+		))
+		return true, nil, crashErr
+	})
+	expected := snapshotJobFromJob(deletionJob)
+
+	_, err := reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+	require.ErrorIs(t, err, crashErr)
+	stored, err := client.BatchV1().Jobs("default").Get(context.Background(), deletionJob.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, stored.Spec.Suspend)
+	assert.False(t, *stored.Spec.Suspend)
+
+	status, err := reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	assert.Equal(t, 1, updateCalls, "the activated deletion Job must not be started again")
 }
 
 func TestCleanupSnapshotDeletionResourcesRejectsChangedDeletionIdentityBeforeUploadCleanup(t *testing.T) {
@@ -732,6 +902,33 @@ func ownerReferenceToObject(owner metav1.Object) metav1.OwnerReference {
 		UID:        owner.GetUID(),
 		Controller: ptr.To(true),
 	}
+}
+
+func testOrphanUploadResources(owner metav1.Object, exporter string) (*batchv1.Job, *corev1.PersistentVolumeClaim) {
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "snapshot-upload",
+		Namespace: owner.GetNamespace(),
+		UID:       "upload-uid",
+		Labels: map[string]string{
+			labelExporter: exporter,
+			labelOwner:    owner.GetName(),
+			labelType:     typeUpload,
+		},
+		OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(owner)},
+	}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      job.Name,
+		Namespace: job.Namespace,
+		UID:       "pvc-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(),
+			Kind:       "Job",
+			Name:       job.Name,
+			UID:        job.UID,
+			Controller: ptr.To(true),
+		}},
+	}}
+	return job, pvc
 }
 
 func desiredDeleteJob(owner *corev1.ConfigMap, exporter string) *batchv1.Job {

@@ -416,16 +416,14 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		for _, snapshotJob := range tarballSnapshots {
 			if !utils.SliceContains[string](tarballNames, snapshotJob.Name) {
 				logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshotJob.Name)
+				cleanupJob := snapshotJob
 				var status datasnapshot.SnapshotStatus
 				var deleteErr error
 				switch snapshotJob.Purpose {
 				case datasnapshot.SnapshotJobDelete:
-					status, deleteErr = exporter.GetSnapshotDeletionStatus(ctx, snapshotJob.Name)
+					status, deleteErr = exporter.GetSnapshotDeletionStatus(ctx, snapshotJob)
 				case datasnapshot.SnapshotJobUpload:
-					if snapshotJob.Terminating {
-						continue
-					}
-					status, deleteErr = exporter.DeleteSnapshotForUpload(ctx, snapshotJob)
+					cleanupJob, status, deleteErr = exporter.DeleteSnapshotForUpload(ctx, snapshotJob)
 					r.recordSnapshotJobReplacement(chainNode, deleteErr)
 				default:
 					continue
@@ -441,7 +439,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						"Failed deleting orphaned tarball %s; delete Job retained for inspection", snapshotJob.Name,
 					)
 				case datasnapshot.SnapshotSucceeded:
-					if err = exporter.CleanupSnapshotDeletion(ctx, snapshotJob); err != nil {
+					if err = exporter.CleanupSnapshotDeletion(ctx, cleanupJob); err != nil {
 						return err
 					}
 					r.recorder.Eventf(chainNode,

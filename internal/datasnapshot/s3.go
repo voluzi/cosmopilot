@@ -172,8 +172,8 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 	return uploadJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), s3Exporter)
 }
 
-func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	return deletionJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-delete", name), s3Exporter)
+func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
+	return reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, snapshotJob, s3Exporter)
 }
 
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
@@ -181,36 +181,46 @@ func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
 }
 
 func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
-	status, err := provider.ensureSnapshotDeletion(ctx, name)
+	job, err := provider.ensureSnapshotDeletion(ctx, name, nil)
 	if err != nil {
 		return "", err
 	}
 	if err = provider.cleanUp(ctx, name); err != nil {
 		return "", err
 	}
-	return status, nil
+	return snapshotJobStatus(job), nil
 }
 
-func (provider *S3) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotStatus, error) {
-	job, _, err := getSnapshotUploadResources(ctx, provider.Client, provider.Owner, upload, s3Exporter)
+func (provider *S3) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotJob, SnapshotStatus, error) {
+	if upload.Purpose != SnapshotJobUpload {
+		return SnapshotJob{}, "", fmt.Errorf("snapshot job %q has purpose %q, expected %q",
+			upload.Name, upload.Purpose, SnapshotJobUpload)
+	}
+	uploadIdentity := SnapshotJobIdentity{UID: upload.UID, Terminating: upload.Terminating}
+	_, pvc, err := getSnapshotUploadResources(ctx, provider.Client, provider.Owner, upload.Name, uploadIdentity, s3Exporter)
 	if err != nil {
-		return "", err
+		return SnapshotJob{}, "", err
 	}
-	if job == nil {
-		return SnapshotNotFound, nil
+	if pvc != nil {
+		uploadIdentity.PVCUID = pvc.UID
 	}
-	if job.DeletionTimestamp != nil {
-		return "", fmt.Errorf("orphan upload job %s/%s is terminating: %w",
-			job.Namespace, job.Name, ErrStaleJobTerminating)
-	}
-	status, err := provider.ensureSnapshotDeletion(ctx, upload.Name)
+	job, err := provider.ensureSnapshotDeletion(ctx, upload.Name, &uploadIdentity)
 	if err != nil {
-		return "", err
+		return SnapshotJob{}, "", err
 	}
-	return status, nil
+	deletion := snapshotJobFromJob(job)
+	status, err := reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, deletion, s3Exporter)
+	if err != nil {
+		return deletion, "", err
+	}
+	return deletion, status, nil
 }
 
-func (provider *S3) ensureSnapshotDeletion(ctx context.Context, name string) (SnapshotStatus, error) {
+func (provider *S3) ensureSnapshotDeletion(
+	ctx context.Context,
+	name string,
+	upload *SnapshotJobIdentity,
+) (*batchv1.Job, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -244,13 +254,16 @@ func (provider *S3) ensureSnapshotDeletion(ctx context.Context, name string) (Sn
 		},
 	}
 	if err := controllerutil.SetControllerReference(provider.Owner, job, provider.Scheme); err != nil {
-		return "", err
+		return nil, err
+	}
+	if upload != nil {
+		setSnapshotDeletionUploadIdentity(job, provider.Owner, s3Exporter, *upload)
 	}
 	job, _, err := ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, "delete")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return snapshotJobStatus(job), nil
+	return job, nil
 }
 
 func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {

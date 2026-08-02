@@ -1291,18 +1291,20 @@ func TestEnsureVolumeSnapshotsReconcilesOrphanJobs(t *testing.T) {
 				}
 				assert.Equal(t, scenario.wantCreateCalls, createCalls)
 				if scenario.purpose == "upload" {
-					storedUploadJob, getErr := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
-					require.NoError(t, getErr, "the upload Job must remain while archive deletion runs")
-					assert.Equal(t, job.UID, storedUploadJob.UID)
-					storedUploadPVC, getErr := clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
-					require.NoError(t, getErr, "the upload PVC must remain while archive deletion runs")
-					assert.Equal(t, types.UID("orphan-pvc-uid"), storedUploadPVC.UID)
+					_, getErr := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+					assert.True(t, apierrors.IsNotFound(getErr), "the upload Job must be absent before archive deletion starts")
+					_, getErr = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+					assert.True(t, apierrors.IsNotFound(getErr), "the upload PVC must be torn down before archive deletion starts")
 					deleteJob, getErr := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
 					require.NoError(t, getErr)
 					assert.Equal(t, types.UID("orphan-delete-job-uid"), deleteJob.UID)
-					for _, action := range clientSet.Actions() {
-						assert.NotEqual(t, "delete", action.GetVerb(), "upload resources must remain until deletion succeeds")
-					}
+					require.NotNil(t, deleteJob.Spec.Suspend)
+					assert.False(t, *deleteJob.Spec.Suspend)
+					assert.Equal(t, string(job.UID), deleteJob.Labels["cleanup-upload-uid"])
+					assert.Equal(t, "orphan-pvc-uid", deleteJob.Labels["cleanup-pvc-uid"])
+					assert.Equal(t, provider.exporter, deleteJob.Labels["cleanup-exporter"])
+					assert.Equal(t, chainNode.Name, deleteJob.Labels["cleanup-owner"])
+					assert.Equal(t, "upload", deleteJob.Labels["cleanup-type"])
 
 					deleteJob.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 					_, getErr = clientSet.BatchV1().Jobs(chainNode.Namespace).UpdateStatus(context.Background(), deleteJob, metav1.UpdateOptions{})
@@ -1326,8 +1328,8 @@ func TestEnsureVolumeSnapshotsReconcilesOrphanJobs(t *testing.T) {
 					}
 					assert.Equal(t, 1, createCalls, "a successful deletion must not be scheduled twice")
 					require.Len(t, deleteActions, 3)
-					assertGuardedDeleteAction(t, deleteActions[0], "persistentvolumeclaims", job.Name, "orphan-pvc-uid")
-					assertGuardedDeleteAction(t, deleteActions[1], "jobs", job.Name, job.UID)
+					assertGuardedDeleteAction(t, deleteActions[0], "jobs", job.Name, job.UID)
+					assertGuardedDeleteAction(t, deleteActions[1], "persistentvolumeclaims", job.Name, "orphan-pvc-uid")
 					assertGuardedDeleteAction(t, deleteActions[2], "jobs", deleteJob.Name, deleteJob.UID)
 
 					_, getErr = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
@@ -1473,8 +1475,8 @@ func TestEnsureVolumeSnapshotsResumesOrphanDeletionAfterCrashFollowingDeleteJobC
 				deleteActions = append(deleteActions, deleteAction)
 			}
 			require.Len(t, deleteActions, 3)
-			assertGuardedDeleteAction(t, deleteActions[0], "persistentvolumeclaims", uploadPVC.Name, uploadPVC.UID)
-			assertGuardedDeleteAction(t, deleteActions[1], "jobs", uploadJob.Name, uploadJob.UID)
+			assertGuardedDeleteAction(t, deleteActions[0], "jobs", uploadJob.Name, uploadJob.UID)
+			assertGuardedDeleteAction(t, deleteActions[1], "persistentvolumeclaims", uploadPVC.Name, uploadPVC.UID)
 			assertGuardedDeleteAction(t, deleteActions[2], "jobs", deleteJob.Name, deleteJob.UID)
 
 			jobs, err := clientSet.BatchV1().Jobs(chainNode.Namespace).List(context.Background(), metav1.ListOptions{})
@@ -1674,6 +1676,225 @@ func TestEnsureVolumeSnapshotsDoesNotActOnSameNameOrphanUploadReplacement(t *tes
 			assert.Equal(t, replacementPVC.UID, storedPVC.UID)
 		})
 	}
+}
+
+func TestEnsureVolumeSnapshotsCleansImmediateOrphanDeletionSuccessWithPairedIdentity(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, provider.export,
+			)
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				if job.Labels["type"] == "delete" {
+					job.UID = "orphan-delete-uid"
+					job.Status.Conditions = []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}}
+				}
+				return false, nil, nil
+			})
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), uploadPVC.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsRecoversWhenListedUploadJobVanishedButPVCRemains(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, provider.export,
+			)
+			listedUpload := uploadJob.DeepCopy()
+			clientSet.PrependReactor("list", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				require.NoError(t, clientSet.Tracker().Delete(
+					batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, uploadJob.Name,
+				))
+				return true, &batchv1.JobList{Items: []batchv1.Job{*listedUpload}}, nil
+			})
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				if job.Labels["type"] == "delete" {
+					job.UID = "orphan-delete-uid"
+					job.Status.Conditions = []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}}
+				}
+				return false, nil, nil
+			})
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			_, err := clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), uploadPVC.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			deleteActions := make([]k8stesting.DeleteAction, 0, 2)
+			for _, action := range clientSet.Actions() {
+				if action.GetVerb() == "delete" {
+					deleteAction, ok := action.(k8stesting.DeleteAction)
+					require.True(t, ok)
+					deleteActions = append(deleteActions, deleteAction)
+				}
+			}
+			require.Len(t, deleteActions, 2)
+			assertGuardedDeleteAction(t, deleteActions[0], "persistentvolumeclaims", uploadPVC.Name, uploadPVC.UID)
+			assertGuardedDeleteAction(t, deleteActions[1], "jobs", "orphan-tarball-delete", "orphan-delete-uid")
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsWaitsForForegroundUploadTerminationBeforeArchiveDeletion(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			reconciler, chainNode, clientSet, uploadJob, _ := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, provider.export,
+			)
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				if job.Labels["type"] == "delete" {
+					job.UID = "orphan-delete-uid"
+				}
+				return false, nil, nil
+			})
+			clientSet.PrependReactor("delete", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				deleteAction, ok := action.(k8stesting.DeleteAction)
+				require.True(t, ok)
+				if deleteAction.GetName() != uploadJob.Name {
+					return false, nil, nil
+				}
+				terminating := uploadJob.DeepCopy()
+				deletionTimestamp := metav1.Now()
+				terminating.DeletionTimestamp = &deletionTimestamp
+				terminating.Finalizers = []string{"foregroundDeletion"}
+				require.NoError(t, clientSet.Tracker().Update(
+					batchv1.SchemeGroupVersion.WithResource("jobs"), terminating, terminating.Namespace,
+				))
+				return true, nil, nil
+			})
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			deleteJob, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, deleteJob.Spec.Suspend)
+			assert.True(t, *deleteJob.Spec.Suspend, "external deletion must remain suspended while the upload Job exists")
+			storedUpload, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, storedUpload.DeletionTimestamp)
+
+			require.NoError(t, clientSet.Tracker().Delete(
+				batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, uploadJob.Name,
+			))
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			deleteJob, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, deleteJob.Spec.Suspend)
+			assert.False(t, *deleteJob.Spec.Suspend, "external deletion may start only after the upload Job is absent")
+		})
+	}
+}
+
+type orphanSnapshotProviderCase struct {
+	name     string
+	exporter string
+	export   *appsv1.ExportTarballConfig
+}
+
+func orphanSnapshotProviderCases() []orphanSnapshotProviderCase {
+	return []orphanSnapshotProviderCase{
+		{
+			name:     "GCS",
+			exporter: "gcs-exporter",
+			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		},
+		{
+			name:     "S3",
+			exporter: "s3-exporter",
+			export: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+				Bucket: "snapshots", Region: "eu-west-1",
+			}},
+		},
+	}
+}
+
+func newOrphanUploadTestReconciler(
+	t *testing.T,
+	now time.Time,
+	exporter string,
+	export *appsv1.ExportTarballConfig,
+) (*Reconciler, *appsv1.ChainNode, *fake.Clientset, *batchv1.Job, *corev1.PersistentVolumeClaim) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := orphanSnapshotTestChainNode(now, export)
+	ownerReference := metav1.OwnerReference{
+		APIVersion: chainNode.APIVersion,
+		Kind:       chainNode.Kind,
+		Name:       chainNode.Name,
+		UID:        chainNode.UID,
+		Controller: ptr.To(true),
+	}
+	uploadJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "orphan-tarball-upload",
+		Namespace: chainNode.Namespace,
+		UID:       "orphan-upload-uid",
+		Labels: map[string]string{
+			"exporter": exporter,
+			"owner":    chainNode.Name,
+			"type":     "upload",
+		},
+		OwnerReferences: []metav1.OwnerReference{ownerReference},
+	}}
+	uploadPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      uploadJob.Name,
+		Namespace: uploadJob.Namespace,
+		UID:       "orphan-pvc-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(),
+			Kind:       "Job",
+			Name:       uploadJob.Name,
+			UID:        uploadJob.UID,
+			Controller: ptr.To(true),
+		}},
+	}}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode).
+		Build()
+	clientSet := fake.NewSimpleClientset(uploadJob, uploadPVC)
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+	return reconciler, chainNode, clientSet, uploadJob, uploadPVC
 }
 
 func orphanSnapshotTestChainNode(now time.Time, export *appsv1.ExportTarballConfig) *appsv1.ChainNode {

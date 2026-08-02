@@ -205,7 +205,7 @@ func TestGCSCleanupSnapshotDeletionUsesForegroundUIDPrecondition(t *testing.T) {
 			Name:            "snapshot-delete",
 			Namespace:       "default",
 			UID:             "gcs-delete-uid",
-			Labels:          map[string]string{labelExporter: gcsExporter, labelType: typeDelete},
+			Labels:          map[string]string{labelExporter: gcsExporter, labelOwner: provider.Owner.GetName(), labelType: typeDelete},
 			OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
 		},
 		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
@@ -231,6 +231,45 @@ func TestGCSCleanupSnapshotDeletionUsesForegroundUIDPrecondition(t *testing.T) {
 	assert.Equal(t, job.UID, *options.Preconditions.UID)
 }
 
+func TestGCSDeleteSnapshotForUploadReturnsPairedActivatedDeletion(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	uploadJob, uploadPVC := testOrphanUploadResources(provider.Owner, gcsExporter)
+	_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), uploadJob, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), uploadPVC, metav1.CreateOptions{})
+	require.NoError(t, err)
+	client := provider.Client.(*fake.Clientset)
+	client.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction, ok := action.(k8stesting.CreateAction)
+		require.True(t, ok)
+		job, ok := createAction.GetObject().(*batchv1.Job)
+		require.True(t, ok)
+		if job.Labels[labelType] == typeDelete {
+			job.UID = "delete-uid"
+		}
+		return false, nil, nil
+	})
+
+	deletion, status, err := provider.DeleteSnapshotForUpload(context.Background(), SnapshotJob{
+		Name: "snapshot", UID: uploadJob.UID, Purpose: SnapshotJobUpload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	assert.Equal(t, SnapshotJob{
+		Name: "snapshot", UID: "delete-uid", Purpose: SnapshotJobDelete,
+		Upload: &SnapshotJobIdentity{UID: uploadJob.UID, PVCUID: uploadPVC.UID},
+	}, deletion)
+
+	deleteJob := getJob(t, provider, "snapshot-delete")
+	require.NotNil(t, deleteJob.Spec.Suspend)
+	assert.False(t, *deleteJob.Spec.Suspend)
+	assert.Equal(t, gcsExporter, deleteJob.Labels[labelCleanupExporter])
+	assert.Equal(t, provider.Owner.GetName(), deleteJob.Labels[labelCleanupOwner])
+	assert.Equal(t, typeUpload, deleteJob.Labels[labelCleanupType])
+	assert.Equal(t, string(uploadJob.UID), deleteJob.Labels[labelCleanupUploadUID])
+	assert.Equal(t, string(uploadPVC.UID), deleteJob.Labels[labelCleanupPVCUID])
+}
+
 func TestGCSListSnapshotsDistinguishesDeletionJobs(t *testing.T) {
 	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
 	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
@@ -254,7 +293,9 @@ func TestGCSListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
 func TestGCSGetSnapshotDeletionStatusDoesNotCreateMissingJob(t *testing.T) {
 	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
 
-	status, err := provider.GetSnapshotDeletionStatus(context.Background(), "snapshot")
+	status, err := provider.GetSnapshotDeletionStatus(context.Background(), SnapshotJob{
+		Name: "snapshot", Purpose: SnapshotJobDelete,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotNotFound, status)
 	for _, action := range provider.Client.(*fake.Clientset).Actions() {

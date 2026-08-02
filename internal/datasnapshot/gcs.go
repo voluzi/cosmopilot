@@ -240,8 +240,8 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 	return uploadJobStatus(ctx, gcs.Client, gcs.Owner, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), gcsExporter)
 }
 
-func (gcs *GCS) GetSnapshotDeletionStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	return deletionJobStatus(ctx, gcs.Client, gcs.Owner, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-delete", name), gcsExporter)
+func (gcs *GCS) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
+	return reconcileSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, snapshotJob, gcsExporter)
 }
 
 func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {
@@ -273,36 +273,46 @@ func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
 }
 
 func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
-	status, err := gcs.ensureSnapshotDeletion(ctx, name)
+	job, err := gcs.ensureSnapshotDeletion(ctx, name, nil)
 	if err != nil {
 		return "", err
 	}
 	if err = gcs.cleanUp(ctx, name); err != nil {
 		return "", err
 	}
-	return status, nil
+	return snapshotJobStatus(job), nil
 }
 
-func (gcs *GCS) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotStatus, error) {
-	job, _, err := getSnapshotUploadResources(ctx, gcs.Client, gcs.Owner, upload, gcsExporter)
+func (gcs *GCS) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotJob, SnapshotStatus, error) {
+	if upload.Purpose != SnapshotJobUpload {
+		return SnapshotJob{}, "", fmt.Errorf("snapshot job %q has purpose %q, expected %q",
+			upload.Name, upload.Purpose, SnapshotJobUpload)
+	}
+	uploadIdentity := SnapshotJobIdentity{UID: upload.UID, Terminating: upload.Terminating}
+	_, pvc, err := getSnapshotUploadResources(ctx, gcs.Client, gcs.Owner, upload.Name, uploadIdentity, gcsExporter)
 	if err != nil {
-		return "", err
+		return SnapshotJob{}, "", err
 	}
-	if job == nil {
-		return SnapshotNotFound, nil
+	if pvc != nil {
+		uploadIdentity.PVCUID = pvc.UID
 	}
-	if job.DeletionTimestamp != nil {
-		return "", fmt.Errorf("orphan upload job %s/%s is terminating: %w",
-			job.Namespace, job.Name, ErrStaleJobTerminating)
-	}
-	status, err := gcs.ensureSnapshotDeletion(ctx, upload.Name)
+	job, err := gcs.ensureSnapshotDeletion(ctx, upload.Name, &uploadIdentity)
 	if err != nil {
-		return "", err
+		return SnapshotJob{}, "", err
 	}
-	return status, nil
+	deletion := snapshotJobFromJob(job)
+	status, err := reconcileSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, deletion, gcsExporter)
+	if err != nil {
+		return deletion, "", err
+	}
+	return deletion, status, nil
 }
 
-func (gcs *GCS) ensureSnapshotDeletion(ctx context.Context, name string) (SnapshotStatus, error) {
+func (gcs *GCS) ensureSnapshotDeletion(
+	ctx context.Context,
+	name string,
+	upload *SnapshotJobIdentity,
+) (*batchv1.Job, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -346,14 +356,17 @@ func (gcs *GCS) ensureSnapshotDeletion(ctx context.Context, name string) (Snapsh
 
 	err := controllerutil.SetControllerReference(gcs.Owner, job, gcs.Scheme)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	if upload != nil {
+		setSnapshotDeletionUploadIdentity(job, gcs.Owner, gcsExporter, *upload)
 	}
 
 	job, _, err = ensureSnapshotJob(ctx, gcs.Client, gcs.Owner, job, "delete")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return snapshotJobStatus(job), nil
+	return job, nil
 }
 
 func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {
