@@ -11,7 +11,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
@@ -241,7 +240,7 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 }
 
 func (gcs *GCS) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
-	return reconcileSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, snapshotJob, gcsExporter)
+	return reconcileSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, snapshotJob, snapshotJobExporter(snapshotJob, gcsExporter))
 }
 
 func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {
@@ -370,20 +369,9 @@ func (gcs *GCS) ensureSnapshotDeletion(
 }
 
 func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {
-	return cleanupSnapshotDeletionResources(ctx, gcs.Client, gcs.Owner, snapshotJob, gcsExporter)
+	return cleanupSnapshotDeletionResources(ctx, gcs.Client, gcs.Owner, snapshotJob, snapshotJobExporter(snapshotJob, gcsExporter))
 }
 
 func (gcs *GCS) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
-	listOptions := metav1.ListOptions{
-		LabelSelector: labels.SelectorFromSet(map[string]string{
-			labelExporter: gcsExporter,
-			labelOwner:    gcs.Owner.GetName(),
-		}).String(),
-	}
-	list, err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).List(ctx, listOptions)
-	if err != nil {
-		return nil, err
-	}
-
-	return snapshotJobsFromJobs(list.Items), nil
+	return listSnapshotJobs(ctx, gcs.Client, gcs.Owner, gcsExporter)
 }

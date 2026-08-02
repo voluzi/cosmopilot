@@ -11,7 +11,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
@@ -173,7 +172,7 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 }
 
 func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
-	return reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, snapshotJob, s3Exporter)
+	return reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter))
 }
 
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
@@ -267,7 +266,7 @@ func (provider *S3) ensureSnapshotDeletion(
 }
 
 func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {
-	return cleanupSnapshotDeletionResources(ctx, provider.Client, provider.Owner, snapshotJob, s3Exporter)
+	return cleanupSnapshotDeletionResources(ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter))
 }
 
 func (provider *S3) cleanUp(ctx context.Context, name string) error {
@@ -286,13 +285,5 @@ func (provider *S3) cleanUp(ctx context.Context, name string) error {
 }
 
 func (provider *S3) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
-	selector := labels.SelectorFromSet(map[string]string{
-		labelExporter: s3Exporter,
-		labelOwner:    provider.Owner.GetName(),
-	}).String()
-	list, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if err != nil {
-		return nil, err
-	}
-	return snapshotJobsFromJobs(list.Items), nil
+	return listSnapshotJobs(ctx, provider.Client, provider.Owner, s3Exporter)
 }

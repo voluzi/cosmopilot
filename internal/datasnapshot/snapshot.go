@@ -13,6 +13,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -35,6 +36,10 @@ type SnapshotJob struct {
 	Purpose     SnapshotJobPurpose
 	Terminating bool
 	Upload      *SnapshotJobIdentity
+	// Exporter is set when a listed deletion Job belongs to a previously configured
+	// provider. Deletion Jobs are self-contained, so they can still be resumed and
+	// cleaned up after the ChainNode switches providers.
+	Exporter string
 }
 
 const (
@@ -346,10 +351,12 @@ func snapshotJobFromJob(job *batchv1.Job) SnapshotJob {
 	return snapshotJob
 }
 
-func snapshotJobsFromJobs(jobs []batchv1.Job) []SnapshotJob {
+func snapshotJobsFromJobs(jobs []batchv1.Job, currentExporter ...string) []SnapshotJob {
 	type groupedSnapshotJobs struct {
-		preferred SnapshotJob
-		upload    *SnapshotJobIdentity
+		preferred         SnapshotJob
+		preferredExporter string
+		upload            *SnapshotJobIdentity
+		uploadExporter    string
 	}
 
 	uniqueJobs := make(map[string]groupedSnapshotJobs, len(jobs))
@@ -359,20 +366,28 @@ func snapshotJobsFromJobs(jobs []batchv1.Job) []SnapshotJob {
 		group := uniqueJobs[snapshotJob.Name]
 		if snapshotJob.Purpose == SnapshotJobUpload {
 			group.upload = &SnapshotJobIdentity{UID: snapshotJob.UID, Terminating: snapshotJob.Terminating}
+			group.uploadExporter = job.Labels[labelExporter]
 		}
 		if group.preferred.Purpose != SnapshotJobDelete || snapshotJob.Purpose == SnapshotJobDelete {
 			group.preferred = snapshotJob
+			group.preferredExporter = job.Labels[labelExporter]
 		}
 		uniqueJobs[snapshotJob.Name] = group
 	}
 
 	result := make([]SnapshotJob, 0, len(uniqueJobs))
 	for _, group := range uniqueJobs {
-		if group.preferred.Purpose == SnapshotJobDelete && group.preferred.Upload == nil {
+		if group.preferred.Purpose == SnapshotJobDelete && group.preferred.Upload == nil &&
+			group.preferredExporter == group.uploadExporter {
 			group.preferred.Upload = group.upload
 		} else if group.preferred.Purpose == SnapshotJobDelete && group.upload != nil &&
+			group.preferredExporter == group.uploadExporter &&
 			group.preferred.Upload.UID == group.upload.UID {
 			group.preferred.Upload.Terminating = group.upload.Terminating
+		}
+		if len(currentExporter) > 0 && group.preferred.Purpose == SnapshotJobDelete &&
+			group.preferredExporter != "" && group.preferredExporter != currentExporter[0] {
+			group.preferred.Exporter = group.preferredExporter
 		}
 		result = append(result, group.preferred)
 	}
@@ -380,6 +395,38 @@ func snapshotJobsFromJobs(jobs []batchv1.Job) []SnapshotJob {
 		return result[i].Name < result[j].Name
 	})
 	return result
+}
+
+func listSnapshotJobs(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	exporter string,
+) ([]SnapshotJob, error) {
+	selector := labels.SelectorFromSet(map[string]string{labelOwner: owner.GetName()}).String()
+	list, err := client.BatchV1().Jobs(owner.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, err
+	}
+
+	jobs := make([]batchv1.Job, 0, len(list.Items))
+	for i := range list.Items {
+		job := list.Items[i]
+		// Upload Jobs need the currently configured provider to construct a matching
+		// deletion workflow. Existing deletion Jobs are self-contained and must stay
+		// discoverable after a provider switch so suspended workflows can resume.
+		if job.Labels[labelExporter] == exporter || job.Labels[labelType] == typeDelete {
+			jobs = append(jobs, job)
+		}
+	}
+	return snapshotJobsFromJobs(jobs, exporter), nil
+}
+
+func snapshotJobExporter(job SnapshotJob, currentExporter string) string {
+	if job.Exporter != "" {
+		return job.Exporter
+	}
+	return currentExporter
 }
 
 func getSnapshotUploadResources(

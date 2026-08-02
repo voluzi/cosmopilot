@@ -367,6 +367,77 @@ func TestSnapshotJobsFromJobsCarriesTerminatingUploadIdentity(t *testing.T) {
 	}}, snapshotJobsFromJobs(jobs))
 }
 
+func TestListSnapshotJobsIncludesPreviousExporterDeletionWorkflow(t *testing.T) {
+	owner := testJobOwner()
+	client := fake.NewSimpleClientset(
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Name:      "previous-delete",
+			Namespace: owner.Namespace,
+			UID:       "previous-delete-uid",
+			Labels: map[string]string{
+				labelExporter:         s3Exporter,
+				labelOwner:            owner.Name,
+				labelType:             typeDelete,
+				labelCleanupExporter:  s3Exporter,
+				labelCleanupOwner:     owner.Name,
+				labelCleanupType:      typeUpload,
+				labelCleanupUploadUID: "previous-upload-uid",
+				labelCleanupPVCUID:    "previous-pvc-uid",
+			},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+		}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Name:      "current-upload",
+			Namespace: owner.Namespace,
+			UID:       "current-upload-uid",
+			Labels: map[string]string{
+				labelExporter: gcsExporter,
+				labelOwner:    owner.Name,
+				labelType:     typeUpload,
+			},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+		}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Name:      "previous-upload",
+			Namespace: owner.Namespace,
+			UID:       "old-upload-only-uid",
+			Labels: map[string]string{
+				labelExporter: s3Exporter,
+				labelOwner:    owner.Name,
+				labelType:     typeUpload,
+			},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+		}},
+	)
+
+	jobs, err := listSnapshotJobs(context.Background(), client, owner, gcsExporter)
+	require.NoError(t, err)
+	assert.Equal(t, []SnapshotJob{
+		{Name: "current", UID: "current-upload-uid", Purpose: SnapshotJobUpload},
+		{
+			Name: "previous", UID: "previous-delete-uid", Purpose: SnapshotJobDelete, Exporter: s3Exporter,
+			Upload: &SnapshotJobIdentity{UID: "previous-upload-uid", PVCUID: "previous-pvc-uid"},
+		},
+	}, jobs)
+}
+
+func TestSnapshotJobsFromJobsDoesNotPairDifferentExporterUpload(t *testing.T) {
+	jobs := []batchv1.Job{
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "snapshot-delete", UID: "delete-uid",
+			Labels: map[string]string{labelExporter: s3Exporter, labelType: typeDelete},
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "snapshot-upload", UID: "upload-uid",
+			Labels: map[string]string{labelExporter: gcsExporter, labelType: typeUpload},
+		}},
+	}
+
+	assert.Equal(t, []SnapshotJob{{
+		Name: "snapshot", UID: "delete-uid", Purpose: SnapshotJobDelete, Exporter: s3Exporter,
+	}}, snapshotJobsFromJobs(jobs, gcsExporter))
+}
+
 func TestGetSnapshotUploadResourcesRejectsChangedIdentityOrOwnership(t *testing.T) {
 	owner := testJobOwner()
 	foreignOwner := &corev1.ConfigMap{
