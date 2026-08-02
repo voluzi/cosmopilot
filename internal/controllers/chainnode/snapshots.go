@@ -334,7 +334,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						"Deleted expired PVC snapshot %s", snapshot.GetName(),
 					)
 					if deleteTarball {
-						r.cleanUpTarballDeletion(ctx, chainNode, &snapshot)
+						if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
+							return err
+						}
 						r.recorder.Eventf(chainNode,
 							corev1.EventTypeNormal,
 							appsv1.ReasonTarballDeleted,
@@ -387,7 +389,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				"Deleted PVC snapshot %s (exceeded retain count of %d)", snapshot.GetName(), *retainCount,
 			)
 			if deleteTarball {
-				r.cleanUpTarballDeletion(ctx, chainNode, &snapshot)
+				if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
+					return err
+				}
 				r.recorder.Eventf(chainNode,
 					corev1.EventTypeNormal,
 					appsv1.ReasonTarballDeleted,
@@ -905,15 +909,15 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 	return status == datasnapshot.SnapshotSucceeded, nil
 }
 
-func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) {
+func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
 	exporter, err := r.getTarballExportProvider(chainNode)
 	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to get tarball exporter for delete Job cleanup", "snapshot", snapshot.GetName())
-		return
+		return err
 	}
 	if err = exporter.CleanupSnapshotDeletion(ctx, getTarballName(chainNode, snapshot)); err != nil {
-		log.FromContext(ctx).Error(err, "failed to clean up tarball delete Job", "snapshot", snapshot.GetName())
+		return err
 	}
+	return nil
 }
 
 func getTarballName(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) string {

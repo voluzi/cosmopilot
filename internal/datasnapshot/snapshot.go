@@ -198,6 +198,59 @@ func uploadJobStatus(
 	return snapshotJobStatus(job), nil
 }
 
+func cleanupSnapshotDeletionJob(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	name, exporter string,
+) error {
+	namespace := owner.GetNamespace()
+	jobName := fmt.Sprintf("%s-delete", name)
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get snapshot deletion job %s/%s: %w", namespace, jobName, err)
+	}
+	if !metav1.IsControlledBy(job, owner) {
+		return fmt.Errorf("snapshot deletion job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
+	}
+	if job.DeletionTimestamp != nil {
+		return fmt.Errorf("snapshot deletion job %s/%s is terminating: %w",
+			job.Namespace, job.Name, ErrStaleJobTerminating)
+	}
+	for _, expected := range []struct {
+		label   string
+		desired string
+	}{
+		{label: labelExporter, desired: exporter},
+		{label: labelType, desired: typeDelete},
+	} {
+		actual := job.Labels[expected.label]
+		if actual == expected.desired {
+			continue
+		}
+		if err = deleteSnapshotJob(ctx, client, job); err != nil {
+			return fmt.Errorf("delete stale snapshot deletion job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		return &StaleJobReplacedError{
+			Purpose:          typeDelete,
+			Namespace:        job.Namespace,
+			Name:             job.Name,
+			UID:              job.UID,
+			ConflictingLabel: expected.label,
+			PreviousValue:    actual,
+			DesiredValue:     expected.desired,
+		}
+	}
+	if err = deleteSnapshotJob(ctx, client, job); err != nil {
+		return fmt.Errorf("delete snapshot deletion job %s/%s: %w", job.Namespace, job.Name, err)
+	}
+	return nil
+}
+
 func deleteSnapshotJob(ctx context.Context, client kubernetes.Interface, job *batchv1.Job) error {
 	propagation := metav1.DeletePropagationForeground
 	err := client.BatchV1().Jobs(job.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{

@@ -198,6 +198,37 @@ func TestGCSDeleteSnapshotReportsTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestGCSCleanupSnapshotDeletionUsesForegroundUIDPrecondition(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "snapshot-delete",
+			Namespace:       "default",
+			UID:             "gcs-delete-uid",
+			Labels:          map[string]string{labelExporter: gcsExporter, labelType: typeDelete},
+			OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
+		},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+		}}},
+	}
+	_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), job, metav1.CreateOptions{})
+	require.NoError(t, err)
+	client := provider.Client.(*fake.Clientset)
+	actionCount := len(client.Actions())
+
+	require.NoError(t, provider.CleanupSnapshotDeletion(context.Background(), "snapshot"))
+
+	deleteAction := requireJobDeleteAction(t, client.Actions()[actionCount:])
+	assert.Equal(t, job.Name, deleteAction.GetName())
+	options := deleteAction.GetDeleteOptions()
+	require.NotNil(t, options.PropagationPolicy)
+	assert.Equal(t, metav1.DeletePropagationForeground, *options.PropagationPolicy)
+	require.NotNil(t, options.Preconditions)
+	require.NotNil(t, options.Preconditions.UID)
+	assert.Equal(t, job.UID, *options.Preconditions.UID)
+}
+
 func TestGCSListSnapshotsIncludesDeletionJobs(t *testing.T) {
 	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
 	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")

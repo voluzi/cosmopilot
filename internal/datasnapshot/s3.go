@@ -224,11 +224,7 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotSt
 }
 
 func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, name string) error {
-	err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Delete(ctx, fmt.Sprintf("%s-delete", name), metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	return nil
+	return cleanupSnapshotDeletionJob(ctx, provider.Client, provider.Owner, name, s3Exporter)
 }
 
 func (provider *S3) cleanUp(ctx context.Context, name string) error {
