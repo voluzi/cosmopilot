@@ -3,7 +3,6 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -173,11 +172,45 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 	return uploadJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), s3Exporter)
 }
 
+func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, name string) (SnapshotStatus, error) {
+	return deletionJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-delete", name), s3Exporter)
+}
+
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
 	return provider.cleanUp(ctx, name)
 }
 
 func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
+	status, err := provider.ensureSnapshotDeletion(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if err = provider.cleanUp(ctx, name); err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+func (provider *S3) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotStatus, error) {
+	job, _, err := getSnapshotUploadResources(ctx, provider.Client, provider.Owner, upload, s3Exporter)
+	if err != nil {
+		return "", err
+	}
+	if job == nil {
+		return SnapshotNotFound, nil
+	}
+	if job.DeletionTimestamp != nil {
+		return "", fmt.Errorf("orphan upload job %s/%s is terminating: %w",
+			job.Namespace, job.Name, ErrStaleJobTerminating)
+	}
+	status, err := provider.ensureSnapshotDeletion(ctx, upload.Name)
+	if err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+func (provider *S3) ensureSnapshotDeletion(ctx context.Context, name string) (SnapshotStatus, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -217,14 +250,11 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotSt
 	if err != nil {
 		return "", err
 	}
-	if err = provider.cleanUp(ctx, name); err != nil {
-		return "", err
-	}
 	return snapshotJobStatus(job), nil
 }
 
-func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, name string) error {
-	return cleanupSnapshotDeletionJob(ctx, provider.Client, provider.Owner, name, s3Exporter)
+func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {
+	return cleanupSnapshotDeletionResources(ctx, provider.Client, provider.Owner, snapshotJob, s3Exporter)
 }
 
 func (provider *S3) cleanUp(ctx context.Context, name string) error {
@@ -242,7 +272,7 @@ func (provider *S3) cleanUp(ctx context.Context, name string) error {
 	return nil
 }
 
-func (provider *S3) ListSnapshots(ctx context.Context) ([]string, error) {
+func (provider *S3) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
 	selector := labels.SelectorFromSet(map[string]string{
 		labelExporter: s3Exporter,
 		labelOwner:    provider.Owner.GetName(),
@@ -251,14 +281,5 @@ func (provider *S3) ListSnapshots(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	uniqueNames := make(map[string]struct{}, len(list.Items))
-	for _, job := range list.Items {
-		uniqueNames[snapshotNameFromJob(&job)] = struct{}{}
-	}
-	names := make([]string, 0, len(uniqueNames))
-	for name := range uniqueNames {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
+	return snapshotJobsFromJobs(list.Items), nil
 }

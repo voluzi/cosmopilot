@@ -3,7 +3,6 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -241,6 +240,10 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 	return uploadJobStatus(ctx, gcs.Client, gcs.Owner, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), gcsExporter)
 }
 
+func (gcs *GCS) GetSnapshotDeletionStatus(ctx context.Context, name string) (SnapshotStatus, error) {
+	return deletionJobStatus(ctx, gcs.Client, gcs.Owner, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-delete", name), gcsExporter)
+}
+
 func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {
 	return gcs.cleanUp(ctx, name)
 }
@@ -270,6 +273,36 @@ func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
 }
 
 func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
+	status, err := gcs.ensureSnapshotDeletion(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if err = gcs.cleanUp(ctx, name); err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+func (gcs *GCS) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotStatus, error) {
+	job, _, err := getSnapshotUploadResources(ctx, gcs.Client, gcs.Owner, upload, gcsExporter)
+	if err != nil {
+		return "", err
+	}
+	if job == nil {
+		return SnapshotNotFound, nil
+	}
+	if job.DeletionTimestamp != nil {
+		return "", fmt.Errorf("orphan upload job %s/%s is terminating: %w",
+			job.Namespace, job.Name, ErrStaleJobTerminating)
+	}
+	status, err := gcs.ensureSnapshotDeletion(ctx, upload.Name)
+	if err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+func (gcs *GCS) ensureSnapshotDeletion(ctx context.Context, name string) (SnapshotStatus, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -320,17 +353,14 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus
 	if err != nil {
 		return "", err
 	}
-	if err = gcs.cleanUp(ctx, name); err != nil {
-		return "", err
-	}
 	return snapshotJobStatus(job), nil
 }
 
-func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, name string) error {
-	return cleanupSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, name, gcsExporter)
+func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {
+	return cleanupSnapshotDeletionResources(ctx, gcs.Client, gcs.Owner, snapshotJob, gcsExporter)
 }
 
-func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
+func (gcs *GCS) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
 	listOptions := metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(map[string]string{
 			labelExporter: gcsExporter,
@@ -342,14 +372,5 @@ func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	names := make(map[string]struct{}, len(list.Items))
-	for _, job := range list.Items {
-		names[snapshotNameFromJob(&job)] = struct{}{}
-	}
-	snapshotNames := make([]string, 0, len(names))
-	for name := range names {
-		snapshotNames = append(snapshotNames, name)
-	}
-	sort.Strings(snapshotNames)
-	return snapshotNames, nil
+	return snapshotJobsFromJobs(list.Items), nil
 }

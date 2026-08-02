@@ -298,6 +298,226 @@ func TestUploadJobStatusReportsMissingJob(t *testing.T) {
 	assert.Equal(t, SnapshotNotFound, status)
 }
 
+func TestDeletionJobStatusReportsMissingJobWithoutCreatingIt(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	status, err := deletionJobStatus(context.Background(), client, testJobOwner(), "default", "snapshot-delete", gcsExporter)
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotNotFound, status)
+	for _, action := range client.Actions() {
+		assert.False(t, action.GetVerb() == "create" && action.GetResource().Resource == "jobs")
+	}
+}
+
+func TestSnapshotJobsFromJobsRetainsUploadIdentityAlongsidePreferredDeletionJob(t *testing.T) {
+	deletionTimestamp := metav1.Now()
+	jobs := []batchv1.Job{
+		{ObjectMeta: metav1.ObjectMeta{Name: "snapshot-delete", UID: "delete-uid", Labels: map[string]string{labelType: typeDelete}}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:              "snapshot-upload",
+			UID:               "upload-uid",
+			DeletionTimestamp: &deletionTimestamp,
+			Labels:            map[string]string{labelType: typeUpload},
+		}},
+	}
+
+	assert.Equal(t, []SnapshotJob{{
+		Name:    "snapshot",
+		UID:     "delete-uid",
+		Purpose: SnapshotJobDelete,
+		Upload:  &SnapshotJobIdentity{UID: "upload-uid", Terminating: true},
+	}}, snapshotJobsFromJobs(jobs))
+}
+
+func TestSnapshotJobsFromJobsCarriesTerminatingUploadIdentity(t *testing.T) {
+	deletionTimestamp := metav1.Now()
+	jobs := []batchv1.Job{{ObjectMeta: metav1.ObjectMeta{
+		Name:              "snapshot-upload",
+		UID:               "upload-uid",
+		DeletionTimestamp: &deletionTimestamp,
+		Labels:            map[string]string{labelType: typeUpload},
+	}}}
+
+	assert.Equal(t, []SnapshotJob{{
+		Name:        "snapshot",
+		UID:         "upload-uid",
+		Purpose:     SnapshotJobUpload,
+		Terminating: true,
+	}}, snapshotJobsFromJobs(jobs))
+}
+
+func TestGetSnapshotUploadResourcesRejectsChangedIdentityOrOwnership(t *testing.T) {
+	owner := testJobOwner()
+	foreignOwner := &corev1.ConfigMap{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: "default", UID: "foreign-owner-uid"},
+	}
+	tests := []struct {
+		name      string
+		mutateJob func(*batchv1.Job)
+		mutatePVC func(*corev1.PersistentVolumeClaim)
+		wantError string
+	}{
+		{
+			name: "same-name replacement Job",
+			mutateJob: func(job *batchv1.Job) {
+				job.UID = "replacement-job-uid"
+			},
+			wantError: "UID",
+		},
+		{
+			name: "foreign controller",
+			mutateJob: func(job *batchv1.Job) {
+				job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
+			},
+			wantError: "not controlled by snapshot owner",
+		},
+		{
+			name: "changed provider",
+			mutateJob: func(job *batchv1.Job) {
+				job.Labels[labelExporter] = s3Exporter
+			},
+			wantError: "exporter label",
+		},
+		{
+			name: "changed type",
+			mutateJob: func(job *batchv1.Job) {
+				job.Labels[labelType] = typeDelete
+			},
+			wantError: "type label",
+		},
+		{
+			name: "same-name replacement PVC",
+			mutatePVC: func(pvc *corev1.PersistentVolumeClaim) {
+				pvc.UID = "replacement-pvc-uid"
+				pvc.OwnerReferences[0].UID = "replacement-job-uid"
+			},
+			wantError: "not controlled by upload job",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name:      "snapshot-upload",
+				Namespace: "default",
+				UID:       "listed-job-uid",
+				Labels: map[string]string{
+					labelExporter: gcsExporter,
+					labelOwner:    owner.Name,
+					labelType:     typeUpload,
+				},
+				OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+			}}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name:      job.Name,
+				Namespace: job.Namespace,
+				UID:       "listed-pvc-uid",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: batchv1.SchemeGroupVersion.String(),
+					Kind:       "Job",
+					Name:       job.Name,
+					UID:        job.UID,
+					Controller: ptr.To(true),
+				}},
+			}}
+			if tt.mutateJob != nil {
+				tt.mutateJob(job)
+			}
+			if tt.mutatePVC != nil {
+				tt.mutatePVC(pvc)
+			}
+			client := fake.NewSimpleClientset(job, pvc)
+
+			_, _, err := getSnapshotUploadResources(context.Background(), client, owner, SnapshotJob{
+				Name:    "snapshot",
+				UID:     "listed-job-uid",
+				Purpose: SnapshotJobUpload,
+			}, gcsExporter)
+			require.ErrorContains(t, err, tt.wantError)
+			for _, action := range client.Actions() {
+				assert.NotEqual(t, "delete", action.GetVerb())
+			}
+		})
+	}
+}
+
+func TestCleanupSnapshotDeletionResourcesRejectsChangedDeletionIdentityBeforeUploadCleanup(t *testing.T) {
+	owner := testJobOwner()
+	foreignOwner := &corev1.ConfigMap{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: "default", UID: "foreign-owner-uid"},
+	}
+	tests := []struct {
+		name      string
+		mutate    func(*batchv1.Job)
+		wantError string
+	}{
+		{
+			name: "same-name replacement",
+			mutate: func(job *batchv1.Job) {
+				job.UID = "replacement-delete-uid"
+			},
+			wantError: "UID",
+		},
+		{
+			name: "foreign replacement",
+			mutate: func(job *batchv1.Job) {
+				job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
+			},
+			wantError: "not controlled by snapshot owner",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uploadJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name:      "snapshot-upload",
+				Namespace: "default",
+				UID:       "upload-job-uid",
+				Labels: map[string]string{
+					labelExporter: gcsExporter,
+					labelOwner:    owner.Name,
+					labelType:     typeUpload,
+				},
+				OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
+			}}
+			uploadPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name:      uploadJob.Name,
+				Namespace: uploadJob.Namespace,
+				UID:       "upload-pvc-uid",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: batchv1.SchemeGroupVersion.String(),
+					Kind:       "Job",
+					Name:       uploadJob.Name,
+					UID:        uploadJob.UID,
+					Controller: ptr.To(true),
+				}},
+			}}
+			deleteJob := desiredDeleteJob(owner, gcsExporter)
+			deleteJob.UID = "listed-delete-uid"
+			deleteJob.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(owner)}
+			tt.mutate(deleteJob)
+			client := fake.NewSimpleClientset(uploadJob, uploadPVC, deleteJob)
+
+			err := cleanupSnapshotDeletionResources(context.Background(), client, owner, SnapshotJob{
+				Name:    "snapshot",
+				UID:     "listed-delete-uid",
+				Purpose: SnapshotJobDelete,
+				Upload:  &SnapshotJobIdentity{UID: uploadJob.UID},
+			}, gcsExporter)
+			require.ErrorContains(t, err, tt.wantError)
+			for _, action := range client.Actions() {
+				assert.NotEqual(t, "delete", action.GetVerb(), "upload resources must survive an unverified deletion Job")
+			}
+			_, err = client.BatchV1().Jobs("default").Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			_, err = client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), uploadPVC.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestEnsureSnapshotJobKeepsJobWithMatchingLabels(t *testing.T) {
 	owner := testJobOwner()
 	existing := desiredDeleteJob(owner, "s3-exporter")
@@ -361,7 +581,7 @@ func TestCleanupSnapshotDeletionJobTreatsNotFoundAsSuccess(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	owner := testJobOwner()
 
-	require.NoError(t, cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter))
+	require.NoError(t, cleanupSnapshotDeletionJob(context.Background(), client, owner, testDeletionSnapshotJob("snapshot"), gcsExporter))
 	for _, action := range client.Actions() {
 		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
 	}
@@ -374,7 +594,7 @@ func TestCleanupSnapshotDeletionJobWaitsForTerminatingJob(t *testing.T) {
 	job.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	client := fake.NewSimpleClientset(job)
 
-	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, testDeletionSnapshotJob("snapshot"), gcsExporter)
 	require.ErrorIs(t, err, ErrStaleJobTerminating)
 
 	for _, action := range client.Actions() {
@@ -393,7 +613,7 @@ func TestCleanupSnapshotDeletionJobRejectsForeignJob(t *testing.T) {
 	job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
 	client := fake.NewSimpleClientset(job)
 
-	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, testDeletionSnapshotJob("snapshot"), gcsExporter)
 	require.ErrorContains(t, err, "not controlled by snapshot owner")
 
 	_, err = client.BatchV1().Jobs("default").Get(context.Background(), job.Name, metav1.GetOptions{})
@@ -439,7 +659,7 @@ func TestCleanupSnapshotDeletionJobReplacesMislabeledOwnedJob(t *testing.T) {
 			tt.mutate(job)
 			client := fake.NewSimpleClientset(job)
 
-			err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+			err := cleanupSnapshotDeletionJob(context.Background(), client, owner, testDeletionSnapshotJob("snapshot"), gcsExporter)
 			require.ErrorIs(t, err, ErrStaleJobReplaced)
 			var replacement *StaleJobReplacedError
 			require.ErrorAs(t, err, &replacement)
@@ -460,7 +680,7 @@ func TestCleanupSnapshotDeletionJobReportsGetFailure(t *testing.T) {
 		return true, nil, errors.New("get refused")
 	})
 
-	err := cleanupSnapshotDeletionJob(context.Background(), client, testJobOwner(), "snapshot", gcsExporter)
+	err := cleanupSnapshotDeletionJob(context.Background(), client, testJobOwner(), testDeletionSnapshotJob("snapshot"), gcsExporter)
 	require.ErrorContains(t, err, "get snapshot deletion job default/snapshot-delete")
 	require.ErrorContains(t, err, "get refused")
 }
@@ -478,7 +698,7 @@ func TestCleanupSnapshotDeletionJobReportsUIDPreconditionConflict(t *testing.T) 
 		)
 	})
 
-	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, testDeletionSnapshotJob("snapshot"), gcsExporter)
 	require.True(t, apierrors.IsConflict(err))
 	require.ErrorContains(t, err, "delete snapshot deletion job default/snapshot-delete")
 	require.ErrorContains(t, err, "UID precondition did not match")
@@ -492,6 +712,10 @@ func testJobOwner() *corev1.ConfigMap {
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"},
 	}
+}
+
+func testDeletionSnapshotJob(name string) SnapshotJob {
+	return SnapshotJob{Name: name, Purpose: SnapshotJobDelete}
 }
 
 func ownerReferenceTo(owner *corev1.ConfigMap) metav1.OwnerReference {

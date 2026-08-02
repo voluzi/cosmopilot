@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
@@ -20,6 +21,21 @@ import (
 
 type SnapshotStatus string
 
+type SnapshotJobPurpose string
+
+type SnapshotJobIdentity struct {
+	UID         types.UID
+	Terminating bool
+}
+
+type SnapshotJob struct {
+	Name        string
+	UID         types.UID
+	Purpose     SnapshotJobPurpose
+	Terminating bool
+	Upload      *SnapshotJobIdentity
+}
+
 const (
 	SnapshotSucceeded SnapshotStatus = "succeeded"
 	SnapshotFailed    SnapshotStatus = "failed"
@@ -30,8 +46,11 @@ const (
 	labelOwner    = "owner"
 	labelType     = "type"
 
-	typeUpload = "upload"
-	typeDelete = "delete"
+	SnapshotJobUpload SnapshotJobPurpose = "upload"
+	SnapshotJobDelete SnapshotJobPurpose = "delete"
+
+	typeUpload = string(SnapshotJobUpload)
+	typeDelete = string(SnapshotJobDelete)
 )
 
 // ErrStaleJobReplaced reports that an existing snapshot Job is being deleted because it cannot
@@ -75,10 +94,12 @@ func (err *StaleJobReplacedError) ProviderSwitch() bool {
 type SnapshotProvider interface {
 	CreateSnapshot(context.Context, string, *snapshotv1.VolumeSnapshot) error
 	GetSnapshotStatus(context.Context, string) (SnapshotStatus, error)
+	GetSnapshotDeletionStatus(context.Context, string) (SnapshotStatus, error)
 	CleanupSnapshot(context.Context, string) error
 	DeleteSnapshot(context.Context, string) (SnapshotStatus, error)
-	CleanupSnapshotDeletion(context.Context, string) error
-	ListSnapshots(ctx context.Context) ([]string, error)
+	DeleteSnapshotForUpload(context.Context, SnapshotJob) (SnapshotStatus, error)
+	CleanupSnapshotDeletion(context.Context, SnapshotJob) error
+	ListSnapshots(ctx context.Context) ([]SnapshotJob, error)
 }
 
 func ensureUploadResources(
@@ -198,20 +219,56 @@ func uploadJobStatus(
 	return snapshotJobStatus(job), nil
 }
 
+func deletionJobStatus(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	namespace, name, exporter string,
+) (SnapshotStatus, error) {
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return SnapshotNotFound, nil
+		}
+		return "", err
+	}
+	if !metav1.IsControlledBy(job, owner) {
+		return "", fmt.Errorf("snapshot deletion job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
+	}
+	if job.Labels[labelExporter] != exporter {
+		return "", fmt.Errorf("snapshot deletion job %s/%s has exporter label %q, expected %q",
+			job.Namespace, job.Name, job.Labels[labelExporter], exporter)
+	}
+	if job.Labels[labelType] != typeDelete {
+		return "", fmt.Errorf("snapshot deletion job %s/%s has type label %q, expected %q",
+			job.Namespace, job.Name, job.Labels[labelType], typeDelete)
+	}
+	return snapshotJobStatus(job), nil
+}
+
 func cleanupSnapshotDeletionJob(
 	ctx context.Context,
 	client kubernetes.Interface,
 	owner metav1.Object,
-	name, exporter string,
+	expected SnapshotJob,
+	exporter string,
 ) error {
+	if expected.Purpose != SnapshotJobDelete {
+		return fmt.Errorf("snapshot job %q has purpose %q, expected %q", expected.Name, expected.Purpose, SnapshotJobDelete)
+	}
 	namespace := owner.GetNamespace()
-	jobName := fmt.Sprintf("%s-delete", name)
+	jobName := fmt.Sprintf("%s-delete", expected.Name)
 	job, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("get snapshot deletion job %s/%s: %w", namespace, jobName, err)
+	}
+	if expected.UID != "" && job.UID != expected.UID {
+		return fmt.Errorf("snapshot deletion job %s/%s has UID %s, expected listed UID %s",
+			job.Namespace, job.Name, job.UID, expected.UID)
 	}
 	if !metav1.IsControlledBy(job, owner) {
 		return fmt.Errorf("snapshot deletion job %s/%s is not controlled by snapshot owner %s",
@@ -291,6 +348,213 @@ func snapshotNameFromJob(job *batchv1.Job) string {
 	default:
 		return job.Name
 	}
+}
+
+func snapshotJobsFromJobs(jobs []batchv1.Job) []SnapshotJob {
+	type groupedSnapshotJobs struct {
+		preferred SnapshotJob
+		upload    *SnapshotJobIdentity
+	}
+
+	uniqueJobs := make(map[string]groupedSnapshotJobs, len(jobs))
+	for i := range jobs {
+		job := &jobs[i]
+		snapshotJob := SnapshotJob{
+			Name:        snapshotNameFromJob(job),
+			UID:         job.UID,
+			Purpose:     SnapshotJobPurpose(job.Labels[labelType]),
+			Terminating: job.DeletionTimestamp != nil,
+		}
+		group := uniqueJobs[snapshotJob.Name]
+		if snapshotJob.Purpose == SnapshotJobUpload {
+			group.upload = &SnapshotJobIdentity{UID: snapshotJob.UID, Terminating: snapshotJob.Terminating}
+		}
+		if group.preferred.Purpose != SnapshotJobDelete || snapshotJob.Purpose == SnapshotJobDelete {
+			group.preferred = snapshotJob
+		}
+		uniqueJobs[snapshotJob.Name] = group
+	}
+
+	result := make([]SnapshotJob, 0, len(uniqueJobs))
+	for _, group := range uniqueJobs {
+		if group.preferred.Purpose == SnapshotJobDelete {
+			group.preferred.Upload = group.upload
+		}
+		result = append(result, group.preferred)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
+func getSnapshotUploadResources(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	expected SnapshotJob,
+	exporter string,
+) (*batchv1.Job, *corev1.PersistentVolumeClaim, error) {
+	if expected.Purpose != SnapshotJobUpload {
+		return nil, nil, fmt.Errorf("snapshot job %q has purpose %q, expected %q", expected.Name, expected.Purpose, SnapshotJobUpload)
+	}
+	if expected.UID == "" {
+		return nil, nil, fmt.Errorf("snapshot upload job %q is missing its listed UID", expected.Name)
+	}
+
+	namespace := owner.GetNamespace()
+	jobName := fmt.Sprintf("%s-upload", expected.Name)
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, nil, fmt.Errorf("get orphan upload job %s/%s: %w", namespace, jobName, err)
+		}
+		job = nil
+	} else {
+		if job.UID != expected.UID {
+			return nil, nil, fmt.Errorf("orphan upload job %s/%s has UID %s, expected listed UID %s",
+				job.Namespace, job.Name, job.UID, expected.UID)
+		}
+		if !metav1.IsControlledBy(job, owner) {
+			return nil, nil, fmt.Errorf("orphan upload job %s/%s is not controlled by snapshot owner %s",
+				job.Namespace, job.Name, owner.GetName())
+		}
+		for _, expectedLabel := range []struct {
+			name  string
+			value string
+		}{
+			{name: labelExporter, value: exporter},
+			{name: labelOwner, value: owner.GetName()},
+			{name: labelType, value: typeUpload},
+		} {
+			if job.Labels[expectedLabel.name] != expectedLabel.value {
+				return nil, nil, fmt.Errorf("orphan upload job %s/%s has %s label %q, expected %q",
+					job.Namespace, job.Name, expectedLabel.name, job.Labels[expectedLabel.name], expectedLabel.value)
+			}
+		}
+	}
+
+	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return job, nil, nil
+		}
+		return nil, nil, fmt.Errorf("get orphan upload PVC %s/%s: %w", namespace, jobName, err)
+	}
+	controller := metav1.GetControllerOfNoCopy(pvc)
+	if controller == nil || controller.APIVersion != batchv1.SchemeGroupVersion.String() || controller.Kind != "Job" ||
+		controller.Name != jobName || controller.UID != expected.UID {
+		return nil, nil, fmt.Errorf("orphan upload PVC %s/%s is not controlled by upload job UID %s",
+			pvc.Namespace, pvc.Name, expected.UID)
+	}
+	return job, pvc, nil
+}
+
+func cleanupSnapshotUploadResources(
+	ctx context.Context,
+	client kubernetes.Interface,
+	job *batchv1.Job,
+	pvc *corev1.PersistentVolumeClaim,
+) error {
+	if pvc != nil {
+		err := client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &pvc.UID},
+		})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete orphan upload PVC %s/%s: %w", pvc.Namespace, pvc.Name, err)
+		}
+	}
+	if job == nil || job.DeletionTimestamp != nil {
+		return nil
+	}
+	if err := deleteSnapshotJob(ctx, client, job); err != nil {
+		return fmt.Errorf("delete orphan upload job %s/%s: %w", job.Namespace, job.Name, err)
+	}
+	return nil
+}
+
+func getSnapshotDeletionJobForCleanup(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	expected SnapshotJob,
+	exporter string,
+) (*batchv1.Job, error) {
+	if expected.Purpose != SnapshotJobDelete {
+		return nil, fmt.Errorf("snapshot job %q has purpose %q, expected %q", expected.Name, expected.Purpose, SnapshotJobDelete)
+	}
+
+	namespace := owner.GetNamespace()
+	jobName := fmt.Sprintf("%s-delete", expected.Name)
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get snapshot deletion job %s/%s: %w", namespace, jobName, err)
+	}
+	if job.UID != expected.UID {
+		return nil, fmt.Errorf("snapshot deletion job %s/%s has UID %s, expected listed UID %s",
+			job.Namespace, job.Name, job.UID, expected.UID)
+	}
+	if !metav1.IsControlledBy(job, owner) {
+		return nil, fmt.Errorf("snapshot deletion job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
+	}
+	if job.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("snapshot deletion job %s/%s is terminating: %w",
+			job.Namespace, job.Name, ErrStaleJobTerminating)
+	}
+	for _, expectedLabel := range []struct {
+		name  string
+		value string
+	}{
+		{name: labelExporter, value: exporter},
+		{name: labelType, value: typeDelete},
+	} {
+		if job.Labels[expectedLabel.name] != expectedLabel.value {
+			return nil, fmt.Errorf("snapshot deletion job %s/%s has %s label %q, expected %q",
+				job.Namespace, job.Name, expectedLabel.name, job.Labels[expectedLabel.name], expectedLabel.value)
+		}
+	}
+	return job, nil
+}
+
+func cleanupSnapshotDeletionResources(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	expected SnapshotJob,
+	exporter string,
+) error {
+	if expected.Upload == nil {
+		return cleanupSnapshotDeletionJob(ctx, client, owner, expected, exporter)
+	}
+
+	deletionJob, err := getSnapshotDeletionJobForCleanup(ctx, client, owner, expected, exporter)
+	if err != nil {
+		return err
+	}
+	upload := SnapshotJob{
+		Name:        expected.Name,
+		UID:         expected.Upload.UID,
+		Purpose:     SnapshotJobUpload,
+		Terminating: expected.Upload.Terminating,
+	}
+	job, pvc, err := getSnapshotUploadResources(ctx, client, owner, upload, exporter)
+	if err != nil {
+		return err
+	}
+	if err = cleanupSnapshotUploadResources(ctx, client, job, pvc); err != nil {
+		return err
+	}
+	if deletionJob == nil {
+		return nil
+	}
+	if err = deleteSnapshotJob(ctx, client, deletionJob); err != nil {
+		return fmt.Errorf("delete snapshot deletion job %s/%s: %w", deletionJob.Namespace, deletionJob.Name, err)
+	}
+	return nil
 }
 
 func ensureUploadPVC(
