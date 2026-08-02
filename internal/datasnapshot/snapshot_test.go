@@ -382,37 +382,53 @@ func TestCleanupSnapshotDeletionJobWaitsForTerminatingJob(t *testing.T) {
 	}
 }
 
-func TestCleanupSnapshotDeletionJobRejectsForeignJobs(t *testing.T) {
+func TestCleanupSnapshotDeletionJobRejectsForeignJob(t *testing.T) {
 	owner := testJobOwner()
 	foreignOwner := &corev1.ConfigMap{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{Name: "other-owner", Namespace: "default", UID: "other-owner-uid"},
 	}
+	job := desiredDeleteJob(owner, gcsExporter)
+	job.UID = "existing-job-uid"
+	job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
+	client := fake.NewSimpleClientset(job)
+
+	err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
+	require.ErrorContains(t, err, "not controlled by snapshot owner")
+
+	_, err = client.BatchV1().Jobs("default").Get(context.Background(), job.Name, metav1.GetOptions{})
+	require.NoError(t, err, "foreign Job must survive")
+	for _, action := range client.Actions() {
+		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
+	}
+}
+
+func TestCleanupSnapshotDeletionJobReplacesMislabeledOwnedJob(t *testing.T) {
+	owner := testJobOwner()
 	tests := []struct {
-		name        string
-		mutate      func(*batchv1.Job)
-		wantMessage string
+		name         string
+		mutate       func(*batchv1.Job)
+		wantLabel    string
+		wantPrevious string
+		wantDesired  string
 	}{
-		{
-			name: "foreign owner",
-			mutate: func(job *batchv1.Job) {
-				job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
-			},
-			wantMessage: "not controlled by snapshot owner",
-		},
 		{
 			name: "wrong exporter",
 			mutate: func(job *batchv1.Job) {
 				job.Labels[labelExporter] = s3Exporter
 			},
-			wantMessage: `has exporter label "s3-exporter", expected "gcs-exporter"`,
+			wantLabel:    labelExporter,
+			wantPrevious: s3Exporter,
+			wantDesired:  gcsExporter,
 		},
 		{
 			name: "wrong type",
 			mutate: func(job *batchv1.Job) {
 				job.Labels[labelType] = typeUpload
 			},
-			wantMessage: `has type label "upload", expected "delete"`,
+			wantLabel:    labelType,
+			wantPrevious: typeUpload,
+			wantDesired:  typeDelete,
 		},
 	}
 
@@ -424,13 +440,16 @@ func TestCleanupSnapshotDeletionJobRejectsForeignJobs(t *testing.T) {
 			client := fake.NewSimpleClientset(job)
 
 			err := cleanupSnapshotDeletionJob(context.Background(), client, owner, "snapshot", gcsExporter)
-			require.ErrorContains(t, err, tt.wantMessage)
+			require.ErrorIs(t, err, ErrStaleJobReplaced)
+			var replacement *StaleJobReplacedError
+			require.ErrorAs(t, err, &replacement)
+			assert.Equal(t, typeDelete, replacement.Purpose)
+			assert.Equal(t, tt.wantLabel, replacement.ConflictingLabel)
+			assert.Equal(t, tt.wantPrevious, replacement.PreviousValue)
+			assert.Equal(t, tt.wantDesired, replacement.DesiredValue)
 
 			_, err = client.BatchV1().Jobs("default").Get(context.Background(), job.Name, metav1.GetOptions{})
-			require.NoError(t, err, "foreign or mislabeled Job must survive")
-			for _, action := range client.Actions() {
-				assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
-			}
+			assert.True(t, apierrors.IsNotFound(err), "mislabeled owned Job must be deleted")
 		})
 	}
 }

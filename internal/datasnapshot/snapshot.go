@@ -221,13 +221,29 @@ func cleanupSnapshotDeletionJob(
 		return fmt.Errorf("snapshot deletion job %s/%s is terminating: %w",
 			job.Namespace, job.Name, ErrStaleJobTerminating)
 	}
-	if actual := job.Labels[labelExporter]; actual != exporter {
-		return fmt.Errorf("snapshot deletion job %s/%s has exporter label %q, expected %q",
-			job.Namespace, job.Name, actual, exporter)
-	}
-	if actual := job.Labels[labelType]; actual != typeDelete {
-		return fmt.Errorf("snapshot deletion job %s/%s has type label %q, expected %q",
-			job.Namespace, job.Name, actual, typeDelete)
+	for _, expected := range []struct {
+		label   string
+		desired string
+	}{
+		{label: labelExporter, desired: exporter},
+		{label: labelType, desired: typeDelete},
+	} {
+		actual := job.Labels[expected.label]
+		if actual == expected.desired {
+			continue
+		}
+		if err = deleteSnapshotJob(ctx, client, job); err != nil {
+			return fmt.Errorf("delete stale snapshot deletion job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		return &StaleJobReplacedError{
+			Purpose:          typeDelete,
+			Namespace:        job.Namespace,
+			Name:             job.Name,
+			UID:              job.UID,
+			ConflictingLabel: expected.label,
+			PreviousValue:    actual,
+			DesiredValue:     expected.desired,
+		}
 	}
 	if err = deleteSnapshotJob(ctx, client, job); err != nil {
 		return fmt.Errorf("delete snapshot deletion job %s/%s: %w", job.Namespace, job.Name, err)

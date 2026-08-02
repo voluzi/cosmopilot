@@ -145,6 +145,63 @@ func TestGetTarballExportProviderUsesConfiguredDataExporterImage(t *testing.T) {
 	}
 }
 
+func TestCleanUpTarballDeletionWaitsForTerminatingJob(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	node := &appsv1.ChainNode{
+		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			UID:       "node-uid",
+		},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency: "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{
+				GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"},
+			},
+		}}},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain-1"},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:              "snapshot",
+		Namespace:         "default",
+		CreationTimestamp: metav1.NewTime(time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)),
+	}}
+	deletionTimestamp := metav1.Now()
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:              getTarballName(node, snapshot) + "-delete",
+		Namespace:         "default",
+		UID:               "delete-job-uid",
+		DeletionTimestamp: &deletionTimestamp,
+		Labels: map[string]string{
+			"exporter": "gcs-exporter",
+			"owner":    node.Name,
+			"type":     "delete",
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: node.APIVersion,
+			Kind:       node.Kind,
+			Name:       node.Name,
+			UID:        node.UID,
+			Controller: ptr.To(true),
+		}},
+	}}
+	clientSet := fake.NewSimpleClientset(job)
+	reconciler := &Reconciler{
+		Scheme:            scheme,
+		snapshotClientSet: clientSet,
+		opts:              &controllers.ControllerRunOptions{},
+	}
+
+	err := reconciler.cleanUpTarballDeletion(context.Background(), node, snapshot)
+	require.ErrorIs(t, err, datasnapshot.ErrStaleJobTerminating)
+	for _, action := range clientSet.Actions() {
+		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
+	}
+}
+
 func TestRecordTarballExportFailureStopsAtRetryLimit(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, snapshotv1.AddToScheme(scheme))
