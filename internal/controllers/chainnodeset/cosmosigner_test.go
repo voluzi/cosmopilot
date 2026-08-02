@@ -174,13 +174,15 @@ func TestReconcileCosmosignerMigrationsAdvancesRecreationToRollout(t *testing.T)
 
 func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 	tests := []struct {
-		name             string
-		targetPhases     []appsv1.ChainNodePhase
-		unrelatedPhase   appsv1.ChainNodePhase
-		mutateTarget     func(*appsv1.ChainNode)
-		wantPending      []string
-		wantMigration    bool
-		wantPendingEvent bool
+		name              string
+		targetPhases      []appsv1.ChainNodePhase
+		unrelatedPhase    appsv1.ChainNodePhase
+		mutateTarget      func(*appsv1.ChainNode)
+		mutateTargetPod   func(*corev1.Pod)
+		recoverTargetPods bool
+		wantPending       []string
+		wantMigration     bool
+		wantPendingEvent  bool
 	}{
 		{
 			name:             "failed and pending targets",
@@ -213,6 +215,28 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 			wantPending:      []string{"test-nodeset-targets-0", "test-nodeset-targets-1"},
 			wantMigration:    true,
 			wantPendingEvent: true,
+		},
+		{
+			name:         "current generation target pods not ready",
+			targetPhases: []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeRunning},
+			mutateTargetPod: func(pod *corev1.Pod) {
+				pod.Status.Conditions[0].Status = corev1.ConditionFalse
+			},
+			wantPending:      []string{"test-nodeset-targets-0", "test-nodeset-targets-1"},
+			wantMigration:    true,
+			wantPendingEvent: true,
+		},
+		{
+			name:         "stale running status with pre-rollout pods",
+			targetPhases: []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeRunning},
+			mutateTargetPod: func(pod *corev1.Pod) {
+				pod.UID = types.UID(pod.Name + "-old")
+				pod.Annotations[controllers.AnnotationChainNodeGeneration] = "1"
+			},
+			recoverTargetPods: true,
+			wantPending:       []string{"test-nodeset-targets-0", "test-nodeset-targets-1"},
+			wantMigration:     true,
+			wantPendingEvent:  true,
 		},
 		{
 			name:           "unrelated non-target failure",
@@ -297,7 +321,7 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 				name := fmt.Sprintf("%s-targets-%d", nodeSet.Name, i)
 				target := &appsv1.ChainNode{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: name, Namespace: nodeSet.Namespace,
+						Name: name, Namespace: nodeSet.Namespace, UID: types.UID(name + "-uid"), Generation: 2,
 						Labels: map[string]string{
 							controllers.LabelChainNodeSet:      nodeSet.Name,
 							controllers.LabelChainNodeSetGroup: "targets",
@@ -311,7 +335,30 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 					tt.mutateTarget(target)
 				}
 				require.NoError(t, controllerutil.SetControllerReference(nodeSet, target, testScheme(t)))
-				objects = append(objects, target)
+				targetPod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: name, Namespace: nodeSet.Namespace, UID: types.UID(name + "-pod-current"),
+						Annotations: map[string]string{
+							controllers.AnnotationChainNodeGeneration: "2",
+						},
+						Labels: map[string]string{
+							controllers.LabelChainNodeSet:      nodeSet.Name,
+							controllers.LabelChainNodeSetGroup: "targets",
+							controllers.LabelCosmosignerTarget: signer.Name,
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{{
+							Type: corev1.PodReady, Status: corev1.ConditionTrue,
+						}},
+					},
+				}
+				if tt.mutateTargetPod != nil {
+					tt.mutateTargetPod(targetPod)
+				}
+				require.NoError(t, controllerutil.SetControllerReference(target, targetPod, testScheme(t)))
+				objects = append(objects, target, targetPod)
 			}
 			if tt.unrelatedPhase != "" {
 				unrelated := &appsv1.ChainNode{
@@ -347,6 +394,29 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 				map[string]cosmosigner.Params{signer.Name: params})
 			require.NoError(t, err)
 			assert.Equal(t, !tt.wantMigration, rolloutsReady)
+
+			if tt.recoverTargetPods {
+				for i := range tt.targetPhases {
+					key := types.NamespacedName{
+						Namespace: nodeSet.Namespace,
+						Name:      fmt.Sprintf("%s-targets-%d", nodeSet.Name, i),
+					}
+					oldPod := &corev1.Pod{}
+					require.NoError(t, r.Get(context.Background(), key, oldPod))
+					freshPod := oldPod.DeepCopy()
+					freshPod.ResourceVersion = ""
+					freshPod.UID = types.UID(freshPod.Name + "-pod-current")
+					freshPod.Annotations[controllers.AnnotationChainNodeGeneration] = "2"
+					require.NoError(t, r.Delete(context.Background(), oldPod))
+					require.NoError(t, r.Create(context.Background(), freshPod))
+				}
+
+				changed, err = r.reconcileSigner(context.Background(), nodeSet, signer, params)
+				require.NoError(t, err)
+				assert.True(t, changed)
+				assert.Nil(t, nodeSet.Status.Cosmosigners[0].Migration)
+				assert.Equal(t, desiredDigest, nodeSet.Status.Cosmosigners[0].AppliedDigest)
+			}
 
 			select {
 			case event := <-recorder.Events:

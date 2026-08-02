@@ -101,21 +101,31 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.createPod(ctx, chainNode, pod)
 	}
 
-	// Patch pod labels without restart ONLY when the spec is otherwise unchanged. When the spec has
-	// also changed the pod is recreated below (podSpecChanged), which applies the new labels together
-	// with the new spec atomically. Patching labels onto the still-running old pod in that case is
-	// unsafe during a signer migration: it would stamp the cosmosigner discovery label onto a pod that
-	// is still running the previous signing path (e.g. a tmKMS sidecar bound to the privval laddr),
-	// exposing it to the new signer while the old signer is still live — two signers racing on one
-	// consensus key. Deferring to recreation closes that window.
+	// Patch mutable pod metadata without restart only when the desired pod spec is already live.
+	// Deferring signer-label changes until then avoids exposing a pod whose spec runs a different
+	// signing path. The generation annotation also waits for the current config hash, making it evidence
+	// that this pod represents the current ChainNode generation.
 	logger.V(1).Info("checking for labels changes", "current", currentPod.Labels, "new", pod.Labels)
-	if !reflect.DeepEqual(currentPod.Labels, pod.Labels) && !podSpecChanged(ctx, currentPod, pod) {
-		logger.Info("updating pod labels", "pod", pod.GetName())
+	podSpecCurrent := !podSpecChanged(ctx, currentPod, pod)
+	labelsChanged := !reflect.DeepEqual(currentPod.Labels, pod.Labels)
+	configCurrent := currentPod.Annotations[controllers.AnnotationConfigHash] == configHash
+	generation := pod.Annotations[controllers.AnnotationChainNodeGeneration]
+	generationChanged := currentPod.Annotations[controllers.AnnotationChainNodeGeneration] != generation
+	if podSpecCurrent && (labelsChanged || (configCurrent && generationChanged)) {
+		logger.Info("updating pod metadata", "pod", pod.GetName())
 		modifiedPod := currentPod.DeepCopy()
-		modifiedPod.Labels = pod.Labels
+		if labelsChanged {
+			modifiedPod.Labels = pod.Labels
+		}
+		if configCurrent && generationChanged {
+			if modifiedPod.Annotations == nil {
+				modifiedPod.Annotations = map[string]string{}
+			}
+			modifiedPod.Annotations[controllers.AnnotationChainNodeGeneration] = generation
+		}
 		currentPod, err = r.PatchPod(ctx, currentPod, modifiedPod)
 		if err != nil {
-			return fmt.Errorf("failed to patch pod labels for %s: %w", pod.GetName(), err)
+			return fmt.Errorf("failed to patch pod metadata for %s: %w", pod.GetName(), err)
 		}
 	}
 
@@ -258,7 +268,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	}
 
 	// Re-create pod if spec changes
-	if podSpecChanged(ctx, currentPod, pod) {
+	if !podSpecCurrent {
 		logger.Info("pod spec changed", "pod", pod.GetName())
 		return r.recreatePod(ctx, chainNode, pod, r.opts.DisruptionCheckEnabled)
 	}
@@ -619,6 +629,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	}
 	// System annotations override user annotations
 	annotations[controllers.AnnotationConfigHash] = configHash
+	annotations[controllers.AnnotationChainNodeGeneration] = strconv.FormatInt(chainNode.GetGeneration(), 10)
 
 	// Use custom pod security context if provided, otherwise use restricted
 	podSecurityContext := chainNode.Spec.Config.GetPodSecurityContext()

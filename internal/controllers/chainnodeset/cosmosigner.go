@@ -1542,9 +1542,40 @@ func (r *Reconciler) cosmosignerMigrationTargetWait(ctx context.Context, nodeSet
 			!node.Spec.RemoteSignerTarget ||
 			node.GetLabels()[controllers.LabelCosmosignerTarget] != wait.signer || !node.IsReady() {
 			wait.targets = append(wait.targets, name)
+			continue
+		}
+
+		// ChainNode status has no observed generation. The live Pod annotation is written only after
+		// the ChainNode controller has reconciled the current desired pod spec and config.
+		pod := &corev1.Pod{}
+		err = r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: node.GetNamespace(), Name: node.GetName()}, pod)
+		if errors.IsNotFound(err) {
+			wait.targets = append(wait.targets, name)
+			continue
+		}
+		if err != nil {
+			return wait, err
+		}
+		if !metav1.IsControlledBy(pod, node) || !pod.GetDeletionTimestamp().IsZero() ||
+			pod.GetAnnotations()[controllers.AnnotationChainNodeGeneration] != strconv.FormatInt(node.GetGeneration(), 10) ||
+			pod.GetLabels()[controllers.LabelCosmosignerTarget] != wait.signer || !cosmosignerMigrationTargetPodReady(pod) {
+			wait.targets = append(wait.targets, name)
 		}
 	}
 	return wait, nil
+}
+
+func cosmosignerMigrationTargetPodReady(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for i := range pod.Status.Conditions {
+		condition := &pod.Status.Conditions[i]
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // initCosmosignerLocks persists a status entry and the raft-membership/PVC-template locks for every
