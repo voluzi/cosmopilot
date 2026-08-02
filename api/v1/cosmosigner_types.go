@@ -2,6 +2,7 @@ package v1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -207,6 +208,11 @@ type CosmosignerMigrationStatus struct {
 	// ResetState is true when the desired public key differs from the applied key, requiring the
 	// old raft-state PVCs to be deleted before recreation.
 	ResetState bool `json:"resetState,omitempty"`
+
+	// RolloutObservedAt records when the replacement StatefulSet was first observed fully rolled out.
+	// Target health evidence must be newer than this timestamp before the migration can complete.
+	// +optional
+	RolloutObservedAt *metav1.Time `json:"rolloutObservedAt,omitempty"`
 }
 
 // CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All

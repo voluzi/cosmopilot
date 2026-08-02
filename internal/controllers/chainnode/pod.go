@@ -111,13 +111,13 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	configCurrent := currentPod.Annotations[controllers.AnnotationConfigHash] == configHash
 	generation := pod.Annotations[controllers.AnnotationChainNodeGeneration]
 	generationChanged := currentPod.Annotations[controllers.AnnotationChainNodeGeneration] != generation
-	if podSpecCurrent && (labelsChanged || (configCurrent && generationChanged)) {
+	if podSpecCurrent && configCurrent && (labelsChanged || generationChanged) {
 		logger.Info("updating pod metadata", "pod", pod.GetName())
 		modifiedPod := currentPod.DeepCopy()
 		if labelsChanged {
 			modifiedPod.Labels = pod.Labels
 		}
-		if configCurrent && generationChanged {
+		if generationChanged {
 			if modifiedPod.Annotations == nil {
 				modifiedPod.Annotations = map[string]string{}
 			}
@@ -279,7 +279,29 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, pod, r.opts.DisruptionCheckEnabled)
 	}
 
-	return r.setNodePhase(ctx, chainNode)
+	if err := r.setNodePhase(ctx, chainNode); err != nil {
+		return err
+	}
+	return r.attestPodHealth(ctx, chainNode, currentPod)
+}
+
+// attestPodHealth records that the ChainNode controller successfully probed the node after the
+// current signer rollout token was requested. Writing only when the token changes avoids a Pod
+// update/reconcile loop while giving the parent controller post-rollout health evidence.
+func (r *Reconciler) attestPodHealth(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {
+	rollout := chainNode.GetAnnotations()[controllers.AnnotationCosmosignerRollout]
+	if rollout == "" || pod.GetAnnotations()[controllers.AnnotationCosmosignerRollout] == rollout {
+		return nil
+	}
+	modifiedPod := pod.DeepCopy()
+	if modifiedPod.Annotations == nil {
+		modifiedPod.Annotations = map[string]string{}
+	}
+	modifiedPod.Annotations[controllers.AnnotationCosmosignerRollout] = rollout
+	if _, err := r.PatchPod(ctx, pod, modifiedPod); err != nil {
+		return fmt.Errorf("failed to attest pod health for %s: %w", pod.GetName(), err)
+	}
+	return nil
 }
 
 func (r *Reconciler) createPod(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {

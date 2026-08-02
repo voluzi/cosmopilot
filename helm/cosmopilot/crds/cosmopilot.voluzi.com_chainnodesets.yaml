@@ -17144,6 +17144,12 @@ spec:
                             ResetState is true when the desired public key differs from the applied key, requiring the
                             old raft-state PVCs to be deleted before recreation.
                           type: boolean
+                        rolloutObservedAt:
+                          description: |-
+                            RolloutObservedAt records when the replacement StatefulSet was first observed fully rolled out.
+                            Target health evidence must be newer than this timestamp before the migration can complete.
+                          format: date-time
+                          type: string
                       required:
                       - desiredDigest
                       - desiredPublicKey

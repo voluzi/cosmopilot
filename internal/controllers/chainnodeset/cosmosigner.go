@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1521,7 +1522,7 @@ func desiredCosmosignerTargetNodeNames(nodeSet *appsv1.ChainNodeSet, signer apps
 	return names, nil
 }
 
-func (r *Reconciler) cosmosignerMigrationTargetWait(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner) (cosmosignerMigrationTargetWait, error) {
+func (r *Reconciler) cosmosignerMigrationTargetWait(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, rolloutToken string) (cosmosignerMigrationTargetWait, error) {
 	wait := cosmosignerMigrationTargetWait{signer: nodeSet.CosmosignerResourceName(signer)}
 	names, err := desiredCosmosignerTargetNodeNames(nodeSet, signer)
 	if err != nil {
@@ -1544,9 +1545,22 @@ func (r *Reconciler) cosmosignerMigrationTargetWait(ctx context.Context, nodeSet
 			wait.targets = append(wait.targets, name)
 			continue
 		}
+		if node.GetAnnotations()[controllers.AnnotationCosmosignerRollout] != rolloutToken {
+			modifiedNode := node.DeepCopy()
+			if modifiedNode.Annotations == nil {
+				modifiedNode.Annotations = map[string]string{}
+			}
+			modifiedNode.Annotations[controllers.AnnotationCosmosignerRollout] = rolloutToken
+			if err := r.Patch(ctx, modifiedNode, client.MergeFrom(node)); err != nil {
+				return wait, err
+			}
+			wait.targets = append(wait.targets, name)
+			continue
+		}
 
-		// ChainNode status has no observed generation. The live Pod annotation is written only after
-		// the ChainNode controller has reconciled the current desired pod spec and config.
+		// ChainNode status has no observed generation. The live Pod annotations are written only after
+		// the ChainNode controller has reconciled the current desired pod spec/config and successfully
+		// probed the node for this signer rollout.
 		pod := &corev1.Pod{}
 		err = r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: node.GetNamespace(), Name: node.GetName()}, pod)
 		if errors.IsNotFound(err) {
@@ -1558,6 +1572,7 @@ func (r *Reconciler) cosmosignerMigrationTargetWait(ctx context.Context, nodeSet
 		}
 		if !metav1.IsControlledBy(pod, node) || !pod.GetDeletionTimestamp().IsZero() ||
 			pod.GetAnnotations()[controllers.AnnotationChainNodeGeneration] != strconv.FormatInt(node.GetGeneration(), 10) ||
+			pod.GetAnnotations()[controllers.AnnotationCosmosignerRollout] != rolloutToken ||
 			pod.GetLabels()[controllers.LabelCosmosignerTarget] != wait.signer || !cosmosignerMigrationTargetPodReady(pod) {
 			wait.targets = append(wait.targets, name)
 		}
@@ -1738,7 +1753,12 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 			// First rollouts happen before child targeting; only a persisted migration can wait for
 			// already-retargeted ChainNodes to recover on the replacement signing path.
 			if st.Migration != nil && st.Migration.Phase == appsv1.CosmosignerMigrationRollingOut {
-				wait, err := r.cosmosignerMigrationTargetWait(ctx, nodeSet, s)
+				if st.Migration.RolloutObservedAt == nil {
+					now := metav1.Now()
+					st.Migration.RolloutObservedAt = &now
+					return true, nil
+				}
+				wait, err := r.cosmosignerMigrationTargetWait(ctx, nodeSet, s, st.Migration.RolloutObservedAt.UTC().Format(time.RFC3339Nano))
 				if err != nil {
 					return false, err
 				}

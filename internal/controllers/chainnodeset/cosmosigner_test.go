@@ -179,6 +179,7 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 		unrelatedPhase    appsv1.ChainNodePhase
 		mutateTarget      func(*appsv1.ChainNode)
 		mutateTargetPod   func(*corev1.Pod)
+		rolloutObserved   bool
 		recoverTargetPods bool
 		wantPending       []string
 		wantMigration     bool
@@ -192,9 +193,10 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 			wantPendingEvent: true,
 		},
 		{
-			name:          "all targets ready",
-			targetPhases:  []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
-			wantMigration: false,
+			name:            "all targets ready after rollout observation",
+			targetPhases:    []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
+			rolloutObserved: true,
+			wantMigration:   false,
 		},
 		{
 			name:         "ready target on wrong signer path",
@@ -239,10 +241,11 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 			wantPendingEvent:  true,
 		},
 		{
-			name:           "unrelated non-target failure",
-			targetPhases:   []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
-			unrelatedPhase: appsv1.PhaseChainNodeError,
-			wantMigration:  false,
+			name:            "unrelated non-target failure",
+			targetPhases:    []appsv1.ChainNodePhase{appsv1.PhaseChainNodeRunning, appsv1.PhaseChainNodeSyncing},
+			unrelatedPhase:  appsv1.PhaseChainNodeError,
+			rolloutObserved: true,
+			wantMigration:   false,
 		},
 	}
 
@@ -285,6 +288,7 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 			}
 			desiredDigest, err := params.LifecycleDigest(signer.Digest())
 			require.NoError(t, err)
+			rolloutObservedAt := metav1.NewTime(time.Date(2026, time.August, 2, 16, 0, 0, 0, time.UTC))
 			nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
 				Name:             signer.Name,
 				AppliedDigest:    "old-digest",
@@ -292,9 +296,10 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 				Replicas:         ptr.To(int32(1)),
 				StateStorageSize: params.StateStorageSize,
 				Migration: &appsv1.CosmosignerMigrationStatus{
-					DesiredDigest:    desiredDigest,
-					DesiredPublicKey: params.ExpectedPublicKey,
-					Phase:            appsv1.CosmosignerMigrationRollingOut,
+					DesiredDigest:     desiredDigest,
+					DesiredPublicKey:  params.ExpectedPublicKey,
+					Phase:             appsv1.CosmosignerMigrationRollingOut,
+					RolloutObservedAt: &rolloutObservedAt,
 				},
 			}}
 
@@ -319,9 +324,15 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 			objects := []client.Object{nodeSet, sts, pvc}
 			for i, phase := range tt.targetPhases {
 				name := fmt.Sprintf("%s-targets-%d", nodeSet.Name, i)
+				rolloutToken := rolloutObservedAt.UTC().Format(time.RFC3339Nano)
+				targetAnnotations := map[string]string{}
+				if tt.rolloutObserved {
+					targetAnnotations[controllers.AnnotationCosmosignerRollout] = rolloutToken
+				}
 				target := &appsv1.ChainNode{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: name, Namespace: nodeSet.Namespace, UID: types.UID(name + "-uid"), Generation: 2,
+						Annotations: targetAnnotations,
 						Labels: map[string]string{
 							controllers.LabelChainNodeSet:      nodeSet.Name,
 							controllers.LabelChainNodeSetGroup: "targets",
@@ -353,6 +364,9 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 							Type: corev1.PodReady, Status: corev1.ConditionTrue,
 						}},
 					},
+				}
+				if tt.rolloutObserved {
+					targetPod.Annotations[controllers.AnnotationCosmosignerRollout] = rolloutToken
 				}
 				if tt.mutateTargetPod != nil {
 					tt.mutateTargetPod(targetPod)
@@ -407,6 +421,14 @@ func TestReconcileSignerMigrationWaitsForTargetHealth(t *testing.T) {
 					freshPod.ResourceVersion = ""
 					freshPod.UID = types.UID(freshPod.Name + "-pod-current")
 					freshPod.Annotations[controllers.AnnotationChainNodeGeneration] = "2"
+					freshPod.Annotations[controllers.AnnotationCosmosignerRollout] = rolloutObservedAt.UTC().Format(time.RFC3339Nano)
+					target := &appsv1.ChainNode{}
+					require.NoError(t, r.Get(context.Background(), key, target))
+					if target.Annotations == nil {
+						target.Annotations = map[string]string{}
+					}
+					target.Annotations[controllers.AnnotationCosmosignerRollout] = rolloutObservedAt.UTC().Format(time.RFC3339Nano)
+					require.NoError(t, r.Update(context.Background(), target))
 					require.NoError(t, r.Delete(context.Background(), oldPod))
 					require.NoError(t, r.Create(context.Background(), freshPod))
 				}
