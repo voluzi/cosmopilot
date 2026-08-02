@@ -1227,6 +1227,7 @@ CosmosignerMigrationStatus records enough progress to resume a migration after a
 | desiredPublicKey | DesiredPublicKey is the canonical base64 consensus public key resolved during preflight. | string | true |
 | phase | Phase is the current break-before-make migration stage. | CosmosignerMigrationPhase | true |
 | resetState | ResetState is true when the desired public key differs from the applied key, requiring the old raft-state PVCs to be deleted before recreation. | bool | false |
+| rolloutObservedAt | RolloutObservedAt records when the replacement StatefulSet was first observed fully rolled out. Target health evidence must be newer than this timestamp before the migration can complete. | *metav1.Time | false |
 
 [Back to Custom Resources](#custom-resources)
 

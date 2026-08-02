@@ -492,6 +492,41 @@ func TestEnsureRollingOutCosmosignerTargetsRecreatesMissingTarget(t *testing.T) 
 	assert.Equal(t, signer.Name, target.Labels[controllers.LabelCosmosignerTarget])
 }
 
+func TestEnsureRollingOutCosmosignerTargetsKeepsOtherNewSignerBlocked(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{
+				{Name: "rolling", Instances: ptr.To(1), Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("rolling-key")}}}},
+				{Name: "new", Instances: ptr.To(1), Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("new-key")}}}},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+	}
+	signers := nodeSet.ResolveCosmosigners()
+	require.Len(t, signers, 2)
+	nodeSet.Status.Cosmosigners = []appsv1.CosmosignerStatus{{
+		Name:          signers[0].Name,
+		AppliedDigest: "old-digest",
+		Migration: &appsv1.CosmosignerMigrationStatus{
+			Phase: appsv1.CosmosignerMigrationRollingOut,
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	require.NoError(t, r.ensureRollingOutCosmosignerTargets(context.Background(), nodeSet, nil))
+
+	rolling := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: "test-nodeset-rolling-0"}, rolling))
+	assert.True(t, rolling.Spec.RemoteSignerTarget)
+	assert.Equal(t, nodeSet.CosmosignerResourceName(signers[0]), rolling.Labels[controllers.LabelCosmosignerTarget])
+
+	newTarget := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: "test-nodeset-new-0"}, newTarget))
+	assert.False(t, newTarget.Spec.RemoteSignerTarget)
+	assert.Empty(t, newTarget.Labels[controllers.LabelCosmosignerTarget])
+}
+
 func TestReconcileCosmosignerMigrationsCoversRuntimeAndKeyDrift(t *testing.T) {
 	for _, tc := range []struct {
 		name          string

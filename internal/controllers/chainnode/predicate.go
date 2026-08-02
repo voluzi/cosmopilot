@@ -9,6 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
 type GenerationChangedPredicate struct {
@@ -63,7 +64,9 @@ func (p GenerationChangedPredicate) Update(e event.UpdateEvent) bool {
 
 	switch o := e.ObjectNew.(type) {
 	case *appsv1.ChainNode:
+		oldNode := e.ObjectOld.(*appsv1.ChainNode)
 		return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
+			oldNode.GetAnnotations()[controllers.AnnotationCosmosignerRollout] != o.GetAnnotations()[controllers.AnnotationCosmosignerRollout] ||
 			(e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero())
 
 	case *corev1.Pod:

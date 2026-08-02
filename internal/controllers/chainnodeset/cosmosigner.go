@@ -827,29 +827,41 @@ func hasRetargetingCosmosignerMigration(nodeSet *appsv1.ChainNodeSet) bool {
 	return false
 }
 
-func hasRollingOutCosmosignerMigration(nodeSet *appsv1.ChainNodeSet) bool {
-	for i := range nodeSet.Status.Cosmosigners {
-		migration := nodeSet.Status.Cosmosigners[i].Migration
-		if migration != nil && migration.Phase == appsv1.CosmosignerMigrationRollingOut {
-			return true
+func rollingOutCosmosignerBlockedTargets(nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) (blockedSignerTargets, bool) {
+	result := blockedSignerTargets{}
+	for name := range blocked {
+		result[name] = struct{}{}
+	}
+	hasRollingOut := false
+	for _, signer := range nodeSet.ResolveCosmosigners() {
+		status := nodeSet.GetCosmosignerStatus(signer.Name)
+		if status != nil && status.Migration != nil && status.Migration.Phase == appsv1.CosmosignerMigrationRollingOut {
+			hasRollingOut = true
+			continue
+		}
+		// This pre-gate pass exists only to repair targets whose signer is already live. Keep newly
+		// added signers behind the normal rollout gate; existing signers retain their current targets.
+		if status == nil || status.AppliedDigest == "" {
+			result[signer.Name] = struct{}{}
 		}
 	}
-	return false
+	return result, hasRollingOut
 }
 
 // ensureRollingOutCosmosignerTargets repairs desired children before the migration health gate.
 // A target deleted during RollingOut must be recreated so it can become healthy and let the
-// migration finish; the normal child reconciliation is otherwise reached only after that gate.
+// migration finish; signers that are not yet live remain blocked from this early reconciliation.
 func (r *Reconciler) ensureRollingOutCosmosignerTargets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, blocked blockedSignerTargets) error {
-	if !hasRollingOutCosmosignerMigration(nodeSet) {
+	rollingBlocked, hasRollingOut := rollingOutCosmosignerBlockedTargets(nodeSet, blocked)
+	if !hasRollingOut {
 		return nil
 	}
 	if nodeSet.Status.ChainID != "" {
-		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, blocked); err != nil {
+		if err := r.ensureValidatorWithBlockedSignerTargets(ctx, nodeSet, rollingBlocked); err != nil {
 			return err
 		}
 	}
-	return r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, blocked)
+	return r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, rollingBlocked)
 }
 
 // retargetingWait describes why a break-before-make retargeting has not converged yet. The whole
