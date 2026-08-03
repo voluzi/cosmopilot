@@ -40,6 +40,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmosignerStatus](#cosmosignerstatus)
 * [CosmosignerVaultBackend](#cosmosignervaultbackend)
 * [CreateValidatorConfig](#createvalidatorconfig)
+* [DiscoveryResourceRequirements](#discoveryresourcerequirements)
 * [ExportTarballConfig](#exporttarballconfig)
 * [ExposeConfig](#exposeconfig)
 * [ExposeGatewayConfig](#exposegatewayconfig)
@@ -630,6 +631,7 @@ Config allows setting specific configurations for a node, including overriding c
 | startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
 | ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
 | nodeUtilsResources | Compute Resources for node-utils container. | *corev1.ResourceRequirements | false |
+| cosmosignerDiscoveryResources | Compute resources for the remote-signer discovery startup gate. When omitted, lightweight defaults are used independently from nodeUtilsResources because both init containers overlap. Resource claims are not supported because the gate does not add Pod-level resource claims. | *[DiscoveryResourceRequirements](#discoveryresourcerequirements) | false |
 | nodeUtilsEnv | Additional environment variables for the node-utils container. | []corev1.EnvVar | false |
 | persistAddressBook | Whether to persist address book file in data directory. Defaults to `true`. | *bool | false |
 | terminationGracePeriodSeconds | Optional duration in seconds the pod needs to terminate gracefully. | *int64 | false |
@@ -740,6 +742,17 @@ CreateValidatorConfig holds configuration for cosmopilot to submit a create-vali
 | minSelfDelegation | Minimum self delegation required on the validator. Defaults to `1`. | *string | false |
 | stakeAmount | Amount to be staked by this validator. | string | true |
 | gasPrices | Gas prices in decimal format to determine the transaction fee. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### DiscoveryResourceRequirements
+
+DiscoveryResourceRequirements describes compute resources for the remote-signer discovery gate. It intentionally excludes resource claims, which require corresponding PodSpec.ResourceClaims.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| limits | Limits describes the maximum amount of compute resources allowed. | corev1.ResourceList | false |
+| requests | Requests describes the minimum amount of compute resources required. | corev1.ResourceList | false |
 
 [Back to Custom Resources](#custom-resources)
 

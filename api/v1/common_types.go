@@ -160,6 +160,25 @@ type SdkOptions struct {
 	GenesisSubcommand *bool `json:"genesisSubcommand,omitempty"`
 }
 
+// DiscoveryResourceRequirements describes compute resources for the remote-signer discovery gate.
+// It intentionally excludes resource claims, which require corresponding PodSpec.ResourceClaims.
+type DiscoveryResourceRequirements struct {
+	// Limits describes the maximum amount of compute resources allowed.
+	// +optional
+	Limits corev1.ResourceList `json:"limits,omitempty" protobuf:"bytes,1,rep,name=limits,casttype=ResourceList,castkey=ResourceName"`
+
+	// Requests describes the minimum amount of compute resources required.
+	// +optional
+	Requests corev1.ResourceList `json:"requests,omitempty" protobuf:"bytes,2,rep,name=requests,casttype=ResourceList,castkey=ResourceName"`
+}
+
+func (r *DiscoveryResourceRequirements) ResourceRequirements() corev1.ResourceRequirements {
+	if r == nil {
+		return corev1.ResourceRequirements{}
+	}
+	return corev1.ResourceRequirements{Limits: r.Limits, Requests: r.Requests}
+}
+
 // Config allows setting specific configurations for a node, including overriding configs in app.toml and config.toml.
 type Config struct {
 	// Allows overriding configs on `.toml` configuration files.
@@ -239,8 +258,9 @@ type Config struct {
 
 	// Compute resources for the remote-signer discovery startup gate. When omitted, lightweight
 	// defaults are used independently from nodeUtilsResources because both init containers overlap.
+	// Resource claims are not supported because the gate does not add Pod-level resource claims.
 	// +optional
-	CosmosignerDiscoveryResources *corev1.ResourceRequirements `json:"cosmosignerDiscoveryResources,omitempty"`
+	CosmosignerDiscoveryResources *DiscoveryResourceRequirements `json:"cosmosignerDiscoveryResources,omitempty"`
 
 	// Additional environment variables for the node-utils container.
 	// +optional

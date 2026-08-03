@@ -1556,18 +1556,21 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 			assert.Equal(t, resource.MustParse("100m"), gate.Resources.Limits[corev1.ResourceCPU])
 			assert.Equal(t, resource.MustParse("32Mi"), gate.Resources.Limits[corev1.ResourceMemory])
 
-			custom := corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			custom := appsv1.DiscoveryResourceRequirements{Requests: corev1.ResourceList{
 				corev1.ResourceCPU: resource.MustParse("25m"), corev1.ResourceMemory: resource.MustParse("64Mi"),
 			}}
 			tc.chainNode.Spec.Config = &appsv1.Config{CosmosignerDiscoveryResources: &custom}
 			configuredPod, err := r.getPodSpec(context.Background(), tc.chainNode, "config-hash")
 			require.NoError(t, err)
+			var configuredGate *corev1.Container
 			for i := range configuredPod.Spec.InitContainers {
 				if configuredPod.Spec.InitContainers[i].Name == CosmosignerDiscoveryWaitContainerName {
-					assert.Equal(t, custom, configuredPod.Spec.InitContainers[i].Resources)
+					configuredGate = &configuredPod.Spec.InitContainers[i]
 					break
 				}
 			}
+			require.NotNil(t, configuredGate, "custom resources require the discovery gate container")
+			assert.Equal(t, custom.ResourceRequirements(), configuredGate.Resources)
 
 			require.Len(t, gate.Env, 1)
 			assert.Equal(t, "POD_IP", gate.Env[0].Name)

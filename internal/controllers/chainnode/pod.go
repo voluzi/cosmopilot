@@ -536,7 +536,7 @@ func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.Ch
 
 func cosmosignerDiscoveryResources(config *appsv1.Config) corev1.ResourceRequirements {
 	if config != nil && config.CosmosignerDiscoveryResources != nil {
-		return *config.CosmosignerDiscoveryResources.DeepCopy()
+		return config.CosmosignerDiscoveryResources.ResourceRequirements()
 	}
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
