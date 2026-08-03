@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -264,6 +265,143 @@ func TestTCPProxy_StartAcceptsConnectionsWhileUpstreamUnavailable(t *testing.T) 
 	}
 	if string(response) != string(payload) {
 		t.Fatalf("response = %q, want %q", response, payload)
+	}
+}
+
+func TestTCPProxy_StopPreventsRestart(t *testing.T) {
+	reservedProxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddr := reservedProxy.Addr().String()
+	_ = reservedProxy.Close()
+
+	proxy, err := NewTCPProxy(proxyAddr, "127.0.0.1:1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startResult := make(chan error, 1)
+	go func() { startResult <- proxy.Start() }()
+	waitForTCPProxy(t, proxyAddr)
+
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-startResult:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("Start() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start() did not return after Stop()")
+	}
+	if err := proxy.Start(); !errors.Is(err, ErrStopped) {
+		t.Fatalf("second Start() error = %v, want ErrStopped", err)
+	}
+}
+
+func TestTCPProxy_OldHandlerDoesNotCloseRestartedListener(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		for {
+			conn, acceptErr := upstream.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(conn)
+		}
+	}()
+
+	reservedProxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddr := reservedProxy.Addr().String()
+	_ = reservedProxy.Close()
+	proxy, err := NewTCPProxy(proxyAddr, upstream.Addr().String(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstRun := make(chan error, 1)
+	go func() { firstRun <- proxy.Start() }()
+	oldConn := waitForTCPProxy(t, proxyAddr)
+	finishingConn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProxyEcho(t, finishingConn, "finish first generation")
+	_ = finishingConn.Close()
+	select {
+	case err := <-firstRun:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first proxy generation did not finish")
+	}
+
+	secondRun := make(chan error, 1)
+	go func() { secondRun <- proxy.Start() }()
+	newConn := waitForTCPProxy(t, proxyAddr)
+	defer newConn.Close()
+
+	_ = oldConn.Close()
+	time.Sleep(100 * time.Millisecond)
+	probe, err := net.DialTimeout("tcp", proxyAddr, time.Second)
+	if err != nil {
+		t.Fatalf("old handler closed restarted listener: %v", err)
+	}
+	defer probe.Close()
+
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-secondRun:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("second Start() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second proxy generation did not stop")
+	}
+}
+
+func waitForTCPProxy(t *testing.T, address string) net.Conn {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, err := net.Dial("tcp", address)
+		if err == nil {
+			return conn
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("proxy did not start: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertProxyEcho(t *testing.T, conn net.Conn, value string) {
+	t.Helper()
+	payload := []byte(value)
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(conn, response); err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != value {
+		t.Fatalf("response = %q, want %q", response, value)
 	}
 }
 

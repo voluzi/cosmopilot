@@ -111,8 +111,11 @@ func (s *NodeUtils) Start() error {
 			for {
 				s.tmkmsActive.Store(true)
 				err := s.tmkmsProxy.Start()
-				log.Errorf("tmkms connection finished with error: %v", err)
 				s.tmkmsActive.Store(false)
+				if errors.Is(err, proxy.ErrStopped) {
+					return
+				}
+				log.Errorf("tmkms connection finished with error: %v", err)
 
 				// If an upgrade is required lets not restart proxy
 				if s.requiresUpgrade.Load() {
