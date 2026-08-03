@@ -41,6 +41,11 @@ const (
 
 func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode, nodePodReady bool) error {
 	logger := log.FromContext(ctx)
+	if !chainNode.SnapshotsEnabled() || !chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
+		if err := r.reconcilePendingTarballDeletions(ctx, chainNode); err != nil {
+			return err
+		}
+	}
 
 	if !chainNode.SnapshotsEnabled() {
 		// Snapshot configuration can be removed while a snapshot annotation is
@@ -463,6 +468,47 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		return r.startNewSnapshot(ctx, chainNode)
 	}
 
+	return nil
+}
+
+func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if r.snapshotClientSet == nil && r.ClientSet == nil {
+		return nil
+	}
+	clientSet := kubernetes.Interface(r.ClientSet)
+	if r.snapshotClientSet != nil {
+		clientSet = r.snapshotClientSet
+	}
+	jobs, err := datasnapshot.ListSnapshotDeletionJobs(ctx, clientSet, chainNode)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if job.Purpose != datasnapshot.SnapshotJobDelete {
+			continue
+		}
+		status, reconcileErr := datasnapshot.ReconcileSnapshotDeletionJob(ctx, clientSet, chainNode, job)
+		if reconcileErr != nil {
+			return reconcileErr
+		}
+		switch status {
+		case datasnapshot.SnapshotFailed:
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeWarning,
+				appsv1.ReasonTarballDeleteError,
+				"Failed deleting tarball %s; delete Job retained for inspection", job.Name,
+			)
+		case datasnapshot.SnapshotSucceeded:
+			if err = datasnapshot.CleanupSnapshotDeletionResources(ctx, clientSet, chainNode, job); err != nil {
+				return err
+			}
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeNormal,
+				appsv1.ReasonTarballDeleted,
+				"Deleted tarball %s", job.Name,
+			)
+		}
+	}
 	return nil
 }
 

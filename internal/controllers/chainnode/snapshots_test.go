@@ -1897,6 +1897,86 @@ func newOrphanUploadTestReconciler(
 	return reconciler, chainNode, clientSet, uploadJob, uploadPVC
 }
 
+func TestEnsureVolumeSnapshotsResumesPendingDeletionWhenExportsAreDisabled(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, test := range []struct {
+		name    string
+		disable func(*appsv1.ChainNode)
+	}{
+		{
+			name: "tarball export disabled",
+			disable: func(chainNode *appsv1.ChainNode) {
+				chainNode.Spec.Persistence.Snapshots.ExportTarball = nil
+			},
+		},
+		{
+			name: "snapshots disabled",
+			disable: func(chainNode *appsv1.ChainNode) {
+				chainNode.Spec.Persistence.Snapshots = nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+
+			chainNode := orphanSnapshotTestChainNode(now, &appsv1.ExportTarballConfig{
+				S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"},
+			})
+			test.disable(chainNode)
+			suspended := true
+			deleteJob := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "orphan-tarball-delete",
+					Namespace: chainNode.Namespace,
+					UID:       "orphan-delete-uid",
+					Labels: map[string]string{
+						"exporter":           "s3-exporter",
+						"owner":              chainNode.Name,
+						"type":               "delete",
+						"cleanup-exporter":   "s3-exporter",
+						"cleanup-owner":      chainNode.Name,
+						"cleanup-type":       "upload",
+						"cleanup-upload-uid": "orphan-upload-uid",
+						"cleanup-pvc-uid":    "orphan-pvc-uid",
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: chainNode.APIVersion,
+						Kind:       chainNode.Kind,
+						Name:       chainNode.Name,
+						UID:        chainNode.UID,
+						Controller: ptr.To(true),
+					}},
+				},
+				Spec: batchv1.JobSpec{Suspend: &suspended},
+			}
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(chainNode).
+				Build()
+			clientSet := fake.NewSimpleClientset(deleteJob)
+			reconciler := &Reconciler{
+				Client:            controllerClient,
+				snapshotClientSet: clientSet,
+				Scheme:            scheme,
+				opts:              &controllers.ControllerRunOptions{},
+				recorder:          record.NewFakeRecorder(10),
+			}
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			stored, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, stored.Spec.Suspend)
+			assert.False(t, *stored.Spec.Suspend)
+		})
+	}
+}
+
 func orphanSnapshotTestChainNode(now time.Time, export *appsv1.ExportTarballConfig) *appsv1.ChainNode {
 	return &appsv1.ChainNode{
 		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},

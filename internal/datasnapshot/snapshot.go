@@ -422,6 +422,45 @@ func listSnapshotJobs(
 	return snapshotJobsFromJobs(jobs, exporter), nil
 }
 
+// ListSnapshotDeletionJobs returns owner-labelled deletion Jobs regardless of
+// the currently configured exporter. Deletion Jobs are self-contained and may
+// need to finish after tarball exports or snapshots have been disabled.
+func ListSnapshotDeletionJobs(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+) ([]SnapshotJob, error) {
+	return listSnapshotJobs(ctx, client, owner, "")
+}
+
+// ReconcileSnapshotDeletionJob resumes and reports a previously created
+// deletion Job using the exporter identity persisted on the Job itself.
+func ReconcileSnapshotDeletionJob(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	job SnapshotJob,
+) (SnapshotStatus, error) {
+	if job.Exporter == "" {
+		return "", fmt.Errorf("snapshot deletion job %q is missing its exporter identity", job.Name)
+	}
+	return reconcileSnapshotDeletionJob(ctx, client, owner, job, job.Exporter)
+}
+
+// CleanupSnapshotDeletionResources removes a completed deletion Job and any
+// paired upload resources using the identities persisted on the deletion Job.
+func CleanupSnapshotDeletionResources(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	job SnapshotJob,
+) error {
+	if job.Exporter == "" {
+		return fmt.Errorf("snapshot deletion job %q is missing its exporter identity", job.Name)
+	}
+	return cleanupSnapshotDeletionResources(ctx, client, owner, job, job.Exporter)
+}
+
 func snapshotJobExporter(job SnapshotJob, currentExporter string) string {
 	if job.Exporter != "" {
 		return job.Exporter
