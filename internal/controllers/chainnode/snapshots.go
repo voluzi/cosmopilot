@@ -499,6 +499,9 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 				"Failed deleting tarball %s; delete Job retained for inspection", job.Name,
 			)
 		case datasnapshot.SnapshotSucceeded:
+			if err = r.persistPendingTarballDeletionSuccess(ctx, chainNode, job.Name); err != nil {
+				return err
+			}
 			if err = datasnapshot.CleanupSnapshotDeletionResources(ctx, clientSet, chainNode, job); err != nil {
 				return err
 			}
@@ -508,6 +511,36 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 				"Deleted tarball %s", job.Name,
 			)
 		}
+	}
+	return nil
+}
+
+func (r *Reconciler) persistPendingTarballDeletionSuccess(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	tarballName string,
+) error {
+	snapshots, err := r.listNodeSnapshots(ctx, chainNode)
+	if err != nil {
+		return err
+	}
+	for i := range snapshots {
+		snapshot := &snapshots[i]
+		baseName := fmt.Sprintf("%s-%s", chainNode.Status.ChainID, snapshot.CreationTimestamp.UTC().Format(timeLayout))
+		if tarballName != baseName && !strings.HasPrefix(tarballName, baseName+"-") {
+			continue
+		}
+		if snapshot.Annotations == nil {
+			snapshot.Annotations = make(map[string]string)
+		}
+		if snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] == strconv.FormatBool(true) {
+			return nil
+		}
+		snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
+		if err = r.Update(ctx, snapshot); err != nil {
+			return fmt.Errorf("persist pending tarball deletion success: %w", err)
+		}
+		return nil
 	}
 	return nil
 }
