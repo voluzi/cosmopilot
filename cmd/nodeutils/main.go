@@ -28,6 +28,7 @@ var (
 	logLevel         string
 	createFifo       bool
 	enableTmkmsProxy bool
+	signerPeerDNS    string
 	nodeBinaryName   string
 	haltHeight       int64
 )
@@ -69,6 +70,7 @@ func main() {
 		nodeutils.WithTraceStore(traceStore),
 		nodeutils.CreateFifo(createFifo),
 		nodeutils.WithTmkmsProxy(enableTmkmsProxy),
+		nodeutils.WithSignerPeerDNS(signerPeerDNS),
 		nodeutils.WithHaltHeight(haltHeight),
 		nodeutils.WithMockMode(mockMode),
 	)

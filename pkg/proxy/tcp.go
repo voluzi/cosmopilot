@@ -25,13 +25,13 @@ type TCP struct {
 	listener      *net.TCPListener
 	stopped       bool
 	runOnce       bool
-	onAccept      func()
+	onAccept      func(*net.TCPConn) bool
 	retryUpstream bool
 	dialContext   context.Context
 	cancelDials   context.CancelFunc
 }
 
-func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...func()) (*TCP, error) {
+func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...func(*net.TCPConn) bool) (*TCP, error) {
 	laddr, err := net.ResolveTCPAddr("tcp", localAddr)
 	if err != nil {
 		return nil, err
@@ -96,8 +96,10 @@ func (p *TCP) Start() error {
 			return fmt.Errorf("failed to accept connection: %v", err)
 		}
 
-		if p.onAccept != nil {
-			p.onAccept()
+		if p.onAccept != nil && !p.onAccept(lconn) {
+			log.WithField("remote", lconn.RemoteAddr()).Warn("rejected untrusted TCP proxy peer")
+			_ = lconn.Close()
+			continue
 		}
 
 		log.WithFields(log.Fields{

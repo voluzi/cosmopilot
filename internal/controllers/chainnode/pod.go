@@ -466,6 +466,10 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 				Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
 			},
 			{
+				Name:  "SIGNER_PEER_DNS",
+				Value: signerPeerDNS(chainNode),
+			},
+			{
 				Name:  "CREATE_FIFO",
 				Value: controllers.StringValueTrue,
 			},
@@ -498,6 +502,14 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 			PeriodSeconds:    2,
 		},
 	}
+}
+
+func signerPeerDNS(chainNode *appsv1.ChainNode) string {
+	name, ok := cosmosignerTargetLabelValue(chainNode)
+	if !ok {
+		return ""
+	}
+	return cosmosigner.SignerServiceDNS(name, chainNode.GetNamespace())
 }
 
 func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.ChainNode, signerName string) corev1.Container {

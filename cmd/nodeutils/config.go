@@ -54,6 +54,11 @@ func init() {
 		"enable tmkms proxy",
 	)
 
+	flag.StringVar(&signerPeerDNS, "signer-peer-dns",
+		environ.GetString("SIGNER_PEER_DNS", ""),
+		"DNS name whose addresses are trusted to release the remote-signer startup gate",
+	)
+
 	flag.StringVar(&nodeBinaryName, "node-binary-name",
 		environ.GetString("NODE_BINARY_NAME", ""),
 		"node application binary name.",

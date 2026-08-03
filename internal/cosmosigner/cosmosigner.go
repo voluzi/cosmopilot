@@ -98,11 +98,16 @@ type Params struct {
 	TargetSelector map[string]string
 }
 
+// SignerServiceDNS returns the namespaced DNS name of the signer's governing headless Service.
+func SignerServiceDNS(name, namespace string) string {
+	return fmt.Sprintf("%s.%s.svc", name, namespace)
+}
+
 // raftServiceDNS is the namespaced DNS name of the StatefulSet's governing headless service, used to
 // build stable per-replica raft peer addresses. The `.svc` (no cluster domain) form resolves via the
 // pod's DNS search domain, so it works regardless of the cluster's DNS domain (not just cluster.local).
 func (p Params) raftServiceDNS() string {
-	return fmt.Sprintf("%s.%s.svc", p.Name, p.Namespace)
+	return SignerServiceDNS(p.Name, p.Namespace)
 }
 
 // DiscoveryServiceName is the name of the headless service the signer points node_service at.
@@ -352,33 +357,6 @@ func (p Params) NetworkPolicy() *networkingv1.NetworkPolicy {
 				From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: p.selectorLabels()}}},
 				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &protocol, Port: ptr.To(intstr.FromInt32(raftPort))}},
 			}},
-		},
-	}
-}
-
-// TargetNetworkPolicy limits the remote-signer port on target Pods to this signer's Pods. The
-// discovery gate treats an accepted connection as proof that the signer found the target, so other
-// namespace workloads must not be able to produce that signal.
-func (p Params) TargetNetworkPolicy() *networkingv1.NetworkPolicy {
-	tcp := corev1.ProtocolTCP
-	udp := corev1.ProtocolUDP
-	allPeers := []networkingv1.NetworkPolicyPeer{{}}
-	return &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: p.Name + "-targets", Namespace: p.Namespace, Labels: p.Labels},
-		Spec: networkingv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{MatchLabels: p.TargetSelector},
-			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
-			Ingress: []networkingv1.NetworkPolicyIngressRule{
-				{
-					From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: p.selectorLabels()}}},
-					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(chainutils.PrivValPort))}},
-				},
-				// Selecting a Pod makes ingress default-deny. Preserve its existing traffic surface while
-				// excluding only the TCP remote-signer port from arbitrary peers.
-				{From: allPeers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(chainutils.PrivValPort - 1))}}},
-				{From: allPeers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(chainutils.PrivValPort + 1)), EndPort: ptr.To(int32(65535))}}},
-				{From: allPeers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(65535))}}},
-			},
 		},
 	}
 }

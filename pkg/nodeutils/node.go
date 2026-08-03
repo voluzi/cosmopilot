@@ -3,6 +3,7 @@ package nodeutils
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -85,15 +86,47 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	nodeUtils.client = client
 
 	if options.TmkmsProxy {
-		nodeUtils.tmkmsProxy, err = proxy.NewTCPProxy(":26659", "127.0.0.1:5555", true, func() {
+		acceptSigner := func(*net.TCPConn) bool {
 			nodeUtils.signerDiscovered.Store(true)
-		})
+			return true
+		}
+		if options.SignerPeerDNS != "" {
+			acceptSigner = nodeUtils.acceptTrustedSignerPeer
+		}
+		nodeUtils.tmkmsProxy, err = proxy.NewTCPProxy(":26659", "127.0.0.1:5555", true, acceptSigner)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return nodeUtils, nil
+}
+
+func trustedSignerPeer(peer net.IP, addresses []net.IPAddr) bool {
+	for _, address := range addresses {
+		if address.IP.Equal(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *NodeUtils) acceptTrustedSignerPeer(conn *net.TCPConn) bool {
+	peer, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok || peer.IP == nil {
+		return false
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(context.Background(), s.cfg.SignerPeerDNS)
+	if err != nil {
+		log.WithError(err).WithField("hostname", s.cfg.SignerPeerDNS).Warn("failed to resolve trusted signer peers")
+		return false
+	}
+	if trustedSignerPeer(peer.IP, addresses) {
+		s.signerDiscovered.Store(true)
+		return true
+	}
+	log.WithFields(log.Fields{"peer": peer.IP.String(), "hostname": s.cfg.SignerPeerDNS}).Warn("remote-signer connection came from an untrusted peer")
+	return false
 }
 
 func (s *NodeUtils) Start() error {

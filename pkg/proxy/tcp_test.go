@@ -82,7 +82,7 @@ func TestNewTCPProxyNilCallbackDoesNotRetryUpstream(t *testing.T) {
 
 func TestNewTCPProxyStoresAcceptCallback(t *testing.T) {
 	called := false
-	proxy, err := NewTCPProxy(":0", "127.0.0.1:8080", false, func() { called = true })
+	proxy, err := NewTCPProxy(":0", "127.0.0.1:8080", false, func(*net.TCPConn) bool { called = true; return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestNewTCPProxyStoresAcceptCallback(t *testing.T) {
 		t.Fatal("NewTCPProxy() did not store the accept callback")
 	}
 
-	proxy.onAccept()
+	proxy.onAccept(nil)
 	if !called {
 		t.Fatal("stored accept callback was not invoked")
 	}
@@ -107,7 +107,7 @@ func TestTCPProxy_RetainsAcceptedConnectionUntilUpstreamStarts(t *testing.T) {
 	}
 
 	accepted := make(chan struct{})
-	proxy, err := NewTCPProxy(":0", upstreamAddr, false, func() { close(accepted) })
+	proxy, err := NewTCPProxy(":0", upstreamAddr, false, func(*net.TCPConn) bool { close(accepted); return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestTCPProxy_RetainsAcceptedConnectionUntilUpstreamStarts(t *testing.T) {
 			handleResult <- acceptErr
 			return
 		}
-		proxy.onAccept()
+		proxy.onAccept(nil)
 		handleResult <- proxy.handle(conn)
 	}()
 
@@ -196,7 +196,7 @@ func TestTCPProxy_StartAcceptsConnectionsWhileUpstreamUnavailable(t *testing.T) 
 	}
 
 	accepted := make(chan struct{}, 2)
-	proxy, err := NewTCPProxy(proxyAddr, upstreamAddr, false, func() { accepted <- struct{}{} })
+	proxy, err := NewTCPProxy(proxyAddr, upstreamAddr, false, func(*net.TCPConn) bool { accepted <- struct{}{}; return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,8 +660,63 @@ func TestTCPProxy_ConcurrentConnections(t *testing.T) {
 	}
 }
 
+func TestTCPProxyRejectsUntrustedPeerBeforeDiscovery(t *testing.T) {
+	callbackCalled := make(chan struct{}, 1)
+	proxy, err := NewTCPProxy("127.0.0.1:0", "127.0.0.1:1", false, func(*net.TCPConn) bool {
+		callbackCalled <- struct{}{}
+		return false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan error, 1)
+	go func() { started <- proxy.Start() }()
+
+	var address string
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		proxy.mu.Lock()
+		if proxy.listener != nil {
+			address = proxy.listener.Addr().String()
+		}
+		proxy.mu.Unlock()
+		if address != "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if address == "" {
+		t.Fatal("proxy did not start")
+	}
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	select {
+	case <-callbackCalled:
+	case <-time.After(time.Second):
+		t.Fatal("peer callback was not invoked")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("rejected peer connection remained open")
+	}
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-started:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("Start() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not stop")
+	}
+}
+
 func TestTCPProxy_StopCancelsDialContext(t *testing.T) {
-	proxy, err := NewTCPProxy(":0", "192.0.2.1:26659", false, func() {})
+	proxy, err := NewTCPProxy(":0", "192.0.2.1:26659", false, func(*net.TCPConn) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
