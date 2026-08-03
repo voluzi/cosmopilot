@@ -57,17 +57,20 @@ const (
 	labelOwner    = "owner"
 	labelType     = "type"
 
-	labelCleanupExporter  = "cleanup-exporter"
-	labelCleanupOwner     = "cleanup-owner"
-	labelCleanupType      = "cleanup-type"
-	labelCleanupUploadUID = "cleanup-upload-uid"
-	labelCleanupPVCUID    = "cleanup-pvc-uid"
+	labelCleanupExporter    = "cleanup-exporter"
+	labelCleanupOwner       = "cleanup-owner"
+	labelCleanupType        = "cleanup-type"
+	labelCleanupUploadUID   = "cleanup-upload-uid"
+	labelCleanupPVCUID      = "cleanup-pvc-uid"
+	labelCleanupAfterUpload = "cleanup-after-upload"
+	labelCleanupDeletionUID = "cleanup-deletion-uid"
 
 	SnapshotJobUpload SnapshotJobPurpose = "upload"
 	SnapshotJobDelete SnapshotJobPurpose = "delete"
 
-	typeUpload = string(SnapshotJobUpload)
-	typeDelete = string(SnapshotJobDelete)
+	typeUpload           = string(SnapshotJobUpload)
+	typeDelete           = string(SnapshotJobDelete)
+	typePostUploadDelete = "post-upload-delete"
 )
 
 // ErrStaleJobReplaced reports that an existing snapshot Job is being deleted because it cannot
@@ -668,15 +671,70 @@ func setSnapshotDeletionUploadIdentity(
 	exporter string,
 	upload SnapshotJobIdentity,
 ) {
+	setSnapshotDeletionUploadIdentityLabels(job, owner, exporter, upload)
+	suspend := true
+	job.Spec.Suspend = &suspend
+}
+
+func setSnapshotDeletionUploadIdentityLabels(
+	job *batchv1.Job,
+	owner metav1.Object,
+	exporter string,
+	upload SnapshotJobIdentity,
+) {
+	if job.Labels == nil {
+		job.Labels = make(map[string]string)
+	}
 	job.Labels[labelCleanupExporter] = exporter
 	job.Labels[labelCleanupOwner] = owner.GetName()
 	job.Labels[labelCleanupType] = typeUpload
 	job.Labels[labelCleanupUploadUID] = string(upload.UID)
 	if upload.PVCUID != "" {
 		job.Labels[labelCleanupPVCUID] = string(upload.PVCUID)
+	} else {
+		delete(job.Labels, labelCleanupPVCUID)
 	}
-	suspend := true
-	job.Spec.Suspend = &suspend
+}
+
+func postUploadDeletionJob(
+	marker *batchv1.Job,
+	owner metav1.Object,
+	exporter string,
+	upload SnapshotJobIdentity,
+) *batchv1.Job {
+	spec := *marker.Spec.DeepCopy()
+	spec.Selector = nil
+	spec.ManualSelector = nil
+	for _, label := range []string{
+		"controller-uid",
+		"job-name",
+		"batch.kubernetes.io/controller-uid",
+		"batch.kubernetes.io/job-name",
+	} {
+		delete(spec.Template.Labels, label)
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      strings.TrimSuffix(marker.Name, "-delete") + "-purge",
+			Namespace: marker.Namespace,
+			Labels: map[string]string{
+				labelExporter:           exporter,
+				labelOwner:              owner.GetName(),
+				labelType:               typePostUploadDelete,
+				labelCleanupDeletionUID: string(marker.UID),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: batchv1.SchemeGroupVersion.String(),
+				Kind:       "Job",
+				Name:       marker.Name,
+				UID:        marker.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: spec,
+	}
+	setSnapshotDeletionUploadIdentity(job, owner, exporter, upload)
+	return job
 }
 
 func snapshotDeletionUploadIdentity(
@@ -779,52 +837,38 @@ func getSnapshotDeletionJob(
 		return nil, nil, err
 	}
 	if upload == nil && expected.Upload != nil {
-		// Legacy deletion Jobs did not persist the paired upload identity. They
-		// cannot safely finish while a co-listed upload may still write the
-		// archive. Upgrade an active legacy Job in place so the suspended cleanup
-		// workflow is durable before upload teardown starts. This also covers an
-		// upload that is already terminating: its pods may still be writing until
-		// foreground deletion completes.
-		if snapshotJobStatus(job) == SnapshotActive {
-			identity := *expected.Upload
-			_, pvc, resourceErr := getSnapshotUploadResources(ctx, client, owner, expected.Name, identity, exporter)
-			if resourceErr != nil {
-				return nil, nil, resourceErr
-			}
-			if pvc != nil {
-				identity.PVCUID = pvc.UID
-			}
-			updated := job.DeepCopy()
-			setSnapshotDeletionUploadIdentity(updated, owner, exporter, identity)
-			updated, err = client.BatchV1().Jobs(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
-			if err != nil {
-				return nil, nil, fmt.Errorf("pair legacy snapshot deletion job %s/%s with upload UID %s: %w",
-					job.Namespace, job.Name, expected.Upload.UID, err)
-			}
-			if updated.UID != job.UID {
-				return nil, nil, fmt.Errorf("paired snapshot deletion job %s/%s has UID %s, expected %s",
-					updated.Namespace, updated.Name, updated.UID, job.UID)
-			}
-			job = updated
-			upload = &identity
-		} else if expected.Upload.Terminating {
-			// The legacy deletion already reached a terminal state, so there is no
-			// running deletion to suspend. Keep its durable marker until the
-			// foreground-terminating upload disappears; the orphan-upload path will
-			// then decide whether another external deletion is required.
-		} else {
-			if err = deleteSnapshotJob(ctx, client, job); err != nil {
-				return nil, nil, fmt.Errorf("replace unpaired snapshot deletion job %s/%s: %w", job.Namespace, job.Name, err)
-			}
-			return nil, nil, &StaleJobReplacedError{
-				Purpose:          typeDelete,
-				Namespace:        job.Namespace,
-				Name:             job.Name,
-				UID:              job.UID,
-				ConflictingLabel: labelCleanupUploadUID,
-				DesiredValue:     string(expected.Upload.UID),
-			}
+		identity := *expected.Upload
+		_, pvc, resourceErr := getSnapshotUploadResources(ctx, client, owner, expected.Name, identity, exporter)
+		if resourceErr != nil {
+			return nil, nil, resourceErr
 		}
+		if pvc != nil {
+			identity.PVCUID = pvc.UID
+		}
+		updated := job.DeepCopy()
+		if snapshotJobStatus(job) == SnapshotActive {
+			setSnapshotDeletionUploadIdentity(updated, owner, exporter, identity)
+		} else {
+			// A completed Job cannot run again. Keep it as the durable marker for a
+			// hidden suspended successor that is activated after the upload vanishes.
+			setSnapshotDeletionUploadIdentityLabels(updated, owner, exporter, identity)
+			updated.Labels[labelCleanupAfterUpload] = "true"
+			// Terminal deletion Jobs normally have a TTL. Disable it atomically with
+			// the cleanup identity so the marker cannot disappear and cascade-delete
+			// its post-upload worker before that worker finishes.
+			updated.Spec.TTLSecondsAfterFinished = nil
+		}
+		updated, err = client.BatchV1().Jobs(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("pair legacy snapshot deletion job %s/%s with upload UID %s: %w",
+				job.Namespace, job.Name, expected.Upload.UID, err)
+		}
+		if updated.UID != job.UID {
+			return nil, nil, fmt.Errorf("paired snapshot deletion job %s/%s has UID %s, expected %s",
+				updated.Namespace, updated.Name, updated.UID, job.UID)
+		}
+		job = updated
+		upload = &identity
 	}
 	if expected.Upload != nil && upload != nil {
 		if expected.Upload.UID != upload.UID {
@@ -835,6 +879,23 @@ func getSnapshotDeletionJob(
 			return nil, nil, fmt.Errorf("snapshot deletion job %s/%s records upload PVC UID %s, expected %s",
 				job.Namespace, job.Name, upload.PVCUID, expected.Upload.PVCUID)
 		}
+	}
+	if afterUpload := job.Labels[labelCleanupAfterUpload]; afterUpload != "" {
+		if afterUpload != "true" {
+			return nil, nil, fmt.Errorf("snapshot deletion job %s/%s has %s label %q, expected %q",
+				job.Namespace, job.Name, labelCleanupAfterUpload, afterUpload, "true")
+		}
+		if upload == nil {
+			return nil, nil, fmt.Errorf("snapshot deletion job %s/%s is missing its post-upload cleanup identity",
+				job.Namespace, job.Name)
+		}
+		worker, _, workerErr := ensureSnapshotJob(
+			ctx, client, job, postUploadDeletionJob(job, owner, exporter, *upload), typePostUploadDelete,
+		)
+		if workerErr != nil {
+			return nil, nil, workerErr
+		}
+		return worker, upload, nil
 	}
 	return job, upload, nil
 }
@@ -944,6 +1005,9 @@ func cleanupSnapshotDeletionResources(
 	}
 	if deletionJob == nil {
 		return nil
+	}
+	if deletionJob.Name != fmt.Sprintf("%s-delete", expected.Name) {
+		return cleanupSnapshotDeletionJob(ctx, client, owner, expected, exporter)
 	}
 	if err = deleteSnapshotJob(ctx, client, deletionJob); err != nil {
 		return fmt.Errorf("delete snapshot deletion job %s/%s: %w", deletionJob.Namespace, deletionJob.Name, err)

@@ -533,6 +533,98 @@ func TestReconcileLegacyDeletionWaitsForTerminatingUnpairedUpload(t *testing.T) 
 	assert.Equal(t, uploadJob.UID, storedUpload.UID)
 }
 
+func TestReconcileLegacyTerminalDeletionRunsAfterTerminatingUploadDisappears(t *testing.T) {
+	tests := []struct {
+		name   string
+		status batchv1.JobStatus
+	}{
+		{
+			name: "succeeded",
+			status: batchv1.JobStatus{
+				Succeeded: 1,
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}},
+			},
+		},
+		{
+			name: "failed",
+			status: batchv1.JobStatus{
+				Failed: 1,
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := testJobOwner()
+			deleteJob := desiredDeleteJob(owner, gcsExporter)
+			deleteJob.UID = "delete-uid"
+			deleteJob.Status = tt.status
+			uploadJob, uploadPVC := testOrphanUploadResources(owner, gcsExporter)
+			deletionTimestamp := metav1.Now()
+			uploadJob.DeletionTimestamp = &deletionTimestamp
+			client := fake.NewSimpleClientset(deleteJob, uploadJob, uploadPVC)
+			expected := snapshotJobsFromJobs([]batchv1.Job{*deleteJob, *uploadJob})[0]
+
+			status, err := reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+			require.NoError(t, err)
+			require.Equal(t, SnapshotActive, status)
+
+			marker, err := client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, string(uploadJob.UID), marker.Labels[labelCleanupUploadUID])
+			assert.Equal(t, string(uploadPVC.UID), marker.Labels[labelCleanupPVCUID])
+			assert.Equal(t, "true", marker.Labels[labelCleanupAfterUpload])
+			assert.Nil(t, marker.Spec.TTLSecondsAfterFinished)
+
+			worker, err := client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), "snapshot-purge", metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, worker.Spec.Suspend)
+			assert.True(t, *worker.Spec.Suspend)
+			assert.True(t, metav1.IsControlledBy(worker, marker))
+
+			require.NoError(t, client.Tracker().Delete(
+				batchv1.SchemeGroupVersion.WithResource("jobs"), uploadJob.Namespace, uploadJob.Name,
+			))
+			status, err = reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+			require.NoError(t, err)
+			require.Equal(t, SnapshotActive, status)
+			worker, err = client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), worker.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, worker.Spec.Suspend)
+			assert.False(t, *worker.Spec.Suspend)
+
+			worker.Status = batchv1.JobStatus{
+				Succeeded: 1,
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}},
+			}
+			require.NoError(t, client.Tracker().Update(
+				batchv1.SchemeGroupVersion.WithResource("jobs"), worker, worker.Namespace,
+			))
+			status, err = reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+			require.NoError(t, err)
+			assert.Equal(t, SnapshotSucceeded, status)
+
+			actionCount := len(client.Actions())
+			require.NoError(t, cleanupSnapshotDeletionResources(
+				context.Background(), client, owner, expected, gcsExporter,
+			))
+			deleteAction := requireJobDeleteAction(t, client.Actions()[actionCount:])
+			assert.Equal(t, marker.Name, deleteAction.GetName())
+			options := deleteAction.GetDeleteOptions()
+			require.NotNil(t, options.Preconditions)
+			require.NotNil(t, options.Preconditions.UID)
+			assert.Equal(t, marker.UID, *options.Preconditions.UID)
+		})
+	}
+}
+
 func TestCleanupLegacyDeletionRetainsUnattributedDanglingUploadPVC(t *testing.T) {
 	owner := testJobOwner()
 	deleteJob := desiredDeleteJob(owner, gcsExporter)

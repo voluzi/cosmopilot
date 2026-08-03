@@ -1569,14 +1569,12 @@ func TestEnsureVolumeSnapshotsDoesNotRestartDeletionForTerminatingOrphanUpload(t
 			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
 			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
 
-			createCalls := 0
-			for _, action := range clientSet.Actions() {
-				if action.GetVerb() == "create" && action.GetResource().Resource == "jobs" {
-					createCalls++
-				}
-			}
-			assert.Zero(t, createCalls, "a terminating upload must not restart archive deletion")
-			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			purgeJob, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-purge", metav1.GetOptions{})
+			require.NoError(t, err, "terminal legacy deletion must persist a post-upload cleanup Job")
+			require.NotNil(t, purgeJob.Spec.Suspend)
+			assert.True(t, *purgeJob.Spec.Suspend, "post-upload deletion must remain suspended while the upload terminates")
+			assert.Equal(t, string(uploadJob.UID), purgeJob.Labels["cleanup-upload-uid"])
+			_, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
 			require.NoError(t, err, "the foreground-terminating upload Job must be left alone")
 		})
 	}
