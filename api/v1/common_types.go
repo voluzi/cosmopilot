@@ -237,6 +237,11 @@ type Config struct {
 	// +optional
 	NodeUtilsResources *corev1.ResourceRequirements `json:"nodeUtilsResources,omitempty"`
 
+	// Compute resources for the remote-signer discovery startup gate. When omitted, lightweight
+	// defaults are used independently from nodeUtilsResources because both init containers overlap.
+	// +optional
+	CosmosignerDiscoveryResources *corev1.ResourceRequirements `json:"cosmosignerDiscoveryResources,omitempty"`
+
 	// Additional environment variables for the node-utils container.
 	// +optional
 	NodeUtilsEnv []corev1.EnvVar `json:"nodeUtilsEnv,omitempty"`

@@ -609,6 +609,11 @@ func (in *Config) DeepCopyInto(out *Config) {
 		*out = new(corev1.ResourceRequirements)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.CosmosignerDiscoveryResources != nil {
+		in, out := &in.CosmosignerDiscoveryResources, &out.CosmosignerDiscoveryResources
+		*out = new(corev1.ResourceRequirements)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.NodeUtilsEnv != nil {
 		in, out := &in.NodeUtilsEnv, &out.NodeUtilsEnv
 		*out = make([]corev1.EnvVar, len(*in))

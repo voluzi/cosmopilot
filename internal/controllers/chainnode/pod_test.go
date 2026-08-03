@@ -7,6 +7,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
 func TestPodSpecHash(t *testing.T) {
@@ -306,6 +308,80 @@ func TestIsImagePullFailure(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isImagePullFailure(tt.state); got != tt.want {
 				t.Errorf("isImagePullFailure() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFailedPodRequiresEarlyRecreation(t *testing.T) {
+	chainNode := &appsv1.ChainNode{}
+	failedApp := corev1.ContainerStatus{
+		Name:  "app",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+	}
+	runningNodeUtils := corev1.ContainerStatus{
+		Name:  nodeUtilsContainerName,
+		Ready: true,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}
+	stoppedNodeUtils := corev1.ContainerStatus{
+		Name:  nodeUtilsContainerName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+	}
+
+	upgradeCandidate := &corev1.Pod{Status: corev1.PodStatus{
+		ContainerStatuses:     []corev1.ContainerStatus{failedApp},
+		InitContainerStatuses: []corev1.ContainerStatus{runningNodeUtils},
+	}}
+	if failedPodRequiresEarlyRecreation(chainNode, upgradeCandidate) {
+		t.Fatal("failed app with live node-utils must reach the upgrade probe before recreation")
+	}
+
+	ordinaryFailure := upgradeCandidate.DeepCopy()
+	ordinaryFailure.Status.InitContainerStatuses = []corev1.ContainerStatus{stoppedNodeUtils}
+	if !failedPodRequiresEarlyRecreation(chainNode, ordinaryFailure) {
+		t.Fatal("failed app with stopped node-utils must be recreated before HTTP probes")
+	}
+}
+
+func TestNodeUtilsIsRunning(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "restartable init sidecar is ready and running",
+			pod: &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+				Name:  nodeUtilsContainerName,
+				Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}}},
+			want: true,
+		},
+		{
+			name: "restartable init sidecar has stopped",
+			pod: &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+				Name:  nodeUtilsContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+			}}}},
+			want: false,
+		},
+		{
+			name: "regular container status does not count",
+			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  nodeUtilsContainerName,
+				Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nodeUtilsIsRunning(tt.pod); got != tt.want {
+				t.Errorf("nodeUtilsIsRunning() = %v, want %v", got, tt.want)
 			}
 		})
 	}

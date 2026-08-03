@@ -149,10 +149,10 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
-	// Handle terminal Pod failures before probing node-utils. Kubernetes stops restartable init
-	// sidecars when another container fails, so the node-utils HTTP endpoint is no longer available
-	// and must not prevent the failed Pod from reaching its recreation path.
-	if podInFailedState(chainNode, currentPod) {
+	// Handle terminal Pod failures before probing node-utils only when node-utils is unavailable.
+	// A scheduled upgrade deliberately terminates the application while keeping node-utils alive so
+	// /must_upgrade can select the replacement image; preserve that probe path.
+	if failedPodRequiresEarlyRecreation(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
 		logFailedCosmosignerDiscoveryGate(logger, currentPod)
@@ -271,6 +271,13 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
 		}
 		return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
+	}
+
+	// A terminated application with a live node-utils sidecar gets one chance to report a
+	// scheduled upgrade above. If no upgrade is required, recreate it as an ordinary failure.
+	if podInFailedState(chainNode, currentPod) {
+		logger.Info("pod is in failed state", "pod", pod.GetName())
+		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
 	// Re-create pod if spec changes
@@ -533,15 +540,22 @@ func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.Ch
 				FieldPath: "status.podIP",
 			}},
 		}},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("10m"),
-				corev1.ResourceMemory: resource.MustParse("16Mi"),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
-			},
+		Resources: cosmosignerDiscoveryResources(chainNode.Spec.Config),
+	}
+}
+
+func cosmosignerDiscoveryResources(config *appsv1.Config) corev1.ResourceRequirements {
+	if config != nil && config.CosmosignerDiscoveryResources != nil {
+		return *config.CosmosignerDiscoveryResources.DeepCopy()
+	}
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("10m"),
+			corev1.ResourceMemory: resource.MustParse("16Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("32Mi"),
 		},
 	}
 }
@@ -1308,6 +1322,19 @@ func podInFailedState(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
 
 func isImagePullFailure(state *corev1.ContainerStateWaiting) bool {
 	return state != nil && (state.Reason == ReasonImagePullBackOff || state.Reason == ReasonErrImagePull)
+}
+
+func failedPodRequiresEarlyRecreation(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
+	return podInFailedState(chainNode, pod) && !nodeUtilsIsRunning(pod)
+}
+
+func nodeUtilsIsRunning(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.InitContainerStatuses {
+		if c.Name == nodeUtilsContainerName {
+			return c.Ready && c.State.Running != nil
+		}
+	}
+	return false
 }
 
 func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
