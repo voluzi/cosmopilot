@@ -154,19 +154,8 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	// /must_upgrade can select the replacement image; preserve that probe path.
 	if failedPodRequiresEarlyRecreation(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
-		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
 		logFailedCosmosignerDiscoveryGate(logger, currentPod)
-		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
-		if err != nil {
-			logger.Info("could not retrieve logs: " + err.Error())
-		} else {
-			logLines := strings.Split(logs, "\n")
-			if len(logLines) > defaultLogsLineCount {
-				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "\n"))
-			} else {
-				logger.Info("app error: " + strings.Join(logLines, "\n"))
-			}
-		}
+		r.logFailedApplication(ctx, logger, currentPod, chainNode.Spec.App.App)
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
@@ -277,6 +266,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	// scheduled upgrade above. If no upgrade is required, recreate it as an ordinary failure.
 	if podInFailedState(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
+		r.logFailedApplication(ctx, logger, currentPod, chainNode.Spec.App.App)
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
@@ -1287,6 +1277,21 @@ func logFailedCosmosignerDiscoveryGate(logger logr.Logger, pod *corev1.Pod) {
 			"exitCode", termination.ExitCode)
 		return
 	}
+}
+
+func (r *Reconciler) logFailedApplication(ctx context.Context, logger logr.Logger, pod *corev1.Pod, containerName string) {
+	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
+	logs, err := ph.GetLogs(ctx, containerName)
+	if err != nil {
+		logger.Info("could not retrieve logs: " + err.Error())
+		return
+	}
+
+	logLines := strings.Split(logs, "\n")
+	if len(logLines) > defaultLogsLineCount {
+		logLines = logLines[len(logLines)-defaultLogsLineCount:]
+	}
+	logger.Info("app error: " + strings.Join(logLines, "\n"))
 }
 
 func podInFailedState(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
