@@ -28,6 +28,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
@@ -496,6 +497,29 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 	}
 }
 
+func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.ChainNode, signerName string) corev1.Container {
+	return corev1.Container{
+		Name:                     CosmosignerDiscoveryWaitContainerName,
+		Image:                    r.opts.NodeUtilsImage,
+		ImagePullPolicy:          corev1.PullIfNotPresent,
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		SecurityContext:          k8s.RestrictedSecurityContext(),
+		Args: []string{
+			"wait-for-dns",
+			cosmosigner.DiscoveryServiceDNS(signerName, chainNode.GetNamespace()),
+			"$(POD_IP)",
+			cosmosignerDiscoveryWaitTimeout.String(),
+		},
+		Env: []corev1.EnvVar{{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "status.podIP",
+			}},
+		}},
+		Resources: chainNode.Spec.Config.GetNodeUtilsResources(),
+	}
+}
+
 // buildAppContainer creates the main application container with its configuration.
 func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesMounts []corev1.VolumeMount, readinessPath string, appResources corev1.ResourceRequirements, securityContext *corev1.SecurityContext) corev1.Container {
 	return corev1.Container{
@@ -676,8 +700,9 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	// (so a stray user label never leaks it onto non-target pods), so it is re-added explicitly here:
 	// a standalone node uses its own signer name; a ChainNodeSet-managed target copies the value the
 	// nodeset controller stamped on the child ChainNode (`<nodeset>-signer`).
-	if v, ok := cosmosignerTargetLabelValue(chainNode); ok {
-		podLabels[controllers.LabelCosmosignerTarget] = v
+	cosmosignerTarget, hasCosmosignerTarget := cosmosignerTargetLabelValue(chainNode)
+	if hasCosmosignerTarget {
+		podLabels[controllers.LabelCosmosignerTarget] = cosmosignerTarget
 		// A standalone target additionally carries the chain-node label its discovery-service
 		// selector scopes on, so a same-named ChainNodeSet's target pods are never selected.
 		if chainNode.UsesCosmosigner() {
@@ -705,6 +730,12 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode)},
 			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
+	}
+	if hasCosmosignerTarget {
+		// The headless Service publishes not-ready addresses, so this waits only for endpoint
+		// discovery and does not hide a signer outage behind an init-container readiness gate.
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers,
+			r.buildCosmosignerDiscoveryInitContainer(chainNode, cosmosignerTarget))
 	}
 
 	for _, volume := range chainNode.GetPersistenceAdditionalVolumes() {

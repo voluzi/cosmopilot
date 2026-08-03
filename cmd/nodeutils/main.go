@@ -39,6 +39,11 @@ func main() {
 		case "mock":
 			handleMockCommand(os.Args[2:])
 			return
+		case "wait-for-dns":
+			if err := handleWaitForDNSCommand(os.Args[2:]); err != nil {
+				log.Fatal(err)
+			}
+			return
 		case "help", "--help", "-h":
 			printHelp()
 			return
@@ -90,6 +95,8 @@ func printHelp() {
 Usage:
   node-utils [flags]           Start the node-utils server
   node-utils mock <command>    Control mock mode (use from kubectl exec)
+  node-utils wait-for-dns <hostname> <ip-address> <timeout>
+                               Wait until DNS publishes an address
   node-utils help              Show this help
 
 Mock Commands (for E2E testing):

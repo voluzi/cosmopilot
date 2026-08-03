@@ -40,6 +40,10 @@ const (
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
 
+	// CosmosignerDiscoveryWaitContainerName identifies the DNS publication gate on signer targets.
+	CosmosignerDiscoveryWaitContainerName = "wait-cosmosigner-discovery"
+	cosmosignerDiscoveryWaitTimeout       = 25 * time.Second
+
 	defaultAddrBookFile         = "/home/app/data/addrbook.json"
 	defaultStateSyncTrustPeriod = "168h0m0s"
 	defaultLogsLineCount        = 50
