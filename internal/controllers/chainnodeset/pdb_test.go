@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -79,6 +80,7 @@ func TestEnsurePodDisruptionBudgetsGroupValidator(t *testing.T) {
 
 	pdb := getPdb(t, r, "default", "test-nodeset-validators-validator")
 	require.NotNil(t, pdb, "group validator PDB should be created")
+	assert.True(t, metav1.IsControlledBy(pdb, nodeSet))
 
 	assert.Equal(t, 1, pdb.Spec.MinAvailable.IntValue())
 	assert.Equal(t, map[string]string{
@@ -217,6 +219,33 @@ func TestEnsurePodDisruptionBudgetsValidatorSuffixDoesNotDeleteRegularGroupPdb(t
 	assert.Equal(t, "foo-validator", pdb.Spec.Selector.MatchLabels[controllers.LabelChainNodeSetGroup])
 }
 
+func TestEnsurePodDisruptionBudgetsRegularGroupOwnedByNodeSet(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-nodeset",
+			Namespace: "default",
+			UID:       types.UID("test-uid"),
+		},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{
+				{
+					Name:      "sentries",
+					Instances: ptr.To(2),
+					PDB:       &appsv1.PdbConfig{Enabled: true, MinAvailable: ptr.To(1)},
+				},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+
+	pdb := getPdb(t, r, "default", "test-nodeset-sentries")
+	require.NotNil(t, pdb, "regular group PDB should be created")
+	assert.True(t, metav1.IsControlledBy(pdb, nodeSet))
+}
+
 // TestEnsurePodDisruptionBudgetsLegacyValidator verifies that the legacy singleton
 // .spec.validator.pdb behavior remains intact.
 func TestEnsurePodDisruptionBudgetsLegacyValidator(t *testing.T) {
@@ -239,6 +268,7 @@ func TestEnsurePodDisruptionBudgetsLegacyValidator(t *testing.T) {
 
 	pdb := getPdb(t, r, "default", "test-nodeset-validator")
 	require.NotNil(t, pdb, "legacy validator PDB should be created")
+	assert.True(t, metav1.IsControlledBy(pdb, nodeSet))
 	// The selector is scoped to the legacy validator pod via the nodeset name and the reserved
 	// validator group, so it does not also match validator-group pods (which share validator=true).
 	assert.Equal(t, map[string]string{
@@ -291,4 +321,111 @@ func TestEnsurePodDisruptionBudgetsLegacyValidatorScopedAwayFromGroupValidators(
 	groupPdb := getPdb(t, r, "default", "test-nodeset-validators-validator")
 	require.NotNil(t, groupPdb, "group validator PDB should be created")
 	assert.Equal(t, "validators", groupPdb.Spec.Selector.MatchLabels[controllers.LabelChainNodeSetGroup])
+}
+
+func TestEnsurePodDisruptionBudgetsPreservesOwnerReferencesOnUpdate(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-nodeset",
+			Namespace: "default",
+			UID:       types.UID("test-uid"),
+		},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{
+				{
+					Name:      "sentries",
+					Instances: ptr.To(2),
+					PDB:       &appsv1.PdbConfig{Enabled: true, MinAvailable: ptr.To(0)},
+				},
+			},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+
+	pdb := getPdb(t, r, "default", "test-nodeset-sentries")
+	require.NotNil(t, pdb)
+	secondaryOwnerReference := metav1.OwnerReference{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Name:       "secondary-owner",
+		UID:        types.UID("secondary-owner-uid"),
+	}
+	pdb.OwnerReferences = []metav1.OwnerReference{secondaryOwnerReference}
+	pdb.Annotations = map[string]string{"preserve": "true"}
+	require.NoError(t, r.Update(context.Background(), pdb))
+
+	nodeSet.Spec.Nodes[0].PDB.MinAvailable = ptr.To(1)
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+
+	updated := getPdb(t, r, "default", "test-nodeset-sentries")
+	require.NotNil(t, updated)
+	assert.Equal(t, 1, updated.Spec.MinAvailable.IntValue())
+	assert.True(t, metav1.IsControlledBy(updated, nodeSet))
+	assert.Contains(t, updated.OwnerReferences, secondaryOwnerReference)
+	assert.Equal(t, map[string]string{"preserve": "true"}, updated.Annotations)
+}
+
+func TestEnsurePodDisruptionBudgetsAdoptsMatchingOrphan(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "sentries", Instances: ptr.To(2), PDB: &appsv1.PdbConfig{Enabled: true, MinAvailable: ptr.To(1)},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+
+	pdb := getPdb(t, r, "default", "test-nodeset-sentries")
+	pdb.OwnerReferences = nil
+	require.NoError(t, r.Update(context.Background(), pdb))
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+
+	assert.True(t, metav1.IsControlledBy(getPdb(t, r, "default", "test-nodeset-sentries"), nodeSet))
+}
+
+func TestEnsurePodDisruptionBudgetsAdoptsMaxUnavailablePDB(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "sentries", Instances: ptr.To(2), PDB: &appsv1.PdbConfig{Enabled: true, MinAvailable: ptr.To(1)},
+		}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	maxUnavailable := intstr.FromInt32(1)
+	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-sentries", Namespace: "default"},
+		Spec:       policyv1.PodDisruptionBudgetSpec{MaxUnavailable: &maxUnavailable},
+	}))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+	pdb := getPdb(t, r, "default", "test-nodeset-sentries")
+	assert.True(t, metav1.IsControlledBy(pdb, nodeSet))
+	assert.Nil(t, pdb.Spec.MaxUnavailable)
+	assert.Equal(t, 1, pdb.Spec.MinAvailable.IntValue())
+}
+
+func TestEnsurePodDisruptionBudgetsDoesNotDeleteForeignPDB(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Spec:       appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(2)}}},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	foreignController := true
+	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset-sentries", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1", Kind: "Deployment", Name: "foreign", UID: types.UID("foreign-uid"), Controller: &foreignController,
+			}},
+		},
+	}))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+	assert.NotNil(t, getPdb(t, r, "default", "test-nodeset-sentries"))
 }

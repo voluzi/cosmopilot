@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
@@ -34,11 +35,11 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 				controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
 			},
 		)
-		if err := r.ensurePodDisruptionBudget(ctx, pdb); err != nil {
+		if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 			return err
 		}
 	} else {
-		if err := r.maybeDeletePDB(ctx, fmt.Sprintf("%s-validator", nodeSet.GetName()), nodeSet.GetNamespace()); err != nil {
+		if err := r.maybeDeletePDB(ctx, nodeSet, fmt.Sprintf("%s-validator", nodeSet.GetName())); err != nil {
 			return err
 		}
 	}
@@ -59,7 +60,7 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 		// validator reconciled below with the dedicated validator PDB. A regular group PDB
 		// would select zero pods, so skip it and delete any stale one left behind.
 		if group.Validator != nil {
-			if err := r.maybeDeletePDB(ctx, group.GetServiceName(nodeSet), nodeSet.GetNamespace()); err != nil {
+			if err := r.maybeDeletePDB(ctx, nodeSet, group.GetServiceName(nodeSet)); err != nil {
 				return err
 			}
 		} else if group.HasPdbEnabled() {
@@ -78,11 +79,11 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 			maps.Copy(labels, GetGlobalIngressLabels(nodeSet, group.Name))
 
 			pdb := getPdbSpec(nodeSet, group.GetServiceName(nodeSet), group.GetPdbMinAvailable(), labels)
-			if err := r.ensurePodDisruptionBudget(ctx, pdb); err != nil {
+			if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 				return err
 			}
 		} else {
-			if err := r.maybeDeletePDB(ctx, group.GetServiceName(nodeSet), nodeSet.GetNamespace()); err != nil {
+			if err := r.maybeDeletePDB(ctx, nodeSet, group.GetServiceName(nodeSet)); err != nil {
 				return err
 			}
 		}
@@ -104,14 +105,14 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 					controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
 				},
 			)
-			if err := r.ensurePodDisruptionBudget(ctx, pdb); err != nil {
+			if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 				return err
 			}
 		} else if _, ownedByRegularGroup := regularGroupServiceNames[validatorPdbName]; !ownedByRegularGroup {
 			// Skip when validatorPdbName is actually a regular group's PDB (its Service name): that
 			// group reconciles this PDB itself above, so deleting it here would remove a live,
 			// correctly-configured PDB on every reconcile.
-			if err := r.maybeDeletePDB(ctx, validatorPdbName, nodeSet.GetNamespace()); err != nil {
+			if err := r.maybeDeletePDB(ctx, nodeSet, validatorPdbName); err != nil {
 				return err
 			}
 		}
@@ -136,44 +137,67 @@ func getPdbSpec(nodeSet *appsv1.ChainNodeSet, name string, min int, labels map[s
 	}
 }
 
-func (r *Reconciler) ensurePodDisruptionBudget(ctx context.Context, pdb *policyv1.PodDisruptionBudget) error {
+func (r *Reconciler) ensurePodDisruptionBudget(
+	ctx context.Context,
+	nodeSet *appsv1.ChainNodeSet,
+	pdb *policyv1.PodDisruptionBudget,
+) error {
 	logger := log.FromContext(ctx)
 
 	currentPdb := &policyv1.PodDisruptionBudget{}
 	err := r.Get(ctx, client.ObjectKeyFromObject(pdb), currentPdb)
 	if err != nil {
 		if errors.IsNotFound(err) {
+			if err := controllerutil.SetControllerReference(nodeSet, pdb, r.Scheme); err != nil {
+				return err
+			}
 			logger.Info("creating pod disruption budget", "pdb", pdb.GetName())
 			return r.Create(ctx, pdb)
 		}
 		return err
 	}
 
-	mustUpdate := currentPdb.Spec.MinAvailable.IntValue() != pdb.Spec.MinAvailable.IntValue() ||
-		!reflect.DeepEqual(currentPdb.Spec.Selector.MatchLabels, pdb.Spec.Selector.MatchLabels)
+	desiredMinAvailable := pdb.Spec.MinAvailable
+	desiredSelector := pdb.Spec.Selector
+	mustUpdate := !reflect.DeepEqual(currentPdb.Spec.MinAvailable, desiredMinAvailable) ||
+		currentPdb.Spec.MaxUnavailable != nil ||
+		!reflect.DeepEqual(currentPdb.Spec.Selector, desiredSelector) ||
+		!metav1.IsControlledBy(currentPdb, nodeSet)
 
-	if mustUpdate {
-		logger.Info("updating pod disruption budget", "pdb", pdb.GetName())
+	if !mustUpdate {
+		*pdb = *currentPdb
+		return nil
+	}
 
-		pdb.ObjectMeta.ResourceVersion = currentPdb.ObjectMeta.ResourceVersion
-		if err := r.Update(ctx, pdb); err != nil {
-			return err
-		}
+	currentPdb.Spec.MinAvailable = desiredMinAvailable
+	currentPdb.Spec.MaxUnavailable = nil
+	currentPdb.Spec.Selector = desiredSelector
+	if err := controllerutil.SetControllerReference(nodeSet, currentPdb, r.Scheme); err != nil {
+		return fmt.Errorf("cannot manage pod disruption budget %s/%s: %w", currentPdb.GetNamespace(), currentPdb.GetName(), err)
+	}
+
+	logger.Info("updating pod disruption budget", "pdb", pdb.GetName())
+	if err := r.Update(ctx, currentPdb); err != nil {
+		return err
 	}
 
 	*pdb = *currentPdb
 	return nil
 }
 
-func (r *Reconciler) maybeDeletePDB(ctx context.Context, name, namespace string) error {
+func (r *Reconciler) maybeDeletePDB(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
 	logger := log.FromContext(ctx)
 
-	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
+	pdb := &policyv1.PodDisruptionBudget{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, pdb); err != nil {
+		return client.IgnoreNotFound(err)
 	}
+
+	if controller := metav1.GetControllerOf(pdb); controller != nil && !metav1.IsControlledBy(pdb, nodeSet) {
+		logger.Info("skipping pod disruption budget owned by another controller", "pdb", pdb.GetName(), "owner", controller.Name)
+		return nil
+	}
+
 	err := r.Delete(ctx, pdb)
 
 	if err == nil {
