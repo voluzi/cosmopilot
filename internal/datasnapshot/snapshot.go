@@ -780,9 +780,39 @@ func getSnapshotDeletionJob(
 	}
 	if upload == nil && expected.Upload != nil {
 		// Legacy deletion Jobs did not persist the paired upload identity. They
-		// cannot safely finish while an active co-listed upload may still write the
-		// archive, so replace them with a suspended paired workflow.
-		if !expected.Upload.Terminating {
+		// cannot safely finish while a co-listed upload may still write the
+		// archive. Upgrade an active legacy Job in place so the suspended cleanup
+		// workflow is durable before upload teardown starts. This also covers an
+		// upload that is already terminating: its pods may still be writing until
+		// foreground deletion completes.
+		if snapshotJobStatus(job) == SnapshotActive {
+			identity := *expected.Upload
+			_, pvc, resourceErr := getSnapshotUploadResources(ctx, client, owner, expected.Name, identity, exporter)
+			if resourceErr != nil {
+				return nil, nil, resourceErr
+			}
+			if pvc != nil {
+				identity.PVCUID = pvc.UID
+			}
+			updated := job.DeepCopy()
+			setSnapshotDeletionUploadIdentity(updated, owner, exporter, identity)
+			updated, err = client.BatchV1().Jobs(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+			if err != nil {
+				return nil, nil, fmt.Errorf("pair legacy snapshot deletion job %s/%s with upload UID %s: %w",
+					job.Namespace, job.Name, expected.Upload.UID, err)
+			}
+			if updated.UID != job.UID {
+				return nil, nil, fmt.Errorf("paired snapshot deletion job %s/%s has UID %s, expected %s",
+					updated.Namespace, updated.Name, updated.UID, job.UID)
+			}
+			job = updated
+			upload = &identity
+		} else if expected.Upload.Terminating {
+			// The legacy deletion already reached a terminal state, so there is no
+			// running deletion to suspend. Keep its durable marker until the
+			// foreground-terminating upload disappears; the orphan-upload path will
+			// then decide whether another external deletion is required.
+		} else {
 			if err = deleteSnapshotJob(ctx, client, job); err != nil {
 				return nil, nil, fmt.Errorf("replace unpaired snapshot deletion job %s/%s: %w", job.Namespace, job.Name, err)
 			}
