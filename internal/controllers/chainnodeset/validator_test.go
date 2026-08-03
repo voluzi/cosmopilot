@@ -345,15 +345,15 @@ func TestEnsureGenesisValidatorSecrets(t *testing.T) {
 
 	require.NoError(t, r.ensureGenesisValidatorSecrets(ctx, nodeSet, cfg, gvs))
 
-	// Both account and priv-key secrets are created with the expected data keys, owned by the set.
+	// Both account and priv-key secrets are created with the expected data keys and stable attribution.
 	mnemonics := map[string]string{}
 	for _, gv := range gvs {
 		acc := &corev1.Secret{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "default", Name: gv.AccountMnemonicSecret}, acc))
 		require.Contains(t, acc.Data, mnemonicKey)
 		assert.NotEmpty(t, acc.Data[mnemonicKey])
-		require.Len(t, acc.OwnerReferences, 1)
-		assert.Equal(t, "test-nodeset", acc.OwnerReferences[0].Name)
+		assert.Empty(t, acc.OwnerReferences)
+		assert.True(t, resourcecleanup.IsAttributed(acc, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
 		mnemonics[gv.AccountMnemonicSecret] = string(acc.Data[mnemonicKey])
 
 		pk := &corev1.Secret{}
@@ -652,8 +652,10 @@ func TestEnsureValidatorRemovesStaleValidator(t *testing.T) {
 
 	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
 
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-validator"}, &appsv1.ChainNode{})
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode must be deleted")
+	current := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-validator"}, current))
+	assert.False(t, current.DeletionTimestamp.IsZero(), "stale validator ChainNode must be terminating")
+	assert.Contains(t, current.Finalizers, resourcecleanup.Finalizer)
 	assert.Empty(t, nodeSet.Status.Validators, "stale validator status must be removed")
 }
 
@@ -771,8 +773,9 @@ func TestEnsureValidatorPreservesRemovedGenesisBaseline(t *testing.T) {
 
 	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
 
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: stale.Name}, &appsv1.ChainNode{})
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode must still be deleted")
+	current := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: stale.Name}, current))
+	assert.False(t, current.DeletionTimestamp.IsZero(), "stale validator ChainNode must still be terminating")
 	assert.Equal(t, []appsv1.ChainNodeSetValidatorStatus{baseline}, nodeSet.Status.Validators)
 	assert.Empty(t, nodeSet.Status.Nodes)
 }
@@ -1038,8 +1041,8 @@ func TestEnsureValidatorRemovesDeletedGroupValidators(t *testing.T) {
 	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
 
 	got := &appsv1.ChainNode{}
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: staleNode.Name}, got)
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode should be deleted")
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: staleNode.Name}, got))
+	assert.False(t, got.DeletionTimestamp.IsZero(), "stale validator ChainNode should be terminating")
 	assert.Empty(t, nodeSet.Status.Validators)
 	assert.Empty(t, nodeSet.Status.Nodes)
 }
@@ -1117,10 +1120,11 @@ func TestEnsureValidatorScaleDownRemovesStale(t *testing.T) {
 	require.NoError(t, r.maybeDeleteNode(context.Background(), nodeSet, staleNode.Name))
 	DeleteValidatorStatus(nodeSet, staleNode.Name)
 
-	// The stale ChainNode is gone from the cluster.
+	// The stale ChainNode is held for durable-resource finalization.
 	got := &appsv1.ChainNode{}
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: staleNode.Name}, got)
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode should be deleted")
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: staleNode.Name}, got))
+	assert.False(t, got.DeletionTimestamp.IsZero(), "stale validator ChainNode should be terminating")
+	assert.Contains(t, got.Finalizers, resourcecleanup.Finalizer)
 
 	// Both the node status and validator status entries for the removed validator are gone.
 	require.Len(t, nodeSet.Status.Validators, 1)

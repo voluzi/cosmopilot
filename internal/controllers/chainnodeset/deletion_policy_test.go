@@ -65,7 +65,7 @@ func TestGeneratedGenesisAndCosmoseedSecretsCarryStableAttribution(t *testing.T)
 		secret := &corev1.Secret{}
 		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: nodeSet.Namespace, Name: name}, secret))
 		assert.True(t, resourcecleanup.IsAttributed(secret, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
-		assert.True(t, metav1.IsControlledBy(secret, nodeSet))
+		assert.Nil(t, metav1.GetControllerOf(secret))
 	}
 }
 

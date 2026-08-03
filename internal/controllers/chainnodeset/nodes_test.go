@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,6 +17,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 // TestEnsureNodesInstanceCount verifies that a group validator does not add an extra
@@ -313,10 +313,12 @@ func TestEnsureNodesRemovesStaleRegularNodesOnValidatorPromotion(t *testing.T) {
 
 	require.NoError(t, r.ensureNodes(context.Background(), nodeSet))
 
-	// The stale regular ChainNodes must be removed.
+	// The stale regular ChainNodes must enter finalization before removal.
 	for _, name := range []string{"test-nodeset-validators-1", "test-nodeset-validators-2"} {
-		err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: name}, &appsv1.ChainNode{})
-		assert.Truef(t, errors.IsNotFound(err), "stale regular ChainNode %s must be deleted", name)
+		current := &appsv1.ChainNode{}
+		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: name}, current))
+		assert.Falsef(t, current.DeletionTimestamp.IsZero(), "stale regular ChainNode %s must be terminating", name)
+		assert.Contains(t, current.Finalizers, resourcecleanup.Finalizer)
 	}
 
 	// The validator ChainNode must be kept.

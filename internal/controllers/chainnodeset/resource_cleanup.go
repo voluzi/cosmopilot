@@ -119,7 +119,7 @@ func (r *Reconciler) attributeCosmoseedDataVolumes(ctx context.Context, nodeSet 
 			prefix := templateName + "-" + seedName + "-"
 			ordinal := strings.TrimPrefix(pvc.GetName(), prefix)
 			if ordinal != pvc.GetName() && ordinal != "" {
-				if _, err := strconv.ParseUint(ordinal, 10, 32); err == nil {
+				if parsed, err := strconv.ParseUint(ordinal, 10, 32); err == nil && strconv.FormatUint(parsed, 10) == ordinal {
 					matched = true
 					break
 				}

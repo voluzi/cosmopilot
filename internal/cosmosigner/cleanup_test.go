@@ -431,6 +431,29 @@ func TestFinalizeOwnerFindsRetainedPVCWithoutAppLabel(t *testing.T) {
 	}
 }
 
+func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *testing.T) {
+	const namespace = "default"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-owner-signer-0", Namespace: namespace,
+		Labels:     map[string]string{labelInstance: "drifted", labelOwnerUID: "foreign"},
+		Finalizers: []string{RetainedStateFinalizer},
+	}}
+	resourcecleanup.Stamp(pvc, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState)
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
+
+	if err := ReleaseOwnerStateFinalizers(context.Background(), c, owner, namespace); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(fresh, RetainedStateFinalizer) {
+		t.Fatal("stable attribution must release the retained-state finalizer after label drift")
+	}
+}
+
 func boolPointer(v bool) *bool { return &v }
 
 func TestDeletePVCsReleasesRetainedStateFinalizer(t *testing.T) {

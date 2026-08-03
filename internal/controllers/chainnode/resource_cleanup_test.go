@@ -177,12 +177,11 @@ func TestFinalizeResourcesRetainsControlledLegacyDataVolumesRemovedFromSpec(t *t
 	assert.False(t, resourcecleanup.IsAttributed(freshGuard, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
-func TestFinalizeResourcesUsesDeletingChainNodeSetPolicy(t *testing.T) {
+func TestFinalizeResourcesUsesLiveChainNodeSetPolicy(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
-	now := metav1.NewTime(time.Now())
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "set", Namespace: "default", UID: "set-uid", DeletionTimestamp: &now,
+			Name: "set", Namespace: "default", UID: "set-uid",
 			Finalizers: []string{resourcecleanup.Finalizer},
 		},
 		Spec: appsv1.ChainNodeSetSpec{DeletionPolicy: &appsv1.DeletionPolicy{

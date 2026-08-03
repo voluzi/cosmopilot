@@ -408,19 +408,21 @@ func attributeOwnedStatePVCs(ctx context.Context, c client.Client, owner client.
 }
 
 // ReleaseOwnerStateFinalizers removes only the Cosmosigner retained-state guard from claims proven
-// by the signer owner-UID label. Namespace deletion already quiesces every managed signer workload,
-// so keeping this operator finalizer would only deadlock namespace termination.
-func ReleaseOwnerStateFinalizers(ctx context.Context, c client.Client, owner metav1.Object, namespace string) error {
+// by either the signer owner-UID/name labels or stable root/class attribution. Namespace deletion
+// already quiesces every managed signer workload, so keeping this operator finalizer would only
+// deadlock namespace termination when mutable labels have drifted.
+func ReleaseOwnerStateFinalizers(ctx context.Context, c client.Client, owner client.Object, namespace string) error {
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return err
 	}
+	root := resourcecleanup.RootOwnerFor(owner)
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
-		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
-			!isStatefulSetDataPVC(pvc.GetName(), name) ||
-			!controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
+		labelOwned := pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID()) && isStatefulSetDataPVC(pvc.GetName(), name)
+		attributed := resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassCosmosignerState)
+		if (!labelOwned && !attributed) || !controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
 			continue
 		}
 		controllerutil.RemoveFinalizer(pvc, RetainedStateFinalizer)

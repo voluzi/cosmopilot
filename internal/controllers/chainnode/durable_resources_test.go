@@ -69,7 +69,7 @@ func TestGeneratedKeySecretsCarryStableAttribution(t *testing.T) {
 			secret := &corev1.Secret{}
 			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: node.Namespace, Name: tt.secret(node)}, secret))
 			assert.True(t, resourcecleanup.IsAttributed(secret, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
-			assert.True(t, metav1.IsControlledBy(secret, node))
+			assert.Nil(t, metav1.GetControllerOf(secret))
 		})
 	}
 }
@@ -108,7 +108,7 @@ func TestGeneratedDataVolumesCarryStableAttribution(t *testing.T) {
 		pvc := &corev1.PersistentVolumeClaim{}
 		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: node.Namespace, Name: name}, pvc))
 		assert.True(t, resourcecleanup.IsAttributed(pvc, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassDataVolumes))
-		assert.True(t, metav1.IsControlledBy(pvc, node))
+		assert.Nil(t, metav1.GetControllerOf(pvc))
 	}
 }
 

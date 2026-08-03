@@ -156,6 +156,9 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {
 	// Cleanup statefulset
 	logger := log.FromContext(ctx)
+	if err := r.attributeCosmoseedDataVolumes(ctx, nodeSet); err != nil {
+		return err
+	}
 
 	// Cleanup statefulset
 	if err := r.Delete(ctx, &appsv1.StatefulSet{

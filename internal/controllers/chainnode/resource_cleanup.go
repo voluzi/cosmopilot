@@ -95,7 +95,7 @@ func (r *Reconciler) effectiveDeletionPolicy(ctx context.Context, chainNode *app
 		}
 		return nil, err
 	}
-	if nodeSet.GetUID() == controller.UID && !nodeSet.GetDeletionTimestamp().IsZero() {
+	if nodeSet.GetUID() == controller.UID {
 		return nodeSet.Spec.DeletionPolicy, nil
 	}
 	return chainNode.Spec.DeletionPolicy, nil

@@ -153,10 +153,10 @@ func TestPrepareGeneratedResourceStampsNewObject(t *testing.T) {
 	assert.True(t, managed)
 	assert.True(t, changed)
 	assert.True(t, IsAttributed(secret, RootOwnerFor(owner), ClassGeneratedKeys))
-	assert.True(t, metav1.IsControlledBy(secret, owner))
+	assert.Nil(t, metav1.GetControllerOf(secret))
 }
 
-func TestPrepareGeneratedResourceReattachesRetainedChildResource(t *testing.T) {
+func TestPrepareGeneratedResourceKeepsRetainedChildResourceNonCascading(t *testing.T) {
 	scheme := cleanupScheme(t)
 	parentRef := metav1.OwnerReference{
 		APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "set", UID: "set-uid", Controller: ptr.To(true),
@@ -171,8 +171,8 @@ func TestPrepareGeneratedResourceReattachesRetainedChildResource(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, managed)
 	assert.True(t, changed)
-	assert.True(t, metav1.IsControlledBy(secret, newChild))
-	assert.Equal(t, types.UID("new-child"), metav1.GetControllerOf(secret).UID)
+	assert.Nil(t, metav1.GetControllerOf(secret))
+	assert.Equal(t, string(newChild.UID), secret.Annotations[AnnotationResourceOwnerUID])
 }
 
 func cleanupScheme(t *testing.T) *runtime.Scheme {
