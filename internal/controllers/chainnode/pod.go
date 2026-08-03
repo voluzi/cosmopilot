@@ -134,18 +134,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 
 	if nodeUtilsIsInFailedState(currentPod) {
 		logger.Info("node-utils is in failed state", "pod", pod.GetName())
-		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
-		logs, err := ph.GetLogs(ctx, nodeUtilsContainerName)
-		if err != nil {
-			logger.Info("could not retrieve logs: " + err.Error())
-		} else {
-			logLines := strings.Split(logs, "\n")
-			if len(logLines) > defaultLogsLineCount {
-				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "\n"))
-			} else {
-				logger.Info("app error: " + strings.Join(logLines, "\n"))
-			}
-		}
+		r.logFailedContainer(ctx, logger, currentPod, nodeUtilsContainerName)
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
@@ -155,7 +144,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	if failedPodRequiresEarlyRecreation(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
 		logFailedCosmosignerDiscoveryGate(logger, currentPod)
-		r.logFailedApplication(ctx, logger, currentPod, chainNode.Spec.App.App)
+		r.logFailedContainer(ctx, logger, currentPod, chainNode.Spec.App.App)
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
@@ -266,7 +255,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	// scheduled upgrade above. If no upgrade is required, recreate it as an ordinary failure.
 	if podInFailedState(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
-		r.logFailedApplication(ctx, logger, currentPod, chainNode.Spec.App.App)
+		r.logFailedContainer(ctx, logger, currentPod, chainNode.Spec.App.App)
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
@@ -1279,7 +1268,7 @@ func logFailedCosmosignerDiscoveryGate(logger logr.Logger, pod *corev1.Pod) {
 	}
 }
 
-func (r *Reconciler) logFailedApplication(ctx context.Context, logger logr.Logger, pod *corev1.Pod, containerName string) {
+func (r *Reconciler) logFailedContainer(ctx context.Context, logger logr.Logger, pod *corev1.Pod, containerName string) {
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
 	logs, err := ph.GetLogs(ctx, containerName)
 	if err != nil {
