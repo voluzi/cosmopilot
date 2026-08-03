@@ -82,6 +82,86 @@ func TestNewTCPProxyStoresAcceptCallback(t *testing.T) {
 	}
 }
 
+func TestTCPProxy_RetainsAcceptedConnectionUntilUpstreamStarts(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamAddr := reserved.Addr().String()
+	if err := reserved.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan struct{})
+	proxy, err := NewTCPProxy(":0", upstreamAddr, false, func() { close(accepted) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenTCP("tcp", proxy.laddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	handleResult := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.AcceptTCP()
+		if acceptErr != nil {
+			handleResult <- acceptErr
+			return
+		}
+		proxy.onAccept()
+		handleResult <- proxy.handle(conn)
+	}()
+
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("accept callback was not invoked")
+	}
+
+	upstream, err := net.Listen("tcp", upstreamAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+	}()
+
+	payload := []byte("signer handshake")
+	if _, err := client.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(client, response); err != nil {
+		t.Fatalf("accepted signer connection was not retained: %v", err)
+	}
+	if string(response) != string(payload) {
+		t.Fatalf("response = %q, want %q", response, payload)
+	}
+	_ = client.Close()
+	select {
+	case err := <-handleResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy handler did not finish after connection close")
+	}
+}
+
 func TestTCPProxy_DataForwarding(t *testing.T) {
 	// Start a simple echo server as the upstream
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")

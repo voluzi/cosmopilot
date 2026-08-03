@@ -5,15 +5,22 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
+const (
+	upstreamRetryInterval = 100 * time.Millisecond
+	upstreamRetryTimeout  = 30 * time.Second
+)
+
 type TCP struct {
-	laddr, raddr *net.TCPAddr
-	listener     *net.TCPListener
-	runOnce      bool
-	onAccept     func()
+	laddr, raddr  *net.TCPAddr
+	listener      *net.TCPListener
+	runOnce       bool
+	onAccept      func()
+	retryUpstream bool
 }
 
 func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...func()) (*TCP, error) {
@@ -33,6 +40,7 @@ func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...fun
 	}
 	if len(onAccept) > 0 {
 		proxy.onAccept = onAccept[0]
+		proxy.retryUpstream = true
 	}
 	return proxy, nil
 }
@@ -76,11 +84,25 @@ func (p *TCP) Stop() error {
 	return p.listener.Close()
 }
 
+func (p *TCP) dialUpstream() (*net.TCPConn, error) {
+	deadline := time.Now().Add(upstreamRetryTimeout)
+	for {
+		rconn, err := net.DialTCP("tcp", nil, p.raddr)
+		if err == nil {
+			return rconn, nil
+		}
+		if !p.retryUpstream || time.Now().Add(upstreamRetryInterval).After(deadline) {
+			return nil, fmt.Errorf("failed to dial upstream: %v", err)
+		}
+		time.Sleep(upstreamRetryInterval)
+	}
+}
+
 func (p *TCP) handle(lconn *net.TCPConn) error {
-	rconn, err := net.DialTCP("tcp", nil, p.raddr)
+	rconn, err := p.dialUpstream()
 	if err != nil {
 		lconn.Close()
-		return fmt.Errorf("failed to dial upstream: %v", err)
+		return err
 	}
 
 	// Use sync.Once to ensure connections are closed exactly once
