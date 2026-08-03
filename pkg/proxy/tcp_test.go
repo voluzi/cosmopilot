@@ -66,6 +66,22 @@ func TestNewTCPProxy(t *testing.T) {
 	}
 }
 
+func TestNewTCPProxyStoresAcceptCallback(t *testing.T) {
+	called := false
+	proxy, err := NewTCPProxy(":0", "127.0.0.1:8080", false, func() { called = true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.onAccept == nil {
+		t.Fatal("NewTCPProxy() did not store the accept callback")
+	}
+
+	proxy.onAccept()
+	if !called {
+		t.Fatal("stored accept callback was not invoked")
+	}
+}
+
 func TestTCPProxy_DataForwarding(t *testing.T) {
 	// Start a simple echo server as the upstream
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")

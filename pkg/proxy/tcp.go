@@ -26,11 +26,15 @@ func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...fun
 		return nil, err
 	}
 
-	return &TCP{
+	proxy := &TCP{
 		laddr:   laddr,
 		raddr:   raddr,
 		runOnce: failOnClose,
-	}, nil
+	}
+	if len(onAccept) > 0 {
+		proxy.onAccept = onAccept[0]
+	}
+	return proxy, nil
 }
 
 func (p *TCP) Start() error {
