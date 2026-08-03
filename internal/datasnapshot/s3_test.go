@@ -189,7 +189,7 @@ func TestS3CleanupSnapshotDeletionUsesForegroundUIDPrecondition(t *testing.T) {
 			Name:            "snapshot-delete",
 			Namespace:       "default",
 			UID:             "s3-delete-uid",
-			Labels:          map[string]string{labelExporter: s3Exporter, labelType: typeDelete},
+			Labels:          map[string]string{labelExporter: s3Exporter, labelOwner: provider.Owner.GetName(), labelType: typeDelete},
 			OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
 		},
 		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
@@ -201,7 +201,9 @@ func TestS3CleanupSnapshotDeletionUsesForegroundUIDPrecondition(t *testing.T) {
 	client := provider.Client.(*fake.Clientset)
 	actionCount := len(client.Actions())
 
-	require.NoError(t, provider.CleanupSnapshotDeletion(context.Background(), "snapshot"))
+	require.NoError(t, provider.CleanupSnapshotDeletion(context.Background(), SnapshotJob{
+		Name: "snapshot", UID: job.UID, Purpose: SnapshotJobDelete,
+	}))
 
 	deleteAction := requireJobDeleteAction(t, client.Actions()[actionCount:])
 	assert.Equal(t, job.Name, deleteAction.GetName())
@@ -213,24 +215,78 @@ func TestS3CleanupSnapshotDeletionUsesForegroundUIDPrecondition(t *testing.T) {
 	assert.Equal(t, job.UID, *options.Preconditions.UID)
 }
 
-func TestS3ListSnapshotsIncludesDeletionJobs(t *testing.T) {
+func TestS3DeleteSnapshotForUploadReturnsPairedActivatedDeletion(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket: "snapshots", Region: "eu-west-1",
+	}})
+	uploadJob, uploadPVC := testOrphanUploadResources(provider.Owner, s3Exporter)
+	_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), uploadJob, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), uploadPVC, metav1.CreateOptions{})
+	require.NoError(t, err)
+	client := provider.Client.(*fake.Clientset)
+	client.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction, ok := action.(k8stesting.CreateAction)
+		require.True(t, ok)
+		job, ok := createAction.GetObject().(*batchv1.Job)
+		require.True(t, ok)
+		if job.Labels[labelType] == typeDelete {
+			job.UID = "delete-uid"
+		}
+		return false, nil, nil
+	})
+
+	deletion, status, err := provider.DeleteSnapshotForUpload(context.Background(), SnapshotJob{
+		Name: "snapshot", UID: uploadJob.UID, Purpose: SnapshotJobUpload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	assert.Equal(t, SnapshotJob{
+		Name: "snapshot", UID: "delete-uid", Purpose: SnapshotJobDelete,
+		Upload: &SnapshotJobIdentity{UID: uploadJob.UID, PVCUID: uploadPVC.UID},
+	}, deletion)
+
+	deleteJob := getS3Job(t, provider, "snapshot-delete")
+	require.NotNil(t, deleteJob.Spec.Suspend)
+	assert.False(t, *deleteJob.Spec.Suspend)
+	assert.Equal(t, s3Exporter, deleteJob.Labels[labelCleanupExporter])
+	assert.Equal(t, provider.Owner.GetName(), deleteJob.Labels[labelCleanupOwner])
+	assert.Equal(t, typeUpload, deleteJob.Labels[labelCleanupType])
+	assert.Equal(t, string(uploadJob.UID), deleteJob.Labels[labelCleanupUploadUID])
+	assert.Equal(t, string(uploadPVC.UID), deleteJob.Labels[labelCleanupPVCUID])
+}
+
+func TestS3ListSnapshotsDistinguishesDeletionJobs(t *testing.T) {
 	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
 	require.NoError(t, err)
 	assert.Equal(t, SnapshotActive, status)
 
-	names, err := provider.ListSnapshots(context.Background())
+	jobs, err := provider.ListSnapshots(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"snapshot"}, names)
+	assert.Equal(t, []SnapshotJob{{Name: "snapshot", Purpose: SnapshotJobDelete}}, jobs)
 }
 
 func TestS3ListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
 	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
 	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot-delete", testVolumeSnapshot()))
 
-	names, err := provider.ListSnapshots(context.Background())
+	jobs, err := provider.ListSnapshots(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"snapshot-delete"}, names)
+	assert.Equal(t, []SnapshotJob{{Name: "snapshot-delete", Purpose: SnapshotJobUpload}}, jobs)
+}
+
+func TestS3GetSnapshotDeletionStatusDoesNotCreateMissingJob(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+
+	status, err := provider.GetSnapshotDeletionStatus(context.Background(), SnapshotJob{
+		Name: "snapshot", Purpose: SnapshotJobDelete,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotNotFound, status)
+	for _, action := range provider.Client.(*fake.Clientset).Actions() {
+		assert.False(t, action.GetVerb() == "create" && action.GetResource().Resource == "jobs")
+	}
 }
 
 func TestS3GetSnapshotStatusPreservesUploadResources(t *testing.T) {

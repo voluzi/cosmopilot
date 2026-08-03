@@ -3,7 +3,6 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -12,7 +11,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
@@ -173,11 +171,55 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 	return uploadJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), s3Exporter)
 }
 
+func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
+	return reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter))
+}
+
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
 	return provider.cleanUp(ctx, name)
 }
 
 func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
+	job, err := provider.ensureSnapshotDeletion(ctx, name, nil)
+	if err != nil {
+		return "", err
+	}
+	if err = provider.cleanUp(ctx, name); err != nil {
+		return "", err
+	}
+	return snapshotJobStatus(job), nil
+}
+
+func (provider *S3) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotJob, SnapshotStatus, error) {
+	if upload.Purpose != SnapshotJobUpload {
+		return SnapshotJob{}, "", fmt.Errorf("snapshot job %q has purpose %q, expected %q",
+			upload.Name, upload.Purpose, SnapshotJobUpload)
+	}
+	uploadIdentity := SnapshotJobIdentity{UID: upload.UID, Terminating: upload.Terminating}
+	_, pvc, err := getSnapshotUploadResources(ctx, provider.Client, provider.Owner, upload.Name, uploadIdentity, s3Exporter)
+	if err != nil {
+		return SnapshotJob{}, "", err
+	}
+	if pvc != nil {
+		uploadIdentity.PVCUID = pvc.UID
+	}
+	job, err := provider.ensureSnapshotDeletion(ctx, upload.Name, &uploadIdentity)
+	if err != nil {
+		return SnapshotJob{}, "", err
+	}
+	deletion := snapshotJobFromJob(job)
+	status, err := reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, deletion, s3Exporter)
+	if err != nil {
+		return deletion, "", err
+	}
+	return deletion, status, nil
+}
+
+func (provider *S3) ensureSnapshotDeletion(
+	ctx context.Context,
+	name string,
+	upload *SnapshotJobIdentity,
+) (*batchv1.Job, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -211,20 +253,20 @@ func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotSt
 		},
 	}
 	if err := controllerutil.SetControllerReference(provider.Owner, job, provider.Scheme); err != nil {
-		return "", err
+		return nil, err
+	}
+	if upload != nil {
+		setSnapshotDeletionUploadIdentity(job, provider.Owner, s3Exporter, *upload)
 	}
 	job, _, err := ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, "delete")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if err = provider.cleanUp(ctx, name); err != nil {
-		return "", err
-	}
-	return snapshotJobStatus(job), nil
+	return job, nil
 }
 
-func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, name string) error {
-	return cleanupSnapshotDeletionJob(ctx, provider.Client, provider.Owner, name, s3Exporter)
+func (provider *S3) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {
+	return cleanupSnapshotDeletionResources(ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter))
 }
 
 func (provider *S3) cleanUp(ctx context.Context, name string) error {
@@ -242,23 +284,6 @@ func (provider *S3) cleanUp(ctx context.Context, name string) error {
 	return nil
 }
 
-func (provider *S3) ListSnapshots(ctx context.Context) ([]string, error) {
-	selector := labels.SelectorFromSet(map[string]string{
-		labelExporter: s3Exporter,
-		labelOwner:    provider.Owner.GetName(),
-	}).String()
-	list, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if err != nil {
-		return nil, err
-	}
-	uniqueNames := make(map[string]struct{}, len(list.Items))
-	for _, job := range list.Items {
-		uniqueNames[snapshotNameFromJob(&job)] = struct{}{}
-	}
-	names := make([]string, 0, len(uniqueNames))
-	for name := range uniqueNames {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
+func (provider *S3) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
+	return listSnapshotJobs(ctx, provider.Client, provider.Owner, s3Exporter)
 }

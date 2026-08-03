@@ -3,7 +3,6 @@ package datasnapshot
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -12,7 +11,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
@@ -241,6 +239,10 @@ func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotSta
 	return uploadJobStatus(ctx, gcs.Client, gcs.Owner, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), gcsExporter)
 }
 
+func (gcs *GCS) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
+	return reconcileSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, snapshotJob, snapshotJobExporter(snapshotJob, gcsExporter))
+}
+
 func (gcs *GCS) CleanupSnapshot(ctx context.Context, name string) error {
 	return gcs.cleanUp(ctx, name)
 }
@@ -270,6 +272,46 @@ func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
 }
 
 func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
+	job, err := gcs.ensureSnapshotDeletion(ctx, name, nil)
+	if err != nil {
+		return "", err
+	}
+	if err = gcs.cleanUp(ctx, name); err != nil {
+		return "", err
+	}
+	return snapshotJobStatus(job), nil
+}
+
+func (gcs *GCS) DeleteSnapshotForUpload(ctx context.Context, upload SnapshotJob) (SnapshotJob, SnapshotStatus, error) {
+	if upload.Purpose != SnapshotJobUpload {
+		return SnapshotJob{}, "", fmt.Errorf("snapshot job %q has purpose %q, expected %q",
+			upload.Name, upload.Purpose, SnapshotJobUpload)
+	}
+	uploadIdentity := SnapshotJobIdentity{UID: upload.UID, Terminating: upload.Terminating}
+	_, pvc, err := getSnapshotUploadResources(ctx, gcs.Client, gcs.Owner, upload.Name, uploadIdentity, gcsExporter)
+	if err != nil {
+		return SnapshotJob{}, "", err
+	}
+	if pvc != nil {
+		uploadIdentity.PVCUID = pvc.UID
+	}
+	job, err := gcs.ensureSnapshotDeletion(ctx, upload.Name, &uploadIdentity)
+	if err != nil {
+		return SnapshotJob{}, "", err
+	}
+	deletion := snapshotJobFromJob(job)
+	status, err := reconcileSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, deletion, gcsExporter)
+	if err != nil {
+		return deletion, "", err
+	}
+	return deletion, status, nil
+}
+
+func (gcs *GCS) ensureSnapshotDeletion(
+	ctx context.Context,
+	name string,
+	upload *SnapshotJobIdentity,
+) (*batchv1.Job, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -313,43 +355,23 @@ func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus
 
 	err := controllerutil.SetControllerReference(gcs.Owner, job, gcs.Scheme)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	if upload != nil {
+		setSnapshotDeletionUploadIdentity(job, gcs.Owner, gcsExporter, *upload)
 	}
 
 	job, _, err = ensureSnapshotJob(ctx, gcs.Client, gcs.Owner, job, "delete")
 	if err != nil {
-		return "", err
-	}
-	if err = gcs.cleanUp(ctx, name); err != nil {
-		return "", err
-	}
-	return snapshotJobStatus(job), nil
-}
-
-func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, name string) error {
-	return cleanupSnapshotDeletionJob(ctx, gcs.Client, gcs.Owner, name, gcsExporter)
-}
-
-func (gcs *GCS) ListSnapshots(ctx context.Context) ([]string, error) {
-	listOptions := metav1.ListOptions{
-		LabelSelector: labels.SelectorFromSet(map[string]string{
-			labelExporter: gcsExporter,
-			labelOwner:    gcs.Owner.GetName(),
-		}).String(),
-	}
-	list, err := gcs.Client.BatchV1().Jobs(gcs.Owner.GetNamespace()).List(ctx, listOptions)
-	if err != nil {
 		return nil, err
 	}
+	return job, nil
+}
 
-	names := make(map[string]struct{}, len(list.Items))
-	for _, job := range list.Items {
-		names[snapshotNameFromJob(&job)] = struct{}{}
-	}
-	snapshotNames := make([]string, 0, len(names))
-	for name := range names {
-		snapshotNames = append(snapshotNames, name)
-	}
-	sort.Strings(snapshotNames)
-	return snapshotNames, nil
+func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, snapshotJob SnapshotJob) error {
+	return cleanupSnapshotDeletionResources(ctx, gcs.Client, gcs.Owner, snapshotJob, snapshotJobExporter(snapshotJob, gcsExporter))
+}
+
+func (gcs *GCS) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
+	return listSnapshotJobs(ctx, gcs.Client, gcs.Owner, gcsExporter)
 }

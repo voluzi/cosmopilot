@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
@@ -603,6 +604,7 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 
 func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {
 	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, batchv1.AddToScheme(scheme))
@@ -616,8 +618,10 @@ func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {
 		}}},
 	}
 	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
 	clientSet := fake.NewSimpleClientset()
 	reconciler := &Reconciler{
+		Client:            controllerClient,
 		snapshotClientSet: clientSet,
 		Scheme:            scheme,
 		opts:              &controllers.ControllerRunOptions{},
@@ -646,6 +650,71 @@ func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {
 	deleted, err = reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
 	require.NoError(t, err)
 	assert.True(t, deleted)
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationTarballDeletionComplete])
+}
+
+func TestIsTarballDeletedRequiresDurableSuccessBeforeReturning(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta:   metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		}}},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
+	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "-00010101000000-delete",
+			Namespace: "default",
+			Labels: map[string]string{
+				"exporter": "gcs-exporter",
+				"owner":    chainNode.Name,
+				"type":     "delete",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: chainNode.APIVersion,
+				Kind:       chainNode.Kind,
+				Name:       chainNode.Name,
+				UID:        chainNode.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type:   batchv1.JobComplete,
+			Status: corev1.ConditionTrue,
+		}}},
+	}
+	clientSet := fake.NewSimpleClientset(job)
+	reconciler := &Reconciler{
+		Client:            &updateFailingClient{Client: baseClient},
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	deleted, err := reconciler.isTarballDeleted(context.Background(), chainNode, snapshot)
+	assert.False(t, deleted)
+	require.ErrorContains(t, err, "update failed")
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
+	_, complete := stored.Annotations[controllers.AnnotationTarballDeletionComplete]
+	assert.False(t, complete)
+	_, complete = snapshot.Annotations[controllers.AnnotationTarballDeletionComplete]
+	assert.False(t, complete)
+	_, err = clientSet.BatchV1().Jobs("default").Get(context.Background(), job.Name, metav1.GetOptions{})
+	require.NoError(t, err)
 }
 
 func TestFinishTarballExportPersistsBeforeCleanup(t *testing.T) {
@@ -813,6 +882,1297 @@ type updateFailingClient struct {
 
 func (c *updateFailingClient) Update(context.Context, client.Object, ...client.UpdateOption) error {
 	return errors.New("update failed")
+}
+
+type replaceSnapshotBeforeDeleteClient struct {
+	client.Client
+	replacement     *snapshotv1.VolumeSnapshot
+	markerPersisted bool
+	deleteUID       types.UID
+}
+
+func (c *replaceSnapshotBeforeDeleteClient) Update(ctx context.Context, object client.Object, opts ...client.UpdateOption) error {
+	if err := c.Client.Update(ctx, object, opts...); err != nil {
+		return err
+	}
+	if snapshot, ok := object.(*snapshotv1.VolumeSnapshot); ok &&
+		snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] == strconv.FormatBool(true) {
+		c.markerPersisted = true
+	}
+	return nil
+}
+
+func (c *replaceSnapshotBeforeDeleteClient) Delete(ctx context.Context, object client.Object, opts ...client.DeleteOption) error {
+	snapshot, ok := object.(*snapshotv1.VolumeSnapshot)
+	if !ok {
+		return c.Client.Delete(ctx, object, opts...)
+	}
+	if !c.markerPersisted {
+		return errors.New("snapshot deleted before tarball deletion marker was persisted")
+	}
+	if err := c.Client.Delete(ctx, snapshot); err != nil {
+		return err
+	}
+	if err := c.Client.Create(ctx, c.replacement.DeepCopy()); err != nil {
+		return err
+	}
+
+	deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+	if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+		c.deleteUID = *deleteOptions.Preconditions.UID
+	}
+	if c.deleteUID != c.replacement.UID {
+		return apierrors.NewConflict(
+			schema.GroupResource{Group: "snapshot.storage.k8s.io", Resource: "volumesnapshots"},
+			snapshot.Name,
+			errors.New("UID precondition did not match"),
+		)
+	}
+	return c.Client.Delete(ctx, c.replacement)
+}
+
+func TestEnsureVolumeSnapshotsDoesNotDeleteSameNameReplacementAfterTarballMarker(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "node",
+			Namespace:         "default",
+			UID:               "node-uid",
+			CreationTimestamp: metav1.NewTime(now),
+			Annotations: map[string]string{
+				controllers.AnnotationLastPvcSnapshot: now.Format(timeLayout),
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:            "24h",
+			Retention:            &retention,
+			PreserveLastSnapshot: ptr.To(false),
+			ExportTarball: &appsv1.ExportTarballConfig{
+				DeleteOnExpire: ptr.To(true),
+				GCS:            &appsv1.GcsExportConfig{Bucket: "snapshots"},
+			},
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			Phase:        appsv1.PhaseChainNodeRunning,
+			ChainID:      "chain-1",
+			PvcSize:      "1Gi",
+			LatestHeight: 1,
+		},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "snapshot",
+			Namespace:         chainNode.Namespace,
+			UID:               "original-snapshot-uid",
+			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+			Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady:  "true",
+				controllers.AnnotationExportingTarball:  tarballFinished,
+				controllers.AnnotationSnapshotRetention: retention,
+			},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	replacement := snapshot.DeepCopy()
+	replacement.UID = "replacement-snapshot-uid"
+	replacement.ResourceVersion = ""
+	replacement.CreationTimestamp = metav1.NewTime(now)
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, snapshot).
+		Build()
+	tracingClient := &replaceSnapshotBeforeDeleteClient{Client: baseClient, replacement: replacement}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      getTarballName(chainNode, snapshot) + "-delete",
+			Namespace: chainNode.Namespace,
+			Labels: map[string]string{
+				"exporter": "gcs-exporter",
+				"owner":    chainNode.Name,
+				"type":     "delete",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: chainNode.APIVersion,
+				Kind:       chainNode.Kind,
+				Name:       chainNode.Name,
+				UID:        chainNode.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		}}},
+	}
+	reconciler := &Reconciler{
+		Client:            tracingClient,
+		snapshotClientSet: fake.NewSimpleClientset(job),
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	err := reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true)
+	require.True(t, apierrors.IsConflict(err))
+	assert.True(t, tracingClient.markerPersisted)
+	assert.Equal(t, snapshot.UID, tracingClient.deleteUID)
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(replacement), stored))
+	assert.Equal(t, replacement.UID, stored.UID)
+}
+
+func TestEnsureVolumeSnapshotsHonorsTarballDeletionMarkerForRetention(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	retain := int32(1)
+	tests := []struct {
+		name      string
+		export    *appsv1.ExportTarballConfig
+		retention *string
+		retain    *int32
+		times     []time.Time
+	}{
+		{
+			name:      "time-based GCS retention",
+			export:    &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			retention: &retention,
+			times:     []time.Time{now.Add(-2 * time.Hour)},
+		},
+		{
+			name:   "count-based S3 retention",
+			export: &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+			retain: &retain,
+			times:  []time.Time{now.Add(-2 * time.Hour), now.Add(-time.Hour)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+
+			chainNode := &appsv1.ChainNode{
+				TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "node",
+					Namespace:         "default",
+					UID:               "node-uid",
+					CreationTimestamp: metav1.NewTime(now),
+					Annotations: map[string]string{
+						controllers.AnnotationLastPvcSnapshot: tt.times[len(tt.times)-1].Format(timeLayout),
+					},
+				},
+				Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+					Frequency:            "240h",
+					Retention:            tt.retention,
+					Retain:               tt.retain,
+					PreserveLastSnapshot: ptr.To(false),
+					ExportTarball:        tt.export,
+				}}},
+				Status: appsv1.ChainNodeStatus{
+					Phase:        appsv1.PhaseChainNodeRunning,
+					ChainID:      "chain-1",
+					PvcSize:      "1Gi",
+					LatestHeight: 1,
+				},
+			}
+			objects := []client.Object{chainNode}
+			for i, createdAt := range tt.times {
+				annotations := map[string]string{
+					controllers.AnnotationPvcSnapshotReady: "true",
+					controllers.AnnotationExportingTarball: tarballFinished,
+				}
+				if i == 0 {
+					annotations[controllers.AnnotationTarballDeletionComplete] = "true"
+				}
+				if tt.retention != nil {
+					annotations[controllers.AnnotationSnapshotRetention] = *tt.retention
+				}
+				objects = append(objects, &snapshotv1.VolumeSnapshot{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              fmt.Sprintf("snapshot-%d", i),
+						Namespace:         chainNode.Namespace,
+						UID:               types.UID(fmt.Sprintf("snapshot-%d-uid", i)),
+						CreationTimestamp: metav1.NewTime(createdAt),
+						Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+						Annotations:       annotations,
+					},
+					Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+				})
+			}
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(objects...).
+				Build()
+			clientSet := fake.NewSimpleClientset()
+			reconciler := &Reconciler{
+				Client:            controllerClient,
+				snapshotClientSet: clientSet,
+				Scheme:            scheme,
+				opts:              &controllers.ControllerRunOptions{},
+				recorder:          record.NewFakeRecorder(10),
+			}
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			oldest := &snapshotv1.VolumeSnapshot{}
+			err := controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot-0", Namespace: chainNode.Namespace}, oldest)
+			assert.True(t, apierrors.IsNotFound(err))
+			jobs, err := clientSet.BatchV1().Jobs(chainNode.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, jobs.Items, "a durable deletion marker must not schedule another delete Job")
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsReconcilesOrphanJobs(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	providers := []struct {
+		name     string
+		exporter string
+		export   *appsv1.ExportTarballConfig
+	}{
+		{
+			name:     "GCS",
+			exporter: "gcs-exporter",
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		},
+		{
+			name:     "S3",
+			exporter: "s3-exporter",
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+		},
+	}
+	scenarios := []struct {
+		name            string
+		purpose         string
+		status          batchv1.JobStatus
+		disappearOnList bool
+		wantCreateCalls int
+		wantDeletionJob bool
+	}{
+		{
+			name:    "cleans successful deletion Job without creating first",
+			purpose: "delete",
+			status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}},
+		},
+		{
+			name:            "does not recreate deletion Job that disappears after listing",
+			purpose:         "delete",
+			disappearOnList: true,
+		},
+		{
+			name:            "starts deletion for orphan upload Job",
+			purpose:         "upload",
+			wantCreateCalls: 1,
+			wantDeletionJob: true,
+		},
+	}
+
+	for _, provider := range providers {
+		for _, scenario := range scenarios {
+			t.Run(provider.name+"/"+scenario.name, func(t *testing.T) {
+				scheme := runtime.NewScheme()
+				require.NoError(t, snapshotv1.AddToScheme(scheme))
+				require.NoError(t, appsv1.AddToScheme(scheme))
+				require.NoError(t, corev1.AddToScheme(scheme))
+				require.NoError(t, batchv1.AddToScheme(scheme))
+
+				chainNode := &appsv1.ChainNode{
+					TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "node",
+						Namespace:         "default",
+						UID:               "node-uid",
+						CreationTimestamp: metav1.NewTime(now),
+						Annotations: map[string]string{
+							controllers.AnnotationLastPvcSnapshot: now.Format(timeLayout),
+						},
+					},
+					Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+						Frequency:     "24h",
+						ExportTarball: provider.export,
+					}}},
+					Status: appsv1.ChainNodeStatus{
+						Phase:        appsv1.PhaseChainNodeRunning,
+						ChainID:      "chain-1",
+						PvcSize:      "1Gi",
+						LatestHeight: 1,
+					},
+				}
+				jobName := "orphan-tarball-" + scenario.purpose
+				controllerClient := fakeclient.NewClientBuilder().
+					WithScheme(scheme).
+					WithStatusSubresource(&appsv1.ChainNode{}).
+					WithObjects(chainNode).
+					Build()
+				job := &batchv1.Job{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      jobName,
+						Namespace: chainNode.Namespace,
+						UID:       "orphan-job-uid",
+						Labels: map[string]string{
+							"exporter": provider.exporter,
+							"owner":    chainNode.Name,
+							"type":     scenario.purpose,
+						},
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: chainNode.APIVersion,
+							Kind:       chainNode.Kind,
+							Name:       chainNode.Name,
+							UID:        chainNode.UID,
+							Controller: ptr.To(true),
+						}},
+					},
+					Status: scenario.status,
+				}
+				objects := []runtime.Object{job}
+				if scenario.purpose == "upload" {
+					objects = append(objects, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+						Name:      job.Name,
+						Namespace: job.Namespace,
+						UID:       "orphan-pvc-uid",
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: batchv1.SchemeGroupVersion.String(),
+							Kind:       "Job",
+							Name:       job.Name,
+							UID:        job.UID,
+							Controller: ptr.To(true),
+						}},
+					}})
+				}
+				clientSet := fake.NewSimpleClientset(objects...)
+				if scenario.disappearOnList {
+					listedJob := job.DeepCopy()
+					clientSet.PrependReactor("list", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+						err := clientSet.Tracker().Delete(batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, job.Name)
+						if err != nil && !apierrors.IsNotFound(err) {
+							require.NoError(t, err)
+						}
+						return true, &batchv1.JobList{Items: []batchv1.Job{*listedJob}}, nil
+					})
+				}
+				if scenario.purpose == "upload" {
+					clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+						createAction, ok := action.(k8stesting.CreateAction)
+						require.True(t, ok)
+						createdJob, ok := createAction.GetObject().(*batchv1.Job)
+						require.True(t, ok)
+						createdJob.UID = "orphan-delete-job-uid"
+						return false, nil, nil
+					})
+				}
+				reconciler := &Reconciler{
+					Client:            controllerClient,
+					snapshotClientSet: clientSet,
+					Scheme:            scheme,
+					opts:              &controllers.ControllerRunOptions{},
+					recorder:          record.NewFakeRecorder(10),
+				}
+
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+				createCalls := 0
+				for _, action := range clientSet.Actions() {
+					if action.GetVerb() == "create" && action.GetResource().Resource == "jobs" {
+						createCalls++
+					}
+				}
+				assert.Equal(t, scenario.wantCreateCalls, createCalls)
+				if scenario.purpose == "upload" {
+					_, getErr := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+					assert.True(t, apierrors.IsNotFound(getErr), "the upload Job must be absent before archive deletion starts")
+					_, getErr = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+					assert.True(t, apierrors.IsNotFound(getErr), "the upload PVC must be torn down before archive deletion starts")
+					deleteJob, getErr := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+					require.NoError(t, getErr)
+					assert.Equal(t, types.UID("orphan-delete-job-uid"), deleteJob.UID)
+					require.NotNil(t, deleteJob.Spec.Suspend)
+					assert.False(t, *deleteJob.Spec.Suspend)
+					assert.Equal(t, string(job.UID), deleteJob.Labels["cleanup-upload-uid"])
+					assert.Equal(t, "orphan-pvc-uid", deleteJob.Labels["cleanup-pvc-uid"])
+					assert.Equal(t, provider.exporter, deleteJob.Labels["cleanup-exporter"])
+					assert.Equal(t, chainNode.Name, deleteJob.Labels["cleanup-owner"])
+					assert.Equal(t, "upload", deleteJob.Labels["cleanup-type"])
+
+					deleteJob.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+					_, getErr = clientSet.BatchV1().Jobs(chainNode.Namespace).UpdateStatus(context.Background(), deleteJob, metav1.UpdateOptions{})
+					require.NoError(t, getErr)
+					require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+					require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+					createCalls = 0
+					deleteActions := make([]k8stesting.DeleteAction, 0, 3)
+					for _, action := range clientSet.Actions() {
+						switch action.GetVerb() {
+						case "create":
+							if action.GetResource().Resource == "jobs" {
+								createCalls++
+							}
+						case "delete":
+							deleteAction, ok := action.(k8stesting.DeleteAction)
+							require.True(t, ok)
+							deleteActions = append(deleteActions, deleteAction)
+						}
+					}
+					assert.Equal(t, 1, createCalls, "a successful deletion must not be scheduled twice")
+					require.Len(t, deleteActions, 3)
+					assertGuardedDeleteAction(t, deleteActions[0], "jobs", job.Name, job.UID)
+					assertGuardedDeleteAction(t, deleteActions[1], "persistentvolumeclaims", job.Name, "orphan-pvc-uid")
+					assertGuardedDeleteAction(t, deleteActions[2], "jobs", deleteJob.Name, deleteJob.UID)
+
+					_, getErr = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+					assert.True(t, apierrors.IsNotFound(getErr), "orphan upload Job must be cleaned up after deletion succeeds")
+					_, getErr = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+					assert.True(t, apierrors.IsNotFound(getErr), "orphan upload PVC must be cleaned up after deletion succeeds")
+					_, getErr = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+					assert.True(t, apierrors.IsNotFound(getErr), "successful deletion Job must be cleaned up last")
+					return
+				}
+				_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-upload", metav1.GetOptions{})
+				assert.True(t, apierrors.IsNotFound(err), "orphan upload Job must be cleaned up")
+				_, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+				if scenario.wantDeletionJob {
+					require.NoError(t, err)
+				} else {
+					assert.True(t, apierrors.IsNotFound(err), "completed or disappeared deletion Job must not be recreated")
+				}
+			})
+		}
+	}
+}
+
+func TestEnsureVolumeSnapshotsResumesOrphanDeletionAfterCrashFollowingDeleteJobCreation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	providers := []struct {
+		name     string
+		exporter string
+		export   *appsv1.ExportTarballConfig
+	}{
+		{
+			name:     "GCS",
+			exporter: "gcs-exporter",
+			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		},
+		{
+			name:     "S3",
+			exporter: "s3-exporter",
+			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+		},
+	}
+
+	for _, provider := range providers {
+		t.Run(provider.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+
+			chainNode := orphanSnapshotTestChainNode(now, provider.export)
+			ownerReference := metav1.OwnerReference{
+				APIVersion: chainNode.APIVersion,
+				Kind:       chainNode.Kind,
+				Name:       chainNode.Name,
+				UID:        chainNode.UID,
+				Controller: ptr.To(true),
+			}
+			uploadJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name:            "orphan-tarball-upload",
+				Namespace:       chainNode.Namespace,
+				UID:             "upload-job-uid",
+				Labels:          map[string]string{"exporter": provider.exporter, "owner": chainNode.Name, "type": "upload"},
+				OwnerReferences: []metav1.OwnerReference{ownerReference},
+			}}
+			uploadPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name:      uploadJob.Name,
+				Namespace: uploadJob.Namespace,
+				UID:       "upload-pvc-uid",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: batchv1.SchemeGroupVersion.String(),
+					Kind:       "Job",
+					Name:       uploadJob.Name,
+					UID:        uploadJob.UID,
+					Controller: ptr.To(true),
+				}},
+			}}
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(chainNode).
+				Build()
+			clientSet := fake.NewSimpleClientset(uploadJob, uploadPVC)
+			crashErr := errors.New("simulated crash after delete Job creation")
+			createdDeleteUIDs := make([]types.UID, 0, 1)
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				if job.Labels["type"] != "delete" {
+					return false, nil, nil
+				}
+
+				uid := types.UID(fmt.Sprintf("delete-job-uid-%d", len(createdDeleteUIDs)+1))
+				createdDeleteUIDs = append(createdDeleteUIDs, uid)
+				job.UID = uid
+				if len(createdDeleteUIDs) != 1 {
+					return false, nil, nil
+				}
+
+				created := job.DeepCopy()
+				require.NoError(t, clientSet.Tracker().Create(
+					batchv1.SchemeGroupVersion.WithResource("jobs"), created, created.Namespace,
+				))
+				return true, nil, crashErr
+			})
+			reconciler := &Reconciler{
+				Client:            controllerClient,
+				snapshotClientSet: clientSet,
+				Scheme:            scheme,
+				opts:              &controllers.ControllerRunOptions{},
+				recorder:          record.NewFakeRecorder(10),
+			}
+
+			err := reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true)
+			require.ErrorIs(t, err, crashErr)
+			_, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			require.NoError(t, err, "the upload Job is the durable cleanup state while deletion runs")
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), uploadPVC.Name, metav1.GetOptions{})
+			require.NoError(t, err, "the upload PVC is the durable cleanup state while deletion runs")
+
+			deleteJob, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, types.UID("delete-job-uid-1"), deleteJob.UID)
+			deleteJob.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			_, err = clientSet.BatchV1().Jobs(chainNode.Namespace).UpdateStatus(context.Background(), deleteJob, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			for range 3 {
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+			}
+
+			assert.Equal(t, []types.UID{"delete-job-uid-1"}, createdDeleteUIDs,
+				"the successful external deletion must never be scheduled a second time")
+			deleteActions := make([]k8stesting.DeleteAction, 0, 3)
+			for _, action := range clientSet.Actions() {
+				if action.GetVerb() != "delete" {
+					continue
+				}
+				deleteAction, ok := action.(k8stesting.DeleteAction)
+				require.True(t, ok)
+				deleteActions = append(deleteActions, deleteAction)
+			}
+			require.Len(t, deleteActions, 3)
+			assertGuardedDeleteAction(t, deleteActions[0], "jobs", uploadJob.Name, uploadJob.UID)
+			assertGuardedDeleteAction(t, deleteActions[1], "persistentvolumeclaims", uploadPVC.Name, uploadPVC.UID)
+			assertGuardedDeleteAction(t, deleteActions[2], "jobs", deleteJob.Name, deleteJob.UID)
+
+			jobs, err := clientSet.BatchV1().Jobs(chainNode.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, jobs.Items)
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), uploadPVC.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsDoesNotRestartDeletionForTerminatingOrphanUpload(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	deletionTimestamp := metav1.NewTime(now.Add(-time.Minute))
+	providers := []struct {
+		name     string
+		exporter string
+		export   *appsv1.ExportTarballConfig
+	}{
+		{
+			name:     "GCS",
+			exporter: "gcs-exporter",
+			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		},
+		{
+			name:     "S3",
+			exporter: "s3-exporter",
+			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+		},
+	}
+
+	for _, provider := range providers {
+		t.Run(provider.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+
+			chainNode := orphanSnapshotTestChainNode(now, provider.export)
+			ownerReference := metav1.OwnerReference{
+				APIVersion: chainNode.APIVersion,
+				Kind:       chainNode.Kind,
+				Name:       chainNode.Name,
+				UID:        chainNode.UID,
+				Controller: ptr.To(true),
+			}
+			uploadJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name:              "orphan-tarball-upload",
+				Namespace:         chainNode.Namespace,
+				UID:               "orphan-upload-uid",
+				DeletionTimestamp: &deletionTimestamp,
+				Finalizers:        []string{"foregroundDeletion"},
+				Labels: map[string]string{
+					"exporter": provider.exporter,
+					"owner":    chainNode.Name,
+					"type":     "upload",
+				},
+				OwnerReferences: []metav1.OwnerReference{ownerReference},
+			}}
+			deleteJob := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "orphan-tarball-delete",
+					Namespace:       chainNode.Namespace,
+					UID:             "orphan-delete-uid",
+					Labels:          map[string]string{"exporter": provider.exporter, "owner": chainNode.Name, "type": "delete"},
+					OwnerReferences: []metav1.OwnerReference{ownerReference},
+				},
+				Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}}},
+			}
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(chainNode).
+				Build()
+			clientSet := fake.NewSimpleClientset(uploadJob, deleteJob)
+			reconciler := &Reconciler{
+				Client:            controllerClient,
+				snapshotClientSet: clientSet,
+				Scheme:            scheme,
+				opts:              &controllers.ControllerRunOptions{},
+				recorder:          record.NewFakeRecorder(10),
+			}
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			purgeJob, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-purge", metav1.GetOptions{})
+			require.NoError(t, err, "terminal legacy deletion must persist a post-upload cleanup Job")
+			require.NotNil(t, purgeJob.Spec.Suspend)
+			assert.True(t, *purgeJob.Spec.Suspend, "post-upload deletion must remain suspended while the upload terminates")
+			assert.Equal(t, string(uploadJob.UID), purgeJob.Labels["cleanup-upload-uid"])
+			_, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			require.NoError(t, err, "the foreground-terminating upload Job must be left alone")
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsDoesNotActOnSameNameOrphanUploadReplacement(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	providers := []struct {
+		name     string
+		exporter string
+		export   *appsv1.ExportTarballConfig
+	}{
+		{
+			name:     "GCS",
+			exporter: "gcs-exporter",
+			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		},
+		{
+			name:     "S3",
+			exporter: "s3-exporter",
+			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+		},
+	}
+
+	for _, provider := range providers {
+		t.Run(provider.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+
+			chainNode := orphanSnapshotTestChainNode(now, provider.export)
+			ownerReference := metav1.OwnerReference{
+				APIVersion: chainNode.APIVersion,
+				Kind:       chainNode.Kind,
+				Name:       chainNode.Name,
+				UID:        chainNode.UID,
+				Controller: ptr.To(true),
+			}
+			originalJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name:            "orphan-tarball-upload",
+				Namespace:       chainNode.Namespace,
+				UID:             "listed-upload-uid",
+				Labels:          map[string]string{"exporter": provider.exporter, "owner": chainNode.Name, "type": "upload"},
+				OwnerReferences: []metav1.OwnerReference{ownerReference},
+			}}
+			originalPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name:      originalJob.Name,
+				Namespace: originalJob.Namespace,
+				UID:       "listed-pvc-uid",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: batchv1.SchemeGroupVersion.String(),
+					Kind:       "Job",
+					Name:       originalJob.Name,
+					UID:        originalJob.UID,
+					Controller: ptr.To(true),
+				}},
+			}}
+			replacementJob := originalJob.DeepCopy()
+			replacementJob.UID = "replacement-upload-uid"
+			replacementPVC := originalPVC.DeepCopy()
+			replacementPVC.UID = "replacement-pvc-uid"
+			replacementPVC.OwnerReferences[0].UID = replacementJob.UID
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(chainNode).
+				Build()
+			clientSet := fake.NewSimpleClientset(originalJob, originalPVC)
+			listedJob := originalJob.DeepCopy()
+			clientSet.PrependReactor("list", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				require.NoError(t, clientSet.Tracker().Delete(batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, originalJob.Name))
+				require.NoError(t, clientSet.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), chainNode.Namespace, originalPVC.Name))
+				require.NoError(t, clientSet.Tracker().Create(batchv1.SchemeGroupVersion.WithResource("jobs"), replacementJob.DeepCopy(), chainNode.Namespace))
+				require.NoError(t, clientSet.Tracker().Create(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), replacementPVC.DeepCopy(), chainNode.Namespace))
+				return true, &batchv1.JobList{Items: []batchv1.Job{*listedJob}}, nil
+			})
+			reconciler := &Reconciler{
+				Client:            controllerClient,
+				snapshotClientSet: clientSet,
+				Scheme:            scheme,
+				opts:              &controllers.ControllerRunOptions{},
+				recorder:          record.NewFakeRecorder(10),
+			}
+
+			err := reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true)
+			require.ErrorContains(t, err, "UID")
+
+			for _, action := range clientSet.Actions() {
+				assert.False(t, action.GetVerb() == "create" && action.GetResource().Resource == "jobs",
+					"a stale listing must not create an archive deletion Job")
+				assert.NotEqual(t, "delete", action.GetVerb(), "replacement resources must not be deleted")
+			}
+			storedJob, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), replacementJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, replacementJob.UID, storedJob.UID)
+			storedPVC, err := clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), replacementPVC.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, replacementPVC.UID, storedPVC.UID)
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsCleansImmediateOrphanDeletionSuccessWithPairedIdentity(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, provider.export,
+			)
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				if job.Labels["type"] == "delete" {
+					job.UID = "orphan-delete-uid"
+					job.Status.Conditions = []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}}
+				}
+				return false, nil, nil
+			})
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), uploadPVC.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsRecoversWhenListedUploadJobVanishedButPVCRemains(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, provider.export,
+			)
+			listedUpload := uploadJob.DeepCopy()
+			clientSet.PrependReactor("list", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				err := clientSet.Tracker().Delete(
+					batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, uploadJob.Name,
+				)
+				if err != nil && !apierrors.IsNotFound(err) {
+					require.NoError(t, err)
+				}
+				return true, &batchv1.JobList{Items: []batchv1.Job{*listedUpload}}, nil
+			})
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				if job.Labels["type"] == "delete" {
+					job.UID = "orphan-delete-uid"
+					job.Status.Conditions = []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}}
+				}
+				return false, nil, nil
+			})
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			_, err := clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(context.Background(), uploadPVC.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			deleteActions := make([]k8stesting.DeleteAction, 0, 2)
+			for _, action := range clientSet.Actions() {
+				if action.GetVerb() == "delete" {
+					deleteAction, ok := action.(k8stesting.DeleteAction)
+					require.True(t, ok)
+					deleteActions = append(deleteActions, deleteAction)
+				}
+			}
+			require.Len(t, deleteActions, 2)
+			assertGuardedDeleteAction(t, deleteActions[0], "persistentvolumeclaims", uploadPVC.Name, uploadPVC.UID)
+			assertGuardedDeleteAction(t, deleteActions[1], "jobs", "orphan-tarball-delete", "orphan-delete-uid")
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsWaitsForForegroundUploadTerminationBeforeArchiveDeletion(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			reconciler, chainNode, clientSet, uploadJob, _ := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, provider.export,
+			)
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				if job.Labels["type"] == "delete" {
+					job.UID = "orphan-delete-uid"
+				}
+				return false, nil, nil
+			})
+			clientSet.PrependReactor("delete", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				deleteAction, ok := action.(k8stesting.DeleteAction)
+				require.True(t, ok)
+				if deleteAction.GetName() != uploadJob.Name {
+					return false, nil, nil
+				}
+				terminating := uploadJob.DeepCopy()
+				deletionTimestamp := metav1.Now()
+				terminating.DeletionTimestamp = &deletionTimestamp
+				terminating.Finalizers = []string{"foregroundDeletion"}
+				require.NoError(t, clientSet.Tracker().Update(
+					batchv1.SchemeGroupVersion.WithResource("jobs"), terminating, terminating.Namespace,
+				))
+				return true, nil, nil
+			})
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			deleteJob, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), "orphan-tarball-delete", metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, deleteJob.Spec.Suspend)
+			assert.True(t, *deleteJob.Spec.Suspend, "external deletion must remain suspended while the upload Job exists")
+			storedUpload, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), uploadJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, storedUpload.DeletionTimestamp)
+
+			require.NoError(t, clientSet.Tracker().Delete(
+				batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, uploadJob.Name,
+			))
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			deleteJob, err = clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, deleteJob.Spec.Suspend)
+			assert.False(t, *deleteJob.Spec.Suspend, "external deletion may start only after the upload Job is absent")
+		})
+	}
+}
+
+type orphanSnapshotProviderCase struct {
+	name     string
+	exporter string
+	export   *appsv1.ExportTarballConfig
+}
+
+func orphanSnapshotProviderCases() []orphanSnapshotProviderCase {
+	return []orphanSnapshotProviderCase{
+		{
+			name:     "GCS",
+			exporter: "gcs-exporter",
+			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+		},
+		{
+			name:     "S3",
+			exporter: "s3-exporter",
+			export: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+				Bucket: "snapshots", Region: "eu-west-1",
+			}},
+		},
+	}
+}
+
+func newOrphanUploadTestReconciler(
+	t *testing.T,
+	now time.Time,
+	exporter string,
+	export *appsv1.ExportTarballConfig,
+) (*Reconciler, *appsv1.ChainNode, *fake.Clientset, *batchv1.Job, *corev1.PersistentVolumeClaim) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := orphanSnapshotTestChainNode(now, export)
+	ownerReference := metav1.OwnerReference{
+		APIVersion: chainNode.APIVersion,
+		Kind:       chainNode.Kind,
+		Name:       chainNode.Name,
+		UID:        chainNode.UID,
+		Controller: ptr.To(true),
+	}
+	uploadJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "orphan-tarball-upload",
+		Namespace: chainNode.Namespace,
+		UID:       "orphan-upload-uid",
+		Labels: map[string]string{
+			"exporter": exporter,
+			"owner":    chainNode.Name,
+			"type":     "upload",
+		},
+		OwnerReferences: []metav1.OwnerReference{ownerReference},
+	}}
+	uploadPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      uploadJob.Name,
+		Namespace: uploadJob.Namespace,
+		UID:       "orphan-pvc-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(),
+			Kind:       "Job",
+			Name:       uploadJob.Name,
+			UID:        uploadJob.UID,
+			Controller: ptr.To(true),
+		}},
+	}}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode).
+		Build()
+	clientSet := fake.NewSimpleClientset(uploadJob, uploadPVC)
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+	return reconciler, chainNode, clientSet, uploadJob, uploadPVC
+}
+
+func TestEnsureVolumeSnapshotsResumesPendingDeletionWhenExportsAreDisabled(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, test := range []struct {
+		name    string
+		disable func(*appsv1.ChainNode)
+	}{
+		{
+			name: "tarball export disabled",
+			disable: func(chainNode *appsv1.ChainNode) {
+				chainNode.Spec.Persistence.Snapshots.ExportTarball = nil
+			},
+		},
+		{
+			name: "snapshots disabled",
+			disable: func(chainNode *appsv1.ChainNode) {
+				chainNode.Spec.Persistence.Snapshots = nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+
+			chainNode := orphanSnapshotTestChainNode(now, &appsv1.ExportTarballConfig{
+				S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"},
+			})
+			test.disable(chainNode)
+			suspended := true
+			deleteJob := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "orphan-tarball-delete",
+					Namespace: chainNode.Namespace,
+					UID:       "orphan-delete-uid",
+					Labels: map[string]string{
+						"exporter":           "s3-exporter",
+						"owner":              chainNode.Name,
+						"type":               "delete",
+						"cleanup-exporter":   "s3-exporter",
+						"cleanup-owner":      chainNode.Name,
+						"cleanup-type":       "upload",
+						"cleanup-upload-uid": "orphan-upload-uid",
+						"cleanup-pvc-uid":    "orphan-pvc-uid",
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: chainNode.APIVersion,
+						Kind:       chainNode.Kind,
+						Name:       chainNode.Name,
+						UID:        chainNode.UID,
+						Controller: ptr.To(true),
+					}},
+				},
+				Spec: batchv1.JobSpec{Suspend: &suspended},
+			}
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(chainNode).
+				Build()
+			clientSet := fake.NewSimpleClientset(deleteJob)
+			reconciler := &Reconciler{
+				Client:            controllerClient,
+				snapshotClientSet: clientSet,
+				Scheme:            scheme,
+				opts:              &controllers.ControllerRunOptions{},
+				recorder:          record.NewFakeRecorder(10),
+			}
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			stored, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, stored.Spec.Suspend)
+			assert.False(t, *stored.Spec.Suspend)
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsPersistsPendingDeletionSuccessWhenSnapshotsAreDisabled(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	chainNode := orphanSnapshotTestChainNode(now, &appsv1.ExportTarballConfig{
+		S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"},
+	})
+	chainNode.Spec.Persistence.Snapshots = nil
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:              "snapshot",
+		Namespace:         chainNode.Namespace,
+		CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+		Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+	}}
+	tarballName := fmt.Sprintf("%s-%s-archive", chainNode.Status.ChainID, snapshot.CreationTimestamp.UTC().Format(timeLayout))
+	deleteJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      tarballName + "-delete",
+			Namespace: chainNode.Namespace,
+			UID:       "delete-uid",
+			Labels: map[string]string{
+				"exporter": "s3-exporter",
+				"owner":    chainNode.Name,
+				"type":     "delete",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: chainNode.APIVersion,
+				Kind:       chainNode.Kind,
+				Name:       chainNode.Name,
+				UID:        chainNode.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		}}},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, snapshot).
+		Build()
+	clientSet := fake.NewSimpleClientset(deleteJob)
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationTarballDeletionComplete])
+	_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestSnapshotKubernetesClientFallsBackToProductionClientSet(t *testing.T) {
+	production := &kubernetes.Clientset{}
+	override := fake.NewSimpleClientset()
+	reconciler := &Reconciler{ClientSet: production}
+	assert.Same(t, production, reconciler.snapshotKubernetesClient())
+	reconciler.snapshotClientSet = override
+	assert.Same(t, override, reconciler.snapshotKubernetesClient())
+}
+
+func TestReconcilePendingTarballDeletionsBlocksFailedWorkflow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	chainNode := orphanSnapshotTestChainNode(now, &appsv1.ExportTarballConfig{
+		GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"},
+	})
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "old-tarball-delete", Namespace: chainNode.Namespace, UID: "delete-uid",
+			Labels: map[string]string{"exporter": "s3-exporter", "owner": chainNode.Name, "type": "delete"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: chainNode.APIVersion, Kind: chainNode.Kind, Name: chainNode.Name,
+				UID: chainNode.UID, Controller: ptr.To(true),
+			}},
+		},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+		}}},
+	}
+	clientSet := fake.NewSimpleClientset(failedJob)
+	reconciler := &Reconciler{snapshotClientSet: clientSet, recorder: record.NewFakeRecorder(10)}
+
+	pending, err := reconciler.reconcilePendingTarballDeletions(context.Background(), chainNode)
+	require.NoError(t, err)
+	assert.True(t, pending)
+	stored, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), failedJob.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, failedJob.UID, stored.UID)
+}
+
+func TestEnsureVolumeSnapshotsProcessesReadySnapshotBehindFailedDeletion(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	chainNode := orphanSnapshotTestChainNode(now, nil)
+	chainNode.Annotations[controllers.AnnotationPvcSnapshotInProgress] = "true"
+	snapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "snapshot", Namespace: chainNode.Namespace, CreationTimestamp: metav1.NewTime(now),
+			Labels:      map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{controllers.AnnotationPvcSnapshotReady: "false"},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{
+			ReadyToUse:  ptr.To(true),
+			RestoreSize: resource.NewQuantity(1, resource.BinarySI),
+		},
+	}
+	failedJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "old-delete", Namespace: chainNode.Namespace, UID: "delete-uid",
+		Labels:          map[string]string{"exporter": "s3-exporter", "owner": chainNode.Name, "type": "delete"},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: chainNode.APIVersion, Kind: chainNode.Kind, Name: chainNode.Name, UID: chainNode.UID, Controller: ptr.To(true)}},
+	}, Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}}}
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode, snapshot).Build()
+	reconciler := &Reconciler{Client: controllerClient, snapshotClientSet: fake.NewSimpleClientset(failedJob), recorder: record.NewFakeRecorder(10), opts: &controllers.ControllerRunOptions{}}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotReady])
+}
+
+func TestPersistPendingTarballDeletionSuccessScopesMarkerToName(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	chainNode := orphanSnapshotTestChainNode(now, nil)
+	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot", Namespace: chainNode.Namespace, CreationTimestamp: metav1.NewTime(now),
+		Labels: map[string]string{controllers.LabelChainNode: chainNode.Name},
+	}}
+	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	reconciler := &Reconciler{Client: controllerClient}
+	oldName := fmt.Sprintf("%s-%s-old", chainNode.Status.ChainID, now.Format(timeLayout))
+	require.NoError(t, reconciler.persistPendingTarballDeletionSuccess(context.Background(), chainNode, oldName))
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
+	assert.Equal(t, oldName, stored.Annotations[controllers.AnnotationTarballDeletionName])
+
+	chainNode.Spec.Persistence.Snapshots.ExportTarball = &appsv1.ExportTarballConfig{Suffix: ptr.To("new")}
+	assert.False(t, tarballDeletionComplete(stored, getTarballName(chainNode, stored), true))
+}
+
+func orphanSnapshotTestChainNode(now time.Time, export *appsv1.ExportTarballConfig) *appsv1.ChainNode {
+	return &appsv1.ChainNode{
+		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "node",
+			Namespace:         "default",
+			UID:               "node-uid",
+			CreationTimestamp: metav1.NewTime(now),
+			Annotations: map[string]string{
+				controllers.AnnotationLastPvcSnapshot: now.Format(timeLayout),
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:     "24h",
+			ExportTarball: export,
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			Phase:        appsv1.PhaseChainNodeRunning,
+			ChainID:      "chain-1",
+			PvcSize:      "1Gi",
+			LatestHeight: 1,
+		},
+	}
+}
+
+func assertGuardedDeleteAction(t *testing.T, action k8stesting.DeleteAction, resource, name string, uid types.UID) {
+	t.Helper()
+	assert.Equal(t, resource, action.GetResource().Resource)
+	assert.Equal(t, name, action.GetName())
+	options := action.GetDeleteOptions()
+	require.NotNil(t, options.Preconditions)
+	require.NotNil(t, options.Preconditions.UID)
+	assert.Equal(t, uid, *options.Preconditions.UID)
 }
 
 func TestIsSnapshotReady(t *testing.T) {

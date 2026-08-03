@@ -41,6 +41,10 @@ const (
 
 func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode, nodePodReady bool) error {
 	logger := log.FromContext(ctx)
+	pendingDeletion, err := r.reconcilePendingTarballDeletions(ctx, chainNode)
+	if err != nil {
+		return err
+	}
 
 	if !chainNode.SnapshotsEnabled() {
 		// Snapshot configuration can be removed while a snapshot annotation is
@@ -306,6 +310,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		// Default case is checking if snapshot has expired (time-based retention).
 		// If tarball is also set for deletion on expire it is also taken care here.
 		default:
+			if pendingDeletion {
+				continue
+			}
 			if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() && len(snapshots) == 1 {
 				logger.Info("skipping retention check to preserve last snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[controllers.AnnotationSnapshotRetention])
 			} else {
@@ -325,7 +332,8 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						}
 					}
 					logger.Info("deleting expired pvc snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[controllers.AnnotationSnapshotRetention])
-					if err = r.Delete(ctx, &snapshot); err != nil {
+					snapshotUID := snapshot.UID
+					if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
 						return err
 					}
 					r.recorder.Eventf(chainNode,
@@ -346,6 +354,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				}
 			}
 		}
+	}
+	if pendingDeletion {
+		return nil
 	}
 
 	// Handle count-based retention (retain field). Re-list snapshots since some may have been deleted above.
@@ -380,7 +391,8 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				}
 			}
 			logger.Info("deleting pvc snapshot due to retain count", "snapshot", snapshot.GetName(), "retain", *retainCount)
-			if err = r.Delete(ctx, &snapshot); err != nil {
+			snapshotUID := snapshot.UID
+			if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
 				return err
 			}
 			r.recorder.Eventf(chainNode,
@@ -411,10 +423,27 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		if err != nil {
 			return err
 		}
-		for _, snapshot := range tarballSnapshots {
-			if !utils.SliceContains[string](tarballNames, snapshot) {
-				logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshot)
-				status, deleteErr := r.deleteTarballWithProvider(ctx, chainNode, exporter, snapshot)
+		for _, snapshotJob := range tarballSnapshots {
+			if !utils.SliceContains[string](tarballNames, snapshotJob.Name) {
+				logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshotJob.Name)
+				cleanupJob := snapshotJob
+				var status datasnapshot.SnapshotStatus
+				var deleteErr error
+				switch snapshotJob.Purpose {
+				case datasnapshot.SnapshotJobDelete:
+					status, deleteErr = exporter.GetSnapshotDeletionStatus(ctx, snapshotJob)
+				case datasnapshot.SnapshotJobUpload:
+					if snapshotJob.Exporter != "" {
+						cleanupJob, status, deleteErr = datasnapshot.DeleteSnapshotForUpload(
+							ctx, r.snapshotKubernetesClient(), chainNode, snapshotJob,
+						)
+					} else {
+						cleanupJob, status, deleteErr = exporter.DeleteSnapshotForUpload(ctx, snapshotJob)
+					}
+					r.recordSnapshotJobReplacement(chainNode, deleteErr)
+				default:
+					continue
+				}
 				if deleteErr != nil {
 					return deleteErr
 				}
@@ -423,16 +452,16 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					r.recorder.Eventf(chainNode,
 						corev1.EventTypeWarning,
 						appsv1.ReasonTarballDeleteError,
-						"Failed deleting orphaned tarball %s; delete Job retained for inspection", snapshot,
+						"Failed deleting orphaned tarball %s; delete Job retained for inspection", snapshotJob.Name,
 					)
 				case datasnapshot.SnapshotSucceeded:
-					if err = exporter.CleanupSnapshotDeletion(ctx, snapshot); err != nil {
+					if err = exporter.CleanupSnapshotDeletion(ctx, cleanupJob); err != nil {
 						return err
 					}
 					r.recorder.Eventf(chainNode,
 						corev1.EventTypeNormal,
 						appsv1.ReasonTarballDeleted,
-						"Deleted orphaned tarball %s", snapshot,
+						"Deleted orphaned tarball %s", snapshotJob.Name,
 					)
 				}
 			}
@@ -450,6 +479,89 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		return r.startNewSnapshot(ctx, chainNode)
 	}
 
+	return nil
+}
+
+func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	if r.snapshotClientSet == nil && r.ClientSet == nil {
+		return false, nil
+	}
+	clientSet := r.snapshotKubernetesClient()
+	jobs, err := datasnapshot.ListSnapshotDeletionJobs(ctx, clientSet, chainNode)
+	if err != nil {
+		return false, err
+	}
+	pending := false
+	for _, job := range jobs {
+		if job.Purpose != datasnapshot.SnapshotJobDelete {
+			continue
+		}
+		status, reconcileErr := datasnapshot.ReconcileSnapshotDeletionJob(ctx, clientSet, chainNode, job)
+		if reconcileErr != nil {
+			return pending, reconcileErr
+		}
+		switch status {
+		case datasnapshot.SnapshotActive:
+			pending = true
+		case datasnapshot.SnapshotFailed:
+			pending = true
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeWarning,
+				appsv1.ReasonTarballDeleteError,
+				"Failed deleting tarball %s; delete Job retained for inspection", job.Name,
+			)
+		case datasnapshot.SnapshotSucceeded:
+			if err = r.persistPendingTarballDeletionSuccess(ctx, chainNode, job.Name); err != nil {
+				return pending, err
+			}
+			if err = datasnapshot.CleanupSnapshotDeletionResources(ctx, clientSet, chainNode, job); err != nil {
+				return pending, err
+			}
+			r.recorder.Eventf(chainNode,
+				corev1.EventTypeNormal,
+				appsv1.ReasonTarballDeleted,
+				"Deleted tarball %s", job.Name,
+			)
+		}
+	}
+	return pending, nil
+}
+
+func (r *Reconciler) snapshotKubernetesClient() kubernetes.Interface {
+	if r.snapshotClientSet != nil {
+		return r.snapshotClientSet
+	}
+	return r.ClientSet
+}
+
+func (r *Reconciler) persistPendingTarballDeletionSuccess(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	tarballName string,
+) error {
+	snapshots, err := r.listNodeSnapshots(ctx, chainNode)
+	if err != nil {
+		return err
+	}
+	for i := range snapshots {
+		snapshot := &snapshots[i]
+		baseName := fmt.Sprintf("%s-%s", chainNode.Status.ChainID, snapshot.CreationTimestamp.UTC().Format(timeLayout))
+		if tarballName != baseName && !strings.HasPrefix(tarballName, baseName+"-") {
+			continue
+		}
+		if snapshot.Annotations == nil {
+			snapshot.Annotations = make(map[string]string)
+		}
+		if tarballDeletionComplete(snapshot, tarballName, false) {
+			return nil
+		}
+		snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
+		snapshot.Annotations[controllers.AnnotationTarballDeletionName] = tarballName
+		if err = r.Update(ctx, snapshot); err != nil {
+			return fmt.Errorf("persist pending tarball deletion success: %w", err)
+		}
+		return nil
+	}
 	return nil
 }
 
@@ -895,6 +1007,11 @@ func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, e
 }
 
 func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
+	tarballName := getTarballName(chainNode, snapshot)
+	if tarballDeletionComplete(snapshot, tarballName, true) {
+		return true, nil
+	}
+
 	status, err := r.deleteTarball(ctx, chainNode, snapshot)
 	if err != nil {
 		return false, err
@@ -906,7 +1023,39 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 			"Failed deleting tarball %s; delete Job retained for inspection", getTarballName(chainNode, snapshot),
 		)
 	}
-	return status == datasnapshot.SnapshotSucceeded, nil
+	if status != datasnapshot.SnapshotSucceeded {
+		return false, nil
+	}
+
+	if snapshot.Annotations == nil {
+		snapshot.Annotations = make(map[string]string)
+	}
+	previous, hadPrevious := snapshot.Annotations[controllers.AnnotationTarballDeletionComplete]
+	previousName, hadPreviousName := snapshot.Annotations[controllers.AnnotationTarballDeletionName]
+	snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
+	snapshot.Annotations[controllers.AnnotationTarballDeletionName] = tarballName
+	if err = r.Update(ctx, snapshot); err != nil {
+		if hadPrevious {
+			snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = previous
+		} else {
+			delete(snapshot.Annotations, controllers.AnnotationTarballDeletionComplete)
+		}
+		if hadPreviousName {
+			snapshot.Annotations[controllers.AnnotationTarballDeletionName] = previousName
+		} else {
+			delete(snapshot.Annotations, controllers.AnnotationTarballDeletionName)
+		}
+		return false, fmt.Errorf("persist tarball deletion success: %w", err)
+	}
+	return true, nil
+}
+
+func tarballDeletionComplete(snapshot *snapshotv1.VolumeSnapshot, tarballName string, allowLegacy bool) bool {
+	if snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] != strconv.FormatBool(true) {
+		return false
+	}
+	deletedName := snapshot.Annotations[controllers.AnnotationTarballDeletionName]
+	return deletedName == tarballName || allowLegacy && deletedName == ""
 }
 
 func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
@@ -914,7 +1063,10 @@ func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *apps
 	if err != nil {
 		return err
 	}
-	if err = exporter.CleanupSnapshotDeletion(ctx, getTarballName(chainNode, snapshot)); err != nil {
+	if err = exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
+		Name:    getTarballName(chainNode, snapshot),
+		Purpose: datasnapshot.SnapshotJobDelete,
+	}); err != nil {
 		return err
 	}
 	return nil
