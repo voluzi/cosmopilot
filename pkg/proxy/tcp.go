@@ -40,7 +40,7 @@ func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...fun
 	}
 	if len(onAccept) > 0 {
 		proxy.onAccept = onAccept[0]
-		proxy.retryUpstream = true
+		proxy.retryUpstream = proxy.onAccept != nil
 	}
 	return proxy, nil
 }
@@ -57,8 +57,10 @@ func (p *TCP) Start() error {
 	for {
 		lconn, err := p.listener.AcceptTCP()
 		if err != nil {
-			log.Errorf("failed to accept connection: %v", err)
-			continue
+			if p.runOnce {
+				return nil
+			}
+			return fmt.Errorf("failed to accept connection: %v", err)
 		}
 
 		if p.onAccept != nil {
@@ -70,13 +72,15 @@ func (p *TCP) Start() error {
 			"raddr": p.raddr,
 		}).Info("handling TCP connection")
 
-		if err = p.handle(lconn); err != nil {
-			log.Errorf("failed to handle connection: %v", err)
-			continue
-		}
-		if p.runOnce {
-			return err
-		}
+		go func() {
+			if handleErr := p.handle(lconn); handleErr != nil {
+				log.Errorf("failed to handle connection: %v", handleErr)
+				return
+			}
+			if p.runOnce {
+				_ = p.listener.Close()
+			}
+		}()
 	}
 }
 

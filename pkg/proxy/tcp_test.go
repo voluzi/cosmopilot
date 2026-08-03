@@ -66,6 +66,19 @@ func TestNewTCPProxy(t *testing.T) {
 	}
 }
 
+func TestNewTCPProxyNilCallbackDoesNotRetryUpstream(t *testing.T) {
+	proxy, err := NewTCPProxy(":0", "127.0.0.1:8080", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.onAccept != nil {
+		t.Fatal("NewTCPProxy() stored a nil callback")
+	}
+	if proxy.retryUpstream {
+		t.Fatal("NewTCPProxy() enabled upstream retries for a nil callback")
+	}
+}
+
 func TestNewTCPProxyStoresAcceptCallback(t *testing.T) {
 	called := false
 	proxy, err := NewTCPProxy(":0", "127.0.0.1:8080", false, func() { called = true })
@@ -159,6 +172,98 @@ func TestTCPProxy_RetainsAcceptedConnectionUntilUpstreamStarts(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("proxy handler did not finish after connection close")
+	}
+}
+
+func TestTCPProxy_StartAcceptsConnectionsWhileUpstreamUnavailable(t *testing.T) {
+	reservedUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamAddr := reservedUpstream.Addr().String()
+	if err := reservedUpstream.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reservedProxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddr := reservedProxy.Addr().String()
+	if err := reservedProxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan struct{}, 2)
+	proxy, err := NewTCPProxy(proxyAddr, upstreamAddr, false, func() { accepted <- struct{}{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	startResult := make(chan error, 1)
+	go func() { startResult <- proxy.Start() }()
+	t.Cleanup(func() {
+		if proxy.listener != nil {
+			_ = proxy.Stop()
+		}
+	})
+
+	dialProxy := func() net.Conn {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			conn, dialErr := net.Dial("tcp", proxyAddr)
+			if dialErr == nil {
+				return conn
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("proxy did not start: %v", dialErr)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	first := dialProxy()
+	defer first.Close()
+	second := dialProxy()
+	defer second.Close()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-accepted:
+		case err := <-startResult:
+			t.Fatalf("proxy stopped before accepting both connections: %v", err)
+		case <-time.After(time.Second):
+			t.Fatal("accept loop blocked while the first connection retried its upstream")
+		}
+	}
+
+	upstream, err := net.Listen("tcp", upstreamAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		for i := 0; i < 2; i++ {
+			conn, acceptErr := upstream.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(conn)
+		}
+	}()
+
+	payload := []byte("second signer")
+	if _, err := second.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	_ = second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(second, response); err != nil {
+		t.Fatalf("second accepted connection was not retained: %v", err)
+	}
+	if string(response) != string(payload) {
+		t.Fatalf("response = %q, want %q", response, payload)
 	}
 }
 
