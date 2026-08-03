@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,8 @@ type TCP struct {
 	runOnce       bool
 	onAccept      func()
 	retryUpstream bool
+	dialContext   context.Context
+	cancelDials   context.CancelFunc
 }
 
 func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...func()) (*TCP, error) {
@@ -38,10 +41,13 @@ func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...fun
 		return nil, err
 	}
 
+	dialContext, cancelDials := context.WithCancel(context.Background())
 	proxy := &TCP{
-		laddr:   laddr,
-		raddr:   raddr,
-		runOnce: failOnClose,
+		laddr:       laddr,
+		raddr:       raddr,
+		runOnce:     failOnClose,
+		dialContext: dialContext,
+		cancelDials: cancelDials,
 	}
 	if len(onAccept) > 0 {
 		proxy.onAccept = onAccept[0]
@@ -116,6 +122,7 @@ func (p *TCP) Start() error {
 func (p *TCP) Stop() error {
 	p.mu.Lock()
 	p.stopped = true
+	p.cancelDials()
 	listener := p.listener
 	p.mu.Unlock()
 	if listener == nil {
@@ -133,9 +140,17 @@ func (p *TCP) dialUpstream() (*net.TCPConn, error) {
 		if stopped {
 			return nil, ErrStopped
 		}
-		rconn, err := net.DialTCP("tcp", nil, p.raddr)
+		conn, err := (&net.Dialer{}).DialContext(p.dialContext, "tcp", p.raddr.String())
 		if err == nil {
+			rconn, ok := conn.(*net.TCPConn)
+			if !ok {
+				_ = conn.Close()
+				return nil, fmt.Errorf("upstream connection is %T, want *net.TCPConn", conn)
+			}
 			return rconn, nil
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, ErrStopped
 		}
 		if !p.retryUpstream || time.Now().Add(upstreamRetryInterval).After(deadline) {
 			return nil, fmt.Errorf("failed to dial upstream: %v", err)

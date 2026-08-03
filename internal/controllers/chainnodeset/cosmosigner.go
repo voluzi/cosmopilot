@@ -1717,6 +1717,9 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	if err := r.applyCosmosignerObject(ctx, nodeSet, params.NetworkPolicy()); err != nil {
 		return false, err
 	}
+	if err := r.applyCosmosignerObject(ctx, nodeSet, params.TargetNetworkPolicy()); err != nil {
+		return false, err
+	}
 
 	// Do not roll out the signer until the validator's generated key has been imported into Vault,
 	// otherwise the signer would come up against an empty/stale transit key while the validator

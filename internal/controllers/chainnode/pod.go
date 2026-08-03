@@ -1297,8 +1297,17 @@ func isImagePullFailure(state *corev1.ContainerStateWaiting) bool {
 }
 
 func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
+	// A failed regular init container terminates restartable init sidecars as the Pod shuts down.
+	// Preserve the discovery gate's diagnostic path instead of misclassifying that expected
+	// node-utils termination as the root failure.
 	for _, c := range pod.Status.InitContainerStatuses {
-		if c.Name == nodeUtilsContainerName && (!c.Ready && c.State.Terminated != nil) {
+		if c.Name == CosmosignerDiscoveryWaitContainerName && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
+			return false
+		}
+	}
+
+	for _, c := range pod.Status.InitContainerStatuses {
+		if c.Name == nodeUtilsContainerName && !c.Ready && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
 			return true
 		}
 	}

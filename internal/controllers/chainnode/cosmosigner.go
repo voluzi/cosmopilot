@@ -359,6 +359,9 @@ func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode 
 	if err := r.applyCosmosignerObject(ctx, chainNode, params.NetworkPolicy()); err != nil {
 		return false, err
 	}
+	if err := r.applyCosmosignerObject(ctx, chainNode, params.TargetNetworkPolicy()); err != nil {
+		return false, err
+	}
 
 	// Do not roll out the signer until the node's generated key has been imported into Vault; an
 	// already-running signer is scaled to zero so it cannot keep signing with the previously

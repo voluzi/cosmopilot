@@ -199,6 +199,33 @@ func TestNetworkPolicyRestrictsRaftIngressToSignerPeers(t *testing.T) {
 	}
 }
 
+func TestTargetNetworkPolicyRestrictsPrivvalIngressToSignerPods(t *testing.T) {
+	policy := testParams().TargetNetworkPolicy()
+	if policy.Name != testParams().Name+"-targets" {
+		t.Fatalf("unexpected target policy name %q", policy.Name)
+	}
+	if policy.Spec.PodSelector.MatchLabels["cosmosigner-target"] != "true" {
+		t.Fatalf("target policy must select discovery targets: %#v", policy.Spec.PodSelector)
+	}
+	if len(policy.Spec.Ingress) != 4 || len(policy.Spec.Ingress[0].From) != 1 {
+		t.Fatalf("expected signer-only privval plus pass-through ingress rules: %#v", policy.Spec.Ingress)
+	}
+	peer := policy.Spec.Ingress[0].From[0].PodSelector
+	if peer == nil || peer.MatchLabels["app.kubernetes.io/instance"] != testParams().Name {
+		t.Fatalf("target ingress must be limited to this signer's pods: %#v", peer)
+	}
+	ports := policy.Spec.Ingress[0].Ports
+	if len(ports) != 1 || ports[0].Port == nil || ports[0].Port.IntVal != 26659 {
+		t.Fatalf("signer ingress must expose port 26659: %#v", ports)
+	}
+	if got := policy.Spec.Ingress[1].Ports[0]; got.Port == nil || got.Port.IntVal != 1 || got.EndPort == nil || *got.EndPort != 26658 {
+		t.Fatalf("lower TCP pass-through range is wrong: %#v", got)
+	}
+	if got := policy.Spec.Ingress[2].Ports[0]; got.Port == nil || got.Port.IntVal != 26660 || got.EndPort == nil || *got.EndPort != 65535 {
+		t.Fatalf("upper TCP pass-through range is wrong: %#v", got)
+	}
+}
+
 func TestLifecycleDigestCoversRuntimeAndExpectedIdentity(t *testing.T) {
 	base := testParams()
 	digest, err := base.LifecycleDigest("signing-digest")

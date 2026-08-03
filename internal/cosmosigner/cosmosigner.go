@@ -356,6 +356,33 @@ func (p Params) NetworkPolicy() *networkingv1.NetworkPolicy {
 	}
 }
 
+// TargetNetworkPolicy limits the remote-signer port on target Pods to this signer's Pods. The
+// discovery gate treats an accepted connection as proof that the signer found the target, so other
+// namespace workloads must not be able to produce that signal.
+func (p Params) TargetNetworkPolicy() *networkingv1.NetworkPolicy {
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+	allPeers := []networkingv1.NetworkPolicyPeer{{}}
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: p.Name + "-targets", Namespace: p.Namespace, Labels: p.Labels},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: p.TargetSelector},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: p.selectorLabels()}}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(chainutils.PrivValPort))}},
+				},
+				// Selecting a Pod makes ingress default-deny. Preserve its existing traffic surface while
+				// excluding only the TCP remote-signer port from arbitrary peers.
+				{From: allPeers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(chainutils.PrivValPort - 1))}}},
+				{From: allPeers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(chainutils.PrivValPort + 1)), EndPort: ptr.To(int32(65535))}}},
+				{From: allPeers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(65535))}}},
+			},
+		},
+	}
+}
+
 // StatefulSet builds the signer StatefulSet. configYAML is the rendered config (from ConfigYAML),
 // hashed into the pod template so a config change rolls the signer.
 func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {

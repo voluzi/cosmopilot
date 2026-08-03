@@ -659,3 +659,28 @@ func TestTCPProxy_ConcurrentConnections(t *testing.T) {
 		}
 	}
 }
+
+func TestTCPProxy_StopCancelsDialContext(t *testing.T) {
+	proxy, err := NewTCPProxy(":0", "192.0.2.1:26659", false, func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, dialErr := proxy.dialUpstream()
+		result <- dialErr
+	}()
+
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("dialUpstream() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dialUpstream() did not stop after Stop()")
+	}
+}
