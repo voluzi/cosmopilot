@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -44,10 +45,29 @@ func runWaitForDNSCommand(ctx context.Context, resolver dnsResolver, client http
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := waitForDNSAddress(ctx, resolver, args[0], args[1], interval); err != nil {
+
+	// An inbound signer connection is definitive evidence that the signer has
+	// discovered this Pod. Keep the Pod-local DNS lookup running for diagnostics,
+	// but do not make it a prerequisite: the target and signer may use different
+	// DNS caches, and either cache can observe publication first.
+	dnsCtx, stopDNS := context.WithCancel(ctx)
+	defer stopDNS()
+	dnsResult := make(chan error, 1)
+	go func() {
+		dnsResult <- waitForDNSAddress(dnsCtx, resolver, args[0], args[1], interval)
+	}()
+
+	if err := waitForSignerDiscovery(ctx, client, signerDiscoveryURL, interval); err != nil {
+		select {
+		case dnsErr := <-dnsResult:
+			if dnsErr != nil && !errors.Is(dnsErr, context.Canceled) {
+				return fmt.Errorf("%w; pod-local DNS observation: %v", err, dnsErr)
+			}
+		default:
+		}
 		return err
 	}
-	return waitForSignerDiscovery(ctx, client, signerDiscoveryURL, interval)
+	return nil
 }
 
 func waitForDNSAddress(ctx context.Context, resolver dnsResolver, hostname, address string, interval time.Duration) error {

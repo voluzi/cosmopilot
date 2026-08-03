@@ -62,7 +62,7 @@ func TestWaitForDNSCommandAppliesTimeoutArgument(t *testing.T) {
 	resolver := &deadlineDNSResolver{}
 	started := time.Now()
 
-	err := runWaitForDNSCommand(context.Background(), resolver, &sequenceHTTPDoer{statuses: []int{http.StatusOK}},
+	err := runWaitForDNSCommand(context.Background(), resolver, &sequenceHTTPDoer{statuses: []int{http.StatusNotAcceptable, http.StatusOK}},
 		[]string{"signer-privval.default.svc", "10.0.0.2", "25s"}, time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +73,22 @@ func TestWaitForDNSCommandAppliesTimeoutArgument(t *testing.T) {
 	remaining := resolver.deadline.Sub(started)
 	if remaining <= 20*time.Second || remaining > 26*time.Second {
 		t.Fatalf("resolver deadline remaining = %s, want a 25s command timeout", remaining)
+	}
+}
+
+func TestWaitForDNSCommandAcceptsSignerConfirmationWhileLocalDNSIsStale(t *testing.T) {
+	resolver := &sequenceDNSResolver{
+		responses: [][]net.IPAddr{{{IP: net.ParseIP("10.0.0.1")}}},
+	}
+	client := &sequenceHTTPDoer{statuses: []int{http.StatusOK}}
+
+	err := runWaitForDNSCommand(context.Background(), resolver, client,
+		[]string{"signer-privval.default.svc", "10.0.0.2", "25s"}, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("signer discovery calls = %d, want 1", client.calls)
 	}
 }
 
