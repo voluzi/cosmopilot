@@ -412,6 +412,8 @@ func TestListSnapshotJobsIncludesPreviousExporterDeletionWorkflow(t *testing.T) 
 
 	jobs, err := listSnapshotJobs(context.Background(), client, owner, gcsExporter)
 	require.NoError(t, err)
+	require.NotNil(t, jobs[1].Source)
+	jobs[1].Source = nil
 	assert.Equal(t, []SnapshotJob{
 		{Name: "current", UID: "current-upload-uid", Purpose: SnapshotJobUpload},
 		{Name: "old-upload-only", UID: "old-upload-only-uid", Purpose: SnapshotJobUpload, Exporter: s3Exporter},
@@ -464,6 +466,26 @@ func TestDeleteSnapshotForPreviousExporterUploadDerivesDeletionJob(t *testing.T)
 	assert.NotContains(t, job.Spec.Template.Labels, "batch.kubernetes.io/job-name")
 	require.NotNil(t, job.Spec.Suspend)
 	assert.False(t, *job.Spec.Suspend)
+}
+
+func TestDeleteSnapshotForPreviousExporterUploadUsesListedSourceAfterJobVanishes(t *testing.T) {
+	owner := testJobOwner()
+	upload, pvc := testOrphanUploadResources(owner, s3Exporter)
+	upload.Spec.Template.Spec.Containers = []corev1.Container{{
+		Name: "dataexporter", Args: []string{"s3", "upload", "data", "snapshots", "snapshot"},
+	}}
+	client := fake.NewSimpleClientset(pvc)
+
+	deletion, status, err := DeleteSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: upload.UID, Purpose: SnapshotJobUpload, Exporter: s3Exporter, Source: upload.DeepCopy(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	assert.Equal(t, s3Exporter, deletion.Exporter)
+	job, err := client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, string(upload.UID), job.Labels[labelCleanupUploadUID])
+	assert.Equal(t, string(pvc.UID), job.Labels[labelCleanupPVCUID])
 }
 
 func TestReconcileLegacyDeletionReplacesActiveUnpairedUploadWorkflow(t *testing.T) {

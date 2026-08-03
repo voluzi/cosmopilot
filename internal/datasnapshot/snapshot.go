@@ -38,6 +38,9 @@ type SnapshotJob struct {
 	Purpose     SnapshotJobPurpose
 	Terminating bool
 	Upload      *SnapshotJobIdentity
+	// Source preserves the listed upload configuration if the live Job vanishes
+	// before previous-provider orphan recovery can derive its deletion Job.
+	Source *batchv1.Job
 	// Exporter is set when a listed deletion Job belongs to a previously configured
 	// provider. Deletion Jobs are self-contained, so they can still be resumed and
 	// cleaned up after the ChainNode switches providers.
@@ -359,6 +362,7 @@ func snapshotJobsFromJobs(jobs []batchv1.Job, currentExporter ...string) []Snaps
 		preferredExporter string
 		upload            *SnapshotJobIdentity
 		uploadExporter    string
+		uploadSource      *batchv1.Job
 	}
 
 	uniqueJobs := make(map[string]groupedSnapshotJobs, len(jobs))
@@ -369,6 +373,7 @@ func snapshotJobsFromJobs(jobs []batchv1.Job, currentExporter ...string) []Snaps
 		if snapshotJob.Purpose == SnapshotJobUpload {
 			group.upload = &SnapshotJobIdentity{UID: snapshotJob.UID, Terminating: snapshotJob.Terminating}
 			group.uploadExporter = job.Labels[labelExporter]
+			group.uploadSource = job.DeepCopy()
 		}
 		if group.preferred.Purpose != SnapshotJobDelete || snapshotJob.Purpose == SnapshotJobDelete {
 			group.preferred = snapshotJob
@@ -390,6 +395,9 @@ func snapshotJobsFromJobs(jobs []batchv1.Job, currentExporter ...string) []Snaps
 		if len(currentExporter) > 0 && group.preferredExporter != "" &&
 			group.preferredExporter != currentExporter[0] {
 			group.preferred.Exporter = group.preferredExporter
+			if group.preferred.Purpose == SnapshotJobUpload {
+				group.preferred.Source = group.uploadSource
+			}
 		}
 		result = append(result, group.preferred)
 	}
@@ -492,7 +500,10 @@ func DeleteSnapshotForUpload(
 		return SnapshotJob{}, "", err
 	}
 	if uploadJob == nil {
-		return SnapshotJob{}, SnapshotNotFound, nil
+		if pvc == nil || upload.Source == nil || upload.Source.UID != upload.UID {
+			return SnapshotJob{}, SnapshotNotFound, nil
+		}
+		uploadJob = upload.Source.DeepCopy()
 	}
 	if pvc != nil {
 		identity.PVCUID = pvc.UID

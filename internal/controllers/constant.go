@@ -31,6 +31,7 @@ const (
 	AnnotationExportingTarball        = "cosmopilot.voluzi.com/exporting-tarball"
 	AnnotationTarballExportAttempts   = "cosmopilot.voluzi.com/tarball-export-attempts"
 	AnnotationTarballDeletionComplete = "cosmopilot.voluzi.com/tarball-deletion-complete"
+	AnnotationTarballDeletionName     = "cosmopilot.voluzi.com/tarball-deletion-name"
 	AnnotationSnapshotIntegrityStatus = "cosmopilot.voluzi.com/snapshot-integrity-status"
 	AnnotationPodSpecHash             = "cosmopilot.voluzi.com/pod-spec-hash"
 	AnnotationChainNodeGeneration     = "cosmopilot.voluzi.com/chainnode-generation"

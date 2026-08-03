@@ -45,9 +45,6 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	if err != nil {
 		return err
 	}
-	if pendingDeletion {
-		return nil
-	}
 
 	if !chainNode.SnapshotsEnabled() {
 		// Snapshot configuration can be removed while a snapshot annotation is
@@ -313,6 +310,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		// Default case is checking if snapshot has expired (time-based retention).
 		// If tarball is also set for deletion on expire it is also taken care here.
 		default:
+			if pendingDeletion {
+				continue
+			}
 			if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() && len(snapshots) == 1 {
 				logger.Info("skipping retention check to preserve last snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[controllers.AnnotationSnapshotRetention])
 			} else {
@@ -354,6 +354,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				}
 			}
 		}
+	}
+	if pendingDeletion {
+		return nil
 	}
 
 	// Handle count-based retention (retain field). Re-list snapshots since some may have been deleted above.
@@ -549,10 +552,11 @@ func (r *Reconciler) persistPendingTarballDeletionSuccess(
 		if snapshot.Annotations == nil {
 			snapshot.Annotations = make(map[string]string)
 		}
-		if snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] == strconv.FormatBool(true) {
+		if tarballDeletionComplete(snapshot, tarballName, false) {
 			return nil
 		}
 		snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
+		snapshot.Annotations[controllers.AnnotationTarballDeletionName] = tarballName
 		if err = r.Update(ctx, snapshot); err != nil {
 			return fmt.Errorf("persist pending tarball deletion success: %w", err)
 		}
@@ -1003,7 +1007,8 @@ func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, e
 }
 
 func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
-	if snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] == strconv.FormatBool(true) {
+	tarballName := getTarballName(chainNode, snapshot)
+	if tarballDeletionComplete(snapshot, tarballName, true) {
 		return true, nil
 	}
 
@@ -1026,16 +1031,31 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 		snapshot.Annotations = make(map[string]string)
 	}
 	previous, hadPrevious := snapshot.Annotations[controllers.AnnotationTarballDeletionComplete]
+	previousName, hadPreviousName := snapshot.Annotations[controllers.AnnotationTarballDeletionName]
 	snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
+	snapshot.Annotations[controllers.AnnotationTarballDeletionName] = tarballName
 	if err = r.Update(ctx, snapshot); err != nil {
 		if hadPrevious {
 			snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = previous
 		} else {
 			delete(snapshot.Annotations, controllers.AnnotationTarballDeletionComplete)
 		}
+		if hadPreviousName {
+			snapshot.Annotations[controllers.AnnotationTarballDeletionName] = previousName
+		} else {
+			delete(snapshot.Annotations, controllers.AnnotationTarballDeletionName)
+		}
 		return false, fmt.Errorf("persist tarball deletion success: %w", err)
 	}
 	return true, nil
+}
+
+func tarballDeletionComplete(snapshot *snapshotv1.VolumeSnapshot, tarballName string, allowLegacy bool) bool {
+	if snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] != strconv.FormatBool(true) {
+		return false
+	}
+	deletedName := snapshot.Annotations[controllers.AnnotationTarballDeletionName]
+	return deletedName == tarballName || allowLegacy && deletedName == ""
 }
 
 func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
