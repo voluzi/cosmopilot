@@ -321,7 +321,7 @@ func TestFailedPodRequiresEarlyRecreation(t *testing.T) {
 	}
 	runningNodeUtils := corev1.ContainerStatus{
 		Name:  nodeUtilsContainerName,
-		Ready: true,
+		Ready: false, // /must_upgrade returns 426 while the sidecar remains available.
 		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 	}
 	stoppedNodeUtils := corev1.ContainerStatus{
@@ -355,6 +355,15 @@ func TestNodeUtilsIsRunning(t *testing.T) {
 			pod: &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
 				Name:  nodeUtilsContainerName,
 				Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}}},
+			want: true,
+		},
+		{
+			name: "restartable init sidecar is unready for a pending upgrade but still running",
+			pod: &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+				Name:  nodeUtilsContainerName,
+				Ready: false,
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 			}}}},
 			want: true,

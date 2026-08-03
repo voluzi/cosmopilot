@@ -1331,7 +1331,10 @@ func failedPodRequiresEarlyRecreation(chainNode *appsv1.ChainNode, pod *corev1.P
 func nodeUtilsIsRunning(pod *corev1.Pod) bool {
 	for _, c := range pod.Status.InitContainerStatuses {
 		if c.Name == nodeUtilsContainerName {
-			return c.Ready && c.State.Running != nil
+			// Readiness is driven by /must_upgrade, which intentionally returns 426 when an
+			// upgrade is required. The sidecar remains available for controller probes while
+			// kubelet reports Ready=false, so availability depends only on its running state.
+			return c.State.Running != nil
 		}
 	}
 	return false
