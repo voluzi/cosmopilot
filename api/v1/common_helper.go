@@ -1126,6 +1126,50 @@ func (v *VolumeSpec) ShouldDeleteWithNode() bool {
 	return false
 }
 
+// GetDataVolumes returns the effective data-volume deletion policy.
+func (p *DeletionPolicy) GetDataVolumes() DeletionPolicyType {
+	if p != nil && p.DataVolumes != nil {
+		return *p.DataVolumes
+	}
+	return DeletionPolicyRetain
+}
+
+// GetGeneratedKeys returns the effective generated-key deletion policy.
+func (p *DeletionPolicy) GetGeneratedKeys() DeletionPolicyType {
+	if p != nil && p.GeneratedKeys != nil {
+		return *p.GeneratedKeys
+	}
+	return DeletionPolicyRetain
+}
+
+// GetCosmosignerState returns the effective Cosmosigner-state deletion policy.
+func (p *DeletionPolicy) GetCosmosignerState() DeletionPolicyType {
+	if p != nil && p.CosmosignerState != nil {
+		return *p.CosmosignerState
+	}
+	return DeletionPolicyRetain
+}
+
+// Validate rejects values that bypass CRD schema validation, including the no-webhook reconcile path.
+func (p *DeletionPolicy) Validate(path string) error {
+	if p == nil {
+		return nil
+	}
+	for _, field := range []struct {
+		name  string
+		value *DeletionPolicyType
+	}{
+		{name: "dataVolumes", value: p.DataVolumes},
+		{name: "generatedKeys", value: p.GeneratedKeys},
+		{name: "cosmosignerState", value: p.CosmosignerState},
+	} {
+		if field.value != nil && *field.value != DeletionPolicyRetain && *field.value != DeletionPolicyDelete {
+			return fmt.Errorf("%s.%s must be Retain or Delete", path, field.name)
+		}
+	}
+	return nil
+}
+
 // GetStorageClass returns the storage class for this volume.
 // If not explicitly set, it falls back to the provided fallback value (typically the main persistence storage class).
 // If the fallback is also nil, the cluster default storage class will be used.

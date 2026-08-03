@@ -8,6 +8,7 @@ import (
 	k8sappsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -16,6 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 // Reconciler reconciles a ChainNode object
@@ -109,14 +112,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 	if !nodeSet.GetDeletionTimestamp().IsZero() {
-		// Legacy PDBs created before controller ownership was added are not garbage-collected.
-		// Remove them from finalization too, because an unhealthy ChainNodeSet may never reach
-		// normal PDB reconciliation before it is deleted.
-		if err := r.deleteStalePodDisruptionBudgets(ctx, nodeSet, nil); err != nil {
+		terminating, err := r.namespaceTerminating(ctx, nodeSet.GetNamespace())
+		if err != nil {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+		if terminating {
+			done, err := r.finalizeTerminatingNamespace(ctx, nodeSet)
+			if err != nil || !done {
+				return ctrl.Result{RequeueAfter: time.Second}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		pdbsDone, err := r.finalizePodDisruptionBudgets(ctx, nodeSet)
+		if err != nil || !pdbsDone {
 			return ctrl.Result{RequeueAfter: time.Second}, err
 		}
 
-		done, err := r.finalizeCosmosignerOwner(ctx, nodeSet)
+		done, err := r.finalizeResources(ctx, nodeSet)
 		if err != nil || !done {
 			return ctrl.Result{RequeueAfter: time.Second}, err
 		}
@@ -136,6 +148,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if nodeSet.Labels[controllers.LabelWorkerName] != r.opts.WorkerName {
 		logger.V(1).Info("skipping chainnodeset due to worker-name mismatch.")
 		return ctrl.Result{}, nil
+	}
+	cleanupFinalizerAdded := false
+	for _, finalizer := range []string{resourcecleanup.Finalizer, podDisruptionBudgetFinalizer} {
+		if controllerutil.ContainsFinalizer(nodeSet, finalizer) {
+			continue
+		}
+		controllerutil.AddFinalizer(nodeSet, finalizer)
+		cleanupFinalizerAdded = true
+	}
+	if cleanupFinalizerAdded {
+		if err := r.Update(ctx, nodeSet); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 	if changed, err := r.prepareCosmosignerOwner(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
@@ -742,6 +768,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.ChainNode{}).
 		Owns(&k8sappsv1.StatefulSet{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

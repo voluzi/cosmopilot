@@ -388,6 +388,7 @@ func (r *Reconciler) getNodeSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNo
 		Spec: appsv1.ChainNodeSpec{
 			Genesis:                       genesisConfig,
 			App:                           nodeSet.GetAppSpecWithUpgrades(),
+			DeletionPolicy:                nodeSet.Spec.DeletionPolicy.DeepCopy(),
 			Config:                        configForChild(group.Config),
 			Persistence:                   group.Persistence.DeepCopy(),
 			Peers:                         group.Peers,

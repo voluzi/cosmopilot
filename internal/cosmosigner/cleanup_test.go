@@ -12,6 +12,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	cosmopilotv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 func TestProtectRetainedStatePVCsUpgradesOnlyVerifiedClaims(t *testing.T) {
@@ -37,15 +40,22 @@ func TestProtectRetainedStatePVCsUpgradesOnlyVerifiedClaims(t *testing.T) {
 		t.Fatal("a verified legacy claim must be protected")
 	}
 	for _, tc := range []struct {
-		name string
-		want bool
-	}{{bound.Name, true}, {pending.Name, false}, {foreign.Name, false}} {
+		name           string
+		wantFinalizer  bool
+		wantAttributed bool
+	}{{bound.Name, true, true}, {pending.Name, false, true}, {foreign.Name, false, false}} {
 		fresh := &corev1.PersistentVolumeClaim{}
 		if err := c.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: tc.name}, fresh); err != nil {
 			t.Fatal(err)
 		}
-		if got := controllerutil.ContainsFinalizer(fresh, RetainedStateFinalizer); got != tc.want {
-			t.Fatalf("claim %q protected = %v, want %v", tc.name, got, tc.want)
+		if got := controllerutil.ContainsFinalizer(fresh, RetainedStateFinalizer); got != tc.wantFinalizer {
+			t.Fatalf("claim %q protected = %v, want %v", tc.name, got, tc.wantFinalizer)
+		}
+		if got := resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState); got != tc.wantAttributed {
+			t.Fatalf("claim %q attributed = %v, want %v", tc.name, got, tc.wantAttributed)
+		}
+		if tc.wantAttributed && fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID] != string(owner.UID) {
+			t.Fatalf("claim %q resource owner UID = %q, want %q", tc.name, fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID], owner.UID)
 		}
 	}
 }
@@ -102,7 +112,7 @@ func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 	}}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts, pvc).Build()
 
-	done, err := FinalizeOwner(context.Background(), c, owner, namespace)
+	done, err := FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,13 +120,121 @@ func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 		t.Fatal("finalization must observe StatefulSet deletion before releasing claims")
 	}
 	for attempts := 0; attempts < 4 && !done; attempts++ {
-		done, err = FinalizeOwner(context.Background(), c, owner, namespace)
+		done, err = FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyDelete)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 	if !done {
 		t.Fatal("owner finalization did not remove retained signer state")
+	}
+}
+
+func TestFinalizeOwnerRetainsStateAfterQuiescingSigner(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, UID: "sts-uid", OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}, Spec: appsv1.StatefulSetSpec{
+		Replicas: &zero,
+		PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+			WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			WhenScaled:  appsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		},
+		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}},
+	}, Status: appsv1.StatefulSetStatus{ObservedGeneration: 0, Replicas: 0}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: namespace, UID: "pvc-uid",
+		Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts, pvc).Build()
+
+	done := false
+	for attempts := 0; attempts < 5 && !done; attempts++ {
+		var err error
+		done, err = FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyRetain)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !done {
+		t.Fatal("owner finalization did not converge")
+	}
+	retained := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), retained); err != nil {
+		t.Fatalf("retained state PVC was deleted: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(retained, RetainedStateFinalizer) {
+		t.Fatal("retained state PVC kept the signer-only deletion guard after quiescence")
+	}
+	if !resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState) {
+		t.Fatalf("retained state PVC lost root attribution: %v", retained.Annotations)
+	}
+}
+
+func TestFinalizeOwnerDeletesOwnedKeyJobPods(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	jobPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-" + importJobSuffix, Namespace: namespace, UID: "job-uid",
+		Labels:          InstanceLabels(name),
+		OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(jobPod).Build()
+
+	done, err := FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyRetain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("owner finalization did not converge after deleting its key job pod")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(jobPod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned key job pod must be absent before durable cleanup, got %v", err)
+	}
+}
+
+func TestQuiesceOwnerForNamespaceTerminationDoesNotWaitForScaleObservation(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	replicas := int32(3)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, UID: "sts-uid",
+		OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}, Spec: appsv1.StatefulSetSpec{
+		Replicas: &replicas,
+		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: namespace, UID: "pod-uid", Labels: InstanceLabels(name),
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: name, UID: sts.UID, Controller: boolPointer(true)}},
+	}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: namespace, UID: "pvc-uid",
+		Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts, pod, pvc).Build()
+
+	done, err := QuiesceOwnerForNamespaceTermination(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("namespace termination quiescence did not converge with immediate fake-client deletion")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("signer pod must be absent, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("signer StatefulSet must be absent, got %v", err)
+	}
+	retained := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), retained); err != nil {
+		t.Fatalf("state PVC must remain protected until the caller releases it: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(retained, RetainedStateFinalizer) {
+		t.Fatal("namespace quiescence released durable state before the caller's cleanup phase")
 	}
 }
 
@@ -147,7 +265,7 @@ func TestFinalizeOwnerIgnoresNonSignerStatefulSet(t *testing.T) {
 	}}
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts).Build()
 
-	done, err := FinalizeOwner(context.Background(), c, owner, namespace)
+	done, err := FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +293,7 @@ func TestFinalizeOwnerFindsRetainedPVCWithoutAppLabel(t *testing.T) {
 	done := false
 	for attempts := 0; attempts < 4 && !done; attempts++ {
 		var err error
-		done, err = FinalizeOwner(context.Background(), c, owner, namespace)
+		done, err = FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyDelete)
 		if err != nil {
 			t.Fatal(err)
 		}

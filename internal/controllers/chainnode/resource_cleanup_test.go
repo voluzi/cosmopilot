@@ -1,0 +1,246 @@
+package chainnode
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
+)
+
+func TestFinalizeResourcesQuiescesLocalSignerAndAppliesDeletionPolicy(t *testing.T) {
+	for _, policy := range []appsv1.DeletionPolicyType{appsv1.DeletionPolicyRetain, appsv1.DeletionPolicyDelete} {
+		t.Run(string(policy), func(t *testing.T) {
+			scheme := resourceCleanupScheme(t)
+			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "validator", Namespace: "default", UID: "node-uid",
+					Finalizers: []string{resourcecleanup.Finalizer, cosmosigner.OwnerFinalizer},
+				},
+				Spec: appsv1.ChainNodeSpec{DeletionPolicy: &appsv1.DeletionPolicy{
+					DataVolumes:   ptr.To(policy),
+					GeneratedKeys: ptr.To(policy),
+				}},
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "pod-uid"}}
+			require.NoError(t, controllerutil.SetControllerReference(node, pod, scheme))
+			initPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace, UID: "init-pod-uid"}}
+			require.NoError(t, controllerutil.SetControllerReference(node, initPod, scheme))
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "pvc-uid"}}
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-priv-key", Namespace: node.Namespace, UID: "secret-uid"}}
+			for _, object := range []client.Object{pvc, secret} {
+				class := resourcecleanup.ClassDataVolumes
+				if _, ok := object.(*corev1.Secret); ok {
+					class = resourcecleanup.ClassGeneratedKeys
+				}
+				_, _, err := resourcecleanup.PrepareGeneratedResource(object, node, scheme, class, true)
+				require.NoError(t, err)
+			}
+			ambiguous := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace, UID: "ambiguous-uid"}}
+			reservation := &appsv1.ConsensusKeyReservation{
+				ObjectMeta: metav1.ObjectMeta{Name: "reservation"},
+				Spec:       appsv1.ConsensusKeyReservationSpec{OwnerUID: node.UID, OwnerKind: "ChainNode", Namespace: node.Namespace, OwnerName: node.Name},
+			}
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, pod, initPod, pvc, secret, ambiguous, reservation).Build()
+			guarded := &quiesceBeforeDurableClient{Client: base, podKeys: []client.ObjectKey{
+				client.ObjectKeyFromObject(pod), client.ObjectKeyFromObject(initPod),
+			}}
+			r := &Reconciler{Client: guarded, Scheme: scheme}
+
+			current := &appsv1.ChainNode{}
+			require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(node), current))
+			done := false
+			for attempts := 0; attempts < 6 && !done; attempts++ {
+				var err error
+				done, err = r.finalizeResources(context.Background(), current)
+				require.NoError(t, err)
+				if !done {
+					require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(node), current))
+				}
+			}
+			assert.True(t, done)
+			assert.True(t, apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+			assert.True(t, apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKeyFromObject(initPod), &corev1.Pod{})))
+
+			for _, object := range []client.Object{pvc, secret} {
+				fresh := object.DeepCopyObject().(client.Object)
+				err := base.Get(context.Background(), client.ObjectKeyFromObject(object), fresh)
+				if policy == appsv1.DeletionPolicyDelete {
+					assert.True(t, apierrors.IsNotFound(err), "%T should be deleted", object)
+				} else {
+					require.NoError(t, err)
+					assert.Nil(t, metav1.GetControllerOf(fresh))
+				}
+			}
+			require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(ambiguous), &corev1.Secret{}))
+			require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}), "issue #86 reservations must not be released by issue #84 cleanup")
+		})
+	}
+}
+
+func TestReconcileNamespaceTerminationReleasesCleanupFinalizers(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	now := metav1.NewTime(time.Now())
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator", Namespace: "terminating", UID: "node-uid", DeletionTimestamp: &now,
+		Finalizers: []string{resourcecleanup.Finalizer, cosmosigner.OwnerFinalizer},
+	}}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "terminating", DeletionTimestamp: &now, Finalizers: []string{"kubernetes"},
+	}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-validator-signer-0", Namespace: node.Namespace, UID: "pvc-uid",
+		Labels: map[string]string{
+			"app.kubernetes.io/instance":              "validator-signer",
+			"cosmopilot.voluzi.com/cosmosigner-owner": string(node.UID),
+		},
+		Finalizers: []string{cosmosigner.RetainedStateFinalizer},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "pod-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(node, pod, scheme))
+	zero := int32(0)
+	signer := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "validator-signer", Namespace: node.Namespace, UID: "signer-uid"}, Spec: k8sappsv1.StatefulSetSpec{
+		Replicas: &zero,
+		PersistentVolumeClaimRetentionPolicy: &k8sappsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+			WhenDeleted: k8sappsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			WhenScaled:  k8sappsv1.RetainPersistentVolumeClaimRetentionPolicyType,
+		},
+		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+			"app.kubernetes.io/name": "cosmosigner", "app.kubernetes.io/instance": "validator-signer",
+		}}},
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(node, signer, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, namespace, pvc, pod, signer).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	for attempts := 0; attempts < 5; attempts++ {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)})
+		require.NoError(t, err)
+		if apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKeyFromObject(node), &appsv1.ChainNode{})) {
+			break
+		}
+	}
+
+	currentNode := &appsv1.ChainNode{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(node), currentNode); err == nil {
+		assert.NotContains(t, currentNode.Finalizers, resourcecleanup.Finalizer)
+		assert.NotContains(t, currentNode.Finalizers, cosmosigner.OwnerFinalizer)
+	} else {
+		assert.True(t, apierrors.IsNotFound(err))
+	}
+	currentPVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(pvc), currentPVC))
+	assert.NotContains(t, currentPVC.Finalizers, cosmosigner.RetainedStateFinalizer)
+	assert.True(t, apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+	assert.True(t, apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKeyFromObject(signer), &k8sappsv1.StatefulSet{})))
+}
+
+func TestQuiesceNodePodWaitsForSameNameReplacement(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "pod-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(node, pod, scheme))
+	replacement := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: pod.Namespace, UID: "replacement-uid"}}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, pod).Build()
+	c := &replacePodAfterDeleteClient{Client: base, replacement: replacement}
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceNodePod(context.Background(), node)
+	require.NoError(t, err)
+	assert.False(t, done)
+	assert.Equal(t, types.UID("pod-uid"), c.deleteUID)
+}
+
+type quiesceBeforeDurableClient struct {
+	client.Client
+	podKeys []client.ObjectKey
+}
+
+type replacePodAfterDeleteClient struct {
+	client.Client
+	replacement *corev1.Pod
+	deleteUID   types.UID
+}
+
+func (c *replacePodAfterDeleteClient) Delete(ctx context.Context, object client.Object, opts ...client.DeleteOption) error {
+	pod, ok := object.(*corev1.Pod)
+	if !ok {
+		return c.Client.Delete(ctx, object, opts...)
+	}
+	deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+	if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+		c.deleteUID = *deleteOptions.Preconditions.UID
+	}
+	if err := c.Client.Delete(ctx, pod); err != nil {
+		return err
+	}
+	return c.Client.Create(ctx, c.replacement.DeepCopy())
+}
+
+func (c *quiesceBeforeDurableClient) Update(ctx context.Context, object client.Object, opts ...client.UpdateOption) error {
+	if _, durable := object.(*corev1.PersistentVolumeClaim); durable {
+		if err := c.requirePodGone(ctx); err != nil {
+			return err
+		}
+	}
+	if _, durable := object.(*corev1.Secret); durable {
+		if err := c.requirePodGone(ctx); err != nil {
+			return err
+		}
+	}
+	return c.Client.Update(ctx, object, opts...)
+}
+
+func (c *quiesceBeforeDurableClient) Delete(ctx context.Context, object client.Object, opts ...client.DeleteOption) error {
+	options := (&client.DeleteOptions{}).ApplyOptions(opts)
+	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != object.GetUID() {
+		return fmt.Errorf("cleanup deletion of %T requires an exact UID precondition", object)
+	}
+	switch object.(type) {
+	case *corev1.PersistentVolumeClaim, *corev1.Secret:
+		if err := c.requirePodGone(ctx); err != nil {
+			return err
+		}
+	}
+	return c.Client.Delete(ctx, object, opts...)
+}
+
+func (c *quiesceBeforeDurableClient) requirePodGone(ctx context.Context) error {
+	for _, key := range c.podKeys {
+		err := c.Client.Get(ctx, key, &corev1.Pod{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("durable cleanup started before signing or initialization pod was absent")
+	}
+	return nil
+}
+
+func resourceCleanupScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	return scheme
+}

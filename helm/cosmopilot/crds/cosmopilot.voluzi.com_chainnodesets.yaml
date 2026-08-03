@@ -688,6 +688,37 @@ spec:
                 required:
                 - backend
                 type: object
+              deletionPolicy:
+                description: |-
+                  DeletionPolicy controls whether durable resources generated for this set and its child
+                  ChainNodes are retained or deleted with the root ChainNodeSet. All resource classes default to Retain.
+                properties:
+                  cosmosignerState:
+                    default: Retain
+                    description: CosmosignerState controls operator-generated Cosmosigner
+                      Raft-state PVCs.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                  dataVolumes:
+                    default: Retain
+                    description: DataVolumes controls operator-generated main and
+                      additional node PVCs.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                  generatedKeys:
+                    default: Retain
+                    description: |-
+                      GeneratedKeys controls operator-generated node, consensus, account, genesis-validator, and
+                      Cosmoseed key Secrets. Existing user-provided Secrets are never classified from their name alone.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
+                type: object
               gatewayRoutes:
                 description: |-
                   List of Gateway API route configs for this ChainNodeSet. This allows to create
@@ -4531,8 +4562,9 @@ spec:
                               to mount on a node.
                             properties:
                               deleteWithNode:
-                                description: Whether this volume should be deleted
-                                  when node is deleted. Defaults to `false`.
+                                description: |-
+                                  Deprecated compatibility field. Root deletion is controlled by
+                                  .spec.deletionPolicy.dataVolumes; this field is not used for cleanup.
                                 type: boolean
                               name:
                                 description: The name of the volume.
@@ -9511,8 +9543,9 @@ spec:
                                   to mount on a node.
                                 properties:
                                   deleteWithNode:
-                                    description: Whether this volume should be deleted
-                                      when node is deleted. Defaults to `false`.
+                                    description: |-
+                                      Deprecated compatibility field. Root deletion is controlled by
+                                      .spec.deletionPolicy.dataVolumes; this field is not used for cleanup.
                                     type: boolean
                                   name:
                                     description: The name of the volume.
@@ -15244,8 +15277,9 @@ spec:
                             mount on a node.
                           properties:
                             deleteWithNode:
-                              description: Whether this volume should be deleted when
-                                node is deleted. Defaults to `false`.
+                              description: |-
+                                Deprecated compatibility field. Root deletion is controlled by
+                                .spec.deletionPolicy.dataVolumes; this field is not used for cleanup.
                               type: boolean
                             name:
                               description: The name of the volume.

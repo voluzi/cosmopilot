@@ -96,11 +96,43 @@ persistence:
 | `size` | Size of the volume |
 | `path` | Mount path inside the container |
 | `storageClass` | Optional. Storage class to use. Defaults to `.persistence.storageClass`, then cluster default |
-| `deleteWithNode` | Optional. Whether to delete the PVC when the node is deleted. Defaults to `false` |
+| `deleteWithNode` | Deprecated compatibility field. Use `.spec.deletionPolicy.dataVolumes`; this field no longer controls root deletion. |
 
 ### Mounted During Initialization
 
 Additional volumes are also mounted during data initialization, allowing them to be used with `.persistence.additionalInitCommands` to extract snapshots or initialize data directly into these volumes.
+
+## Deletion and Retention
+
+Deleting a `ChainNode` or `ChainNodeSet` retains durable resources by default. Destructive cleanup requires an explicit `Delete` value for each resource class:
+
+```yaml
+spec:
+  deletionPolicy:
+    dataVolumes: Delete
+    generatedKeys: Delete
+    cosmosignerState: Delete
+```
+
+The fields are independent and each defaults to `Retain`:
+
+| Field | Resources covered |
+|-------|-------------------|
+| `dataVolumes` | Main and additional PVCs generated for nodes |
+| `generatedKeys` | Generated node, consensus, account, genesis-validator, and Cosmoseed key Secrets |
+| `cosmosignerState` | Generated Cosmosigner Raft-state PVCs |
+
+For a `ChainNodeSet`, the policy is copied to generated child `ChainNode` resources. Generated durable resources also carry stable root-owner attribution to the `ChainNodeSet`, allowing the parent to finish cleanup even after individual children have been removed.
+
+`Retain` preserves attributed resources and removes only the matching Cosmopilot controller owner reference. Other owner references are left intact. `Delete` stops node and signer workloads first, deletes only attributed resources with exact UID preconditions, and waits for their absence before removing the root finalizer.
+
+Cosmopilot does not classify a Secret or PVC from its deterministic name alone. User-provided resources and ambiguous legacy resources are preserved. Existing resources are adopted only when controller ownership or stable attribution proves that Cosmopilot generated them.
+
+:::warning[Namespace deletion]
+Kubernetes removes namespaced resources when their namespace is deleted, regardless of `Retain`. During namespace termination Cosmopilot first quiesces managed node, Cosmosigner, and Cosmoseed workloads, then releases its own cleanup finalizers so the namespace can converge. Use backups or move retained data outside the namespace if it must survive namespace deletion.
+:::
+
+`ConsensusKeyReservation` resources are not released or deleted by this policy. Their safe lifecycle belongs to the separate consensus-key-reservation workflow.
 
 ## Snapshots
 

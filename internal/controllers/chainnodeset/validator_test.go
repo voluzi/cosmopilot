@@ -20,14 +20,22 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	t.Helper()
+	for _, object := range objs {
+		if nodeSet, ok := object.(*appsv1.ChainNodeSet); ok && nodeSet.GetDeletionTimestamp().IsZero() {
+			controllerutil.AddFinalizer(nodeSet, resourcecleanup.Finalizer)
+			controllerutil.AddFinalizer(nodeSet, podDisruptionBudgetFinalizer)
+		}
+	}
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))

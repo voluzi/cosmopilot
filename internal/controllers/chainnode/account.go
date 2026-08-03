@@ -11,13 +11,12 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 func (r *Reconciler) ensureAccount(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
-	// We probably want the user to delete the secret with mnemonic when we dont need it anymore.
-	// And we only need it for gentx.
 	if chainNode.Status.ValidatorAddress != "" {
 		return nil
 	}
@@ -45,10 +44,22 @@ func (r *Reconciler) ensureAccount(ctx context.Context, chainNode *appsv1.ChainN
 			return err
 		}
 	}
+	if mustCreate {
+		if _, _, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, true); err != nil {
+			return err
+		}
+	}
 
 	// Ensure private key
 	var validatorAddress, accountAddress string
 	mustUpdate := false
+	if !mustCreate {
+		_, metadataChanged, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+		if err != nil {
+			return err
+		}
+		mustUpdate = metadataChanged
+	}
 	if _, ok := secret.Data[MnemonicKey]; !ok {
 		if !mustCreate {
 			mustUpdate = true

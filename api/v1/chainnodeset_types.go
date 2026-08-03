@@ -61,6 +61,11 @@ type ChainNodeSetSpec struct {
 	// +optional
 	Genesis *GenesisConfig `json:"genesis"`
 
+	// DeletionPolicy controls whether durable resources generated for this set and its child
+	// ChainNodes are retained or deleted with the root ChainNodeSet. All resource classes default to Retain.
+	// +optional
+	DeletionPolicy *DeletionPolicy `json:"deletionPolicy,omitempty"`
+
 	// Indicates this node set will run a validator and allows configuring it.
 	// +optional
 	Validator *NodeSetValidatorConfig `json:"validator,omitempty"`

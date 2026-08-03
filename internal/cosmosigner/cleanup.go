@@ -12,6 +12,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	cosmopilotv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 // IsOwnedSignerStatefulSet reports whether sts is a cosmosigner deployment controlled by owner,
@@ -51,7 +54,8 @@ func DeletePVCs(ctx context.Context, c client.Client, owner metav1.Object, names
 		if !pvc.GetDeletionTimestamp().IsZero() {
 			continue
 		}
-		if err := c.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+		uid := pvc.GetUID()
+		if err := c.Delete(ctx, pvc, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	}
@@ -68,22 +72,29 @@ func ProtectRetainedStatePVCs(ctx context.Context, c client.Client, owner client
 		return false, err
 	}
 	changed := false
+	root := resourcecleanup.RootOwnerFor(owner)
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
 		if pvc.GetLabels()[labelAppName] != appNameCosmosigner ||
 			pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
 			!isStatefulSetDataPVC(pvc.GetName(), name) ||
-			!pvc.GetDeletionTimestamp().IsZero() ||
-			pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" ||
-			controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
+			!pvc.GetDeletionTimestamp().IsZero() {
 			continue
 		}
-		controllerutil.AddFinalizer(pvc, RetainedStateFinalizer)
-		if err := c.Update(ctx, pvc); err != nil {
-			return changed, err
+		metadataChanged := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassCosmosignerState)
+		metadataChanged = resourcecleanup.StampResourceOwner(pvc, owner.GetUID()) || metadataChanged
+		if pvc.Status.Phase == corev1.ClaimBound && pvc.Spec.VolumeName != "" &&
+			!controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
+			controllerutil.AddFinalizer(pvc, RetainedStateFinalizer)
+			metadataChanged = true
 		}
-		changed = true
+		if metadataChanged {
+			if err := c.Update(ctx, pvc); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
 	}
 	statefulSets := &appsv1.StatefulSetList{}
 	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
@@ -126,10 +137,34 @@ func HasOwnedSignerState(ctx context.Context, c client.Client, owner metav1.Obje
 	return false, nil
 }
 
-// FinalizeOwner advances root-CR deletion in fail-safe order: quiesce signer pods, remove their
-// StatefulSets, then release and delete retained claims. It reports complete only after no owned
-// claim remains, including claims held by an unrelated external finalizer.
-func FinalizeOwner(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+// FinalizeOwner advances root-CR deletion in fail-safe order: attribute legacy claims, quiesce signer
+// pods, remove their StatefulSets, then apply the explicit state policy. It reports complete only
+// after deleted claims are absent or retained claims have released the signer-only finalizer.
+func FinalizeOwner(
+	ctx context.Context,
+	c client.Client,
+	owner client.Object,
+	namespace string,
+	policy cosmopilotv1.DeletionPolicyType,
+) (bool, error) {
+	attributed, err := attributeOwnedStatePVCs(ctx, c, owner, namespace)
+	if err != nil || attributed {
+		return false, err
+	}
+	quiesced, err := QuiesceOwner(ctx, c, owner, namespace)
+	if err != nil || !quiesced {
+		return false, err
+	}
+	return FinalizeState(ctx, c, owner, namespace, policy)
+}
+
+// QuiesceOwner removes every managed signer StatefulSet only after its pods have stopped. Raft-state
+// PVCs remain protected for the caller to process after all other signing workloads are also absent.
+func QuiesceOwner(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+	jobPodsDone, err := deleteOwnedKeyJobPods(ctx, c, owner, namespace)
+	if err != nil || !jobPodsDone {
+		return false, err
+	}
 	statefulSets := &appsv1.StatefulSetList{}
 	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -139,19 +174,137 @@ func FinalizeOwner(ctx context.Context, c client.Client, owner client.Object, na
 		if !IsOwnedSignerStatefulSet(sts, owner) {
 			continue
 		}
-		if !sts.GetDeletionTimestamp().IsZero() {
-			return false, nil
-		}
-		quiesced, err := ScaleDown(ctx, c, owner, namespace, sts.GetName())
-		if err != nil || !quiesced {
+		deleted, err := DeleteStatefulSet(ctx, c, owner, namespace, sts.GetName())
+		if err != nil || !deleted {
 			return false, err
 		}
-		if err := c.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
+	}
+	return true, nil
+}
+
+// QuiesceOwnerForNamespaceTermination directly stops signer pods before deleting their StatefulSets.
+// It does not wait for StatefulSet scale or retention-policy observations, which may no longer
+// progress after namespace termination begins; durable-state finalizers remain for the caller.
+func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+	jobPodsDone, err := deleteOwnedKeyJobPods(ctx, c, owner, namespace)
+	if err != nil || !jobPodsDone {
+		return false, err
+	}
+
+	ownedNames := map[string]struct{}{}
+	statefulSets := &appsv1.StatefulSetList{}
+	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if IsOwnedSignerStatefulSet(sts, owner) {
+			ownedNames[sts.GetName()] = struct{}{}
+		}
+	}
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		name := pvc.GetLabels()[labelInstance]
+		if pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID()) && isStatefulSetDataPVC(pvc.GetName(), name) {
+			ownedNames[name] = struct{}{}
+		}
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	allPodsGone := true
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		instance := pod.GetLabels()[labelInstance]
+		if _, owned := ownedNames[instance]; !owned {
+			continue
+		}
+		if pod.GetLabels()[labelAppName] != appNameCosmosigner && !isStatefulSetReplicaPodName(pod.GetName(), instance) {
+			continue
+		}
+		if pod.GetDeletionTimestamp().IsZero() {
+			uid := pod.GetUID()
+			if err := c.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+				return false, err
+			}
+		}
+		remaining := &corev1.Pod{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(pod), remaining); err == nil {
+			allPodsGone = false
+		} else if !errors.IsNotFound(err) {
 			return false, err
 		}
+	}
+	if !allPodsGone {
 		return false, nil
 	}
 
+	allStatefulSetsGone := true
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if !IsOwnedSignerStatefulSet(sts, owner) {
+			continue
+		}
+		if sts.GetDeletionTimestamp().IsZero() {
+			uid := sts.GetUID()
+			if err := c.Delete(ctx, sts, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+				return false, err
+			}
+		}
+		remaining := &appsv1.StatefulSet{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(sts), remaining); err == nil {
+			allStatefulSetsGone = false
+		} else if !errors.IsNotFound(err) {
+			return false, err
+		}
+	}
+	return allStatefulSetsGone, nil
+}
+
+func deleteOwnedKeyJobPods(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	allDone := true
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		instance := pod.GetLabels()[labelInstance]
+		if !metav1.IsControlledBy(pod, owner) ||
+			pod.GetLabels()[labelAppName] != appNameCosmosigner ||
+			(pod.GetName() != instance+"-"+importJobSuffix && pod.GetName() != instance+"-"+pubkeyJobSuffix) {
+			continue
+		}
+		if pod.GetDeletionTimestamp().IsZero() {
+			uid := pod.GetUID()
+			if err := c.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+				return false, err
+			}
+		}
+		remaining := &corev1.Pod{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(pod), remaining); err == nil {
+			allDone = false
+		} else if !errors.IsNotFound(err) {
+			return false, err
+		}
+	}
+	return allDone, nil
+}
+
+// FinalizeState applies the configured policy after every signer workload is absent.
+func FinalizeState(
+	ctx context.Context,
+	c client.Client,
+	owner client.Object,
+	namespace string,
+	policy cosmopilotv1.DeletionPolicyType,
+) (bool, error) {
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -167,24 +320,72 @@ func FinalizeOwner(ctx context.Context, c client.Client, owner client.Object, na
 		if err != nil || !gone {
 			return false, err
 		}
-		if controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
-			controllerutil.RemoveFinalizer(pvc, RetainedStateFinalizer)
+	}
+
+	return resourcecleanup.FinalizeClass(
+		ctx,
+		c,
+		resourcecleanup.RootOwnerFor(owner),
+		resourcecleanup.ClassCosmosignerState,
+		policy,
+		owner.GetUID(),
+		RetainedStateFinalizer,
+	)
+}
+
+// attributeOwnedStatePVCs upgrades claims carrying the immutable signer owner-UID label. Unlike
+// deterministic-name recovery, that label distinguishes same-name roots and is sufficient evidence
+// to classify pre-deletion-policy Cosmosigner state.
+func attributeOwnedStatePVCs(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	root := resourcecleanup.RootOwnerFor(owner)
+	changed := false
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		name := pvc.GetLabels()[labelInstance]
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) || !isStatefulSetDataPVC(pvc.GetName(), name) {
+			continue
+		}
+		metadataChanged := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassCosmosignerState)
+		metadataChanged = resourcecleanup.StampResourceOwner(pvc, owner.GetUID()) || metadataChanged
+		if metadataChanged {
 			if err := c.Update(ctx, pvc); err != nil {
 				if errors.IsNotFound(err) {
-					return false, nil
+					continue
 				}
-				return false, err
+				return changed, err
 			}
-			return false, nil
+			changed = true
 		}
-		if pvc.GetDeletionTimestamp().IsZero() {
-			if err := c.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
-				return false, err
-			}
-		}
-		return false, nil
 	}
-	return true, nil
+	return changed, nil
+}
+
+// ReleaseOwnerStateFinalizers removes only the Cosmosigner retained-state guard from claims proven
+// by the signer owner-UID label. Namespace deletion already quiesces every managed signer workload,
+// so keeping this operator finalizer would only deadlock namespace termination.
+func ReleaseOwnerStateFinalizers(ctx context.Context, c client.Client, owner metav1.Object, namespace string) error {
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		name := pvc.GetLabels()[labelInstance]
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
+			!isStatefulSetDataPVC(pvc.GetName(), name) ||
+			!controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
+			continue
+		}
+		controllerutil.RemoveFinalizer(pvc, RetainedStateFinalizer)
+		if err := c.Update(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // OwnedPVCsGone reports whether all raft-state claims attributable to owner are absent. Claims

@@ -28,6 +28,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
@@ -251,6 +252,9 @@ func (r *Reconciler) ensureCosmoseedNodeKeys(ctx context.Context, nodeSet *v1.Ch
 				secret.Data[keyName] = key
 				ids[i] = id
 			}
+			if _, _, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, true); err != nil {
+				return nil, err
+			}
 
 			logger.Info("creating secret")
 			return ids, r.Create(ctx, secret)
@@ -258,7 +262,10 @@ func (r *Reconciler) ensureCosmoseedNodeKeys(ctx context.Context, nodeSet *v1.Ch
 		return nil, err
 	}
 
-	needsUpdate := false
+	_, needsUpdate, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+	if err != nil {
+		return nil, err
+	}
 	if secret.Data == nil {
 		secret.Data = make(map[string][]byte, nodeSet.Spec.Cosmoseed.GetInstances())
 	}
