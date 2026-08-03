@@ -1260,7 +1260,9 @@ func TestEnsureVolumeSnapshotsReconcilesOrphanJobs(t *testing.T) {
 					listedJob := job.DeepCopy()
 					clientSet.PrependReactor("list", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
 						err := clientSet.Tracker().Delete(batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, job.Name)
-						require.NoError(t, err)
+						if err != nil && !apierrors.IsNotFound(err) {
+							require.NoError(t, err)
+						}
 						return true, &batchv1.JobList{Items: []batchv1.Job{*listedJob}}, nil
 					})
 				}
@@ -1720,9 +1722,12 @@ func TestEnsureVolumeSnapshotsRecoversWhenListedUploadJobVanishedButPVCRemains(t
 			)
 			listedUpload := uploadJob.DeepCopy()
 			clientSet.PrependReactor("list", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
-				require.NoError(t, clientSet.Tracker().Delete(
+				err := clientSet.Tracker().Delete(
 					batchv1.SchemeGroupVersion.WithResource("jobs"), chainNode.Namespace, uploadJob.Name,
-				))
+				)
+				if err != nil && !apierrors.IsNotFound(err) {
+					require.NoError(t, err)
+				}
 				return true, &batchv1.JobList{Items: []batchv1.Job{*listedUpload}}, nil
 			})
 			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {

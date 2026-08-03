@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -385,8 +387,8 @@ func snapshotJobsFromJobs(jobs []batchv1.Job, currentExporter ...string) []Snaps
 			group.preferred.Upload.UID == group.upload.UID {
 			group.preferred.Upload.Terminating = group.upload.Terminating
 		}
-		if len(currentExporter) > 0 && group.preferred.Purpose == SnapshotJobDelete &&
-			group.preferredExporter != "" && group.preferredExporter != currentExporter[0] {
+		if len(currentExporter) > 0 && group.preferredExporter != "" &&
+			group.preferredExporter != currentExporter[0] {
 			group.preferred.Exporter = group.preferredExporter
 		}
 		result = append(result, group.preferred)
@@ -418,10 +420,10 @@ func listSnapshotJobs(
 		if !metav1.IsControlledBy(&job, owner) {
 			continue
 		}
-		// Upload Jobs need the currently configured provider to construct a matching
-		// deletion workflow. Existing deletion Jobs are self-contained and must stay
-		// discoverable after a provider switch so suspended workflows can resume.
-		if job.Labels[labelExporter] == exporter || job.Labels[labelType] == typeDelete {
+		// Jobs remain discoverable after a provider switch. Upload Jobs retain the
+		// previous provider's pod configuration, which is enough to derive a matching
+		// deletion workflow without using the newly configured credentials.
+		if job.Labels[labelType] == typeUpload || job.Labels[labelType] == typeDelete {
 			jobs = append(jobs, job)
 		}
 	}
@@ -436,7 +438,13 @@ func ListSnapshotDeletionJobs(
 	client kubernetes.Interface,
 	owner metav1.Object,
 ) ([]SnapshotJob, error) {
-	return listSnapshotJobs(ctx, client, owner, "")
+	jobs, err := listSnapshotJobs(ctx, client, owner, "")
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(jobs, func(job SnapshotJob) bool {
+		return job.Purpose != SnapshotJobDelete
+	}), nil
 }
 
 // ReconcileSnapshotDeletionJob resumes and reports a previously created
@@ -465,6 +473,81 @@ func CleanupSnapshotDeletionResources(
 		return fmt.Errorf("snapshot deletion job %q is missing its exporter identity", job.Name)
 	}
 	return cleanupSnapshotDeletionResources(ctx, client, owner, job, job.Exporter)
+}
+
+// DeleteSnapshotForUpload creates a deletion workflow from an upload Job that
+// belongs to a previously configured exporter.
+func DeleteSnapshotForUpload(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	upload SnapshotJob,
+) (SnapshotJob, SnapshotStatus, error) {
+	if upload.Purpose != SnapshotJobUpload || upload.Exporter == "" {
+		return SnapshotJob{}, "", fmt.Errorf("snapshot upload job %q is missing its previous exporter identity", upload.Name)
+	}
+	identity := SnapshotJobIdentity{UID: upload.UID, Terminating: upload.Terminating}
+	uploadJob, pvc, err := getSnapshotUploadResources(ctx, client, owner, upload.Name, identity, upload.Exporter)
+	if err != nil {
+		return SnapshotJob{}, "", err
+	}
+	if uploadJob == nil {
+		return SnapshotJob{}, SnapshotNotFound, nil
+	}
+	if pvc != nil {
+		identity.PVCUID = pvc.UID
+	}
+	deletionJob, err := deletionJobFromUpload(uploadJob, owner, upload.Exporter, identity)
+	if err != nil {
+		return SnapshotJob{}, "", err
+	}
+	deletionJob, _, err = ensureSnapshotJob(ctx, client, owner, deletionJob, typeDelete)
+	if err != nil {
+		return SnapshotJob{}, "", err
+	}
+	deletion := snapshotJobFromJob(deletionJob)
+	deletion.Exporter = upload.Exporter
+	status, err := reconcileSnapshotDeletionJob(ctx, client, owner, deletion, upload.Exporter)
+	return deletion, status, err
+}
+
+func deletionJobFromUpload(
+	upload *batchv1.Job,
+	owner metav1.Object,
+	exporter string,
+	identity SnapshotJobIdentity,
+) (*batchv1.Job, error) {
+	if len(upload.Spec.Template.Spec.Containers) != 1 {
+		return nil, fmt.Errorf("snapshot upload job %s/%s has %d containers, expected 1",
+			upload.Namespace, upload.Name, len(upload.Spec.Template.Spec.Containers))
+	}
+	container := upload.Spec.Template.Spec.Containers[0]
+	provider := strings.TrimSuffix(exporter, "-exporter")
+	if len(container.Args) < 5 || container.Args[0] != provider || container.Args[1] != typeUpload {
+		return nil, fmt.Errorf("snapshot upload job %s/%s has unexpected exporter arguments", upload.Namespace, upload.Name)
+	}
+	name := snapshotNameFromJob(upload)
+	container.Args = []string{provider, typeDelete, container.Args[3], name}
+	container.WorkingDir = "/app"
+	container.VolumeMounts = slices.DeleteFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
+		return mount.Name == "data"
+	})
+	template := *upload.Spec.Template.DeepCopy()
+	template.Spec.Containers = []corev1.Container{container}
+	template.Spec.Volumes = slices.DeleteFunc(template.Spec.Volumes, func(volume corev1.Volume) bool {
+		return volume.Name == "data"
+	})
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name + "-delete",
+			Namespace:       upload.Namespace,
+			Labels:          map[string]string{labelExporter: exporter, labelOwner: owner.GetName(), labelType: typeDelete},
+			OwnerReferences: append([]metav1.OwnerReference(nil), upload.OwnerReferences...),
+		},
+		Spec: batchv1.JobSpec{BackoffLimit: ptr.To[int32](5), Template: template},
+	}
+	setSnapshotDeletionUploadIdentity(job, owner, exporter, identity)
+	return job, nil
 }
 
 func snapshotJobExporter(job SnapshotJob, currentExporter string) string {
@@ -676,6 +759,24 @@ func getSnapshotDeletionJob(
 	if err != nil {
 		return nil, nil, err
 	}
+	if upload == nil && expected.Upload != nil {
+		// Legacy deletion Jobs did not persist the paired upload identity. They
+		// cannot safely finish while an active co-listed upload may still write the
+		// archive, so replace them with a suspended paired workflow.
+		if !expected.Upload.Terminating {
+			if err = deleteSnapshotJob(ctx, client, job); err != nil {
+				return nil, nil, fmt.Errorf("replace unpaired snapshot deletion job %s/%s: %w", job.Namespace, job.Name, err)
+			}
+			return nil, nil, &StaleJobReplacedError{
+				Purpose:          typeDelete,
+				Namespace:        job.Namespace,
+				Name:             job.Name,
+				UID:              job.UID,
+				ConflictingLabel: labelCleanupUploadUID,
+				DesiredValue:     string(expected.Upload.UID),
+			}
+		}
+	}
 	if expected.Upload != nil && upload != nil {
 		if expected.Upload.UID != upload.UID {
 			return nil, nil, fmt.Errorf("snapshot deletion job %s/%s records upload UID %s, expected %s",
@@ -759,6 +860,9 @@ func cleanupSnapshotDeletionResources(
 	exporter string,
 ) error {
 	if expected.Upload == nil {
+		if err := cleanupDanglingUploadPVC(ctx, client, owner.GetNamespace(), expected.Name); err != nil {
+			return err
+		}
 		return cleanupSnapshotDeletionJob(ctx, client, owner, expected, exporter)
 	}
 
@@ -794,6 +898,34 @@ func cleanupSnapshotDeletionResources(
 	}
 	if err = deleteSnapshotJob(ctx, client, deletionJob); err != nil {
 		return fmt.Errorf("delete snapshot deletion job %s/%s: %w", deletionJob.Namespace, deletionJob.Name, err)
+	}
+	return nil
+}
+
+func cleanupDanglingUploadPVC(ctx context.Context, client kubernetes.Interface, namespace, name string) error {
+	jobName := name + "-upload"
+	if _, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{}); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get legacy upload job %s/%s: %w", namespace, jobName, err)
+	}
+	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get dangling upload PVC %s/%s: %w", namespace, jobName, err)
+	}
+	controller := metav1.GetControllerOfNoCopy(pvc)
+	if controller == nil || controller.APIVersion != batchv1.SchemeGroupVersion.String() ||
+		controller.Kind != "Job" || controller.Name != jobName || controller.UID == "" {
+		return fmt.Errorf("dangling upload PVC %s/%s lacks a verified upload Job controller", namespace, jobName)
+	}
+	err = client.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &pvc.UID},
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete dangling upload PVC %s/%s: %w", namespace, jobName, err)
 	}
 	return nil
 }

@@ -398,7 +398,7 @@ func TestListSnapshotJobsIncludesPreviousExporterDeletionWorkflow(t *testing.T) 
 			OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(owner)},
 		}},
 		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-			Name:      "previous-upload",
+			Name:      "old-upload-only-upload",
 			Namespace: owner.Namespace,
 			UID:       "old-upload-only-uid",
 			Labels: map[string]string{
@@ -414,11 +414,77 @@ func TestListSnapshotJobsIncludesPreviousExporterDeletionWorkflow(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, []SnapshotJob{
 		{Name: "current", UID: "current-upload-uid", Purpose: SnapshotJobUpload},
+		{Name: "old-upload-only", UID: "old-upload-only-uid", Purpose: SnapshotJobUpload, Exporter: s3Exporter},
 		{
 			Name: "previous", UID: "previous-delete-uid", Purpose: SnapshotJobDelete, Exporter: s3Exporter,
 			Upload: &SnapshotJobIdentity{UID: "previous-upload-uid", PVCUID: "previous-pvc-uid"},
 		},
 	}, jobs)
+}
+
+func TestDeleteSnapshotForPreviousExporterUploadDerivesDeletionJob(t *testing.T) {
+	owner := testJobOwner()
+	upload, pvc := testOrphanUploadResources(owner, s3Exporter)
+	upload.Spec.Template.Spec.Containers = []corev1.Container{{
+		Name:         "dataexporter",
+		Image:        "dataexporter:test",
+		Args:         []string{"s3", "upload", "data", "snapshots", "snapshot"},
+		WorkingDir:   "/home/app",
+		VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/home/app/data"}},
+	}}
+	upload.Spec.Template.Spec.Volumes = []corev1.Volume{{Name: "data"}}
+	client := fake.NewSimpleClientset(upload, pvc)
+
+	deletion, status, err := DeleteSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: upload.UID, Purpose: SnapshotJobUpload, Exporter: s3Exporter,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	assert.Equal(t, s3Exporter, deletion.Exporter)
+
+	job, err := client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, s3Exporter, job.Labels[labelExporter])
+	require.Len(t, job.Spec.Template.Spec.Containers, 1)
+	assert.Equal(t, []string{"s3", "delete", "snapshots", "snapshot"}, job.Spec.Template.Spec.Containers[0].Args)
+	assert.Equal(t, "/app", job.Spec.Template.Spec.Containers[0].WorkingDir)
+	assert.Empty(t, job.Spec.Template.Spec.Containers[0].VolumeMounts)
+	assert.Empty(t, job.Spec.Template.Spec.Volumes)
+	require.NotNil(t, job.Spec.Suspend)
+	assert.False(t, *job.Spec.Suspend)
+}
+
+func TestReconcileLegacyDeletionReplacesActiveUnpairedUploadWorkflow(t *testing.T) {
+	owner := testJobOwner()
+	deleteJob := desiredDeleteJob(owner, gcsExporter)
+	deleteJob.UID = "delete-uid"
+	uploadJob, _ := testOrphanUploadResources(owner, gcsExporter)
+	client := fake.NewSimpleClientset(deleteJob, uploadJob)
+	expected := snapshotJobsFromJobs([]batchv1.Job{*deleteJob, *uploadJob})[0]
+
+	_, err := reconcileSnapshotDeletionJob(context.Background(), client, owner, expected, gcsExporter)
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	_, getErr := client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr))
+}
+
+func TestCleanupLegacyDeletionRemovesDanglingUploadPVC(t *testing.T) {
+	owner := testJobOwner()
+	deleteJob := desiredDeleteJob(owner, gcsExporter)
+	deleteJob.UID = "delete-uid"
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot-upload", Namespace: owner.Namespace, UID: "pvc-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: "snapshot-upload", UID: "upload-uid", Controller: ptr.To(true),
+		}},
+	}}
+	client := fake.NewSimpleClientset(deleteJob, pvc)
+
+	require.NoError(t, cleanupSnapshotDeletionResources(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: deleteJob.UID, Purpose: SnapshotJobDelete,
+	}, gcsExporter))
+	_, err := client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func TestListSnapshotJobsIgnoresSameNamePreviousOwner(t *testing.T) {
