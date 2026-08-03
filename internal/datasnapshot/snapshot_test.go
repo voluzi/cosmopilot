@@ -421,6 +421,27 @@ func TestListSnapshotJobsIncludesPreviousExporterDeletionWorkflow(t *testing.T) 
 	}, jobs)
 }
 
+func TestListSnapshotJobsIgnoresSameNamePreviousOwner(t *testing.T) {
+	owner := testJobOwner()
+	previousOwner := owner.DeepCopy()
+	previousOwner.UID = "previous-owner-uid"
+	client := fake.NewSimpleClientset(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      "previous-delete",
+		Namespace: owner.Namespace,
+		UID:       "previous-delete-uid",
+		Labels: map[string]string{
+			labelExporter: s3Exporter,
+			labelOwner:    owner.Name,
+			labelType:     typeDelete,
+		},
+		OwnerReferences: []metav1.OwnerReference{ownerReferenceTo(previousOwner)},
+	}})
+
+	jobs, err := listSnapshotJobs(context.Background(), client, owner, gcsExporter)
+	require.NoError(t, err)
+	assert.Empty(t, jobs)
+}
+
 func TestSnapshotJobsFromJobsDoesNotPairDifferentExporterUpload(t *testing.T) {
 	jobs := []batchv1.Job{
 		{ObjectMeta: metav1.ObjectMeta{

@@ -412,6 +412,12 @@ func listSnapshotJobs(
 	jobs := make([]batchv1.Job, 0, len(list.Items))
 	for i := range list.Items {
 		job := list.Items[i]
+		// The owner label is name-based and can survive a delete/recreate race.
+		// Ignore Jobs controlled by a previous object with the same name; the old
+		// owner's garbage collection must handle them.
+		if !metav1.IsControlledBy(&job, owner) {
+			continue
+		}
 		// Upload Jobs need the currently configured provider to construct a matching
 		// deletion workflow. Existing deletion Jobs are self-contained and must stay
 		// discoverable after a provider switch so suspended workflows can resume.
