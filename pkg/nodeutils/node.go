@@ -33,6 +33,7 @@ type NodeUtils struct {
 	upgradeChecker    *UpgradeChecker
 	requiresUpgrade   atomic.Bool
 	tmkmsActive       atomic.Bool
+	signerDiscovered  atomic.Bool
 	tmkmsProxy        *proxy.TCP
 	nodeBinaryName    string
 	appProcess        *process.Process
@@ -84,7 +85,9 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	nodeUtils.client = client
 
 	if options.TmkmsProxy {
-		nodeUtils.tmkmsProxy, err = proxy.NewTCPProxy(":26659", "127.0.0.1:5555", true)
+		nodeUtils.tmkmsProxy, err = proxy.NewTCPProxy(":26659", "127.0.0.1:5555", true, func() {
+			nodeUtils.signerDiscovered.Store(true)
+		})
 		if err != nil {
 			return nil, err
 		}

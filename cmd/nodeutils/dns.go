@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 const (
 	dnsLookupInterval     = time.Second
 	dnsDiagnosticInterval = 5 * time.Second
+	signerDiscoveryURL    = "http://127.0.0.1:8000/signer_discovered"
 )
 
 type dnsResolver interface {
@@ -24,10 +26,14 @@ type dnsResolver interface {
 func handleWaitForDNSCommand(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return runWaitForDNSCommand(ctx, net.DefaultResolver, args, dnsLookupInterval)
+	return runWaitForDNSCommand(ctx, net.DefaultResolver, http.DefaultClient, args, dnsLookupInterval)
 }
 
-func runWaitForDNSCommand(ctx context.Context, resolver dnsResolver, args []string, interval time.Duration) error {
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func runWaitForDNSCommand(ctx context.Context, resolver dnsResolver, client httpDoer, args []string, interval time.Duration) error {
 	if len(args) != 3 {
 		return fmt.Errorf("usage: node-utils wait-for-dns <hostname> <ip-address> <timeout>")
 	}
@@ -38,7 +44,10 @@ func runWaitForDNSCommand(ctx context.Context, resolver dnsResolver, args []stri
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return waitForDNSAddress(ctx, resolver, args[0], args[1], interval)
+	if err := waitForDNSAddress(ctx, resolver, args[0], args[1], interval); err != nil {
+		return err
+	}
+	return waitForSignerDiscovery(ctx, client, signerDiscoveryURL, interval)
 }
 
 func waitForDNSAddress(ctx context.Context, resolver dnsResolver, hostname, address string, interval time.Duration) error {
@@ -116,4 +125,44 @@ func formatDNSAddresses(addresses []net.IPAddr) string {
 		formatted = append(formatted, address.String())
 	}
 	return strings.Join(formatted, ",")
+}
+
+func waitForSignerDiscovery(ctx context.Context, client httpDoer, url string, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("signer discovery poll interval must be positive")
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lastStatus string
+	var lastErr error
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			lastStatus = resp.Status
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for remote signer discovery confirmation (last status: %s; last error: %s): %w",
+				formatDiagnosticValue(lastStatus), formatDNSLookupError(lastErr), ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func formatDiagnosticValue(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }

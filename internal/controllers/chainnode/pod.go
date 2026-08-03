@@ -11,9 +11,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -254,6 +256,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	if podInFailedState(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
+		logFailedCosmosignerDiscoveryGate(logger, currentPod)
 		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
 		if err != nil {
 			logger.Info("could not retrieve logs: " + err.Error())
@@ -516,7 +519,16 @@ func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.Ch
 				FieldPath: "status.podIP",
 			}},
 		}},
-		Resources: chainNode.Spec.Config.GetNodeUtilsResources(),
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("10m"),
+				corev1.ResourceMemory: resource.MustParse("16Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("32Mi"),
+			},
+		},
 	}
 }
 
@@ -1232,6 +1244,21 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 	}
 
 	return nil
+}
+
+func logFailedCosmosignerDiscoveryGate(logger logr.Logger, pod *corev1.Pod) {
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name != CosmosignerDiscoveryWaitContainerName || status.State.Terminated == nil || status.State.Terminated.ExitCode == 0 {
+			continue
+		}
+		termination := status.State.Terminated
+		logger.Info("cosmosigner discovery startup gate failed",
+			"container", status.Name,
+			"reason", termination.Reason,
+			"message", termination.Message,
+			"exitCode", termination.ExitCode)
+		return
+	}
 }
 
 func podInFailedState(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {

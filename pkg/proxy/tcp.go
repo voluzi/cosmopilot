@@ -13,9 +13,10 @@ type TCP struct {
 	laddr, raddr *net.TCPAddr
 	listener     *net.TCPListener
 	runOnce      bool
+	onAccept     func()
 }
 
-func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool) (*TCP, error) {
+func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...func()) (*TCP, error) {
 	laddr, err := net.ResolveTCPAddr("tcp", localAddr)
 	if err != nil {
 		return nil, err
@@ -46,6 +47,10 @@ func (p *TCP) Start() error {
 		if err != nil {
 			log.Errorf("failed to accept connection: %v", err)
 			continue
+		}
+
+		if p.onAccept != nil {
+			p.onAccept()
 		}
 
 		log.WithFields(log.Fields{

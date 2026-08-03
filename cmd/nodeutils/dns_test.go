@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +29,25 @@ func (r *sequenceDNSResolver) LookupIPAddr(context.Context, string) ([]net.IPAdd
 	return nil, nil
 }
 
+type sequenceHTTPDoer struct {
+	statuses []int
+	errors   []error
+	calls    int
+}
+
+func (d *sequenceHTTPDoer) Do(*http.Request) (*http.Response, error) {
+	index := d.calls
+	d.calls++
+	if index < len(d.errors) && d.errors[index] != nil {
+		return nil, d.errors[index]
+	}
+	status := http.StatusNotAcceptable
+	if index < len(d.statuses) {
+		status = d.statuses[index]
+	}
+	return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(""))}, nil
+}
+
 type deadlineDNSResolver struct {
 	deadline    time.Time
 	hasDeadline bool
@@ -41,7 +62,7 @@ func TestWaitForDNSCommandAppliesTimeoutArgument(t *testing.T) {
 	resolver := &deadlineDNSResolver{}
 	started := time.Now()
 
-	err := runWaitForDNSCommand(context.Background(), resolver,
+	err := runWaitForDNSCommand(context.Background(), resolver, &sequenceHTTPDoer{statuses: []int{http.StatusOK}},
 		[]string{"signer-privval.default.svc", "10.0.0.2", "25s"}, time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
@@ -108,5 +129,19 @@ func TestWaitForDNSAddressRejectsInvalidTarget(t *testing.T) {
 	err := waitForDNSAddress(context.Background(), &sequenceDNSResolver{}, "signer-privval.default.svc", "not-an-ip", time.Millisecond)
 	if err == nil {
 		t.Fatal("waitForDNSAddress() expected an invalid-address error")
+	}
+}
+
+func TestWaitForSignerDiscoveryRetriesUntilConfirmed(t *testing.T) {
+	client := &sequenceHTTPDoer{
+		errors:   []error{errors.New("node-utils not ready")},
+		statuses: []int{0, http.StatusNotAcceptable, http.StatusOK},
+	}
+	err := waitForSignerDiscovery(context.Background(), client, signerDiscoveryURL, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 3 {
+		t.Fatalf("signer discovery calls = %d, want 3", client.calls)
 	}
 }
