@@ -433,6 +433,13 @@ func TestDeleteSnapshotForPreviousExporterUploadDerivesDeletionJob(t *testing.T)
 		VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/home/app/data"}},
 	}}
 	upload.Spec.Template.Spec.Volumes = []corev1.Volume{{Name: "data"}}
+	upload.Spec.Template.Labels = map[string]string{
+		"application":                        "dataexporter",
+		"controller-uid":                     "upload-uid",
+		"job-name":                           upload.Name,
+		"batch.kubernetes.io/controller-uid": "upload-uid",
+		"batch.kubernetes.io/job-name":       upload.Name,
+	}
 	client := fake.NewSimpleClientset(upload, pvc)
 
 	deletion, status, err := DeleteSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
@@ -450,6 +457,11 @@ func TestDeleteSnapshotForPreviousExporterUploadDerivesDeletionJob(t *testing.T)
 	assert.Equal(t, "/app", job.Spec.Template.Spec.Containers[0].WorkingDir)
 	assert.Empty(t, job.Spec.Template.Spec.Containers[0].VolumeMounts)
 	assert.Empty(t, job.Spec.Template.Spec.Volumes)
+	assert.Equal(t, "dataexporter", job.Spec.Template.Labels["application"])
+	assert.NotContains(t, job.Spec.Template.Labels, "controller-uid")
+	assert.NotContains(t, job.Spec.Template.Labels, "job-name")
+	assert.NotContains(t, job.Spec.Template.Labels, "batch.kubernetes.io/controller-uid")
+	assert.NotContains(t, job.Spec.Template.Labels, "batch.kubernetes.io/job-name")
 	require.NotNil(t, job.Spec.Suspend)
 	assert.False(t, *job.Spec.Suspend)
 }
@@ -468,7 +480,7 @@ func TestReconcileLegacyDeletionReplacesActiveUnpairedUploadWorkflow(t *testing.
 	assert.True(t, apierrors.IsNotFound(getErr))
 }
 
-func TestCleanupLegacyDeletionRemovesDanglingUploadPVC(t *testing.T) {
+func TestCleanupLegacyDeletionRetainsUnattributedDanglingUploadPVC(t *testing.T) {
 	owner := testJobOwner()
 	deleteJob := desiredDeleteJob(owner, gcsExporter)
 	deleteJob.UID = "delete-uid"
@@ -483,8 +495,9 @@ func TestCleanupLegacyDeletionRemovesDanglingUploadPVC(t *testing.T) {
 	require.NoError(t, cleanupSnapshotDeletionResources(context.Background(), client, owner, SnapshotJob{
 		Name: "snapshot", UID: deleteJob.UID, Purpose: SnapshotJobDelete,
 	}, gcsExporter))
-	_, err := client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
-	assert.True(t, apierrors.IsNotFound(err))
+	storedPVC, err := client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, pvc.UID, storedPVC.UID)
 }
 
 func TestListSnapshotJobsIgnoresSameNamePreviousOwner(t *testing.T) {

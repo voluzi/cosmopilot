@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
@@ -2044,6 +2045,47 @@ func TestEnsureVolumeSnapshotsPersistsPendingDeletionSuccessWhenSnapshotsAreDisa
 	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationTarballDeletionComplete])
 	_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), deleteJob.Name, metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestSnapshotKubernetesClientFallsBackToProductionClientSet(t *testing.T) {
+	production := &kubernetes.Clientset{}
+	override := fake.NewSimpleClientset()
+	reconciler := &Reconciler{ClientSet: production}
+	assert.Same(t, production, reconciler.snapshotKubernetesClient())
+	reconciler.snapshotClientSet = override
+	assert.Same(t, override, reconciler.snapshotKubernetesClient())
+}
+
+func TestReconcilePendingTarballDeletionsBlocksFailedWorkflow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	chainNode := orphanSnapshotTestChainNode(now, &appsv1.ExportTarballConfig{
+		GCS: &appsv1.GcsExportConfig{Bucket: "new-bucket"},
+	})
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "old-tarball-delete", Namespace: chainNode.Namespace, UID: "delete-uid",
+			Labels: map[string]string{"exporter": "s3-exporter", "owner": chainNode.Name, "type": "delete"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: chainNode.APIVersion, Kind: chainNode.Kind, Name: chainNode.Name,
+				UID: chainNode.UID, Controller: ptr.To(true),
+			}},
+		},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+		}}},
+	}
+	clientSet := fake.NewSimpleClientset(failedJob)
+	reconciler := &Reconciler{snapshotClientSet: clientSet, recorder: record.NewFakeRecorder(10)}
+
+	pending, err := reconciler.reconcilePendingTarballDeletions(context.Background(), chainNode)
+	require.NoError(t, err)
+	assert.True(t, pending)
+	stored, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(context.Background(), failedJob.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, failedJob.UID, stored.UID)
 }
 
 func orphanSnapshotTestChainNode(now time.Time, export *appsv1.ExportTarballConfig) *appsv1.ChainNode {

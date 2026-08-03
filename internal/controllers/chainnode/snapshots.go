@@ -432,7 +432,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				case datasnapshot.SnapshotJobUpload:
 					if snapshotJob.Exporter != "" {
 						cleanupJob, status, deleteErr = datasnapshot.DeleteSnapshotForUpload(
-							ctx, r.snapshotClientSet, chainNode, snapshotJob,
+							ctx, r.snapshotKubernetesClient(), chainNode, snapshotJob,
 						)
 					} else {
 						cleanupJob, status, deleteErr = exporter.DeleteSnapshotForUpload(ctx, snapshotJob)
@@ -483,10 +483,7 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 	if r.snapshotClientSet == nil && r.ClientSet == nil {
 		return false, nil
 	}
-	clientSet := kubernetes.Interface(r.ClientSet)
-	if r.snapshotClientSet != nil {
-		clientSet = r.snapshotClientSet
-	}
+	clientSet := r.snapshotKubernetesClient()
 	jobs, err := datasnapshot.ListSnapshotDeletionJobs(ctx, clientSet, chainNode)
 	if err != nil {
 		return false, err
@@ -504,6 +501,7 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 		case datasnapshot.SnapshotActive:
 			pending = true
 		case datasnapshot.SnapshotFailed:
+			pending = true
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeWarning,
 				appsv1.ReasonTarballDeleteError,
@@ -524,6 +522,13 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 		}
 	}
 	return pending, nil
+}
+
+func (r *Reconciler) snapshotKubernetesClient() kubernetes.Interface {
+	if r.snapshotClientSet != nil {
+		return r.snapshotClientSet
+	}
+	return r.ClientSet
 }
 
 func (r *Reconciler) persistPendingTarballDeletionSuccess(

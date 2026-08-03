@@ -533,6 +533,14 @@ func deletionJobFromUpload(
 		return mount.Name == "data"
 	})
 	template := *upload.Spec.Template.DeepCopy()
+	for _, label := range []string{
+		"controller-uid",
+		"job-name",
+		"batch.kubernetes.io/controller-uid",
+		"batch.kubernetes.io/job-name",
+	} {
+		delete(template.Labels, label)
+	}
 	template.Spec.Containers = []corev1.Container{container}
 	template.Spec.Volumes = slices.DeleteFunc(template.Spec.Volumes, func(volume corev1.Volume) bool {
 		return volume.Name == "data"
@@ -860,9 +868,9 @@ func cleanupSnapshotDeletionResources(
 	exporter string,
 ) error {
 	if expected.Upload == nil {
-		if err := cleanupDanglingUploadPVC(ctx, client, owner.GetNamespace(), expected.Name); err != nil {
-			return err
-		}
+		// Legacy deletion Jobs did not persist an upload UID. A same-name PVC
+		// controlled by an already-absent Job cannot be tied to this ChainNode, so
+		// retain it rather than risk deleting another node's colliding upload PVC.
 		return cleanupSnapshotDeletionJob(ctx, client, owner, expected, exporter)
 	}
 
@@ -898,34 +906,6 @@ func cleanupSnapshotDeletionResources(
 	}
 	if err = deleteSnapshotJob(ctx, client, deletionJob); err != nil {
 		return fmt.Errorf("delete snapshot deletion job %s/%s: %w", deletionJob.Namespace, deletionJob.Name, err)
-	}
-	return nil
-}
-
-func cleanupDanglingUploadPVC(ctx context.Context, client kubernetes.Interface, namespace, name string) error {
-	jobName := name + "-upload"
-	if _, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{}); err == nil {
-		return nil
-	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get legacy upload job %s/%s: %w", namespace, jobName, err)
-	}
-	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, jobName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("get dangling upload PVC %s/%s: %w", namespace, jobName, err)
-	}
-	controller := metav1.GetControllerOfNoCopy(pvc)
-	if controller == nil || controller.APIVersion != batchv1.SchemeGroupVersion.String() ||
-		controller.Kind != "Job" || controller.Name != jobName || controller.UID == "" {
-		return fmt.Errorf("dangling upload PVC %s/%s lacks a verified upload Job controller", namespace, jobName)
-	}
-	err = client.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &pvc.UID},
-	})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete dangling upload PVC %s/%s: %w", namespace, jobName, err)
 	}
 	return nil
 }
