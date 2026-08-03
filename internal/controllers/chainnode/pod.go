@@ -1297,10 +1297,6 @@ func isImagePullFailure(state *corev1.ContainerStateWaiting) bool {
 }
 
 func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
-	if pod.Status.Phase == corev1.PodFailed {
-		return true
-	}
-
 	for _, c := range pod.Status.InitContainerStatuses {
 		if c.Name == nodeUtilsContainerName && (!c.Ready && c.State.Terminated != nil) {
 			return true

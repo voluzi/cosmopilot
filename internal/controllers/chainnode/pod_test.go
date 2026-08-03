@@ -351,6 +351,40 @@ func TestNodeUtilsIsInFailedState(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "failed pod with discovery gate failure",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: CosmosignerDiscoveryWaitContainerName,
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
+							},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "terminated node-utils init container",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: nodeUtilsContainerName,
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
