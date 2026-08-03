@@ -149,6 +149,27 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
+	// Handle terminal Pod failures before probing node-utils. Kubernetes stops restartable init
+	// sidecars when another container fails, so the node-utils HTTP endpoint is no longer available
+	// and must not prevent the failed Pod from reaching its recreation path.
+	if podInFailedState(chainNode, currentPod) {
+		logger.Info("pod is in failed state", "pod", pod.GetName())
+		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
+		logFailedCosmosignerDiscoveryGate(logger, currentPod)
+		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
+		if err != nil {
+			logger.Info("could not retrieve logs: " + err.Error())
+		} else {
+			logLines := strings.Split(logs, "\n")
+			if len(logLines) > defaultLogsLineCount {
+				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "\n"))
+			} else {
+				logger.Info("app error: " + strings.Join(logLines, "\n"))
+			}
+		}
+		return r.recreatePod(ctx, chainNode, pod, false)
+	}
+
 	logger.V(1).Info("updating latest height")
 	if err = r.updateLatestHeight(ctx, chainNode); err != nil {
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
@@ -250,25 +271,6 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
 		}
 		return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
-	}
-
-	// Recreate pod if it is in failed state
-	if podInFailedState(chainNode, currentPod) {
-		logger.Info("pod is in failed state", "pod", pod.GetName())
-		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
-		logFailedCosmosignerDiscoveryGate(logger, currentPod)
-		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
-		if err != nil {
-			logger.Info("could not retrieve logs: " + err.Error())
-		} else {
-			logLines := strings.Split(logs, "\n")
-			if len(logLines) > defaultLogsLineCount {
-				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "\n"))
-			} else {
-				logger.Info("app error: " + strings.Join(logLines, "\n"))
-			}
-		}
-		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
 	// Re-create pod if spec changes
