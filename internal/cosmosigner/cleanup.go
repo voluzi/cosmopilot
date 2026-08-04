@@ -421,7 +421,8 @@ func ReleaseOwnerStateFinalizers(ctx context.Context, c client.Client, owner cli
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
 		labelOwned := pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID()) && isStatefulSetDataPVC(pvc.GetName(), name)
-		attributed := resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassCosmosignerState)
+		attributed := resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassCosmosignerState) &&
+			pvc.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] == string(owner.GetUID())
 		if (!labelOwned && !attributed) || !controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
 			continue
 		}

@@ -440,6 +440,7 @@ func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *test
 		Finalizers: []string{RetainedStateFinalizer},
 	}}
 	resourcecleanup.Stamp(pvc, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState)
+	resourcecleanup.StampResourceOwner(pvc, owner.UID)
 	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
 
 	if err := ReleaseOwnerStateFinalizers(context.Background(), c, owner, namespace); err != nil {
@@ -451,6 +452,30 @@ func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *test
 	}
 	if controllerutil.ContainsFinalizer(fresh, RetainedStateFinalizer) {
 		t.Fatal("stable attribution must release the retained-state finalizer after label drift")
+	}
+}
+
+func TestReleaseOwnerStateFinalizersPreservesSiblingStateWithSharedRoot(t *testing.T) {
+	const namespace = "default"
+	root := resourcecleanup.RootOwner{APIVersion: "cosmopilot.voluzi.com/v1", Kind: "ChainNodeSet", Name: "set", Namespace: namespace, UID: "set-uid"}
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "child-a", Namespace: namespace, UID: types.UID("child-a-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-child-b-signer-0", Namespace: namespace,
+		Finalizers: []string{RetainedStateFinalizer},
+	}}
+	resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassCosmosignerState)
+	resourcecleanup.StampResourceOwner(pvc, types.UID("child-b-uid"))
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
+
+	if err := ReleaseOwnerStateFinalizers(context.Background(), c, owner, namespace); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(fresh, RetainedStateFinalizer) {
+		t.Fatal("a child must not release a sibling's Cosmosigner state guard")
 	}
 }
 

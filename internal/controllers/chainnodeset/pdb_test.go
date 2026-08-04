@@ -540,6 +540,50 @@ func TestEnsurePodDisruptionBudgetsDoesNotDeleteSupplementalPDB(t *testing.T) {
 	assert.NotNil(t, getPdb(t, r, "default", "custom-supplemental"))
 }
 
+func TestEnsurePodDisruptionBudgetsDeletesRecordedRemovedGroupPDBWithoutGroupSelector(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid"),
+			Annotations: map[string]string{annotationGrouplessPDBHistory: "test-nodeset-removed"},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-removed", Namespace: "default"},
+		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			controllers.LabelUpgrading:    controllers.StringValueFalse,
+			controllers.LabelChainID:      nodeSet.Status.ChainID,
+			controllers.LabelChainNodeSet: nodeSet.Name,
+		}}},
+	}))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+	assert.Nil(t, getPdb(t, r, "default", "test-nodeset-removed"))
+}
+
+func TestRecordGrouplessPDBHistoryPersistsRemovedGroupIdentity(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "fullnodes", Instances: ptr.To(2),
+			IgnoreGroupOnDisruptionChecks: ptr.To(true),
+			PDB:                           &appsv1.PdbConfig{Enabled: true},
+		}}},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+
+	changed, err := r.recordGrouplessPDBHistory(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	fresh := &appsv1.ChainNodeSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(nodeSet), fresh))
+	assert.Equal(t, "test-nodeset-fullnodes", fresh.Annotations[annotationGrouplessPDBHistory])
+
+	fresh.Spec.Nodes = nil
+	assert.True(t, isRecordedGrouplessPDB(fresh, "test-nodeset-fullnodes"))
+}
+
 func TestEnsurePodDisruptionBudgetsPreservesAmbiguousRemovedGroupPDBWithoutGroupSelector(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},

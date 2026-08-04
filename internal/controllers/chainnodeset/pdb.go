@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 
 	"golang.org/x/exp/maps"
 	policyv1 "k8s.io/api/policy/v1"
@@ -18,9 +20,16 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
-const podDisruptionBudgetFinalizer = "cosmopilot.voluzi.com/pdb-cleanup"
+const (
+	podDisruptionBudgetFinalizer  = "cosmopilot.voluzi.com/pdb-cleanup"
+	annotationGrouplessPDBHistory = "cosmopilot.voluzi.com/groupless-pdb-history"
+	grouplessPDBHistorySeparator  = ","
+)
 
 func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	if _, err := r.recordGrouplessPDBHistory(ctx, nodeSet); err != nil {
+		return err
+	}
 	desiredPdbNames := map[string]struct{}{}
 	if nodeSet.Spec.Validator.HasPdbEnabled() {
 		pdb := getPdbSpec(
@@ -178,6 +187,9 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	}
 	group := labels[controllers.LabelChainNodeSetGroup]
 	if group == "" {
+		if isRecordedGrouplessPDB(nodeSet, pdb.GetName()) {
+			return true
+		}
 		for _, configuredGroup := range nodeSet.Spec.Nodes {
 			if configuredGroup.Validator == nil &&
 				configuredGroup.HasPdbEnabled() &&
@@ -195,6 +207,54 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	}
 
 	return pdb.GetName() == name
+}
+
+func (r *Reconciler) recordGrouplessPDBHistory(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	names := grouplessPDBHistory(nodeSet)
+	changed := false
+	for _, group := range nodeSet.Spec.Nodes {
+		if group.Validator != nil || !group.HasPdbEnabled() || !group.ShouldIgnoreGroupLabelOnDisruptions() {
+			continue
+		}
+		name := group.GetServiceName(nodeSet)
+		if _, exists := names[name]; !exists {
+			names[name] = struct{}{}
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	values := make([]string, 0, len(names))
+	for name := range names {
+		values = append(values, name)
+	}
+	sort.Strings(values)
+	annotations := nodeSet.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[annotationGrouplessPDBHistory] = strings.Join(values, grouplessPDBHistorySeparator)
+	nodeSet.SetAnnotations(annotations)
+	if err := r.Update(ctx, nodeSet); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func isRecordedGrouplessPDB(nodeSet *appsv1.ChainNodeSet, name string) bool {
+	_, ok := grouplessPDBHistory(nodeSet)[name]
+	return ok
+}
+
+func grouplessPDBHistory(nodeSet *appsv1.ChainNodeSet) map[string]struct{} {
+	names := map[string]struct{}{}
+	for _, name := range strings.Split(nodeSet.GetAnnotations()[annotationGrouplessPDBHistory], grouplessPDBHistorySeparator) {
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
 }
 
 func getPdbSpec(nodeSet *appsv1.ChainNodeSet, name string, min int, labels map[string]string) *policyv1.PodDisruptionBudget {

@@ -517,14 +517,28 @@ func TestAttributeCosmoseedDataVolumesPreservesPreprovisionedExactNameClaim(t *t
 	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
 }
 
-func TestIsLegacyCosmoseedClaimRequiresStatefulSetControllerProvenance(t *testing.T) {
-	generated := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{ManagedFields: []metav1.ManagedFieldsEntry{{
-		Manager: "kube-controller-manager",
-	}}}}
-	userProvided := &corev1.PersistentVolumeClaim{}
+func TestAttributeCosmoseedDataVolumesPreservesBoundPreprovisionedClaimWithControllerManagedFields(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	seed := &k8sappsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid"},
+		Spec:       k8sappsv1.StatefulSetSpec{VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}}},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
+	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-set-seed-0", Namespace: nodeSet.Namespace,
+		ManagedFields: []metav1.ManagedFieldsEntry{{
+			Manager: "kube-controller-manager", Operation: metav1.ManagedFieldsOperationUpdate,
+			APIVersion: "v1", FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{}`)},
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, claim).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
 
-	assert.True(t, isLegacyCosmoseedClaim(generated))
-	assert.False(t, isLegacyCosmoseedClaim(userProvided))
+	require.NoError(t, r.attributeCosmoseedDataVolumes(context.Background(), nodeSet))
+	fresh := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(claim), fresh))
+	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
 }
 
 func TestQuiesceCosmoseedUsesOwnedDeterministicNameWhenLabelsDrift(t *testing.T) {
