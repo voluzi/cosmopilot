@@ -19,6 +19,7 @@ import (
 )
 
 func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	desiredPdbNames := map[string]struct{}{}
 	if nodeSet.Spec.Validator.HasPdbEnabled() {
 		pdb := getPdbSpec(
 			nodeSet,
@@ -35,6 +36,7 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 				controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
 			},
 		)
+		desiredPdbNames[pdb.GetName()] = struct{}{}
 		if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 			return err
 		}
@@ -79,6 +81,7 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 			maps.Copy(labels, GetGlobalIngressLabels(nodeSet, group.Name))
 
 			pdb := getPdbSpec(nodeSet, group.GetServiceName(nodeSet), group.GetPdbMinAvailable(), labels)
+			desiredPdbNames[pdb.GetName()] = struct{}{}
 			if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 				return err
 			}
@@ -105,6 +108,7 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 					controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
 				},
 			)
+			desiredPdbNames[pdb.GetName()] = struct{}{}
 			if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 				return err
 			}
@@ -115,6 +119,33 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 			if err := r.maybeDeletePDB(ctx, nodeSet, validatorPdbName); err != nil {
 				return err
 			}
+		}
+	}
+
+	return r.deleteStalePodDisruptionBudgets(ctx, nodeSet, desiredPdbNames)
+}
+
+func (r *Reconciler) deleteStalePodDisruptionBudgets(
+	ctx context.Context,
+	nodeSet *appsv1.ChainNodeSet,
+	desiredNames map[string]struct{},
+) error {
+	pdbs := &policyv1.PodDisruptionBudgetList{}
+	if err := r.List(ctx, pdbs, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return err
+	}
+
+	for i := range pdbs.Items {
+		pdb := &pdbs.Items[i]
+		if pdb.Spec.Selector == nil ||
+			pdb.Spec.Selector.MatchLabels[controllers.LabelChainNodeSet] != nodeSet.GetName() {
+			continue
+		}
+		if _, desired := desiredNames[pdb.GetName()]; desired {
+			continue
+		}
+		if err := r.maybeDeletePDB(ctx, nodeSet, pdb.GetName()); err != nil {
+			return err
 		}
 	}
 

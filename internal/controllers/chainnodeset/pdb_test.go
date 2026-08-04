@@ -429,3 +429,45 @@ func TestEnsurePodDisruptionBudgetsDoesNotDeleteForeignPDB(t *testing.T) {
 	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
 	assert.NotNil(t, getPdb(t, r, "default", "test-nodeset-sentries"))
 }
+
+func TestEnsurePodDisruptionBudgetsDeletesRemovedGroupPDB(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-removed", Namespace: "default"},
+		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			controllers.LabelChainNodeSet:      nodeSet.Name,
+			controllers.LabelChainNodeSetGroup: "removed",
+		}}},
+	}))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+	assert.Nil(t, getPdb(t, r, "default", "test-nodeset-removed"))
+}
+
+func TestEnsurePodDisruptionBudgetsDoesNotDeleteRemovedGroupPDBOwnedByAnotherController(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	foreignController := true
+	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset-removed", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1", Kind: "Deployment", Name: "foreign", UID: types.UID("foreign-uid"), Controller: &foreignController,
+			}},
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			controllers.LabelChainNodeSet:      nodeSet.Name,
+			controllers.LabelChainNodeSetGroup: "removed",
+		}}},
+	}))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+	assert.NotNil(t, getPdb(t, r, "default", "test-nodeset-removed"))
+}
