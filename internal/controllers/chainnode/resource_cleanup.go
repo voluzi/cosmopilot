@@ -18,6 +18,10 @@ import (
 // finalizeResources stops every signing workload before applying durable-resource policy. Consensus
 // key reservations are deliberately outside this workflow; issue #86 owns their safe release.
 func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	deletionPolicy, err := r.effectiveDeletionPolicy(ctx, chainNode)
+	if err != nil {
+		return false, err
+	}
 	quiesced, err := r.quiesceNodePod(ctx, chainNode)
 	if err != nil || !quiesced {
 		return false, err
@@ -28,7 +32,7 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 		r.Client,
 		chainNode,
 		chainNode.GetNamespace(),
-		chainNode.Spec.DeletionPolicy.GetCosmosignerState(),
+		deletionPolicy.GetCosmosignerState(),
 	)
 	if err != nil || !signerDone {
 		return false, err
@@ -46,7 +50,7 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 		r.Client,
 		root,
 		resourcecleanup.ClassDataVolumes,
-		chainNode.Spec.DeletionPolicy.GetDataVolumes(),
+		deletionPolicy.GetDataVolumes(),
 		chainNode.GetUID(),
 	)
 	if err != nil {
@@ -57,7 +61,7 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 		r.Client,
 		root,
 		resourcecleanup.ClassGeneratedKeys,
-		chainNode.Spec.DeletionPolicy.GetGeneratedKeys(),
+		deletionPolicy.GetGeneratedKeys(),
 		chainNode.GetUID(),
 	)
 	if err != nil || !dataDone || !keysDone {
@@ -77,6 +81,24 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 		}
 	}
 	return true, nil
+}
+
+func (r *Reconciler) effectiveDeletionPolicy(ctx context.Context, chainNode *appsv1.ChainNode) (*appsv1.DeletionPolicy, error) {
+	controller := metav1.GetControllerOf(chainNode)
+	if controller == nil || controller.APIVersion != appsv1.GroupVersion.String() || controller.Kind != "ChainNodeSet" {
+		return chainNode.Spec.DeletionPolicy, nil
+	}
+	nodeSet := &appsv1.ChainNodeSet{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: controller.Name}, nodeSet); err != nil {
+		if errors.IsNotFound(err) {
+			return chainNode.Spec.DeletionPolicy, nil
+		}
+		return nil, err
+	}
+	if nodeSet.GetUID() == controller.UID && !nodeSet.GetDeletionTimestamp().IsZero() {
+		return nodeSet.Spec.DeletionPolicy, nil
+	}
+	return chainNode.Spec.DeletionPolicy, nil
 }
 
 func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNode *appsv1.ChainNode) error {

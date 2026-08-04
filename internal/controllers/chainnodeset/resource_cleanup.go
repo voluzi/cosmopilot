@@ -3,6 +3,8 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +28,9 @@ func (r *Reconciler) finalizeResources(ctx context.Context, nodeSet *appsv1.Chai
 
 	childrenDone, err := r.quiesceAndDeleteChildren(ctx, nodeSet)
 	if err != nil || !childrenDone {
+		return false, err
+	}
+	if err := r.attributeCosmoseedDataVolumes(ctx, nodeSet); err != nil {
 		return false, err
 	}
 	seedDone, err := r.quiesceCosmoseed(ctx, nodeSet)
@@ -84,6 +89,54 @@ func (r *Reconciler) finalizeResources(ctx context.Context, nodeSet *appsv1.Chai
 		}
 	}
 	return true, nil
+}
+
+func (r *Reconciler) attributeCosmoseedDataVolumes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	seedName := nodeSet.GetName() + "-seed"
+	seed := &k8sappsv1.StatefulSet{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: seedName}, seed); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !metav1.IsControlledBy(seed, nodeSet) {
+		return nil
+	}
+	claimTemplates := map[string]struct{}{}
+	for i := range seed.Spec.VolumeClaimTemplates {
+		claimTemplates[seed.Spec.VolumeClaimTemplates[i].GetName()] = struct{}{}
+	}
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcs, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return err
+	}
+	root := resourcecleanup.RootOwnerFor(nodeSet)
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		matched := false
+		for templateName := range claimTemplates {
+			prefix := templateName + "-" + seedName + "-"
+			ordinal := strings.TrimPrefix(pvc.GetName(), prefix)
+			if ordinal != pvc.GetName() && ordinal != "" {
+				if _, err := strconv.ParseUint(ordinal, 10, 32); err == nil {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
+			continue
+		}
+		changed := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassDataVolumes)
+		changed = resourcecleanup.StampResourceOwner(pvc, nodeSet.GetUID()) || changed
+		if changed {
+			if err := r.Update(ctx, pvc); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {

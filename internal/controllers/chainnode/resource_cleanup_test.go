@@ -177,6 +177,48 @@ func TestFinalizeResourcesRetainsControlledLegacyDataVolumesRemovedFromSpec(t *t
 	assert.False(t, resourcecleanup.IsAttributed(freshGuard, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
+func TestFinalizeResourcesUsesDeletingChainNodeSetPolicy(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	now := metav1.NewTime(time.Now())
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "set", Namespace: "default", UID: "set-uid", DeletionTimestamp: &now,
+			Finalizers: []string{resourcecleanup.Finalizer},
+		},
+		Spec: appsv1.ChainNodeSetSpec{DeletionPolicy: &appsv1.DeletionPolicy{
+			DataVolumes:   ptr.To(appsv1.DeletionPolicyRetain),
+			GeneratedKeys: ptr.To(appsv1.DeletionPolicyRetain),
+		}},
+	}
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-fullnodes-0", Namespace: nodeSet.Namespace, UID: "node-uid", Finalizers: []string{resourcecleanup.Finalizer}},
+		Spec: appsv1.ChainNodeSpec{DeletionPolicy: &appsv1.DeletionPolicy{
+			DataVolumes:   ptr.To(appsv1.DeletionPolicyDelete),
+			GeneratedKeys: ptr.To(appsv1.DeletionPolicyDelete),
+		}},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, node, scheme))
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "pvc-uid"}}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace, UID: "secret-uid"},
+		Data:       map[string][]byte{MnemonicKey: []byte("legacy mnemonic")},
+	}
+	for _, object := range []client.Object{pvc, secret} {
+		require.NoError(t, controllerutil.SetControllerReference(node, object, scheme))
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, node, pvc, secret).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), node)
+	require.NoError(t, err)
+	assert.True(t, done)
+	for _, object := range []client.Object{pvc, secret} {
+		retained := object.DeepCopyObject().(client.Object)
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(object), retained))
+		assert.Nil(t, metav1.GetControllerOf(retained))
+	}
+}
+
 func TestReconcileNamespaceTerminationReleasesCleanupFinalizers(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	now := metav1.NewTime(time.Now())

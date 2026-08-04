@@ -143,6 +143,43 @@ func TestQuiesceOwnerWaitsForAlreadyDeletingStatefulSet(t *testing.T) {
 	}
 }
 
+func TestQuiesceOwnerRecognizesSignerWhenTemplateLabelsDrift(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	zero := int32(0)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: namespace, UID: "sts-uid",
+			OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &zero,
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+				labelAppName: "edited", labelInstance: "edited",
+			}}},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{
+				Name: dataVolumeName, Labels: pvcOwnerLabels(name, owner.UID),
+			}}},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts).Build()
+
+	done := false
+	for attempts := 0; attempts < 4 && !done; attempts++ {
+		var err error
+		done, err = QuiesceOwner(context.Background(), c, owner, namespace)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !done {
+		t.Fatal("label-drifted owned signer did not quiesce")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("label-drifted owned signer must be deleted, got %v", err)
+	}
+}
+
 func TestNamespaceTerminationDoesNotDeleteForeignSameInstancePod(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}

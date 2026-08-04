@@ -18,13 +18,27 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
-// IsOwnedSignerStatefulSet reports whether sts is a cosmosigner deployment controlled by owner,
-// identified by the immutable signer labels on its pod template (object labels are user-influenced
-// and cannot be trusted for this).
+// IsOwnedSignerStatefulSet reports whether sts is a cosmosigner deployment controlled by owner.
+// The pod-template identity is preferred; immutable generated PVC-template identity provides a
+// recovery path when mutable pod-template labels drift.
 func IsOwnedSignerStatefulSet(sts *appsv1.StatefulSet, owner metav1.Object) bool {
-	return metav1.IsControlledBy(sts, owner) &&
-		sts.Spec.Template.Labels[labelAppName] == appNameCosmosigner &&
-		sts.Spec.Template.Labels[labelInstance] == sts.GetName()
+	if !metav1.IsControlledBy(sts, owner) {
+		return false
+	}
+	if sts.Spec.Template.Labels[labelAppName] == appNameCosmosigner &&
+		sts.Spec.Template.Labels[labelInstance] == sts.GetName() {
+		return true
+	}
+	for i := range sts.Spec.VolumeClaimTemplates {
+		claim := &sts.Spec.VolumeClaimTemplates[i]
+		if claim.GetName() == dataVolumeName &&
+			claim.GetLabels()[labelAppName] == appNameCosmosigner &&
+			claim.GetLabels()[labelInstance] == sts.GetName() &&
+			claim.GetLabels()[labelOwnerUID] == string(owner.GetUID()) {
+			return true
+		}
+	}
+	return false
 }
 
 func statefulSetPVCTemplateReadyForCleanup(sts *appsv1.StatefulSet, root resourcecleanup.RootOwner) bool {

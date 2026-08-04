@@ -431,6 +431,47 @@ func TestQuiesceCosmoseedStopsPodsBeforeDeletingStatefulSet(t *testing.T) {
 	assert.Equal(t, []string{"Pod/set-seed-0", "StatefulSet/set-seed"}, c.deleted)
 }
 
+func TestFinalizeResourcesAppliesDataPolicyToCosmoseedClaims(t *testing.T) {
+	for _, policy := range []appsv1.DeletionPolicyType{appsv1.DeletionPolicyRetain, appsv1.DeletionPolicyDelete} {
+		t.Run(string(policy), func(t *testing.T) {
+			scheme := nodeSetCleanupScheme(t)
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid", Finalizers: []string{resourcecleanup.Finalizer}},
+				Spec:       appsv1.ChainNodeSetSpec{DeletionPolicy: &appsv1.DeletionPolicy{DataVolumes: ptr.To(policy)}},
+			}
+			zero := int32(0)
+			seed := &k8sappsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid"},
+				Spec: k8sappsv1.StatefulSetSpec{
+					Replicas:             &zero,
+					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}},
+				},
+			}
+			require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
+			claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-set-seed-0", Namespace: nodeSet.Namespace, UID: "claim-uid"}}
+			foreign := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-set-seed-backup", Namespace: nodeSet.Namespace, UID: "foreign-uid"}}
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, claim, foreign).Build()
+			r := &Reconciler{Client: base, Scheme: scheme}
+
+			done := false
+			for attempts := 0; attempts < 4 && !done; attempts++ {
+				var err error
+				done, err = r.finalizeResources(context.Background(), nodeSet)
+				require.NoError(t, err)
+			}
+			assert.True(t, done)
+			if policy == appsv1.DeletionPolicyDelete {
+				assert.True(t, apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKeyFromObject(claim), &corev1.PersistentVolumeClaim{})))
+			} else {
+				retained := &corev1.PersistentVolumeClaim{}
+				require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(claim), retained))
+				assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
+			}
+			require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(foreign), &corev1.PersistentVolumeClaim{}))
+		})
+	}
+}
+
 func TestQuiesceCosmoseedUsesOwnedDeterministicNameWhenLabelsDrift(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
