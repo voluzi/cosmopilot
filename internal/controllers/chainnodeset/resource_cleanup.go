@@ -95,6 +95,20 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 		if !metav1.IsControlledBy(child, nodeSet) {
 			continue
 		}
+		if child.GetDeletionTimestamp().IsZero() {
+			if !controllerutil.ContainsFinalizer(child, resourcecleanup.Finalizer) {
+				controllerutil.AddFinalizer(child, resourcecleanup.Finalizer)
+				if err := r.Update(ctx, child); err != nil {
+					return false, err
+				}
+			}
+			uid := child.GetUID()
+			if err := r.Delete(ctx, child, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+				return false, err
+			}
+			allDone = false
+			continue
+		}
 		podDone, err := r.quiesceChildPod(ctx, child)
 		if err != nil {
 			return false, err
@@ -103,9 +117,9 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 			allDone = false
 			continue
 		}
-		if child.GetDeletionTimestamp().IsZero() {
-			uid := child.GetUID()
-			if err := r.Delete(ctx, child, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+		if controllerutil.ContainsFinalizer(child, resourcecleanup.Finalizer) {
+			controllerutil.RemoveFinalizer(child, resourcecleanup.Finalizer)
+			if err := r.Update(ctx, child); err != nil && !errors.IsNotFound(err) {
 				return false, err
 			}
 		}
@@ -167,6 +181,15 @@ func (r *Reconciler) quiesceCosmoseed(ctx context.Context, nodeSet *appsv1.Chain
 		if !metav1.IsControlledBy(sts, nodeSet) ||
 			sts.GetLabels()[controllers.LabelApp] != controllers.CosmoseedName ||
 			sts.GetLabels()[controllers.LabelChainNodeSet] != nodeSet.GetName() {
+			continue
+		}
+		if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0 {
+			zero := int32(0)
+			sts.Spec.Replicas = &zero
+			if err := r.Update(ctx, sts); err != nil {
+				return false, err
+			}
+			allDone = false
 			continue
 		}
 		podsDone, err := r.deleteControlledPods(ctx, sts)

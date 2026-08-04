@@ -178,6 +178,14 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	}
 	group := labels[controllers.LabelChainNodeSetGroup]
 	if group == "" {
+		for _, configuredGroup := range nodeSet.Spec.Nodes {
+			if configuredGroup.Validator == nil &&
+				configuredGroup.HasPdbEnabled() &&
+				configuredGroup.ShouldIgnoreGroupLabelOnDisruptions() &&
+				configuredGroup.GetServiceName(nodeSet) == pdb.GetName() {
+				return true
+			}
+		}
 		return false
 	}
 

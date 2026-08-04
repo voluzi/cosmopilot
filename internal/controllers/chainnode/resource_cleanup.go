@@ -33,6 +33,9 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 	if err != nil || !signerDone {
 		return false, err
 	}
+	if err := r.attributeControlledLegacyKeys(ctx, chainNode); err != nil {
+		return false, err
+	}
 
 	root := resourcecleanup.RootOwnerFor(chainNode)
 	dataDone, err := resourcecleanup.FinalizeClass(
@@ -71,6 +74,33 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 		}
 	}
 	return true, nil
+}
+
+func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	secrets := &corev1.SecretList{}
+	if err := r.List(ctx, secrets, client.InNamespace(chainNode.GetNamespace())); err != nil {
+		return err
+	}
+	root := resourcecleanup.RootOwnerFor(chainNode)
+	for i := range secrets.Items {
+		secret := &secrets.Items[i]
+		if !metav1.IsControlledBy(secret, chainNode) ||
+			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
+			continue
+		}
+		managed, changed, err := resourcecleanup.PrepareGeneratedResource(
+			secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false,
+		)
+		if err != nil {
+			return err
+		}
+		if managed && changed {
+			if err := r.Update(ctx, secret); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) quiesceNodePod(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {

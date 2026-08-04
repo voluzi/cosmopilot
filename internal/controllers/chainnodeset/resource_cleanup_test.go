@@ -200,7 +200,7 @@ func TestReconcileNamespaceTerminationReleasesCleanupFinalizers(t *testing.T) {
 	}
 }
 
-func TestQuiesceAndDeleteChildrenStopsPodBeforeDeletingLegacyChild(t *testing.T) {
+func TestQuiesceAndDeleteChildrenMarksLegacyChildTerminatingBeforePodCleanup(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
 	child := ownedChild(t, scheme, nodeSet, "set-fullnodes-0")
@@ -212,11 +212,12 @@ func TestQuiesceAndDeleteChildrenStopsPodBeforeDeletingLegacyChild(t *testing.T)
 
 	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
 	require.NoError(t, err)
-	assert.True(t, done)
-	assert.Equal(t, []string{"Pod/set-fullnodes-0", "ChainNode/set-fullnodes-0"}, c.deleted)
+	assert.False(t, done)
+	assert.Equal(t, []string{"ChainNode/set-fullnodes-0"}, c.deleted)
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
 }
 
-func TestQuiesceAndDeleteChildrenStopsInitializationPodsBeforeDeletingLegacyChild(t *testing.T) {
+func TestQuiesceAndDeleteChildrenLeavesInitializationPodToTerminatingChild(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
 	child := ownedChild(t, scheme, nodeSet, "set-fullnodes-0")
@@ -228,8 +229,9 @@ func TestQuiesceAndDeleteChildrenStopsInitializationPodsBeforeDeletingLegacyChil
 
 	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
 	require.NoError(t, err)
-	assert.True(t, done)
-	assert.Equal(t, []string{"Pod/set-fullnodes-0-init-data", "ChainNode/set-fullnodes-0"}, c.deleted)
+	assert.False(t, done)
+	assert.Equal(t, []string{"ChainNode/set-fullnodes-0"}, c.deleted)
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(initPod), &corev1.Pod{}))
 }
 
 func TestQuiesceCosmoseedStopsPodsBeforeDeletingStatefulSet(t *testing.T) {
@@ -251,6 +253,31 @@ func TestQuiesceCosmoseedStopsPodsBeforeDeletingStatefulSet(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, done)
 	assert.Equal(t, []string{"Pod/set-seed-0", "StatefulSet/set-seed"}, c.deleted)
+}
+
+func TestQuiesceCosmoseedScalesDownBeforeDeletingPods(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	one := int32(1)
+	seed := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid",
+		Labels: map[string]string{controllers.LabelApp: controllers.CosmoseedName, controllers.LabelChainNodeSet: nodeSet.Name},
+	}, Spec: k8sappsv1.StatefulSetSpec{Replicas: &one}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "set-seed-0", Namespace: nodeSet.Namespace, UID: "seed-pod-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(seed, pod, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, pod).Build()
+	c := &recordCleanupDeleteOrderClient{Client: base}
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceCosmoseed(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, done)
+	assert.Empty(t, c.deleted)
+	current := &k8sappsv1.StatefulSet{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(seed), current))
+	require.NotNil(t, current.Spec.Replicas)
+	assert.Zero(t, *current.Spec.Replicas)
 }
 
 func TestReconcileDeletionFinalizesPDBAndDurableResources(t *testing.T) {

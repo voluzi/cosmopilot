@@ -76,16 +76,17 @@ Some applications need to persist data outside the main `data` directory. While 
 For these cases, you can create additional volumes:
 
 ```yaml
-persistence:
-  additionalVolumes:
-    - name: wasm
-      size: 1Gi
-      path: /home/app/wasm
-      deleteWithNode: true
-    - name: ibc-08-wasm
-      size: 1Gi
-      path: /home/app/ibc_08-wasm
-      deleteWithNode: true
+spec:
+  deletionPolicy:
+    dataVolumes: Delete
+  persistence:
+    additionalVolumes:
+      - name: wasm
+        size: 1Gi
+        path: /home/app/wasm
+      - name: ibc-08-wasm
+        size: 1Gi
+        path: /home/app/ibc_08-wasm
 ```
 
 ### Configuration Options

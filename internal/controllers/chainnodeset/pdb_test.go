@@ -250,6 +250,31 @@ func TestEnsurePodDisruptionBudgetsRegularGroupOwnedByNodeSet(t *testing.T) {
 	assert.True(t, metav1.IsControlledBy(pdb, nodeSet))
 }
 
+func TestEnsurePodDisruptionBudgetsAdoptsActiveGroupPDBWithoutGroupSelector(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "sentries", Instances: ptr.To(2),
+			PDB:                           &appsv1.PdbConfig{Enabled: true, MinAvailable: ptr.To(1)},
+			IgnoreGroupOnDisruptionChecks: ptr.To(true),
+		}}},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	legacy := getPdbSpec(nodeSet, "test-nodeset-sentries", 1, map[string]string{
+		controllers.LabelUpgrading:    controllers.StringValueFalse,
+		controllers.LabelChainID:      "test-chain",
+		controllers.LabelChainNodeSet: "test-nodeset",
+	})
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.Create(context.Background(), legacy))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+
+	pdb := getPdb(t, r, "default", legacy.Name)
+	require.NotNil(t, pdb)
+	assert.True(t, metav1.IsControlledBy(pdb, nodeSet))
+}
+
 // TestEnsurePodDisruptionBudgetsLegacyValidator verifies that the legacy singleton
 // .spec.validator.pdb behavior remains intact.
 func TestEnsurePodDisruptionBudgetsLegacyValidator(t *testing.T) {

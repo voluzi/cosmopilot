@@ -95,6 +95,26 @@ func TestFinalizeResourcesQuiescesLocalSignerAndAppliesDeletionPolicy(t *testing
 	}
 }
 
+func TestFinalizeResourcesRetainsControlledLegacyGeneratedKeys(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator", Namespace: "default", UID: "node-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+	}}
+	legacy := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "validator-priv-key", Namespace: node.Namespace, UID: "secret-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(node, legacy, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, legacy).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), node)
+	require.NoError(t, err)
+	assert.True(t, done)
+	retained := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(legacy), retained))
+	assert.Nil(t, metav1.GetControllerOf(retained))
+	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+}
+
 func TestReconcileNamespaceTerminationReleasesCleanupFinalizers(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	now := metav1.NewTime(time.Now())
