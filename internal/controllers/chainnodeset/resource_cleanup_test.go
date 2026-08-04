@@ -305,6 +305,22 @@ func TestFinalizeResourcesRetainsControlledLegacyGenesisValidatorSecrets(t *test
 	}
 }
 
+func TestAttributeControlledLegacyKeysSkipsRegularGroups(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "fullnodes", Instances: ptr.To(2),
+		}}},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	require.NotPanics(t, func() {
+		require.NoError(t, r.attributeControlledLegacyKeys(context.Background(), nodeSet))
+	})
+}
+
 func TestQuiesceCosmoseedStopsPodsBeforeDeletingStatefulSet(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}

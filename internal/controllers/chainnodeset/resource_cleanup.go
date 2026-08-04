@@ -233,6 +233,9 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet 
 	knownNames := map[string]struct{}{}
 	for i := range nodeSet.Spec.Nodes {
 		group := &nodeSet.Spec.Nodes[i]
+		if group.Validator == nil {
+			continue
+		}
 		for _, validator := range groupGenesisValidators(nodeSet, group.Name, group.GetInstances(), group.Validator) {
 			knownNames[validator.AccountMnemonicSecret] = struct{}{}
 			knownNames[validator.PrivKeySecret] = struct{}{}

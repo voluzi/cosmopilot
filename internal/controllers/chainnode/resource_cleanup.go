@@ -115,10 +115,6 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNod
 }
 
 func (r *Reconciler) attributeControlledLegacyDataVolumes(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	knownNames := map[string]struct{}{chainNode.GetName(): {}}
-	for _, volume := range chainNode.GetPersistenceAdditionalVolumes() {
-		knownNames[fmt.Sprintf("%s-%s", chainNode.GetName(), volume.Name)] = struct{}{}
-	}
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcs, client.InNamespace(chainNode.GetNamespace())); err != nil {
 		return err
@@ -127,9 +123,6 @@ func (r *Reconciler) attributeControlledLegacyDataVolumes(ctx context.Context, c
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		if !metav1.IsControlledBy(pvc, chainNode) || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
-			continue
-		}
-		if _, known := knownNames[pvc.GetName()]; !known {
 			continue
 		}
 		managed, changed, err := resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, false)

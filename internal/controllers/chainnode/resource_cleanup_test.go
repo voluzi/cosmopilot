@@ -115,7 +115,7 @@ func TestFinalizeResourcesRetainsControlledLegacyGeneratedKeys(t *testing.T) {
 	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
-func TestFinalizeResourcesRetainsOnlyKnownControlledLegacyResources(t *testing.T) {
+func TestFinalizeResourcesRetainsControlledLegacyDataVolumesRemovedFromSpec(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid", Finalizers: []string{resourcecleanup.Finalizer}},
@@ -126,20 +126,21 @@ func TestFinalizeResourcesRetainsOnlyKnownControlledLegacyResources(t *testing.T
 	}
 	mainPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "main-pvc"}}
 	additionalPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-wasm", Namespace: node.Namespace, UID: "additional-pvc"}}
+	removedAdditionalPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-archive", Namespace: node.Namespace, UID: "removed-additional-pvc"}}
 	nodeKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "node-key"}}
 	accountKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace, UID: "account-key"}}
 	consensusKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-priv-key", Namespace: node.Namespace, UID: "consensus-key"}}
 	cosmoguardKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-cg-cluster", Namespace: node.Namespace, UID: "guard-key"}}
-	for _, object := range []client.Object{mainPVC, additionalPVC, nodeKey, accountKey, consensusKey, cosmoguardKey} {
+	for _, object := range []client.Object{mainPVC, additionalPVC, removedAdditionalPVC, nodeKey, accountKey, consensusKey, cosmoguardKey} {
 		require.NoError(t, controllerutil.SetControllerReference(node, object, scheme))
 	}
-	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, mainPVC, additionalPVC, nodeKey, accountKey, consensusKey, cosmoguardKey).Build()
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, mainPVC, additionalPVC, removedAdditionalPVC, nodeKey, accountKey, consensusKey, cosmoguardKey).Build()
 	r := &Reconciler{Client: base, Scheme: scheme}
 
 	done, err := r.finalizeResources(context.Background(), node)
 	require.NoError(t, err)
 	assert.True(t, done)
-	for _, object := range []client.Object{mainPVC, additionalPVC, nodeKey, accountKey, consensusKey} {
+	for _, object := range []client.Object{mainPVC, additionalPVC, removedAdditionalPVC, nodeKey, accountKey, consensusKey} {
 		fresh := object.DeepCopyObject().(client.Object)
 		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(object), fresh))
 		assert.Nil(t, metav1.GetControllerOf(fresh))
