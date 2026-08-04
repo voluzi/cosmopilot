@@ -28,7 +28,6 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
@@ -193,16 +192,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		}
 
 		// Force update config files, to prevent restarting again because of config changes
-		app, err := chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, chainNode,
-			chainNode.Spec.App.GetSdkVersion(),
-			[]sdkcmd.Option{sdkcmd.WithGenesisSubcommand(chainNode.Spec.App.UseGenesisSubcommand())},
-			chainutils.WithImage(chainNode.GetAppImage()),
-			chainutils.WithImagePullPolicy(chainNode.Spec.App.ImagePullPolicy),
-			chainutils.WithBinary(chainNode.Spec.App.App),
-			chainutils.WithPriorityClass(r.opts.GetDefaultPriorityClassName()),
-			chainutils.WithAffinityConfig(chainNode.Spec.Affinity),
-			chainutils.WithNodeSelector(chainNode.Spec.NodeSelector),
-		)
+		app, err := r.newApp(chainNode)
 		if err != nil {
 			return fmt.Errorf("failed to create new app for upgrade %s: %w", chainNode.GetName(), err)
 		}

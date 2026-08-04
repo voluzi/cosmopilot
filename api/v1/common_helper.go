@@ -237,7 +237,11 @@ func (cfg *Config) ShouldIgnoreSyncing() bool {
 
 func (cfg *Config) GetEnv() []corev1.EnvVar {
 	if cfg != nil && cfg.Env != nil {
-		return cfg.Env
+		env := make([]corev1.EnvVar, len(cfg.Env))
+		for i := range cfg.Env {
+			cfg.Env[i].DeepCopyInto(&env[i])
+		}
+		return env
 	}
 	return []corev1.EnvVar{}
 }

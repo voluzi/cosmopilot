@@ -632,16 +632,18 @@ func exposeForInstance(src *appsv1.ExposeConfig, index int) *appsv1.ExposeConfig
 //
 // The rest of the dashboard config (enable, port, basicAuth) is inherited unchanged.
 func configForChild(src *appsv1.Config) *appsv1.Config {
-	if src == nil || !src.CosmoGuardDashboardEnabled() {
-		return src
-	}
-	dashboard := src.GetCosmoGuardDashboard()
-	if dashboard.Ingress == nil && dashboard.Gateway == nil {
-		return src
+	if src == nil {
+		return nil
 	}
 	out := src.DeepCopy()
-	childDashboard := out.GetCosmoGuardDashboard()
-	childDashboard.Ingress = nil
-	childDashboard.Gateway = nil
+	if !out.CosmoGuardDashboardEnabled() {
+		return out
+	}
+	dashboard := out.GetCosmoGuardDashboard()
+	if dashboard.Ingress == nil && dashboard.Gateway == nil {
+		return out
+	}
+	dashboard.Ingress = nil
+	dashboard.Gateway = nil
 	return out
 }

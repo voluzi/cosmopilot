@@ -36,6 +36,19 @@ func DefaultStatsClientFactory(host string) nodeutils.StatsClient {
 	return nodeutils.NewClient(host)
 }
 
+func (r *Reconciler) newApp(chainNode *appsv1.ChainNode) (*chainutils.App, error) {
+	return chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, chainNode, chainNode.Spec.App.GetSdkVersion(),
+		[]sdkcmd.Option{sdkcmd.WithGenesisSubcommand(chainNode.Spec.App.UseGenesisSubcommand())},
+		chainutils.WithImage(chainNode.GetAppImage()),
+		chainutils.WithImagePullPolicy(chainNode.Spec.App.ImagePullPolicy),
+		chainutils.WithBinary(chainNode.Spec.App.App),
+		chainutils.WithEnv(chainNode.Spec.Config.GetEnv()),
+		chainutils.WithPriorityClass(r.opts.GetDefaultPriorityClassName()),
+		chainutils.WithAffinityConfig(chainNode.Spec.Affinity),
+		chainutils.WithNodeSelector(chainNode.Spec.NodeSelector),
+	)
+}
+
 // SetStatsClientFactory sets the factory function for creating StatsClient instances.
 // This is primarily used in tests to inject mock clients.
 func (r *Reconciler) SetStatsClientFactory(factory StatsClientFactory) {
@@ -242,15 +255,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	app, err := chainutils.NewApp(r.ClientSet, r.Scheme, r.RestConfig, chainNode, chainNode.Spec.App.GetSdkVersion(),
-		[]sdkcmd.Option{sdkcmd.WithGenesisSubcommand(chainNode.Spec.App.UseGenesisSubcommand())},
-		chainutils.WithImage(chainNode.GetAppImage()),
-		chainutils.WithImagePullPolicy(chainNode.Spec.App.ImagePullPolicy),
-		chainutils.WithBinary(chainNode.Spec.App.App),
-		chainutils.WithPriorityClass(r.opts.GetDefaultPriorityClassName()),
-		chainutils.WithAffinityConfig(chainNode.Spec.Affinity),
-		chainutils.WithNodeSelector(chainNode.Spec.NodeSelector),
-	)
+	app, err := r.newApp(chainNode)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

@@ -15,7 +15,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
 
-func (a *App) GenerateConfigFiles(ctx context.Context) (map[string]string, error) {
+func (a *App) buildConfigGeneratorPod() *corev1.Pod {
 	var (
 		homeVolumeMount = corev1.VolumeMount{
 			Name:      "home",
@@ -59,6 +59,7 @@ func (a *App) GenerateConfigFiles(ctx context.Context) (map[string]string, error
 					ImagePullPolicy: a.pullPolicy,
 					Command:         []string{a.binary},
 					Args:            a.cmd.InitArgs(none, none),
+					Env:             a.appEnv(),
 					VolumeMounts:    []corev1.VolumeMount{homeVolumeMount, configVolumeMount},
 					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
@@ -79,6 +80,11 @@ func (a *App) GenerateConfigFiles(ctx context.Context) (map[string]string, error
 			ActiveDeadlineSeconds: ptr.To[int64](300),
 		},
 	}
+	return pod
+}
+
+func (a *App) GenerateConfigFiles(ctx context.Context) (map[string]string, error) {
+	pod := a.buildConfigGeneratorPod()
 	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {
 		return nil, fmt.Errorf("setting controller reference: %w", err)
 	}
