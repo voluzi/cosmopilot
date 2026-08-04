@@ -302,6 +302,9 @@ func (r *Reconciler) finalizePodDisruptionBudgets(ctx context.Context, nodeSet *
 	allDone := true
 	for i := range pdbs.Items {
 		pdb := &pdbs.Items[i]
+		if controller := metav1.GetControllerOf(pdb); controller != nil && !metav1.IsControlledBy(pdb, nodeSet) {
+			continue
+		}
 		if !metav1.IsControlledBy(pdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, pdb) {
 			continue
 		}

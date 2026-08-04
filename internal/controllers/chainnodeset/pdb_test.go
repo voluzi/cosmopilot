@@ -573,6 +573,31 @@ func TestFinalizePodDisruptionBudgetsDeletesOwnedAndHistoricalSingleton(t *testi
 	assert.NotContains(t, current.Finalizers, podDisruptionBudgetFinalizer)
 }
 
+func TestFinalizePodDisruptionBudgetsPreservesForeignHistoricalSingleton(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid"), Finalizers: []string{podDisruptionBudgetFinalizer}},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	foreignController := true
+	foreign := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validator", Namespace: "default", UID: "foreign-uid", OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1", Kind: "Deployment", Name: "foreign", UID: "foreign-controller-uid", Controller: &foreignController,
+		}}},
+		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			controllers.LabelUpgrading:             controllers.StringValueFalse,
+			controllers.LabelChainID:               nodeSet.Status.ChainID,
+			controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
+		}}},
+	}
+	require.NoError(t, r.Create(context.Background(), foreign))
+
+	done, err := r.finalizePodDisruptionBudgets(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done)
+	assert.NotNil(t, getPdb(t, r, "default", foreign.Name))
+}
+
 type pdbUIDGuardClient struct {
 	client.Client
 }
