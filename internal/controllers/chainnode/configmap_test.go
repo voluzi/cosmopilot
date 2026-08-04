@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
@@ -56,6 +57,21 @@ func TestConfigGenerationCacheKeyIncludesAppEnv(t *testing.T) {
 	differentOrderKey, err := configGenerationCacheKey(differentOrder)
 	require.NoError(t, err)
 	assert.NotEqual(t, baseKey, differentOrderKey)
+
+	withDivisor := base.DeepCopy()
+	withDivisor.Spec.Config.Env = []corev1.EnvVar{{
+		Name: "CPU_LIMIT",
+		ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+			Resource: "limits.cpu",
+			Divisor:  resource.MustParse("1"),
+		}},
+	}}
+	firstDivisorKey, err := configGenerationCacheKey(withDivisor)
+	require.NoError(t, err)
+	withDivisor.Spec.Config.Env[0].ValueFrom.ResourceFieldRef.Divisor = resource.MustParse("2")
+	secondDivisorKey, err := configGenerationCacheKey(withDivisor)
+	require.NoError(t, err)
+	assert.NotEqual(t, firstDivisorKey, secondDivisorKey)
 }
 
 func TestGetConfigHash(t *testing.T) {

@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -379,13 +380,12 @@ func (r *Reconciler) getGeneratedConfigs(ctx context.Context, app *chainutils.Ap
 }
 
 func configGenerationCacheKey(chainNode *appsv1.ChainNode) (string, error) {
-	envHash, err := hashstructure.Hash(chainNode.Spec.Config.GetEnv(), hashstructure.FormatV2, &hashstructure.HashOptions{
-		ZeroNil: true,
-	})
+	envJSON, err := json.Marshal(chainNode.Spec.Config.GetEnv())
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s:%d", chainNode.GetAppImage(), envHash), nil
+	envHash := sha256.Sum256(envJSON)
+	return fmt.Sprintf("%s:%x", chainNode.GetAppImage(), envHash), nil
 }
 
 func (r *Reconciler) storeConfigsInCache(key string, configs map[string]interface{}) {
