@@ -98,21 +98,36 @@ type Params struct {
 	TargetSelector map[string]string
 }
 
+// SignerServiceDNS returns the namespaced DNS name of the signer's governing headless Service.
+func SignerServiceDNS(name, namespace string) string {
+	return fmt.Sprintf("%s.%s.svc", name, namespace)
+}
+
 // raftServiceDNS is the namespaced DNS name of the StatefulSet's governing headless service, used to
 // build stable per-replica raft peer addresses. The `.svc` (no cluster domain) form resolves via the
 // pod's DNS search domain, so it works regardless of the cluster's DNS domain (not just cluster.local).
 func (p Params) raftServiceDNS() string {
-	return fmt.Sprintf("%s.%s.svc", p.Name, p.Namespace)
+	return SignerServiceDNS(p.Name, p.Namespace)
 }
 
 // DiscoveryServiceName is the name of the headless service the signer points node_service at.
 func (p Params) DiscoveryServiceName() string {
-	return p.Name + discoveryServiceSuffix
+	return DiscoveryServiceName(p.Name)
+}
+
+// DiscoveryServiceName returns the headless target-discovery Service name for a signer.
+func DiscoveryServiceName(name string) string {
+	return name + discoveryServiceSuffix
+}
+
+// DiscoveryServiceDNS returns the namespaced DNS name used by targets and the signer.
+func DiscoveryServiceDNS(name, namespace string) string {
+	return fmt.Sprintf("%s.%s.svc", DiscoveryServiceName(name), namespace)
 }
 
 // nodeServiceEndpoint is the host:port the signer dials to discover target nodes.
 func (p Params) nodeServiceEndpoint() string {
-	return fmt.Sprintf("%s.%s.svc:%d", p.DiscoveryServiceName(), p.Namespace, chainutils.PrivValPort)
+	return fmt.Sprintf("%s:%d", DiscoveryServiceDNS(p.Name, p.Namespace), chainutils.PrivValPort)
 }
 
 // selectorLabels are the immutable labels that identify signer pods.

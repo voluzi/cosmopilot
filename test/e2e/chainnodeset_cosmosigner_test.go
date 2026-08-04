@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -19,10 +20,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	chainnodecontroller "github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
 	managedcosmosigner "github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/test/e2e/apps"
 )
@@ -43,11 +48,21 @@ var _ = Describe("ChainNodeSet Cosmosigner", func() {
 				// The signer StatefulSet must be created and the chain must produce blocks, which only
 				// happens if the validator node's remote signer is actually signing.
 				WaitForChainNodeSetHeight(cns, 3)
+				signerName := fmt.Sprintf("%s-signer", cns.GetName())
+				validatorPodName := fmt.Sprintf("%s-validator", cns.GetName())
+				validatorPod := waitForReadyCosmosignerTargetPod(
+					ns.Name, validatorPodName, signerName, cns.Spec.App.App,
+				)
+				for cycle := 1; cycle <= 2; cycle++ {
+					validatorPod = replaceCosmosignerTargetPodOnce(
+						cns, validatorPod, signerName, cns.Spec.App.App, cycle,
+					)
+				}
 
 				sts := &appsv1k8s.StatefulSet{}
 				Eventually(func() error {
 					return Framework().Client().Get(Framework().Context(),
-						client.ObjectKey{Namespace: ns.Name, Name: fmt.Sprintf("%s-signer", cns.GetName())}, sts)
+						client.ObjectKey{Namespace: ns.Name, Name: signerName}, sts)
 				}).Should(Succeed())
 				Expect(*sts.Spec.Replicas).To(BeNumerically("==", 1))
 			}),
@@ -354,6 +369,150 @@ func podReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+func waitForReadyCosmosignerTargetPod(namespace, name, signerName, appContainer string) *corev1.Pod {
+	var result *corev1.Pod
+	Eventually(func(g Gomega) {
+		pod := &corev1.Pod{}
+		g.Expect(Framework().Client().Get(
+			Framework().Context(), client.ObjectKey{Namespace: namespace, Name: name}, pod,
+		)).To(Succeed())
+		g.Expect(pod.Labels[controllers.LabelCosmosignerTarget]).To(Equal(signerName))
+		g.Expect(pod.Status.Phase).To(Equal(corev1.PodRunning))
+		g.Expect(podReady(pod)).To(BeTrue())
+		g.Expect(cosmosignerDiscoveryGateSucceeded(pod)).To(BeTrue())
+		restartCount, previousLogs, found := appContainerRestartDetails(namespace, pod, appContainer)
+		g.Expect(found).To(BeTrue(), "app container %q status is missing", appContainer)
+		g.Expect(restartCount).To(BeZero(), "initial app container restarted; previous logs:\n%s", previousLogs)
+		result = pod.DeepCopy()
+	}, 2*time.Minute, 500*time.Millisecond).Should(Succeed())
+	return result
+}
+
+func replaceCosmosignerTargetPodOnce(cns *appsv1.ChainNodeSet, current *corev1.Pod, signerName, appContainer string, cycle int) *corev1.Pod {
+	By(fmt.Sprintf("restarting Cosmosigner target pod, cycle %d", cycle))
+	namespace := cns.GetNamespace()
+	ctx, cancel := context.WithTimeout(Framework().Context(), 2*time.Minute)
+	defer cancel()
+
+	podWatch, err := Framework().KubeClient().CoreV1().Pods(namespace).Watch(ctx, metav1.ListOptions{
+		FieldSelector:   fields.OneTermEqualSelector("metadata.name", current.Name).String(),
+		ResourceVersion: current.ResourceVersion,
+	})
+	Expect(err).NotTo(HaveOccurred())
+	defer podWatch.Stop()
+
+	oldUID := string(current.UID)
+	Expect(Framework().Client().Delete(Framework().Context(), current.DeepCopy())).To(Succeed())
+
+	replacementUIDs := map[string]struct{}{}
+	var replacement *corev1.Pod
+	for replacement == nil {
+		select {
+		case <-ctx.Done():
+			Fail(fmt.Sprintf("timed out waiting for Cosmosigner target pod replacement in cycle %d: %v", cycle, ctx.Err()))
+		case event, ok := <-podWatch.ResultChan():
+			if !ok {
+				Fail(fmt.Sprintf("Cosmosigner target pod watch closed before cycle %d replacement became ready", cycle))
+			}
+			if event.Type == watch.Error {
+				Fail(fmt.Sprintf("Cosmosigner target pod watch failed in cycle %d: %v", cycle, apierrors.FromObject(event.Object)))
+			}
+			pod, ok := event.Object.(*corev1.Pod)
+			if !ok || string(pod.UID) == oldUID {
+				continue
+			}
+			replacementUIDs[string(pod.UID)] = struct{}{}
+			Expect(replacementUIDs).To(HaveLen(1), "cycle %d created more than one replacement Pod UID", cycle)
+			if pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning && podReady(pod) && cosmosignerDiscoveryGateSucceeded(pod) {
+				replacement = pod.DeepCopy()
+			}
+		}
+	}
+
+	Expect(replacement.Labels[controllers.LabelCosmosignerTarget]).To(Equal(signerName))
+	Expect(string(replacement.UID)).NotTo(Equal(oldUID))
+	restartCount, previousLogs, found := appContainerRestartDetails(namespace, replacement, appContainer)
+	Expect(found).To(BeTrue(), "cycle %d app container %q status is missing", cycle, appContainer)
+	Expect(restartCount).To(BeZero(), "cycle %d app container restarted; previous logs:\n%s", cycle, previousLogs)
+	heightAtReplacement, err := observedChainNodeSetHeight(cns)
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func() (int64, error) {
+		return observedChainNodeSetHeight(cns)
+	}, time.Minute, time.Second).Should(BeNumerically(">", heightAtReplacement),
+		"cycle %d chain height must advance after the replacement becomes ready", cycle)
+
+	Consistently(func(g Gomega) {
+		pod := &corev1.Pod{}
+		g.Expect(Framework().Client().Get(
+			Framework().Context(), client.ObjectKey{Namespace: namespace, Name: replacement.Name}, pod,
+		)).To(Succeed())
+		g.Expect(string(pod.UID)).To(Equal(string(replacement.UID)), "cycle %d must not create a second replacement", cycle)
+		g.Expect(pod.Status.Phase).To(Equal(corev1.PodRunning))
+		g.Expect(podReady(pod)).To(BeTrue())
+		g.Expect(cosmosignerDiscoveryGateSucceeded(pod)).To(BeTrue())
+		restartCount, previousLogs, found := appContainerRestartDetails(namespace, pod, appContainer)
+		g.Expect(found).To(BeTrue(), "cycle %d app container %q status is missing", cycle, appContainer)
+		g.Expect(restartCount).To(BeZero(), "cycle %d app container restarted; previous logs:\n%s", cycle, previousLogs)
+	}, 35*time.Second, 500*time.Millisecond).Should(Succeed())
+	assertNoCosmosignerDiscoveryPubKeyFailure(namespace, replacement.Name, appContainer, cycle)
+
+	return replacement
+}
+
+func cosmosignerDiscoveryGateSucceeded(pod *corev1.Pod) bool {
+	for i := range pod.Status.InitContainerStatuses {
+		status := &pod.Status.InitContainerStatuses[i]
+		if status.Name == chainnodecontroller.CosmosignerDiscoveryWaitContainerName {
+			return status.State.Terminated != nil && status.State.Terminated.ExitCode == 0
+		}
+	}
+	return false
+}
+
+func appContainerRestartDetails(namespace string, pod *corev1.Pod, appContainer string) (int32, string, bool) {
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		if status.Name != appContainer {
+			continue
+		}
+		if status.RestartCount == 0 {
+			return 0, "", true
+		}
+		logs, err := Framework().KubeClient().CoreV1().Pods(namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+			Container: appContainer,
+			Previous:  true,
+		}).DoRaw(Framework().Context())
+		if err != nil {
+			return status.RestartCount, fmt.Sprintf("failed to read previous logs: %v", err), true
+		}
+		return status.RestartCount, string(logs), true
+	}
+	return 0, "", false
+}
+
+func assertNoCosmosignerDiscoveryPubKeyFailure(namespace, podName, appContainer string, cycle int) {
+	logs, err := Framework().KubeClient().CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: appContainer,
+	}).DoRaw(Framework().Context())
+	Expect(err).NotTo(HaveOccurred())
+	lower := strings.ToLower(string(logs))
+	for _, signature := range []string{
+		"can't get pubkey",
+		"can't-get-pubkey",
+		"cannot get pubkey",
+		"cannot-get-pubkey",
+		"exhausted all attempts to get pubkey",
+		"failed to get private validator pubkey",
+	} {
+		Expect(lower).NotTo(ContainSubstring(signature), "cycle %d app logs contain a remote-signer public-key startup failure", cycle)
+	}
+	for _, line := range strings.Split(lower, "\n") {
+		publicKeyLine := strings.Contains(line, "pubkey") || strings.Contains(line, "public key") || strings.Contains(line, "public-key")
+		timeoutLine := strings.Contains(line, "timeout") || strings.Contains(line, "timed out") || strings.Contains(line, "deadline exceeded")
+		Expect(publicKeyLine && timeoutLine).To(BeFalse(), "cycle %d app logs contain a public-key timeout line: %q", cycle, line)
+	}
 }
 
 const e2eHoldFinalizer = "e2e.cosmopilot.voluzi.com/hold"

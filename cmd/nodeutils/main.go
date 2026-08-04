@@ -28,6 +28,7 @@ var (
 	logLevel         string
 	createFifo       bool
 	enableTmkmsProxy bool
+	signerPeerDNS    string
 	nodeBinaryName   string
 	haltHeight       int64
 )
@@ -38,6 +39,11 @@ func main() {
 		switch os.Args[1] {
 		case "mock":
 			handleMockCommand(os.Args[2:])
+			return
+		case "wait-for-dns":
+			if err := handleWaitForDNSCommand(os.Args[2:]); err != nil {
+				log.Fatal(err)
+			}
 			return
 		case "help", "--help", "-h":
 			printHelp()
@@ -64,6 +70,7 @@ func main() {
 		nodeutils.WithTraceStore(traceStore),
 		nodeutils.CreateFifo(createFifo),
 		nodeutils.WithTmkmsProxy(enableTmkmsProxy),
+		nodeutils.WithSignerPeerDNS(signerPeerDNS),
 		nodeutils.WithHaltHeight(haltHeight),
 		nodeutils.WithMockMode(mockMode),
 	)
@@ -90,6 +97,8 @@ func printHelp() {
 Usage:
   node-utils [flags]           Start the node-utils server
   node-utils mock <command>    Control mock mode (use from kubectl exec)
+  node-utils wait-for-dns <hostname> <ip-address> <timeout>
+                               Wait until DNS publishes an address
   node-utils help              Show this help
 
 Mock Commands (for E2E testing):

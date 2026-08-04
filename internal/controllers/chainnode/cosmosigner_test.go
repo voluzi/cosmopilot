@@ -1465,6 +1465,209 @@ func TestStandaloneTargetPodLabel(t *testing.T) {
 	}
 }
 
+func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
+	const (
+		namespace      = "default"
+		nodeUtilsImage = "node-utils:test"
+	)
+
+	tests := []struct {
+		name         string
+		chainNode    *appsv1.ChainNode
+		wantDNSName  string
+		wantInitGate bool
+	}{
+		{
+			name: "standalone target",
+			chainNode: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: namespace, UID: "solo-uid"},
+				Spec:       appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
+			},
+			wantDNSName:  "solo-signer-privval.default.svc",
+			wantInitGate: true,
+		},
+		{
+			name: "ChainNodeSet target",
+			chainNode: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mychain-sentries-0",
+					Namespace: namespace,
+					UID:       "child-uid",
+					Labels: map[string]string{
+						controllers.LabelChainNodeSet:      "mychain",
+						controllers.LabelCosmosignerTarget: "mychain-sentries-signer",
+					},
+				},
+				Spec: appsv1.ChainNodeSpec{RemoteSignerTarget: true},
+			},
+			wantDNSName:  "mychain-sentries-signer-privval.default.svc",
+			wantInitGate: true,
+		},
+		{
+			name: "non-target with stray target label",
+			chainNode: &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+				Name:      "plain",
+				Namespace: namespace,
+				UID:       "plain-uid",
+				Labels:    map[string]string{controllers.LabelCosmosignerTarget: "leaked-signer"},
+			}},
+			wantInitGate: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			genesisConfigMap := "genesis"
+			tc.chainNode.Spec.Genesis = &appsv1.GenesisConfig{ConfigMap: &genesisConfigMap}
+			tc.chainNode.Spec.App = appsv1.AppSpec{Image: "chain", App: "chaind"}
+			tc.chainNode.Status = appsv1.ChainNodeStatus{ChainID: "test-1", NodeID: "node-id"}
+
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: tc.chainNode.Name, Namespace: namespace}}
+			r := &Reconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build(),
+				Scheme: scheme,
+				opts:   &controllers.ControllerRunOptions{NodeUtilsImage: nodeUtilsImage},
+			}
+
+			pod, err := r.getPodSpec(context.Background(), tc.chainNode, "config-hash")
+			require.NoError(t, err)
+
+			var gate *corev1.Container
+			for i := range pod.Spec.InitContainers {
+				if pod.Spec.InitContainers[i].Name == CosmosignerDiscoveryWaitContainerName {
+					gate = &pod.Spec.InitContainers[i]
+					break
+				}
+			}
+			if !tc.wantInitGate {
+				require.Nil(t, gate, "ordinary nodes must not wait on cosmosigner discovery")
+				return
+			}
+
+			require.NotNil(t, gate, "remote-signer target must wait for discovery publication")
+			assert.Equal(t, nodeUtilsImage, gate.Image)
+			assert.Equal(t, []string{"wait-for-dns", tc.wantDNSName, "$(POD_IP)", "25s"}, gate.Args)
+			assert.Equal(t, corev1.TerminationMessageFallbackToLogsOnError, gate.TerminationMessagePolicy)
+			assert.Equal(t, resource.MustParse("10m"), gate.Resources.Requests[corev1.ResourceCPU])
+			assert.Equal(t, resource.MustParse("16Mi"), gate.Resources.Requests[corev1.ResourceMemory])
+			assert.Equal(t, resource.MustParse("100m"), gate.Resources.Limits[corev1.ResourceCPU])
+			assert.Equal(t, resource.MustParse("32Mi"), gate.Resources.Limits[corev1.ResourceMemory])
+
+			custom := appsv1.DiscoveryResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("25m"), corev1.ResourceMemory: resource.MustParse("64Mi"),
+			}}
+			tc.chainNode.Spec.Config = &appsv1.Config{CosmosignerDiscoveryResources: &custom}
+			configuredPod, err := r.getPodSpec(context.Background(), tc.chainNode, "config-hash")
+			require.NoError(t, err)
+			var configuredGate *corev1.Container
+			for i := range configuredPod.Spec.InitContainers {
+				if configuredPod.Spec.InitContainers[i].Name == CosmosignerDiscoveryWaitContainerName {
+					configuredGate = &configuredPod.Spec.InitContainers[i]
+					break
+				}
+			}
+			require.NotNil(t, configuredGate, "custom resources require the discovery gate container")
+			assert.Equal(t, custom.ResourceRequirements(), configuredGate.Resources)
+
+			require.Len(t, gate.Env, 1)
+			assert.Equal(t, "POD_IP", gate.Env[0].Name)
+			require.NotNil(t, gate.Env[0].ValueFrom)
+			require.NotNil(t, gate.Env[0].ValueFrom.FieldRef)
+			assert.Equal(t, "status.podIP", gate.Env[0].ValueFrom.FieldRef.FieldPath)
+		})
+	}
+}
+
+func TestNodeUtilsSignerPeerDNSRendering(t *testing.T) {
+	const namespace = "default"
+	tests := []struct {
+		name    string
+		node    *appsv1.ChainNode
+		wantDNS string
+	}{
+		{
+			name: "standalone Cosmosigner target",
+			node: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: namespace},
+				Spec:       appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
+			},
+			wantDNS: "solo-signer.default.svc",
+		},
+		{
+			name: "ChainNodeSet Cosmosigner target",
+			node: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mychain-sentries-0",
+					Namespace: namespace,
+					Labels: map[string]string{
+						controllers.LabelChainNodeSet:      "mychain",
+						controllers.LabelCosmosignerTarget: "mychain-sentries-signer",
+					},
+				},
+				Spec: appsv1.ChainNodeSpec{RemoteSignerTarget: true},
+			},
+			wantDNS: "mychain-sentries-signer.default.svc",
+		},
+		{
+			name: "ordinary node",
+			node: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: namespace},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			genesisConfigMap := "genesis"
+			tt.node.Spec.Genesis = &appsv1.GenesisConfig{ConfigMap: &genesisConfigMap}
+			tt.node.Spec.App = appsv1.AppSpec{Image: "chain", App: "chaind"}
+			tt.node.Status = appsv1.ChainNodeStatus{ChainID: "test-1", NodeID: "node-id"}
+
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: tt.node.Name, Namespace: namespace}}
+			r := &Reconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build(),
+				Scheme: scheme,
+				opts:   &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+			}
+
+			pod, err := r.getPodSpec(context.Background(), tt.node, "config-hash")
+			require.NoError(t, err)
+			var nodeUtils *corev1.Container
+			for i := range pod.Spec.InitContainers {
+				if pod.Spec.InitContainers[i].Name == nodeUtilsContainerName {
+					nodeUtils = &pod.Spec.InitContainers[i]
+					break
+				}
+			}
+			require.NotNil(t, nodeUtils)
+			require.NotNil(t, nodeUtils.RestartPolicy)
+			assert.Equal(t, corev1.ContainerRestartPolicyAlways, *nodeUtils.RestartPolicy)
+
+			var signerDNS string
+			var signerDNSSet bool
+			for _, env := range nodeUtils.Env {
+				if env.Name == "SIGNER_PEER_DNS" {
+					signerDNS = env.Value
+					signerDNSSet = true
+					break
+				}
+			}
+			if tt.wantDNS == "" {
+				assert.False(t, signerDNSSet, "ordinary nodes must not set SIGNER_PEER_DNS")
+				return
+			}
+			assert.True(t, signerDNSSet, "Cosmosigner targets must set SIGNER_PEER_DNS")
+			assert.Equal(t, tt.wantDNS, signerDNS)
+		})
+	}
+}
+
 // TestNonTargetNodeHasNoDiscoveryLabel verifies a plain node never carries the label, even if a stray
 // copy is present in its inherited metadata (which WithChainNodeLabels must strip).
 func TestNonTargetNodeHasNoDiscoveryLabel(t *testing.T) {

@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -63,6 +65,344 @@ func TestNewTCPProxy(t *testing.T) {
 				t.Errorf("NewTCPProxy() runOnce = %v, want %v", proxy.runOnce, tt.failOnClose)
 			}
 		})
+	}
+}
+
+func TestNewTCPProxyNilCallbackDoesNotRetryUpstream(t *testing.T) {
+	proxy, err := NewTCPProxy(":0", "127.0.0.1:8080", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.onAccept != nil {
+		t.Fatal("NewTCPProxy() stored a nil callback")
+	}
+	if proxy.retryUpstream {
+		t.Fatal("NewTCPProxy() enabled upstream retries for a nil callback")
+	}
+}
+
+func TestNewTCPProxyStoresAcceptCallback(t *testing.T) {
+	called := false
+	proxy, err := NewTCPProxy(":0", "127.0.0.1:8080", false, func(*net.TCPConn) bool { called = true; return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.onAccept == nil {
+		t.Fatal("NewTCPProxy() did not store the accept callback")
+	}
+
+	proxy.onAccept(nil)
+	if !called {
+		t.Fatal("stored accept callback was not invoked")
+	}
+}
+
+func TestTCPProxy_RetainsAcceptedConnectionUntilUpstreamStarts(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamAddr := reserved.Addr().String()
+	if err := reserved.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan struct{})
+	proxy, err := NewTCPProxy(":0", upstreamAddr, false, func(*net.TCPConn) bool { close(accepted); return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenTCP("tcp", proxy.laddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	handleResult := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.AcceptTCP()
+		if acceptErr != nil {
+			handleResult <- acceptErr
+			return
+		}
+		proxy.onAccept(nil)
+		handleResult <- proxy.handle(conn)
+	}()
+
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("accept callback was not invoked")
+	}
+
+	upstream, err := net.Listen("tcp", upstreamAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		conn, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+	}()
+
+	payload := []byte("signer handshake")
+	if _, err := client.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(client, response); err != nil {
+		t.Fatalf("accepted signer connection was not retained: %v", err)
+	}
+	if string(response) != string(payload) {
+		t.Fatalf("response = %q, want %q", response, payload)
+	}
+	_ = client.Close()
+	select {
+	case err := <-handleResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy handler did not finish after connection close")
+	}
+}
+
+func TestTCPProxy_StartAcceptsConnectionsWhileUpstreamUnavailable(t *testing.T) {
+	reservedUpstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamAddr := reservedUpstream.Addr().String()
+	if err := reservedUpstream.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reservedProxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddr := reservedProxy.Addr().String()
+	if err := reservedProxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan struct{}, 2)
+	proxy, err := NewTCPProxy(proxyAddr, upstreamAddr, false, func(*net.TCPConn) bool { accepted <- struct{}{}; return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	startResult := make(chan error, 1)
+	go func() { startResult <- proxy.Start() }()
+	t.Cleanup(func() {
+		if proxy.listener != nil {
+			_ = proxy.Stop()
+		}
+	})
+
+	dialProxy := func() net.Conn {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			conn, dialErr := net.Dial("tcp", proxyAddr)
+			if dialErr == nil {
+				return conn
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("proxy did not start: %v", dialErr)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	first := dialProxy()
+	defer first.Close()
+	second := dialProxy()
+	defer second.Close()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-accepted:
+		case err := <-startResult:
+			t.Fatalf("proxy stopped before accepting both connections: %v", err)
+		case <-time.After(time.Second):
+			t.Fatal("accept loop blocked while the first connection retried its upstream")
+		}
+	}
+
+	upstream, err := net.Listen("tcp", upstreamAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		for i := 0; i < 2; i++ {
+			conn, acceptErr := upstream.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(conn)
+		}
+	}()
+
+	payload := []byte("second signer")
+	if _, err := second.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	_ = second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(second, response); err != nil {
+		t.Fatalf("second accepted connection was not retained: %v", err)
+	}
+	if string(response) != string(payload) {
+		t.Fatalf("response = %q, want %q", response, payload)
+	}
+}
+
+func TestTCPProxy_StopPreventsRestart(t *testing.T) {
+	reservedProxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddr := reservedProxy.Addr().String()
+	_ = reservedProxy.Close()
+
+	proxy, err := NewTCPProxy(proxyAddr, "127.0.0.1:1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startResult := make(chan error, 1)
+	go func() { startResult <- proxy.Start() }()
+	waitForTCPProxy(t, proxyAddr)
+
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-startResult:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("Start() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start() did not return after Stop()")
+	}
+	if err := proxy.Start(); !errors.Is(err, ErrStopped) {
+		t.Fatalf("second Start() error = %v, want ErrStopped", err)
+	}
+}
+
+func TestTCPProxy_OldHandlerDoesNotCloseRestartedListener(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	go func() {
+		for {
+			conn, acceptErr := upstream.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(conn)
+		}
+	}()
+
+	reservedProxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyAddr := reservedProxy.Addr().String()
+	_ = reservedProxy.Close()
+	proxy, err := NewTCPProxy(proxyAddr, upstream.Addr().String(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstRun := make(chan error, 1)
+	go func() { firstRun <- proxy.Start() }()
+	oldConn := waitForTCPProxy(t, proxyAddr)
+	finishingConn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProxyEcho(t, finishingConn, "finish first generation")
+	_ = finishingConn.Close()
+	select {
+	case err := <-firstRun:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first proxy generation did not finish")
+	}
+
+	secondRun := make(chan error, 1)
+	go func() { secondRun <- proxy.Start() }()
+	newConn := waitForTCPProxy(t, proxyAddr)
+	defer newConn.Close()
+
+	_ = oldConn.Close()
+	time.Sleep(100 * time.Millisecond)
+	probe, err := net.DialTimeout("tcp", proxyAddr, time.Second)
+	if err != nil {
+		t.Fatalf("old handler closed restarted listener: %v", err)
+	}
+	defer probe.Close()
+
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-secondRun:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("second Start() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second proxy generation did not stop")
+	}
+}
+
+func waitForTCPProxy(t *testing.T, address string) net.Conn {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, err := net.Dial("tcp", address)
+		if err == nil {
+			return conn
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("proxy did not start: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertProxyEcho(t *testing.T, conn net.Conn, value string) {
+	t.Helper()
+	payload := []byte(value)
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len(payload))
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(conn, response); err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != value {
+		t.Fatalf("response = %q, want %q", response, value)
 	}
 }
 
@@ -318,5 +658,120 @@ func TestTCPProxy_ConcurrentConnections(t *testing.T) {
 		if err != nil {
 			t.Errorf("concurrent connection error: %v", err)
 		}
+	}
+}
+
+func TestTCPProxyRejectsUntrustedPeerBeforeDiscovery(t *testing.T) {
+	callbackCalled := make(chan struct{}, 1)
+	proxy, err := NewTCPProxy("127.0.0.1:0", "127.0.0.1:1", false, func(*net.TCPConn) bool {
+		callbackCalled <- struct{}{}
+		return false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan error, 1)
+	go func() { started <- proxy.Start() }()
+
+	var address string
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		proxy.mu.Lock()
+		if proxy.listener != nil {
+			address = proxy.listener.Addr().String()
+		}
+		proxy.mu.Unlock()
+		if address != "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if address == "" {
+		t.Fatal("proxy did not start")
+	}
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	select {
+	case <-callbackCalled:
+	case <-time.After(time.Second):
+		t.Fatal("peer callback was not invoked")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("rejected peer connection remained open")
+	}
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-started:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("Start() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not stop")
+	}
+}
+
+func TestTCPProxy_StopCancelsDialContext(t *testing.T) {
+	proxy, err := NewTCPProxy(":0", "192.0.2.1:26659", false, func(*net.TCPConn) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, dialErr := proxy.dialUpstream()
+		result <- dialErr
+	}()
+
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("dialUpstream() error = %v, want ErrStopped", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dialUpstream() did not stop after Stop()")
+	}
+}
+
+func TestTCPProxy_StopInterruptsUpstreamRetryDelay(t *testing.T) {
+	proxy, err := NewTCPProxy(":0", "127.0.0.1:1", false, func(*net.TCPConn) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempted := make(chan struct{})
+	var signalAttempt sync.Once
+	proxy.dial = func(context.Context, string, string) (net.Conn, error) {
+		signalAttempt.Do(func() { close(attempted) })
+		return nil, errors.New("upstream unavailable")
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, dialErr := proxy.dialUpstream()
+		result <- dialErr
+	}()
+	<-attempted
+
+	stoppedAt := time.Now()
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("dialUpstream() error = %v, want ErrStopped", err)
+		}
+		if elapsed := time.Since(stoppedAt); elapsed > 50*time.Millisecond {
+			t.Fatalf("dialUpstream() stopped after %s, retry delay was not interrupted", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dialUpstream() did not stop during retry delay")
 	}
 }

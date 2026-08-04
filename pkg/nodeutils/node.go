@@ -3,6 +3,7 @@ package nodeutils
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -21,24 +22,38 @@ import (
 const (
 	fineStatsCollectorInterval   = 10 * time.Second
 	coarseStatsCollectorInterval = 5 * time.Minute
+	signerPeerLookupTimeout      = 2 * time.Second
 )
 
+type signerPeerResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+type tmkmsProxy interface {
+	Start() error
+	Stop() error
+}
+
 type NodeUtils struct {
-	server            *http.Server
-	router            *mux.Router
-	cfg               *Options
-	client            *chainutils.Client
-	tracer            *tracer.StoreTracer
-	latestBlockHeight atomic.Int64
-	upgradeChecker    *UpgradeChecker
-	requiresUpgrade   atomic.Bool
-	tmkmsActive       atomic.Bool
-	tmkmsProxy        *proxy.TCP
-	nodeBinaryName    string
-	appProcess        *process.Process
-	fineStats         *statscollector.Collector
-	coarseStats       *statscollector.Collector
-	mockStats         *MockStats
+	server                 *http.Server
+	router                 *mux.Router
+	cfg                    *Options
+	client                 *chainutils.Client
+	tracer                 *tracer.StoreTracer
+	latestBlockHeight      atomic.Int64
+	upgradeChecker         *UpgradeChecker
+	requiresUpgrade        atomic.Bool
+	tmkmsActive            atomic.Bool
+	signerDiscovered       atomic.Bool
+	signerPeerResolver     signerPeerResolver
+	trustedSignerAddresses atomic.Pointer[[]net.IPAddr]
+	signerPeerLookupActive atomic.Bool
+	tmkmsProxy             tmkmsProxy
+	nodeBinaryName         string
+	appProcess             *process.Process
+	fineStats              *statscollector.Collector
+	coarseStats            *statscollector.Collector
+	mockStats              *MockStats
 }
 
 func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
@@ -48,11 +63,12 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	}
 
 	nodeUtils := &NodeUtils{
-		cfg:            options,
-		router:         mux.NewRouter(),
-		nodeBinaryName: nodeBinaryName,
-		fineStats:      statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
-		coarseStats:    statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
+		cfg:                options,
+		router:             mux.NewRouter(),
+		nodeBinaryName:     nodeBinaryName,
+		signerPeerResolver: net.DefaultResolver,
+		fineStats:          statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
+		coarseStats:        statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
 	}
 
 	// Initialize tracer - needed in both normal and mock mode to track block heights
@@ -84,13 +100,90 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	nodeUtils.client = client
 
 	if options.TmkmsProxy {
-		nodeUtils.tmkmsProxy, err = proxy.NewTCPProxy(":26659", "127.0.0.1:5555", true)
+		acceptSigner := func(*net.TCPConn) bool {
+			nodeUtils.signerDiscovered.Store(true)
+			return true
+		}
+		if options.SignerPeerDNS != "" {
+			acceptSigner = nodeUtils.acceptTrustedSignerPeer
+			nodeUtils.refreshTrustedSignerPeers()
+		}
+		nodeUtils.tmkmsProxy, err = proxy.NewTCPProxy(":26659", "127.0.0.1:5555", true, acceptSigner)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return nodeUtils, nil
+}
+
+func trustedSignerPeer(peer net.IP, addresses []net.IPAddr) bool {
+	for _, address := range addresses {
+		if address.IP.Equal(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *NodeUtils) refreshTrustedSignerPeers() {
+	if !s.signerPeerLookupActive.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.signerPeerLookupActive.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), signerPeerLookupTimeout)
+		defer cancel()
+		addresses, err := s.signerPeerResolver.LookupIPAddr(ctx, s.cfg.SignerPeerDNS)
+		if err != nil {
+			log.WithError(err).WithField("hostname", s.cfg.SignerPeerDNS).Warn("failed to resolve trusted signer peers")
+			return
+		}
+		resolved := append([]net.IPAddr(nil), addresses...)
+		s.trustedSignerAddresses.Store(&resolved)
+	}()
+}
+
+func (s *NodeUtils) acceptTrustedSignerPeer(conn *net.TCPConn) bool {
+	peer, ok := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok || peer.IP == nil {
+		return false
+	}
+	return s.acceptTrustedSignerIP(peer.IP)
+}
+
+func (s *NodeUtils) acceptTrustedSignerIP(peer net.IP) bool {
+	if peer == nil {
+		return false
+	}
+	addresses := s.trustedSignerAddresses.Load()
+	if addresses != nil && trustedSignerPeer(peer, *addresses) {
+		s.signerDiscovered.Store(true)
+		return true
+	}
+	s.refreshTrustedSignerPeers()
+	log.WithFields(log.Fields{"peer": peer.String(), "hostname": s.cfg.SignerPeerDNS}).Warn("remote-signer connection came from an untrusted peer")
+	return false
+}
+
+func (s *NodeUtils) runTmkmsProxy() {
+	for {
+		s.tmkmsActive.Store(true)
+		err := s.tmkmsProxy.Start()
+		s.tmkmsActive.Store(false)
+		if errors.Is(err, proxy.ErrStopped) {
+			return
+		}
+		log.Errorf("tmkms connection finished with error: %v", err)
+
+		// If an upgrade is required lets not restart proxy
+		if s.requiresUpgrade.Load() {
+			return
+		}
+
+		// Wait one second before restarting
+		time.Sleep(time.Second)
+	}
 }
 
 func (s *NodeUtils) Start() error {
@@ -104,22 +197,7 @@ func (s *NodeUtils) Start() error {
 	}()
 
 	if s.tmkmsProxy != nil {
-		go func() {
-			for {
-				s.tmkmsActive.Store(true)
-				err := s.tmkmsProxy.Start()
-				log.Errorf("tmkms connection finished with error: %v", err)
-				s.tmkmsActive.Store(false)
-
-				// If an upgrade is required lets not restart proxy
-				if s.requiresUpgrade.Load() {
-					return
-				}
-
-				// Wait one second before restarting
-				time.Sleep(time.Second)
-			}
-		}()
+		go s.runTmkmsProxy()
 	}
 
 	// Fine-grained collector (1h window)

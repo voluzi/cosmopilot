@@ -29,6 +29,7 @@ func defaultOptions() *Options {
 		TraceStore:     DefaultTraceStore,
 		CreateFifo:     false,
 		TmkmsProxy:     false,
+		SignerPeerDNS:  "",
 		HaltHeight:     0,
 	}
 }
@@ -42,6 +43,7 @@ type Options struct {
 	TraceStore     string
 	CreateFifo     bool
 	TmkmsProxy     bool
+	SignerPeerDNS  string
 	HaltHeight     int64
 	MockMode       bool
 }
@@ -93,6 +95,12 @@ func CreateFifo(create bool) Option {
 func WithTmkmsProxy(enable bool) Option {
 	return func(opts *Options) {
 		opts.TmkmsProxy = enable
+	}
+}
+
+func WithSignerPeerDNS(hostname string) Option {
+	return func(opts *Options) {
+		opts.SignerPeerDNS = hostname
 	}
 }
 

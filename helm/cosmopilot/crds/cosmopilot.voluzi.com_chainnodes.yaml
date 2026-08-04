@@ -1403,6 +1403,33 @@ spec:
                     - config
                     - enable
                     type: object
+                  cosmosignerDiscoveryResources:
+                    description: |-
+                      Compute resources for the remote-signer discovery startup gate. When omitted, lightweight
+                      defaults are used independently from nodeUtilsResources because both init containers overlap.
+                      Resource claims are not supported because the gate does not add Pod-level resource claims.
+                    properties:
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: Limits describes the maximum amount of compute
+                          resources allowed.
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: Requests describes the minimum amount of compute
+                          resources required.
+                        type: object
+                    type: object
                   dashedConfigToml:
                     description: Whether field naming in config.toml should use dashes
                       instead of underscores. Defaults to `false`.

@@ -11,9 +11,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,6 +30,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
@@ -131,18 +134,17 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 
 	if nodeUtilsIsInFailedState(currentPod) {
 		logger.Info("node-utils is in failed state", "pod", pod.GetName())
-		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
-		logs, err := ph.GetLogs(ctx, nodeUtilsContainerName)
-		if err != nil {
-			logger.Info("could not retrieve logs: " + err.Error())
-		} else {
-			logLines := strings.Split(logs, "\n")
-			if len(logLines) > defaultLogsLineCount {
-				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "\n"))
-			} else {
-				logger.Info("app error: " + strings.Join(logLines, "\n"))
-			}
-		}
+		r.logFailedContainer(ctx, logger, currentPod, nodeUtilsContainerName)
+		return r.recreatePod(ctx, chainNode, pod, false)
+	}
+
+	// Handle terminal Pod failures before probing node-utils only when node-utils is unavailable.
+	// A scheduled upgrade deliberately terminates the application while keeping node-utils alive so
+	// /must_upgrade can select the replacement image; preserve that probe path.
+	if failedPodRequiresEarlyRecreation(chainNode, currentPod) {
+		logger.Info("pod is in failed state", "pod", pod.GetName())
+		logFailedCosmosignerDiscoveryGate(logger, currentPod)
+		r.logFailedContainer(ctx, logger, currentPod, chainNode.Spec.App.App)
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
@@ -249,21 +251,11 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
 	}
 
-	// Recreate pod if it is in failed state
+	// A terminated application with a live node-utils sidecar gets one chance to report a
+	// scheduled upgrade above. If no upgrade is required, recreate it as an ordinary failure.
 	if podInFailedState(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
-		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, currentPod)
-		logs, err := ph.GetLogs(ctx, chainNode.Spec.App.App)
-		if err != nil {
-			logger.Info("could not retrieve logs: " + err.Error())
-		} else {
-			logLines := strings.Split(logs, "\n")
-			if len(logLines) > defaultLogsLineCount {
-				logger.Info("app error: " + strings.Join(logLines[len(logLines)-defaultLogsLineCount:], "\n"))
-			} else {
-				logger.Info("app error: " + strings.Join(logLines, "\n"))
-			}
-		}
+		r.logFailedContainer(ctx, logger, currentPod, chainNode.Spec.App.App)
 		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
@@ -419,6 +411,42 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 // buildNodeUtilsInitContainer creates the node-utils sidecar init container.
 func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) corev1.Container {
 	var sidecarRestartAlways = corev1.ContainerRestartPolicyAlways
+	env := []corev1.EnvVar{
+		{
+			Name:  "BLOCK_THRESHOLD",
+			Value: chainNode.Spec.Config.GetBlockThreshold(),
+		},
+		{
+			Name:  "LOG_LEVEL",
+			Value: chainNode.Spec.Config.GetNodeUtilsLogLevel(),
+		},
+		{
+			Name:  "TMKMS_PROXY",
+			Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
+		},
+	}
+	if signerDNS := signerPeerDNS(chainNode); signerDNS != "" {
+		env = append(env, corev1.EnvVar{Name: "SIGNER_PEER_DNS", Value: signerDNS})
+	}
+	env = append(env,
+		corev1.EnvVar{
+			Name:  "CREATE_FIFO",
+			Value: controllers.StringValueTrue,
+		},
+		corev1.EnvVar{
+			Name:  "TRACE_STORE",
+			Value: "/trace/trace.fifo",
+		},
+		corev1.EnvVar{
+			Name:  "NODE_BINARY_NAME",
+			Value: chainNode.Spec.App.App,
+		},
+		corev1.EnvVar{
+			Name:  "HALT_HEIGHT",
+			Value: strconv.FormatInt(chainNode.Spec.Config.GetHaltHeight(), 10),
+		},
+	)
+	env = append(env, chainNode.Spec.Config.GetNodeUtilsEnv()...)
 
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
@@ -448,36 +476,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 				MountPath: "/config",
 			},
 		},
-		Env: append([]corev1.EnvVar{
-			{
-				Name:  "BLOCK_THRESHOLD",
-				Value: chainNode.Spec.Config.GetBlockThreshold(),
-			},
-			{
-				Name:  "LOG_LEVEL",
-				Value: chainNode.Spec.Config.GetNodeUtilsLogLevel(),
-			},
-			{
-				Name:  "TMKMS_PROXY",
-				Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
-			},
-			{
-				Name:  "CREATE_FIFO",
-				Value: controllers.StringValueTrue,
-			},
-			{
-				Name:  "TRACE_STORE",
-				Value: "/trace/trace.fifo",
-			},
-			{
-				Name:  "NODE_BINARY_NAME",
-				Value: chainNode.Spec.App.App,
-			},
-			{
-				Name:  "HALT_HEIGHT",
-				Value: strconv.FormatInt(chainNode.Spec.Config.GetHaltHeight(), 10),
-			},
-		}, chainNode.Spec.Config.GetNodeUtilsEnv()...),
+		Env:       env,
 		Resources: chainNode.Spec.Config.GetNodeUtilsResources(),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -492,6 +491,53 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 			},
 			FailureThreshold: 1,
 			PeriodSeconds:    2,
+		},
+	}
+}
+
+func signerPeerDNS(chainNode *appsv1.ChainNode) string {
+	name, ok := cosmosignerTargetLabelValue(chainNode)
+	if !ok {
+		return ""
+	}
+	return cosmosigner.SignerServiceDNS(name, chainNode.GetNamespace())
+}
+
+func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.ChainNode, signerName string) corev1.Container {
+	return corev1.Container{
+		Name:                     CosmosignerDiscoveryWaitContainerName,
+		Image:                    r.opts.NodeUtilsImage,
+		ImagePullPolicy:          corev1.PullIfNotPresent,
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		SecurityContext:          k8s.RestrictedSecurityContext(),
+		Args: []string{
+			"wait-for-dns",
+			cosmosigner.DiscoveryServiceDNS(signerName, chainNode.GetNamespace()),
+			"$(POD_IP)",
+			cosmosignerDiscoveryWaitTimeout.String(),
+		},
+		Env: []corev1.EnvVar{{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "status.podIP",
+			}},
+		}},
+		Resources: cosmosignerDiscoveryResources(chainNode.Spec.Config),
+	}
+}
+
+func cosmosignerDiscoveryResources(config *appsv1.Config) corev1.ResourceRequirements {
+	if config != nil && config.CosmosignerDiscoveryResources != nil {
+		return config.CosmosignerDiscoveryResources.ResourceRequirements()
+	}
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("10m"),
+			corev1.ResourceMemory: resource.MustParse("16Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("32Mi"),
 		},
 	}
 }
@@ -676,8 +722,9 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	// (so a stray user label never leaks it onto non-target pods), so it is re-added explicitly here:
 	// a standalone node uses its own signer name; a ChainNodeSet-managed target copies the value the
 	// nodeset controller stamped on the child ChainNode (`<nodeset>-signer`).
-	if v, ok := cosmosignerTargetLabelValue(chainNode); ok {
-		podLabels[controllers.LabelCosmosignerTarget] = v
+	cosmosignerTarget, hasCosmosignerTarget := cosmosignerTargetLabelValue(chainNode)
+	if hasCosmosignerTarget {
+		podLabels[controllers.LabelCosmosignerTarget] = cosmosignerTarget
 		// A standalone target additionally carries the chain-node label its discovery-service
 		// selector scopes on, so a same-named ChainNodeSet's target pods are never selected.
 		if chainNode.UsesCosmosigner() {
@@ -705,6 +752,12 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode)},
 			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
+	}
+	if hasCosmosignerTarget {
+		// The headless Service publishes not-ready addresses, so this waits only for endpoint
+		// discovery and does not hide a signer outage behind an init-container readiness gate.
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers,
+			r.buildCosmosignerDiscoveryInitContainer(chainNode, cosmosignerTarget))
 	}
 
 	for _, volume := range chainNode.GetPersistenceAdditionalVolumes() {
@@ -1203,6 +1256,53 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 	return nil
 }
 
+func logFailedCosmosignerDiscoveryGate(logger logr.Logger, pod *corev1.Pod) {
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name != CosmosignerDiscoveryWaitContainerName || status.State.Terminated == nil || status.State.Terminated.ExitCode == 0 {
+			continue
+		}
+		termination := status.State.Terminated
+		logger.Info("cosmosigner discovery startup gate failed",
+			"container", status.Name,
+			"reason", termination.Reason,
+			"message", termination.Message,
+			"exitCode", termination.ExitCode)
+		return
+	}
+}
+
+func (r *Reconciler) logFailedContainer(ctx context.Context, logger logr.Logger, pod *corev1.Pod, containerName string) {
+	if !containerHasTerminated(pod, containerName) {
+		return
+	}
+	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
+	logs, err := ph.GetLogs(ctx, containerName)
+	if err != nil {
+		logger.Info("could not retrieve logs: " + err.Error())
+		return
+	}
+
+	logLines := strings.Split(logs, "\n")
+	if len(logLines) > defaultLogsLineCount {
+		logLines = logLines[len(logLines)-defaultLogsLineCount:]
+	}
+	logger.Info("app error: " + strings.Join(logLines, "\n"))
+}
+
+func containerHasTerminated(pod *corev1.Pod, containerName string) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == containerName && status.State.Terminated != nil {
+			return true
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name == containerName && status.State.Terminated != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func podInFailedState(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
 	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		return true
@@ -1238,13 +1338,34 @@ func isImagePullFailure(state *corev1.ContainerStateWaiting) bool {
 	return state != nil && (state.Reason == ReasonImagePullBackOff || state.Reason == ReasonErrImagePull)
 }
 
+func failedPodRequiresEarlyRecreation(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
+	return podInFailedState(chainNode, pod) && !nodeUtilsIsRunning(pod)
+}
+
+func nodeUtilsIsRunning(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.InitContainerStatuses {
+		if c.Name == nodeUtilsContainerName {
+			// Readiness is driven by /must_upgrade, which intentionally returns 426 when an
+			// upgrade is required. The sidecar remains available for controller probes while
+			// kubelet reports Ready=false, so availability depends only on its running state.
+			return c.State.Running != nil
+		}
+	}
+	return false
+}
+
 func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
-	if pod.Status.Phase == corev1.PodFailed {
-		return true
+	// A failed regular init container terminates restartable init sidecars as the Pod shuts down.
+	// Preserve the discovery gate's diagnostic path instead of misclassifying that expected
+	// node-utils termination as the root failure.
+	for _, c := range pod.Status.InitContainerStatuses {
+		if c.Name == CosmosignerDiscoveryWaitContainerName && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
+			return false
+		}
 	}
 
 	for _, c := range pod.Status.InitContainerStatuses {
-		if c.Name == nodeUtilsContainerName && (!c.Ready && c.State.Terminated != nil) {
+		if c.Name == nodeUtilsContainerName && !c.Ready && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
 			return true
 		}
 	}

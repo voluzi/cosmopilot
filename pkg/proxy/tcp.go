@@ -1,21 +1,38 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
+var ErrStopped = errors.New("tcp proxy stopped")
+
+const (
+	upstreamRetryInterval = 100 * time.Millisecond
+	upstreamRetryTimeout  = 30 * time.Second
+)
+
 type TCP struct {
-	laddr, raddr *net.TCPAddr
-	listener     *net.TCPListener
-	runOnce      bool
+	laddr, raddr  *net.TCPAddr
+	mu            sync.Mutex
+	listener      *net.TCPListener
+	stopped       bool
+	runOnce       bool
+	onAccept      func(*net.TCPConn) bool
+	retryUpstream bool
+	dialContext   context.Context
+	cancelDials   context.CancelFunc
+	dial          func(context.Context, string, string) (net.Conn, error)
 }
 
-func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool) (*TCP, error) {
+func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...func(*net.TCPConn) bool) (*TCP, error) {
 	laddr, err := net.ResolveTCPAddr("tcp", localAddr)
 	if err != nil {
 		return nil, err
@@ -25,26 +42,66 @@ func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool) (*TCP, error) {
 		return nil, err
 	}
 
-	return &TCP{
-		laddr:   laddr,
-		raddr:   raddr,
-		runOnce: failOnClose,
-	}, nil
+	dialContext, cancelDials := context.WithCancel(context.Background())
+	dialer := &net.Dialer{}
+	proxy := &TCP{
+		laddr:       laddr,
+		raddr:       raddr,
+		runOnce:     failOnClose,
+		dialContext: dialContext,
+		cancelDials: cancelDials,
+		dial:        dialer.DialContext,
+	}
+	if len(onAccept) > 0 {
+		proxy.onAccept = onAccept[0]
+		proxy.retryUpstream = proxy.onAccept != nil
+	}
+	return proxy, nil
 }
 
 func (p *TCP) Start() error {
-	var err error
 	log.Infof("starting tcp proxy at %v", p.laddr)
-	p.listener, err = net.ListenTCP("tcp", p.laddr)
+
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return ErrStopped
+	}
+	listener, err := net.ListenTCP("tcp", p.laddr)
 	if err != nil {
+		p.mu.Unlock()
 		return err
 	}
-	defer p.listener.Close()
+	p.listener = listener
+	p.mu.Unlock()
+
+	defer func() {
+		_ = listener.Close()
+		p.mu.Lock()
+		if p.listener == listener {
+			p.listener = nil
+		}
+		p.mu.Unlock()
+	}()
 
 	for {
-		lconn, err := p.listener.AcceptTCP()
+		lconn, err := listener.AcceptTCP()
 		if err != nil {
-			log.Errorf("failed to accept connection: %v", err)
+			p.mu.Lock()
+			stopped := p.stopped
+			p.mu.Unlock()
+			if stopped {
+				return ErrStopped
+			}
+			if p.runOnce {
+				return nil
+			}
+			return fmt.Errorf("failed to accept connection: %v", err)
+		}
+
+		if p.onAccept != nil && !p.onAccept(lconn) {
+			log.WithField("remote", lconn.RemoteAddr()).Warn("rejected untrusted TCP proxy peer")
+			_ = lconn.Close()
 			continue
 		}
 
@@ -53,25 +110,76 @@ func (p *TCP) Start() error {
 			"raddr": p.raddr,
 		}).Info("handling TCP connection")
 
-		if err = p.handle(lconn); err != nil {
-			log.Errorf("failed to handle connection: %v", err)
-			continue
-		}
-		if p.runOnce {
-			return err
-		}
+		go func(runListener *net.TCPListener, conn *net.TCPConn) {
+			if handleErr := p.handle(conn); handleErr != nil {
+				if !errors.Is(handleErr, ErrStopped) {
+					log.Errorf("failed to handle connection: %v", handleErr)
+				}
+				return
+			}
+			if p.runOnce {
+				_ = runListener.Close()
+			}
+		}(listener, lconn)
 	}
 }
 
 func (p *TCP) Stop() error {
-	return p.listener.Close()
+	p.mu.Lock()
+	p.stopped = true
+	p.cancelDials()
+	listener := p.listener
+	p.mu.Unlock()
+	if listener == nil {
+		return nil
+	}
+	return listener.Close()
+}
+
+func (p *TCP) dialUpstream() (*net.TCPConn, error) {
+	deadline := time.Now().Add(upstreamRetryTimeout)
+	for {
+		p.mu.Lock()
+		stopped := p.stopped
+		p.mu.Unlock()
+		if stopped {
+			return nil, ErrStopped
+		}
+		conn, err := p.dial(p.dialContext, "tcp", p.raddr.String())
+		if err == nil {
+			rconn, ok := conn.(*net.TCPConn)
+			if !ok {
+				_ = conn.Close()
+				return nil, fmt.Errorf("upstream connection is %T, want *net.TCPConn", conn)
+			}
+			return rconn, nil
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, ErrStopped
+		}
+		if !p.retryUpstream || time.Now().Add(upstreamRetryInterval).After(deadline) {
+			return nil, fmt.Errorf("failed to dial upstream: %v", err)
+		}
+		retryTimer := time.NewTimer(upstreamRetryInterval)
+		select {
+		case <-retryTimer.C:
+		case <-p.dialContext.Done():
+			if !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+			return nil, ErrStopped
+		}
+	}
 }
 
 func (p *TCP) handle(lconn *net.TCPConn) error {
-	rconn, err := net.DialTCP("tcp", nil, p.raddr)
+	rconn, err := p.dialUpstream()
 	if err != nil {
 		lconn.Close()
-		return fmt.Errorf("failed to dial upstream: %v", err)
+		return err
 	}
 
 	// Use sync.Once to ensure connections are closed exactly once

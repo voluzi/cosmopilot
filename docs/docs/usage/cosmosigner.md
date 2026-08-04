@@ -23,6 +23,12 @@ public-key verification. For production validators, use an immutable image diges
 mutable tag so a rescheduled replica cannot pick up different code without a managed migration.
 :::
 
+:::warning[node-utils compatibility]
+Cosmosigner discovery gating requires node-utils 2.10.0 or newer. If you override or pin the Helm
+`nodeUtilsImage` value, keep it at 2.10.0 or later or targeted node Pods cannot pass their startup
+gate.
+:::
+
 ## How it works
 
 `Cosmopilot` deploys, for each configured signer:
