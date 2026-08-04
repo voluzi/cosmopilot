@@ -238,6 +238,7 @@ func updateValidatorStatus(
 	}
 	nodeStatus := appsv1.ChainNodeSetNodeStatus{
 		Name:    validator.Name,
+		UID:     validator.UID,
 		ID:      validator.Status.NodeID,
 		Address: validator.Status.IP,
 		Port:    chainutils.P2pPort,
@@ -263,6 +264,7 @@ func updateValidatorStatus(
 	}
 	status := appsv1.ChainNodeSetValidatorStatus{
 		Name:             validator.Name,
+		UID:              validator.UID,
 		Group:            group,
 		Address:          validator.Status.ValidatorAddress,
 		Status:           validator.Status.ValidatorStatus,

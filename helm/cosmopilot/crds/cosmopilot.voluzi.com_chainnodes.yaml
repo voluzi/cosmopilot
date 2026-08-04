@@ -3115,8 +3115,9 @@ spec:
                     type: string
                   dataVolumes:
                     default: Retain
-                    description: DataVolumes controls operator-generated main and
-                      additional node PVCs.
+                    description: |-
+                      DataVolumes controls operator-generated main and additional node PVCs and, for a ChainNodeSet,
+                      Cosmoseed `data-<set>-seed-<ordinal>` PVCs.
                     enum:
                     - Retain
                     - Delete

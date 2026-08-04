@@ -118,14 +118,23 @@ spec:
 The fields are independent and each defaults to `Retain`:
 
 :::warning[Upgrade migration]
-Before upgrading an existing manifest that uses `deleteWithNode: true`, add
-`.spec.deletionPolicy.dataVolumes: Delete` if PVC deletion is still intended. The legacy field is no
-longer consulted during root deletion; without this migration, those PVCs are retained by default.
+Helm does not upgrade files from a chart's `crds/` directory. Apply the target CRDs before applying
+any migration that writes `.spec.deletionPolicy`; otherwise the API server cannot persist the new
+field:
+
+```shell
+helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply -f -
+```
+
+Only after that command succeeds, update existing manifests that use `deleteWithNode: true` with
+`.spec.deletionPolicy.dataVolumes: Delete` if PVC deletion is still intended, apply those migrated
+resources, and then run the Helm upgrade. The legacy field is no longer consulted during root
+deletion; without this migration, those PVCs are retained by default.
 :::
 
 | Field | Resources covered |
 |-------|-------------------|
-| `dataVolumes` | Main and additional PVCs generated for nodes |
+| `dataVolumes` | Main and additional PVCs generated for nodes, plus Cosmoseed `data-<set>-seed-<ordinal>` PVCs |
 | `generatedKeys` | Generated node, consensus, account, genesis-validator, and Cosmoseed key Secrets |
 | `cosmosignerState` | Generated Cosmosigner Raft-state PVCs |
 

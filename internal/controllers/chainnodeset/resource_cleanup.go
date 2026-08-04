@@ -3,6 +3,8 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -90,11 +92,41 @@ func (r *Reconciler) finalizeResources(ctx context.Context, nodeSet *appsv1.Chai
 }
 
 func (r *Reconciler) attributeCosmoseedDataVolumes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
-	// Newly generated Cosmoseed claims inherit stable attribution from the StatefulSet claim template.
-	// Older claims cannot be distinguished safely from exact-name pre-provisioned user PVCs: binding
-	// controllers write the same managedFields metadata to both. Preserve ambiguous legacy claims
-	// rather than stamping them into the destructive deletion-policy set.
+	// Deterministic names and StatefulSet managed fields also occur on pre-provisioned claims, so
+	// only claims that already prove their root attribution are safe to complete here.
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcs, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return err
+	}
+	root := resourcecleanup.RootOwnerFor(nodeSet)
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if !isCosmoseedDataVolume(nodeSet, pvc) ||
+			!resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
+			continue
+		}
+		changed := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassDataVolumes)
+		changed = resourcecleanup.StampResourceOwner(pvc, nodeSet.GetUID()) || changed
+		if changed {
+			if err := r.Update(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+func isCosmoseedDataVolume(nodeSet *appsv1.ChainNodeSet, pvc *corev1.PersistentVolumeClaim) bool {
+	return hasCanonicalOrdinal(pvc.GetName(), "data-"+nodeSet.GetName()+"-seed-")
+}
+
+func hasCanonicalOrdinal(name, prefix string) bool {
+	suffix := strings.TrimPrefix(name, prefix)
+	if suffix == name || suffix == "" {
+		return false
+	}
+	ordinal, err := strconv.Atoi(suffix)
+	return err == nil && ordinal >= 0 && strconv.Itoa(ordinal) == suffix
 }
 
 func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
@@ -105,7 +137,12 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 	allDone := true
 	for i := range children.Items {
 		child := &children.Items[i]
-		if !metav1.IsControlledBy(child, nodeSet) && !isRecordedNodeSetChild(nodeSet, child.GetName()) {
+		controlled := metav1.IsControlledBy(child, nodeSet)
+		recordedName, recordedUID := recordedNodeSetChildIdentity(nodeSet, child)
+		if !controlled && !recordedUID {
+			if recordedName {
+				return false, fmt.Errorf("refusing cleanup of ChainNode %s/%s UID %s because it does not match the UID recorded by ChainNodeSet %s", child.GetNamespace(), child.GetName(), child.GetUID(), nodeSet.GetName())
+			}
 			continue
 		}
 		if controller := metav1.GetControllerOf(child); controller != nil && !metav1.IsControlledBy(child, nodeSet) {
@@ -324,47 +361,62 @@ func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNod
 }
 
 func (r *Reconciler) quiesceCosmoseed(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
-	statefulSets := &k8sappsv1.StatefulSetList{}
-	if err := r.List(ctx, statefulSets, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+	sts := &k8sappsv1.StatefulSet{}
+	key := client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName() + "-seed"}
+	if err := r.Get(ctx, key, sts); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
 		return false, err
 	}
-	allDone := true
-	for i := range statefulSets.Items {
-		sts := &statefulSets.Items[i]
-		if !metav1.IsControlledBy(sts, nodeSet) || sts.GetName() != nodeSet.GetName()+"-seed" {
-			continue
-		}
-		if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0 {
-			zero := int32(0)
-			sts.Spec.Replicas = &zero
-			if err := r.Update(ctx, sts); err != nil {
-				return false, err
-			}
-			allDone = false
-			continue
-		}
-		podsDone, err := r.deleteControlledPods(ctx, sts)
-		if err != nil {
+	if !metav1.IsControlledBy(sts, nodeSet) {
+		pods := &corev1.PodList{}
+		if err := r.List(ctx, pods, client.InNamespace(nodeSet.GetNamespace())); err != nil {
 			return false, err
 		}
-		if !podsDone {
-			allDone = false
-			continue
-		}
-		if sts.GetDeletionTimestamp().IsZero() {
-			uid := sts.GetUID()
-			if err := r.Delete(ctx, sts, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
-				return false, err
+		podsPresent := false
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if metav1.IsControlledBy(pod, sts) || hasCanonicalOrdinal(pod.GetName(), sts.GetName()+"-") {
+				podsPresent = true
+				break
 			}
 		}
-		remaining := &k8sappsv1.StatefulSet{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(sts), remaining); err == nil {
-			allDone = false
-		} else if !errors.IsNotFound(err) {
+		quiesced := !podsPresent && ((sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0) || !sts.GetDeletionTimestamp().IsZero())
+		if quiesced {
+			return true, nil
+		}
+		ownership := "has no controller"
+		if controller := metav1.GetControllerOf(sts); controller != nil {
+			ownership = fmt.Sprintf("is controlled by %s %q UID %s", controller.Kind, controller.Name, controller.UID)
+		}
+		return false, fmt.Errorf("refusing durable cleanup while Cosmoseed StatefulSet %s/%s %s; restore its ChainNodeSet UID %s controller reference, or scale/delete it and wait for all seed pods to terminate", sts.GetNamespace(), sts.GetName(), ownership, nodeSet.GetUID())
+	}
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0 {
+		zero := int32(0)
+		sts.Spec.Replicas = &zero
+		if err := r.Update(ctx, sts); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	podsDone, err := r.deleteControlledPods(ctx, sts)
+	if err != nil || !podsDone {
+		return false, err
+	}
+	if sts.GetDeletionTimestamp().IsZero() {
+		uid := sts.GetUID()
+		if err := r.Delete(ctx, sts, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
 			return false, err
 		}
 	}
-	return allDone, nil
+	remaining := &k8sappsv1.StatefulSet{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sts), remaining); err == nil {
+		return false, nil
+	} else if !errors.IsNotFound(err) {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *Reconciler) deleteControlledPods(ctx context.Context, owner client.Object) (bool, error) {

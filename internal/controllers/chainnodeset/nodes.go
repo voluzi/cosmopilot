@@ -239,6 +239,7 @@ func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context
 
 		nodeStatus := appsv1.ChainNodeSetNodeStatus{
 			Name:    node.Name,
+			UID:     node.UID,
 			ID:      node.Status.NodeID,
 			Address: node.Status.IP,
 			Port:    chainutils.P2pPort,
@@ -303,7 +304,7 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 
 	metadataDrift := !metav1.IsControlledBy(currentNode, nodeSet) ||
 		!controllerutil.ContainsFinalizer(currentNode, resourcecleanup.Finalizer)
-	if metadataDrift && !metav1.IsControlledBy(currentNode, nodeSet) && !isRecordedNodeSetChild(nodeSet, currentNode.GetName()) {
+	if metadataDrift && !metav1.IsControlledBy(currentNode, nodeSet) && !isRecordedNodeSetChild(nodeSet, currentNode) {
 		return fmt.Errorf("refusing to adopt unrecorded ChainNode %s/%s", currentNode.GetNamespace(), currentNode.GetName())
 	}
 	if !currentNode.Equal(node) || metadataDrift {
@@ -620,7 +621,7 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	if err := r.Get(ctx, key, node); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !metav1.IsControlledBy(node, nodeSet) && !isRecordedNodeSetChild(nodeSet, node.GetName()) {
+	if !metav1.IsControlledBy(node, nodeSet) && !isRecordedNodeSetChild(nodeSet, node) {
 		return fmt.Errorf("refusing to delete ChainNode %s/%s not controlled by ChainNodeSet UID %s", node.GetNamespace(), node.GetName(), nodeSet.GetUID())
 	}
 	if controller := metav1.GetControllerOf(node); controller != nil && !metav1.IsControlledBy(node, nodeSet) {
@@ -648,18 +649,29 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	return client.IgnoreNotFound(r.Delete(ctx, node, client.Preconditions{UID: &uid}))
 }
 
-func isRecordedNodeSetChild(nodeSet *appsv1.ChainNodeSet, name string) bool {
+func isRecordedNodeSetChild(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {
+	_, uidMatches := recordedNodeSetChildIdentity(nodeSet, child)
+	return uidMatches
+}
+
+func recordedNodeSetChildIdentity(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) (nameRecorded, uidMatches bool) {
 	for _, status := range nodeSet.Status.Nodes {
-		if status.Name == name {
-			return true
+		if status.Name == child.GetName() {
+			nameRecorded = true
+			if status.UID != "" && status.UID == child.GetUID() {
+				return true, true
+			}
 		}
 	}
 	for _, status := range nodeSet.Status.Validators {
-		if status.Name == name {
-			return true
+		if status.Name == child.GetName() {
+			nameRecorded = true
+			if status.UID != "" && status.UID == child.GetUID() {
+				return true, true
+			}
 		}
 	}
-	return false
+	return nameRecorded, false
 }
 
 // exposeForInstance returns the ExposeConfig that should be applied to the i-th

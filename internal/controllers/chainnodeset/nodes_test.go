@@ -26,7 +26,7 @@ func TestEnsureNodePreservesCleanupFinalizerOnSpecUpdate(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
 		Status: appsv1.ChainNodeSetStatus{ChainID: "chain", Nodes: []appsv1.ChainNodeSetNodeStatus{{
-			Name: "set-fullnodes-0", Group: "fullnodes",
+			Name: "set-fullnodes-0", UID: types.UID("child-uid"), Group: "fullnodes",
 		}}},
 	}
 	group := appsv1.NodeGroupSpec{Name: "fullnodes", Instances: ptr.To(1)}
@@ -53,7 +53,7 @@ func TestDeleteNodeWithCleanupFinalizerAdoptsRecordedLegacyChild(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
 		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
-			Name: "set-fullnodes-0", Group: "fullnodes",
+			Name: "set-fullnodes-0", UID: types.UID("legacy-uid"), Group: "fullnodes",
 		}}},
 	}
 	legacy := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
@@ -68,6 +68,30 @@ func TestDeleteNodeWithCleanupFinalizerAdoptsRecordedLegacyChild(t *testing.T) {
 	assert.False(t, fresh.DeletionTimestamp.IsZero())
 	assert.Contains(t, fresh.Finalizers, resourcecleanup.Finalizer)
 	assert.True(t, metav1.IsControlledBy(fresh, nodeSet))
+}
+
+func TestEnsureNodeRefusesRecordedValidatorReplacementWithDifferentUID(t *testing.T) {
+	const name = "set-validator"
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
+		Status: appsv1.ChainNodeSetStatus{Validators: []appsv1.ChainNodeSetValidatorStatus{{
+			Name: name, UID: types.UID("recorded-validator-uid"), Group: validatorGroupName,
+		}}},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	desired := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nodeSet.Namespace}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, desired, r.Scheme))
+	replacement := desired.DeepCopy()
+	replacement.UID = types.UID("replacement-validator-uid")
+	replacement.OwnerReferences = nil
+	require.NoError(t, r.Create(context.Background(), replacement))
+
+	err := r.ensureNode(context.Background(), nodeSet, desired, waitNone)
+	require.ErrorContains(t, err, "refusing to adopt")
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(replacement), fresh))
+	assert.Equal(t, replacement.UID, fresh.UID)
+	assert.Empty(t, fresh.OwnerReferences)
 }
 
 func TestDeleteNodeWithCleanupFinalizerPreservesForeignLabeledNode(t *testing.T) {
@@ -348,10 +372,12 @@ func TestEnsureNodesRemovesStaleRegularNodesOnValidatorPromotion(t *testing.T) {
 	}
 	// Indices 1 and 2 are stale regular ChainNodes left from when the group ran 3 regular instances.
 	mkRegular := func(index int) *appsv1.ChainNode {
+		name := fmt.Sprintf("test-nodeset-validators-%d", index)
 		return &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("test-nodeset-validators-%d", index),
+				Name:      name,
 				Namespace: "default",
+				UID:       types.UID(name + "-uid"),
 				Labels: map[string]string{
 					controllers.LabelChainNodeSet:      "test-nodeset",
 					controllers.LabelChainNodeSetGroup: "validators",
@@ -375,8 +401,8 @@ func TestEnsureNodesRemovesStaleRegularNodesOnValidatorPromotion(t *testing.T) {
 		Status: appsv1.ChainNodeSetStatus{
 			ChainID: "test-chain",
 			Nodes: []appsv1.ChainNodeSetNodeStatus{
-				{Name: "test-nodeset-validators-1", Group: "validators"},
-				{Name: "test-nodeset-validators-2", Group: "validators"},
+				{Name: stale1.Name, UID: stale1.UID, Group: "validators"},
+				{Name: stale2.Name, UID: stale2.UID, Group: "validators"},
 			},
 		},
 	}

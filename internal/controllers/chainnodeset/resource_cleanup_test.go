@@ -234,6 +234,30 @@ func TestQuiesceAndDeleteChildrenLeavesInitializationPodToTerminatingChild(t *te
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(initPod), &corev1.Pod{}))
 }
 
+func TestQuiesceAndDeleteChildrenBlocksOnRecordedReplacementWithDifferentUID(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: "recorded-child-uid", Group: "fullnodes",
+		}}},
+	}
+	replacement := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: nodeSet.Namespace, UID: "replacement-child-uid",
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, replacement).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), "replacement-child-uid")
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(replacement), fresh))
+	assert.True(t, fresh.DeletionTimestamp.IsZero())
+	assert.Empty(t, fresh.OwnerReferences)
+}
+
 func TestQuiesceAndDeleteChildrenUsesRootRetentionPolicyBeforeRemovingFinalizer(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	now := metav1.NewTime(time.Now())
@@ -474,41 +498,30 @@ func TestFinalizeResourcesAppliesDataPolicyToCosmoseedClaims(t *testing.T) {
 	}
 }
 
-func TestAttributeCosmoseedDataVolumesRejectsNonCanonicalOrdinal(t *testing.T) {
+func TestAttributeCosmoseedDataVolumesCompletesStableAttributionForCanonicalClaim(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
-	seed := &k8sappsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid"},
-		Spec:       k8sappsv1.StatefulSetSpec{VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}}},
-	}
-	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
 	canonical := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-set-seed-1", Namespace: nodeSet.Namespace}}
 	resourcecleanup.Stamp(canonical, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes)
-	resourcecleanup.StampResourceOwner(canonical, nodeSet.UID)
 	nonCanonical := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-set-seed-01", Namespace: nodeSet.Namespace}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, canonical, nonCanonical).Build()
+	resourcecleanup.Stamp(nonCanonical, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, canonical, nonCanonical).Build()
 	r := &Reconciler{Client: c, Scheme: scheme}
 
 	require.NoError(t, r.attributeCosmoseedDataVolumes(context.Background(), nodeSet))
-	root := resourcecleanup.RootOwnerFor(nodeSet)
 	freshCanonical := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(canonical), freshCanonical))
-	assert.True(t, resourcecleanup.IsAttributed(freshCanonical, root, resourcecleanup.ClassDataVolumes))
+	assert.Equal(t, string(nodeSet.UID), freshCanonical.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
 	freshNonCanonical := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(nonCanonical), freshNonCanonical))
-	assert.False(t, resourcecleanup.IsAttributed(freshNonCanonical, root, resourcecleanup.ClassDataVolumes))
+	assert.Empty(t, freshNonCanonical.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
 }
 
 func TestAttributeCosmoseedDataVolumesPreservesPreprovisionedExactNameClaim(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
-	seed := &k8sappsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid"},
-		Spec:       k8sappsv1.StatefulSetSpec{VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}}},
-	}
-	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
 	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-set-seed-0", Namespace: nodeSet.Namespace}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, claim).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, claim).Build()
 	r := &Reconciler{Client: c, Scheme: scheme}
 
 	require.NoError(t, r.attributeCosmoseedDataVolumes(context.Background(), nodeSet))
@@ -520,25 +533,40 @@ func TestAttributeCosmoseedDataVolumesPreservesPreprovisionedExactNameClaim(t *t
 func TestAttributeCosmoseedDataVolumesPreservesBoundPreprovisionedClaimWithControllerManagedFields(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
-	seed := &k8sappsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid"},
-		Spec:       k8sappsv1.StatefulSetSpec{VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}}},
-	}
-	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
 	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-set-seed-0", Namespace: nodeSet.Namespace,
 		ManagedFields: []metav1.ManagedFieldsEntry{{
 			Manager: "kube-controller-manager", Operation: metav1.ManagedFieldsOperationUpdate,
 			APIVersion: "v1", FieldsType: "FieldsV1", FieldsV1: &metav1.FieldsV1{Raw: []byte(`{}`)},
 		}},
-	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, claim).Build()
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "preprovisioned-volume"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, claim).Build()
 	r := &Reconciler{Client: c, Scheme: scheme}
 
 	require.NoError(t, r.attributeCosmoseedDataVolumes(context.Background(), nodeSet))
 	fresh := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(claim), fresh))
 	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
+}
+
+func TestQuiesceCosmoseedBlocksOnUnownedLiveDeterministicStatefulSet(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	one := int32(1)
+	seed := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-seed", Namespace: nodeSet.Namespace, UID: "replacement-seed-uid",
+	}, Spec: k8sappsv1.StatefulSetSpec{Replicas: &one}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "set-seed-0", Namespace: nodeSet.Namespace, UID: "replacement-pod-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(seed, pod, scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, pod).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceCosmoseed(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), "set-seed")
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(seed), &k8sappsv1.StatefulSet{}))
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
 }
 
 func TestQuiesceCosmoseedUsesOwnedDeterministicNameWhenLabelsDrift(t *testing.T) {

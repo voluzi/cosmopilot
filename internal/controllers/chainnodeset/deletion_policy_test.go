@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
@@ -84,4 +86,34 @@ func TestExistingUnownedGeneratedKeyNameRemainsAmbiguous(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(secret), current))
 	assert.False(t, resourcecleanup.IsAttributed(current, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
 	assert.Empty(t, current.OwnerReferences)
+}
+
+func TestCosmoseedStatefulSetUpdatePreservesExistingClaimTemplate(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmoseed: &appsv1.CosmoseedConfig{Enabled: ptr.To(true), Instances: ptr.To(1)},
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	existing, err := r.getStatefulSet(nodeSet, "old-config", nil)
+	require.NoError(t, err)
+	require.Len(t, existing.Spec.VolumeClaimTemplates, 1)
+	existing.Spec.VolumeClaimTemplates[0].Annotations = nil
+	require.NoError(t, r.Create(context.Background(), existing))
+
+	desired, err := r.getStatefulSet(nodeSet, "new-config", nil)
+	require.NoError(t, err)
+	assert.True(t, resourcecleanup.IsAttributed(
+		&desired.Spec.VolumeClaimTemplates[0],
+		resourcecleanup.RootOwnerFor(nodeSet),
+		resourcecleanup.ClassDataVolumes,
+	))
+	require.NoError(t, r.ensureStatefulSet(context.Background(), desired))
+
+	fresh := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(existing), fresh))
+	require.Len(t, fresh.Spec.VolumeClaimTemplates, 1)
+	assert.Empty(t, fresh.Spec.VolumeClaimTemplates[0].Annotations)
+	assert.Equal(t, "new-config", fresh.Spec.Template.Annotations[controllers.AnnotationConfigHash])
 }

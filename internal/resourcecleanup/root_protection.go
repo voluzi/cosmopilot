@@ -5,6 +5,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -46,13 +47,21 @@ func protectChainNodeSets(ctx context.Context, c client.Client) error {
 }
 
 func protectRoot(ctx context.Context, c client.Client, object client.Object) error {
-	if !object.GetDeletionTimestamp().IsZero() || controllerutil.ContainsFinalizer(object, Finalizer) {
-		return nil
-	}
-	base := object.DeepCopyObject().(client.Object)
-	controllerutil.AddFinalizer(object, Finalizer)
-	if err := c.Patch(ctx, object, client.MergeFrom(base)); err != nil && !errors.IsNotFound(err) {
+	key := client.ObjectKeyFromObject(object)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := object.DeepCopyObject().(client.Object)
+		if err := c.Get(ctx, key, fresh); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if !fresh.GetDeletionTimestamp().IsZero() || controllerutil.ContainsFinalizer(fresh, Finalizer) {
+			return nil
+		}
+		base := fresh.DeepCopyObject().(client.Object)
+		controllerutil.AddFinalizer(fresh, Finalizer)
+		err := c.Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		if errors.IsNotFound(err) {
+			return nil
+		}
 		return err
-	}
-	return nil
+	})
 }

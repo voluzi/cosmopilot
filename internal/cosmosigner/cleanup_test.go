@@ -433,7 +433,15 @@ func TestFinalizeOwnerFindsRetainedPVCWithoutAppLabel(t *testing.T) {
 
 func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *testing.T) {
 	const namespace = "default"
-	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	scheme := lockScheme(t)
+	if err := cosmopilotv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	root := &cosmopilotv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: namespace, UID: types.UID("set-uid")}}
+	owner := &cosmopilotv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	if err := controllerutil.SetControllerReference(root, owner, scheme); err != nil {
+		t.Fatal(err)
+	}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-owner-signer-0", Namespace: namespace,
 		Labels:     map[string]string{labelInstance: "drifted", labelOwnerUID: "foreign"},
@@ -441,7 +449,7 @@ func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *test
 	}}
 	resourcecleanup.Stamp(pvc, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState)
 	resourcecleanup.StampResourceOwner(pvc, owner.UID)
-	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 
 	if err := ReleaseOwnerStateFinalizers(context.Background(), c, owner, namespace); err != nil {
 		t.Fatal(err)
@@ -457,15 +465,22 @@ func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *test
 
 func TestReleaseOwnerStateFinalizersPreservesSiblingStateWithSharedRoot(t *testing.T) {
 	const namespace = "default"
-	root := resourcecleanup.RootOwner{APIVersion: "cosmopilot.voluzi.com/v1", Kind: "ChainNodeSet", Name: "set", Namespace: namespace, UID: "set-uid"}
-	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "child-a", Namespace: namespace, UID: types.UID("child-a-uid")}}
+	scheme := lockScheme(t)
+	if err := cosmopilotv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	root := &cosmopilotv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: namespace, UID: types.UID("set-uid")}}
+	owner := &cosmopilotv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "child-a", Namespace: namespace, UID: types.UID("child-a-uid")}}
+	if err := controllerutil.SetControllerReference(root, owner, scheme); err != nil {
+		t.Fatal(err)
+	}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data-child-b-signer-0", Namespace: namespace,
 		Finalizers: []string{RetainedStateFinalizer},
 	}}
-	resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassCosmosignerState)
+	resourcecleanup.Stamp(pvc, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState)
 	resourcecleanup.StampResourceOwner(pvc, types.UID("child-b-uid"))
-	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 
 	if err := ReleaseOwnerStateFinalizers(context.Background(), c, owner, namespace); err != nil {
 		t.Fatal(err)
