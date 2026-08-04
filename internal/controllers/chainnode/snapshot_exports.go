@@ -107,7 +107,7 @@ func snapshotExportFor(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeS
 }
 
 func tarballNameForSnapshot(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) string {
-	if export := snapshotExportFor(chainNode, snapshot); export != nil && export.ObjectName != "" {
+	if export := snapshotExportFor(chainNode, snapshot); export != nil {
 		return export.ObjectName
 	}
 	return getTarballName(chainNode, snapshot)

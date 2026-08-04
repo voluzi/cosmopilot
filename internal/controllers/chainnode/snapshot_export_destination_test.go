@@ -939,12 +939,21 @@ func TestEnsureVolumeSnapshotsFailsClosedForLegacyUploadAfterExportRemoval(t *te
 
 	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
 	storedSnapshot := &snapshotv1.VolumeSnapshot{}
-	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot), "cleanup acknowledgement must gate retention")
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot))
 	storedNode := &appsv1.ChainNode{}
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
 	require.Len(t, storedNode.Status.SnapshotExports, 1)
 	assert.True(t, storedNode.Status.SnapshotExports[0].DeleteOnExpire)
 	assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, storedNode.Status.SnapshotExports[0].Phase)
+
+	// Exercise retention directly after the legacy in-flight branch has recorded
+	// the unknown destination. Without deletion proof or operator acknowledgement,
+	// the expired VolumeSnapshot must remain present.
+	storedSnapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
+	require.NoError(t, reconciler.Update(context.Background(), storedSnapshot))
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), storedNode, true))
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), &snapshotv1.VolumeSnapshot{}),
+		"unknown remote cleanup must gate expired snapshot deletion")
 }
 
 func TestUnknownLegacyExportPreservesCleanupIntentWithoutGuessingObjectName(t *testing.T) {
