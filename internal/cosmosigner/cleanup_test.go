@@ -227,6 +227,31 @@ func TestNamespaceTerminationRecognizesSignerPodWhenLabelsDrift(t *testing.T) {
 	}
 }
 
+func TestNamespaceTerminationIgnoresSameNamePodForOrphanedStatePVC(t *testing.T) {
+	const namespace, name = "default", "orphaned-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: namespace,
+		Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+	}}
+	foreign := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: namespace, UID: "foreign-pod",
+		Labels: map[string]string{labelAppName: "unrelated", labelInstance: "unrelated"},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc, foreign).Build()
+
+	done, err := QuiesceOwnerForNamespaceTermination(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("an unrelated same-name pod must not block cleanup for an orphaned state PVC")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(foreign), &corev1.Pod{}); err != nil {
+		t.Fatalf("unrelated same-name pod was deleted: %v", err)
+	}
+}
+
 func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}

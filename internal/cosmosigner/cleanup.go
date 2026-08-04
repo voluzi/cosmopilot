@@ -262,6 +262,9 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 		stsUID, owned := ownedNames[instance]
 		if !owned {
 			for name, uid := range ownedNames {
+				if uid == "" {
+					continue
+				}
 				if isStatefulSetReplicaPodName(pod.GetName(), name) {
 					instance, stsUID, owned = name, uid, true
 					break
