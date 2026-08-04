@@ -59,7 +59,7 @@ func (a *App) buildConfigGeneratorPod() *corev1.Pod {
 					ImagePullPolicy: a.pullPolicy,
 					Command:         []string{a.binary},
 					Args:            a.cmd.InitArgs(none, none),
-					Env:             a.appEnv("app"),
+					Env:             a.appEnv(),
 					VolumeMounts:    []corev1.VolumeMount{homeVolumeMount, configVolumeMount},
 					SecurityContext: k8s.RestrictedSecurityContext(),
 				},

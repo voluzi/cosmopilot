@@ -156,14 +156,8 @@ func WithNodeSelector(selector map[string]string) Option {
 	}
 }
 
-func (a *App) appEnv(containerName string) []corev1.EnvVar {
-	env := deepCopyEnv(a.env)
-	for i := range env {
-		if env[i].ValueFrom != nil && env[i].ValueFrom.ResourceFieldRef != nil && env[i].ValueFrom.ResourceFieldRef.ContainerName != "" {
-			env[i].ValueFrom.ResourceFieldRef.ContainerName = containerName
-		}
-	}
-	return env
+func (a *App) appEnv() []corev1.EnvVar {
+	return deepCopyEnv(a.env)
 }
 
 func deepCopyEnv(env []corev1.EnvVar) []corev1.EnvVar {

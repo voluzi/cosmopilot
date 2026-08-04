@@ -81,7 +81,7 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 					ImagePullPolicy: a.pullPolicy,
 					Command:         []string{a.binary},
 					Args:            a.cmd.InitArgs(none, none),
-					Env:             a.appEnv("app"),
+					Env:             a.appEnv(),
 					VolumeMounts:    []corev1.VolumeMount{homeVolumeMount, dataVolumeMount},
 					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
