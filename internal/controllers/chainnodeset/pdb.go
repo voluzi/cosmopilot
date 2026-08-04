@@ -144,12 +144,34 @@ func (r *Reconciler) deleteStalePodDisruptionBudgets(
 		if _, desired := desiredNames[pdb.GetName()]; desired {
 			continue
 		}
+		if !metav1.IsControlledBy(pdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, pdb) {
+			continue
+		}
 		if err := r.maybeDeletePDB(ctx, nodeSet, pdb.GetName()); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptionBudget) bool {
+	if pdb.Spec.Selector == nil {
+		return false
+	}
+
+	labels := pdb.Spec.Selector.MatchLabels
+	group := labels[controllers.LabelChainNodeSetGroup]
+	if group == "" {
+		return false
+	}
+
+	name := fmt.Sprintf("%s-%s", nodeSet.GetName(), group)
+	if labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue && group != validatorGroupName {
+		name += "-validator"
+	}
+
+	return pdb.GetName() == name
 }
 
 func getPdbSpec(nodeSet *appsv1.ChainNodeSet, name string, min int, labels map[string]string) *policyv1.PodDisruptionBudget {
