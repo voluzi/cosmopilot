@@ -177,18 +177,13 @@ func (r *Reconciler) finalizeChildDurableResources(
 
 func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context, child *appsv1.ChainNode) error {
 	root := resourcecleanup.RootOwnerFor(child)
-	pvcNames := map[string]struct{}{child.GetName(): {}}
-	for _, volume := range child.GetPersistenceAdditionalVolumes() {
-		pvcNames[fmt.Sprintf("%s-%s", child.GetName(), volume.Name)] = struct{}{}
-	}
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcs, client.InNamespace(child.GetNamespace())); err != nil {
 		return err
 	}
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
-		_, known := pvcNames[pvc.GetName()]
-		if !known || !metav1.IsControlledBy(pvc, child) || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
+		if !metav1.IsControlledBy(pvc, child) || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
 			continue
 		}
 		managed, changed, err := resourcecleanup.PrepareGeneratedResource(pvc, child, r.Scheme, resourcecleanup.ClassDataVolumes, false)
@@ -230,10 +225,7 @@ func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context
 }
 
 func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
-	knownNames := map[string]struct{}{}
-	if nodeSet.Spec.Cosmoseed != nil {
-		knownNames[fmt.Sprintf("%s-cosmoseed", nodeSet.GetName())] = struct{}{}
-	}
+	knownNames := map[string]struct{}{fmt.Sprintf("%s-cosmoseed", nodeSet.GetName()): {}}
 	for i := range nodeSet.Spec.Nodes {
 		group := &nodeSet.Spec.Nodes[i]
 		if group.Validator == nil {

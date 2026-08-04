@@ -278,6 +278,32 @@ func TestQuiesceAndDeleteChildrenUsesRootRetentionPolicyBeforeRemovingFinalizer(
 	}
 }
 
+func TestQuiesceAndDeleteChildrenRetainsControlledLegacyVolumeRemovedFromSpec(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	now := metav1.NewTime(time.Now())
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{DeletionPolicy: &appsv1.DeletionPolicy{
+			DataVolumes: ptr.To(appsv1.DeletionPolicyRetain),
+		}},
+	}
+	child := ownedChild(t, scheme, nodeSet, "set-fullnodes-0")
+	child.DeletionTimestamp = &now
+	child.Finalizers = []string{resourcecleanup.Finalizer}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-removed", Namespace: child.Namespace, UID: "pvc-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(child, pvc, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child, pvc).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done)
+	retained := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(pvc), retained))
+	assert.Nil(t, metav1.GetControllerOf(retained))
+	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(child), resourcecleanup.ClassDataVolumes))
+}
+
 func TestFinalizeResourcesRetainsControlledLegacyGenesisValidatorSecrets(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{
@@ -309,7 +335,6 @@ func TestFinalizeResourcesRetainsControlledLegacyCosmoseedSecret(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid", Finalizers: []string{resourcecleanup.Finalizer}},
-		Spec:       appsv1.ChainNodeSetSpec{Cosmoseed: &appsv1.CosmoseedConfig{}},
 	}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "set-cosmoseed", Namespace: nodeSet.Namespace, UID: "seed-key-uid"}}
 	require.NoError(t, controllerutil.SetControllerReference(nodeSet, secret, scheme))
