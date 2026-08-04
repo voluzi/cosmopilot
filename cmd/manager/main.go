@@ -148,7 +148,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err = mgr.AddReadyzCheck("readyz", rootProtectionReadiness(mgr.Elected(), rootProtectionReady)); err != nil {
+	if err = mgr.AddReadyzCheck("readyz", rootProtectionReadiness(enableLeaderElection, mgr.Elected(), rootProtectionReady)); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -160,12 +160,15 @@ func main() {
 	}
 }
 
-func rootProtectionReadiness(elected, ready <-chan struct{}) healthz.Checker {
+func rootProtectionReadiness(leaderElectionEnabled bool, elected, ready <-chan struct{}) healthz.Checker {
 	return func(_ *http.Request) error {
 		select {
 		case <-ready:
 			return nil
 		default:
+		}
+		if !leaderElectionEnabled {
+			return fmt.Errorf("existing-root protection and durable-resource migration are still running")
 		}
 		select {
 		case <-elected:

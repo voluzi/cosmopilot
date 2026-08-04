@@ -13,15 +13,28 @@ import (
 func TestRootProtectionReadinessAllowsStandbyBeforeLeadership(t *testing.T) {
 	elected := make(chan struct{})
 	ready := make(chan struct{})
-	if err := rootProtectionReadiness(elected, ready)(nil); err != nil {
+	if err := rootProtectionReadiness(true, elected, ready)(nil); err != nil {
 		t.Fatalf("standby readiness must not wait for leader-only startup migration: %v", err)
+	}
+}
+
+func TestRootProtectionReadinessWaitsWithoutLeaderElection(t *testing.T) {
+	elected := make(chan struct{})
+	ready := make(chan struct{})
+	check := rootProtectionReadiness(false, elected, ready)
+	if err := check(nil); err == nil {
+		t.Fatal("readiness must wait for startup migration when leader election is disabled")
+	}
+	close(ready)
+	if err := check(nil); err != nil {
+		t.Fatalf("readiness remained blocked after startup migration completed: %v", err)
 	}
 }
 
 func TestRootProtectionReadinessWaitsForStartupMigrationAfterLeadership(t *testing.T) {
 	elected := make(chan struct{})
 	ready := make(chan struct{})
-	check := rootProtectionReadiness(elected, ready)
+	check := rootProtectionReadiness(true, elected, ready)
 	close(elected)
 	if err := check(nil); err == nil {
 		t.Fatal("elected leader readiness must fail before root protection and durable migration complete")
