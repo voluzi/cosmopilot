@@ -195,7 +195,10 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 			continue
 		}
 		if controller := metav1.GetControllerOf(child); controller != nil && !metav1.IsControlledBy(child, nodeSet) {
-			continue
+			return false, fmt.Errorf(
+				"refusing cleanup of recorded ChainNode %s/%s UID %s controlled by %s UID %s",
+				child.GetNamespace(), child.GetName(), child.GetUID(), controller.Name, controller.UID,
+			)
 		}
 		if child.GetDeletionTimestamp().IsZero() {
 			if !controllerutil.ContainsFinalizer(child, resourcecleanup.Finalizer) {

@@ -258,6 +258,33 @@ func TestQuiesceAndDeleteChildrenBlocksOnRecordedReplacementWithDifferentUID(t *
 	assert.Empty(t, fresh.OwnerReferences)
 }
 
+func TestQuiesceAndDeleteChildrenBlocksOnRecordedChildControlledByForeignOwner(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: "recorded-child-uid", Group: "fullnodes",
+		}}},
+	}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: nodeSet.Namespace, UID: "recorded-child-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "foreign-set", UID: "foreign-set-uid", Controller: ptr.To(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), "foreign-set")
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(child), fresh))
+	assert.True(t, fresh.DeletionTimestamp.IsZero())
+	assert.Equal(t, types.UID("foreign-set-uid"), metav1.GetControllerOf(fresh).UID)
+}
+
 func TestQuiesceAndDeleteChildrenUsesRootRetentionPolicyBeforeRemovingFinalizer(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	now := metav1.NewTime(time.Now())
