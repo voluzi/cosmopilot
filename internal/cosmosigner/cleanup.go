@@ -298,10 +298,7 @@ func deleteOwnedKeyJobPods(ctx context.Context, c client.Client, owner client.Ob
 	allDone := true
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		instance := pod.GetLabels()[labelInstance]
-		if !metav1.IsControlledBy(pod, owner) ||
-			pod.GetLabels()[labelAppName] != appNameCosmosigner ||
-			(pod.GetName() != instance+"-"+importJobSuffix && pod.GetName() != instance+"-"+pubkeyJobSuffix) {
+		if !metav1.IsControlledBy(pod, owner) || !isKeyJobPodName(pod.GetName()) {
 			continue
 		}
 		if pod.GetDeletionTimestamp().IsZero() {
@@ -318,6 +315,15 @@ func deleteOwnedKeyJobPods(ctx context.Context, c client.Client, owner client.Ob
 		}
 	}
 	return allDone, nil
+}
+
+func isKeyJobPodName(name string) bool {
+	for _, suffix := range []string{"-" + importJobSuffix, "-" + pubkeyJobSuffix} {
+		if strings.HasSuffix(name, suffix) && strings.TrimSuffix(name, suffix) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // FinalizeState applies the configured policy after every signer workload is absent.

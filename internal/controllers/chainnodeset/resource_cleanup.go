@@ -231,6 +231,9 @@ func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context
 
 func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	knownNames := map[string]struct{}{}
+	if nodeSet.Spec.Cosmoseed != nil {
+		knownNames[fmt.Sprintf("%s-cosmoseed", nodeSet.GetName())] = struct{}{}
+	}
 	for i := range nodeSet.Spec.Nodes {
 		group := &nodeSet.Spec.Nodes[i]
 		if group.Validator == nil {

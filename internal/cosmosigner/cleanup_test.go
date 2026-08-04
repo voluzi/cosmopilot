@@ -261,6 +261,28 @@ func TestFinalizeOwnerDeletesOwnedKeyJobPods(t *testing.T) {
 	}
 }
 
+func TestFinalizeOwnerDeletesOwnedKeyJobPodWhenLabelsDrift(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	jobPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-" + pubkeyJobSuffix, Namespace: namespace, UID: "job-uid",
+		Labels:          map[string]string{labelAppName: "edited", labelInstance: "edited"},
+		OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(jobPod).Build()
+
+	done, err := FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyRetain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("owner finalization did not converge after deleting its label-drifted key job pod")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(jobPod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned key job pod must be absent before durable cleanup despite label drift, got %v", err)
+	}
+}
+
 func TestQuiesceOwnerForNamespaceTerminationDoesNotWaitForScaleObservation(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
