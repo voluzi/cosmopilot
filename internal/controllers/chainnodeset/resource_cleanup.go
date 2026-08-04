@@ -359,6 +359,11 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet 
 	}
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
+		annotations := secret.GetAnnotations()
+		if attributedUID := annotations[resourcecleanup.AnnotationRootOwnerUID]; attributedUID != "" &&
+			attributedUID != string(nodeSet.GetUID()) {
+			continue
+		}
 		if !resourcecleanup.IsLegacyGeneratedKeySecret(secret, known...) ||
 			(!metav1.IsControlledBy(secret, nodeSet) && !isLegacyCosmoseedKeySecret(nodeSet, secret)) ||
 			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {

@@ -206,6 +206,9 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 		return false
 	}
 	group := labels[controllers.LabelChainNodeSetGroup]
+	if group == "" && labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue {
+		return false
+	}
 	if labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue && group != "" {
 		if !hasOnlyLabels(labels,
 			controllers.LabelUpgrading,

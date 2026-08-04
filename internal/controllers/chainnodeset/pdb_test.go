@@ -709,6 +709,28 @@ func TestEnsurePodDisruptionBudgetsDeletesRecordedRemovedGroupPDBWithoutGroupSel
 	assert.Nil(t, getPdb(t, r, "default", "test-nodeset-removed"))
 }
 
+func TestLegacyNodeSetPDBRejectsValidatorLabelOnRecordedGrouplessPDB(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid"),
+			Annotations: map[string]string{annotationGrouplessPDBHistory: "test-nodeset-removed"},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	minAvailable := intstr.FromInt32(1)
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-removed", Namespace: "default"},
+		Spec: policyv1.PodDisruptionBudgetSpec{MinAvailable: &minAvailable, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			controllers.LabelUpgrading:             controllers.StringValueFalse,
+			controllers.LabelChainID:               nodeSet.Status.ChainID,
+			controllers.LabelChainNodeSet:          nodeSet.Name,
+			controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
+		}}},
+	}
+
+	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb), "regular groupless history must not adopt a validator-selecting PDB")
+}
+
 func TestRecordGrouplessPDBHistoryPersistsRemovedGroupIdentity(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},

@@ -490,6 +490,34 @@ func TestMigrateLegacyDurableResourcesAttributesUnownedLegacyCosmoseedSecret(t *
 	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
 }
 
+func TestMigrateLegacyDurableResourcesPreservesCosmoseedSecretAttributedToPreviousRoot(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "new-set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{Cosmoseed: &appsv1.CosmoseedConfig{
+			Enabled: ptr.To(true), Instances: ptr.To(1),
+		}},
+	}
+	_, key, err := cometbft.GenerateNodeKey()
+	require.NoError(t, err)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-cosmoseed", Namespace: nodeSet.Namespace, UID: "seed-key-uid"},
+		Data:       map[string][]byte{"set-seed-0": key},
+	}
+	oldRoot := resourcecleanup.RootOwnerFor(nodeSet)
+	oldRoot.UID = "old-set-uid"
+	resourcecleanup.Stamp(secret, oldRoot, resourcecleanup.ClassGeneratedKeys)
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, secret).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	_, err = r.MigrateLegacyDurableResources(context.Background(), nodeSet)
+	require.NoError(t, err)
+	fresh := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
+	assert.True(t, resourcecleanup.IsAttributed(fresh, oldRoot, resourcecleanup.ClassGeneratedKeys))
+	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
+}
+
 func TestMigrateLegacyDurableResourcesPreservesNonCanonicalCosmoseedSecret(t *testing.T) {
 	for _, keyName := range []string{"set-seed--1", "set-seed-01"} {
 		t.Run(keyName, func(t *testing.T) {

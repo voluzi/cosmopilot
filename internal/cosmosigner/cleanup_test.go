@@ -278,6 +278,34 @@ func TestNamespaceTerminationIgnoresSameNamePodForOrphanedStatePVC(t *testing.T)
 	}
 }
 
+func TestNamespaceTerminationBlocksLabelStrippedSignerPodDerivedFromStatePVC(t *testing.T) {
+	const namespace, name = "default", "orphaned-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: namespace,
+		Labels: map[string]string{labelOwnerUID: string(owner.UID)}, Finalizers: []string{RetainedStateFinalizer},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: namespace, UID: "pod-uid",
+		Labels: map[string]string{labelAppName: "edited", labelInstance: "edited"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1", Kind: "StatefulSet", Name: name, UID: "missing-sts-uid", Controller: boolPointer(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc, pod).Build()
+
+	done, err := QuiesceOwnerForNamespaceTermination(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("a PVC-attributed signer pod must block state-finalizer release when its StatefulSet is absent")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("unverified signer pod must remain untouched: %v", err)
+	}
+}
+
 func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}

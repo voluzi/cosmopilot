@@ -270,7 +270,13 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
-		if pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID()) && isStatefulSetDataPVC(pvc.GetName(), name) {
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) {
+			continue
+		}
+		if name == "" {
+			name, _ = statefulSetNameFromDataPVC(pvc.GetName())
+		}
+		if isStatefulSetDataPVC(pvc.GetName(), name) {
 			if _, exists := ownedNames[name]; !exists {
 				ownedNames[name] = ""
 			}
@@ -286,13 +292,12 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 		pod := &pods.Items[i]
 		instance := pod.GetLabels()[labelInstance]
 		stsUID, owned := ownedNames[instance]
+		matchedByName := false
 		if !owned {
 			for name, uid := range ownedNames {
-				if uid == "" {
-					continue
-				}
 				if isStatefulSetReplicaPodName(pod.GetName(), name) {
 					instance, stsUID, owned = name, uid, true
+					matchedByName = true
 					break
 				}
 			}
@@ -304,6 +309,10 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 			continue
 		}
 		controller := metav1.GetControllerOf(pod)
+		if matchedByName && stsUID == "" &&
+			(controller == nil || controller.Kind != "StatefulSet" || controller.Name != instance) {
+			continue
+		}
 		if stsUID == "" || controller == nil || controller.Kind != "StatefulSet" || controller.Name != instance || controller.UID != stsUID {
 			allPodsGone = false
 			continue
