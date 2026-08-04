@@ -234,26 +234,48 @@ func TestQuiesceAndDeleteChildrenLeavesInitializationPodToTerminatingChild(t *te
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(initPod), &corev1.Pod{}))
 }
 
-func TestQuiesceAndDeleteChildrenAppliesChildRetentionBeforeRemovingFinalizer(t *testing.T) {
+func TestQuiesceAndDeleteChildrenUsesRootRetentionPolicyBeforeRemovingFinalizer(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	now := metav1.NewTime(time.Now())
-	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{DeletionPolicy: &appsv1.DeletionPolicy{
+			DataVolumes:   ptr.To(appsv1.DeletionPolicyRetain),
+			GeneratedKeys: ptr.To(appsv1.DeletionPolicyRetain),
+		}},
+	}
 	child := ownedChild(t, scheme, nodeSet, "set-fullnodes-0")
 	child.DeletionTimestamp = &now
 	child.Finalizers = []string{resourcecleanup.Finalizer}
+	child.Spec.DeletionPolicy = &appsv1.DeletionPolicy{
+		DataVolumes:   ptr.To(appsv1.DeletionPolicyDelete),
+		GeneratedKeys: ptr.To(appsv1.DeletionPolicyDelete),
+	}
 	child.Spec.Persistence = &appsv1.Persistence{AdditionalVolumes: []appsv1.VolumeSpec{{Name: "wasm", Size: "1Gi", Path: "/wasm"}}}
+	child.Spec.Validator = &appsv1.ValidatorConfig{}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-wasm", Namespace: child.Namespace, UID: "pvc-uid"}}
-	require.NoError(t, controllerutil.SetControllerReference(child, pvc, scheme))
-	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child, pvc).Build()
+	key := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: child.Spec.Validator.GetPrivKeySecretName(child), Namespace: child.Namespace, UID: "key-uid"}}
+	for _, object := range []client.Object{pvc, key} {
+		require.NoError(t, controllerutil.SetControllerReference(child, object, scheme))
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child, pvc, key).Build()
 	r := &Reconciler{Client: base, Scheme: scheme}
 
 	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
 	require.NoError(t, err)
 	assert.True(t, done)
-	retained := &corev1.PersistentVolumeClaim{}
-	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(pvc), retained))
-	assert.Nil(t, metav1.GetControllerOf(retained))
-	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(child), resourcecleanup.ClassDataVolumes))
+	for _, object := range []struct {
+		resource client.Object
+		class    resourcecleanup.ResourceClass
+	}{
+		{resource: pvc, class: resourcecleanup.ClassDataVolumes},
+		{resource: key, class: resourcecleanup.ClassGeneratedKeys},
+	} {
+		retained := object.resource.DeepCopyObject().(client.Object)
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(object.resource), retained))
+		assert.Nil(t, metav1.GetControllerOf(retained))
+		assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(child), object.class))
+	}
 }
 
 func TestFinalizeResourcesRetainsControlledLegacyGenesisValidatorSecrets(t *testing.T) {

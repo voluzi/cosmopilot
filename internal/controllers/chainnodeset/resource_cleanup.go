@@ -119,7 +119,7 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 			allDone = false
 			continue
 		}
-		childDone, err := r.finalizeChildDurableResources(ctx, child)
+		childDone, err := r.finalizeChildDurableResources(ctx, nodeSet, child)
 		if err != nil {
 			return false, err
 		}
@@ -137,16 +137,34 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 	return allDone, nil
 }
 
-func (r *Reconciler) finalizeChildDurableResources(ctx context.Context, child *appsv1.ChainNode) (bool, error) {
+func (r *Reconciler) finalizeChildDurableResources(
+	ctx context.Context,
+	nodeSet *appsv1.ChainNodeSet,
+	child *appsv1.ChainNode,
+) (bool, error) {
 	if err := r.attributeControlledLegacyChildResources(ctx, child); err != nil {
 		return false, err
 	}
 	root := resourcecleanup.RootOwnerFor(child)
-	dataDone, err := resourcecleanup.FinalizeClass(ctx, r.Client, root, resourcecleanup.ClassDataVolumes, child.Spec.DeletionPolicy.GetDataVolumes(), child.GetUID())
+	dataDone, err := resourcecleanup.FinalizeClass(
+		ctx,
+		r.Client,
+		root,
+		resourcecleanup.ClassDataVolumes,
+		nodeSet.Spec.DeletionPolicy.GetDataVolumes(),
+		child.GetUID(),
+	)
 	if err != nil {
 		return false, err
 	}
-	keysDone, err := resourcecleanup.FinalizeClass(ctx, r.Client, root, resourcecleanup.ClassGeneratedKeys, child.Spec.DeletionPolicy.GetGeneratedKeys(), child.GetUID())
+	keysDone, err := resourcecleanup.FinalizeClass(
+		ctx,
+		r.Client,
+		root,
+		resourcecleanup.ClassGeneratedKeys,
+		nodeSet.Spec.DeletionPolicy.GetGeneratedKeys(),
+		child.GetUID(),
+	)
 	if err != nil || !dataDone || !keysDone {
 		return false, err
 	}
