@@ -4,11 +4,59 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
+
+func TestConfigGenerationCacheKeyIncludesAppEnv(t *testing.T) {
+	base := &appsv1.ChainNode{
+		Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{Image: "example/app", App: "appd"},
+			Config: &appsv1.Config{Env: []corev1.EnvVar{
+				{Name: "HOME", Value: "/home/app"},
+				{
+					Name: "FROM_SECRET",
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "app-secret"},
+						Key:                  "token",
+					}},
+				},
+			}},
+		},
+	}
+
+	baseKey, err := configGenerationCacheKey(base)
+	require.NoError(t, err)
+	require.NotEmpty(t, baseKey)
+
+	same := base.DeepCopy()
+	sameKey, err := configGenerationCacheKey(same)
+	require.NoError(t, err)
+	assert.Equal(t, baseKey, sameKey)
+
+	differentValue := base.DeepCopy()
+	differentValue.Spec.Config.Env[0].Value = "/different-home"
+	differentValueKey, err := configGenerationCacheKey(differentValue)
+	require.NoError(t, err)
+	assert.NotEqual(t, baseKey, differentValueKey)
+
+	differentValueFrom := base.DeepCopy()
+	differentValueFrom.Spec.Config.Env[1].ValueFrom.SecretKeyRef.Name = "different-secret"
+	differentValueFromKey, err := configGenerationCacheKey(differentValueFrom)
+	require.NoError(t, err)
+	assert.NotEqual(t, baseKey, differentValueFromKey)
+
+	differentOrder := base.DeepCopy()
+	differentOrder.Spec.Config.Env[0], differentOrder.Spec.Config.Env[1] =
+		differentOrder.Spec.Config.Env[1], differentOrder.Spec.Config.Env[0]
+	differentOrderKey, err := configGenerationCacheKey(differentOrder)
+	require.NoError(t, err)
+	assert.NotEqual(t, baseKey, differentOrderKey)
+}
 
 func TestGetConfigHash(t *testing.T) {
 	tests := []struct {
