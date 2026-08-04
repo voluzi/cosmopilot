@@ -388,6 +388,17 @@ func (r *Reconciler) listChainPeers(ctx context.Context, chainID string) (v1.Pee
 
 func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string, publicAddresses []string) (*appsv1.StatefulSet, error) {
 	replicas := int32(nodeSet.Spec.Cosmoseed.GetInstances())
+	claimTemplate := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}},
+		},
+	}
+	resourcecleanup.Stamp(&claimTemplate, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes)
+	resourcecleanup.StampResourceOwner(&claimTemplate, nodeSet.GetUID())
 
 	labels := map[string]string{
 		controllers.LabelApp:          controllers.CosmoseedName,
@@ -500,25 +511,9 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string,
 					},
 				},
 			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "data",
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{
-							corev1.ReadWriteOnce,
-						},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("1Gi"),
-							},
-						},
-					},
-				},
-			},
-			ServiceName:         fmt.Sprintf("%s-seed-headless", nodeSet.GetName()),
-			PodManagementPolicy: appsv1.ParallelPodManagement,
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{claimTemplate},
+			ServiceName:          fmt.Sprintf("%s-seed-headless", nodeSet.GetName()),
+			PodManagementPolicy:  appsv1.ParallelPodManagement,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			},

@@ -13,12 +13,82 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
+
+func TestEnsureNodePreservesCleanupFinalizerOnSpecUpdate(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "chain", Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", Group: "fullnodes",
+		}}},
+	}
+	group := appsv1.NodeGroupSpec{Name: "fullnodes", Instances: ptr.To(1)}
+	r := newValidatorTestReconciler(t, nodeSet)
+	current, err := r.getNodeSpec(nodeSet, group, 0)
+	require.NoError(t, err)
+	current.OwnerReferences = nil
+	current.UID = types.UID("child-uid")
+	current.Finalizers = []string{resourcecleanup.Finalizer, "example.com/other"}
+	require.NoError(t, r.Create(context.Background(), current))
+
+	desired, err := r.getNodeSpec(nodeSet, group, 0)
+	require.NoError(t, err)
+	desired.Spec.RemoteSignerTarget = true
+	require.NoError(t, r.ensureNode(context.Background(), nodeSet, desired, waitNone))
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(current), fresh))
+	assert.ElementsMatch(t, current.Finalizers, fresh.Finalizers)
+	assert.True(t, metav1.IsControlledBy(fresh, nodeSet))
+}
+
+func TestDeleteNodeWithCleanupFinalizerAdoptsRecordedLegacyChild(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", Group: "fullnodes",
+		}}},
+	}
+	legacy := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: types.UID("legacy-uid"),
+		Labels: map[string]string{controllers.LabelChainNodeSet: nodeSet.Name},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, legacy)
+
+	require.NoError(t, r.deleteNodeWithCleanupFinalizer(context.Background(), nodeSet, legacy.Name))
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(legacy), fresh))
+	assert.False(t, fresh.DeletionTimestamp.IsZero())
+	assert.Contains(t, fresh.Finalizers, resourcecleanup.Finalizer)
+}
+
+func TestDeleteNodeWithCleanupFinalizerPreservesForeignLabeledNode(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
+	}
+	foreignOwner := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: types.UID("other-uid")},
+	}
+	foreign := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: types.UID("foreign-uid"),
+		Labels: map[string]string{controllers.LabelChainNodeSet: nodeSet.Name},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, foreignOwner)
+	require.NoError(t, controllerutil.SetControllerReference(foreignOwner, foreign, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), foreign))
+
+	err := r.deleteNodeWithCleanupFinalizer(context.Background(), nodeSet, foreign.Name)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not controlled")
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(foreign), &appsv1.ChainNode{}))
+}
 
 // TestEnsureNodesInstanceCount verifies that a group validator does not add an extra
 // status.instances count beyond the group's own instances. Only the legacy singleton
@@ -301,7 +371,13 @@ func TestEnsureNodesRemovesStaleRegularNodesOnValidatorPromotion(t *testing.T) {
 				Validator: &appsv1.NodeSetValidatorConfig{},
 			}},
 		},
-		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "test-chain",
+			Nodes: []appsv1.ChainNodeSetNodeStatus{
+				{Name: "test-nodeset-validators-1", Group: "validators"},
+				{Name: "test-nodeset-validators-2", Group: "validators"},
+			},
+		},
 	}
 
 	cl := fake.NewClientBuilder().

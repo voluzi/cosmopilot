@@ -301,10 +301,24 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 		node.Spec.OverrideVersion = currentNode.Spec.OverrideVersion
 	}
 
-	if !currentNode.Equal(node) {
+	metadataDrift := !metav1.IsControlledBy(currentNode, nodeSet) ||
+		!controllerutil.ContainsFinalizer(currentNode, resourcecleanup.Finalizer)
+	if metadataDrift && !metav1.IsControlledBy(currentNode, nodeSet) && !isRecordedNodeSetChild(nodeSet, currentNode.GetName()) {
+		return fmt.Errorf("refusing to adopt unrecorded ChainNode %s/%s", currentNode.GetNamespace(), currentNode.GetName())
+	}
+	if !currentNode.Equal(node) || metadataDrift {
 		logger.Info("updating chainnode", "chainnode", node.GetName())
 		node.ObjectMeta.ResourceVersion = currentNode.ObjectMeta.ResourceVersion
 		node.Annotations = currentNode.Annotations
+		node.Finalizers = currentNode.Finalizers
+		node.Status = currentNode.Status
+		controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
+		if controller := metav1.GetControllerOf(currentNode); controller != nil && !metav1.IsControlledBy(currentNode, nodeSet) {
+			return fmt.Errorf("refusing to update ChainNode %s/%s controlled by %s UID %s", currentNode.GetNamespace(), currentNode.GetName(), controller.Name, controller.UID)
+		}
+		if err := controllerutil.SetControllerReference(nodeSet, node, r.Scheme); err != nil {
+			return err
+		}
 		if err := r.Update(ctx, node); err != nil {
 			return err
 		}
@@ -606,8 +620,11 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	if err := r.Get(ctx, key, node); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !metav1.IsControlledBy(node, nodeSet) && node.GetLabels()[controllers.LabelChainNodeSet] != nodeSet.GetName() {
+	if !metav1.IsControlledBy(node, nodeSet) && !isRecordedNodeSetChild(nodeSet, node.GetName()) {
 		return fmt.Errorf("refusing to delete ChainNode %s/%s not controlled by ChainNodeSet UID %s", node.GetNamespace(), node.GetName(), nodeSet.GetUID())
+	}
+	if controller := metav1.GetControllerOf(node); controller != nil && !metav1.IsControlledBy(node, nodeSet) {
+		return fmt.Errorf("refusing to delete ChainNode %s/%s controlled by %s UID %s", node.GetNamespace(), node.GetName(), controller.Name, controller.UID)
 	}
 	if node.GetDeletionTimestamp().IsZero() && !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) {
 		controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
@@ -617,6 +634,20 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	}
 	uid := node.GetUID()
 	return client.IgnoreNotFound(r.Delete(ctx, node, client.Preconditions{UID: &uid}))
+}
+
+func isRecordedNodeSetChild(nodeSet *appsv1.ChainNodeSet, name string) bool {
+	for _, status := range nodeSet.Status.Nodes {
+		if status.Name == name {
+			return true
+		}
+	}
+	for _, status := range nodeSet.Status.Validators {
+		if status.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // exposeForInstance returns the ExposeConfig that should be applied to the i-th

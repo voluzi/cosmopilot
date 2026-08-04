@@ -232,6 +232,11 @@ func (r *Reconciler) ensurePodDisruptionBudget(
 		}
 		return err
 	}
+	if controller := metav1.GetControllerOf(currentPdb); controller != nil && !metav1.IsControlledBy(currentPdb, nodeSet) {
+		logger.Info("skipping pod disruption budget owned by another controller", "pdb", currentPdb.GetName(), "owner", controller.Name)
+		*pdb = *currentPdb
+		return nil
+	}
 	if !metav1.IsControlledBy(currentPdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, currentPdb) {
 		return fmt.Errorf("refusing to adopt pod disruption budget %s/%s without controller ownership or an identifiable legacy Cosmopilot selector", currentPdb.GetNamespace(), currentPdb.GetName())
 	}

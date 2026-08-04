@@ -53,6 +53,25 @@ func getPdb(t *testing.T, r *Reconciler, namespace, name string) *policyv1.PodDi
 	return pdb
 }
 
+func TestEnsurePodDisruptionBudgetPreservesForeignControlledLegacyShape(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	foreignOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "other-uid"}}
+	r := newPdbTestReconciler(t, nodeSet)
+	foreign := getPdbSpec(nodeSet, "set-fullnodes", 1, map[string]string{
+		controllers.LabelChainNodeSet:      nodeSet.Name,
+		controllers.LabelChainNodeSetGroup: "fullnodes",
+	})
+	require.NoError(t, controllerutil.SetControllerReference(foreignOwner, foreign, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), foreign))
+	desired := getPdbSpec(nodeSet, foreign.Name, 2, foreign.Spec.Selector.MatchLabels)
+
+	require.NoError(t, r.ensurePodDisruptionBudget(context.Background(), nodeSet, desired))
+	fresh := getPdb(t, r, "default", foreign.Name)
+	require.NotNil(t, fresh)
+	assert.True(t, metav1.IsControlledBy(fresh, foreignOwner))
+	assert.Equal(t, 1, fresh.Spec.MinAvailable.IntValue())
+}
+
 // TestEnsurePodDisruptionBudgetsGroupValidator verifies that a group validator PDB
 // (.spec.nodes[].validator.pdb) is reconciled with a dedicated, non-colliding name and a
 // selector scoped to the validators of that group.

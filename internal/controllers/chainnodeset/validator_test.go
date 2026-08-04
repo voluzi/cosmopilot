@@ -646,6 +646,7 @@ func TestEnsureValidatorRemovesStaleValidator(t *testing.T) {
 		Status: appsv1.ChainNodeSetStatus{
 			ChainID:    "test-chain",
 			Validators: []appsv1.ChainNodeSetValidatorStatus{{Name: "test-nodeset-validator", Group: validatorGroupName}},
+			Nodes:      []appsv1.ChainNodeSetNodeStatus{{Name: "test-nodeset-validator", Group: validatorGroupName}},
 		},
 	}
 	r := newValidatorTestReconciler(t, nodeSet, stale)
@@ -679,6 +680,7 @@ func TestEnsureValidatorPreservesGenesisBaselineWhileUpdatingLiveStatus(t *testi
 		},
 		Status: appsv1.ChainNodeSetStatus{
 			ChainID: "test-chain",
+			Nodes:   []appsv1.ChainNodeSetNodeStatus{{Name: name, Group: "validators"}},
 			Validators: []appsv1.ChainNodeSetValidatorStatus{{
 				Name:             name,
 				Group:            "validators",

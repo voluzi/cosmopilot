@@ -125,15 +125,9 @@ func (r *Reconciler) attributeCosmoseedDataVolumes(ctx context.Context, nodeSet 
 				}
 			}
 		}
-		if !matched || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
+		if !matched || !resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) ||
+			pvc.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] != string(nodeSet.GetUID()) {
 			continue
-		}
-		changed := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassDataVolumes)
-		changed = resourcecleanup.StampResourceOwner(pvc, nodeSet.GetUID()) || changed
-		if changed {
-			if err := r.Update(ctx, pvc); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -147,7 +141,10 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 	allDone := true
 	for i := range children.Items {
 		child := &children.Items[i]
-		if !metav1.IsControlledBy(child, nodeSet) {
+		if !metav1.IsControlledBy(child, nodeSet) && !isRecordedNodeSetChild(nodeSet, child.GetName()) {
+			continue
+		}
+		if controller := metav1.GetControllerOf(child); controller != nil && !metav1.IsControlledBy(child, nodeSet) {
 			continue
 		}
 		if child.GetDeletionTimestamp().IsZero() {
