@@ -2,11 +2,18 @@ package chainnode
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
@@ -341,6 +348,69 @@ func TestFailedPodRequiresEarlyRecreation(t *testing.T) {
 	ordinaryFailure.Status.InitContainerStatuses = []corev1.ContainerStatus{stoppedNodeUtils}
 	if !failedPodRequiresEarlyRecreation(chainNode, ordinaryFailure) {
 		t.Fatal("failed app with stopped node-utils must be recreated before HTTP probes")
+	}
+}
+
+func TestLogFailedContainerOnlyFetchesLogsForTerminatedContainer(t *testing.T) {
+	var requests atomic.Int32
+	httpClient := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		if got := r.URL.Query().Get("container"); got != "chaind" {
+			t.Errorf("container query = %q, want chaind", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("application failed")),
+		}, nil
+	})}
+
+	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Reconciler{ClientSet: clientSet}
+
+	tests := []struct {
+		name         string
+		pod          *corev1.Pod
+		wantRequests int32
+	}{
+		{
+			name: "pure discovery gate failure skips app logs",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+				Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+					Name: CosmosignerDiscoveryWaitContainerName,
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 1,
+					}},
+				}}},
+			},
+		},
+		{
+			name: "terminated application preserves logs",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+				Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "chaind",
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 1,
+					}},
+				}}},
+			},
+			wantRequests: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := requests.Load()
+			r.logFailedContainer(context.Background(), logr.Discard(), tt.pod, "chaind")
+			if got := requests.Load() - before; got != tt.wantRequests {
+				t.Fatalf("log requests = %d, want %d", got, tt.wantRequests)
+			}
+		})
 	}
 }
 

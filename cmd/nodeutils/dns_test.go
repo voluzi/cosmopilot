@@ -92,6 +92,61 @@ func TestWaitForDNSCommandAcceptsSignerConfirmationWhileLocalDNSIsStale(t *testi
 	}
 }
 
+func TestWaitForDNSCommandRejectsWrongArgumentCount(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no arguments"},
+		{name: "missing timeout", args: []string{"signer-privval.default.svc", "10.0.0.2"}},
+		{name: "extra argument", args: []string{"signer-privval.default.svc", "10.0.0.2", "25s", "extra"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runWaitForDNSCommand(context.Background(), &sequenceDNSResolver{}, &sequenceHTTPDoer{}, tt.args, time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), "usage: node-utils wait-for-dns") {
+				t.Fatalf("runWaitForDNSCommand() error = %v, want usage error", err)
+			}
+		})
+	}
+}
+
+func TestWaitForDNSCommandRejectsInvalidTimeout(t *testing.T) {
+	for _, timeout := range []string{"not-a-duration", "0s", "-1s"} {
+		t.Run(timeout, func(t *testing.T) {
+			err := runWaitForDNSCommand(context.Background(), &sequenceDNSResolver{}, &sequenceHTTPDoer{},
+				[]string{"signer-privval.default.svc", "10.0.0.2", timeout}, time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), "invalid DNS wait timeout") {
+				t.Fatalf("runWaitForDNSCommand() error = %v, want invalid-timeout error", err)
+			}
+		})
+	}
+}
+
+func TestWaitForDNSCommandTimesOutWithSignerDiscoveryDiagnostics(t *testing.T) {
+	client := &sequenceHTTPDoer{
+		statuses: []int{0, http.StatusNotAcceptable},
+		errors:   []error{errors.New("node-utils connection refused")},
+	}
+	started := time.Now()
+	err := runWaitForDNSCommand(context.Background(), &sequenceDNSResolver{}, client,
+		[]string{"signer-privval.default.svc", "10.0.0.2", "20ms"}, time.Millisecond)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runWaitForDNSCommand() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("runWaitForDNSCommand() took %s, want bounded timeout", elapsed)
+	}
+	if !strings.Contains(err.Error(), "last status: Not Acceptable") {
+		t.Fatalf("runWaitForDNSCommand() error = %v, want last HTTP status", err)
+	}
+	if !strings.Contains(err.Error(), "last error: node-utils connection refused") {
+		t.Fatalf("runWaitForDNSCommand() error = %v, want last client error", err)
+	}
+}
+
 func TestWaitForDNSAddressRetriesUntilTargetIsPublished(t *testing.T) {
 	resolver := &sequenceDNSResolver{
 		responses: [][]net.IPAddr{

@@ -30,7 +30,12 @@ $ helm show values oci://ghcr.io/voluzi/helm/cosmopilot
 
 ### `nodeUtilsImage`
 - **Description**: The container image of `node-utils` (with version tag included). This is a container deployed by `cosmopilot` as a sidecar with helper methods for calculating data size, handling upgrades, and a few more utilities.
-- **Default**: `ghcr.io/voluzi/node-utils`
+- **Default**: `ghcr.io/voluzi/node-utils:2.10.0`
+
+:::warning[Cosmosigner discovery gating]
+If you override or pin `nodeUtilsImage`, use node-utils 2.10.0 or newer. Cosmosigner target Pods
+require the discovery-gate command introduced in 2.10.0 and cannot start with an older image.
+:::
 
 ### `cosmoGuardImage`
 - **Description**: The container image of [CosmoGuard](https://github.com/voluzi/cosmoguard) (with version tag included) used for the standalone CosmoGuard deployments.

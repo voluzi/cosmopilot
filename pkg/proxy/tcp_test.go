@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -737,5 +738,40 @@ func TestTCPProxy_StopCancelsDialContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("dialUpstream() did not stop after Stop()")
+	}
+}
+
+func TestTCPProxy_StopInterruptsUpstreamRetryDelay(t *testing.T) {
+	proxy, err := NewTCPProxy(":0", "127.0.0.1:1", false, func(*net.TCPConn) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempted := make(chan struct{})
+	var signalAttempt sync.Once
+	proxy.dial = func(context.Context, string, string) (net.Conn, error) {
+		signalAttempt.Do(func() { close(attempted) })
+		return nil, errors.New("upstream unavailable")
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, dialErr := proxy.dialUpstream()
+		result <- dialErr
+	}()
+	<-attempted
+
+	stoppedAt := time.Now()
+	if err := proxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrStopped) {
+			t.Fatalf("dialUpstream() error = %v, want ErrStopped", err)
+		}
+		if elapsed := time.Since(stoppedAt); elapsed > 50*time.Millisecond {
+			t.Fatalf("dialUpstream() stopped after %s, retry delay was not interrupted", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dialUpstream() did not stop during retry delay")
 	}
 }

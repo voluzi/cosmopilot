@@ -29,6 +29,7 @@ type TCP struct {
 	retryUpstream bool
 	dialContext   context.Context
 	cancelDials   context.CancelFunc
+	dial          func(context.Context, string, string) (net.Conn, error)
 }
 
 func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...func(*net.TCPConn) bool) (*TCP, error) {
@@ -42,12 +43,14 @@ func NewTCPProxy(localAddr, remoteAddr string, failOnClose bool, onAccept ...fun
 	}
 
 	dialContext, cancelDials := context.WithCancel(context.Background())
+	dialer := &net.Dialer{}
 	proxy := &TCP{
 		laddr:       laddr,
 		raddr:       raddr,
 		runOnce:     failOnClose,
 		dialContext: dialContext,
 		cancelDials: cancelDials,
+		dial:        dialer.DialContext,
 	}
 	if len(onAccept) > 0 {
 		proxy.onAccept = onAccept[0]
@@ -142,7 +145,7 @@ func (p *TCP) dialUpstream() (*net.TCPConn, error) {
 		if stopped {
 			return nil, ErrStopped
 		}
-		conn, err := (&net.Dialer{}).DialContext(p.dialContext, "tcp", p.raddr.String())
+		conn, err := p.dial(p.dialContext, "tcp", p.raddr.String())
 		if err == nil {
 			rconn, ok := conn.(*net.TCPConn)
 			if !ok {
@@ -157,7 +160,18 @@ func (p *TCP) dialUpstream() (*net.TCPConn, error) {
 		if !p.retryUpstream || time.Now().Add(upstreamRetryInterval).After(deadline) {
 			return nil, fmt.Errorf("failed to dial upstream: %v", err)
 		}
-		time.Sleep(upstreamRetryInterval)
+		retryTimer := time.NewTimer(upstreamRetryInterval)
+		select {
+		case <-retryTimer.C:
+		case <-p.dialContext.Done():
+			if !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+			return nil, ErrStopped
+		}
 	}
 }
 

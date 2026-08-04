@@ -5,8 +5,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/voluzi/cosmopilot/v2/pkg/proxy"
 )
 
 type blockingSignerPeerResolver struct {
@@ -112,6 +116,74 @@ func TestAcceptTrustedSignerPeerDoesNotBlockOnDNS(t *testing.T) {
 	}
 	if err := <-dialed; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAcceptTrustedSignerPeerRejectsPeerAbsentFromTrustedSnapshot(t *testing.T) {
+	resolver := &blockingSignerPeerResolver{started: make(chan struct{}, 1), release: make(chan struct{})}
+	server := &NodeUtils{
+		cfg:                &Options{SignerPeerDNS: "signer.example"},
+		signerPeerResolver: resolver,
+	}
+	trusted := []net.IPAddr{{IP: net.ParseIP("192.0.2.10")}}
+	server.trustedSignerAddresses.Store(&trusted)
+
+	if server.acceptTrustedSignerIP(net.ParseIP("127.0.0.1")) {
+		t.Fatal("peer absent from trusted snapshot was accepted")
+	}
+	if server.signerDiscovered.Load() {
+		t.Fatal("untrusted peer released signer discovery gate")
+	}
+	close(resolver.release)
+}
+
+type stoppedTmkmsProxy struct {
+	starts    atomic.Int32
+	started   chan struct{}
+	stopped   chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
+}
+
+func (p *stoppedTmkmsProxy) Start() error {
+	p.starts.Add(1)
+	p.startOnce.Do(func() { close(p.started) })
+	<-p.stopped
+	return proxy.ErrStopped
+}
+
+func (p *stoppedTmkmsProxy) Stop() error {
+	p.stopOnce.Do(func() { close(p.stopped) })
+	return nil
+}
+
+func TestStartProxyLoopExitsAfterStopReturnsErrStopped(t *testing.T) {
+	tmkmsProxy := &stoppedTmkmsProxy{started: make(chan struct{}), stopped: make(chan struct{})}
+	server := &NodeUtils{tmkmsProxy: tmkmsProxy}
+	done := make(chan struct{})
+	go func() {
+		server.runTmkmsProxy()
+		close(done)
+	}()
+	select {
+	case <-tmkmsProxy.started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("proxy loop did not start")
+	}
+	if err := tmkmsProxy.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("proxy loop did not exit after ErrStopped")
+	}
+	if got := tmkmsProxy.starts.Load(); got != 1 {
+		t.Fatalf("proxy Start calls = %d, want 1 after ErrStopped", got)
+	}
+	if server.tmkmsActive.Load() {
+		t.Fatal("tmkms proxy remained active after ErrStopped")
 	}
 }
 

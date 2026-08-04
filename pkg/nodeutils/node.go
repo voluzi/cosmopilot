@@ -29,6 +29,11 @@ type signerPeerResolver interface {
 	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
 }
 
+type tmkmsProxy interface {
+	Start() error
+	Stop() error
+}
+
 type NodeUtils struct {
 	server                 *http.Server
 	router                 *mux.Router
@@ -43,7 +48,7 @@ type NodeUtils struct {
 	signerPeerResolver     signerPeerResolver
 	trustedSignerAddresses atomic.Pointer[[]net.IPAddr]
 	signerPeerLookupActive atomic.Bool
-	tmkmsProxy             *proxy.TCP
+	tmkmsProxy             tmkmsProxy
 	nodeBinaryName         string
 	appProcess             *process.Process
 	fineStats              *statscollector.Collector
@@ -144,14 +149,41 @@ func (s *NodeUtils) acceptTrustedSignerPeer(conn *net.TCPConn) bool {
 	if !ok || peer.IP == nil {
 		return false
 	}
+	return s.acceptTrustedSignerIP(peer.IP)
+}
+
+func (s *NodeUtils) acceptTrustedSignerIP(peer net.IP) bool {
+	if peer == nil {
+		return false
+	}
 	addresses := s.trustedSignerAddresses.Load()
-	if addresses != nil && trustedSignerPeer(peer.IP, *addresses) {
+	if addresses != nil && trustedSignerPeer(peer, *addresses) {
 		s.signerDiscovered.Store(true)
 		return true
 	}
 	s.refreshTrustedSignerPeers()
-	log.WithFields(log.Fields{"peer": peer.IP.String(), "hostname": s.cfg.SignerPeerDNS}).Warn("remote-signer connection came from an untrusted peer")
+	log.WithFields(log.Fields{"peer": peer.String(), "hostname": s.cfg.SignerPeerDNS}).Warn("remote-signer connection came from an untrusted peer")
 	return false
+}
+
+func (s *NodeUtils) runTmkmsProxy() {
+	for {
+		s.tmkmsActive.Store(true)
+		err := s.tmkmsProxy.Start()
+		s.tmkmsActive.Store(false)
+		if errors.Is(err, proxy.ErrStopped) {
+			return
+		}
+		log.Errorf("tmkms connection finished with error: %v", err)
+
+		// If an upgrade is required lets not restart proxy
+		if s.requiresUpgrade.Load() {
+			return
+		}
+
+		// Wait one second before restarting
+		time.Sleep(time.Second)
+	}
 }
 
 func (s *NodeUtils) Start() error {
@@ -165,25 +197,7 @@ func (s *NodeUtils) Start() error {
 	}()
 
 	if s.tmkmsProxy != nil {
-		go func() {
-			for {
-				s.tmkmsActive.Store(true)
-				err := s.tmkmsProxy.Start()
-				s.tmkmsActive.Store(false)
-				if errors.Is(err, proxy.ErrStopped) {
-					return
-				}
-				log.Errorf("tmkms connection finished with error: %v", err)
-
-				// If an upgrade is required lets not restart proxy
-				if s.requiresUpgrade.Load() {
-					return
-				}
-
-				// Wait one second before restarting
-				time.Sleep(time.Second)
-			}
-		}()
+		go s.runTmkmsProxy()
 	}
 
 	// Fine-grained collector (1h window)

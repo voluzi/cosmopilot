@@ -1581,6 +1581,93 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 	}
 }
 
+func TestNodeUtilsSignerPeerDNSRendering(t *testing.T) {
+	const namespace = "default"
+	tests := []struct {
+		name    string
+		node    *appsv1.ChainNode
+		wantDNS string
+	}{
+		{
+			name: "standalone Cosmosigner target",
+			node: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: namespace},
+				Spec:       appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
+			},
+			wantDNS: "solo-signer.default.svc",
+		},
+		{
+			name: "ChainNodeSet Cosmosigner target",
+			node: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mychain-sentries-0",
+					Namespace: namespace,
+					Labels: map[string]string{
+						controllers.LabelChainNodeSet:      "mychain",
+						controllers.LabelCosmosignerTarget: "mychain-sentries-signer",
+					},
+				},
+				Spec: appsv1.ChainNodeSpec{RemoteSignerTarget: true},
+			},
+			wantDNS: "mychain-sentries-signer.default.svc",
+		},
+		{
+			name: "ordinary node",
+			node: &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: namespace},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			genesisConfigMap := "genesis"
+			tt.node.Spec.Genesis = &appsv1.GenesisConfig{ConfigMap: &genesisConfigMap}
+			tt.node.Spec.App = appsv1.AppSpec{Image: "chain", App: "chaind"}
+			tt.node.Status = appsv1.ChainNodeStatus{ChainID: "test-1", NodeID: "node-id"}
+
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: tt.node.Name, Namespace: namespace}}
+			r := &Reconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build(),
+				Scheme: scheme,
+				opts:   &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+			}
+
+			pod, err := r.getPodSpec(context.Background(), tt.node, "config-hash")
+			require.NoError(t, err)
+			var nodeUtils *corev1.Container
+			for i := range pod.Spec.InitContainers {
+				if pod.Spec.InitContainers[i].Name == nodeUtilsContainerName {
+					nodeUtils = &pod.Spec.InitContainers[i]
+					break
+				}
+			}
+			require.NotNil(t, nodeUtils)
+			require.NotNil(t, nodeUtils.RestartPolicy)
+			assert.Equal(t, corev1.ContainerRestartPolicyAlways, *nodeUtils.RestartPolicy)
+
+			var signerDNS string
+			var signerDNSSet bool
+			for _, env := range nodeUtils.Env {
+				if env.Name == "SIGNER_PEER_DNS" {
+					signerDNS = env.Value
+					signerDNSSet = true
+					break
+				}
+			}
+			if tt.wantDNS == "" {
+				assert.False(t, signerDNSSet, "ordinary nodes must not set SIGNER_PEER_DNS")
+				return
+			}
+			assert.True(t, signerDNSSet, "Cosmosigner targets must set SIGNER_PEER_DNS")
+			assert.Equal(t, tt.wantDNS, signerDNS)
+		})
+	}
+}
+
 // TestNonTargetNodeHasNoDiscoveryLabel verifies a plain node never carries the label, even if a stray
 // copy is present in its inherited metadata (which WithChainNodeLabels must strip).
 func TestNonTargetNodeHasNoDiscoveryLabel(t *testing.T) {

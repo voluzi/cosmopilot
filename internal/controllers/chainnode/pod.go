@@ -411,6 +411,42 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 // buildNodeUtilsInitContainer creates the node-utils sidecar init container.
 func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) corev1.Container {
 	var sidecarRestartAlways = corev1.ContainerRestartPolicyAlways
+	env := []corev1.EnvVar{
+		{
+			Name:  "BLOCK_THRESHOLD",
+			Value: chainNode.Spec.Config.GetBlockThreshold(),
+		},
+		{
+			Name:  "LOG_LEVEL",
+			Value: chainNode.Spec.Config.GetNodeUtilsLogLevel(),
+		},
+		{
+			Name:  "TMKMS_PROXY",
+			Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
+		},
+	}
+	if signerDNS := signerPeerDNS(chainNode); signerDNS != "" {
+		env = append(env, corev1.EnvVar{Name: "SIGNER_PEER_DNS", Value: signerDNS})
+	}
+	env = append(env,
+		corev1.EnvVar{
+			Name:  "CREATE_FIFO",
+			Value: controllers.StringValueTrue,
+		},
+		corev1.EnvVar{
+			Name:  "TRACE_STORE",
+			Value: "/trace/trace.fifo",
+		},
+		corev1.EnvVar{
+			Name:  "NODE_BINARY_NAME",
+			Value: chainNode.Spec.App.App,
+		},
+		corev1.EnvVar{
+			Name:  "HALT_HEIGHT",
+			Value: strconv.FormatInt(chainNode.Spec.Config.GetHaltHeight(), 10),
+		},
+	)
+	env = append(env, chainNode.Spec.Config.GetNodeUtilsEnv()...)
 
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
@@ -440,40 +476,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 				MountPath: "/config",
 			},
 		},
-		Env: append([]corev1.EnvVar{
-			{
-				Name:  "BLOCK_THRESHOLD",
-				Value: chainNode.Spec.Config.GetBlockThreshold(),
-			},
-			{
-				Name:  "LOG_LEVEL",
-				Value: chainNode.Spec.Config.GetNodeUtilsLogLevel(),
-			},
-			{
-				Name:  "TMKMS_PROXY",
-				Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
-			},
-			{
-				Name:  "SIGNER_PEER_DNS",
-				Value: signerPeerDNS(chainNode),
-			},
-			{
-				Name:  "CREATE_FIFO",
-				Value: controllers.StringValueTrue,
-			},
-			{
-				Name:  "TRACE_STORE",
-				Value: "/trace/trace.fifo",
-			},
-			{
-				Name:  "NODE_BINARY_NAME",
-				Value: chainNode.Spec.App.App,
-			},
-			{
-				Name:  "HALT_HEIGHT",
-				Value: strconv.FormatInt(chainNode.Spec.Config.GetHaltHeight(), 10),
-			},
-		}, chainNode.Spec.Config.GetNodeUtilsEnv()...),
+		Env:       env,
 		Resources: chainNode.Spec.Config.GetNodeUtilsResources(),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -1269,6 +1272,9 @@ func logFailedCosmosignerDiscoveryGate(logger logr.Logger, pod *corev1.Pod) {
 }
 
 func (r *Reconciler) logFailedContainer(ctx context.Context, logger logr.Logger, pod *corev1.Pod, containerName string) {
+	if !containerHasTerminated(pod, containerName) {
+		return
+	}
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
 	logs, err := ph.GetLogs(ctx, containerName)
 	if err != nil {
@@ -1281,6 +1287,20 @@ func (r *Reconciler) logFailedContainer(ctx context.Context, logger logr.Logger,
 		logLines = logLines[len(logLines)-defaultLogsLineCount:]
 	}
 	logger.Info("app error: " + strings.Join(logLines, "\n"))
+}
+
+func containerHasTerminated(pod *corev1.Pod, containerName string) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == containerName && status.State.Terminated != nil {
+			return true
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name == containerName && status.State.Terminated != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func podInFailedState(chainNode *appsv1.ChainNode, pod *corev1.Pod) bool {
