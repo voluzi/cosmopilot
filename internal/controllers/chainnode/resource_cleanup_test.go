@@ -100,8 +100,34 @@ func TestFinalizeResourcesRetainsControlledLegacyGeneratedKeys(t *testing.T) {
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 		Name: "validator", Namespace: "default", UID: "node-uid",
 		Finalizers: []string{resourcecleanup.Finalizer},
-	}, Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}}}
-	legacy := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "validator-priv-key", Namespace: node.Namespace, UID: "secret-uid"}}
+	}}
+	legacy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-priv-key", Namespace: node.Namespace, UID: "secret-uid"},
+		Data:       map[string][]byte{PrivKeyFilename: []byte("legacy-consensus-key")},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(node, legacy, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, legacy).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), node)
+	require.NoError(t, err)
+	assert.True(t, done)
+	retained := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(legacy), retained))
+	assert.Nil(t, metav1.GetControllerOf(retained))
+	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+}
+
+func TestFinalizeResourcesRetainsControlledLegacyAccountAfterValidatorRemoval(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator", Namespace: "default", UID: "node-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+	}}
+	legacy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-account", Namespace: node.Namespace, UID: "secret-uid"},
+		Data:       map[string][]byte{MnemonicKey: []byte("legacy mnemonic")},
+	}
 	require.NoError(t, controllerutil.SetControllerReference(node, legacy, scheme))
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, legacy).Build()
 	r := &Reconciler{Client: base, Scheme: scheme}

@@ -312,8 +312,14 @@ func TestFinalizeResourcesRetainsControlledLegacyGenesisValidatorSecrets(t *test
 			Name: "validators", Instances: ptr.To(2), Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{}},
 		}}},
 	}
-	account := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "set-validators-1-account", Namespace: nodeSet.Namespace, UID: "account-uid"}}
-	key := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "set-validators-1-priv-key", Namespace: nodeSet.Namespace, UID: "key-uid"}}
+	account := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-validators-1-account", Namespace: nodeSet.Namespace, UID: "account-uid"},
+		Data:       map[string][]byte{mnemonicKey: []byte("legacy mnemonic")},
+	}
+	key := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-validators-1-priv-key", Namespace: nodeSet.Namespace, UID: "key-uid"},
+		Data:       map[string][]byte{privKeyFilename: []byte("legacy-consensus-key")},
+	}
 	for _, secret := range []*corev1.Secret{account, key} {
 		require.NoError(t, controllerutil.SetControllerReference(nodeSet, secret, scheme))
 	}
@@ -329,6 +335,44 @@ func TestFinalizeResourcesRetainsControlledLegacyGenesisValidatorSecrets(t *test
 		assert.Nil(t, metav1.GetControllerOf(fresh))
 		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
 	}
+}
+
+func TestFinalizeResourcesRetainsControlledLegacyKeysFromRemovedValidatorGroup(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid", Finalizers: []string{resourcecleanup.Finalizer}},
+	}
+	account := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-removed-1-account", Namespace: nodeSet.Namespace, UID: "account-uid"},
+		Data:       map[string][]byte{mnemonicKey: []byte("legacy mnemonic")},
+	}
+	key := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-removed-1-priv-key", Namespace: nodeSet.Namespace, UID: "key-uid"},
+		Data:       map[string][]byte{privKeyFilename: []byte("legacy-consensus-key")},
+	}
+	guard := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-removed-cg-cluster", Namespace: nodeSet.Namespace, UID: "guard-uid"},
+		Data:       map[string][]byte{"encryptionKey": []byte("operational-key")},
+	}
+	for _, secret := range []*corev1.Secret{account, key, guard} {
+		require.NoError(t, controllerutil.SetControllerReference(nodeSet, secret, scheme))
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, account, key, guard).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done)
+	for _, secret := range []*corev1.Secret{account, key} {
+		fresh := &corev1.Secret{}
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
+		assert.Nil(t, metav1.GetControllerOf(fresh))
+		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
+	}
+	freshGuard := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(guard), freshGuard))
+	assert.NotNil(t, metav1.GetControllerOf(freshGuard), "operational CosmoGuard credentials must remain garbage-collectable")
+	assert.False(t, resourcecleanup.IsAttributed(freshGuard, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
 }
 
 func TestFinalizeResourcesRetainsControlledLegacyCosmoseedSecret(t *testing.T) {

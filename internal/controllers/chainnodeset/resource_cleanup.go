@@ -196,19 +196,15 @@ func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context
 			}
 		}
 	}
-	secretNames := map[string]struct{}{child.GetName(): {}}
-	if child.Spec.Validator != nil {
-		secretNames[child.Spec.Validator.GetAccountSecretName(child)] = struct{}{}
-		secretNames[child.Spec.Validator.GetPrivKeySecretName(child)] = struct{}{}
-	}
 	secrets := &corev1.SecretList{}
 	if err := r.List(ctx, secrets, client.InNamespace(child.GetNamespace())); err != nil {
 		return err
 	}
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
-		_, known := secretNames[secret.GetName()]
-		if !known || !metav1.IsControlledBy(secret, child) || resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
+		if !metav1.IsControlledBy(secret, child) ||
+			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) ||
+			!isLegacyChildGeneratedKeySecret(child, secret) {
 			continue
 		}
 		managed, changed, err := resourcecleanup.PrepareGeneratedResource(secret, child, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
@@ -222,6 +218,20 @@ func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context
 		}
 	}
 	return nil
+}
+
+func isLegacyChildGeneratedKeySecret(child *appsv1.ChainNode, secret *corev1.Secret) bool {
+	if secret.GetName() == child.GetName() {
+		return true
+	}
+	if child.Spec.Validator != nil &&
+		(secret.GetName() == child.Spec.Validator.GetAccountSecretName(child) ||
+			secret.GetName() == child.Spec.Validator.GetPrivKeySecretName(child)) {
+		return true
+	}
+	_, mnemonic := secret.Data[mnemonicKey]
+	_, consensusKey := secret.Data[privKeyFilename]
+	return mnemonic || consensusKey
 }
 
 func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
@@ -244,7 +254,11 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet 
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
 		_, known := knownNames[secret.GetName()]
-		if !known || !metav1.IsControlledBy(secret, nodeSet) || resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
+		_, mnemonic := secret.Data[mnemonicKey]
+		_, consensusKey := secret.Data[privKeyFilename]
+		if (!known && !mnemonic && !consensusKey) ||
+			!metav1.IsControlledBy(secret, nodeSet) ||
+			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
 			continue
 		}
 		managed, changed, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)

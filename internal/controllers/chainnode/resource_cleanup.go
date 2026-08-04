@@ -80,11 +80,6 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 }
 
 func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	knownNames := map[string]struct{}{chainNode.GetName(): {}}
-	if chainNode.Spec.Validator != nil {
-		knownNames[chainNode.Spec.Validator.GetAccountSecretName(chainNode)] = struct{}{}
-		knownNames[chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)] = struct{}{}
-	}
 	secrets := &corev1.SecretList{}
 	if err := r.List(ctx, secrets, client.InNamespace(chainNode.GetNamespace())); err != nil {
 		return err
@@ -93,10 +88,8 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNod
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
 		if !metav1.IsControlledBy(secret, chainNode) ||
-			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
-			continue
-		}
-		if _, known := knownNames[secret.GetName()]; !known {
+			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) ||
+			!isLegacyGeneratedKeySecret(chainNode, secret) {
 			continue
 		}
 		managed, changed, err := resourcecleanup.PrepareGeneratedResource(
@@ -112,6 +105,20 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNod
 		}
 	}
 	return nil
+}
+
+func isLegacyGeneratedKeySecret(chainNode *appsv1.ChainNode, secret *corev1.Secret) bool {
+	if secret.GetName() == chainNode.GetName() {
+		return true
+	}
+	if chainNode.Spec.Validator != nil &&
+		(secret.GetName() == chainNode.Spec.Validator.GetAccountSecretName(chainNode) ||
+			secret.GetName() == chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)) {
+		return true
+	}
+	_, mnemonic := secret.Data[MnemonicKey]
+	_, consensusKey := secret.Data[PrivKeyFilename]
+	return mnemonic || consensusKey
 }
 
 func (r *Reconciler) attributeControlledLegacyDataVolumes(ctx context.Context, chainNode *appsv1.ChainNode) error {
