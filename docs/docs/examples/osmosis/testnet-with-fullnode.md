@@ -6,6 +6,8 @@ kind: ChainNodeSet
 metadata:
   name: osmosis-devnet
 spec:
+  deletionPolicy:
+    dataVolumes: Delete
   app:
     image: osmolabs/osmosis
     version: 31.0.0
@@ -26,11 +28,9 @@ spec:
         - name: wasm
           size: 1Gi
           path: /home/app/wasm
-          deleteWithNode: true
         - name: ibc-08-wasm
           size: 1Gi
           path: /home/app/ibc_08-wasm
-          deleteWithNode: true
 
     config:
       runFlags: [ "--reject-config-defaults=true" ]
@@ -61,11 +61,9 @@ spec:
           - name: wasm
             size: 1Gi
             path: /home/app/wasm
-            deleteWithNode: true
           - name: ibc-08-wasm
             size: 1Gi
             path: /home/app/ibc_08-wasm
-            deleteWithNode: true
 
       config:
         runFlags: [ "--reject-config-defaults=true" ]

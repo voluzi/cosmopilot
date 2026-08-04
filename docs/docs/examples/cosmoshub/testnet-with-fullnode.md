@@ -6,6 +6,8 @@ kind: ChainNodeSet
 metadata:
   name: cosmoshub-testnet
 spec:
+  deletionPolicy:
+    dataVolumes: Delete
   app:
     image: ghcr.io/cosmos/gaia
     version: v25.2.0
@@ -21,7 +23,6 @@ spec:
         - name: wasm
           size: 1Gi
           path: /home/app/wasm
-          deleteWithNode: true
 
     config:
       override:

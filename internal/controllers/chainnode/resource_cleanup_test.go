@@ -100,7 +100,7 @@ func TestFinalizeResourcesRetainsControlledLegacyGeneratedKeys(t *testing.T) {
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 		Name: "validator", Namespace: "default", UID: "node-uid",
 		Finalizers: []string{resourcecleanup.Finalizer},
-	}}
+	}, Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}}}
 	legacy := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "validator-priv-key", Namespace: node.Namespace, UID: "secret-uid"}}
 	require.NoError(t, controllerutil.SetControllerReference(node, legacy, scheme))
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, legacy).Build()
@@ -113,6 +113,41 @@ func TestFinalizeResourcesRetainsControlledLegacyGeneratedKeys(t *testing.T) {
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(legacy), retained))
 	assert.Nil(t, metav1.GetControllerOf(retained))
 	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+}
+
+func TestFinalizeResourcesRetainsOnlyKnownControlledLegacyResources(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid", Finalizers: []string{resourcecleanup.Finalizer}},
+		Spec: appsv1.ChainNodeSpec{
+			Persistence: &appsv1.Persistence{AdditionalVolumes: []appsv1.VolumeSpec{{Name: "wasm", Size: "1Gi", Path: "/wasm"}}},
+			Validator:   &appsv1.ValidatorConfig{},
+		},
+	}
+	mainPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "main-pvc"}}
+	additionalPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-wasm", Namespace: node.Namespace, UID: "additional-pvc"}}
+	nodeKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "node-key"}}
+	accountKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace, UID: "account-key"}}
+	consensusKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-priv-key", Namespace: node.Namespace, UID: "consensus-key"}}
+	cosmoguardKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-cg-cluster", Namespace: node.Namespace, UID: "guard-key"}}
+	for _, object := range []client.Object{mainPVC, additionalPVC, nodeKey, accountKey, consensusKey, cosmoguardKey} {
+		require.NoError(t, controllerutil.SetControllerReference(node, object, scheme))
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, mainPVC, additionalPVC, nodeKey, accountKey, consensusKey, cosmoguardKey).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), node)
+	require.NoError(t, err)
+	assert.True(t, done)
+	for _, object := range []client.Object{mainPVC, additionalPVC, nodeKey, accountKey, consensusKey} {
+		fresh := object.DeepCopyObject().(client.Object)
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(object), fresh))
+		assert.Nil(t, metav1.GetControllerOf(fresh))
+	}
+	freshGuard := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(cosmoguardKey), freshGuard))
+	assert.NotNil(t, metav1.GetControllerOf(freshGuard), "operational CosmoGuard credentials must remain garbage-collectable")
+	assert.False(t, resourcecleanup.IsAttributed(freshGuard, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
 func TestReconcileNamespaceTerminationReleasesCleanupFinalizers(t *testing.T) {

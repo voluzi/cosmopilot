@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -24,6 +25,17 @@ func IsOwnedSignerStatefulSet(sts *appsv1.StatefulSet, owner metav1.Object) bool
 	return metav1.IsControlledBy(sts, owner) &&
 		sts.Spec.Template.Labels[labelAppName] == appNameCosmosigner &&
 		sts.Spec.Template.Labels[labelInstance] == sts.GetName()
+}
+
+func statefulSetPVCTemplateReadyForCleanup(sts *appsv1.StatefulSet, root resourcecleanup.RootOwner) bool {
+	for i := range sts.Spec.VolumeClaimTemplates {
+		claim := &sts.Spec.VolumeClaimTemplates[i]
+		if claim.GetName() == dataVolumeName {
+			return controllerutil.ContainsFinalizer(claim, RetainedStateFinalizer) &&
+				resourcecleanup.IsAttributed(claim, root, resourcecleanup.ClassCosmosignerState)
+		}
+	}
+	return false
 }
 
 // DeletePVCs deletes the per-pod raft-state PVCs of a signer instance owned by owner. StatefulSet
@@ -102,7 +114,7 @@ func ProtectRetainedStatePVCs(ctx context.Context, c client.Client, owner client
 	}
 	for i := range statefulSets.Items {
 		sts := &statefulSets.Items[i]
-		if !IsOwnedSignerStatefulSet(sts, owner) || statefulSetPVCTemplateRetainsState(sts) {
+		if !IsOwnedSignerStatefulSet(sts, owner) || statefulSetPVCTemplateReadyForCleanup(sts, root) {
 			continue
 		}
 		_, err := DeleteStatefulSet(ctx, c, owner, namespace, sts.GetName())
@@ -174,6 +186,9 @@ func QuiesceOwner(ctx context.Context, c client.Client, owner client.Object, nam
 		if !IsOwnedSignerStatefulSet(sts, owner) {
 			continue
 		}
+		if !sts.GetDeletionTimestamp().IsZero() {
+			return false, nil
+		}
 		deleted, err := DeleteStatefulSet(ctx, c, owner, namespace, sts.GetName())
 		if err != nil || !deleted {
 			return false, err
@@ -191,7 +206,7 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 		return false, err
 	}
 
-	ownedNames := map[string]struct{}{}
+	ownedNames := map[string]types.UID{}
 	statefulSets := &appsv1.StatefulSetList{}
 	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -199,7 +214,7 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 	for i := range statefulSets.Items {
 		sts := &statefulSets.Items[i]
 		if IsOwnedSignerStatefulSet(sts, owner) {
-			ownedNames[sts.GetName()] = struct{}{}
+			ownedNames[sts.GetName()] = sts.GetUID()
 		}
 	}
 	pvcs := &corev1.PersistentVolumeClaimList{}
@@ -210,7 +225,9 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
 		if pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID()) && isStatefulSetDataPVC(pvc.GetName(), name) {
-			ownedNames[name] = struct{}{}
+			if _, exists := ownedNames[name]; !exists {
+				ownedNames[name] = ""
+			}
 		}
 	}
 
@@ -222,10 +239,16 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		instance := pod.GetLabels()[labelInstance]
-		if _, owned := ownedNames[instance]; !owned {
+		stsUID, owned := ownedNames[instance]
+		if !owned {
 			continue
 		}
 		if pod.GetLabels()[labelAppName] != appNameCosmosigner && !isStatefulSetReplicaPodName(pod.GetName(), instance) {
+			continue
+		}
+		controller := metav1.GetControllerOf(pod)
+		if stsUID == "" || controller == nil || controller.Kind != "StatefulSet" || controller.Name != instance || controller.UID != stsUID {
+			allPodsGone = false
 			continue
 		}
 		if pod.GetDeletionTimestamp().IsZero() {

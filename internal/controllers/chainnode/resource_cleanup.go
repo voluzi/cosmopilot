@@ -33,6 +33,9 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 	if err != nil || !signerDone {
 		return false, err
 	}
+	if err := r.attributeControlledLegacyDataVolumes(ctx, chainNode); err != nil {
+		return false, err
+	}
 	if err := r.attributeControlledLegacyKeys(ctx, chainNode); err != nil {
 		return false, err
 	}
@@ -77,6 +80,11 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 }
 
 func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	knownNames := map[string]struct{}{chainNode.GetName(): {}}
+	if chainNode.Spec.Validator != nil {
+		knownNames[chainNode.Spec.Validator.GetAccountSecretName(chainNode)] = struct{}{}
+		knownNames[chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)] = struct{}{}
+	}
 	secrets := &corev1.SecretList{}
 	if err := r.List(ctx, secrets, client.InNamespace(chainNode.GetNamespace())); err != nil {
 		return err
@@ -88,6 +96,9 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNod
 			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
 			continue
 		}
+		if _, known := knownNames[secret.GetName()]; !known {
+			continue
+		}
 		managed, changed, err := resourcecleanup.PrepareGeneratedResource(
 			secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false,
 		)
@@ -96,6 +107,37 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNod
 		}
 		if managed && changed {
 			if err := r.Update(ctx, secret); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) attributeControlledLegacyDataVolumes(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	knownNames := map[string]struct{}{chainNode.GetName(): {}}
+	for _, volume := range chainNode.GetPersistenceAdditionalVolumes() {
+		knownNames[fmt.Sprintf("%s-%s", chainNode.GetName(), volume.Name)] = struct{}{}
+	}
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcs, client.InNamespace(chainNode.GetNamespace())); err != nil {
+		return err
+	}
+	root := resourcecleanup.RootOwnerFor(chainNode)
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if !metav1.IsControlledBy(pvc, chainNode) || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
+			continue
+		}
+		if _, known := knownNames[pvc.GetName()]; !known {
+			continue
+		}
+		managed, changed, err := resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, false)
+		if err != nil {
+			return err
+		}
+		if managed && changed {
+			if err := r.Update(ctx, pvc); err != nil {
 				return err
 			}
 		}

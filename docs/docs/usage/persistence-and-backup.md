@@ -97,7 +97,7 @@ spec:
 | `size` | Size of the volume |
 | `path` | Mount path inside the container |
 | `storageClass` | Optional. Storage class to use. Defaults to `.persistence.storageClass`, then cluster default |
-| `deleteWithNode` | Deprecated compatibility field. Use `.spec.deletionPolicy.dataVolumes`; this field no longer controls root deletion. |
+| `deleteWithNode` | Deprecated. Existing `true` values no longer control deletion; set `.spec.deletionPolicy.dataVolumes: Delete` to preserve destructive PVC cleanup, or omit it to retain PVCs. |
 
 ### Mounted During Initialization
 
@@ -116,6 +116,12 @@ spec:
 ```
 
 The fields are independent and each defaults to `Retain`:
+
+:::warning[Upgrade migration]
+Before upgrading an existing manifest that uses `deleteWithNode: true`, add
+`.spec.deletionPolicy.dataVolumes: Delete` if PVC deletion is still intended. The legacy field is no
+longer consulted during root deletion; without this migration, those PVCs are retained by default.
+:::
 
 | Field | Resources covered |
 |-------|-------------------|

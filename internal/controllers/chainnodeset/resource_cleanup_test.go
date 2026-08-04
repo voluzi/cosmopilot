@@ -234,6 +234,55 @@ func TestQuiesceAndDeleteChildrenLeavesInitializationPodToTerminatingChild(t *te
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(initPod), &corev1.Pod{}))
 }
 
+func TestQuiesceAndDeleteChildrenAppliesChildRetentionBeforeRemovingFinalizer(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	now := metav1.NewTime(time.Now())
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	child := ownedChild(t, scheme, nodeSet, "set-fullnodes-0")
+	child.DeletionTimestamp = &now
+	child.Finalizers = []string{resourcecleanup.Finalizer}
+	child.Spec.Persistence = &appsv1.Persistence{AdditionalVolumes: []appsv1.VolumeSpec{{Name: "wasm", Size: "1Gi", Path: "/wasm"}}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-wasm", Namespace: child.Namespace, UID: "pvc-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(child, pvc, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child, pvc).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done)
+	retained := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(pvc), retained))
+	assert.Nil(t, metav1.GetControllerOf(retained))
+	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(child), resourcecleanup.ClassDataVolumes))
+}
+
+func TestFinalizeResourcesRetainsControlledLegacyGenesisValidatorSecrets(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid", Finalizers: []string{resourcecleanup.Finalizer}},
+		Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{
+			Name: "validators", Instances: ptr.To(2), Validator: &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{}},
+		}}},
+	}
+	account := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "set-validators-1-account", Namespace: nodeSet.Namespace, UID: "account-uid"}}
+	key := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "set-validators-1-priv-key", Namespace: nodeSet.Namespace, UID: "key-uid"}}
+	for _, secret := range []*corev1.Secret{account, key} {
+		require.NoError(t, controllerutil.SetControllerReference(nodeSet, secret, scheme))
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, account, key).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done)
+	for _, secret := range []*corev1.Secret{account, key} {
+		fresh := &corev1.Secret{}
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
+		assert.Nil(t, metav1.GetControllerOf(fresh))
+		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
+	}
+}
+
 func TestQuiesceCosmoseedStopsPodsBeforeDeletingStatefulSet(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
@@ -253,6 +302,21 @@ func TestQuiesceCosmoseedStopsPodsBeforeDeletingStatefulSet(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, done)
 	assert.Equal(t, []string{"Pod/set-seed-0", "StatefulSet/set-seed"}, c.deleted)
+}
+
+func TestQuiesceCosmoseedUsesOwnedDeterministicNameWhenLabelsDrift(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	zero := int32(0)
+	seed := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid", Labels: map[string]string{"edited": "true"}}, Spec: k8sappsv1.StatefulSetSpec{Replicas: &zero}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.quiesceCosmoseed(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done)
+	assert.True(t, apierrors.IsNotFound(base.Get(context.Background(), client.ObjectKeyFromObject(seed), &k8sappsv1.StatefulSet{})))
 }
 
 func TestQuiesceCosmoseedScalesDownBeforeDeletingPods(t *testing.T) {
@@ -337,13 +401,23 @@ func (c *recordCleanupDeleteOrderClient) Delete(ctx context.Context, object clie
 
 func (c *nodeSetQuiesceGuardClient) Update(ctx context.Context, object client.Object, opts ...client.UpdateOption) error {
 	if _, durable := object.(*corev1.PersistentVolumeClaim); durable {
-		if err := c.requireWorkloadsGone(ctx); err != nil {
-			return err
+		controller := metav1.GetControllerOf(object)
+		childOwned := controller != nil && controller.Kind == "ChainNode"
+		childAttributed := object.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] != ""
+		if !childOwned && !childAttributed {
+			if err := c.requireWorkloadsGone(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	if _, durable := object.(*corev1.Secret); durable {
-		if err := c.requireWorkloadsGone(ctx); err != nil {
-			return err
+		controller := metav1.GetControllerOf(object)
+		childOwned := controller != nil && controller.Kind == "ChainNode"
+		childAttributed := object.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] != ""
+		if !childOwned && !childAttributed {
+			if err := c.requireWorkloadsGone(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	return c.Client.Update(ctx, object, opts...)
@@ -356,8 +430,13 @@ func (c *nodeSetQuiesceGuardClient) Delete(ctx context.Context, object client.Ob
 	}
 	switch object.(type) {
 	case *corev1.PersistentVolumeClaim, *corev1.Secret:
-		if err := c.requireWorkloadsGone(ctx); err != nil {
-			return err
+		controller := metav1.GetControllerOf(object)
+		childOwned := controller != nil && controller.Kind == "ChainNode"
+		childAttributed := object.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] != ""
+		if !childOwned && !childAttributed {
+			if err := c.requireWorkloadsGone(ctx); err != nil {
+				return err
+			}
 		}
 	case *corev1.Pod:
 		controller := metav1.GetControllerOf(object)

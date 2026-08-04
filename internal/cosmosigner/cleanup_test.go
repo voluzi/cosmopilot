@@ -96,6 +96,72 @@ func TestProtectRetainedStatePVCsRetiresLegacyTemplate(t *testing.T) {
 	}
 }
 
+func TestProtectRetainedStatePVCsRetiresTemplateMissingRootAttribution(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	zero := int32(0)
+	claim := corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName, Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+	}}
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, Generation: 1, OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}, Spec: appsv1.StatefulSetSpec{
+		Replicas:                             &zero,
+		PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType, WhenScaled: appsv1.RetainPersistentVolumeClaimRetentionPolicyType},
+		Template:                             corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}}, VolumeClaimTemplates: []corev1.PersistentVolumeClaim{claim},
+	}, Status: appsv1.StatefulSetStatus{ObservedGeneration: 1, Replicas: 0}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts).Build()
+
+	pending, err := ProtectRetainedStatePVCs(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pending {
+		t.Fatal("an unattributed immutable template must be retired before scaling can resume")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unattributed template StatefulSet must be retired, got %v", err)
+	}
+}
+
+func TestQuiesceOwnerWaitsForAlreadyDeletingStatefulSet(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	now := metav1.Now()
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, UID: "sts-uid", DeletionTimestamp: &now, Finalizers: []string{"hold"},
+		OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}, Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}}}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts).Build()
+
+	done, err := QuiesceOwner(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("an already-deleting StatefulSet must be observed absent before cleanup advances")
+	}
+}
+
+func TestNamespaceTerminationDoesNotDeleteForeignSameInstancePod(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: "owned-sts", OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}}}, Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}}}}
+	foreign := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: namespace, UID: "foreign-pod", Labels: InstanceLabels(name), OwnerReferences: []metav1.OwnerReference{{UID: "foreign-sts", Controller: boolPointer(true)}}}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts, foreign).Build()
+
+	done, err := QuiesceOwnerForNamespaceTermination(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("a same-instance pod not controlled by the owned StatefulSet must block cleanup")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(foreign), &corev1.Pod{}); err != nil {
+		t.Fatalf("foreign signer pod was deleted: %v", err)
+	}
+}
+
 func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}

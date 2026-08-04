@@ -12,7 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
@@ -42,6 +41,9 @@ func (r *Reconciler) finalizeResources(ctx context.Context, nodeSet *appsv1.Chai
 		nodeSet.Spec.DeletionPolicy.GetCosmosignerState(),
 	)
 	if err != nil || !signerStateDone {
+		return false, err
+	}
+	if err := r.attributeControlledLegacyKeys(ctx, nodeSet); err != nil {
 		return false, err
 	}
 
@@ -117,11 +119,13 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 			allDone = false
 			continue
 		}
-		if controllerutil.ContainsFinalizer(child, resourcecleanup.Finalizer) {
-			controllerutil.RemoveFinalizer(child, resourcecleanup.Finalizer)
-			if err := r.Update(ctx, child); err != nil && !errors.IsNotFound(err) {
-				return false, err
-			}
+		childDone, err := r.finalizeChildDurableResources(ctx, child)
+		if err != nil {
+			return false, err
+		}
+		if !childDone {
+			allDone = false
+			continue
 		}
 		remaining := &appsv1.ChainNode{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(child), remaining); err == nil {
@@ -131,6 +135,113 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 		}
 	}
 	return allDone, nil
+}
+
+func (r *Reconciler) finalizeChildDurableResources(ctx context.Context, child *appsv1.ChainNode) (bool, error) {
+	if err := r.attributeControlledLegacyChildResources(ctx, child); err != nil {
+		return false, err
+	}
+	root := resourcecleanup.RootOwnerFor(child)
+	dataDone, err := resourcecleanup.FinalizeClass(ctx, r.Client, root, resourcecleanup.ClassDataVolumes, child.Spec.DeletionPolicy.GetDataVolumes(), child.GetUID())
+	if err != nil {
+		return false, err
+	}
+	keysDone, err := resourcecleanup.FinalizeClass(ctx, r.Client, root, resourcecleanup.ClassGeneratedKeys, child.Spec.DeletionPolicy.GetGeneratedKeys(), child.GetUID())
+	if err != nil || !dataDone || !keysDone {
+		return false, err
+	}
+	controllerutil.RemoveFinalizer(child, resourcecleanup.Finalizer)
+	if err := r.Update(ctx, child); err != nil && !errors.IsNotFound(err) {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context, child *appsv1.ChainNode) error {
+	root := resourcecleanup.RootOwnerFor(child)
+	pvcNames := map[string]struct{}{child.GetName(): {}}
+	for _, volume := range child.GetPersistenceAdditionalVolumes() {
+		pvcNames[fmt.Sprintf("%s-%s", child.GetName(), volume.Name)] = struct{}{}
+	}
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcs, client.InNamespace(child.GetNamespace())); err != nil {
+		return err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		_, known := pvcNames[pvc.GetName()]
+		if !known || !metav1.IsControlledBy(pvc, child) || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
+			continue
+		}
+		managed, changed, err := resourcecleanup.PrepareGeneratedResource(pvc, child, r.Scheme, resourcecleanup.ClassDataVolumes, false)
+		if err != nil {
+			return err
+		}
+		if managed && changed {
+			if err := r.Update(ctx, pvc); err != nil {
+				return err
+			}
+		}
+	}
+	secretNames := map[string]struct{}{child.GetName(): {}}
+	if child.Spec.Validator != nil {
+		secretNames[child.Spec.Validator.GetAccountSecretName(child)] = struct{}{}
+		secretNames[child.Spec.Validator.GetPrivKeySecretName(child)] = struct{}{}
+	}
+	secrets := &corev1.SecretList{}
+	if err := r.List(ctx, secrets, client.InNamespace(child.GetNamespace())); err != nil {
+		return err
+	}
+	for i := range secrets.Items {
+		secret := &secrets.Items[i]
+		_, known := secretNames[secret.GetName()]
+		if !known || !metav1.IsControlledBy(secret, child) || resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
+			continue
+		}
+		managed, changed, err := resourcecleanup.PrepareGeneratedResource(secret, child, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+		if err != nil {
+			return err
+		}
+		if managed && changed {
+			if err := r.Update(ctx, secret); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	knownNames := map[string]struct{}{}
+	for i := range nodeSet.Spec.Nodes {
+		group := &nodeSet.Spec.Nodes[i]
+		for _, validator := range groupGenesisValidators(nodeSet, group.Name, group.GetInstances(), group.Validator) {
+			knownNames[validator.AccountMnemonicSecret] = struct{}{}
+			knownNames[validator.PrivKeySecret] = struct{}{}
+		}
+	}
+	secrets := &corev1.SecretList{}
+	if err := r.List(ctx, secrets, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return err
+	}
+	root := resourcecleanup.RootOwnerFor(nodeSet)
+	for i := range secrets.Items {
+		secret := &secrets.Items[i]
+		_, known := knownNames[secret.GetName()]
+		if !known || !metav1.IsControlledBy(secret, nodeSet) || resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
+			continue
+		}
+		managed, changed, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+		if err != nil {
+			return err
+		}
+		if managed && changed {
+			if err := r.Update(ctx, secret); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNode) (bool, error) {
@@ -178,9 +289,7 @@ func (r *Reconciler) quiesceCosmoseed(ctx context.Context, nodeSet *appsv1.Chain
 	allDone := true
 	for i := range statefulSets.Items {
 		sts := &statefulSets.Items[i]
-		if !metav1.IsControlledBy(sts, nodeSet) ||
-			sts.GetLabels()[controllers.LabelApp] != controllers.CosmoseedName ||
-			sts.GetLabels()[controllers.LabelChainNodeSet] != nodeSet.GetName() {
+		if !metav1.IsControlledBy(sts, nodeSet) || sts.GetName() != nodeSet.GetName()+"-seed" {
 			continue
 		}
 		if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 0 {
