@@ -125,12 +125,33 @@ func (r *Reconciler) attributeCosmoseedDataVolumes(ctx context.Context, nodeSet 
 				}
 			}
 		}
-		if !matched || !resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) ||
-			pvc.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] != string(nodeSet.GetUID()) {
+		if !matched {
 			continue
+		}
+		alreadyAttributed := resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) &&
+			pvc.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] == string(nodeSet.GetUID())
+		legacyGenerated := isLegacyCosmoseedClaim(pvc)
+		if alreadyAttributed || !legacyGenerated {
+			continue
+		}
+		changed := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassDataVolumes)
+		changed = resourcecleanup.StampResourceOwner(pvc, nodeSet.GetUID()) || changed
+		if changed {
+			if err := r.Update(ctx, pvc); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func isLegacyCosmoseedClaim(pvc *corev1.PersistentVolumeClaim) bool {
+	for _, managedField := range pvc.GetManagedFields() {
+		if managedField.Manager == "kube-controller-manager" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {

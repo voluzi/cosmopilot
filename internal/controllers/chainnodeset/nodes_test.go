@@ -67,6 +67,7 @@ func TestDeleteNodeWithCleanupFinalizerAdoptsRecordedLegacyChild(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(legacy), fresh))
 	assert.False(t, fresh.DeletionTimestamp.IsZero())
 	assert.Contains(t, fresh.Finalizers, resourcecleanup.Finalizer)
+	assert.True(t, metav1.IsControlledBy(fresh, nodeSet))
 }
 
 func TestDeleteNodeWithCleanupFinalizerPreservesForeignLabeledNode(t *testing.T) {

@@ -517,6 +517,16 @@ func TestAttributeCosmoseedDataVolumesPreservesPreprovisionedExactNameClaim(t *t
 	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
 }
 
+func TestIsLegacyCosmoseedClaimRequiresStatefulSetControllerProvenance(t *testing.T) {
+	generated := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{ManagedFields: []metav1.ManagedFieldsEntry{{
+		Manager: "kube-controller-manager",
+	}}}}
+	userProvided := &corev1.PersistentVolumeClaim{}
+
+	assert.True(t, isLegacyCosmoseedClaim(generated))
+	assert.False(t, isLegacyCosmoseedClaim(userProvided))
+}
+
 func TestQuiesceCosmoseedUsesOwnedDeterministicNameWhenLabelsDrift(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}

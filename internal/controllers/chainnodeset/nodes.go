@@ -626,10 +626,22 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	if controller := metav1.GetControllerOf(node); controller != nil && !metav1.IsControlledBy(node, nodeSet) {
 		return fmt.Errorf("refusing to delete ChainNode %s/%s controlled by %s UID %s", node.GetNamespace(), node.GetName(), controller.Name, controller.UID)
 	}
-	if node.GetDeletionTimestamp().IsZero() && !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) {
-		controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
-		if err := r.Update(ctx, node); err != nil {
-			return err
+	if node.GetDeletionTimestamp().IsZero() {
+		changed := false
+		if !metav1.IsControlledBy(node, nodeSet) {
+			if err := controllerutil.SetControllerReference(nodeSet, node, r.Scheme); err != nil {
+				return err
+			}
+			changed = true
+		}
+		if !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) {
+			controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
+			changed = true
+		}
+		if changed {
+			if err := r.Update(ctx, node); err != nil {
+				return err
+			}
 		}
 	}
 	uid := node.GetUID()
