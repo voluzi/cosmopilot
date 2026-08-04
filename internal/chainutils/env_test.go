@@ -62,12 +62,28 @@ func TestAppEnvPreservesOrderAndValueFromWithFreshCopies(t *testing.T) {
 	source[0].Value = "mutated-source"
 	source[1].ValueFrom.SecretKeyRef.Name = "mutated-secret"
 
-	first := app.appEnv()
+	first := app.appEnv("app")
 	require.Equal(t, testAppEnv(), first)
 	first[0].Value = "mutated-build"
 	first[1].ValueFrom.SecretKeyRef.Name = "mutated-build-secret"
 
-	assert.Equal(t, testAppEnv(), app.appEnv())
+	assert.Equal(t, testAppEnv(), app.appEnv("app"))
+}
+
+func TestAppEnvRetargetsContainerScopedResourceRefs(t *testing.T) {
+	source := []corev1.EnvVar{{
+		Name: "CPU_LIMIT",
+		ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+			ContainerName: "appd",
+			Resource:      "limits.cpu",
+		}},
+	}}
+	app := newTestAppWithEnv(t, source)
+
+	env := app.appEnv("init-chain")
+	require.Equal(t, "init-chain", env[0].ValueFrom.ResourceFieldRef.ContainerName)
+	assert.Equal(t, "appd", source[0].ValueFrom.ResourceFieldRef.ContainerName)
+	assert.Equal(t, "appd", app.env[0].ValueFrom.ResourceFieldRef.ContainerName)
 }
 
 func TestBuildInitPodPropagatesAppEnvOnlyToTheChainApp(t *testing.T) {
