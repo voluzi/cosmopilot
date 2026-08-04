@@ -125,6 +125,24 @@ func TestPrepareGeneratedResourceDoesNotAdoptAmbiguousLegacyObject(t *testing.T)
 	assert.Empty(t, secret.OwnerReferences)
 }
 
+func TestIsLegacyGeneratedKeySecret(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secret     *corev1.Secret
+		knownNames []string
+		want       bool
+	}{
+		{name: "known deterministic name", secret: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "node-key"}}, knownNames: []string{"node-key"}, want: true},
+		{name: "mnemonic data", secret: &corev1.Secret{Data: map[string][]byte{"mnemonic": []byte("words")}}, want: true},
+		{name: "consensus key data", secret: &corev1.Secret{Data: map[string][]byte{"priv_validator_key.json": []byte("key")}}, want: true},
+		{name: "operational secret", secret: &corev1.Secret{Data: map[string][]byte{"encryptionKey": []byte("key")}}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsLegacyGeneratedKeySecret(tc.secret, tc.knownNames...))
+		})
+	}
+}
+
 func TestPrepareGeneratedResourceStampsNewObject(t *testing.T) {
 	scheme := cleanupScheme(t)
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"}}

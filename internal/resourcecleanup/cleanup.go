@@ -37,6 +37,24 @@ const (
 	ClassCosmosignerState ResourceClass = "cosmosignerState"
 )
 
+const (
+	mnemonicSecretDataKey  = "mnemonic"
+	consensusSecretDataKey = "priv_validator_key.json"
+)
+
+// IsLegacyGeneratedKeySecret classifies a controller-owned historical generated-key Secret from
+// deterministic identities supplied by the caller or the stable key payload fields.
+func IsLegacyGeneratedKeySecret(secret *corev1.Secret, knownNames ...string) bool {
+	for _, name := range knownNames {
+		if secret.GetName() == name {
+			return true
+		}
+	}
+	_, mnemonic := secret.Data[mnemonicSecretDataKey]
+	_, consensusKey := secret.Data[consensusSecretDataKey]
+	return mnemonic || consensusKey
+}
+
 // RootOwner is the stable ChainNode or ChainNodeSet identity stamped on generated durable resources.
 type RootOwner struct {
 	APIVersion string

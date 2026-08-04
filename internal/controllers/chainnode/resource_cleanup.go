@@ -130,17 +130,14 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, chainNod
 }
 
 func isLegacyGeneratedKeySecret(chainNode *appsv1.ChainNode, secret *corev1.Secret) bool {
-	if secret.GetName() == chainNode.GetName() {
-		return true
+	knownNames := []string{chainNode.GetName()}
+	if chainNode.Spec.Validator != nil {
+		knownNames = append(knownNames,
+			chainNode.Spec.Validator.GetAccountSecretName(chainNode),
+			chainNode.Spec.Validator.GetPrivKeySecretName(chainNode),
+		)
 	}
-	if chainNode.Spec.Validator != nil &&
-		(secret.GetName() == chainNode.Spec.Validator.GetAccountSecretName(chainNode) ||
-			secret.GetName() == chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)) {
-		return true
-	}
-	_, mnemonic := secret.Data[MnemonicKey]
-	_, consensusKey := secret.Data[PrivKeyFilename]
-	return mnemonic || consensusKey
+	return resourcecleanup.IsLegacyGeneratedKeySecret(secret, knownNames...)
 }
 
 func (r *Reconciler) attributeControlledLegacyDataVolumes(ctx context.Context, chainNode *appsv1.ChainNode) error {

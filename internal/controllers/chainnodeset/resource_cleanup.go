@@ -274,17 +274,14 @@ func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context
 }
 
 func isLegacyChildGeneratedKeySecret(child *appsv1.ChainNode, secret *corev1.Secret) bool {
-	if secret.GetName() == child.GetName() {
-		return true
+	knownNames := []string{child.GetName()}
+	if child.Spec.Validator != nil {
+		knownNames = append(knownNames,
+			child.Spec.Validator.GetAccountSecretName(child),
+			child.Spec.Validator.GetPrivKeySecretName(child),
+		)
 	}
-	if child.Spec.Validator != nil &&
-		(secret.GetName() == child.Spec.Validator.GetAccountSecretName(child) ||
-			secret.GetName() == child.Spec.Validator.GetPrivKeySecretName(child)) {
-		return true
-	}
-	_, mnemonic := secret.Data[mnemonicKey]
-	_, consensusKey := secret.Data[privKeyFilename]
-	return mnemonic || consensusKey
+	return resourcecleanup.IsLegacyGeneratedKeySecret(secret, knownNames...)
 }
 
 func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
@@ -304,12 +301,13 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet 
 		return err
 	}
 	root := resourcecleanup.RootOwnerFor(nodeSet)
+	known := make([]string, 0, len(knownNames))
+	for name := range knownNames {
+		known = append(known, name)
+	}
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
-		_, known := knownNames[secret.GetName()]
-		_, mnemonic := secret.Data[mnemonicKey]
-		_, consensusKey := secret.Data[privKeyFilename]
-		if (!known && !mnemonic && !consensusKey) ||
+		if !resourcecleanup.IsLegacyGeneratedKeySecret(secret, known...) ||
 			!metav1.IsControlledBy(secret, nodeSet) ||
 			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
 			continue
