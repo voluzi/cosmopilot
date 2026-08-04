@@ -21,6 +21,7 @@ type App struct {
 
 	binary            string
 	image             string
+	env               []corev1.EnvVar
 	pullPolicy        corev1.PullPolicy
 	priorityClassName string
 	NodeSelector      map[string]string
@@ -125,6 +126,12 @@ func WithImage(image string) Option {
 	}
 }
 
+func WithEnv(env []corev1.EnvVar) Option {
+	return func(c *App) {
+		c.env = deepCopyEnv(env)
+	}
+}
+
 func WithImagePullPolicy(p corev1.PullPolicy) Option {
 	return func(c *App) {
 		c.pullPolicy = p
@@ -147,4 +154,19 @@ func WithNodeSelector(selector map[string]string) Option {
 	return func(c *App) {
 		c.NodeSelector = selector
 	}
+}
+
+func (a *App) appEnv() []corev1.EnvVar {
+	return deepCopyEnv(a.env)
+}
+
+func deepCopyEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	if env == nil {
+		return nil
+	}
+	out := make([]corev1.EnvVar, len(env))
+	for i := range env {
+		env[i].DeepCopyInto(&out[i])
+	}
+	return out
 }

@@ -1212,6 +1212,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Command:         []string{chainNode.Spec.App.App},
 							Args:            []string{"start", "--grpc-only", "--home", "/home/app"},
+							Env:             chainNode.Spec.Config.GetEnv(),
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "data",
@@ -1272,7 +1273,8 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 		return err
 	}
 
-	job, err := r.ClientSet.BatchV1().Jobs(chainNode.GetNamespace()).Create(ctx, job, metav1.CreateOptions{})
+	clientSet := r.snapshotKubernetesClient()
+	job, err := clientSet.BatchV1().Jobs(chainNode.GetNamespace()).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		return err
 	}
@@ -1304,7 +1306,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 		return err
 	}
 
-	if _, err = r.ClientSet.CoreV1().PersistentVolumeClaims(pvc.GetNamespace()).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+	if _, err = clientSet.CoreV1().PersistentVolumeClaims(pvc.GetNamespace()).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
 		return err
 	}
 

@@ -15,14 +15,12 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
 )
 
-func (a *App) CreateValidator(
-	ctx context.Context,
+func (a *App) buildCreateValidatorPod(
 	pubKey string,
-	account *Account,
 	nodeInfo *NodeInfo,
 	params *Params,
 	node string,
-) error {
+) *corev1.Pod {
 
 	var (
 		dataVolumeMount = corev1.VolumeMount{
@@ -56,6 +54,7 @@ func (a *App) CreateValidator(
 					ImagePullPolicy: a.pullPolicy,
 					Command:         []string{a.binary},
 					Args:            a.cmd.RecoverAccountArgs(defaultAccountName),
+					Env:             a.appEnv(),
 					Stdin:           true,
 					StdinOnce:       true,
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -84,6 +83,7 @@ func (a *App) CreateValidator(
 						sdkcmd.WithOptionalArg(sdkcmd.Identity, nodeInfo.Identity),
 						sdkcmd.WithArg(sdkcmd.Node, node),
 					),
+					Env:             a.appEnv(),
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
 					SecurityContext: k8s.RestrictedSecurityContext(),
 				},
@@ -94,6 +94,18 @@ func (a *App) CreateValidator(
 			ActiveDeadlineSeconds: ptr.To[int64](300),
 		},
 	}
+	return pod
+}
+
+func (a *App) CreateValidator(
+	ctx context.Context,
+	pubKey string,
+	account *Account,
+	nodeInfo *NodeInfo,
+	params *Params,
+	node string,
+) error {
+	pod := a.buildCreateValidatorPod(pubKey, nodeInfo, params, node)
 
 	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {
 		return err

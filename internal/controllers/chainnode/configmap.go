@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -341,11 +342,16 @@ func (r *Reconciler) ensureConfigMap(ctx context.Context, cm *corev1.ConfigMap) 
 func (r *Reconciler) getGeneratedConfigs(ctx context.Context, app *chainutils.App, chainNode *appsv1.ChainNode) (map[string]interface{}, error) {
 	logger := log.FromContext(ctx)
 
-	lock := r.configLocks.getLockForVersion(chainNode.GetAppImage())
+	cacheKey, err := configGenerationCacheKey(chainNode)
+	if err != nil {
+		return nil, fmt.Errorf("building config generation cache key: %w", err)
+	}
+
+	lock := r.configLocks.getLockForVersion(cacheKey)
 	lock.Lock()
 	defer lock.Unlock()
 
-	configs, err := r.getConfigsFromCache(chainNode.GetAppImage())
+	configs, err := r.getConfigsFromCache(cacheKey)
 	if err != nil {
 		return nil, err
 	}
@@ -369,8 +375,17 @@ func (r *Reconciler) getGeneratedConfigs(ctx context.Context, app *chainutils.Ap
 		}
 	}
 
-	r.storeConfigsInCache(chainNode.GetAppImage(), decodedConfigs)
-	return r.getConfigsFromCache(chainNode.GetAppImage())
+	r.storeConfigsInCache(cacheKey, decodedConfigs)
+	return r.getConfigsFromCache(cacheKey)
+}
+
+func configGenerationCacheKey(chainNode *appsv1.ChainNode) (string, error) {
+	envJSON, err := json.Marshal(chainNode.Spec.Config.GetEnv())
+	if err != nil {
+		return "", err
+	}
+	envHash := sha256.Sum256(envJSON)
+	return fmt.Sprintf("%s:%x", chainNode.GetAppImage(), envHash), nil
 }
 
 func (r *Reconciler) storeConfigsInCache(key string, configs map[string]interface{}) {

@@ -33,6 +33,62 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/datasnapshot"
 )
 
+func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	restoreSize := resource.MustParse("1Gi")
+	snapshot := &snapshotv1.VolumeSnapshot{
+		TypeMeta: metav1.TypeMeta{APIVersion: snapshotv1.SchemeGroupVersion.String(), Kind: "VolumeSnapshot"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "snapshot",
+			Namespace:   "default",
+			Annotations: map[string]string{},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{RestoreSize: &restoreSize},
+	}
+	env := []corev1.EnvVar{
+		{Name: "HOME", Value: "/home/app"},
+		{
+			Name: "FROM_SECRET",
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "app-secret"},
+				Key:                  "token",
+			}},
+		},
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{
+			App:         appsv1.AppSpec{Image: "example/app", App: "appd"},
+			Config:      &appsv1.Config{Env: env},
+			Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{}},
+		},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain"},
+	}
+	clientSet := fake.NewSimpleClientset()
+	reconciler := &Reconciler{
+		Client:            fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build(),
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+	}
+
+	require.NoError(t, reconciler.startSnapshotIntegrityCheck(context.Background(), chainNode, snapshot))
+	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-ichk", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	require.Len(t, job.Spec.Template.Spec.InitContainers, 2)
+	assert.Empty(t, job.Spec.Template.Spec.InitContainers[0].Env)
+	require.Equal(t, env, job.Spec.Template.Spec.InitContainers[1].Env)
+	job.Spec.Template.Spec.InitContainers[1].Env[1].ValueFrom.SecretKeyRef.Name = "mutated"
+	assert.Equal(t, "app-secret", chainNode.Spec.Config.Env[1].ValueFrom.SecretKeyRef.Name)
+	assert.Empty(t, job.Spec.Template.Spec.Containers[0].Env)
+}
+
 func TestGetTarballExportProvider(t *testing.T) {
 	reconciler := &Reconciler{opts: &controllers.ControllerRunOptions{}}
 	tests := []struct {
