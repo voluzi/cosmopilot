@@ -489,3 +489,37 @@ func TestEnsurePodDisruptionBudgetsDoesNotDeleteSupplementalPDB(t *testing.T) {
 	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
 	assert.NotNil(t, getPdb(t, r, "default", "custom-supplemental"))
 }
+
+func TestEnsurePodDisruptionBudgetsDeletesRemovedGroupPDBWithoutGroupSelector(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-removed", Namespace: "default"},
+		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			controllers.LabelChainNodeSet: nodeSet.Name,
+		}}},
+	}))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+	assert.Nil(t, getPdb(t, r, "default", "test-nodeset-removed"))
+}
+
+func TestDeleteStalePodDisruptionBudgetsDuringFinalization(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-removed", Namespace: "default"},
+		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			controllers.LabelChainNodeSet:      nodeSet.Name,
+			controllers.LabelChainNodeSetGroup: "removed",
+		}}},
+	}))
+
+	require.NoError(t, r.deleteStalePodDisruptionBudgets(context.Background(), nodeSet, nil))
+	assert.Nil(t, getPdb(t, r, "default", "test-nodeset-removed"))
+}

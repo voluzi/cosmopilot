@@ -109,6 +109,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 	if !nodeSet.GetDeletionTimestamp().IsZero() {
+		// Legacy PDBs created before controller ownership was added are not garbage-collected.
+		// Remove them from finalization too, because an unhealthy ChainNodeSet may never reach
+		// normal PDB reconciliation before it is deleted.
+		if err := r.deleteStalePodDisruptionBudgets(ctx, nodeSet, nil); err != nil {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+
 		done, err := r.finalizeCosmosignerOwner(ctx, nodeSet)
 		if err != nil || !done {
 			return ctrl.Result{RequeueAfter: time.Second}, err

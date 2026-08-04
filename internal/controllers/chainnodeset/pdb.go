@@ -163,7 +163,14 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	labels := pdb.Spec.Selector.MatchLabels
 	group := labels[controllers.LabelChainNodeSetGroup]
 	if group == "" {
-		return false
+		// Regular groups configured to ignore the group label still used the generated
+		// <nodeset>-<group> name. The exact prefix contract distinguishes those legacy
+		// resources from supplemental PDBs with custom names.
+		if labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue {
+			return false
+		}
+		prefix := nodeSet.GetName() + "-"
+		return len(pdb.GetName()) > len(prefix) && pdb.GetName()[:len(prefix)] == prefix
 	}
 
 	name := fmt.Sprintf("%s-%s", nodeSet.GetName(), group)
