@@ -1176,6 +1176,37 @@ func TestEnsureVolumeSnapshotsKeepsRetainedExportRecordWhenSnapshotDeleteFails(t
 	assert.Equal(t, "retained-object", storedNode.Status.SnapshotExports[0].ObjectName)
 }
 
+func TestEnsureVolumeSnapshotsKeepsRetainedExportRecordWhileSnapshotTerminates(t *testing.T) {
+	node := destinationTestChainNode(nil)
+	retention := "1h"
+	node.Spec.Persistence.Snapshots.Retention = &retention
+	node.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+	snapshot := destinationTestSnapshot()
+	snapshot.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-2 * time.Hour))
+	snapshot.Finalizers = []string{"snapshot.storage.kubernetes.io/volumesnapshot-bound-protection"}
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady:  "true",
+		controllers.AnnotationExportingTarball:  tarballFinished,
+		controllers.AnnotationSnapshotRetention: retention,
+	}
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "retained", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ObjectName: "retained-object",
+		Phase: appsv1.SnapshotExportPhaseUploaded, DeleteOnExpire: false,
+		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket"},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	terminating := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), terminating))
+	require.NotNil(t, terminating.DeletionTimestamp)
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
+	require.Len(t, storedNode.Status.SnapshotExports, 1, "terminating snapshot must retain historical export identity")
+	assert.Equal(t, "retained-object", storedNode.Status.SnapshotExports[0].ObjectName)
+}
+
 func TestPruneRetainedSnapshotExportsRetriesAfterSnapshotDeletion(t *testing.T) {
 	node := destinationTestChainNode(nil)
 	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{

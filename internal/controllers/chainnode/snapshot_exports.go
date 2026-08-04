@@ -287,6 +287,25 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 	return err
 }
 
+func (r *Reconciler) removeRetainedSnapshotExportIfGone(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	snapshot *snapshotv1.VolumeSnapshot,
+	id string,
+) error {
+	current := &snapshotv1.VolumeSnapshot{}
+	err := r.Get(ctx, client.ObjectKeyFromObject(snapshot), current)
+	if err == nil && current.UID == snapshot.UID {
+		// Delete can succeed while a CSI finalizer keeps the VolumeSnapshot terminating.
+		// Preserve its historical remote-export identity until a later relist confirms it is gone.
+		return nil
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return r.removeSnapshotExport(ctx, chainNode, id)
+}
+
 func (r *Reconciler) removeSnapshotExport(ctx context.Context, chainNode *appsv1.ChainNode, id string) error {
 	_, err := r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
 		kept := make([]appsv1.SnapshotExportStatus, 0, len(fresh.Status.SnapshotExports))

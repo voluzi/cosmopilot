@@ -352,7 +352,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						return err
 					}
 					if !deleteTarball && retainedExport != nil {
-						if err = r.removeSnapshotExport(ctx, chainNode, retainedExport.ID); err != nil {
+						if err = r.removeRetainedSnapshotExportIfGone(ctx, chainNode, &snapshot, retainedExport.ID); err != nil {
 							return err
 						}
 					}
@@ -418,7 +418,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				return err
 			}
 			if !deleteTarball && retainedExport != nil {
-				if err = r.removeSnapshotExport(ctx, chainNode, retainedExport.ID); err != nil {
+				if err = r.removeRetainedSnapshotExportIfGone(ctx, chainNode, &snapshot, retainedExport.ID); err != nil {
 					return err
 				}
 			}
