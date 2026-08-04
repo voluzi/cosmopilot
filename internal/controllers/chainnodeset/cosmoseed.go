@@ -80,6 +80,11 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 	if err != nil {
 		return err
 	}
+	if pending, err := r.retireLegacyCosmoseedStatefulSetBeforeScaleUp(ctx, nodeSet, ss); err != nil {
+		return err
+	} else if pending {
+		return fmt.Errorf("waiting for legacy Cosmoseed StatefulSet claim-template migration")
+	}
 
 	if err = r.ensureStatefulSet(ctx, ss); err != nil {
 		return err
@@ -151,6 +156,29 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 	}
 
 	return nil
+}
+
+func (r *Reconciler) retireLegacyCosmoseedStatefulSetBeforeScaleUp(
+	ctx context.Context,
+	nodeSet *v1.ChainNodeSet,
+	desired *appsv1.StatefulSet,
+) (bool, error) {
+	current := &appsv1.StatefulSet{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(desired), current); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if ptr.Deref(desired.Spec.Replicas, 0) <= ptr.Deref(current.Spec.Replicas, 0) ||
+		reflect.DeepEqual(current.Spec.VolumeClaimTemplates, desired.Spec.VolumeClaimTemplates) {
+		return false, nil
+	}
+	if !metav1.IsControlledBy(current, nodeSet) {
+		return false, fmt.Errorf("cannot migrate Cosmoseed StatefulSet %s: controller ownership is not the ChainNodeSet", current.GetName())
+	}
+	uid := current.GetUID()
+	if err := r.Delete(ctx, current, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {

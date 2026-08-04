@@ -126,10 +126,12 @@ field:
 helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply -f -
 ```
 
-Only after that command succeeds, update existing manifests that use `deleteWithNode: true` with
-`.spec.deletionPolicy.dataVolumes: Delete` if PVC deletion is still intended, apply those migrated
-resources, and then run the Helm upgrade. The legacy field is no longer consulted during root
-deletion; without this migration, those PVCs are retained by default.
+Only after that command succeeds, review existing manifests that use `deleteWithNode: true`. The new
+`.spec.deletionPolicy.dataVolumes: Delete` is broader than the legacy per-volume flag: it deletes the
+main node PVC, every additional node PVC, and ChainNodeSet Cosmoseed PVCs, not only the volume that
+previously set `deleteWithNode`. Set it only when deletion of that entire data-volume class is
+intended, apply the reviewed resources, and then run the Helm upgrade. The legacy field is no longer
+consulted during root deletion; without this migration, PVCs are retained by default.
 :::
 
 | Field | Resources covered |

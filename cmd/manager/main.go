@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -13,7 +12,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -94,15 +92,9 @@ func main() {
 		log.Fatalf("unable to create clientset: %v", err)
 	}
 
-	// Protect pre-upgrade roots before controllers start and can observe deletion events. New roots
-	// still receive the same finalizer in their first reconcile.
-	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
-	if err != nil {
-		setupLog.Error(err, "unable to create startup cleanup client")
-		os.Exit(1)
-	}
-	if err := resourcecleanup.ProtectExistingRoots(context.Background(), directClient); err != nil {
-		setupLog.Error(err, "unable to protect existing cleanup roots")
+	// Register before controllers so the elected worker leader starts the upgrade migration first.
+	if err := mgr.Add(&resourcecleanup.RootProtector{Client: mgr.GetClient(), WorkerName: runOpts.WorkerName}); err != nil {
+		setupLog.Error(err, "unable to register existing-root protection")
 		os.Exit(1)
 	}
 

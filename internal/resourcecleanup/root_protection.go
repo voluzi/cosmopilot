@@ -10,22 +10,41 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// ProtectExistingRoots installs the durable-resource cleanup finalizer on every existing root before
-// controllers begin processing deletion events. This closes the upgrade window where an old root
-// could be deleted before its first normal post-upgrade reconcile installed the new finalizer.
-func ProtectExistingRoots(ctx context.Context, c client.Client) error {
-	if err := protectChainNodes(ctx, c); err != nil {
-		return err
-	}
-	return protectChainNodeSets(ctx, c)
+// RootProtector installs cleanup finalizers after this manager instance acquires leadership. It stays
+// alive after the one-time migration so successful completion does not stop the manager.
+type RootProtector struct {
+	Client     client.Client
+	WorkerName string
 }
 
-func protectChainNodes(ctx context.Context, c client.Client) error {
+func (p *RootProtector) Start(ctx context.Context) error {
+	if err := ProtectExistingRoots(ctx, p.Client, p.WorkerName); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func (*RootProtector) NeedLeaderElection() bool { return true }
+
+// ProtectExistingRoots installs the durable-resource cleanup finalizer on existing roots assigned
+// to workerName. The empty worker name intentionally matches only unpartitioned roots.
+func ProtectExistingRoots(ctx context.Context, c client.Client, workerName string) error {
+	if err := protectChainNodes(ctx, c, workerName); err != nil {
+		return err
+	}
+	return protectChainNodeSets(ctx, c, workerName)
+}
+
+func protectChainNodes(ctx context.Context, c client.Client, workerName string) error {
 	list := &appsv1.ChainNodeList{}
 	if err := c.List(ctx, list); err != nil {
 		return err
 	}
 	for i := range list.Items {
+		if list.Items[i].GetLabels()["cosmopilot.voluzi.com/worker-name"] != workerName {
+			continue
+		}
 		if err := protectRoot(ctx, c, &list.Items[i]); err != nil {
 			return err
 		}
@@ -33,12 +52,15 @@ func protectChainNodes(ctx context.Context, c client.Client) error {
 	return nil
 }
 
-func protectChainNodeSets(ctx context.Context, c client.Client) error {
+func protectChainNodeSets(ctx context.Context, c client.Client, workerName string) error {
 	list := &appsv1.ChainNodeSetList{}
 	if err := c.List(ctx, list); err != nil {
 		return err
 	}
 	for i := range list.Items {
+		if list.Items[i].GetLabels()["cosmopilot.voluzi.com/worker-name"] != workerName {
+			continue
+		}
 		if err := protectRoot(ctx, c, &list.Items[i]); err != nil {
 			return err
 		}

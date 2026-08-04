@@ -7,12 +7,33 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
+
+func (r *Reconciler) migrateExistingAccountSecret(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if !chainNode.IsValidator() {
+		return nil
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: chainNode.GetNamespace(),
+		Name:      chainNode.Spec.Validator.GetAccountSecretName(chainNode),
+	}, secret); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	managed, changed, err := resourcecleanup.PrepareGeneratedResource(
+		secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false,
+	)
+	if err != nil || !managed || !changed {
+		return err
+	}
+	return r.Update(ctx, secret)
+}
 
 func (r *Reconciler) ensureAccount(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)

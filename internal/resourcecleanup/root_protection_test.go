@@ -27,7 +27,7 @@ func TestProtectExistingRootsInstallsCleanupFinalizer(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, nodeSet).Build()
 
-	if err := ProtectExistingRoots(context.Background(), c); err != nil {
+	if err := ProtectExistingRoots(context.Background(), c, ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, object := range []client.Object{node, nodeSet} {
@@ -52,7 +52,7 @@ func TestProtectExistingRootsDoesNotMutateAlreadyDeletingRoot(t *testing.T) {
 	}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
 
-	if err := ProtectExistingRoots(context.Background(), c); err != nil {
+	if err := ProtectExistingRoots(context.Background(), c, ""); err != nil {
 		t.Fatal(err)
 	}
 	fresh := &appsv1.ChainNode{}
@@ -75,7 +75,7 @@ func TestProtectExistingRootsRetriesConflictWithoutClobberingConcurrentFinalizer
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
 	c := &conflictOnceRootClient{Client: base}
 
-	if err := ProtectExistingRoots(context.Background(), c); err != nil {
+	if err := ProtectExistingRoots(context.Background(), c, ""); err != nil {
 		t.Fatal(err)
 	}
 	if c.patchAttempts != 2 {
@@ -89,6 +89,39 @@ func TestProtectExistingRootsRetriesConflictWithoutClobberingConcurrentFinalizer
 		if !containsString(fresh.GetFinalizers(), finalizer) {
 			t.Fatalf("finalizers %v do not contain %q", fresh.GetFinalizers(), finalizer)
 		}
+	}
+}
+
+func TestProtectExistingRootsScopesFinalizersToWorker(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	mine := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "mine", Namespace: "default", Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-a"},
+	}}
+	other := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "other", Namespace: "default", Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-b"},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mine, other).Build()
+
+	if err := ProtectExistingRoots(context.Background(), c, "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+	for object, want := range map[client.Object]bool{mine: true, other: false} {
+		fresh := object.DeepCopyObject().(client.Object)
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(object), fresh); err != nil {
+			t.Fatal(err)
+		}
+		if got := containsString(fresh.GetFinalizers(), Finalizer); got != want {
+			t.Fatalf("%s cleanup finalizer = %v, want %v", object.GetName(), got, want)
+		}
+	}
+}
+
+func TestRootProtectorRequiresLeaderElection(t *testing.T) {
+	if !(&RootProtector{}).NeedLeaderElection() {
+		t.Fatal("root protection must run only after leadership is acquired")
 	}
 }
 

@@ -281,6 +281,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{}, err
 		}
 	}
+	// Migrate pre-upgrade account Secrets before the status-gated account path can skip them.
+	if err = r.migrateExistingAccountSecret(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if chainNode.RequiresAccount() {
 		logger.V(1).Info("ensure account exists")

@@ -141,6 +141,29 @@ func TestFinalizeResourcesRetainsControlledLegacyAccountAfterValidatorRemoval(t 
 	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
+func TestMigrateExistingAccountSecretRunsAfterAccountStatusCompleted(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"},
+		Spec:       appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}},
+		Status:     appsv1.ChainNodeStatus{AccountAddress: "cosmos1completed"},
+	}
+	legacy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Spec.Validator.GetAccountSecretName(node), Namespace: node.Namespace, UID: "secret-uid"},
+		Data:       map[string][]byte{MnemonicKey: []byte("legacy mnemonic")},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(node, legacy, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, legacy).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	require.False(t, node.RequiresAccount())
+	require.NoError(t, r.migrateExistingAccountSecret(context.Background(), node))
+	fresh := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(legacy), fresh))
+	assert.Nil(t, metav1.GetControllerOf(fresh))
+	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+}
+
 func TestFinalizeResourcesRetainsControlledLegacyDataVolumesRemovedFromSpec(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{
