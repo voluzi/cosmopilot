@@ -131,6 +131,8 @@ func TestS3DeleteSnapshotUsesSameAuthentication(t *testing.T) {
 
 	job := getS3Job(t, provider, "snapshot-delete")
 	assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
+	require.NotNil(t, job.Spec.BackoffLimit)
+	assert.Zero(t, *job.Spec.BackoffLimit)
 	container := job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, "aws-credentials", secretEnvFromName(container.EnvFrom))
 	assert.Equal(t, []string{"s3", "delete", "snapshots", "snapshot"}, container.Args)
@@ -303,6 +305,8 @@ func TestS3DeleteSnapshotForUploadReturnsPairedActivatedDeletion(t *testing.T) {
 	deleteJob := getS3Job(t, provider, "snapshot-delete")
 	require.NotNil(t, deleteJob.Spec.Suspend)
 	assert.False(t, *deleteJob.Spec.Suspend)
+	require.NotNil(t, deleteJob.Spec.BackoffLimit)
+	assert.Equal(t, int32(5), *deleteJob.Spec.BackoffLimit)
 	assert.Equal(t, s3Exporter, deleteJob.Labels[labelCleanupExporter])
 	assert.Equal(t, provider.Owner.GetName(), deleteJob.Labels[labelCleanupOwner])
 	assert.Equal(t, typeUpload, deleteJob.Labels[labelCleanupType])

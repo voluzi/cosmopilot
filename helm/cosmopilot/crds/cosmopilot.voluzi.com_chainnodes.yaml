@@ -6385,6 +6385,16 @@ spec:
                       type: string
                     concurrentJobs:
                       type: integer
+                    deleteAttempts:
+                      description: DeleteAttempts is the number of logical remote-delete
+                        attempts reserved for this export.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    deleteExhausted:
+                      description: DeleteExhausted records that the final logical
+                        delete attempt was observed to fail.
+                      type: boolean
                     deleteOnExpire:
                       description: DeleteOnExpire records the cleanup policy bound
                         to this upload.
@@ -6432,7 +6442,16 @@ spec:
                       type: object
                     id:
                       type: string
+                    lastDeleteError:
+                      description: LastDeleteError is the terminal error reported
+                        by the most recent logical delete attempt.
+                      type: string
                     message:
+                      type: string
+                    nextDeleteRetryAt:
+                      description: NextDeleteRetryAt is when the controller may reserve
+                        the next logical delete attempt.
+                      format: date-time
                       type: string
                     objectName:
                       type: string

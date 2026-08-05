@@ -439,7 +439,7 @@ func TestSnapshotExportAcknowledgementPatchFailureRetriesMetadataConsumption(t *
 	assert.Equal(t, appsv1.SnapshotExportPhaseAcknowledged, stored.Status.SnapshotExports[0].Phase)
 }
 
-func TestCleanupRequiredWaitsForFailedDeleteJobRemovalBeforeRetrying(t *testing.T) {
+func TestFailedDeleteJobPersistsRetryBeforeForegroundRemoval(t *testing.T) {
 	node := destinationTestChainNode(&appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "current", Region: "eu-west-1"}})
 	snapshot := destinationTestSnapshot()
 	export := appsv1.SnapshotExportStatus{
@@ -491,14 +491,16 @@ func TestCleanupRequiredWaitsForFailedDeleteJobRemovalBeforeRetrying(t *testing.
 
 	deleted, err := reconciler.isTarballDeleted(context.Background(), node, snapshot)
 	assert.False(t, deleted)
-	require.ErrorIs(t, err, datasnapshot.ErrStaleJobTerminating)
+	require.NoError(t, err)
 	storedNode := &appsv1.ChainNode{}
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
 	require.Len(t, storedNode.Status.SnapshotExports, 1)
-	assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, storedNode.Status.SnapshotExports[0].Phase)
+	assert.Equal(t, appsv1.SnapshotExportPhaseDeleting, storedNode.Status.SnapshotExports[0].Phase)
+	assert.Equal(t, int32(1), storedNode.Status.SnapshotExports[0].DeleteAttempts)
+	assert.NotEmpty(t, storedNode.Status.SnapshotExports[0].LastDeleteError)
+	assert.NotNil(t, storedNode.Status.SnapshotExports[0].NextDeleteRetryAt)
 	condition := findCondition(storedNode.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Nil(t, condition)
 }
 
 func TestCleanupRequiredSnapshotDoesNotBlockUnrelatedCountRetention(t *testing.T) {
@@ -1298,4 +1300,525 @@ func TestSnapshotExportStatusIDIsStableAndDNSLabelSafe(t *testing.T) {
 		string(first.Destination.Provider), first.Destination.Bucket, first.Destination.Endpoint,
 	}, "\x00")))
 	assert.Equal(t, fmt.Sprintf("export-%x", digest[:8]), first.ID)
+}
+
+func TestSnapshotExportDeleteRetriesAreDurableAndCapped(t *testing.T) {
+	tests := []struct {
+		name         string
+		current      *appsv1.ExportTarballConfig
+		destination  appsv1.SnapshotExportDestination
+		expectedArgs []string
+	}{
+		{
+			name:    "S3",
+			current: &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "current-gcs"}},
+			destination: appsv1.SnapshotExportDestination{
+				Provider: appsv1.SnapshotExportProviderS3,
+				Bucket:   "original-s3",
+				Region:   "eu-west-1",
+			},
+			expectedArgs: []string{"s3", "delete", "original-s3", "recorded-object"},
+		},
+		{
+			name:    "GCS",
+			current: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "current-s3", Region: "us-east-1"}},
+			destination: appsv1.SnapshotExportDestination{
+				Provider: appsv1.SnapshotExportProviderGCS,
+				Bucket:   "original-gcs",
+			},
+			expectedArgs: []string{"gcs", "delete", "original-gcs", "recorded-object"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
+			node := destinationTestChainNode(tt.current)
+			snapshot := destinationTestSnapshot()
+			node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "recorded-export",
+				SnapshotName:   snapshot.Name,
+				SnapshotUID:    snapshot.UID,
+				ObjectName:     "recorded-object",
+				Destination:    tt.destination,
+				Phase:          appsv1.SnapshotExportPhaseUploaded,
+				DeleteOnExpire: true,
+			}}
+			reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+			reconciler.snapshotDeleteNow = func() time.Time { return now }
+			clientSet := reconciler.snapshotKubernetesClient().(*fake.Clientset)
+			createdJobs := 0
+			clientSet.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				createAction := action.(k8stesting.CreateAction)
+				job := createAction.GetObject().(*batchv1.Job).DeepCopy()
+				createdJobs++
+				job.UID = types.UID(fmt.Sprintf("delete-uid-%d", createdJobs))
+				err := clientSet.Tracker().Create(batchv1.SchemeGroupVersion.WithResource("jobs"), job, job.Namespace)
+				return true, job, err
+			})
+
+			deleted, err := reconciler.isTarballDeleted(context.Background(), node, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			job, err := clientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), "recorded-object-delete", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, types.UID("delete-uid-1"), job.UID)
+			assert.Equal(t, tt.expectedArgs, job.Spec.Template.Spec.Containers[0].Args)
+			stored := getDestinationTestNode(t, reconciler, node)
+			require.Len(t, stored.Status.SnapshotExports, 1)
+			assert.Equal(t, int32(1), stored.Status.SnapshotExports[0].DeleteAttempts)
+			assert.Equal(t, appsv1.SnapshotExportPhaseDeleting, stored.Status.SnapshotExports[0].Phase)
+			assert.Equal(t, tt.destination, stored.Status.SnapshotExports[0].Destination)
+
+			restarted := &Reconciler{
+				Client:            reconciler.Client,
+				snapshotClientSet: reconciler.snapshotClientSet,
+				Scheme:            reconciler.Scheme,
+				opts:              reconciler.opts,
+				recorder:          record.NewFakeRecorder(20),
+				snapshotDeleteNow: func() time.Time { return now },
+			}
+			deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			assert.Equal(t, 1, createdJobs)
+			stored = getDestinationTestNode(t, restarted, node)
+			assert.Equal(t, int32(1), stored.Status.SnapshotExports[0].DeleteAttempts)
+
+			require.NoError(t, clientSet.BatchV1().Jobs(node.Namespace).Delete(
+				context.Background(), job.Name, metav1.DeleteOptions{},
+			))
+			deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			stored = getDestinationTestNode(t, restarted, node)
+			vanished := stored.Status.SnapshotExports[0]
+			assert.Equal(t, int32(1), vanished.DeleteAttempts)
+			assert.Contains(t, vanished.LastDeleteError, "disappeared before completion")
+			require.NotNil(t, vanished.NextDeleteRetryAt)
+			firstRetryAt := vanished.NextDeleteRetryAt.DeepCopy()
+
+			now = firstRetryAt.Add(-time.Second)
+			for range 4 {
+				deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+				require.NoError(t, err)
+				assert.False(t, deleted)
+				stored = getDestinationTestNode(t, restarted, node)
+				assert.Equal(t, int32(1), stored.Status.SnapshotExports[0].DeleteAttempts)
+				assert.Equal(t, firstRetryAt, stored.Status.SnapshotExports[0].NextDeleteRetryAt)
+			}
+			assert.Equal(t, 1, createdJobs)
+
+			now = firstRetryAt.Time
+			deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			secondJob, err := clientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), "recorded-object-delete", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, types.UID("delete-uid-2"), secondJob.UID)
+			stored = getDestinationTestNode(t, restarted, node)
+			assert.Equal(t, int32(2), stored.Status.SnapshotExports[0].DeleteAttempts)
+			assert.Nil(t, stored.Status.SnapshotExports[0].NextDeleteRetryAt)
+
+			secondJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+				Reason: "AccessDenied", Message: "permanent provider denial",
+			}}
+			_, err = clientSet.BatchV1().Jobs(node.Namespace).UpdateStatus(context.Background(), secondJob, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			stored = getDestinationTestNode(t, restarted, node)
+			secondFailure := stored.Status.SnapshotExports[0]
+			assert.Equal(t, int32(2), secondFailure.DeleteAttempts)
+			assert.Contains(t, secondFailure.LastDeleteError, "AccessDenied")
+			require.NotNil(t, secondFailure.NextDeleteRetryAt)
+
+			now = secondFailure.NextDeleteRetryAt.Time
+			deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			thirdJob, err := clientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), "recorded-object-delete", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, types.UID("delete-uid-3"), thirdJob.UID)
+			thirdJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+				Reason: "AccessDenied", Message: "permanent provider denial",
+			}}
+			_, err = clientSet.BatchV1().Jobs(node.Namespace).UpdateStatus(context.Background(), thirdJob, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+
+			stored = getDestinationTestNode(t, restarted, node)
+			terminal := stored.Status.SnapshotExports[0]
+			assert.Equal(t, tarballDeleteMaxAttempts, terminal.DeleteAttempts)
+			assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, terminal.Phase)
+			assert.Nil(t, terminal.NextDeleteRetryAt)
+			assert.Equal(t, tt.destination, terminal.Destination)
+			condition := findCondition(stored.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
+			require.NotNil(t, condition)
+			assert.Equal(t, appsv1.ReasonTarballDeleteAttemptsExhausted, condition.Reason)
+			assert.Contains(t, condition.Message, string(tt.destination.Provider))
+			assert.Contains(t, condition.Message, tt.destination.Bucket)
+			assert.Contains(t, condition.Message, "recorded-object")
+			assert.Contains(t, condition.Message, strconv.Itoa(int(tarballDeleteMaxAttempts)))
+			assert.Contains(t, condition.Message, "AccessDenied")
+			assert.Contains(t, condition.Message, "permanent provider denial")
+
+			now = now.Add(24 * time.Hour)
+			for range 4 {
+				deleted, err = restarted.isTarballDeleted(context.Background(), stored, snapshot)
+				require.NoError(t, err)
+				assert.False(t, deleted)
+				stored = getDestinationTestNode(t, restarted, node)
+			}
+			assert.Equal(t, 3, createdJobs)
+			assert.Equal(t, tarballDeleteMaxAttempts, stored.Status.SnapshotExports[0].DeleteAttempts)
+		})
+	}
+}
+
+func TestPendingSnapshotExportRetryWaitsForRecordedReference(t *testing.T) {
+	tests := []struct {
+		name        string
+		destination appsv1.SnapshotExportDestination
+		reference   client.Object
+	}{
+		{
+			name: "S3 credentials Secret",
+			destination: appsv1.SnapshotExportDestination{
+				Provider: appsv1.SnapshotExportProviderS3,
+				Bucket:   "recorded-s3",
+				Region:   "eu-west-1",
+				CredentialsSecret: &appsv1.SnapshotExportSecretReference{
+					Name: "recorded-aws",
+				},
+			},
+			reference: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "recorded-aws", Namespace: "default"},
+				Data: map[string][]byte{
+					"AWS_ACCESS_KEY_ID":     []byte("access"),
+					"AWS_SECRET_ACCESS_KEY": []byte("secret"),
+				},
+			},
+		},
+		{
+			name: "GCS ServiceAccount",
+			destination: appsv1.SnapshotExportDestination{
+				Provider:           appsv1.SnapshotExportProviderGCS,
+				Bucket:             "recorded-gcs",
+				ServiceAccountName: "recorded-gcs-sa",
+			},
+			reference: &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "recorded-gcs-sa", Namespace: "default"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
+			retryAt := metav1.NewTime(now.Add(-time.Minute))
+			node := destinationTestChainNode(nil)
+			node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:                "recorded-export",
+				SnapshotName:      "snapshot",
+				SnapshotUID:       "snapshot-uid",
+				ObjectName:        "recorded-object",
+				Destination:       tt.destination,
+				Phase:             appsv1.SnapshotExportPhaseDeleting,
+				DeleteAttempts:    2,
+				LastDeleteError:   "delete attempt 2 failed: transient provider error",
+				NextDeleteRetryAt: &retryAt,
+			}}
+			reconciler := destinationTestReconciler(t, node, nil)
+			reconciler.snapshotDeleteNow = func() time.Time { return now }
+			clientSet := reconciler.snapshotKubernetesClient().(*fake.Clientset)
+
+			pending, err := reconciler.reconcilePendingTarballDeletions(context.Background(), node)
+			require.NoError(t, err)
+			assert.True(t, pending)
+			stored := getDestinationTestNode(t, reconciler, node)
+			require.Len(t, stored.Status.SnapshotExports, 1)
+			export := &stored.Status.SnapshotExports[0]
+			assert.Equal(t, int32(2), export.DeleteAttempts)
+			assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, export.Phase)
+			assert.False(t, export.DeleteExhausted)
+			require.NotNil(t, export.NextDeleteRetryAt)
+			assert.True(t, export.NextDeleteRetryAt.Time.Equal(retryAt.Time))
+			condition := findCondition(stored.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
+			require.NotNil(t, condition)
+			assert.Equal(t, appsv1.ReasonTarballCleanupRequired, condition.Reason)
+			jobs, err := clientSet.BatchV1().Jobs(node.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, jobs.Items)
+
+			switch reference := tt.reference.(type) {
+			case *corev1.Secret:
+				_, err = clientSet.CoreV1().Secrets(node.Namespace).Create(
+					context.Background(), reference.DeepCopy(), metav1.CreateOptions{},
+				)
+			case *corev1.ServiceAccount:
+				_, err = clientSet.CoreV1().ServiceAccounts(node.Namespace).Create(
+					context.Background(), reference.DeepCopy(), metav1.CreateOptions{},
+				)
+			default:
+				t.Fatalf("unsupported reference type %T", reference)
+			}
+			require.NoError(t, err)
+
+			pending, err = reconciler.reconcilePendingTarballDeletions(context.Background(), stored)
+			require.NoError(t, err)
+			assert.True(t, pending)
+			stored = getDestinationTestNode(t, reconciler, node)
+			export = &stored.Status.SnapshotExports[0]
+			assert.Equal(t, tarballDeleteMaxAttempts, export.DeleteAttempts)
+			assert.Equal(t, appsv1.SnapshotExportPhaseDeleting, export.Phase)
+			assert.False(t, export.DeleteExhausted)
+			assert.Nil(t, export.NextDeleteRetryAt)
+			job, err := clientSet.BatchV1().Jobs(node.Namespace).Get(
+				context.Background(), "recorded-object-delete", metav1.GetOptions{},
+			)
+			require.NoError(t, err)
+			require.NotNil(t, job.Spec.BackoffLimit)
+			assert.Zero(t, *job.Spec.BackoffLimit)
+		})
+	}
+}
+
+func TestSnapshotExportReferenceLossDoesNotExhaustActiveFinalDeleteAttempt(t *testing.T) {
+	tests := []struct {
+		name        string
+		destination appsv1.SnapshotExportDestination
+		reference   client.Object
+	}{
+		{
+			name: "S3 credentials Secret",
+			destination: appsv1.SnapshotExportDestination{
+				Provider: appsv1.SnapshotExportProviderS3,
+				Bucket:   "recorded-s3",
+				Region:   "eu-west-1",
+				CredentialsSecret: &appsv1.SnapshotExportSecretReference{
+					Name: "recorded-aws",
+				},
+			},
+			reference: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "recorded-aws", Namespace: "default"},
+				Data: map[string][]byte{
+					"AWS_ACCESS_KEY_ID":     []byte("access"),
+					"AWS_SECRET_ACCESS_KEY": []byte("secret"),
+				},
+			},
+		},
+		{
+			name: "GCS ServiceAccount",
+			destination: appsv1.SnapshotExportDestination{
+				Provider:           appsv1.SnapshotExportProviderGCS,
+				Bucket:             "recorded-gcs",
+				ServiceAccountName: "recorded-gcs-sa",
+			},
+			reference: &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: "recorded-gcs-sa", Namespace: "default"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := destinationTestChainNode(nil)
+			snapshot := destinationTestSnapshot()
+			node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:              "recorded-export",
+				SnapshotName:    snapshot.Name,
+				SnapshotUID:     snapshot.UID,
+				ObjectName:      "recorded-object",
+				Destination:     tt.destination,
+				Phase:           appsv1.SnapshotExportPhaseDeleting,
+				DeleteAttempts:  tarballDeleteMaxAttempts,
+				LastDeleteError: "delete attempt 2 failed: transient provider error",
+			}}
+			reconciler := destinationTestReconciler(t, node, []client.Object{snapshot, tt.reference})
+			clientSet := reconciler.snapshotKubernetesClient().(*fake.Clientset)
+
+			exporter, err := reconciler.tarballProviderForExport(node, &node.Status.SnapshotExports[0])
+			require.NoError(t, err)
+			status, err := exporter.DeleteSnapshot(context.Background(), "recorded-object")
+			require.NoError(t, err)
+			assert.Equal(t, datasnapshot.SnapshotActive, status)
+			job, err := clientSet.BatchV1().Jobs(node.Namespace).Get(
+				context.Background(), "recorded-object-delete", metav1.GetOptions{},
+			)
+			require.NoError(t, err)
+			job.UID = "active-third-attempt"
+			job, err = clientSet.BatchV1().Jobs(node.Namespace).Update(context.Background(), job, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			switch reference := tt.reference.(type) {
+			case *corev1.Secret:
+				require.NoError(t, clientSet.CoreV1().Secrets(node.Namespace).Delete(
+					context.Background(), reference.Name, metav1.DeleteOptions{},
+				))
+			case *corev1.ServiceAccount:
+				require.NoError(t, clientSet.CoreV1().ServiceAccounts(node.Namespace).Delete(
+					context.Background(), reference.Name, metav1.DeleteOptions{},
+				))
+			default:
+				t.Fatalf("unsupported reference type %T", reference)
+			}
+
+			deleted, err := reconciler.isTarballDeleted(context.Background(), node, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			stored := getDestinationTestNode(t, reconciler, node)
+			require.Len(t, stored.Status.SnapshotExports, 1)
+			export := &stored.Status.SnapshotExports[0]
+			assert.Equal(t, tarballDeleteMaxAttempts, export.DeleteAttempts)
+			assert.Equal(t, "delete attempt 2 failed: transient provider error", export.LastDeleteError)
+			assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, export.Phase)
+			assert.False(t, export.DeleteExhausted)
+			assert.False(t, snapshotExportDeleteTerminal(export))
+			condition := findCondition(stored.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
+			require.NotNil(t, condition)
+			assert.Equal(t, appsv1.ReasonTarballCleanupRequired, condition.Reason)
+			active, err := clientSet.BatchV1().Jobs(node.Namespace).Get(
+				context.Background(), job.Name, metav1.GetOptions{},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, job.UID, active.UID)
+
+			deleted, err = reconciler.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			stored = getDestinationTestNode(t, reconciler, node)
+			active, err = clientSet.BatchV1().Jobs(node.Namespace).Get(
+				context.Background(), job.Name, metav1.GetOptions{},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, job.UID, active.UID)
+
+			switch reference := tt.reference.(type) {
+			case *corev1.Secret:
+				_, err = clientSet.CoreV1().Secrets(node.Namespace).Create(
+					context.Background(), reference.DeepCopy(), metav1.CreateOptions{},
+				)
+			case *corev1.ServiceAccount:
+				_, err = clientSet.CoreV1().ServiceAccounts(node.Namespace).Create(
+					context.Background(), reference.DeepCopy(), metav1.CreateOptions{},
+				)
+			}
+			require.NoError(t, err)
+
+			deleted, err = reconciler.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			active, err = clientSet.BatchV1().Jobs(node.Namespace).Get(
+				context.Background(), job.Name, metav1.GetOptions{},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, job.UID, active.UID)
+
+			active.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+				Reason: "AccessDenied", Message: "permanent provider denial",
+			}}
+			_, err = clientSet.BatchV1().Jobs(node.Namespace).UpdateStatus(
+				context.Background(), active, metav1.UpdateOptions{},
+			)
+			require.NoError(t, err)
+			stored = getDestinationTestNode(t, reconciler, node)
+			deleted, err = reconciler.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+
+			stored = getDestinationTestNode(t, reconciler, node)
+			export = &stored.Status.SnapshotExports[0]
+			assert.True(t, export.DeleteExhausted)
+			assert.True(t, snapshotExportDeleteTerminal(export))
+			assert.Contains(t, export.LastDeleteError, "AccessDenied")
+			condition = findCondition(stored.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
+			require.NotNil(t, condition)
+			assert.Equal(t, appsv1.ReasonTarballDeleteAttemptsExhausted, condition.Reason)
+			_, err = clientSet.BatchV1().Jobs(node.Namespace).Get(
+				context.Background(), job.Name, metav1.GetOptions{},
+			)
+			assert.True(t, apierrors.IsNotFound(err))
+		})
+	}
+}
+
+func TestSnapshotExportDeleteSuccessIsIdempotent(t *testing.T) {
+	tests := []struct {
+		name        string
+		current     *appsv1.ExportTarballConfig
+		destination appsv1.SnapshotExportDestination
+	}{
+		{
+			name:        "S3",
+			current:     &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "current-gcs"}},
+			destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderS3, Bucket: "original-s3", Region: "eu-west-1"},
+		},
+		{
+			name:        "GCS",
+			current:     &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "current-s3", Region: "us-east-1"}},
+			destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "original-gcs"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC)
+			node := destinationTestChainNode(tt.current)
+			snapshot := destinationTestSnapshot()
+			node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID: "recorded-export", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID,
+				ObjectName: "recorded-object", Destination: tt.destination,
+				Phase: appsv1.SnapshotExportPhaseUploaded, DeleteOnExpire: true,
+			}}
+			reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+			reconciler.snapshotDeleteNow = func() time.Time { return now }
+			clientSet := reconciler.snapshotKubernetesClient().(*fake.Clientset)
+
+			deleted, err := reconciler.isTarballDeleted(context.Background(), node, snapshot)
+			require.NoError(t, err)
+			assert.False(t, deleted)
+			job, err := clientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), "recorded-object-delete", metav1.GetOptions{})
+			require.NoError(t, err)
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			_, err = clientSet.BatchV1().Jobs(node.Namespace).UpdateStatus(context.Background(), job, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			stored := getDestinationTestNode(t, reconciler, node)
+			deleted, err = reconciler.isTarballDeleted(context.Background(), stored, snapshot)
+			require.NoError(t, err)
+			assert.True(t, deleted)
+			stored = getDestinationTestNode(t, reconciler, node)
+			require.Len(t, stored.Status.SnapshotExports, 1)
+			assert.Equal(t, appsv1.SnapshotExportPhaseDeleted, stored.Status.SnapshotExports[0].Phase)
+			assert.Equal(t, int32(1), stored.Status.SnapshotExports[0].DeleteAttempts)
+			assert.Equal(t, tt.destination, stored.Status.SnapshotExports[0].Destination)
+
+			storedSnapshot := &snapshotv1.VolumeSnapshot{}
+			require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot))
+			assert.Equal(t, "true", storedSnapshot.Annotations[controllers.AnnotationTarballDeletionComplete])
+			assert.Equal(t, "recorded-object", storedSnapshot.Annotations[controllers.AnnotationTarballDeletionName])
+			require.NoError(t, clientSet.BatchV1().Jobs(node.Namespace).Delete(context.Background(), job.Name, metav1.DeleteOptions{}))
+
+			deleted, err = reconciler.isTarballDeleted(context.Background(), stored, storedSnapshot)
+			require.NoError(t, err)
+			assert.True(t, deleted)
+			jobs, err := clientSet.BatchV1().Jobs(node.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, jobs.Items)
+		})
+	}
+}
+
+func getDestinationTestNode(t *testing.T, reconciler *Reconciler, node *appsv1.ChainNode) *appsv1.ChainNode {
+	t.Helper()
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), stored))
+	return stored
 }

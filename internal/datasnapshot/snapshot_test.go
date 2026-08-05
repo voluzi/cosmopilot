@@ -453,6 +453,8 @@ func TestDeleteSnapshotForPreviousExporterUploadDerivesDeletionJob(t *testing.T)
 
 	job, err := client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
 	require.NoError(t, err)
+	require.NotNil(t, job.Spec.BackoffLimit)
+	assert.Equal(t, int32(5), *job.Spec.BackoffLimit)
 	assert.Equal(t, s3Exporter, job.Labels[labelExporter])
 	require.Len(t, job.Spec.Template.Spec.Containers, 1)
 	assert.Equal(t, []string{"s3", "delete", "snapshots", "snapshot"}, job.Spec.Template.Spec.Containers[0].Args)

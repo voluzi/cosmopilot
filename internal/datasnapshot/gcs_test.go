@@ -145,6 +145,8 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 
 			job := getJob(t, provider, "snapshot-delete")
 			assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
+			require.NotNil(t, job.Spec.BackoffLimit)
+			assert.Zero(t, *job.Spec.BackoffLimit)
 			podSpec := job.Spec.Template.Spec
 			container := podSpec.Containers[0]
 			assert.Equal(t, tt.wantServiceAccount, podSpec.ServiceAccountName)
@@ -287,6 +289,8 @@ func TestGCSDeleteSnapshotForUploadReturnsPairedActivatedDeletion(t *testing.T) 
 	deleteJob := getJob(t, provider, "snapshot-delete")
 	require.NotNil(t, deleteJob.Spec.Suspend)
 	assert.False(t, *deleteJob.Spec.Suspend)
+	require.NotNil(t, deleteJob.Spec.BackoffLimit)
+	assert.Equal(t, int32(5), *deleteJob.Spec.BackoffLimit)
 	assert.Equal(t, gcsExporter, deleteJob.Labels[labelCleanupExporter])
 	assert.Equal(t, provider.Owner.GetName(), deleteJob.Labels[labelCleanupOwner])
 	assert.Equal(t, typeUpload, deleteJob.Labels[labelCleanupType])

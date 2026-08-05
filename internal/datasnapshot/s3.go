@@ -193,7 +193,18 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 }
 
 func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
-	return reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter))
+	if !snapshotJob.RequireDestinationIdentity || snapshotJob.Exporter != "" && snapshotJob.Exporter != s3Exporter {
+		return reconcileSnapshotDeletionJob(
+			ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter),
+		)
+	}
+	desired, err := provider.snapshotDeletionJob(snapshotJob.Name, snapshotJob.Upload)
+	if err != nil {
+		return "", err
+	}
+	return reconcileSnapshotDeletionJobForDesired(
+		ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter), desired,
+	)
 }
 
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
@@ -241,6 +252,22 @@ func (provider *S3) ensureSnapshotDeletion(
 	name string,
 	upload *SnapshotJobIdentity,
 ) (*batchv1.Job, error) {
+	job, err := provider.snapshotDeletionJob(name, upload)
+	if err != nil {
+		return nil, err
+	}
+	job, _, err = ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, "delete")
+	if err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+func (provider *S3) snapshotDeletionJob(name string, upload *SnapshotJobIdentity) (*batchv1.Job, error) {
+	backoffLimit := int32(0)
+	if upload != nil {
+		backoffLimit = unboundSnapshotDeleteBackoffLimit
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -253,7 +280,7 @@ func (provider *S3) ensureSnapshotDeletion(
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To[int32](5),
+			BackoffLimit: ptr.To(backoffLimit),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -279,10 +306,6 @@ func (provider *S3) ensureSnapshotDeletion(
 	}
 	if upload != nil {
 		setSnapshotDeletionUploadIdentity(job, provider.Owner, s3Exporter, *upload)
-	}
-	job, _, err := ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, "delete")
-	if err != nil {
-		return nil, err
 	}
 	return job, nil
 }

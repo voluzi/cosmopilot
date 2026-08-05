@@ -49,6 +49,10 @@ type SnapshotJob struct {
 	// provider. Deletion Jobs are self-contained, so they can still be resumed and
 	// cleaned up after the ChainNode switches providers.
 	Exporter string
+	Failure  string
+	// RequireDestinationIdentity binds status observation to the caller's desired
+	// destination. Legacy orphan workflows leave it false and remain self-contained.
+	RequireDestinationIdentity bool
 }
 
 const (
@@ -76,6 +80,8 @@ const (
 	typeUpload           = string(SnapshotJobUpload)
 	typeDelete           = string(SnapshotJobDelete)
 	typePostUploadDelete = "post-upload-delete"
+
+	unboundSnapshotDeleteBackoffLimit int32 = 5
 )
 
 func snapshotDestinationLabel(values ...string) string {
@@ -515,6 +521,7 @@ func snapshotJobFromJob(job *batchv1.Job) SnapshotJob {
 		UID:         job.UID,
 		Purpose:     SnapshotJobPurpose(job.Labels[labelType]),
 		Terminating: job.DeletionTimestamp != nil,
+		Failure:     snapshotJobFailure(job),
 	}
 	if snapshotJob.Purpose == SnapshotJobDelete && job.Labels[labelCleanupUploadUID] != "" {
 		snapshotJob.Upload = &SnapshotJobIdentity{
@@ -523,6 +530,27 @@ func snapshotJobFromJob(job *batchv1.Job) SnapshotJob {
 		}
 	}
 	return snapshotJob
+}
+
+func snapshotJobFailure(job *batchv1.Job) string {
+	for _, condition := range job.Status.Conditions {
+		if condition.Type != batchv1.JobFailed || condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		reason := strings.TrimSpace(condition.Reason)
+		message := strings.TrimSpace(condition.Message)
+		switch {
+		case reason != "" && message != "":
+			return reason + ": " + message
+		case reason != "":
+			return reason
+		case message != "":
+			return message
+		default:
+			return "delete Job failed"
+		}
+	}
+	return ""
 }
 
 func snapshotJobsFromJobs(jobs []batchv1.Job, currentIdentity ...string) []SnapshotJob {
@@ -747,7 +775,7 @@ func deletionJobFromUpload(
 			Labels:          map[string]string{labelExporter: exporter, labelOwner: owner.GetName(), labelType: typeDelete},
 			OwnerReferences: append([]metav1.OwnerReference(nil), upload.OwnerReferences...),
 		},
-		Spec: batchv1.JobSpec{BackoffLimit: ptr.To[int32](5), Template: template},
+		Spec: batchv1.JobSpec{BackoffLimit: ptr.To(unboundSnapshotDeleteBackoffLimit), Template: template},
 	}
 	if destination := upload.Labels[labelDestination]; destination != "" {
 		job.Labels[labelDestination] = destination
@@ -1144,6 +1172,31 @@ func reconcileSnapshotDeletionJob(
 			updated.Namespace, updated.Name, updated.UID, deletionJob.UID)
 	}
 	return snapshotJobStatus(updated), nil
+}
+
+func reconcileSnapshotDeletionJobForDesired(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	expected SnapshotJob,
+	exporter string,
+	desired *batchv1.Job,
+) (SnapshotStatus, error) {
+	job, err := client.BatchV1().Jobs(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return SnapshotNotFound, nil
+		}
+		return "", err
+	}
+	if expected.UID != "" && job.UID != expected.UID {
+		return "", fmt.Errorf("snapshot deletion job %s/%s has UID %s, expected listed UID %s",
+			job.Namespace, job.Name, job.UID, expected.UID)
+	}
+	if _, err = reconcileSnapshotJobIdentity(ctx, client, owner, job, desired, typeDelete); err != nil {
+		return "", err
+	}
+	return reconcileSnapshotDeletionJob(ctx, client, owner, expected, exporter)
 }
 
 func cleanupSnapshotDeletionResources(

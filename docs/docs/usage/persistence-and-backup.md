@@ -342,6 +342,26 @@ is retained and the `SnapshotExportCleanup` condition names the destination requ
 operator action. Restore the named reference to resume automatic cleanup; use the
 documented cleanup acknowledgement annotation only after manual cleanup or verification.
 
+Remote deletion uses at most three logical attempts. Each attempt is a single-Pod Job,
+and failed Jobs are removed with foreground propagation before the controller creates a
+replacement. The attempt count, last error, and next retry time are stored in
+`ChainNode.status.snapshotExports`, so a controller restart or Job TTL cleanup cannot
+reset the budget. Retries use exponential backoff (one minute after the first failure,
+then two minutes after the second).
+
+The durable `deleteExhausted` state is set only after the controller observes the final
+attempt fail or disappear. If a recorded credentials Secret or ServiceAccount becomes
+unavailable while an attempt is active, cleanup is reported as required without marking
+the retry budget exhausted or deleting that Job. Restoring the reference resumes
+observation of the same attempt. Legacy orphan cleanup Jobs that have no matching status
+record retain a Kubernetes Job backoff limit of five.
+
+After the third failure, automatic deletion stops and the `SnapshotExportCleanup`
+condition reports the original provider, bucket/object, attempt count, and last error.
+The recorded destination remains authoritative even if the live export configuration
+changes. Fix the provider-side failure and manually remove the object, then use the
+cleanup acknowledgement annotation to confirm cleanup when appropriate.
+
 ### Google Cloud Storage
 
 The following fields are available for GCS:
