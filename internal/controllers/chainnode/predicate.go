@@ -16,9 +16,31 @@ type GenerationChangedPredicate struct {
 	predicate.Funcs
 }
 
-var ignoreSuffixes = []string{
-	"config-generator", "data-init", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity",
-	"write-file", "create-validator", "-signer-pubkey", "-signer-import",
+var temporaryPodSuffixes = []string{
+	"config-generator", "data-init", "init-data", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity",
+	"write-file", "create-validator", "signer-pubkey", "signer-import",
+}
+
+func isTemporaryPodName(name string) bool {
+	for _, suffix := range temporaryPodSuffixes {
+		if strings.HasSuffix(name, "-"+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isChainNodeSigningPodName(name, chainNodeName string) bool {
+	if name == chainNodeName {
+		return true
+	}
+	for _, suffix := range temporaryPodSuffixes {
+		baseName := chainNodeName + "-" + suffix
+		if name == baseName || strings.HasPrefix(name, baseName+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 // Create implements default CreateEvent filter
@@ -28,10 +50,8 @@ func (p GenerationChangedPredicate) Create(e event.CreateEvent) bool {
 	}
 
 	// Ignore events from temporary pods
-	for _, suffix := range ignoreSuffixes {
-		if strings.HasSuffix(e.Object.(metav1.Object).GetName(), suffix) {
-			return false
-		}
+	if isTemporaryPodName(e.Object.(metav1.Object).GetName()) {
+		return false
 	}
 
 	return p.Funcs.Create(e)
@@ -44,10 +64,8 @@ func (p GenerationChangedPredicate) Delete(e event.DeleteEvent) bool {
 	}
 
 	// Ignore events from temporary pods
-	for _, suffix := range ignoreSuffixes {
-		if strings.HasSuffix(e.Object.(metav1.Object).GetName(), suffix) {
-			return false
-		}
+	if isTemporaryPodName(e.Object.(metav1.Object).GetName()) {
+		return false
 	}
 
 	return p.Funcs.Delete(e)
@@ -71,10 +89,8 @@ func (p GenerationChangedPredicate) Update(e event.UpdateEvent) bool {
 
 	case *corev1.Pod:
 		// Ignore events from temporary pods
-		for _, suffix := range ignoreSuffixes {
-			if strings.HasSuffix(o.Name, suffix) {
-				return false
-			}
+		if isTemporaryPodName(o.Name) {
+			return false
 		}
 		return p.Funcs.Update(e)
 

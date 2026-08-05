@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -110,7 +109,7 @@ func (r *Reconciler) finalizeOwnedSigningPods(ctx context.Context, chainNode *ap
 		pod := &pods.Items[i]
 		owner := metav1.GetControllerOf(pod)
 		owned := owner != nil && owner.UID == chainNode.GetUID()
-		if chainNodeSigningPodName(pod.GetName(), chainNode.GetName()) && !owned {
+		if isChainNodeSigningPodName(pod.GetName(), chainNode.GetName()) && !owned {
 			return false, fmt.Errorf("refusing to release consensus-key reservations while signing-path pod %s/%s is not owned by ChainNode UID %q", pod.GetNamespace(), pod.GetName(), chainNode.GetUID())
 		}
 		if !owned {
@@ -133,21 +132,6 @@ func (r *Reconciler) finalizeOwnedSigningPods(ctx context.Context, chainNode *ap
 		}
 	}
 	return true, nil
-}
-
-func chainNodeSigningPodName(name, chainNodeName string) bool {
-	if name == chainNodeName {
-		return true
-	}
-	for _, suffix := range []string{
-		"config-generator", "data-init", "init-data", "genesis-init", "tmkms-vault-upload",
-		"tmkms-generate-identity", "write-file", "create-validator", "signer-pubkey", "signer-import",
-	} {
-		if name == chainNodeName+"-"+suffix || strings.HasPrefix(name, chainNodeName+"-"+suffix+"-") {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Reconciler) removeConsensusKeyReservationFinalizer(ctx context.Context, chainNode *appsv1.ChainNode) error {
