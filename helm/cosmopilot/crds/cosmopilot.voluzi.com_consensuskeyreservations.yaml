@@ -53,8 +53,8 @@ spec:
           spec:
             description: |-
               ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one
-              consensus public key on one chain. Reservations are intentionally not garbage-collected
-              automatically: an operator must verify every old signing path is gone before deleting a stale one.
+              consensus public key on one chain. The owning root's reservation lifecycle finalizer releases the
+              immutable reservation only after all attributable signing workloads are confirmed absent.
             properties:
               chainID:
                 type: string
@@ -82,8 +82,8 @@ spec:
             - publicKey
             type: object
             x-kubernetes-validations:
-            - message: consensus key reservations are immutable; delete only after
-                proving every old signing path is stopped
+            - message: consensus key reservations are immutable; release requires
+                verified signing-path teardown
               rule: self == oldSelf
         required:
         - spec

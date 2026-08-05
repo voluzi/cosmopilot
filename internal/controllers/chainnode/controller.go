@@ -131,7 +131,8 @@ func (r *Reconciler) reservationReader() client.Reader {
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets,verbs=get;list;watch
-//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/finalizers,verbs=update
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create;delete
 //+kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims;configmaps;secrets;services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -164,7 +165,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 	if !chainNode.GetDeletionTimestamp().IsZero() {
-		done, err := r.finalizeCosmosignerOwner(ctx, chainNode)
+		done, err := r.finalizeConsensusKeyReservationOwner(ctx, chainNode)
+		if err != nil || !done {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+		done, err = r.finalizeCosmosignerOwner(ctx, chainNode)
 		if err != nil || !done {
 			return ctrl.Result{RequeueAfter: time.Second}, err
 		}
@@ -184,6 +189,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if chainNode.Labels[controllers.LabelWorkerName] != r.opts.WorkerName {
 		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
 		return ctrl.Result{}, nil
+	}
+	if _, err := r.prepareConsensusKeyReservationOwner(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
 	}
 	if changed, err := r.prepareCosmosignerOwner(ctx, chainNode); err != nil {
 		return ctrl.Result{}, err

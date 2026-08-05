@@ -561,7 +561,7 @@ ConsensusKeyReservationList contains consensus-key reservations.
 
 #### ConsensusKeyReservationSpec
 
-ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one consensus public key on one chain. Reservations are intentionally not garbage-collected automatically: an operator must verify every old signing path is gone before deleting a stale one.
+ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one consensus public key on one chain. The owning root's reservation lifecycle finalizer releases the immutable reservation only after all attributable signing workloads are confirmed absent.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |

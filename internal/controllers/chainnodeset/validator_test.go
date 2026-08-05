@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -34,6 +35,7 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
 	require.NoError(t, autoscalingv2.AddToScheme(scheme))
 	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, networkingv1.AddToScheme(scheme))

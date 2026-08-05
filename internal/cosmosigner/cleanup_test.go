@@ -56,7 +56,7 @@ func TestProtectRetainedStatePVCsRetiresLegacyTemplate(t *testing.T) {
 	zero := int32(0)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: namespace, Generation: 1,
+			Name: name, Namespace: namespace, UID: "signer-uid", Generation: 1,
 			OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
 		},
 		Spec: appsv1.StatefulSetSpec{

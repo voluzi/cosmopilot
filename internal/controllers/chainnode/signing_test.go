@@ -69,6 +69,9 @@ func TestEnsureValidatorConsensusKeyReservationStopsConflictingLocalSigner(t *te
 			OwnerKind: "ChainNodeSet", Namespace: "other", OwnerName: "other-validator", Claim: "validator",
 		},
 	}
+	conflictingOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "other-validator", Namespace: "other", UID: "other-root",
+	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: name, Namespace: namespace,
 		OwnerReferences: []metav1.OwnerReference{{
@@ -76,7 +79,7 @@ func TestEnsureValidatorConsensusKeyReservationStopsConflictingLocalSigner(t *te
 			UID: chainNode.UID, Controller: ptr.To(true),
 		}},
 	}}
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(keySecret, reservation, pod).Build()}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(keySecret, reservation, conflictingOwner, pod).Build()}
 
 	_, err = r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode)
 	if err == nil {

@@ -67,7 +67,7 @@ func TestReconcileStatefulSetMigrationRetainsPVCsBeforeQuiescing(t *testing.T) {
 	one := int32(1)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: ns, Generation: 1,
+			Name: name, Namespace: ns, UID: "signer-uid", Generation: 1,
 			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
 		},
 		Spec: appsv1.StatefulSetSpec{
@@ -153,7 +153,7 @@ func TestReconcileStatefulSetMigrationRechecksStatefulSetAbsenceBeforeRecreation
 	zero := int32(0)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: ns, Generation: 1,
+			Name: name, Namespace: ns, UID: "signer-uid", Generation: 1,
 			Finalizers:      []string{"cosmopilot.voluzi.com/test-hold"},
 			OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
 		},

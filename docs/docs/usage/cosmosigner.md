@@ -465,20 +465,31 @@ running together during a rolling operator upgrade. Reservations are atomic amon
 controllers, but an older controller does not consult them. Apply the CRD, finish the controller
 rollout, and only then begin a local/TmKMS/Cosmosigner migration.
 
-Reservations are intentionally never garbage-collected. Deleting the owning resource does not prove
-that its signer pods, TmKMS sidecars, local validators, retained PVCs, or externally managed replicas
-are unable to sign. Inspect reservations with `kubectl get ckr`.
+Reservations are released automatically by a dedicated finalizer on the owning `ChainNode` or
+`ChainNodeSet`. Cosmopilot first prevents the retired claim from being recreated, requests deletion
+of its managed local-validator, TmKMS, and Cosmosigner workloads, and waits until the relevant
+`ChainNode`, Pod, Job, and StatefulSet objects are absent. It then deletes only reservations whose
+immutable owner UID and claim match, using the reservation object's UID as a deletion precondition.
+Retained key Secrets, node-data PVCs, and Cosmosigner raft PVCs are inert state and do not by
+themselves block reservation release.
 
-Delete a stale reservation only after proving every former signing path for that consensus key is
-stopped and cannot restart. Then inspect the reservation owner and remove the exact object:
+A resource recreated with the same namespace/name but a new UID stays blocked until the old signing
+path is absent. Once verified, the stale reservation is recovered and the replacement acquires a new
+reservation normally. Ambiguous or foreign workloads fail closed and produce a
+`ConsensusKeyReservationBlocked` event.
+
+Use `kubectl get ckr` to inspect reservations. Manual deletion is reserved for exceptional recovery
+where the controller cannot safely attribute old resources. Before deleting one manually, prove that
+every former signing process is stopped and cannot restart, inspect the immutable owner UID and claim,
+and delete only the exact object:
 
 ```shell
 kubectl get ckr <reservation-name> -o yaml
 kubectl delete ckr <reservation-name>
 ```
 
-Deleting a reservation permits another controller root to claim the key; doing so while an old path
-can still sign can create independent double-sign state for the same validator.
+Deleting a reservation manually permits another controller root to claim the key; doing so while an
+old path can still sign can create independent double-sign state for the same validator.
 
 :::warning[Cosmos does not rotate the validator key]
 Cosmopilot does not submit an on-chain consensus-key rotation. Once validator status or a serving

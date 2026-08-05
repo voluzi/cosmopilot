@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8sappsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -35,6 +36,7 @@ func TestReconcileCosmosignerMigrationWaitsForTerminatingPod(t *testing.T) {
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "validator-uid"},
 		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{
@@ -301,6 +303,7 @@ func TestPreflightCosmosignerQuiescesSentrySignerOnReservationConflict(t *testin
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 	r := &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, reservation, sts, pvc).Build(),
