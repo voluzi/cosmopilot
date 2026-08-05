@@ -390,10 +390,7 @@ func isLegacyCosmoseedKeySecret(nodeSet *appsv1.ChainNodeSet, secret *corev1.Sec
 	}
 	prefix := nodeSet.GetName() + "-seed-"
 	for name, key := range secret.Data {
-		if !strings.HasPrefix(name, prefix) {
-			return false
-		}
-		if _, err := strconv.Atoi(strings.TrimPrefix(name, prefix)); err != nil {
+		if !hasCanonicalOrdinal(name, prefix) {
 			return false
 		}
 		if _, err := cometbft.GetNodeID(key); err != nil {

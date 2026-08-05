@@ -236,7 +236,7 @@ func TestMigrateLegacyDurableResourcesAttributesAllVerifiedClasses(t *testing.T)
 	assert.Contains(t, freshSigner.Finalizers, cosmosigner.RetainedStateFinalizer)
 }
 
-func TestMigrateLegacyDurableResourcesAttributesUnownedLegacyMainPVC(t *testing.T) {
+func TestMigrateLegacyDurableResourcesPreservesUnownedSameNamePVC(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"}}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
@@ -257,7 +257,8 @@ func TestMigrateLegacyDurableResourcesAttributesUnownedLegacyMainPVC(t *testing.
 	require.NoError(t, err)
 	fresh := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pvc), fresh))
-	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassDataVolumes))
+	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassDataVolumes),
+		"normal existing-PVC labels and data annotations do not prove that Cosmopilot generated the claim")
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(ambiguous), fresh))
 	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassDataVolumes))
 }
