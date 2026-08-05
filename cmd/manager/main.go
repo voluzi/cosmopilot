@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	monitoring "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -93,23 +96,38 @@ func main() {
 	}
 
 	// Controller-runtime starts leader-elected runnables concurrently. Gate both controllers until the
-	// elected worker has protected every pre-upgrade root assigned to it.
+	// elected worker has protected every pre-upgrade root and migrated its verified durable resources.
 	rootProtectionReady := make(chan struct{})
 	runOpts.RootProtectionReady = rootProtectionReady
-	if err := mgr.Add(&resourcecleanup.RootProtector{
-		Client: mgr.GetClient(), WorkerName: runOpts.WorkerName, Ready: rootProtectionReady,
-	}); err != nil {
-		setupLog.Error(err, "unable to register existing-root protection")
-		os.Exit(1)
-	}
 
-	if _, err = chainnode.New(mgr, clientSet, &runOpts); err != nil {
+	chainNodeReconciler, err := chainnode.New(mgr, clientSet, &runOpts)
+	if err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ChainNode")
 		os.Exit(1)
 	}
 
-	if _, err = chainnodeset.New(mgr, clientSet, &runOpts); err != nil {
+	chainNodeSetReconciler, err := chainnodeset.New(mgr, clientSet, &runOpts)
+	if err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ChainNodeSet")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&resourcecleanup.RootProtector{
+		Client: mgr.GetClient(), WorkerName: runOpts.WorkerName, Ready: rootProtectionReady,
+		Migrate: func(ctx context.Context) error {
+			for {
+				pending, err := migrateLegacyDurableResources(ctx, mgr.GetClient(), chainNodeReconciler, chainNodeSetReconciler)
+				if err != nil || !pending {
+					return err
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Second):
+				}
+			}
+		},
+	}); err != nil {
+		setupLog.Error(err, "unable to register existing-root protection")
 		os.Exit(1)
 	}
 
@@ -139,4 +157,44 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func migrateLegacyDurableResources(
+	ctx context.Context,
+	c client.Client,
+	chainNodeReconciler *chainnode.Reconciler,
+	chainNodeSetReconciler *chainnodeset.Reconciler,
+) (bool, error) {
+	pending := false
+	nodes := &appsv1.ChainNodeList{}
+	if err := c.List(ctx, nodes); err != nil {
+		return false, err
+	}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if node.GetLabels()[controllers.LabelWorkerName] != runOpts.WorkerName || !node.GetDeletionTimestamp().IsZero() {
+			continue
+		}
+		changed, err := chainNodeReconciler.MigrateLegacyDurableResources(ctx, node)
+		if err != nil {
+			return false, err
+		}
+		pending = pending || changed
+	}
+	nodeSets := &appsv1.ChainNodeSetList{}
+	if err := c.List(ctx, nodeSets); err != nil {
+		return false, err
+	}
+	for i := range nodeSets.Items {
+		nodeSet := &nodeSets.Items[i]
+		if nodeSet.GetLabels()[controllers.LabelWorkerName] != runOpts.WorkerName || !nodeSet.GetDeletionTimestamp().IsZero() {
+			continue
+		}
+		changed, err := chainNodeSetReconciler.MigrateLegacyDurableResources(ctx, nodeSet)
+		if err != nil {
+			return false, err
+		}
+		pending = pending || changed
+	}
+	return pending, nil
 }

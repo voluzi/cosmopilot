@@ -109,7 +109,13 @@ func ProtectRetainedStatePVCs(ctx context.Context, c client.Client, owner client
 			continue
 		}
 		metadataChanged := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassCosmosignerState)
-		metadataChanged = resourcecleanup.StampResourceOwner(pvc, owner.GetUID()) || metadataChanged
+		_, preparedChanged, err := resourcecleanup.PrepareGeneratedResource(
+			pvc, owner, nil, resourcecleanup.ClassCosmosignerState, false,
+		)
+		if err != nil {
+			return changed, err
+		}
+		metadataChanged = preparedChanged || metadataChanged
 		if pvc.Status.Phase == corev1.ClaimBound && pvc.Spec.VolumeName != "" &&
 			!controllerutil.ContainsFinalizer(pvc, RetainedStateFinalizer) {
 			controllerutil.AddFinalizer(pvc, RetainedStateFinalizer)

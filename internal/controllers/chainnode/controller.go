@@ -155,6 +155,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.Error(err, "unable to fetch chainnode")
 		return ctrl.Result{}, err
 	}
+	if !r.opts.MatchesWorker(chainNode.Labels) {
+		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
+		return ctrl.Result{}, nil
+	}
 	if !chainNode.GetDeletionTimestamp().IsZero() {
 		terminating, err := r.namespaceTerminating(ctx, chainNode.GetNamespace())
 		if err != nil {
@@ -184,10 +188,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	if chainNode.Labels[controllers.LabelWorkerName] != r.opts.WorkerName {
-		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
-		return ctrl.Result{}, nil
-	}
 	if !controllerutil.ContainsFinalizer(chainNode, resourcecleanup.Finalizer) {
 		controllerutil.AddFinalizer(chainNode, resourcecleanup.Finalizer)
 		if err := r.Update(ctx, chainNode); err != nil {

@@ -114,6 +114,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.Error(err, "unable to fetch chainnodeset")
 		return ctrl.Result{}, err
 	}
+	if !r.opts.MatchesWorker(nodeSet.Labels) {
+		logger.V(1).Info("skipping chainnodeset due to worker-name mismatch.")
+		return ctrl.Result{}, nil
+	}
 	if !nodeSet.GetDeletionTimestamp().IsZero() {
 		terminating, err := r.namespaceTerminating(ctx, nodeSet.GetNamespace())
 		if err != nil {
@@ -148,10 +152,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	if nodeSet.Labels[controllers.LabelWorkerName] != r.opts.WorkerName {
-		logger.V(1).Info("skipping chainnodeset due to worker-name mismatch.")
-		return ctrl.Result{}, nil
-	}
 	cleanupFinalizerAdded := false
 	for _, finalizer := range []string{resourcecleanup.Finalizer, podDisruptionBudgetFinalizer} {
 		if controllerutil.ContainsFinalizer(nodeSet, finalizer) {

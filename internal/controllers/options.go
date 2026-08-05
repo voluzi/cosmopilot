@@ -37,6 +37,14 @@ func (opts *ControllerRunOptions) WaitForRootProtection(ctx context.Context) err
 	}
 }
 
+func (opts *ControllerRunOptions) MatchesWorker(labels map[string]string) bool {
+	workerName := ""
+	if opts != nil {
+		workerName = opts.WorkerName
+	}
+	return labels[LabelWorkerName] == workerName
+}
+
 func (opts *ControllerRunOptions) GetDataExporterImage() string {
 	if opts == nil || opts.DataExporterImage == "" {
 		return DefaultDataExporterImage

@@ -17,11 +17,17 @@ type RootProtector struct {
 	Client     client.Client
 	WorkerName string
 	Ready      chan<- struct{}
+	Migrate    func(context.Context) error
 }
 
 func (p *RootProtector) Start(ctx context.Context) error {
 	if err := ProtectExistingRoots(ctx, p.Client, p.WorkerName); err != nil {
 		return err
+	}
+	if p.Migrate != nil {
+		if err := p.Migrate(ctx); err != nil {
+			return err
+		}
 	}
 	if p.Ready != nil {
 		close(p.Ready)

@@ -323,6 +323,28 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet 
 	return nil
 }
 
+// MigrateLegacyDurableResources removes cascading ownership from verified root and child durable
+// resources before deletion reconciliation is allowed to start.
+func (r *Reconciler) MigrateLegacyDurableResources(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	if err := r.attributeControlledLegacyKeys(ctx, nodeSet); err != nil {
+		return false, err
+	}
+	children := &appsv1.ChainNodeList{}
+	if err := r.List(ctx, children, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return false, err
+	}
+	for i := range children.Items {
+		child := &children.Items[i]
+		if !metav1.IsControlledBy(child, nodeSet) {
+			continue
+		}
+		if err := r.attributeControlledLegacyChildResources(ctx, child); err != nil {
+			return false, err
+		}
+	}
+	return cosmosigner.ProtectRetainedStatePVCs(ctx, r.Client, nodeSet, nodeSet.GetNamespace())
+}
+
 func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNode) (bool, error) {
 	key := client.ObjectKeyFromObject(child)
 	mainPod := &corev1.Pod{}
