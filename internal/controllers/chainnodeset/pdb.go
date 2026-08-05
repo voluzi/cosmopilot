@@ -151,6 +151,9 @@ func (r *Reconciler) deleteStalePodDisruptionBudgets(
 		if _, desired := desiredNames[pdb.GetName()]; desired {
 			continue
 		}
+		if pdb.GetLabels()[controllers.LabelScope] == scopeCosmoGuard {
+			continue
+		}
 		if !metav1.IsControlledBy(pdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, pdb) {
 			continue
 		}
@@ -194,6 +197,9 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	if labels[controllers.LabelChainNodeSet] != nodeSet.GetName() {
 		return false
 	}
+	if !hasOnlyLegacyRegularPDBLabels(nodeSet, labels) {
+		return false
+	}
 	group := labels[controllers.LabelChainNodeSetGroup]
 	if group == "" {
 		if isRecordedGrouplessPDB(nodeSet, pdb.GetName()) {
@@ -216,6 +222,23 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	}
 
 	return pdb.GetName() == name
+}
+
+func hasOnlyLegacyRegularPDBLabels(nodeSet *appsv1.ChainNodeSet, labels map[string]string) bool {
+	for key, value := range labels {
+		switch key {
+		case controllers.LabelUpgrading,
+			controllers.LabelChainID,
+			controllers.LabelChainNodeSet,
+			controllers.LabelChainNodeSetGroup,
+			controllers.LabelChainNodeSetValidator:
+			continue
+		}
+		if !strings.HasPrefix(key, nodeSet.GetName()+"-global-") || value != controllers.StringValueTrue {
+			return false
+		}
+	}
+	return true
 }
 
 func hasOnlyLabels(labels map[string]string, allowed ...string) bool {

@@ -358,10 +358,9 @@ func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait
 
 func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group string, index int) error {
 	nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, index)
-	if err := r.deleteNodeWithCleanupFinalizer(ctx, nodeSet, nodeName); err != nil {
+	if err := r.maybeDeleteNode(ctx, nodeSet, nodeName); err != nil {
 		return err
 	}
-	DeleteNodeStatus(nodeSet, nodeName)
 
 	r.recorder.Eventf(nodeSet,
 		corev1.EventTypeNormal,
@@ -627,30 +626,28 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	if controller := metav1.GetControllerOf(node); controller != nil && !metav1.IsControlledBy(node, nodeSet) {
 		return fmt.Errorf("refusing to delete ChainNode %s/%s controlled by %s UID %s", node.GetNamespace(), node.GetName(), controller.Name, controller.UID)
 	}
-	if node.GetDeletionTimestamp().IsZero() {
-		changed := false
-		workerName := nodeSet.GetLabels()[controllers.LabelWorkerName]
-		if node.GetLabels()[controllers.LabelWorkerName] != workerName {
-			if node.Labels == nil {
-				node.Labels = map[string]string{}
-			}
-			node.Labels[controllers.LabelWorkerName] = workerName
-			changed = true
+	changed := false
+	workerName := nodeSet.GetLabels()[controllers.LabelWorkerName]
+	if node.GetLabels()[controllers.LabelWorkerName] != workerName {
+		if node.Labels == nil {
+			node.Labels = map[string]string{}
 		}
-		if !metav1.IsControlledBy(node, nodeSet) {
-			if err := controllerutil.SetControllerReference(nodeSet, node, r.Scheme); err != nil {
-				return err
-			}
-			changed = true
+		node.Labels[controllers.LabelWorkerName] = workerName
+		changed = true
+	}
+	if !metav1.IsControlledBy(node, nodeSet) {
+		if err := controllerutil.SetControllerReference(nodeSet, node, r.Scheme); err != nil {
+			return err
 		}
-		if !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) {
-			controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
-			changed = true
-		}
-		if changed {
-			if err := r.Update(ctx, node); err != nil {
-				return err
-			}
+		changed = true
+	}
+	if !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) && node.GetDeletionTimestamp().IsZero() {
+		controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
+		changed = true
+	}
+	if changed {
+		if err := r.Update(ctx, node); err != nil {
+			return err
 		}
 	}
 	uid := node.GetUID()

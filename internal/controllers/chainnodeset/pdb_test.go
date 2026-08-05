@@ -99,6 +99,55 @@ func TestLegacyNodeSetPDBRejectsExtraValidatorMatchLabels(t *testing.T) {
 	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
 }
 
+func TestLegacyNodeSetPDBRejectsExtraRegularMatchLabels(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "chain-id"},
+	}
+	pdb := getPdbSpec(nodeSet, "set-fullnodes", 1, map[string]string{
+		controllers.LabelUpgrading:         controllers.StringValueFalse,
+		controllers.LabelChainID:           nodeSet.Status.ChainID,
+		controllers.LabelChainNodeSet:      nodeSet.Name,
+		controllers.LabelChainNodeSetGroup: "fullnodes",
+		"custom-selector":                  "narrower",
+	})
+
+	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
+}
+
+func TestLegacyNodeSetPDBAcceptsHistoricalGlobalIngressMatchLabel(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "chain-id"},
+	}
+	pdb := getPdbSpec(nodeSet, "set-fullnodes", 1, map[string]string{
+		controllers.LabelUpgrading:         controllers.StringValueFalse,
+		controllers.LabelChainID:           nodeSet.Status.ChainID,
+		controllers.LabelChainNodeSet:      nodeSet.Name,
+		controllers.LabelChainNodeSetGroup: "fullnodes",
+		"set-global-removed":               controllers.StringValueTrue,
+	})
+
+	assert.True(t, isLegacyNodeSetPDB(nodeSet, pdb))
+}
+
+func TestEnsurePodDisruptionBudgetsPreservesCosmoGuardPDB(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+	guard := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-nodeset-fullnodes-cg", Namespace: "default",
+		Labels: map[string]string{controllers.LabelScope: scopeCosmoGuard},
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, guard, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), guard))
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+	assert.NotNil(t, getPdb(t, r, "default", guard.Name))
+}
+
 func TestEnsurePodDisruptionBudgetPreservesForeignControlledLegacyShape(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
 	foreignOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "other-uid"}}
