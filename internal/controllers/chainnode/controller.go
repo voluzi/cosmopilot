@@ -284,8 +284,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{}, err
 		}
 	}
-	// Migrate pre-upgrade account Secrets before the status-gated account path can skip them.
-	if err = r.migrateExistingAccountSecret(ctx, chainNode); err != nil {
+	// Migrate pre-upgrade validator Secrets before status-gated generation paths can skip them.
+	if err = r.migrateExistingValidatorSecrets(ctx, chainNode); err != nil {
 		return ctrl.Result{}, err
 	}
 

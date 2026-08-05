@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
@@ -727,6 +728,46 @@ func TestMigrateLegacyDurableResourcesRecoversRecordedChildOwnership(t *testing.
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pvc), freshPVC))
 	assert.True(t, resourcecleanup.IsAttributed(freshPVC, resourcecleanup.RootOwnerFor(freshChild), resourcecleanup.ClassDataVolumes))
 	assert.Nil(t, metav1.GetControllerOf(freshPVC))
+}
+
+func TestMigrateLegacyDurableResourcesAttributesRecordedChildUnownedDefaultKeys(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-validators-0", UID: "child-uid",
+		}}},
+	}
+	child := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-validators-0", Namespace: nodeSet.Namespace, UID: "child-uid"},
+		Spec:       appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}},
+	}
+	account, err := chainutils.CreateAccount("cosmos", "cosmosvaloper", child.Spec.Validator.GetAccountHDPath())
+	require.NoError(t, err)
+	privKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	accountSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-account", Namespace: child.Namespace, UID: "account-uid"},
+		Data:       map[string][]byte{"mnemonic": []byte(account.Mnemonic)},
+	}
+	privKeySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-priv-key", Namespace: child.Namespace, UID: "priv-key-uid"},
+		Data:       map[string][]byte{"priv_validator_key.json": privKey},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child, accountSecret, privKeySecret).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	pending, err := r.MigrateLegacyDurableResources(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, pending)
+	freshChild := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(child), freshChild))
+	for _, secret := range []*corev1.Secret{accountSecret, privKeySecret} {
+		fresh := &corev1.Secret{}
+		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
+		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(freshChild), resourcecleanup.ClassGeneratedKeys))
+		assert.Equal(t, string(child.UID), fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
+	}
 }
 
 func TestMigrateLegacyDurableResourcesAttributesOwnedCosmoseedClaim(t *testing.T) {

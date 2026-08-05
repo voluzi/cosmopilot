@@ -169,6 +169,9 @@ func (r *Reconciler) attributeControlledLegacyDataVolumes(ctx context.Context, c
 // MigrateLegacyDurableResources removes cascading root ownership from verified pre-upgrade durable
 // resources before deletion reconciliation is allowed to start.
 func (r *Reconciler) MigrateLegacyDurableResources(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	if err := r.migrateExistingValidatorSecrets(ctx, chainNode); err != nil {
+		return false, err
+	}
 	if err := r.attributeControlledLegacyDataVolumes(ctx, chainNode); err != nil {
 		return false, err
 	}

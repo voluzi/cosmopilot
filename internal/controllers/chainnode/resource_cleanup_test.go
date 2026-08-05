@@ -21,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
@@ -192,6 +194,73 @@ func TestMigrateExistingAccountSecretRunsAfterAccountStatusCompleted(t *testing.
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(legacy), fresh))
 	assert.Nil(t, metav1.GetControllerOf(fresh))
 	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+}
+
+func TestMigrateExistingValidatorSecretsAttributesUnownedDefaultLegacyKeys(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"},
+		Spec:       appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}},
+		Status: appsv1.ChainNodeStatus{
+			AccountAddress: "cosmos1completed",
+			Validator:      true,
+			PubKey:         "completed",
+		},
+	}
+	account, err := chainutils.CreateAccount("cosmos", "cosmosvaloper", node.Spec.Validator.GetAccountHDPath())
+	require.NoError(t, err)
+	privKey, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	accountSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace, UID: "account-uid"},
+		Data:       map[string][]byte{MnemonicKey: []byte(account.Mnemonic)},
+	}
+	privKeySecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-priv-key", Namespace: node.Namespace, UID: "priv-key-uid"},
+		Data:       map[string][]byte{PrivKeyFilename: privKey},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, accountSecret, privKeySecret).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	require.NoError(t, r.migrateExistingValidatorSecrets(context.Background(), node))
+	for _, secret := range []*corev1.Secret{accountSecret, privKeySecret} {
+		fresh := &corev1.Secret{}
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
+		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+		assert.Equal(t, string(node.UID), fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
+	}
+}
+
+func TestMigrateExistingValidatorSecretsPreservesUnownedCustomAndInvalidDefaults(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	customAccount := "funded-account"
+	customPrivKey := "external-consensus-key"
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{
+			Init:             &appsv1.GenesisInitConfig{AccountMnemonicSecret: &customAccount},
+			PrivateKeySecret: &customPrivKey,
+		}},
+	}
+	secrets := []*corev1.Secret{
+		{ObjectMeta: metav1.ObjectMeta{Name: customAccount, Namespace: node.Namespace}, Data: map[string][]byte{MnemonicKey: []byte("not controller generated")}},
+		{ObjectMeta: metav1.ObjectMeta{Name: customPrivKey, Namespace: node.Namespace}, Data: map[string][]byte{PrivKeyFilename: []byte("not controller generated")}},
+		{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace}, Data: map[string][]byte{MnemonicKey: []byte("invalid mnemonic")}},
+		{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-priv-key", Namespace: node.Namespace}, Data: map[string][]byte{PrivKeyFilename: []byte("invalid key")}},
+	}
+	objects := []client.Object{node}
+	for _, secret := range secrets {
+		objects = append(objects, secret)
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	require.NoError(t, r.migrateExistingValidatorSecrets(context.Background(), node))
+	for _, secret := range secrets {
+		fresh := &corev1.Secret{}
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
+		assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+	}
 }
 
 func TestMigrateLegacyDurableResourcesAttributesAllVerifiedClasses(t *testing.T) {

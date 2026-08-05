@@ -273,8 +273,8 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) {
 			continue
 		}
-		if name == "" {
-			name, _ = statefulSetNameFromDataPVC(pvc.GetName())
+		if canonicalName, ok := statefulSetNameFromDataPVC(pvc.GetName()); ok {
+			name = canonicalName
 		}
 		if isStatefulSetDataPVC(pvc.GetName(), name) {
 			if _, exists := ownedNames[name]; !exists {

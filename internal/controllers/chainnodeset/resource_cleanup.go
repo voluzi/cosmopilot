@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
@@ -307,14 +308,22 @@ func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context
 	}
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
-		if !metav1.IsControlledBy(secret, child) ||
-			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) ||
+		if resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) ||
 			!isLegacyChildGeneratedKeySecret(child, secret) {
 			continue
 		}
-		managed, changed, err := resourcecleanup.PrepareGeneratedResource(secret, child, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
-		if err != nil {
-			return err
+		managed := metav1.IsControlledBy(secret, child)
+		changed := false
+		if managed {
+			var err error
+			managed, changed, err = resourcecleanup.PrepareGeneratedResource(secret, child, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+			if err != nil {
+				return err
+			}
+		} else if isUnownedLegacyChildDefaultKey(child, secret) {
+			changed = resourcecleanup.Stamp(secret, root, resourcecleanup.ClassGeneratedKeys)
+			changed = resourcecleanup.StampResourceOwner(secret, child.GetUID()) || changed
+			managed = true
 		}
 		if managed && changed {
 			if err := r.Update(ctx, secret); err != nil {
@@ -323,6 +332,36 @@ func (r *Reconciler) attributeControlledLegacyChildResources(ctx context.Context
 		}
 	}
 	return nil
+}
+
+func isUnownedLegacyChildDefaultKey(child *appsv1.ChainNode, secret *corev1.Secret) bool {
+	if child.Spec.Validator == nil || metav1.GetControllerOf(secret) != nil ||
+		secret.GetAnnotations()[resourcecleanup.AnnotationRootOwnerUID] != "" || len(secret.Data) != 1 {
+		return false
+	}
+	switch secret.GetName() {
+	case child.GetName() + "-account":
+		mnemonic, ok := secret.Data["mnemonic"]
+		if !ok {
+			return false
+		}
+		_, err := chainutils.AccountFromMnemonic(
+			string(mnemonic),
+			child.Spec.Validator.GetAccountPrefix(),
+			child.Spec.Validator.GetValPrefix(),
+			child.Spec.Validator.GetAccountHDPath(),
+		)
+		return err == nil
+	case child.GetName() + "-priv-key":
+		key, ok := secret.Data["priv_validator_key.json"]
+		if !ok {
+			return false
+		}
+		_, err := cometbft.GetPubKey(key)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 func isLegacyChildGeneratedKeySecret(child *appsv1.ChainNode, secret *corev1.Secret) bool {
