@@ -69,7 +69,8 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	}
 	for i := range statefulSets.Items {
 		sts := &statefulSets.Items[i]
-		if !IsOwnedSignerStatefulSet(sts, owner) {
+		if !IsOwnedSignerStatefulSet(sts, owner) &&
+			!(metav1.IsControlledBy(sts, owner) && deterministicSignerStatefulSetBelongsToRoot(sts.GetName(), owner)) {
 			continue
 		}
 		signerNames = append(signerNames, sts.GetName())
@@ -392,8 +393,9 @@ func EnsureConsensusKeyReservationOwnerFinalizer(ctx context.Context, reader cli
 		return false, fmt.Errorf("consensus-key reservation owner %s/%s is already terminating", owner.GetNamespace(), owner.GetName())
 	}
 	if controllerutil.ContainsFinalizer(fresh, ReservationOwnerFinalizer) {
-		owner.SetResourceVersion(fresh.GetResourceVersion())
-		owner.SetFinalizers(append([]string(nil), fresh.GetFinalizers()...))
+		if err := replaceReservationOwnerWithFreshCopy(owner, fresh); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 	base, ok := fresh.DeepCopyObject().(client.Object)
@@ -414,9 +416,30 @@ func EnsureConsensusKeyReservationOwnerFinalizer(ctx context.Context, reader cli
 	if confirmed.GetUID() != owner.GetUID() || !controllerutil.ContainsFinalizer(confirmed, ReservationOwnerFinalizer) {
 		return false, fmt.Errorf("consensus-key reservation finalizer was not persisted on exact owner UID %q", owner.GetUID())
 	}
-	owner.SetResourceVersion(confirmed.GetResourceVersion())
-	owner.SetFinalizers(append([]string(nil), confirmed.GetFinalizers()...))
+	if err := replaceReservationOwnerWithFreshCopy(owner, confirmed); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func replaceReservationOwnerWithFreshCopy(owner, fresh client.Object) error {
+	switch typedOwner := owner.(type) {
+	case *appsv1.ChainNode:
+		typedFresh, ok := fresh.(*appsv1.ChainNode)
+		if !ok {
+			return fmt.Errorf("consensus-key reservation owner copy type %T does not match %T", fresh, owner)
+		}
+		*typedOwner = *typedFresh.DeepCopy()
+	case *appsv1.ChainNodeSet:
+		typedFresh, ok := fresh.(*appsv1.ChainNodeSet)
+		if !ok {
+			return fmt.Errorf("consensus-key reservation owner copy type %T does not match %T", fresh, owner)
+		}
+		*typedOwner = *typedFresh.DeepCopy()
+	default:
+		return fmt.Errorf("unsupported consensus-key reservation owner %T", owner)
+	}
+	return nil
 }
 
 // ReleaseConsensusKeyReservations deletes reservations belonging to the exact root identity with a
@@ -815,9 +838,32 @@ func managedSigningOneShotBelongsToRoot(name string, labels map[string]string, o
 	}
 	switch owner.(type) {
 	case *appsv1.ChainNode:
-		return strings.HasPrefix(name, owner.GetName()+"-") || labels["chain-node"] == owner.GetName()
+		if chainNode := labels["chain-node"]; chainNode != "" {
+			return chainNode == owner.GetName()
+		}
+		if labels["nodeset"] != "" {
+			return false
+		}
+		return strings.HasPrefix(name, owner.GetName()+"-")
 	case *appsv1.ChainNodeSet:
-		return strings.HasPrefix(name, owner.GetName()+"-") || labels["nodeset"] == owner.GetName()
+		if nodeSet := labels["nodeset"]; nodeSet != "" {
+			return nodeSet == owner.GetName()
+		}
+		if labels["chain-node"] != "" {
+			return false
+		}
+		return strings.HasPrefix(name, owner.GetName()+"-")
+	default:
+		return false
+	}
+}
+
+func deterministicSignerStatefulSetBelongsToRoot(name string, owner client.Object) bool {
+	switch owner.(type) {
+	case *appsv1.ChainNode:
+		return name == owner.GetName()+"-signer"
+	case *appsv1.ChainNodeSet:
+		return strings.HasPrefix(name, owner.GetName()+"-") && strings.HasSuffix(name, "-signer")
 	default:
 		return false
 	}

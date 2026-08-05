@@ -44,6 +44,85 @@ func TestEnsureConsensusKeyReservationOwnerFinalizerPersistsBeforeClaim(t *testi
 	}
 }
 
+func TestEnsureConsensusKeyReservationOwnerFinalizerSynchronizesCachedOwner(t *testing.T) {
+	tests := []struct {
+		name                    string
+		finalizerAlreadyPresent bool
+		wantChanged             bool
+	}{
+		{name: "already present", finalizerAlreadyPresent: true, wantChanged: false},
+		{name: "newly patched", wantChanged: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := reservationLifecycleScheme(t)
+			owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+				Name: "validator", Namespace: "default", UID: "owner-uid", ResourceVersion: "1",
+				Labels: map[string]string{"cached": "stale"}, Finalizers: []string{"example.com/other"},
+			}}
+			freshOwner := owner.DeepCopy()
+			freshOwner.ResourceVersion = ""
+			freshOwner.Labels = map[string]string{"concurrent": "preserve"}
+			freshOwner.Spec.Validator = &appsv1.ValidatorConfig{}
+			if tt.finalizerAlreadyPresent {
+				freshOwner.Finalizers = append(freshOwner.Finalizers, ReservationOwnerFinalizer)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(freshOwner).Build()
+
+			changed, err := EnsureConsensusKeyReservationOwnerFinalizer(context.Background(), c, c, owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed != tt.wantChanged {
+				t.Fatalf("changed = %v, want %v", changed, tt.wantChanged)
+			}
+
+			confirmed := &appsv1.ChainNode{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(owner), confirmed); err != nil {
+				t.Fatal(err)
+			}
+			if !containsString(confirmed.Finalizers, ReservationOwnerFinalizer) {
+				t.Fatalf("missing lifecycle finalizer in API-server state: %v", confirmed.Finalizers)
+			}
+			if confirmed.Labels["concurrent"] != "preserve" {
+				t.Fatalf("concurrent metadata edit was lost: %v", confirmed.Labels)
+			}
+			if owner.Labels["concurrent"] != "preserve" {
+				t.Fatalf("synchronized owner is missing concurrent metadata: %v", owner.Labels)
+			}
+			if _, stale := owner.Labels["cached"]; stale {
+				t.Fatalf("synchronized owner retained stale cached metadata: %v", owner.Labels)
+			}
+			if owner.Spec.Validator == nil {
+				t.Fatal("synchronized owner is missing the fresh spec")
+			}
+			if !containsString(owner.Finalizers, "example.com/other") ||
+				!containsString(owner.Finalizers, ReservationOwnerFinalizer) {
+				t.Fatalf("synchronized owner finalizers = %v", owner.Finalizers)
+			}
+			if owner.ResourceVersion != confirmed.ResourceVersion {
+				t.Fatalf("synchronized owner resourceVersion = %q, want %q", owner.ResourceVersion, confirmed.ResourceVersion)
+			}
+
+			owner.Labels["reconciled"] = "true"
+			if err := c.Update(context.Background(), owner); err != nil {
+				t.Fatalf("full-object update from synchronized owner failed: %v", err)
+			}
+			updated := &appsv1.ChainNode{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(owner), updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Labels["concurrent"] != "preserve" || updated.Labels["reconciled"] != "true" {
+				t.Fatalf("full-object update lost synchronized metadata: %v", updated.Labels)
+			}
+			if _, stale := updated.Labels["cached"]; stale {
+				t.Fatalf("full-object update restored stale cached metadata: %v", updated.Labels)
+			}
+		})
+	}
+}
+
 func TestReleaseConsensusKeyReservationsDeletesOnlyExactOwnerAndConfirmsAbsence(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
@@ -154,6 +233,76 @@ func TestFinalizeConsensusKeySigningPathsBlocksExactForeignOneShotPod(t *testing
 	}
 }
 
+func TestFinalizeConsensusKeySigningPathsUsesExactOneShotLabelsBeforeNameFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		owner client.Object
+		path  client.Object
+	}{
+		{
+			name:  "ChainNodeSet Job",
+			owner: &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default", UID: "owner-uid"}},
+			path: &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-bar-signer-import", Namespace: "default", UID: "job-uid", Labels: map[string]string{"nodeset": "foo-bar"},
+			}},
+		},
+		{
+			name:  "ChainNodeSet direct Pod",
+			owner: &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default", UID: "owner-uid"}},
+			path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-bar-signer-pubkey", Namespace: "default", UID: "pod-uid", Labels: map[string]string{"nodeset": "foo-bar"},
+			}},
+		},
+		{
+			name:  "ChainNodeSet generated Job Pod",
+			owner: &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default", UID: "owner-uid"}},
+			path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-bar-signer-import-generated", Namespace: "default", UID: "pod-uid", Labels: map[string]string{"nodeset": "foo-bar"},
+			}},
+		},
+		{
+			name:  "ChainNode Job",
+			owner: &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}},
+			path: &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name: "validator-signer-import", Namespace: "default", UID: "job-uid", Labels: map[string]string{"chain-node": "validator-copy"},
+			}},
+		},
+		{
+			name:  "ChainNode direct Pod attributed to node set",
+			owner: &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}},
+			path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "validator-signer-pubkey", Namespace: "default", UID: "pod-uid", Labels: map[string]string{"nodeset": "validators"},
+			}},
+		},
+		{
+			name:  "ChainNode generated Job Pod",
+			owner: &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}},
+			path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "validator-signer-import-generated", Namespace: "default", UID: "pod-uid", Labels: map[string]string{"chain-node": "validator-copy"},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := reservationLifecycleScheme(t)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.owner, tt.path).Build()
+
+			done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, tt.owner, tt.owner.GetNamespace())
+			if err != nil || !done {
+				t.Fatalf("foreign-attributed one-shot path must be ignored, done=%v err=%v", done, err)
+			}
+			remaining, ok := tt.path.DeepCopyObject().(client.Object)
+			if !ok {
+				t.Fatalf("path %T is not a Kubernetes object", tt.path)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(tt.path), remaining); err != nil {
+				t.Fatalf("foreign-attributed one-shot path was modified: %v", err)
+			}
+		})
+	}
+}
+
 func TestFinalizeConsensusKeySigningPathsLeavesChildOneShotPodToChainNodeSetCleanup(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "owner-uid"}}
@@ -194,6 +343,48 @@ func TestFinalizeConsensusKeySigningPathsWaitsForLabelLessSignerReplica(t *testi
 	}
 	if done {
 		t.Fatal("label-less deterministic signer replica must keep finalization pending")
+	}
+}
+
+func TestFinalizeConsensusKeySigningPathsDeletesOwnedLabelLessDeterministicChainNodeSetSigner(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "owner-uid"}}
+	sts := &appsk8sv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "nodes-legacy-signer", Namespace: owner.Namespace, UID: "signer-uid",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: owner.Name,
+				UID: owner.UID, Controller: ptr.To(true),
+			}},
+		},
+		Spec: appsk8sv1.StatefulSetSpec{
+			Replicas: ptr.To(int32(0)),
+			PersistentVolumeClaimRetentionPolicy: &appsk8sv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: appsk8sv1.RetainPersistentVolumeClaimRetentionPolicyType,
+				WhenScaled:  appsk8sv1.RetainPersistentVolumeClaimRetentionPolicyType,
+			},
+		},
+		Status: appsk8sv1.StatefulSetStatus{ObservedGeneration: 1},
+	}
+	sts.Generation = 1
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + sts.Name + "-0", Namespace: owner.Namespace,
+		Labels: pvcOwnerLabels(sts.Name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, sts, pvc).Build()
+
+	done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("label-less deterministic signer must be fully torn down")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsk8sv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("label-less deterministic signer StatefulSet must be absent, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}); err != nil {
+		t.Fatalf("retained signer PVC must be preserved: %v", err)
 	}
 }
 
