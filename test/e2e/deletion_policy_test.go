@@ -112,6 +112,15 @@ var _ = Describe("Deletion policy", func() {
 		recreated.Name = node.Name
 		recreated.GenerateName = ""
 		Expect(Framework().Client().Create(Framework().Context(), recreated)).To(Succeed())
+		// Arm the ownership-aware reclaim here rather than after the waits below: from the moment Create
+		// returns, the controller may claim a cluster-scoped reservation for this owner, so a failure
+		// anywhere below would otherwise leave both the owner and that reservation behind — and namespace
+		// teardown is fire-and-forget and could not reclaim a cluster-scoped object in any case. There is
+		// nothing to record yet, so the reclaim resolves the reservation from the owner UID when it runs.
+		// Nothing pins the pod this owner brings up: the hold this spec placed was on the previous pod
+		// and was lifted above, so the reclaim's teardown wait is not blocked behind it.
+		deferReservationCleanupForOwner("ChainNode", ns.Name, recreated.Name, recreated.UID)
+
 		// Running is the acceptance bar here, not a second block: the phase already requires the pod
 		// to be up and the node to answer RPC as synced, and the reacquisition itself is proven by
 		// recordConsensusKeyReservation below rather than by any height the node reaches.
@@ -119,11 +128,7 @@ var _ = Describe("Deletion policy", func() {
 		RefreshChainNode(recreated)
 		Expect(recreated.UID).NotTo(Equal(node.UID), "the recreated ChainNode must be a new object, not the old one")
 
-		// Register the same ownership-aware cleanup for the reacquired reservation. It only runs after
-		// the spec finishes, deletes the recreated owner before touching its reservation, and prevents
-		// a stalled namespace teardown from leaking this cluster-scoped object into a reused cluster.
 		reacquired := recordConsensusKeyReservation("ChainNode", ns.Name, recreated.Name, recreated.UID)
-		deferReservationCleanup(reacquired)
 		Expect(reacquired.Name).To(Equal(record.Name),
 			"the retained consensus key must resolve to the same deterministic reservation name")
 		Expect(reacquired.ChainID).To(Equal(record.ChainID))
@@ -265,36 +270,105 @@ func recordConsensusKeyReservation(ownerKind, namespace, ownerName string, owner
 // deferReservationCleanup keeps a cluster-scoped reservation from outliving a failed spec: namespace
 // teardown is fire-and-forget and could not reclaim a cluster-scoped object in any case.
 //
-// The reclaim must not commit the fault these specs exist to catch, though. Deleting the reservation
-// outright would drop it while its owner is still running and its validator still signing, which is
-// exactly the double-signing window the reservation exists to close. So the cleanup follows the
-// controller's own order instead: delete the recorded owner, wait for that owner and the signing
-// surface of its claim to be gone, and only then delete the reservation. Every step is guarded by a
-// UID precondition, so a reservation or owner that was already released and replaced under the same
-// name is left untouched.
-//
 // Both specs that pin a pod register their hold release after this cleanup, and Ginkgo runs cleanups
-// in reverse order of registration, so the hold is already lifted by the time the wait below starts.
-// A teardown that still does not converge leaves the reservation in place: leaking one cluster-scoped
-// object is the safe failure here, deleting a live consensus-key reservation is not.
+// in reverse order of registration, so the hold is already lifted by the time reclaimReservation
+// starts waiting on teardown.
 func deferReservationCleanup(record reservationRecord) {
 	DeferCleanup(func() {
-		if _, held := reservationStillRecorded(record); !held {
-			return
-		}
-		deleteReservationOwner(record)
-		if !confirmReservationOwnerTeardown(record) {
-			By(fmt.Sprintf("leaving ConsensusKeyReservation %q in place: teardown of owner %s %s/%s was not confirmed",
-				record.Name, record.OwnerKind, record.Namespace, record.OwnerName))
-			return
-		}
-		current, held := reservationStillRecorded(record)
-		if !held {
-			return
-		}
-		uid := current.UID
-		_ = Framework().Client().Delete(Framework().Context(), current, client.Preconditions{UID: &uid})
+		reclaimReservation(record)
 	})
+}
+
+// deferReservationCleanupForOwner registers the same reclaim for an owner whose reservation has not
+// been recorded yet, so it can be armed the moment a Create returns instead of only once the spec has
+// observed what that Create led the controller to claim. A failure in between would otherwise leave
+// both the owner and its cluster-scoped reservation behind.
+//
+// The reservation is resolved when the cleanup runs rather than captured now, because at registration
+// time the controller may not have created it. Attribution stays exact: only a reservation whose
+// immutable spec names this owner UID is ever considered, and the delete that ends the reclaim is
+// still preconditioned on the object UID that resolution returned.
+func deferReservationCleanupForOwner(ownerKind, namespace, ownerName string, ownerUID types.UID) {
+	Expect(ownerUID).NotTo(BeEmpty(), "an owner-scoped reservation cleanup needs the created owner's UID")
+	owner := reservationRecord{
+		OwnerKind: ownerKind,
+		Namespace: namespace,
+		OwnerName: ownerName,
+		OwnerUID:  ownerUID,
+	}
+	DeferCleanup(func() {
+		held := reservationsHeldByOwner(owner)
+		if len(held) == 0 {
+			// Nothing cluster-scoped is attributed to this owner, so there is nothing to reclaim and no
+			// teardown to confirm. The owner is still deleted, through the same UID-preconditioned path:
+			// that is what keeps a half-reconciled owner from claiming a reservation after this cleanup
+			// has already looked, and its own finalizer releases anything it did claim.
+			deleteReservationOwner(owner)
+			return
+		}
+		for _, record := range held {
+			reclaimReservation(record)
+		}
+	})
+}
+
+// reclaimReservation deletes one recorded reservation without committing the fault these specs exist
+// to catch. Deleting it outright would drop the reservation while its owner is still running and its
+// validator still signing, which is exactly the double-signing window the reservation exists to close.
+// So the reclaim follows the controller's own order instead: delete the recorded owner, wait for that
+// owner and the signing surface of its claim to be gone, and only then delete the reservation. Every
+// step is guarded by a UID precondition, so a reservation or owner that was already released and
+// replaced under the same name is left untouched.
+//
+// A teardown that does not converge leaves the reservation in place: leaking one cluster-scoped object
+// is the safe failure here, deleting a live consensus-key reservation is not.
+func reclaimReservation(record reservationRecord) {
+	if _, held := reservationStillRecorded(record); !held {
+		return
+	}
+	deleteReservationOwner(record)
+	if !confirmReservationOwnerTeardown(record) {
+		By(fmt.Sprintf("leaving ConsensusKeyReservation %q in place: teardown of owner %s %s/%s was not confirmed",
+			record.Name, record.OwnerKind, record.Namespace, record.OwnerName))
+		return
+	}
+	current, held := reservationStillRecorded(record)
+	if !held {
+		return
+	}
+	uid := current.UID
+	_ = Framework().Client().Delete(Framework().Context(), current, client.Preconditions{UID: &uid})
+}
+
+// reservationsHeldByOwner resolves every reservation the cluster currently attributes to owner into a
+// record the reclaim can act on. Attribution is by owner UID, which a reservation's immutable spec can
+// never have retargeted, so a reservation that merely shares a name with one this owner once held is
+// never picked up. A list error yields nothing: an unreadable cluster is no evidence that anything is
+// reclaimable.
+func reservationsHeldByOwner(owner reservationRecord) []reservationRecord {
+	list := &appsv1.ConsensusKeyReservationList{}
+	if err := Framework().Client().List(Framework().Context(), list); err != nil {
+		return nil
+	}
+	var held []reservationRecord
+	for i := range list.Items {
+		reservation := &list.Items[i]
+		if reservation.Spec.OwnerUID != owner.OwnerUID {
+			continue
+		}
+		held = append(held, reservationRecord{
+			Name:      reservation.Name,
+			UID:       reservation.UID,
+			OwnerUID:  reservation.Spec.OwnerUID,
+			OwnerKind: reservation.Spec.OwnerKind,
+			Namespace: reservation.Spec.Namespace,
+			OwnerName: reservation.Spec.OwnerName,
+			ChainID:   reservation.Spec.ChainID,
+			PublicKey: reservation.Spec.PublicKey,
+			Claim:     reservation.Spec.Claim,
+		})
+	}
+	return held
 }
 
 // reservationStillRecorded reports whether the cluster still holds the exact object the record was
