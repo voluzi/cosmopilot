@@ -261,6 +261,40 @@ func TestEnsureConsensusKeyReservationReportsBlockedStaleRecoveryWhileManagedJob
 	}
 }
 
+func TestEnsureConsensusKeyReservationBlocksRecoveryForOrphanedManagedJobPod(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	holder := ReservationHolder{
+		UID: "new-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator", Claim: "validator",
+	}
+	stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator", Claim: "validator",
+	})
+	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator-tmkms-vault-upload-r4ndm", Namespace: holder.Namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job",
+			Name: "validator-tmkms-vault-upload", UID: "deleted-job-uid", Controller: ptr.To(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, pod).Build()
+
+	_, err := EnsureConsensusKeyReservationWithResult(
+		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
+	)
+	if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) {
+		t.Fatalf("orphaned managed Job pod must block stale recovery, got %v", err)
+	}
+	if !strings.Contains(err.Error(), pod.Name) {
+		t.Fatalf("blocked recovery error must name the orphaned Job pod, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("stale reservation must remain while orphaned Job pod exists: %v", err)
+	}
+}
+
 func TestCleanupManagedSigningPathDeletesJobPodBeforeJob(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{

@@ -637,6 +637,9 @@ func staleReservationPodMatches(pod *corev1.Pod, reservation *appsv1.ConsensusKe
 		(reservation.Spec.OwnerKind == "ChainNode" && pod.GetName() == reservation.Spec.OwnerName) {
 		return true
 	}
+	if staleReservationOneShotPodMatches(pod.GetName(), reservation) {
+		return true
+	}
 	if pod.GetLabels()["app.kubernetes.io/name"] != "cosmosigner" {
 		return false
 	}
@@ -651,6 +654,22 @@ func staleReservationPodMatches(pod *corev1.Pod, reservation *appsv1.ConsensusKe
 		return instance == reservation.Spec.OwnerName+"-signer"
 	}
 	return strings.HasPrefix(instance, reservation.Spec.OwnerName+"-")
+}
+
+func staleReservationOneShotPodMatches(name string, reservation *appsv1.ConsensusKeyReservation) bool {
+	managedJobName := ""
+	for _, marker := range []string{
+		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
+	} {
+		if index := strings.Index(name, marker+"-"); index >= 0 {
+			managedJobName = name[:index+len(marker)]
+			break
+		}
+	}
+	if managedJobName == "" {
+		return false
+	}
+	return staleReservationJobMatches(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: managedJobName}}, reservation)
 }
 
 func signerPodBelongsToRoot(pod *corev1.Pod, owner client.Object) bool {
