@@ -75,6 +75,9 @@ func run(args []string, cmds commands) error {
 			printHelp()
 			return nil
 		case "mock":
+			if err := validateMockArgs(args[1:]); err != nil {
+				return err
+			}
 			cmds.mock(args[1:])
 			return nil
 		case "wait-for-dns":
@@ -100,6 +103,20 @@ func rejectPositionalArgs(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unexpected argument %q after flags: run `node-utils help`", args[0])
+}
+
+func validateMockArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: node-utils mock <set-cpu <millicores>|set-memory <mib>|get>")
+	}
+	want := 1
+	if args[0] == "set-cpu" || args[0] == "set-memory" {
+		want = 2
+	}
+	if len(args) != want {
+		return fmt.Errorf("invalid arguments for node-utils mock %s", args[0])
+	}
+	return nil
 }
 
 func startServer() error {

@@ -120,7 +120,7 @@ func TestWaitForDNSCommandRejectsInvalidPodAddress(t *testing.T) {
 	for _, address := range []string{"", "$(POD_IP)", "not-an-ip"} {
 		t.Run(address, func(t *testing.T) {
 			err := runWaitForDNSCommand(context.Background(), &sequenceDNSResolver{}, &sequenceHTTPDoer{},
-				[]string{"signer-privval.default.svc", address, "25s"}, time.Millisecond)
+				[]string{"signer-privval.default.svc", address, "20ms"}, time.Millisecond)
 			if err == nil || !strings.Contains(err.Error(), "invalid IP address") {
 				t.Fatalf("runWaitForDNSCommand() error = %v, want invalid-address error", err)
 			}

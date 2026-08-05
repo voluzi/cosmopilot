@@ -48,7 +48,6 @@ func TestRunWaitForDNSRunsWithoutServerConfiguration(t *testing.T) {
 	cmds := testCommands(t)
 	cmds.waitForDNS = func(args []string) error {
 		forwarded = append([]string(nil), args...)
-		// The signer has dialed this Pod and the node-utils sidecar recorded the authenticated
 		// The command is dispatched directly without touching server configuration. Simulate the
 		// authenticated signer confirmation that releases the gate.
 		return runWaitForDNSCommand(
@@ -95,6 +94,24 @@ func TestRunRejectsUnknownSubcommand(t *testing.T) {
 				if !strings.Contains(err.Error(), name) {
 					t.Fatalf("run() error = %v, want it to list the supported subcommand %q", err, name)
 				}
+			}
+		})
+	}
+}
+
+func TestRunRejectsMalformedMockArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"mock"},
+		{"mock", "get", "extra"},
+		{"mock", "set-cpu"},
+		{"mock", "set-cpu", "500", "extra"},
+		{"mock", "set-memory"},
+		{"mock", "set-memory", "512", "extra"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			err := run(args, testCommands(t))
+			if err == nil || !strings.Contains(err.Error(), "node-utils mock") {
+				t.Fatalf("run(%q) error = %v, want mock usage error", args, err)
 			}
 		})
 	}

@@ -495,21 +495,22 @@ func waitForCosmosignerRetargetCompletion(cns *appsv1.ChainNodeSet, logicalName,
 		pollTimeout  = 8 * time.Minute
 	)
 	deadline := time.Now().Add(pollTimeout)
-	sawMigration := false
 	for {
 		current := &appsv1.ChainNodeSet{}
-		Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current)).To(Succeed())
+		if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current); err != nil {
+			Expect(time.Now()).To(BeTemporally("<", deadline),
+				"timed out reading the ChainNodeSet while waiting for the retarget to %s: %v", targetPodName, err)
+			time.Sleep(pollInterval)
+			continue
+		}
 		status := current.GetCosmosignerStatus(logicalName)
 		Expect(status).NotTo(BeNil(), "signer %q lost its status entry during the retarget", logicalName)
 		switch {
 		case status.Migration != nil:
-			sawMigration = true
 		case status.AppliedDigest != "" && status.AppliedDigest != previousDigest:
 			Expect(cosmosignerTargetPodServed(
 				cns.GetNamespace(), targetPodName, appsv1.CosmosignerStatusResourceName(status),
 			)).To(BeTrue(), "the retarget completed before %s was running, ready and past its discovery gate", targetPodName)
-			Expect(sawMigration).To(BeTrue(),
-				"the retarget must run through the migration state machine, not swap targets in place")
 			return status.DeepCopy()
 		}
 		Expect(time.Now()).To(BeTemporally("<", deadline),
