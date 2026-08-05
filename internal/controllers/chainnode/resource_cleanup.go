@@ -23,6 +23,9 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 	if err != nil {
 		return false, err
 	}
+	if err := r.refuseOrphanedRecordedChild(ctx, chainNode); err != nil {
+		return false, err
+	}
 	quiesced, err := r.quiesceNodePod(ctx, chainNode)
 	if err != nil || !quiesced {
 		return false, err
@@ -82,6 +85,46 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 		}
 	}
 	return true, nil
+}
+
+// refuseOrphanedRecordedChild blocks standalone finalization of a generated child that lost its
+// ChainNodeSet controller reference. Such a child resolves to itself as cleanup root and would stamp
+// its durable resources under its own UID, where the parent can no longer reach them during
+// scale-down or root cleanup. A recorded name and UID proves the parent relationship, so this fails
+// closed rather than guessing; restoring the reference lets cleanup proceed under the parent root.
+func (r *Reconciler) refuseOrphanedRecordedChild(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if metav1.GetControllerOf(chainNode) != nil {
+		return nil
+	}
+	nodeSets := &appsv1.ChainNodeSetList{}
+	if err := r.List(ctx, nodeSets, client.InNamespace(chainNode.GetNamespace())); err != nil {
+		return err
+	}
+	for i := range nodeSets.Items {
+		nodeSet := &nodeSets.Items[i]
+		if !recordsChildIdentity(nodeSet, chainNode) {
+			continue
+		}
+		return fmt.Errorf(
+			"refusing standalone durable cleanup of ChainNode %s/%s UID %s recorded by ChainNodeSet %s UID %s; restore its controller reference so its resources are finalized under the ChainNodeSet root",
+			chainNode.GetNamespace(), chainNode.GetName(), chainNode.GetUID(), nodeSet.GetName(), nodeSet.GetUID(),
+		)
+	}
+	return nil
+}
+
+func recordsChildIdentity(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {
+	for _, status := range nodeSet.Status.Nodes {
+		if status.Name == child.GetName() && status.UID != "" && status.UID == child.GetUID() {
+			return true
+		}
+	}
+	for _, status := range nodeSet.Status.Validators {
+		if status.Name == child.GetName() && status.UID != "" && status.UID == child.GetUID() {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) effectiveDeletionPolicy(ctx context.Context, chainNode *appsv1.ChainNode) (*appsv1.DeletionPolicy, error) {

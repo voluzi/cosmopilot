@@ -196,6 +196,47 @@ func TestMigrateExistingAccountSecretRunsAfterAccountStatusCompleted(t *testing.
 	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
+func TestFinalizeResourcesRefusesOrphanedRecordedChild(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: "child-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+	}}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: node.Namespace, UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: node.Name, UID: node.UID,
+		}}},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, nodeSet).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	_, err := r.finalizeResources(context.Background(), node)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded by ChainNodeSet set")
+}
+
+func TestFinalizeResourcesAllowsGenuineStandaloneChainNode(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "standalone", Namespace: "default", UID: "node-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+	}}
+	// Same name recorded by a ChainNodeSet, but a different UID: not this node's parent.
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: node.Namespace, UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: node.Name, UID: "some-other-uid",
+		}}},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, nodeSet).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), node)
+	require.NoError(t, err)
+	assert.True(t, done)
+}
+
 func TestMigrateExistingValidatorSecretsAttributesControlledPrivKeySecret(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{
