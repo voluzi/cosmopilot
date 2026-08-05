@@ -127,6 +127,32 @@ func TestMaybeDeleteNodeRepairsTerminatingRecordedChildBeforeForgettingStatus(t 
 	assert.Empty(t, nodeSet.Status.Nodes, "status may be forgotten only after controller and worker routing are repaired")
 }
 
+func TestMaybeDeleteNodeRetainsTerminatingRecordedChildWithoutCleanupFinalizer(t *testing.T) {
+	now := metav1.Now()
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: types.UID("child-uid"), Group: "fullnodes",
+		}}},
+	}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name:              "set-fullnodes-0",
+		Namespace:         "default",
+		UID:               types.UID("child-uid"),
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"example.com/other"},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, child)
+
+	err := r.maybeDeleteNode(context.Background(), nodeSet, child.Name)
+	require.ErrorContains(t, err, "terminating without cleanup finalizer")
+	assert.Len(t, nodeSet.Status.Nodes, 1, "status must retain the child until durable-resource cleanup can be recovered")
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(child), fresh))
+	assert.NotContains(t, fresh.Finalizers, resourcecleanup.Finalizer)
+}
+
 func TestEnsureNodeRefusesRecordedValidatorReplacementWithDifferentUID(t *testing.T) {
 	const name = "set-validator"
 	nodeSet := &appsv1.ChainNodeSet{
@@ -277,9 +303,9 @@ func TestEnsureNodesReadyInstances(t *testing.T) {
 		delete(node.Labels, controllers.LabelChainNodeSetGroup)
 		return node
 	}
-	// A ChainNode needs a finalizer for the fake client to keep it around with a deletion timestamp.
+	// A ChainNode needs its cleanup finalizer for the fake client to keep it around with a deletion timestamp.
 	terminating := func(node *appsv1.ChainNode) *appsv1.ChainNode {
-		node.Finalizers = []string{"cosmopilot.voluzi.com/test"}
+		node.Finalizers = []string{resourcecleanup.Finalizer}
 		node.DeletionTimestamp = ptr.To(metav1.Now())
 		return node
 	}

@@ -626,6 +626,12 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	if controller := metav1.GetControllerOf(node); controller != nil && !metav1.IsControlledBy(node, nodeSet) {
 		return fmt.Errorf("refusing to delete ChainNode %s/%s controlled by %s UID %s", node.GetNamespace(), node.GetName(), controller.Name, controller.UID)
 	}
+	if !node.GetDeletionTimestamp().IsZero() && !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) {
+		return fmt.Errorf(
+			"ChainNode %s/%s is terminating without cleanup finalizer %q; retaining ChainNodeSet status because durable-resource cleanup cannot be guaranteed",
+			node.GetNamespace(), node.GetName(), resourcecleanup.Finalizer,
+		)
+	}
 	changed := false
 	workerName := nodeSet.GetLabels()[controllers.LabelWorkerName]
 	if node.GetLabels()[controllers.LabelWorkerName] != workerName {
