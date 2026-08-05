@@ -265,7 +265,10 @@ func (provider *S3) ensureSnapshotDeletion(
 	if err != nil {
 		return nil, err
 	}
-	job, _, err = ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, "delete")
+	if len(bounded) > 0 && bounded[0] {
+		return ensureSnapshotDeletionJobForDesired(ctx, provider.Client, provider.Owner, job)
+	}
+	job, _, err = ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, typeDelete)
 	if err != nil {
 		return nil, err
 	}

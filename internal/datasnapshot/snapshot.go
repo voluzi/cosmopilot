@@ -1175,6 +1175,37 @@ func reconcileSnapshotDeletionJob(
 	return snapshotJobStatus(updated), nil
 }
 
+func ensureSnapshotDeletionJobForDesired(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	desired *batchv1.Job,
+) (*batchv1.Job, error) {
+	job, _, err := ensureSnapshotJob(ctx, client, owner, desired, typeDelete)
+	if err != nil {
+		return nil, err
+	}
+	if int32PointersEqual(job.Spec.BackoffLimit, desired.Spec.BackoffLimit) {
+		return job, nil
+	}
+	if job.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("stale %s job %s/%s is terminating: %w",
+			typeDelete, job.Namespace, job.Name, ErrStaleJobTerminating)
+	}
+	if err = deleteSnapshotJob(ctx, client, job); err != nil {
+		return nil, fmt.Errorf("delete stale %s job %s/%s: %w", typeDelete, job.Namespace, job.Name, err)
+	}
+	return nil, &StaleJobReplacedError{
+		Purpose:          typeDelete,
+		Namespace:        job.Namespace,
+		Name:             job.Name,
+		UID:              job.UID,
+		ConflictingLabel: "spec.backoffLimit",
+		PreviousValue:    int32PointerString(job.Spec.BackoffLimit),
+		DesiredValue:     int32PointerString(desired.Spec.BackoffLimit),
+	}
+}
+
 func reconcileSnapshotDeletionJobForDesired(
 	ctx context.Context,
 	client kubernetes.Interface,

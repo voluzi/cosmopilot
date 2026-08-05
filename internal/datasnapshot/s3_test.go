@@ -334,6 +334,29 @@ func TestS3ListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
 	assert.Equal(t, []SnapshotJob{{Name: "snapshot-delete", Purpose: SnapshotJobUpload}}, jobs)
 }
 
+func TestS3DeleteSnapshotBoundedReplacesExistingLegacyBackoffJob(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	legacy, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, legacy.Spec.BackoffLimit)
+	assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *legacy.Spec.BackoffLimit)
+
+	status, err = provider.DeleteSnapshotBounded(context.Background(), "snapshot")
+	assert.Empty(t, status)
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, "spec.backoffLimit", replacement.ConflictingLabel)
+	assert.Equal(t, "5", replacement.PreviousValue)
+	assert.Equal(t, "0", replacement.DesiredValue)
+
+	_, getErr := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr))
+}
+
 func TestS3GetSnapshotDeletionStatusReplacesPreUpgradeBackoffJob(t *testing.T) {
 	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
 		Bucket: "snapshots", Region: "eu-west-1",

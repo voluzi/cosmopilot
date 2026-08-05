@@ -330,7 +330,10 @@ func (gcs *GCS) ensureSnapshotDeletion(
 	if err != nil {
 		return nil, err
 	}
-	job, _, err = ensureSnapshotJob(ctx, gcs.Client, gcs.Owner, job, "delete")
+	if len(bounded) > 0 && bounded[0] {
+		return ensureSnapshotDeletionJobForDesired(ctx, gcs.Client, gcs.Owner, job)
+	}
+	job, _, err = ensureSnapshotJob(ctx, gcs.Client, gcs.Owner, job, typeDelete)
 	if err != nil {
 		return nil, err
 	}

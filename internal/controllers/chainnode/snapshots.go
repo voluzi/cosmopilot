@@ -364,12 +364,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						"Deleted expired PVC snapshot %s", snapshot.GetName(),
 					)
 					if deleteTarball {
-						cleanupProofRequired := true
-						if current := snapshotExportFor(chainNode, &snapshot); current != nil &&
-							current.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
-							current.DeleteAttempts == 0 && !current.DeleteExhausted {
-							cleanupProofRequired = false
-						}
+						cleanupProofRequired := !snapshotExportPreAttemptCleanup(snapshotExportFor(chainNode, &snapshot))
 						if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 							return err
 						}
@@ -436,12 +431,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				"Deleted PVC snapshot %s (exceeded retain count of %d)", snapshot.GetName(), *retainCount,
 			)
 			if deleteTarball {
-				cleanupProofRequired := true
-				if current := snapshotExportFor(chainNode, &snapshot); current != nil &&
-					current.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
-					current.DeleteAttempts == 0 && !current.DeleteExhausted {
-					cleanupProofRequired = false
-				}
+				cleanupProofRequired := !snapshotExportPreAttemptCleanup(snapshotExportFor(chainNode, &snapshot))
 				if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
@@ -1423,8 +1413,7 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 	}
 	if status == datasnapshot.SnapshotActive {
 		current := snapshotExportByObjectName(chainNode, export.ObjectName)
-		if current != nil && current.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
-			current.DeleteAttempts == 0 && !current.DeleteExhausted {
+		if snapshotExportPreAttemptCleanup(current) {
 			// No delete Job has been reserved, so there is no in-flight cleanup that
 			// requires the local VolumeSnapshot to remain. Keep the export status for
 			// a later remote cleanup retry, but allow retention to proceed.
@@ -1516,6 +1505,11 @@ func tarballDeletionComplete(snapshot *snapshotv1.VolumeSnapshot, tarballName st
 	return deletedName == tarballName || allowLegacy && deletedName == ""
 }
 
+func snapshotExportPreAttemptCleanup(export *appsv1.SnapshotExportStatus) bool {
+	return export != nil && export.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
+		export.DeleteAttempts == 0 && !export.DeleteExhausted
+}
+
 func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
 	export := snapshotExportFor(chainNode, snapshot)
 	if export == nil {
@@ -1527,7 +1521,7 @@ func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *apps
 			Name: getTarballName(chainNode, snapshot), Purpose: datasnapshot.SnapshotJobDelete,
 		})
 	}
-	if export.Phase == appsv1.SnapshotExportPhaseCleanupRequired && export.DeleteAttempts == 0 && !export.DeleteExhausted {
+	if snapshotExportPreAttemptCleanup(export) {
 		// Reference validation failed before a delete Job was reserved. There are no
 		// deletion resources to clean up, and the durable export status must remain
 		// so remote cleanup can resume after the reference is restored.
