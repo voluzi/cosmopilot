@@ -730,7 +730,9 @@ func TestMigrateLegacyDurableResourcesRecoversRecordedChildOwnership(t *testing.
 	assert.Nil(t, metav1.GetControllerOf(freshPVC))
 }
 
-func TestMigrateLegacyDurableResourcesAttributesRecordedChildUnownedDefaultKeys(t *testing.T) {
+// A recorded child does not make its unowned key Secrets adoptable: valid key material at the
+// generated default names is indistinguishable from a key the user imported.
+func TestMigrateLegacyDurableResourcesPreservesRecordedChildUnownedDefaultKeys(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
@@ -765,8 +767,8 @@ func TestMigrateLegacyDurableResourcesAttributesRecordedChildUnownedDefaultKeys(
 	for _, secret := range []*corev1.Secret{accountSecret, privKeySecret} {
 		fresh := &corev1.Secret{}
 		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
-		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(freshChild), resourcecleanup.ClassGeneratedKeys))
-		assert.Equal(t, string(child.UID), fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
+		assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(freshChild), resourcecleanup.ClassGeneratedKeys))
+		assert.Empty(t, fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
 	}
 }
 

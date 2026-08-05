@@ -146,6 +146,14 @@ For a `ChainNodeSet`, the policy is copied to generated child `ChainNode` resour
 
 Cosmopilot does not classify a Secret or PVC from its deterministic name alone. User-provided resources and ambiguous legacy resources are preserved. Existing resources are adopted only when controller ownership or stable attribution proves that Cosmopilot generated them.
 
+:::note[Validator key Secrets created before the upgrade]
+Cosmopilot did not set an owner reference on the account (`<chainnode>-account`) and consensus key (`<chainnode>-priv-key`) Secrets it generated before this release, so upgraded clusters have no proof it generated them. A key you imported yourself is byte-for-byte identical to a generated one at the same name, and treating the name and payload as proof would place your own key material under `generatedKeys: Delete`.
+
+These Secrets are therefore **retained even when `generatedKeys` is `Delete`**, and must be removed manually if unwanted. The node key Secret (`<chainnode>`) was owner-referenced before the upgrade, so it is attributed and deleted normally. Secrets generated from this release onwards carry attribution at creation and are covered by the policy.
+
+To hand a pre-upgrade Secret over to the policy deliberately, annotate it with the root-owner attribution Cosmopilot stamps on its own resources (`cosmopilot.voluzi.com/root-owner-*` and `cosmopilot.voluzi.com/resource-class: generatedKeys`).
+:::
+
 :::warning[Namespace deletion]
 Kubernetes removes namespaced resources when their namespace is deleted, regardless of `Retain`. During namespace termination Cosmopilot first quiesces managed node, Cosmosigner, and Cosmoseed workloads, then releases its own cleanup finalizers so the namespace can converge. Use backups or move retained data outside the namespace if it must survive namespace deletion.
 :::

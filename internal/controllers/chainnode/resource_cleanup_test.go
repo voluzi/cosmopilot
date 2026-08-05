@@ -196,70 +196,62 @@ func TestMigrateExistingAccountSecretRunsAfterAccountStatusCompleted(t *testing.
 	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
-func TestMigrateExistingValidatorSecretsAttributesUnownedDefaultLegacyKeys(t *testing.T) {
+func TestMigrateExistingValidatorSecretsAttributesControlledPrivKeySecret(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"},
 		Spec:       appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}},
-		Status: appsv1.ChainNodeStatus{
-			AccountAddress: "cosmos1completed",
-			Validator:      true,
-			PubKey:         "completed",
-		},
+	}
+	legacy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Spec.Validator.GetPrivKeySecretName(node), Namespace: node.Namespace, UID: "priv-key-uid"},
+		Data:       map[string][]byte{PrivKeyFilename: []byte("legacy key")},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(node, legacy, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, legacy).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	require.NoError(t, r.migrateExistingValidatorSecrets(context.Background(), node))
+	fresh := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(legacy), fresh))
+	assert.Nil(t, metav1.GetControllerOf(fresh))
+	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+}
+
+// Valid key material at the generated default names is exactly what a user-imported key looks like,
+// so it must never be adopted on shape alone: attribution would place it under generatedKeys: Delete.
+func TestMigrateExistingValidatorSecretsPreservesUnownedDefaultNamedKeys(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"},
+		Spec:       appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}},
 	}
 	account, err := chainutils.CreateAccount("cosmos", "cosmosvaloper", node.Spec.Validator.GetAccountHDPath())
 	require.NoError(t, err)
 	privKey, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
-	accountSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace, UID: "account-uid"},
-		Data:       map[string][]byte{MnemonicKey: []byte(account.Mnemonic)},
-	}
-	privKeySecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-priv-key", Namespace: node.Namespace, UID: "priv-key-uid"},
-		Data:       map[string][]byte{PrivKeyFilename: privKey},
-	}
-	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, accountSecret, privKeySecret).Build()
-	r := &Reconciler{Client: base, Scheme: scheme}
-
-	require.NoError(t, r.migrateExistingValidatorSecrets(context.Background(), node))
-	for _, secret := range []*corev1.Secret{accountSecret, privKeySecret} {
-		fresh := &corev1.Secret{}
-		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
-		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
-		assert.Equal(t, string(node.UID), fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
-	}
-}
-
-func TestMigrateExistingValidatorSecretsPreservesUnownedCustomAndInvalidDefaults(t *testing.T) {
-	scheme := resourceCleanupScheme(t)
-	customAccount := "funded-account"
-	customPrivKey := "external-consensus-key"
-	node := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{
-			Init:             &appsv1.GenesisInitConfig{AccountMnemonicSecret: &customAccount},
-			PrivateKeySecret: &customPrivKey,
-		}},
-	}
-	secrets := []*corev1.Secret{
-		{ObjectMeta: metav1.ObjectMeta{Name: customAccount, Namespace: node.Namespace}, Data: map[string][]byte{MnemonicKey: []byte("not controller generated")}},
-		{ObjectMeta: metav1.ObjectMeta{Name: customPrivKey, Namespace: node.Namespace}, Data: map[string][]byte{PrivKeyFilename: []byte("not controller generated")}},
-		{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-account", Namespace: node.Namespace}, Data: map[string][]byte{MnemonicKey: []byte("invalid mnemonic")}},
-		{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-priv-key", Namespace: node.Namespace}, Data: map[string][]byte{PrivKeyFilename: []byte("invalid key")}},
+	imported := []*corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: node.Spec.Validator.GetAccountSecretName(node), Namespace: node.Namespace, UID: "account-uid"},
+			Data:       map[string][]byte{MnemonicKey: []byte(account.Mnemonic)},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: node.Spec.Validator.GetPrivKeySecretName(node), Namespace: node.Namespace, UID: "priv-key-uid"},
+			Data:       map[string][]byte{PrivKeyFilename: privKey},
+		},
 	}
 	objects := []client.Object{node}
-	for _, secret := range secrets {
+	for _, secret := range imported {
 		objects = append(objects, secret)
 	}
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	r := &Reconciler{Client: base, Scheme: scheme}
 
 	require.NoError(t, r.migrateExistingValidatorSecrets(context.Background(), node))
-	for _, secret := range secrets {
+	for _, secret := range imported {
 		fresh := &corev1.Secret{}
 		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
 		assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
+		assert.Empty(t, fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID])
 	}
 }
 

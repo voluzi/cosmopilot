@@ -12,7 +12,6 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
@@ -20,24 +19,14 @@ func (r *Reconciler) migrateExistingAccountSecret(ctx context.Context, chainNode
 	if !chainNode.IsValidator() {
 		return nil
 	}
-	return r.migrateExistingGeneratedKeySecret(
-		ctx,
-		chainNode,
-		chainNode.Spec.Validator.GetAccountSecretName(chainNode),
-		chainNode.GetName()+"-account",
-		MnemonicKey,
-		func(payload []byte) error {
-			_, err := chainutils.AccountFromMnemonic(
-				string(payload),
-				chainNode.Spec.Validator.GetAccountPrefix(),
-				chainNode.Spec.Validator.GetValPrefix(),
-				chainNode.Spec.Validator.GetAccountHDPath(),
-			)
-			return err
-		},
-	)
+	return r.migrateExistingGeneratedKeySecret(ctx, chainNode, chainNode.Spec.Validator.GetAccountSecretName(chainNode))
 }
 
+// migrateExistingValidatorSecrets stamps durable attribution on the account and consensus key
+// Secrets of a pre-upgrade validator. Only current controller ownership or an existing stamp
+// qualifies: a key imported by the user is byte-identical to a generated one at the same name, so
+// adopting on name and payload shape would place user-supplied key material under
+// .spec.deletionPolicy.generatedKeys: Delete. Unowned Secrets stay retained instead.
 func (r *Reconciler) migrateExistingValidatorSecrets(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	if !chainNode.IsValidator() {
 		return nil
@@ -45,53 +34,22 @@ func (r *Reconciler) migrateExistingValidatorSecrets(ctx context.Context, chainN
 	if err := r.migrateExistingAccountSecret(ctx, chainNode); err != nil {
 		return err
 	}
-	return r.migrateExistingGeneratedKeySecret(
-		ctx,
-		chainNode,
-		chainNode.Spec.Validator.GetPrivKeySecretName(chainNode),
-		chainNode.GetName()+"-priv-key",
-		PrivKeyFilename,
-		func(payload []byte) error {
-			_, err := cometbft.GetPubKey(payload)
-			return err
-		},
-	)
+	return r.migrateExistingGeneratedKeySecret(ctx, chainNode, chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
 }
 
-func (r *Reconciler) migrateExistingGeneratedKeySecret(
-	ctx context.Context,
-	chainNode *appsv1.ChainNode,
-	resolvedName string,
-	legacyDefaultName string,
-	payloadKey string,
-	validatePayload func([]byte) error,
-) error {
+func (r *Reconciler) migrateExistingGeneratedKeySecret(ctx context.Context, chainNode *appsv1.ChainNode, name string) error {
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Namespace: chainNode.GetNamespace(),
-		Name:      resolvedName,
+		Name:      name,
 	}, secret); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	managed, changed, err := resourcecleanup.PrepareGeneratedResource(
 		secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false,
 	)
-	if err != nil {
+	if err != nil || !managed || !changed {
 		return err
-	}
-	if !managed {
-		annotations := secret.GetAnnotations()
-		payload, payloadPresent := secret.Data[payloadKey]
-		if secret.GetName() != legacyDefaultName || metav1.GetControllerOf(secret) != nil ||
-			annotations[resourcecleanup.AnnotationRootOwnerUID] != "" || len(secret.Data) != 1 ||
-			!payloadPresent || validatePayload(payload) != nil {
-			return nil
-		}
-		changed = resourcecleanup.Stamp(secret, resourcecleanup.RootOwnerFor(chainNode), resourcecleanup.ClassGeneratedKeys)
-		changed = resourcecleanup.StampResourceOwner(secret, chainNode.GetUID()) || changed
-	}
-	if !changed {
-		return nil
 	}
 	return r.Update(ctx, secret)
 }
