@@ -92,8 +92,13 @@ func main() {
 		log.Fatalf("unable to create clientset: %v", err)
 	}
 
-	// Register before controllers so the elected worker leader starts the upgrade migration first.
-	if err := mgr.Add(&resourcecleanup.RootProtector{Client: mgr.GetClient(), WorkerName: runOpts.WorkerName}); err != nil {
+	// Controller-runtime starts leader-elected runnables concurrently. Gate both controllers until the
+	// elected worker has protected every pre-upgrade root assigned to it.
+	rootProtectionReady := make(chan struct{})
+	runOpts.RootProtectionReady = rootProtectionReady
+	if err := mgr.Add(&resourcecleanup.RootProtector{
+		Client: mgr.GetClient(), WorkerName: runOpts.WorkerName, Ready: rootProtectionReady,
+	}); err != nil {
 		setupLog.Error(err, "unable to register existing-root protection")
 		os.Exit(1)
 	}

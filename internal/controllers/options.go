@@ -1,6 +1,9 @@
 package controllers
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 const (
 	LabelWorkerName          = "worker-name"
@@ -19,6 +22,19 @@ type ControllerRunOptions struct {
 	ReleaseName              string
 	DisruptionCheckEnabled   bool
 	DisruptionMaxUnavailable int
+	RootProtectionReady      <-chan struct{}
+}
+
+func (opts *ControllerRunOptions) WaitForRootProtection(ctx context.Context) error {
+	if opts == nil || opts.RootProtectionReady == nil {
+		return nil
+	}
+	select {
+	case <-opts.RootProtectionReady:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (opts *ControllerRunOptions) GetDataExporterImage() string {

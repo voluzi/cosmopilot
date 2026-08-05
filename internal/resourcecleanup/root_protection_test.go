@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
 func TestProtectExistingRootsInstallsCleanupFinalizer(t *testing.T) {
@@ -98,10 +100,10 @@ func TestProtectExistingRootsScopesFinalizersToWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	mine := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
-		Name: "mine", Namespace: "default", Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-a"},
+		Name: "mine", Namespace: "default", Labels: map[string]string{controllers.LabelWorkerName: "worker-a"},
 	}}
 	other := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
-		Name: "other", Namespace: "default", Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-b"},
+		Name: "other", Namespace: "default", Labels: map[string]string{controllers.LabelWorkerName: "worker-b"},
 	}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mine, other).Build()
 
@@ -122,6 +124,39 @@ func TestProtectExistingRootsScopesFinalizersToWorker(t *testing.T) {
 func TestRootProtectorRequiresLeaderElection(t *testing.T) {
 	if !(&RootProtector{}).NeedLeaderElection() {
 		t.Fatal("root protection must run only after leadership is acquired")
+	}
+}
+
+func TestRootProtectorReleasesControllerGateAfterMigration(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (&RootProtector{Client: c, Ready: ready}).Start(ctx)
+	}()
+
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("root-protection migration did not release the controller gate")
+	}
+
+	fresh := &appsv1.ChainNode{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(node), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(fresh, Finalizer) {
+		t.Fatal("controller gate opened before root migration installed the cleanup finalizer")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

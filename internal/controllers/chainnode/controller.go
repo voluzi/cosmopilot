@@ -142,6 +142,9 @@ func (r *Reconciler) reservationReader() client.Reader {
 // move the current state of the cluster closer to the desired state.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	if err := r.opts.WaitForRootProtection(ctx); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	chainNode := &appsv1.ChainNode{}
 	if err := r.Get(ctx, req.NamespacedName, chainNode); err != nil {

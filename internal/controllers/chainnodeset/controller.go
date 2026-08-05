@@ -101,6 +101,9 @@ func (r *Reconciler) requeueWaiting(ctx context.Context, nodeSet *appsv1.ChainNo
 // move the current state of the cluster closer to the desired state.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	if err := r.opts.WaitForRootProtection(ctx); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	nodeSet := &appsv1.ChainNodeSet{}
 	if err := r.Get(ctx, req.NamespacedName, nodeSet); err != nil {

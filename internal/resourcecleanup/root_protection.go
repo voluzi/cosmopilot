@@ -4,6 +4,7 @@ import (
 	"context"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -15,11 +16,15 @@ import (
 type RootProtector struct {
 	Client     client.Client
 	WorkerName string
+	Ready      chan<- struct{}
 }
 
 func (p *RootProtector) Start(ctx context.Context) error {
 	if err := ProtectExistingRoots(ctx, p.Client, p.WorkerName); err != nil {
 		return err
+	}
+	if p.Ready != nil {
+		close(p.Ready)
 	}
 	<-ctx.Done()
 	return nil
@@ -42,7 +47,7 @@ func protectChainNodes(ctx context.Context, c client.Client, workerName string) 
 		return err
 	}
 	for i := range list.Items {
-		if list.Items[i].GetLabels()["cosmopilot.voluzi.com/worker-name"] != workerName {
+		if list.Items[i].GetLabels()[controllers.LabelWorkerName] != workerName {
 			continue
 		}
 		if err := protectRoot(ctx, c, &list.Items[i]); err != nil {
@@ -58,7 +63,7 @@ func protectChainNodeSets(ctx context.Context, c client.Client, workerName strin
 		return err
 	}
 	for i := range list.Items {
-		if list.Items[i].GetLabels()["cosmopilot.voluzi.com/worker-name"] != workerName {
+		if list.Items[i].GetLabels()[controllers.LabelWorkerName] != workerName {
 			continue
 		}
 		if err := protectRoot(ctx, c, &list.Items[i]); err != nil {
