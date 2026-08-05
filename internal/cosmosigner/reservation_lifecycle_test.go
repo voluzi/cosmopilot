@@ -431,6 +431,56 @@ func TestCleanupManagedSigningPathDeletesJobPodBeforeJob(t *testing.T) {
 	}
 }
 
+func TestCleanupManagedSigningPathBlocksPodFromPreviousJobUID(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator", Namespace: "default", UID: "owner-uid",
+	}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator-tmkms-vault-upload", Namespace: owner.Namespace, UID: "current-job-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name,
+			UID: owner.UID, Controller: ptr.To(true),
+		}},
+	}}
+	oldPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: job.Name + "-old", Namespace: owner.Namespace, UID: "old-pod-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name,
+			UID: "previous-job-uid", Controller: ptr.To(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, job, oldPod).Build()
+
+	result, err := CleanupManagedSigningPath(context.Background(), c, c, owner, owner.Namespace, ManagedSigningPath{
+		OneShotNames: []string{job.Name},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Done || !strings.Contains(result.Blocked, oldPod.Name) {
+		t.Fatalf("previous-UID Job pod must block cleanup: %+v", result)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(job), &batchv1.Job{}); err != nil {
+		t.Fatalf("current Job must remain while an ambiguous old pod exists: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(oldPod), &corev1.Pod{}); err != nil {
+		t.Fatalf("previous-UID Job pod must not be modified: %v", err)
+	}
+}
+
+func TestManagedSigningOneShotPodJobNameUsesLastMarker(t *testing.T) {
+	name := "validator-import-copy-tmkms-vault-upload-generated"
+	got, ok := managedSigningOneShotPodJobName(name)
+	if !ok {
+		t.Fatalf("expected %q to be recognized as a generated managed Job pod", name)
+	}
+	want := "validator-import-copy-tmkms-vault-upload"
+	if got != want {
+		t.Fatalf("managed Job name = %q, want %q", got, want)
+	}
+}
+
 func TestFinalizeConsensusKeySigningPathsRetainsPVC(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{

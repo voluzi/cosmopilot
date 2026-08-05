@@ -227,9 +227,12 @@ func cleanupManagedSigningJob(ctx context.Context, reader client.Reader, c clien
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		controller := metav1.GetControllerOf(pod)
-		if controller == nil || controller.UID != job.GetUID() {
+		if !strings.HasPrefix(pod.GetName(), name+"-") {
 			continue
+		}
+		controller := metav1.GetControllerOf(pod)
+		if controller == nil || controller.Kind != "Job" || controller.Name != job.GetName() || controller.UID != job.GetUID() {
+			return ManagedSigningPathCleanupResult{Blocked: fmt.Sprintf("Job Pod %s/%s does not belong to current Job UID %q; refusing claim cleanup", pod.GetNamespace(), pod.GetName(), job.GetUID())}, nil
 		}
 		if pod.GetUID() == "" {
 			return ManagedSigningPathCleanupResult{}, fmt.Errorf("Job Pod %s/%s has no UID; refusing an unguarded delete", pod.GetNamespace(), pod.GetName())
@@ -318,14 +321,17 @@ func isManagedSigningOneShotName(name string) bool {
 }
 
 func managedSigningOneShotPodJobName(name string) (string, bool) {
+	lastIndex := -1
+	jobName := ""
 	for _, marker := range []string{
 		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
 	} {
-		if index := strings.Index(name, marker+"-"); index >= 0 {
-			return name[:index+len(marker)], true
+		if index := strings.LastIndex(name, marker+"-"); index > lastIndex {
+			lastIndex = index
+			jobName = name[:index+len(marker)]
 		}
 	}
-	return "", false
+	return jobName, lastIndex >= 0
 }
 
 // EnsureConsensusKeyReservationOwnerFinalizer persists the reservation lifecycle finalizer on the
