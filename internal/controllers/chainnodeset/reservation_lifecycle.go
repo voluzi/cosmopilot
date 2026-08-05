@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	appsk8sv1 "k8s.io/api/apps/v1"
@@ -269,7 +270,8 @@ func (r *Reconciler) consensusKeyReservationClaimSigningPathsGone(ctx context.Co
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if managedClaimOneShotName(pod.GetName(), claim) ||
-			managedRetiredNodeSetSignerOneShot(pod, nodeSet, desiredSignerResources) {
+			managedRetiredNodeSetSignerOneShot(pod, nodeSet, desiredSignerResources) ||
+			managedRetiredNodeSetSignerReplica(pod, nodeSet, desiredSignerResources) {
 			return false, fmt.Errorf("Pod %s/%s still matches undesired reservation claim %q", pod.GetNamespace(), pod.GetName(), claim)
 		}
 	}
@@ -281,6 +283,18 @@ func managedRetiredNodeSetSignerOneShot(obj client.Object, nodeSet *appsv1.Chain
 	if !ok {
 		return false
 	}
+	return managedRetiredNodeSetSignerResource(obj, nodeSet, desired, resourceName)
+}
+
+func managedRetiredNodeSetSignerReplica(pod *corev1.Pod, nodeSet *appsv1.ChainNodeSet, desired map[string]struct{}) bool {
+	resourceName, ok := statefulSetReplicaResourceName(pod.GetName())
+	if !ok {
+		return false
+	}
+	return managedRetiredNodeSetSignerResource(pod, nodeSet, desired, resourceName)
+}
+
+func managedRetiredNodeSetSignerResource(obj client.Object, nodeSet *appsv1.ChainNodeSet, desired map[string]struct{}, resourceName string) bool {
 	if _, current := desired[resourceName]; current {
 		return false
 	}
@@ -309,6 +323,19 @@ func managedSignerOneShotResourceName(name string) (string, bool) {
 		return "", false
 	}
 	return name[:lastIndex], true
+}
+
+func statefulSetReplicaResourceName(name string) (string, bool) {
+	separator := strings.LastIndexByte(name, '-')
+	if separator <= 0 || separator == len(name)-1 {
+		return "", false
+	}
+	ordinal := name[separator+1:]
+	n, err := strconv.Atoi(ordinal)
+	if err != nil || n < 0 || strconv.Itoa(n) != ordinal {
+		return "", false
+	}
+	return name[:separator], true
 }
 
 func deterministicNodeSetSignerResourceName(name, nodeSetName string) bool {

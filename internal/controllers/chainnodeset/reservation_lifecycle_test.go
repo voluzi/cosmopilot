@@ -475,6 +475,61 @@ func TestReconcileConsensusKeyReservationClaimsUsesExactOneShotLabelsBeforeNodeS
 	}
 }
 
+func TestReconcileConsensusKeyReservationClaimsBlocksSignerReplicaAfterStatusLoss(t *testing.T) {
+	tests := []struct {
+		name        string
+		pod         *corev1.Pod
+		wantBlocked bool
+	}{
+		{
+			name: "label-less owned-name replica",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-sentry-signer-0", Namespace: "default", UID: "pod-uid",
+			}},
+			wantBlocked: true,
+		},
+		{
+			name: "prefix-related exact foreign replica",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-bar-sentry-signer-0", Namespace: "default", UID: "pod-uid",
+				Labels: map[string]string{"nodeset": "foo-bar"},
+			}},
+		},
+		{
+			name: "noncanonical ordinal",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-sentry-signer-00", Namespace: "default", UID: "pod-uid",
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo", Namespace: "default", UID: "nodes-uid",
+				Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+			}}
+			reservation := nodeSetReservation(nodeSet, "retired", "ckr-uid", nodeSetReservationLifecyclePublicKey, "signer-retired-hash")
+			r := newValidatorTestReconciler(t, nodeSet, reservation, tt.pod)
+			r.APIReader = r.Client
+
+			done, err := r.reconcileConsensusKeyReservationClaims(context.Background(), nodeSet)
+			if tt.wantBlocked {
+				if err == nil || done || !strings.Contains(err.Error(), tt.pod.Name) {
+					t.Fatalf("label-less signer replica must block claim release, done=%v err=%v", done, err)
+				}
+				if err := r.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); err != nil {
+					t.Fatalf("reservation must remain while the signer replica exists: %v", err)
+				}
+				return
+			}
+			if err != nil || !done {
+				t.Fatalf("foreign exact labels must override replica prefix fallback, done=%v err=%v", done, err)
+			}
+		})
+	}
+}
+
 func TestRemovedCosmosignerStatusDroppedWhenReservationClaimStaysDesired(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"},
