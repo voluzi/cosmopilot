@@ -10,9 +10,9 @@ func init() {
 }
 
 // ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one
-// consensus public key on one chain. Reservations are intentionally not garbage-collected
-// automatically: an operator must verify every old signing path is gone before deleting a stale one.
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="consensus key reservations are immutable; delete only after proving every old signing path is stopped"
+// consensus public key on one chain. The owning root's reservation lifecycle finalizer releases the
+// immutable reservation only after all attributable signing workloads are confirmed absent.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="consensus key reservations are immutable; release requires verified signing-path teardown"
 type ConsensusKeyReservationSpec struct {
 	ChainID   string `json:"chainID"`
 	PublicKey string `json:"publicKey"`

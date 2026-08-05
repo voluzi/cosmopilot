@@ -40,56 +40,69 @@ func ConsensusKeyReservationName(chainID, publicKey string) string {
 // reader must bypass the controller cache so conflict scans around the create observe one ordered
 // API-server history even when concurrent claims use different reservation names.
 func EnsureConsensusKeyReservation(ctx context.Context, reader client.Reader, writer client.Writer, chainID, publicKey string, holder ReservationHolder) error {
+	_, err := EnsureConsensusKeyReservationWithResult(ctx, reader, writer, chainID, publicKey, holder)
+	return err
+}
+
+// ConsensusKeyReservationEnsureResult reports a stale reservation replaced during acquisition.
+type ConsensusKeyReservationEnsureResult struct {
+	RecoveredReservation string
+}
+
+// EnsureConsensusKeyReservationWithResult claims a consensus key and reports safe stale-owner
+// recovery so controllers can surface it as an event.
+func EnsureConsensusKeyReservationWithResult(ctx context.Context, reader client.Reader, writer client.Writer, chainID, publicKey string, holder ReservationHolder) (ConsensusKeyReservationEnsureResult, error) {
+	result := ConsensusKeyReservationEnsureResult{}
 	if holder.UID == "" || chainID == "" || holder.Claim == "" {
-		return fmt.Errorf("consensus-key reservation requires owner UID, chain ID, and claim")
+		return result, fmt.Errorf("consensus-key reservation requires owner UID, chain ID, and claim")
 	}
 	if err := validateCanonicalPublicKey(publicKey); err != nil {
-		return err
+		return result, err
 	}
 	name := ConsensusKeyReservationName(chainID, publicKey)
-	existing := &appsv1.ConsensusKeyReservation{}
-	if err := reader.Get(ctx, client.ObjectKey{Name: name}, existing); err == nil {
-		if err := reservationOwnedBy(existing, chainID, publicKey, holder); err != nil {
-			return err
+	for {
+		existing := &appsv1.ConsensusKeyReservation{}
+		if err := reader.Get(ctx, client.ObjectKey{Name: name}, existing); err == nil {
+			if err := reservationOwnedBy(existing, chainID, publicKey, holder); err != nil {
+				recovered, recoveryErr := recoverStaleConsensusKeyReservation(ctx, reader, writer, existing, chainID, publicKey, holder)
+				if recoveryErr != nil {
+					return result, recoveryErr
+				}
+				if recovered {
+					result.RecoveredReservation = existing.GetName()
+					continue
+				}
+				return result, err
+			}
+			if err := ensureNoConflictingReservationClaim(ctx, reader, chainID, publicKey, holder); err != nil {
+				return result, err
+			}
+			return result, ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder)
+		} else if !apierrors.IsNotFound(err) {
+			return result, err
 		}
 		if err := ensureNoConflictingReservationClaim(ctx, reader, chainID, publicKey, holder); err != nil {
-			return err
+			return result, err
 		}
-		return ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder)
-	} else if !apierrors.IsNotFound(err) {
-		return err
-	}
-	if err := ensureNoConflictingReservationClaim(ctx, reader, chainID, publicKey, holder); err != nil {
-		return err
-	}
-	if err := ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder); err != nil {
-		return err
-	}
-	reservation := &appsv1.ConsensusKeyReservation{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: appsv1.ConsensusKeyReservationSpec{
-			ChainID: chainID, PublicKey: publicKey, OwnerUID: holder.UID,
-			OwnerKind: holder.Kind, Namespace: holder.Namespace, OwnerName: holder.Name, Claim: holder.Claim,
-		},
-	}
-	if err := writer.Create(ctx, reservation); err == nil {
-		if err := ensureNoConflictingReservationClaim(ctx, reader, chainID, publicKey, holder); err != nil {
-			return err
+		if err := ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder); err != nil {
+			return result, err
 		}
-		return ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder)
-	} else if !apierrors.IsAlreadyExists(err) {
-		return err
+		reservation := &appsv1.ConsensusKeyReservation{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: appsv1.ConsensusKeyReservationSpec{
+				ChainID: chainID, PublicKey: publicKey, OwnerUID: holder.UID,
+				OwnerKind: holder.Kind, Namespace: holder.Namespace, OwnerName: holder.Name, Claim: holder.Claim,
+			},
+		}
+		if err := writer.Create(ctx, reservation); err == nil {
+			if err := ensureNoConflictingReservationClaim(ctx, reader, chainID, publicKey, holder); err != nil {
+				return result, err
+			}
+			return result, ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder)
+		} else if !apierrors.IsAlreadyExists(err) {
+			return result, err
+		}
 	}
-	if err := reader.Get(ctx, client.ObjectKey{Name: name}, existing); err != nil {
-		return err
-	}
-	if err := reservationOwnedBy(existing, chainID, publicKey, holder); err != nil {
-		return err
-	}
-	if err := ensureNoConflictingReservationClaim(ctx, reader, chainID, publicKey, holder); err != nil {
-		return err
-	}
-	return ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder)
 }
 
 func reservationOwnedBy(reservation *appsv1.ConsensusKeyReservation, chainID, publicKey string, holder ReservationHolder) error {

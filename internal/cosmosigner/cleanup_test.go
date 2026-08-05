@@ -66,7 +66,7 @@ func TestProtectRetainedStatePVCsRetiresLegacyTemplate(t *testing.T) {
 	zero := int32(0)
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: namespace, Generation: 1,
+			Name: name, Namespace: namespace, UID: "signer-uid", Generation: 1,
 			OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
 		},
 		Spec: appsv1.StatefulSetSpec{
@@ -104,7 +104,7 @@ func TestProtectRetainedStatePVCsRetiresTemplateMissingRootAttribution(t *testin
 		Name: dataVolumeName, Labels: pvcOwnerLabels(name, owner.UID), Finalizers: []string{RetainedStateFinalizer},
 	}}
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
-		Name: name, Namespace: namespace, Generation: 1, OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+		Name: name, Namespace: namespace, UID: "sts-uid", Generation: 1, OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
 	}, Spec: appsv1.StatefulSetSpec{
 		Replicas:                             &zero,
 		PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{WhenDeleted: appsv1.RetainPersistentVolumeClaimRetentionPolicyType, WhenScaled: appsv1.RetainPersistentVolumeClaimRetentionPolicyType},
@@ -406,7 +406,7 @@ func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
 	zero := int32(0)
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
-		Name: name, Namespace: namespace, OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+		Name: name, Namespace: namespace, UID: "sts-uid", OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
 	}, Spec: appsv1.StatefulSetSpec{
 		Replicas: &zero,
 		Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}},

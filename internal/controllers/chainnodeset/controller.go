@@ -80,7 +80,7 @@ func (r *Reconciler) requeueWaiting(ctx context.Context, nodeSet *appsv1.ChainNo
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes,verbs=get;list;watch
-//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create
+//+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create;delete
 //+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
@@ -119,6 +119,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 	if !nodeSet.GetDeletionTimestamp().IsZero() {
+		if !controllerutil.ContainsFinalizer(nodeSet, cosmosigner.ReservationOwnerFinalizer) {
+			done, err := r.finalizeConsensusKeyReservationOwner(ctx, nodeSet)
+			if err != nil || !done {
+				return ctrl.Result{RequeueAfter: time.Second}, err
+			}
+		}
 		terminating, err := r.namespaceTerminating(ctx, nodeSet.GetNamespace())
 		if err != nil {
 			return ctrl.Result{RequeueAfter: time.Second}, err
@@ -128,26 +134,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			if err != nil || !done {
 				return ctrl.Result{RequeueAfter: time.Second}, err
 			}
-			return ctrl.Result{}, nil
-		}
-		pdbsDone, err := r.finalizePodDisruptionBudgets(ctx, nodeSet)
-		if err != nil || !pdbsDone {
-			return ctrl.Result{RequeueAfter: time.Second}, err
-		}
+		} else {
+			pdbsDone, err := r.finalizePodDisruptionBudgets(ctx, nodeSet)
+			if err != nil || !pdbsDone {
+				return ctrl.Result{RequeueAfter: time.Second}, err
+			}
 
-		done, err := r.finalizeResources(ctx, nodeSet)
+			done, err := r.finalizeResources(ctx, nodeSet)
+			if err != nil || !done {
+				return ctrl.Result{RequeueAfter: time.Second}, err
+			}
+		}
+		done, err := r.finalizeConsensusKeyReservationOwner(ctx, nodeSet)
 		if err != nil || !done {
 			return ctrl.Result{RequeueAfter: time.Second}, err
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// Check if namespace is being terminated - if so, skip reconcile to avoid errors
+	// Check if namespace is being terminated - if so, complete reservation cleanup but skip ordinary reconciliation.
 	ns := &corev1.Namespace{}
 	if err := r.Get(ctx, client.ObjectKey{Name: req.Namespace}, ns); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if ns.DeletionTimestamp != nil {
+		done, err := r.finalizeConsensusKeyReservationOwner(ctx, nodeSet)
+		if err != nil || !done {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
 		logger.V(1).Info("namespace is being terminated, skipping reconcile")
 		return ctrl.Result{}, nil
 	}
@@ -165,6 +179,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
+	}
+	if _, err := r.prepareConsensusKeyReservationOwner(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
 	}
 	if changed, err := r.prepareCosmosignerOwner(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err
@@ -352,6 +369,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err := r.ensureNodesWithBlockedSignerTargets(ctx, nodeSet, blockedSignerTargets); err != nil {
 		return ctrl.Result{}, err
+	}
+	if done, err := r.reconcileConsensusKeyReservationClaims(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	} else if !done {
+		return r.requeueWaiting(ctx, nodeSet)
 	}
 
 	if err := r.ensureSeedNodes(ctx, nodeSet); err != nil {

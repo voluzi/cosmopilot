@@ -19,3 +19,13 @@ func TestGenerationChangedPredicateAllowsChainNodeSetDeletionTimestamp(t *testin
 
 	require.True(t, p.Update(event.UpdateEvent{ObjectOld: oldNodeSet, ObjectNew: newNodeSet}))
 }
+
+func TestGenerationChangedPredicateAllowsChainNodeDeletionTimestamp(t *testing.T) {
+	p := GenerationChangedPredicate{}
+	oldNode := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Generation: 1}}
+	newNode := oldNode.DeepCopy()
+	now := metav1.Now()
+	newNode.DeletionTimestamp = &now
+
+	require.True(t, p.Update(event.UpdateEvent{ObjectOld: oldNode, ObjectNew: newNode}))
+}

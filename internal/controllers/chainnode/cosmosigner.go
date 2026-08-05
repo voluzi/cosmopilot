@@ -529,7 +529,7 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 			return cosmosigner.Params{}, r.quiesceManagedCosmosigner(ctx, chainNode, params.Name, fmt.Errorf("cosmosigner cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history"))
 		}
 	}
-	if err := cosmosigner.EnsureConsensusKeyReservation(ctx, r.reservationReader(), r.Client, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
+	if err := r.ensureConsensusKeyReservation(ctx, chainNode, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
 		UID: chainNode.GetUID(), Kind: "ChainNode", Namespace: chainNode.GetNamespace(), Name: chainNode.GetName(), Claim: standaloneCosmosignerReservationClaim(chainNode),
 	}); err != nil {
 		if stderrors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict) {
@@ -572,7 +572,12 @@ func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *app
 				return false, err
 			}
 		}
-		return r.ensureCosmosigner(ctx, chainNode)
+		pending, err := r.ensureCosmosigner(ctx, chainNode)
+		if err != nil || pending {
+			return pending, err
+		}
+		claimsReconciled, err := r.reconcileConsensusKeyReservationClaims(ctx, chainNode)
+		return !claimsReconciled, err
 	}
 	if chainNode.Status.ChainID == "" {
 		return false, nil
@@ -610,8 +615,11 @@ func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *app
 	} else if !marked {
 		return true, nil
 	}
-	_, err = r.recordCosmosignerAppliedState(ctx, chainNode, params)
-	return false, err
+	if _, err = r.recordCosmosignerAppliedState(ctx, chainNode, params); err != nil {
+		return false, err
+	}
+	claimsReconciled, err := r.reconcileConsensusKeyReservationClaims(ctx, chainNode)
+	return !claimsReconciled, err
 }
 
 func (r *Reconciler) reconcileCosmosignerMigration(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (bool, error) {

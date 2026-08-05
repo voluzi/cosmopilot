@@ -42,9 +42,8 @@ func (p GenerationChangedPredicate) Update(e event.UpdateEvent) bool {
 			(e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero())
 
 	case *appsv1.ChainNode:
-		// For ChainNode updates, only trigger reconcile if generation changed
-		// This prevents reconciliation loops when only status is updated
-		return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration()
+		return e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() ||
+			(e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero())
 
 	default:
 		return p.Funcs.Update(e)

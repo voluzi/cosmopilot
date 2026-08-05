@@ -408,7 +408,7 @@ func ScaleDown(ctx context.Context, c client.Client, owner client.Object, namesp
 // checks both immutable signer labels and deterministic StatefulSet replica names, so a terminating
 // pod still blocks even if its labels were edited. Pods from any owner block reuse of the signer
 // name; ownership does not make concurrent signing or a pod-name collision safe.
-func SignerPodsGone(ctx context.Context, c client.Client, namespace, name string) (bool, error) {
+func SignerPodsGone(ctx context.Context, c client.Reader, namespace, name string) (bool, error) {
 	pods := &corev1.PodList{}
 	if err := c.List(ctx, pods, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -482,6 +482,9 @@ func DeleteStatefulSet(ctx context.Context, c client.Client, owner client.Object
 		return false, err
 	}
 	uid := sts.GetUID()
+	if uid == "" {
+		return false, fmt.Errorf("owned cosmosigner StatefulSet %q has no UID; refusing an unguarded delete", sts.GetName())
+	}
 	if err := c.Delete(ctx, sts, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
 		return false, err
 	}

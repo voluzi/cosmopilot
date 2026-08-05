@@ -27,6 +27,16 @@ func TestGenerationChangedPredicateIgnoresCosmosignerJobPods(t *testing.T) {
 	}
 }
 
+func TestTemporaryPodMatcherSharesReservationSigningPaths(t *testing.T) {
+	for _, suffix := range temporaryPodSuffixes {
+		name := "validator-" + suffix
+		require.True(t, isTemporaryPodName(name), suffix)
+		require.True(t, isChainNodeSigningPodName(name, "validator"), suffix)
+		require.True(t, isChainNodeSigningPodName(name+"-generated", "validator"), suffix)
+	}
+	require.False(t, isChainNodeSigningPodName("other-create-validator", "validator"))
+}
+
 func TestGenerationChangedPredicateAllowsChainNodeDeletionTimestamp(t *testing.T) {
 	p := GenerationChangedPredicate{}
 	oldNode := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Generation: 1}}
