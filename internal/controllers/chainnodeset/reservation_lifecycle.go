@@ -123,6 +123,7 @@ func (r *Reconciler) retiringConsensusKeyReservationPublicKeys(ctx context.Conte
 	if err := r.uncachedReader().List(ctx, reservations); err != nil {
 		return nil, err
 	}
+	desiredClaims := desiredConsensusKeyReservationClaims(nodeSet)
 	publicKeys := make(map[string]struct{})
 	for i := range reservations.Items {
 		reservation := &reservations.Items[i]
@@ -132,6 +133,9 @@ func (r *Reconciler) retiringConsensusKeyReservationPublicKeys(ctx context.Conte
 		if reservation.Spec.OwnerKind != "ChainNodeSet" || reservation.Spec.Namespace != nodeSet.GetNamespace() ||
 			reservation.Spec.OwnerName != nodeSet.GetName() || reservation.Spec.Claim == "" || reservation.Spec.PublicKey == "" {
 			return nil, fmt.Errorf("reservation %q matches ChainNodeSet UID %q but has inconsistent owner, claim, or public-key metadata", reservation.GetName(), nodeSet.GetUID())
+		}
+		if _, desired := desiredClaims[reservation.Spec.Claim]; desired {
+			continue
 		}
 		publicKeys[reservation.Spec.PublicKey] = struct{}{}
 	}

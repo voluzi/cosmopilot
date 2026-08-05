@@ -302,6 +302,35 @@ func TestRemovedCosmosignerStatusRetainedUntilResourceOneShotsAreGone(t *testing
 	}
 }
 
+func TestRemovedCosmosignerStatusDroppedWhenReservationClaimStaysDesired(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"},
+		Spec:       appsv1.ChainNodeSetSpec{Validator: &appsv1.NodeSetValidatorConfig{}},
+		Status: appsv1.ChainNodeSetStatus{Cosmosigners: []appsv1.CosmosignerStatus{{
+			Name: "nodes-signer", ResourceName: "nodes-retired-signer", PublicKey: nodeSetReservationLifecyclePublicKey,
+		}}},
+	}
+	claim := validatorNodeName(nodeSet, appsv1.ReservedValidatorGroupName, 0)
+	reservation := nodeSetReservation(nodeSet, "desired", "ckr-uid", nodeSetReservationLifecyclePublicKey, claim)
+	r := newValidatorTestReconciler(t, nodeSet, reservation)
+	r.APIReader = r.Client
+
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
+	if err != nil || !done {
+		t.Fatalf("absent retired signer should finish workload teardown, done=%v err=%v", done, err)
+	}
+	fresh := &appsv1.ChainNodeSet{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(nodeSet), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.GetCosmosignerStatus("nodes-signer") != nil {
+		t.Fatal("retired signer status must be dropped when its reservation claim remains desired")
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("desired reservation must remain: %v", err)
+	}
+}
+
 func TestReconcileTerminatingNamespaceRunsReservationFinalizer(t *testing.T) {
 	now := metav1.NewTime(time.Now())
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
