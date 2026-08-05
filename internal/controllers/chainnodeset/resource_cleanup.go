@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
@@ -429,7 +430,7 @@ func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNod
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		controlled := metav1.IsControlledBy(pod, child)
-		if !controlled && !isDeterministicChildPodName(pod.GetName(), child.GetName()) {
+		if !controlled && !controllers.IsDeterministicChainNodePodName(pod.GetName(), child.GetName()) {
 			continue
 		}
 		if !controlled {
@@ -451,25 +452,6 @@ func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNod
 		}
 	}
 	return allDone, nil
-}
-
-func isDeterministicChildPodName(podName, childName string) bool {
-	if podName == childName {
-		return true
-	}
-	for _, suffix := range []string{
-		"-init-data",
-		"-config-generator",
-		"-genesis-init",
-		"-create-validator",
-		"-tmkms-generate-identity",
-		"-tmkms-vault-upload",
-	} {
-		if podName == childName+suffix {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Reconciler) quiesceCosmoseed(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
