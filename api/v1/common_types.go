@@ -4,6 +4,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/voluzi/cosmopilot/v2/internal/tmkms"
 )
@@ -49,6 +50,8 @@ const (
 	ReasonTarballDeleted             = "TarballDeleted"
 	ReasonTarballExportError         = "TarballExportError"
 	ReasonTarballDeleteError         = "TarballDeleteError"
+	ReasonTarballCleanupRequired     = "TarballCleanupRequired"
+	ReasonTarballCleanupAcknowledged = "TarballCleanupAcknowledged"
 	ReasonSnapshotJobReplaced        = "SnapshotJobReplaced"
 	ReasonSnapshotIntegrityStart     = "IntegrityCheckStart"
 	ReasonUpgradeCompleted           = "UpgradeCompleted"
@@ -1184,6 +1187,85 @@ type S3ExportConfig struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	ConcurrentJobs *int `json:"concurrentJobs,omitempty"`
+}
+
+// SnapshotExportProvider identifies an exported tarball's object store.
+// +kubebuilder:validation:Enum=s3;gcs;unknown
+type SnapshotExportProvider string
+
+const (
+	SnapshotExportProviderS3      SnapshotExportProvider = "s3"
+	SnapshotExportProviderGCS     SnapshotExportProvider = "gcs"
+	SnapshotExportProviderUnknown SnapshotExportProvider = "unknown"
+)
+
+// SnapshotExportPhase is the durable lifecycle phase of an exported tarball.
+// +kubebuilder:validation:Enum=Uploading;Uploaded;Deleting;CleanupRequired;Deleted;Acknowledged
+type SnapshotExportPhase string
+
+const (
+	SnapshotExportPhaseUploading       SnapshotExportPhase = "Uploading"
+	SnapshotExportPhaseUploaded        SnapshotExportPhase = "Uploaded"
+	SnapshotExportPhaseDeleting        SnapshotExportPhase = "Deleting"
+	SnapshotExportPhaseCleanupRequired SnapshotExportPhase = "CleanupRequired"
+	SnapshotExportPhaseDeleted         SnapshotExportPhase = "Deleted"
+	SnapshotExportPhaseAcknowledged    SnapshotExportPhase = "Acknowledged"
+)
+
+// SnapshotExportSecretReference is a local Secret reference used by snapshot export Jobs. Key is set
+// for GCS credentials and empty for S3 credentials exposed with envFrom. Secret contents are never
+// copied into status.
+type SnapshotExportSecretReference struct {
+	Name string `json:"name"`
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// SnapshotExportDestination contains the routing and authentication references required to reach the
+// object store used by an upload. The namespace is always the owning ChainNode's namespace.
+type SnapshotExportDestination struct {
+	Provider SnapshotExportProvider `json:"provider"`
+	Bucket   string                 `json:"bucket"`
+	// +optional
+	Region string `json:"region,omitempty"`
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// +optional
+	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
+	// +optional
+	CredentialsSecret *SnapshotExportSecretReference `json:"credentialsSecret,omitempty"`
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+}
+
+// SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is
+// persisted before its upload Job is created and retained until remote deletion succeeds or an
+// operator explicitly acknowledges cleanup.
+type SnapshotExportStatus struct {
+	ID           string `json:"id"`
+	SnapshotName string `json:"snapshotName"`
+	// +optional
+	SnapshotUID types.UID                 `json:"snapshotUID,omitempty"`
+	ObjectName  string                    `json:"objectName"`
+	Destination SnapshotExportDestination `json:"destination"`
+	Phase       SnapshotExportPhase       `json:"phase"`
+	// +optional
+	Message string `json:"message,omitempty"`
+	// +optional
+	Compression TarballCompression `json:"compression,omitempty"`
+	// +optional
+	SizeLimit string `json:"sizeLimit,omitempty"`
+	// +optional
+	PartSize string `json:"partSize,omitempty"`
+	// +optional
+	ChunkSize string `json:"chunkSize,omitempty"`
+	// +optional
+	BufferSize string `json:"bufferSize,omitempty"`
+	// +optional
+	ConcurrentJobs int `json:"concurrentJobs,omitempty"`
+	// DeleteOnExpire records the cleanup policy bound to this upload.
+	// +optional
+	DeleteOnExpire bool `json:"deleteOnExpire,omitempty"`
 }
 
 // UpgradePhase indicates the current phase of an upgrade.

@@ -7,10 +7,9 @@ network policies.
 
 ## Annotations
 
-All `Cosmopilot` annotations use the `cosmopilot.voluzi.com/` prefix and are
-**managed by the operator** — they reflect internal state and should be treated as
-read-only. Inspecting them is a quick way to understand what the operator is doing
-with a node.
+All `Cosmopilot` annotations use the `cosmopilot.voluzi.com/` prefix. They are
+managed by the operator and should be treated as read-only, except for the explicit
+snapshot-export cleanup acknowledgement described below.
 
 | Annotation | Set on | Meaning |
 | --- | --- | --- |
@@ -28,10 +27,18 @@ with a node.
 | `cosmopilot.voluzi.com/snapshot-retention` | VolumeSnapshot | Retention marker for the snapshot. |
 | `cosmopilot.voluzi.com/snapshot-integrity-status` | VolumeSnapshot | Result of the snapshot integrity check. |
 | `cosmopilot.voluzi.com/exporting-tarball` | Node | A snapshot tarball export is in progress. |
+| `cosmopilot.voluzi.com/acknowledge-snapshot-export-cleanup` | Node | Comma-separated cleanup IDs from `.status.snapshotExports`. Setting an ID explicitly acknowledges that operator cleanup cannot be proven and allows the associated snapshot lifecycle to continue. The controller removes processed IDs after persisting the acknowledgement in status. |
 | `cosmopilot.voluzi.com/vpa-resources` | Pod | Resources currently applied by the vertical autoscaling logic. |
 | `cosmopilot.voluzi.com/last-cpu-scale` | Pod | Timestamp of the last CPU scaling action. |
 | `cosmopilot.voluzi.com/last-memory-scale` | Pod | Timestamp of the last memory scaling action. |
 | `cosmopilot.voluzi.com/oom-recovery-history` | Pod | History used to recover from out-of-memory events. |
+
+Snapshot destinations and authentication references are recorded in
+`ChainNode.status.snapshotExports`, not on `VolumeSnapshot` metadata. If a referenced
+Secret or ServiceAccount is removed before deletion, the controller retains the
+record and sets the `SnapshotExportCleanup` condition. Restore the named reference
+to resume automatic cleanup. Only use the acknowledgement annotation after manually
+verifying or deleting the object named by that status record.
 
 ### Standard Kubernetes annotations
 

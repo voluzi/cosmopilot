@@ -327,7 +327,11 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 			controllers.AnnotationTarballExportAttempts: strconv.Itoa(tarballExportMaxAttempts - 1),
 		},
 	}}
-	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, snapshot).
+		Build()
 	// ...but the in-flight upload Job belongs to the previous S3 exporter.
 	clientSet := fake.NewSimpleClientset(&batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -603,13 +607,22 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 		Name: "snapshot", Namespace: "default",
 		Annotations: map[string]string{controllers.AnnotationExportingTarball: "true"},
 	}}
-	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, snapshot).
+		Build()
 	clientSet := fake.NewSimpleClientset(
 		&batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "-00010101000000-upload",
 				Namespace: "default",
-				Labels:    map[string]string{"exporter": "gcs-exporter"},
+				Labels: map[string]string{
+					"exporter":    "gcs-exporter",
+					"owner":       chainNode.Name,
+					"type":        "upload",
+					"destination": datasnapshot.SnapshotDestinationLabel("gcs", "snapshots", "", "", false, "credentialsSecret", "", "", "serviceAccount", ""),
+				},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: appsv1.GroupVersion.String(),
 					Kind:       "ChainNode",
@@ -674,7 +687,15 @@ func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {
 		}}},
 	}
 	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
-	controllerClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	export, err := newSnapshotExportStatus(chainNode, snapshot)
+	require.NoError(t, err)
+	export.Phase = appsv1.SnapshotExportPhaseUploaded
+	chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{export}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, snapshot).
+		Build()
 	clientSet := fake.NewSimpleClientset()
 	reconciler := &Reconciler{
 		Client:            controllerClient,
@@ -727,15 +748,24 @@ func TestIsTarballDeletedRequiresDurableSuccessBeforeReturning(t *testing.T) {
 		}}},
 	}
 	snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"}}
-	baseClient := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build()
+	export, err := newSnapshotExportStatus(chainNode, snapshot)
+	require.NoError(t, err)
+	export.Phase = appsv1.SnapshotExportPhaseUploaded
+	chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{export}
+	baseClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, snapshot).
+		Build()
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "-00010101000000-delete",
 			Namespace: "default",
 			Labels: map[string]string{
-				"exporter": "gcs-exporter",
-				"owner":    chainNode.Name,
-				"type":     "delete",
+				"exporter":    "gcs-exporter",
+				"owner":       chainNode.Name,
+				"type":        "delete",
+				"destination": datasnapshot.SnapshotDestinationLabel("gcs", "snapshots", "", "", false, "credentialsSecret", "", "", "serviceAccount", ""),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: chainNode.APIVersion,

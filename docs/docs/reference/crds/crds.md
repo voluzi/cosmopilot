@@ -66,6 +66,9 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [SdkOptions](#sdkoptions)
 * [SeedStatus](#seedstatus)
 * [SidecarSpec](#sidecarspec)
+* [SnapshotExportDestination](#snapshotexportdestination)
+* [SnapshotExportSecretReference](#snapshotexportsecretreference)
+* [SnapshotExportStatus](#snapshotexportstatus)
 * [StateSyncConfig](#statesyncconfig)
 * [SubdomainsConfig](#subdomainsconfig)
 * [TmKMS](#tmkms)
@@ -170,6 +173,7 @@ ChainNodeStatus defines the observed state of ChainNode
 | cosmosignerStateStorageSize | CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. Not meant to be set by hand. | string | false |
 | cosmosignerStateStorageClassName | CosmosignerStateStorageClassName records the storage class of the managed signer's raft-state PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default class was selected, while an explicit \"\" means no class was requested. See CosmosignerStateStorageSize. Not meant to be set by hand. | *string | false |
 | cosmosignerAtEstablishment | CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at the moment the chain ID was first recorded. Empty string when no signer targeted a validator at chain establishment — including sentry-mode signers, whose key identity is deliberately excluded. It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand. | *string | false |
+| snapshotExports | SnapshotExports records the controller-owned destination and lifecycle state of snapshot tarballs. It is stored in status so VolumeSnapshot metadata cannot redirect privileged cleanup Jobs. | [][SnapshotExportStatus](#snapshotexportstatus) | false |
 | cosmosignerServingIdentity | CosmosignerServingIdentity records the effective signing identity of the rolled-out validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on teardown. It records that this signer protected the node's validator role across removal and migration recovery. Not meant to be set by hand. | string | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -986,6 +990,56 @@ SidecarSpec allows configuring additional containers to run alongside the node.
 | restartPodOnFailure | Whether the pod of this node should be restarted when this sidecar container fails. Defaults to `false`. | *bool | false |
 | runBeforeNode | When enabled, this container turns into an init container instead of a sidecar as it will have to finish before the node container starts. Defaults to `false`. | *bool | false |
 | deferUntilHealthy | DeferUntilHealthy determines whether this container should be deferred until the group is healthy. When enabled, this container will only be added to the pod if the group to which the node belongs is healthy (has the minimum pods available as defined in its PodDisruptionBudget). This makes the container optional, allowing for faster node startup when the group is unhealthy. Note: this is ignored on orphan ChainNodes. It is only useful when using ChainNodeSet. Defaults to `false`. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportDestination
+
+SnapshotExportDestination contains the routing and authentication references required to reach the object store used by an upload. The namespace is always the owning ChainNode's namespace.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| provider |  | SnapshotExportProvider | true |
+| bucket |  | string | true |
+| region |  | string | false |
+| endpoint |  | string | false |
+| forcePathStyle |  | bool | false |
+| credentialsSecret |  | *[SnapshotExportSecretReference](#snapshotexportsecretreference) | false |
+| serviceAccountName |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportSecretReference
+
+SnapshotExportSecretReference is a local Secret reference used by snapshot export Jobs. Key is set for GCS credentials and empty for S3 credentials exposed with envFrom. Secret contents are never copied into status.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name |  | string | true |
+| key |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportStatus
+
+SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is persisted before its upload Job is created and retained until remote deletion succeeds or an operator explicitly acknowledges cleanup.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| id |  | string | true |
+| snapshotName |  | string | true |
+| snapshotUID |  | types.UID | false |
+| objectName |  | string | true |
+| destination |  | [SnapshotExportDestination](#snapshotexportdestination) | true |
+| phase |  | SnapshotExportPhase | true |
+| message |  | string | false |
+| compression |  | TarballCompression | false |
+| sizeLimit |  | string | false |
+| partSize |  | string | false |
+| chunkSize |  | string | false |
+| bufferSize |  | string | false |
+| concurrentJobs |  | int | false |
+| deleteOnExpire | DeleteOnExpire records the cleanup policy bound to this upload. | bool | false |
 
 [Back to Custom Resources](#custom-resources)
 

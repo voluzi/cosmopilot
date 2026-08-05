@@ -2,10 +2,12 @@ package datasnapshot
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
@@ -20,6 +22,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
 type SnapshotStatus string
@@ -53,9 +57,10 @@ const (
 	SnapshotActive    SnapshotStatus = "active"
 	SnapshotNotFound  SnapshotStatus = "notfound"
 
-	labelExporter = "exporter"
-	labelOwner    = "owner"
-	labelType     = "type"
+	labelExporter    = "exporter"
+	labelOwner       = "owner"
+	labelType        = "type"
+	labelDestination = "destination"
 
 	labelCleanupExporter    = "cleanup-exporter"
 	labelCleanupOwner       = "cleanup-owner"
@@ -72,6 +77,21 @@ const (
 	typeDelete           = string(SnapshotJobDelete)
 	typePostUploadDelete = "post-upload-delete"
 )
+
+func snapshotDestinationLabel(values ...string) string {
+	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return fmt.Sprintf("%x", digest[:8])
+}
+
+// SnapshotDestinationLabel returns the immutable Job label for an object-store destination.
+func SnapshotDestinationLabel(provider, bucket, region, endpoint string, forcePathStyle bool, authentication ...string) string {
+	values := []string{provider, bucket}
+	if provider == string(appsv1.SnapshotExportProviderGCS) {
+		return snapshotDestinationLabel(append(values, authentication...)...)
+	}
+	values = append(values, region, endpoint, strconv.FormatBool(forcePathStyle))
+	return snapshotDestinationLabel(append(values, authentication...)...)
+}
 
 // ErrStaleJobReplaced reports that an existing snapshot Job is being deleted because it cannot
 // converge to the desired state. Callers should requeue instead of failing the reconcile; the
@@ -167,18 +187,63 @@ func ensureSnapshotJob(
 	if !metav1.IsControlledBy(job, owner) {
 		return nil, false, fmt.Errorf("%s job %s/%s is not controlled by snapshot owner %s", purpose, job.Namespace, job.Name, owner.GetName())
 	}
-	for key, value := range desired.Labels {
+	if job.DeletionTimestamp != nil {
+		return nil, false, fmt.Errorf("stale %s job %s/%s is terminating: %w", purpose, job.Namespace, job.Name, ErrStaleJobTerminating)
+	}
+	job, err = reconcileSnapshotJobIdentity(ctx, client, owner, job, desired, purpose)
+	if err != nil {
+		return nil, false, err
+	}
+	return job, false, nil
+}
+
+func reconcileSnapshotJobIdentity(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	job, desired *batchv1.Job,
+	purpose string,
+) (*batchv1.Job, error) {
+	jobs := client.BatchV1().Jobs(job.Namespace)
+	var err error
+	keys := make([]string, 0, len(desired.Labels))
+	seen := make(map[string]struct{}, len(desired.Labels))
+	for _, key := range []string{labelExporter, labelOwner, labelType, labelDestination} {
+		if _, ok := desired.Labels[key]; ok {
+			keys = append(keys, key)
+			seen[key] = struct{}{}
+		}
+	}
+	remaining := make([]string, 0, len(desired.Labels)-len(keys))
+	for key := range desired.Labels {
+		if _, ok := seen[key]; !ok {
+			remaining = append(remaining, key)
+		}
+	}
+	sort.Strings(remaining)
+	keys = append(keys, remaining...)
+	for _, key := range keys {
+		value := desired.Labels[key]
 		if job.Labels[key] != value {
 			if job.DeletionTimestamp != nil {
-				return nil, false, fmt.Errorf("stale %s job %s/%s is terminating: %w", purpose, job.Namespace, job.Name, ErrStaleJobTerminating)
+				return nil, fmt.Errorf("stale %s job %s/%s is terminating: %w", purpose, job.Namespace, job.Name, ErrStaleJobTerminating)
 			}
-			// Labels are set at creation and never updated, so a mismatch can never converge — it means
-			// the Job was created for a different desired state (e.g. another export provider). Exports
-			// and deletions are idempotent, so drop the stale Job and let the next reconcile recreate it.
+			if key == labelDestination && job.Labels[key] == "" && snapshotJobPodIdentityMatches(job, desired) {
+				updated := job.DeepCopy()
+				if updated.Labels == nil {
+					updated.Labels = make(map[string]string)
+				}
+				updated.Labels[key] = value
+				job, err = jobs.Update(ctx, updated, metav1.UpdateOptions{})
+				if err != nil {
+					return nil, fmt.Errorf("adopt legacy %s job %s/%s: %w", purpose, updated.Namespace, updated.Name, err)
+				}
+				continue
+			}
 			if err = deleteSnapshotJob(ctx, client, job); err != nil {
-				return nil, false, fmt.Errorf("delete stale %s job %s/%s: %w", purpose, job.Namespace, job.Name, err)
+				return nil, fmt.Errorf("delete stale %s job %s/%s: %w", purpose, job.Namespace, job.Name, err)
 			}
-			return nil, false, &StaleJobReplacedError{
+			return nil, &StaleJobReplacedError{
 				Purpose:          purpose,
 				Namespace:        job.Namespace,
 				Name:             job.Name,
@@ -189,7 +254,78 @@ func ensureSnapshotJob(
 			}
 		}
 	}
-	return job, false, nil
+	return job, nil
+}
+
+type snapshotJobPodIdentity struct {
+	ServiceAccountName string
+	PriorityClassName  string
+	RestartPolicy      corev1.RestartPolicy
+	ImagePullSecrets   []corev1.LocalObjectReference
+	Volumes            []corev1.Volume
+	InitContainers     []snapshotJobContainerIdentity
+	Containers         []snapshotJobContainerIdentity
+}
+
+type snapshotJobContainerIdentity struct {
+	Name         string
+	Image        string
+	Command      []string
+	Args         []string
+	WorkingDir   string
+	Env          []corev1.EnvVar
+	EnvFrom      []corev1.EnvFromSource
+	VolumeMounts []corev1.VolumeMount
+}
+
+func snapshotJobPodIdentityMatches(actual, desired *batchv1.Job) bool {
+	return apiequality.Semantic.DeepEqual(snapshotJobIdentity(actual), snapshotJobIdentity(desired))
+}
+
+func snapshotJobIdentity(job *batchv1.Job) snapshotJobPodIdentity {
+	pod := job.Spec.Template.Spec
+	serviceAccountName := pod.ServiceAccountName
+	if serviceAccountName == "default" {
+		serviceAccountName = ""
+	}
+	return snapshotJobPodIdentity{
+		ServiceAccountName: serviceAccountName,
+		PriorityClassName:  pod.PriorityClassName,
+		RestartPolicy:      pod.RestartPolicy,
+		ImagePullSecrets:   pod.ImagePullSecrets,
+		Volumes:            normalizedSnapshotJobVolumes(pod.Volumes),
+		InitContainers:     snapshotJobContainerIdentities(pod.InitContainers),
+		Containers:         snapshotJobContainerIdentities(pod.Containers),
+	}
+}
+
+func normalizedSnapshotJobVolumes(volumes []corev1.Volume) []corev1.Volume {
+	normalized := make([]corev1.Volume, len(volumes))
+	for i := range volumes {
+		volumes[i].DeepCopyInto(&normalized[i])
+		if secret := normalized[i].Secret; secret != nil && secret.DefaultMode != nil && *secret.DefaultMode == corev1.SecretVolumeSourceDefaultMode {
+			secret.DefaultMode = nil
+		}
+	}
+	return normalized
+}
+
+func snapshotJobContainerIdentities(containers []corev1.Container) []snapshotJobContainerIdentity {
+	identities := make([]snapshotJobContainerIdentity, len(containers))
+	for i := range containers {
+		container := containers[i]
+		identities[i] = snapshotJobContainerIdentity{
+			Name:         container.Name,
+			Image:        container.Image,
+			Command:      container.Command,
+			Args:         container.Args,
+			WorkingDir:   container.WorkingDir,
+			Env:          container.Env,
+			EnvFrom:      container.EnvFrom,
+			VolumeMounts: container.VolumeMounts,
+		}
+	}
+	return identities
 }
 
 // uploadJobStatus reports the status of an existing upload Job, rejecting one that belongs to a
@@ -235,6 +371,30 @@ func uploadJobStatus(
 			PreviousValue:    job.Labels[labelExporter],
 			DesiredValue:     exporter,
 		}
+	}
+	return snapshotJobStatus(job), nil
+}
+
+func uploadJobStatusForDesired(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	desired *batchv1.Job,
+) (SnapshotStatus, error) {
+	job, err := client.BatchV1().Jobs(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return SnapshotNotFound, nil
+		}
+		return "", err
+	}
+	if !metav1.IsControlledBy(job, owner) {
+		return "", fmt.Errorf("upload job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
+	}
+	job, err = reconcileSnapshotJobIdentity(ctx, client, owner, job, desired, typeUpload)
+	if err != nil {
+		return "", err
 	}
 	return snapshotJobStatus(job), nil
 }
@@ -567,6 +727,9 @@ func deletionJobFromUpload(
 			OwnerReferences: append([]metav1.OwnerReference(nil), upload.OwnerReferences...),
 		},
 		Spec: batchv1.JobSpec{BackoffLimit: ptr.To[int32](5), Template: template},
+	}
+	if destination := upload.Labels[labelDestination]; destination != "" {
+		job.Labels[labelDestination] = destination
 	}
 	setSnapshotDeletionUploadIdentity(job, owner, exporter, identity)
 	return job, nil

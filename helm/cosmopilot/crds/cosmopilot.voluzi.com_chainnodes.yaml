@@ -6327,6 +6327,112 @@ spec:
               seedMode:
                 description: Indicates if this node is running with seed mode enabled.
                 type: boolean
+              snapshotExports:
+                description: |-
+                  SnapshotExports records the controller-owned destination and lifecycle state of snapshot tarballs.
+                  It is stored in status so VolumeSnapshot metadata cannot redirect privileged cleanup Jobs.
+                items:
+                  description: |-
+                    SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is
+                    persisted before its upload Job is created and retained until remote deletion succeeds or an
+                    operator explicitly acknowledges cleanup.
+                  properties:
+                    bufferSize:
+                      type: string
+                    chunkSize:
+                      type: string
+                    compression:
+                      description: TarballCompression identifies the compression applied
+                        to exported tar archives.
+                      enum:
+                      - none
+                      - gzip
+                      - zstd
+                      - lz4
+                      type: string
+                    concurrentJobs:
+                      type: integer
+                    deleteOnExpire:
+                      description: DeleteOnExpire records the cleanup policy bound
+                        to this upload.
+                      type: boolean
+                    destination:
+                      description: |-
+                        SnapshotExportDestination contains the routing and authentication references required to reach the
+                        object store used by an upload. The namespace is always the owning ChainNode's namespace.
+                      properties:
+                        bucket:
+                          type: string
+                        credentialsSecret:
+                          description: |-
+                            SnapshotExportSecretReference is a local Secret reference used by snapshot export Jobs. Key is set
+                            for GCS credentials and empty for S3 credentials exposed with envFrom. Secret contents are never
+                            copied into status.
+                          properties:
+                            key:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        endpoint:
+                          type: string
+                        forcePathStyle:
+                          type: boolean
+                        provider:
+                          description: SnapshotExportProvider identifies an exported
+                            tarball's object store.
+                          enum:
+                          - s3
+                          - gcs
+                          - unknown
+                          type: string
+                        region:
+                          type: string
+                        serviceAccountName:
+                          type: string
+                      required:
+                      - bucket
+                      - provider
+                      type: object
+                    id:
+                      type: string
+                    message:
+                      type: string
+                    objectName:
+                      type: string
+                    partSize:
+                      type: string
+                    phase:
+                      description: SnapshotExportPhase is the durable lifecycle phase
+                        of an exported tarball.
+                      enum:
+                      - Uploading
+                      - Uploaded
+                      - Deleting
+                      - CleanupRequired
+                      - Deleted
+                      - Acknowledged
+                      type: string
+                    sizeLimit:
+                      type: string
+                    snapshotName:
+                      type: string
+                    snapshotUID:
+                      description: |-
+                        UID is a type that holds unique ID values, including UUIDs.  Because we
+                        don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                        intent and helps make sure that UIDs and names do not get conflated.
+                      type: string
+                  required:
+                  - destination
+                  - id
+                  - objectName
+                  - phase
+                  - snapshotName
+                  type: object
+                type: array
               tmKMSReservationIdentity:
                 description: |-
                   TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was

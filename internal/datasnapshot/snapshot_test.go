@@ -1017,6 +1017,57 @@ func TestEnsureSnapshotJobKeepsJobWithMatchingLabels(t *testing.T) {
 	assert.Equal(t, "existing-uid", string(job.UID))
 }
 
+func TestEnsureSnapshotJobAdoptsLegacyJobWithMatchingPodIdentity(t *testing.T) {
+	owner := testJobOwner()
+	desired := desiredDeleteJob(owner, "s3-exporter")
+	desired.Labels[labelDestination] = "destination-id"
+	desired.Spec.Template.Spec = corev1.PodSpec{
+		RestartPolicy:      corev1.RestartPolicyNever,
+		ServiceAccountName: "snapshot-cleaner",
+		Containers: []corev1.Container{{
+			Name: "dataexporter",
+			Args: []string{"s3", "delete", "bucket", "object"},
+		}},
+	}
+	existing := desired.DeepCopy()
+	existing.UID = "legacy-uid"
+	delete(existing.Labels, labelDestination)
+	client := fake.NewSimpleClientset(existing)
+
+	job, created, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, "legacy-uid", string(job.UID))
+	assert.Equal(t, "destination-id", job.Labels[labelDestination])
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "delete", action.GetVerb())
+	}
+}
+
+func TestEnsureSnapshotJobRejectsLegacyJobWithDifferentPodIdentity(t *testing.T) {
+	owner := testJobOwner()
+	desired := desiredDeleteJob(owner, "s3-exporter")
+	desired.Labels[labelDestination] = "destination-id"
+	desired.Spec.Template.Spec = corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Containers: []corev1.Container{{
+			Name: "dataexporter",
+			Args: []string{"s3", "delete", "desired-bucket", "object"},
+		}},
+	}
+	existing := desired.DeepCopy()
+	existing.UID = "legacy-uid"
+	delete(existing.Labels, labelDestination)
+	existing.Spec.Template.Spec.Containers[0].Args[2] = "other-bucket"
+	client := fake.NewSimpleClientset(existing)
+
+	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, labelDestination, replacement.ConflictingLabel)
+}
+
 func TestEnsureSnapshotJobReportsDeleteFailureOfStaleJob(t *testing.T) {
 	owner := testJobOwner()
 	client := fake.NewSimpleClientset(&batchv1.Job{

@@ -41,7 +41,10 @@ const (
 
 func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode, nodePodReady bool) error {
 	logger := log.FromContext(ctx)
-	pendingDeletion, err := r.reconcilePendingTarballDeletions(ctx, chainNode)
+	if err := r.reconcileSnapshotExportAcknowledgements(ctx, chainNode); err != nil {
+		return err
+	}
+	_, err := r.reconcilePendingTarballDeletions(ctx, chainNode)
 	if err != nil {
 		return err
 	}
@@ -120,7 +123,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 
 	for _, snapshot := range snapshots {
 		if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
-			tarballNames = append(tarballNames, getTarballName(chainNode, &snapshot))
+			tarballNames = append(tarballNames, tarballNameForSnapshot(chainNode, &snapshot))
 		}
 
 		switch {
@@ -310,9 +313,6 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		// Default case is checking if snapshot has expired (time-based retention).
 		// If tarball is also set for deletion on expire it is also taken care here.
 		default:
-			if pendingDeletion {
-				continue
-			}
 			if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() && len(snapshots) == 1 {
 				logger.Info("skipping retention check to preserve last snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[controllers.AnnotationSnapshotRetention])
 			} else {
@@ -322,6 +322,8 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				}
 				if expired {
 					deleteTarball := chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+					cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
+					tarballName := tarballNameForSnapshot(chainNode, &snapshot)
 					if deleteTarball {
 						deleted, deleteErr := r.isTarballDeleted(ctx, chainNode, &snapshot)
 						if deleteErr != nil {
@@ -345,20 +347,18 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 							return err
 						}
-						r.recorder.Eventf(chainNode,
-							corev1.EventTypeNormal,
-							appsv1.ReasonTarballDeleted,
-							"Deleted expired tarball %s", getTarballName(chainNode, &snapshot),
-						)
+						if !cleanupAcknowledged {
+							r.recorder.Eventf(chainNode,
+								corev1.EventTypeNormal,
+								appsv1.ReasonTarballDeleted,
+								"Deleted expired tarball %s", tarballName,
+							)
+						}
 					}
 				}
 			}
 		}
 	}
-	if pendingDeletion {
-		return nil
-	}
-
 	// Handle count-based retention (retain field). Re-list snapshots since some may have been deleted above.
 	if retainCount := chainNode.Spec.Persistence.Snapshots.GetRetainCount(); retainCount != nil {
 		snapshots, err = r.listNodeSnapshots(ctx, chainNode)
@@ -381,13 +381,15 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		for i := 0; i < toDelete; i++ {
 			snapshot := snapshots[i]
 			deleteTarball := chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+			cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
+			tarballName := tarballNameForSnapshot(chainNode, &snapshot)
 			if deleteTarball {
 				deleted, deleteErr := r.isTarballDeleted(ctx, chainNode, &snapshot)
 				if deleteErr != nil {
 					return deleteErr
 				}
 				if !deleted {
-					break
+					continue
 				}
 			}
 			logger.Info("deleting pvc snapshot due to retain count", "snapshot", snapshot.GetName(), "retain", *retainCount)
@@ -404,11 +406,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
-				r.recorder.Eventf(chainNode,
-					corev1.EventTypeNormal,
-					appsv1.ReasonTarballDeleted,
-					"Deleted tarball %s (exceeded retain count)", getTarballName(chainNode, &snapshot),
-				)
+				if !cleanupAcknowledged {
+					r.recorder.Eventf(chainNode,
+						corev1.EventTypeNormal,
+						appsv1.ReasonTarballDeleted,
+						"Deleted tarball %s (exceeded retain count)", tarballName,
+					)
+				}
 			}
 		}
 	}
@@ -531,7 +535,10 @@ func (r *Reconciler) snapshotKubernetesClient() kubernetes.Interface {
 	if r.snapshotClientSet != nil {
 		return r.snapshotClientSet
 	}
-	return r.ClientSet
+	if r.ClientSet != nil {
+		return r.ClientSet
+	}
+	return nil
 }
 
 func (r *Reconciler) persistPendingTarballDeletionSuccess(
@@ -552,15 +559,21 @@ func (r *Reconciler) persistPendingTarballDeletionSuccess(
 		if snapshot.Annotations == nil {
 			snapshot.Annotations = make(map[string]string)
 		}
-		if tarballDeletionComplete(snapshot, tarballName, false) {
-			return nil
+		if !tarballDeletionComplete(snapshot, tarballName, false) {
+			snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
+			snapshot.Annotations[controllers.AnnotationTarballDeletionName] = tarballName
+			if err = r.Update(ctx, snapshot); err != nil {
+				return fmt.Errorf("persist pending tarball deletion success: %w", err)
+			}
 		}
-		snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
-		snapshot.Annotations[controllers.AnnotationTarballDeletionName] = tarballName
-		if err = r.Update(ctx, snapshot); err != nil {
-			return fmt.Errorf("persist pending tarball deletion success: %w", err)
+		if export := snapshotExportByObjectName(chainNode, tarballName); export != nil && export.Phase != appsv1.SnapshotExportPhaseDeleted {
+			_, err = r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseDeleted, "remote deletion proven")
+			return err
 		}
 		return nil
+	}
+	if export := snapshotExportByObjectName(chainNode, tarballName); export != nil {
+		return r.removeSnapshotExport(ctx, chainNode, export.ID)
 	}
 	return nil
 }
@@ -767,6 +780,17 @@ func getSnapshotName(chainNode *appsv1.ChainNode) string {
 }
 
 func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (datasnapshot.SnapshotProvider, error) {
+	if chainNode.Spec.Persistence == nil || chainNode.Spec.Persistence.Snapshots == nil ||
+		chainNode.Spec.Persistence.Snapshots.ExportTarball == nil {
+		return nil, fmt.Errorf("no upload target defined")
+	}
+	return r.tarballProviderForConfig(chainNode, chainNode.Spec.Persistence.Snapshots.ExportTarball)
+}
+
+func (r *Reconciler) tarballProviderForConfig(
+	chainNode *appsv1.ChainNode,
+	cfg *appsv1.ExportTarballConfig,
+) (datasnapshot.SnapshotProvider, error) {
 	clientSet := kubernetes.Interface(r.ClientSet)
 	if r.snapshotClientSet != nil {
 		clientSet = r.snapshotClientSet
@@ -776,7 +800,7 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 		imagePullSecrets = chainNode.Spec.Config.ImagePullSecrets
 	}
 	switch {
-	case chainNode.Spec.Persistence.Snapshots.ExportTarball.GCS != nil:
+	case cfg != nil && cfg.GCS != nil:
 		return datasnapshot.NewGcsSnapshotProvider(
 			clientSet,
 			r.Scheme,
@@ -784,10 +808,10 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 			r.opts.GetDefaultPriorityClassName(),
 			r.opts.GetDataExporterImage(),
 			imagePullSecrets,
-			chainNode.Spec.Persistence.Snapshots.ExportTarball,
+			cfg,
 		), nil
 
-	case chainNode.Spec.Persistence.Snapshots.ExportTarball.S3 != nil:
+	case cfg != nil && cfg.S3 != nil:
 		return datasnapshot.NewS3SnapshotProvider(
 			clientSet,
 			r.Scheme,
@@ -795,7 +819,7 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 			r.opts.GetDefaultPriorityClassName(),
 			r.opts.GetDataExporterImage(),
 			imagePullSecrets,
-			chainNode.Spec.Persistence.Snapshots.ExportTarball,
+			cfg,
 		), nil
 
 	default:
@@ -804,22 +828,46 @@ func (r *Reconciler) getTarballExportProvider(chainNode *appsv1.ChainNode) (data
 }
 
 func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
-	exporter, err := r.getTarballExportProvider(chainNode)
+	export, err := r.ensureSnapshotExportStatus(ctx, chainNode, snapshot)
+	if err != nil {
+		if stderrors.Is(err, errSnapshotExportStatusUnavailable) {
+			exporter, providerErr := r.getTarballExportProvider(chainNode)
+			if providerErr != nil {
+				return providerErr
+			}
+			err = exporter.CreateSnapshot(ctx, getTarballName(chainNode, snapshot), snapshot)
+			r.recordSnapshotJobReplacement(chainNode, err)
+			return err
+		}
+		return err
+	}
+	exporter, err := r.tarballProviderForExport(chainNode, export)
 	if err != nil {
 		return err
 	}
-	err = exporter.CreateSnapshot(ctx, getTarballName(chainNode, snapshot), snapshot)
+	err = exporter.CreateSnapshot(ctx, export.ObjectName, snapshot)
 	r.recordSnapshotJobReplacement(chainNode, err)
 	return err
 }
 
 func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
-	exporter, err := r.getTarballExportProvider(chainNode)
+	export := snapshotExportFor(chainNode, snapshot)
+	if export == nil {
+		var err error
+		export, err = r.ensureSnapshotExportStatus(ctx, chainNode, snapshot)
+		if err != nil {
+			if stderrors.Is(err, errSnapshotExportStatusUnavailable) {
+				return r.isTarballReadyLegacy(ctx, chainNode, snapshot)
+			}
+			return false, err
+		}
+	}
+	exporter, err := r.tarballProviderForExport(chainNode, export)
 	if err != nil {
 		return false, err
 	}
 
-	status, err := exporter.GetSnapshotStatus(ctx, getTarballName(chainNode, snapshot))
+	status, err := exporter.GetSnapshotStatus(ctx, export.ObjectName)
 	if err != nil {
 		r.recordSnapshotJobReplacement(chainNode, err)
 		// The upload Job belonged to a previous exporter and was deleted. Clear the export state instead
@@ -846,7 +894,7 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonTarballExportError,
-			"Tarball %s export job not found; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
+			"Tarball %s export job not found; %s", export.ObjectName, tarballFailureAction(retry),
 		)
 		return false, nil
 
@@ -861,7 +909,7 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonTarballExportError,
-			"Tarball %s export failed; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry),
+			"Tarball %s export failed; %s", export.ObjectName, tarballFailureAction(retry),
 		)
 		return false, nil
 
@@ -869,10 +917,43 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeNormal,
 			appsv1.ReasonTarballExportFinish,
-			"Finished exporting tarball %s", getTarballName(chainNode, snapshot),
+			"Finished exporting tarball %s", export.ObjectName,
 		)
 		return true, nil
 
+	default:
+		return false, nil
+	}
+}
+
+func (r *Reconciler) isTarballReadyLegacy(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
+	exporter, err := r.getTarballExportProvider(chainNode)
+	if err != nil {
+		return false, err
+	}
+	status, err := exporter.GetSnapshotStatus(ctx, getTarballName(chainNode, snapshot))
+	if err != nil {
+		r.recordSnapshotJobReplacement(chainNode, err)
+		if stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) {
+			if resetErr := r.resetTarballExport(ctx, snapshot); resetErr != nil {
+				return false, resetErr
+			}
+		}
+		return false, err
+	}
+	switch status {
+	case datasnapshot.SnapshotNotFound, datasnapshot.SnapshotFailed:
+		if cleanupErr := r.cleanUpTarballExport(ctx, chainNode, snapshot); cleanupErr != nil {
+			return false, cleanupErr
+		}
+		retry, updateErr := r.recordTarballExportFailure(ctx, snapshot)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		r.recordTarballExportError(chainNode, fmt.Errorf("tarball %s export failed; %s", getTarballName(chainNode, snapshot), tarballFailureAction(retry)))
+		return false, nil
+	case datasnapshot.SnapshotSucceeded:
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -928,6 +1009,11 @@ func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.
 			return err
 		}
 	}
+	if export := snapshotExportFor(chainNode, snapshot); export != nil && export.Phase != appsv1.SnapshotExportPhaseUploaded {
+		if _, err := r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseUploaded, ""); err != nil {
+			return err
+		}
+	}
 	if err := r.cleanUpTarballExport(ctx, chainNode, snapshot); err != nil {
 		return err
 	}
@@ -936,19 +1022,31 @@ func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.
 }
 
 func (r *Reconciler) cleanUpTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
-	exporter, err := r.getTarballExportProvider(chainNode)
+	export := snapshotExportFor(chainNode, snapshot)
+	if export == nil {
+		exporter, err := r.getTarballExportProvider(chainNode)
+		if err != nil {
+			return err
+		}
+		return exporter.CleanupSnapshot(ctx, getTarballName(chainNode, snapshot))
+	}
+	exporter, err := r.tarballProviderForExport(chainNode, export)
 	if err != nil {
 		return err
 	}
-	return exporter.CleanupSnapshot(ctx, getTarballName(chainNode, snapshot))
+	return exporter.CleanupSnapshot(ctx, export.ObjectName)
 }
 
 func (r *Reconciler) deleteTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (datasnapshot.SnapshotStatus, error) {
-	exporter, err := r.getTarballExportProvider(chainNode)
+	export := snapshotExportFor(chainNode, snapshot)
+	if export == nil {
+		return "", fmt.Errorf("snapshot %s has no controller-owned export destination", snapshot.Name)
+	}
+	exporter, err := r.tarballProviderForExport(chainNode, export)
 	if err != nil {
 		return "", err
 	}
-	return r.deleteTarballWithProvider(ctx, chainNode, exporter, getTarballName(chainNode, snapshot))
+	return r.deleteTarballWithProvider(ctx, chainNode, exporter, export.ObjectName)
 }
 
 func (r *Reconciler) deleteTarballWithProvider(
@@ -1007,9 +1105,51 @@ func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, e
 }
 
 func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
-	tarballName := getTarballName(chainNode, snapshot)
-	if tarballDeletionComplete(snapshot, tarballName, true) {
+	export := snapshotExportFor(chainNode, snapshot)
+	if export == nil {
+		if tarballDeletionComplete(snapshot, getTarballName(chainNode, snapshot), true) {
+			return true, nil
+		}
+		if r.Client == nil {
+			return r.isTarballDeletedLegacy(ctx, chainNode, snapshot)
+		}
+		var err error
+		export, err = r.ensureUnknownSnapshotExportStatus(ctx, chainNode, snapshot)
+		if err != nil {
+			if stderrors.Is(err, errSnapshotExportStatusUnavailable) {
+				return r.isTarballDeletedLegacy(ctx, chainNode, snapshot)
+			}
+			return false, err
+		}
+	}
+	if export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
 		return true, nil
+	}
+	if export.Phase == appsv1.SnapshotExportPhaseDeleted {
+		return true, nil
+	}
+	if export.Destination.Provider == appsv1.SnapshotExportProviderUnknown {
+		return false, nil
+	}
+	tarballName := export.ObjectName
+	if err := r.validateSnapshotExportReferences(ctx, chainNode, export); err != nil {
+		var unavailable *snapshotExportReferenceUnavailableError
+		if stderrors.As(err, &unavailable) {
+			if statusErr := r.requireSnapshotExportCleanup(ctx, chainNode, export, unavailable.Error()); statusErr != nil {
+				return false, statusErr
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	if export.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
+		exporter, err := r.tarballProviderForExport(chainNode, export)
+		if err != nil {
+			return false, err
+		}
+		if err = exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{Name: export.ObjectName, Purpose: datasnapshot.SnapshotJobDelete}); err != nil {
+			return false, err
+		}
 	}
 
 	status, err := r.deleteTarball(ctx, chainNode, snapshot)
@@ -1017,11 +1157,20 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 		return false, err
 	}
 	if status == datasnapshot.SnapshotFailed {
-		r.recorder.Eventf(chainNode,
-			corev1.EventTypeWarning,
-			appsv1.ReasonTarballDeleteError,
-			"Failed deleting tarball %s; delete Job retained for inspection", getTarballName(chainNode, snapshot),
-		)
+		message := fmt.Sprintf("failed deleting %s; delete Job retained for inspection, or acknowledge cleanup with annotation %q=%q",
+			describeSnapshotExport(export), controllers.AnnotationSnapshotExportCleanupAcknowledgement, export.ID)
+		if err = r.requireSnapshotExportCleanup(ctx, chainNode, export, message); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if status == datasnapshot.SnapshotActive {
+		if export.Phase == appsv1.SnapshotExportPhaseUploaded || export.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
+			if _, err = r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseDeleting, ""); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
 	}
 	if status != datasnapshot.SnapshotSucceeded {
 		return false, nil
@@ -1047,6 +1196,55 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 		}
 		return false, fmt.Errorf("persist tarball deletion success: %w", err)
 	}
+	if _, err = r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseDeleted, "remote deletion proven"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *Reconciler) isTarballDeletedLegacy(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
+	tarballName := getTarballName(chainNode, snapshot)
+	if tarballDeletionComplete(snapshot, tarballName, true) {
+		return true, nil
+	}
+	exporter, err := r.getTarballExportProvider(chainNode)
+	if err != nil {
+		return false, err
+	}
+	status, err := r.deleteTarballWithProvider(ctx, chainNode, exporter, tarballName)
+	if err != nil {
+		return false, err
+	}
+	if status == datasnapshot.SnapshotFailed {
+		r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonTarballDeleteError,
+			"Failed deleting tarball %s; delete Job retained for inspection", tarballName)
+	}
+	if status != datasnapshot.SnapshotSucceeded {
+		return false, nil
+	}
+	if snapshot.Annotations == nil {
+		snapshot.Annotations = make(map[string]string)
+	}
+	previous, hadPrevious := snapshot.Annotations[controllers.AnnotationTarballDeletionComplete]
+	previousName, hadPreviousName := snapshot.Annotations[controllers.AnnotationTarballDeletionName]
+	snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = strconv.FormatBool(true)
+	snapshot.Annotations[controllers.AnnotationTarballDeletionName] = tarballName
+	if r.Client == nil {
+		return true, nil
+	}
+	if err = r.Update(ctx, snapshot); err != nil {
+		if hadPrevious {
+			snapshot.Annotations[controllers.AnnotationTarballDeletionComplete] = previous
+		} else {
+			delete(snapshot.Annotations, controllers.AnnotationTarballDeletionComplete)
+		}
+		if hadPreviousName {
+			snapshot.Annotations[controllers.AnnotationTarballDeletionName] = previousName
+		} else {
+			delete(snapshot.Annotations, controllers.AnnotationTarballDeletionName)
+		}
+		return false, err
+	}
 	return true, nil
 }
 
@@ -1059,17 +1257,30 @@ func tarballDeletionComplete(snapshot *snapshotv1.VolumeSnapshot, tarballName st
 }
 
 func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
-	exporter, err := r.getTarballExportProvider(chainNode)
+	export := snapshotExportFor(chainNode, snapshot)
+	if export == nil {
+		exporter, err := r.getTarballExportProvider(chainNode)
+		if err != nil {
+			return err
+		}
+		return exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
+			Name: getTarballName(chainNode, snapshot), Purpose: datasnapshot.SnapshotJobDelete,
+		})
+	}
+	if export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
+		return r.removeSnapshotExport(ctx, chainNode, export.ID)
+	}
+	exporter, err := r.tarballProviderForExport(chainNode, export)
 	if err != nil {
 		return err
 	}
 	if err = exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
-		Name:    getTarballName(chainNode, snapshot),
+		Name:    export.ObjectName,
 		Purpose: datasnapshot.SnapshotJobDelete,
 	}); err != nil {
 		return err
 	}
-	return nil
+	return r.removeSnapshotExport(ctx, chainNode, export.ID)
 }
 
 func getTarballName(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) string {
