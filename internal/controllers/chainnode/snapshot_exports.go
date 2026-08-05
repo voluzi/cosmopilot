@@ -167,9 +167,13 @@ func (r *Reconciler) ensureUnknownSnapshotExportStatus(
 	// The legacy upload may have used a suffix or destination that has since changed. Do not guess an
 	// object name from mutable current configuration; the operator must identify the original object.
 	objectName := ""
-	deleteOnExpire := chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil &&
-		chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
-		chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+	// Without current export configuration, the original cleanup policy is unknowable. Fail closed so
+	// retention cannot discard the only lifecycle evidence before explicit operator acknowledgement.
+	deleteOnExpire := true
+	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil &&
+		chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
+		deleteOnExpire = chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+	}
 	digest := sha256.Sum256([]byte(strings.Join([]string{string(chainNode.UID), snapshot.Name, string(snapshot.UID), "unknown"}, "\x00")))
 	id := fmt.Sprintf("export-%x", digest[:8])
 	message := fmt.Sprintf(

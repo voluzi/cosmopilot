@@ -853,6 +853,100 @@ func TestIsTarballReadyRequiresAcknowledgementForLegacyInFlightExport(t *testing
 	assert.Empty(t, jobs.Items)
 }
 
+func TestEnsureVolumeSnapshotsDefersOrphanCleanupForUnknownLegacyUpload(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{
+		Suffix: ptr.To("new"),
+		GCS:    &appsv1.GcsExportConfig{Bucket: "new-bucket"},
+	})
+	snapshot := destinationTestSnapshot()
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady: "true",
+		controllers.AnnotationExportingTarball: "true",
+	}
+	legacyJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "chain-1-20260801T000000-old-upload", Namespace: node.Namespace, UID: "legacy-upload-uid",
+		Labels: map[string]string{"exporter": "gcs-exporter", "owner": node.Name, "type": "upload"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: node.APIVersion, Kind: node.Kind, Name: node.Name, UID: node.UID, Controller: ptr.To(true),
+		}},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+	reconciler.snapshotClientSet = fake.NewSimpleClientset(legacyJob)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	_, err := reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), legacyJob.Name, metav1.GetOptions{})
+	require.NoError(t, err, "unknown legacy upload must not be treated as orphaned")
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), stored))
+	require.Len(t, stored.Status.SnapshotExports, 1)
+	assert.Equal(t, appsv1.SnapshotExportProviderUnknown, stored.Status.SnapshotExports[0].Destination.Provider)
+}
+
+func TestEnsureVolumeSnapshotsFinishesRecordedUploadAfterExportRemoval(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "old-bucket"}})
+	snapshot := destinationTestSnapshot()
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady: "true",
+		controllers.AnnotationExportingTarball: "true",
+	}
+	restoreSize := resource.MustParse("1Gi")
+	snapshot.Status.RestoreSize = &restoreSize
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+	require.NoError(t, reconciler.exportTarball(context.Background(), node, snapshot))
+	require.Len(t, node.Status.SnapshotExports, 1)
+	export := node.Status.SnapshotExports[0]
+	job, err := reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), export.ObjectName+"-upload", metav1.GetOptions{})
+	require.NoError(t, err)
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	_, err = reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).UpdateStatus(context.Background(), job, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	storedBeforeRemoval := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedBeforeRemoval))
+	storedBeforeRemoval.Spec.Persistence.Snapshots.ExportTarball = nil
+	require.NoError(t, reconciler.Update(context.Background(), storedBeforeRemoval))
+	node = storedBeforeRemoval
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	storedSnapshot := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot))
+	assert.Equal(t, tarballFinished, storedSnapshot.Annotations[controllers.AnnotationExportingTarball])
+	_, err = reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	_, err = reconciler.snapshotClientSet.CoreV1().PersistentVolumeClaims(node.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
+	require.Len(t, storedNode.Status.SnapshotExports, 1)
+	assert.Equal(t, appsv1.SnapshotExportPhaseUploaded, storedNode.Status.SnapshotExports[0].Phase)
+}
+
+func TestEnsureVolumeSnapshotsFailsClosedForLegacyUploadAfterExportRemoval(t *testing.T) {
+	node := destinationTestChainNode(nil)
+	retention := "1h"
+	node.Spec.Persistence.Snapshots.Retention = &retention
+	node.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+	snapshot := destinationTestSnapshot()
+	snapshot.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-2 * time.Hour))
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady:  "true",
+		controllers.AnnotationExportingTarball:  "true",
+		controllers.AnnotationSnapshotRetention: retention,
+	}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	storedSnapshot := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot), "cleanup acknowledgement must gate retention")
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
+	require.Len(t, storedNode.Status.SnapshotExports, 1)
+	assert.True(t, storedNode.Status.SnapshotExports[0].DeleteOnExpire)
+	assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, storedNode.Status.SnapshotExports[0].Phase)
+}
+
 func TestUnknownLegacyExportPreservesCleanupIntentWithoutGuessingObjectName(t *testing.T) {
 	node := destinationTestChainNode(&appsv1.ExportTarballConfig{
 		GCS:            &appsv1.GcsExportConfig{Bucket: "current-bucket"},

@@ -118,12 +118,21 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		}
 	}
 
-	// Grab list of possible tarball names to make sure we delete any possible dangling jobs
+	// Grab list of controller-owned tarball names to make sure we delete dangling jobs. If a legacy
+	// in-flight export has no status record, its object name may have come from older mutable config;
+	// fail closed and defer orphan cleanup until the operator acknowledges that unknown export.
 	tarballNames := make([]string, 0)
+	unknownLegacyExport := false
 
 	for _, snapshot := range snapshots {
-		if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
-			tarballNames = append(tarballNames, tarballNameForSnapshot(chainNode, &snapshot))
+		if export := snapshotExportFor(chainNode, &snapshot); export != nil {
+			if export.ObjectName != "" {
+				tarballNames = append(tarballNames, export.ObjectName)
+			}
+		} else if snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true) {
+			unknownLegacyExport = true
+		} else if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
+			tarballNames = append(tarballNames, getTarballName(chainNode, &snapshot))
 		}
 
 		switch {
@@ -288,8 +297,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			)
 
 		// A completed upload is persisted before cleanup so a controller restart cannot trigger another upload.
-		case chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
-			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(true) &&
+		case snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(true) &&
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true):
 			ready, err := r.isTarballReady(ctx, chainNode, &snapshot)
 			if err != nil {
@@ -303,7 +311,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				}
 			}
 
-		case chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
+		case (chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() || snapshotExportFor(chainNode, &snapshot) != nil) &&
 			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(true) &&
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == tarballUploaded:
 			if err = r.finishTarballExport(ctx, chainNode, &snapshot); err != nil {
@@ -434,7 +442,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	}
 
 	// Remove any dangling jobs whose volumesnapshot does not exist anymore
-	if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
+	if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && !unknownLegacyExport {
 		exporter, err := r.getTarballExportProvider(chainNode)
 		if err != nil {
 			return err
