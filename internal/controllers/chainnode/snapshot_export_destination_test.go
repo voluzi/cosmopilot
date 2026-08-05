@@ -1068,6 +1068,99 @@ func TestSnapshotExportAcknowledgementEventsOnlyReportNewTransitions(t *testing.
 	assert.NotContains(t, events, "cleanup already")
 }
 
+func TestEnsureVolumeSnapshotsDefersOrphanCleanupForPersistedUnknownLegacyUpload(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{
+		Suffix: ptr.To("new"),
+		GCS:    &appsv1.GcsExportConfig{Bucket: "new-bucket"},
+	})
+	snapshot := destinationTestSnapshot()
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady: "true",
+		controllers.AnnotationExportingTarball: "true",
+	}
+	legacyJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "chain-1-20260801T000000-old-upload", Namespace: node.Namespace, UID: "legacy-upload-uid",
+		Labels: map[string]string{"exporter": "gcs-exporter", "owner": node.Name, "type": "upload"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: node.APIVersion, Kind: node.Kind, Name: node.Name, UID: node.UID, Controller: ptr.To(true),
+		}},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+	reconciler.snapshotClientSet = fake.NewSimpleClientset(legacyJob)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	require.Len(t, node.Status.SnapshotExports, 1)
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	_, err := reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), legacyJob.Name, metav1.GetOptions{})
+	require.NoError(t, err, "persisted unknown export must continue suppressing orphan cleanup")
+}
+
+func TestEnsureVolumeSnapshotsRetriesRecordedUploadAfterExportRemoval(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "old-bucket"}})
+	snapshot := destinationTestSnapshot()
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady: "true",
+		controllers.AnnotationExportingTarball: "true",
+	}
+	restoreSize := resource.MustParse("1Gi")
+	snapshot.Status.RestoreSize = &restoreSize
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+	require.NoError(t, reconciler.exportTarball(context.Background(), node, snapshot))
+	require.Len(t, node.Status.SnapshotExports, 1)
+	export := node.Status.SnapshotExports[0]
+	require.NoError(t, reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Delete(
+		context.Background(), export.ObjectName+"-upload", metav1.DeleteOptions{},
+	))
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
+	storedNode.Spec.Persistence.Snapshots.ExportTarball = nil
+	require.NoError(t, reconciler.Update(context.Background(), storedNode))
+	node = storedNode
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	storedSnapshot := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot))
+	assert.Empty(t, storedSnapshot.Annotations[controllers.AnnotationExportingTarball])
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	_, err := reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Get(
+		context.Background(), export.ObjectName+"-upload", metav1.GetOptions{},
+	)
+	require.NoError(t, err, "recorded uploading export must retry with its persisted destination")
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot))
+	assert.Equal(t, strconv.FormatBool(true), storedSnapshot.Annotations[controllers.AnnotationExportingTarball])
+}
+
+func TestEnsureVolumeSnapshotsKeepsRetainedExportRecordWhenStatusPruneFails(t *testing.T) {
+	node := destinationTestChainNode(nil)
+	retention := "1h"
+	node.Spec.Persistence.Snapshots.Retention = &retention
+	node.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+	snapshot := destinationTestSnapshot()
+	snapshot.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-2 * time.Hour))
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady:  "true",
+		controllers.AnnotationExportingTarball:  tarballFinished,
+		controllers.AnnotationSnapshotRetention: retention,
+	}
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "retained", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ObjectName: "retained-object",
+		Phase: appsv1.SnapshotExportPhaseUploaded, DeleteOnExpire: false,
+		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket"},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+	pruneErr := errors.New("status prune failed")
+	reconciler.Client = &statusUpdateFailingClient{Client: reconciler.Client, err: pruneErr}
+
+	err := reconciler.ensureVolumeSnapshots(context.Background(), node, true)
+	require.ErrorIs(t, err, pruneErr)
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), &snapshotv1.VolumeSnapshot{}),
+		"snapshot deletion must wait until retained export status is pruned")
+}
+
 func TestSnapshotExportStatusIDIsStableAndDNSLabelSafe(t *testing.T) {
 	node := destinationTestChainNode(&appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "bucket", Region: "region"}})
 	snapshot := destinationTestSnapshot()

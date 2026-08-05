@@ -368,5 +368,5 @@ func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, snapshotJob Snapsho
 }
 
 func (gcs *GCS) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
-	return listSnapshotJobs(ctx, gcs.Client, gcs.Owner, gcsExporter)
+	return listSnapshotJobs(ctx, gcs.Client, gcs.Owner, gcsExporter, gcs.destinationLabel())
 }

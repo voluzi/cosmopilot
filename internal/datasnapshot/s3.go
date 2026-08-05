@@ -307,5 +307,5 @@ func (provider *S3) cleanUp(ctx context.Context, name string) error {
 }
 
 func (provider *S3) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
-	return listSnapshotJobs(ctx, provider.Client, provider.Owner, s3Exporter)
+	return listSnapshotJobs(ctx, provider.Client, provider.Owner, s3Exporter, provider.destinationLabel())
 }

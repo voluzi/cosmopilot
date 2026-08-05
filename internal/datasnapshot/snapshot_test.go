@@ -1364,3 +1364,18 @@ func requireJobDeleteAction(t *testing.T, actions []k8stesting.Action) k8stestin
 	require.FailNow(t, "job delete action not found")
 	return nil
 }
+
+func TestSnapshotJobsFromJobsMarksSameExporterDifferentDestinationUploadAsPrevious(t *testing.T) {
+	job := batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot-upload", UID: "upload-uid",
+		Labels: map[string]string{
+			labelExporter: "gcs-exporter", labelType: typeUpload, labelDestination: "old-destination",
+		},
+	}}
+
+	jobs := snapshotJobsFromJobs([]batchv1.Job{job}, "gcs-exporter", "new-destination")
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "gcs-exporter", jobs[0].Exporter)
+	require.NotNil(t, jobs[0].Source)
+	assert.Equal(t, "old-destination", jobs[0].Source.Labels[labelDestination])
+}

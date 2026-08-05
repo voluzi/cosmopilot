@@ -525,7 +525,7 @@ func snapshotJobFromJob(job *batchv1.Job) SnapshotJob {
 	return snapshotJob
 }
 
-func snapshotJobsFromJobs(jobs []batchv1.Job, currentExporter ...string) []SnapshotJob {
+func snapshotJobsFromJobs(jobs []batchv1.Job, currentIdentity ...string) []SnapshotJob {
 	type groupedSnapshotJobs struct {
 		preferred         SnapshotJob
 		preferredExporter string
@@ -561,8 +561,15 @@ func snapshotJobsFromJobs(jobs []batchv1.Job, currentExporter ...string) []Snaps
 			group.preferred.Upload.UID == group.upload.UID {
 			group.preferred.Upload.Terminating = group.upload.Terminating
 		}
-		if len(currentExporter) > 0 && group.preferredExporter != "" &&
-			group.preferredExporter != currentExporter[0] {
+		previousExporter := len(currentIdentity) > 0 && group.preferredExporter != "" &&
+			group.preferredExporter != currentIdentity[0]
+		uploadDestination := ""
+		if group.uploadSource != nil {
+			uploadDestination = group.uploadSource.Labels[labelDestination]
+		}
+		previousDestination := len(currentIdentity) > 1 && group.preferred.Purpose == SnapshotJobUpload &&
+			uploadDestination != "" && uploadDestination != currentIdentity[1]
+		if previousExporter || previousDestination {
 			group.preferred.Exporter = group.preferredExporter
 			if group.preferred.Purpose == SnapshotJobUpload {
 				group.preferred.Source = group.uploadSource
@@ -581,6 +588,7 @@ func listSnapshotJobs(
 	client kubernetes.Interface,
 	owner metav1.Object,
 	exporter string,
+	destination ...string,
 ) ([]SnapshotJob, error) {
 	selector := labels.SelectorFromSet(map[string]string{labelOwner: owner.GetName()}).String()
 	list, err := client.BatchV1().Jobs(owner.GetNamespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
@@ -604,7 +612,9 @@ func listSnapshotJobs(
 			jobs = append(jobs, job)
 		}
 	}
-	return snapshotJobsFromJobs(jobs, exporter), nil
+	identity := []string{exporter}
+	identity = append(identity, destination...)
+	return snapshotJobsFromJobs(jobs, identity...), nil
 }
 
 // ListSnapshotDeletionJobs returns owner-labelled deletion Jobs regardless of

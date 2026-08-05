@@ -128,6 +128,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		if export := snapshotExportFor(chainNode, &snapshot); export != nil {
 			if export.ObjectName != "" {
 				tarballNames = append(tarballNames, export.ObjectName)
+			} else if export.Destination.Provider == appsv1.SnapshotExportProviderUnknown &&
+				snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true) {
+				unknownLegacyExport = true
 			}
 		} else if snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true) {
 			unknownLegacyExport = true
@@ -278,7 +281,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			}
 
 		// If for some reason, there is an error starting the tarball export, it is never retried. So we do it here.
-		case chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
+		case (chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() || snapshotExportUploading(chainNode, &snapshot)) &&
 			(!chainNode.Spec.Persistence.Snapshots.ShouldVerify() || snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] == string(snapshotIntegrityOk)) &&
 			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(true) &&
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == "":
@@ -293,7 +296,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeNormal,
 				appsv1.ReasonTarballExportStart,
-				"Exporting tarball %s from snapshot", getTarballName(chainNode, &snapshot),
+				"Exporting tarball %s from snapshot", tarballNameForSnapshot(chainNode, &snapshot),
 			)
 
 		// A completed upload is persisted before cleanup so a controller restart cannot trigger another upload.
@@ -344,15 +347,15 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					}
 					logger.Info("deleting expired pvc snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[controllers.AnnotationSnapshotRetention])
 					snapshotUID := snapshot.UID
-					if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
-						return err
-					}
 					if !deleteTarball {
 						if export := snapshotExportFor(chainNode, &snapshot); export != nil {
 							if err = r.removeSnapshotExport(ctx, chainNode, export.ID); err != nil {
 								return err
 							}
 						}
+					}
+					if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
+						return err
 					}
 					r.recorder.Eventf(chainNode,
 						corev1.EventTypeNormal,
@@ -411,15 +414,15 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			}
 			logger.Info("deleting pvc snapshot due to retain count", "snapshot", snapshot.GetName(), "retain", *retainCount)
 			snapshotUID := snapshot.UID
-			if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
-				return err
-			}
 			if !deleteTarball {
 				if export := snapshotExportFor(chainNode, &snapshot); export != nil {
 					if err = r.removeSnapshotExport(ctx, chainNode, export.ID); err != nil {
 						return err
 					}
 				}
+			}
+			if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
+				return err
 			}
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeNormal,

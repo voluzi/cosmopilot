@@ -113,6 +113,12 @@ func tarballNameForSnapshot(chainNode *appsv1.ChainNode, snapshot *snapshotv1.Vo
 	return getTarballName(chainNode, snapshot)
 }
 
+func snapshotExportUploading(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {
+	export := snapshotExportFor(chainNode, snapshot)
+	return export != nil && export.Phase == appsv1.SnapshotExportPhaseUploading &&
+		export.Destination.Provider != appsv1.SnapshotExportProviderUnknown
+}
+
 func snapshotExportCleanupAcknowledged(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {
 	export := snapshotExportFor(chainNode, snapshot)
 	return export != nil && export.Phase == appsv1.SnapshotExportPhaseAcknowledged
