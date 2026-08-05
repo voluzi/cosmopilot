@@ -13,6 +13,7 @@ func TestIsDeterministicChainNodePodName(t *testing.T) {
 		nodeName + "-init-data",
 		nodeName + "-config-generator",
 		nodeName + "-genesis-init",
+		nodeName + "-write-file",
 		nodeName + "-create-validator",
 		nodeName + "-tmkms-generate-identity",
 		nodeName + "-tmkms-vault-upload",

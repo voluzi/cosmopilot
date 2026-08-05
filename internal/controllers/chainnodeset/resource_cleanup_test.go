@@ -237,7 +237,7 @@ func TestQuiesceAndDeleteChildrenLeavesInitializationPodToTerminatingChild(t *te
 func TestQuiesceChildPodBlocksOnOrphanedHelperPod(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "set-fullnodes-0", Namespace: "default", UID: "child-uid"}}
-	helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-init-data", Namespace: child.Namespace, UID: "helper-uid"}}
+	helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-write-file", Namespace: child.Namespace, UID: "helper-uid"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child, helper).Build()
 	r := &Reconciler{Client: c, Scheme: scheme}
 

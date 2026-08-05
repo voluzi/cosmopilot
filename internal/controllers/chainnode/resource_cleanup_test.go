@@ -107,7 +107,7 @@ func TestFinalizeResourcesBlocksOnOrphanedHelperPod(t *testing.T) {
 		}},
 	}
 	helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: node.Name + "-init-data", Namespace: node.Namespace, UID: "helper-uid",
+		Name: node.Name + "-write-file", Namespace: node.Namespace, UID: "helper-uid",
 	}}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "pvc-uid"}}
 	_, _, err := resourcecleanup.PrepareGeneratedResource(pvc, node, scheme, resourcecleanup.ClassDataVolumes, true)

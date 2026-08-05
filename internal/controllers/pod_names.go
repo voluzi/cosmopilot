@@ -4,6 +4,7 @@ var deterministicChainNodePodSuffixes = [...]string{
 	"-init-data",
 	"-config-generator",
 	"-genesis-init",
+	"-write-file",
 	"-create-validator",
 	"-tmkms-generate-identity",
 	"-tmkms-vault-upload",
