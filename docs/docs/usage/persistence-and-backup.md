@@ -154,6 +154,15 @@ These Secrets are therefore **retained even when `generatedKeys` is `Delete`**, 
 To hand a pre-upgrade Secret over to the policy deliberately, annotate it with the root-owner attribution Cosmopilot stamps on its own resources (`cosmopilot.voluzi.com/root-owner-*` and `cosmopilot.voluzi.com/resource-class: generatedKeys`).
 :::
 
+:::note[PVCs created before the upgrade]
+Two classes of pre-upgrade PVC carry no owner reference and are therefore **retained even when `dataVolumes` is `Delete`**:
+
+- **Additional node volumes left at `deleteWithNode: false`.** Cosmopilot only owner-referenced an additional volume's PVC when `deleteWithNode` was `true`, so an unowned claim records your earlier decision to keep that volume. Adopting it would reverse that choice on upgrade. Additional volumes that had `deleteWithNode: true` are attributed and deleted normally.
+- **Cosmoseed `data-<set>-seed-<ordinal>` claims.** These were provisioned from the seed StatefulSet's volume claim template without a retention policy, so Kubernetes left them with no owner reference. They may also have been pre-provisioned by you, which is indistinguishable after the fact.
+
+Delete these manually if unwanted, or hand one over to the policy by annotating it with the root-owner attribution Cosmopilot stamps on its own resources (`cosmopilot.voluzi.com/root-owner-*` and `cosmopilot.voluzi.com/resource-class: dataVolumes`). PVCs generated from this release onwards are attributed at creation and fully covered.
+:::
+
 :::warning[Namespace deletion]
 Kubernetes removes namespaced resources when their namespace is deleted, regardless of `Retain`. During namespace termination Cosmopilot first quiesces managed node, Cosmosigner, and Cosmoseed workloads, then releases its own cleanup finalizers so the namespace can converge. Use backups or move retained data outside the namespace if it must survive namespace deletion.
 :::
