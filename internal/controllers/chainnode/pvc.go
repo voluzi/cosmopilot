@@ -15,12 +15,12 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
@@ -271,6 +271,9 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 				Name:     chainNode.Spec.Persistence.RestoreFromSnapshot.Name,
 			}
 		}
+		if _, _, err := resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, true); err != nil {
+			return nil, ctrl.Result{}, err
+		}
 
 		if err = r.Create(ctx, pvc); err != nil {
 			return nil, ctrl.Result{}, err
@@ -282,6 +285,15 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		}
 
 	} else {
+		_, metadataChanged, err := resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, false)
+		if err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		if metadataChanged {
+			if err := r.Update(ctx, pvc); err != nil {
+				return nil, ctrl.Result{}, err
+			}
+		}
 		// This happens when a chainnode is created but the volume for it already exists. We try to get the
 		// block height for the data on that volume, so that operator will know which version to run this
 		// node with.
@@ -539,10 +551,8 @@ func (r *Reconciler) ensureAdditionalVolumes(ctx context.Context, chainNode *app
 					},
 				}
 
-				if volume.ShouldDeleteWithNode() {
-					if err = controllerutil.SetControllerReference(chainNode, pvc, r.Scheme); err != nil {
-						return fmt.Errorf("failed to set controller reference for PVC %s: %w", volumeName, err)
-					}
+				if _, _, err = resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, true); err != nil {
+					return fmt.Errorf("failed to attribute PVC %s: %w", volumeName, err)
 				}
 
 				if err = r.Create(ctx, pvc); err != nil {
@@ -552,11 +562,19 @@ func (r *Reconciler) ensureAdditionalVolumes(ctx context.Context, chainNode *app
 				return fmt.Errorf("failed to get PVC %s: %w", volumeName, err)
 			}
 		} else {
+			_, metadataChanged, err := resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, false)
+			if err != nil {
+				return fmt.Errorf("failed to attribute PVC %s: %w", volumeName, err)
+			}
+			mustUpdate := metadataChanged
 			if pvc.Spec.Resources.Requests[corev1.ResourceStorage] != specSize {
 				logger.Info("updating pvc", "name", volumeName, "old-size", pvc.Spec.Resources.Requests[corev1.ResourceStorage], "new-size", volume.Size)
 				pvc.Spec.Resources.Requests[corev1.ResourceStorage] = specSize
+				mustUpdate = true
+			}
+			if mustUpdate {
 				if err = r.Update(ctx, pvc); err != nil {
-					return fmt.Errorf("failed to update PVC %s size: %w", volumeName, err)
+					return fmt.Errorf("failed to update PVC %s: %w", volumeName, err)
 				}
 			}
 		}

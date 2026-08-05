@@ -17,6 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
@@ -24,6 +25,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
@@ -153,6 +155,9 @@ func (r *Reconciler) reservationReader() client.Reader {
 // move the current state of the cluster closer to the desired state.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	if err := r.opts.WaitForRootProtection(ctx); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	chainNode := &appsv1.ChainNode{}
 	if err := r.Get(ctx, req.NamespacedName, chainNode); err != nil {
@@ -163,8 +168,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.Error(err, "unable to fetch chainnode")
 		return ctrl.Result{}, err
 	}
+	if !r.opts.MatchesWorker(chainNode.Labels) {
+		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
+		return ctrl.Result{}, nil
+	}
 	if !chainNode.GetDeletionTimestamp().IsZero() {
-		done, err := r.finalizeCosmosignerOwner(ctx, chainNode)
+		terminating, err := r.namespaceTerminating(ctx, chainNode.GetNamespace())
+		if err != nil {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+		if terminating {
+			done, err := r.finalizeTerminatingNamespace(ctx, chainNode)
+			if err != nil || !done {
+				return ctrl.Result{RequeueAfter: time.Second}, err
+			}
+			return ctrl.Result{}, nil
+		}
+		done, err := r.finalizeResources(ctx, chainNode)
 		if err != nil || !done {
 			return ctrl.Result{RequeueAfter: time.Second}, err
 		}
@@ -181,9 +201,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	if chainNode.Labels[controllers.LabelWorkerName] != r.opts.WorkerName {
-		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
-		return ctrl.Result{}, nil
+	if !controllerutil.ContainsFinalizer(chainNode, resourcecleanup.Finalizer) {
+		controllerutil.AddFinalizer(chainNode, resourcecleanup.Finalizer)
+		if err := r.Update(ctx, chainNode); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 	if changed, err := r.prepareCosmosignerOwner(ctx, chainNode); err != nil {
 		return ctrl.Result{}, err
@@ -265,6 +288,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err = r.ensureSigningKey(ctx, chainNode); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+	// Migrate pre-upgrade validator Secrets before status-gated generation paths can skip them.
+	if err = r.migrateExistingValidatorSecrets(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if chainNode.RequiresAccount() {

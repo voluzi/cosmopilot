@@ -3,6 +3,7 @@ package v1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func init() {
@@ -60,6 +61,11 @@ type ChainNodeSetSpec struct {
 	// other validator relies on an external genesis.
 	// +optional
 	Genesis *GenesisConfig `json:"genesis"`
+
+	// DeletionPolicy controls whether durable resources generated for this set and its child
+	// ChainNodes are retained or deleted with the root ChainNodeSet. All resource classes default to Retain.
+	// +optional
+	DeletionPolicy *DeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// Indicates this node set will run a validator and allows configuring it.
 	// +optional
@@ -227,6 +233,10 @@ type ChainNodeSetNodeStatus struct {
 	// Name of the node.
 	Name string `json:"name"`
 
+	// UID identifies the exact ChainNode instance recorded under this name.
+	// +optional
+	UID types.UID `json:"uid,omitempty"`
+
 	// Whether this node can be accessed publicly.
 	Public bool `json:"public"`
 
@@ -259,6 +269,10 @@ type ChainNodeSetNodeStatus struct {
 type ChainNodeSetValidatorStatus struct {
 	// Name of the validator ChainNode.
 	Name string `json:"name"`
+
+	// UID identifies the exact validator ChainNode instance recorded under this name.
+	// +optional
+	UID types.UID `json:"uid,omitempty"`
 
 	// Group to which this validator belongs.
 	Group string `json:"group"`

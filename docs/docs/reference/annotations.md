@@ -32,6 +32,13 @@ snapshot-export cleanup acknowledgement described below.
 | `cosmopilot.voluzi.com/last-cpu-scale` | Pod | Timestamp of the last CPU scaling action. |
 | `cosmopilot.voluzi.com/last-memory-scale` | Pod | Timestamp of the last memory scaling action. |
 | `cosmopilot.voluzi.com/oom-recovery-history` | Pod | History used to recover from out-of-memory events. |
+| `cosmopilot.voluzi.com/resource-class` | Generated PVC / Secret | Deletion-policy class: `dataVolumes`, `generatedKeys`, or `cosmosignerState`. |
+| `cosmopilot.voluzi.com/resource-owner-uid` | Generated PVC / Secret | Immediate child `ChainNode` UID, used while a `ChainNodeSet` child performs its own cleanup. |
+| `cosmopilot.voluzi.com/root-owner-api-version` | Generated PVC / Secret | API version of the stable `ChainNode` or `ChainNodeSet` deletion-policy root. |
+| `cosmopilot.voluzi.com/root-owner-kind` | Generated PVC / Secret | Kind of the stable deletion-policy root. |
+| `cosmopilot.voluzi.com/root-owner-name` | Generated PVC / Secret | Name of the stable deletion-policy root. |
+| `cosmopilot.voluzi.com/root-owner-namespace` | Generated PVC / Secret | Namespace of the stable deletion-policy root. |
+| `cosmopilot.voluzi.com/root-owner-uid` | Generated PVC / Secret | UID that prevents a same-name recreated root from claiming retained resources automatically. |
 
 Snapshot destinations and authentication references are recorded in
 `ChainNode.status.snapshotExports`, not on `VolumeSnapshot` metadata. If a referenced

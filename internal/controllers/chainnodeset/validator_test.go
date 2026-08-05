@@ -20,14 +20,22 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	t.Helper()
+	for _, object := range objs {
+		if nodeSet, ok := object.(*appsv1.ChainNodeSet); ok && nodeSet.GetDeletionTimestamp().IsZero() {
+			controllerutil.AddFinalizer(nodeSet, resourcecleanup.Finalizer)
+			controllerutil.AddFinalizer(nodeSet, podDisruptionBudgetFinalizer)
+		}
+	}
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
@@ -337,15 +345,15 @@ func TestEnsureGenesisValidatorSecrets(t *testing.T) {
 
 	require.NoError(t, r.ensureGenesisValidatorSecrets(ctx, nodeSet, cfg, gvs))
 
-	// Both account and priv-key secrets are created with the expected data keys, owned by the set.
+	// Both account and priv-key secrets are created with the expected data keys and stable attribution.
 	mnemonics := map[string]string{}
 	for _, gv := range gvs {
 		acc := &corev1.Secret{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "default", Name: gv.AccountMnemonicSecret}, acc))
 		require.Contains(t, acc.Data, mnemonicKey)
 		assert.NotEmpty(t, acc.Data[mnemonicKey])
-		require.Len(t, acc.OwnerReferences, 1)
-		assert.Equal(t, "test-nodeset", acc.OwnerReferences[0].Name)
+		assert.Empty(t, acc.OwnerReferences)
+		assert.True(t, resourcecleanup.IsAttributed(acc, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
 		mnemonics[gv.AccountMnemonicSecret] = string(acc.Data[mnemonicKey])
 
 		pk := &corev1.Secret{}
@@ -623,6 +631,7 @@ func TestEnsureValidatorRemovesStaleValidator(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-nodeset-validator",
 			Namespace: "default",
+			UID:       types.UID("stale-validator-uid"),
 			Labels: map[string]string{
 				controllers.LabelChainNodeSet:          "test-nodeset",
 				controllers.LabelChainNodeSetValidator: "true",
@@ -637,15 +646,18 @@ func TestEnsureValidatorRemovesStaleValidator(t *testing.T) {
 		},
 		Status: appsv1.ChainNodeSetStatus{
 			ChainID:    "test-chain",
-			Validators: []appsv1.ChainNodeSetValidatorStatus{{Name: "test-nodeset-validator", Group: validatorGroupName}},
+			Validators: []appsv1.ChainNodeSetValidatorStatus{{Name: stale.Name, UID: stale.UID, Group: validatorGroupName}},
+			Nodes:      []appsv1.ChainNodeSetNodeStatus{{Name: stale.Name, UID: stale.UID, Group: validatorGroupName}},
 		},
 	}
 	r := newValidatorTestReconciler(t, nodeSet, stale)
 
 	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
 
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-validator"}, &appsv1.ChainNode{})
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode must be deleted")
+	current := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset-validator"}, current))
+	assert.False(t, current.DeletionTimestamp.IsZero(), "stale validator ChainNode must be terminating")
+	assert.Contains(t, current.Finalizers, resourcecleanup.Finalizer)
 	assert.Empty(t, nodeSet.Status.Validators, "stale validator status must be removed")
 }
 
@@ -669,6 +681,7 @@ func TestEnsureValidatorPreservesGenesisBaselineWhileUpdatingLiveStatus(t *testi
 		},
 		Status: appsv1.ChainNodeSetStatus{
 			ChainID: "test-chain",
+			Nodes:   []appsv1.ChainNodeSetNodeStatus{{Name: name, Group: "validators"}},
 			Validators: []appsv1.ChainNodeSetValidatorStatus{{
 				Name:             name,
 				Group:            "validators",
@@ -735,6 +748,7 @@ func TestEnsureValidatorPreservesRemovedGenesisBaseline(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-nodeset-validators-0",
 			Namespace: "default",
+			UID:       types.UID("stale-validator-uid"),
 			Labels: map[string]string{
 				controllers.LabelChainNodeSet:          "test-nodeset",
 				controllers.LabelChainNodeSetGroup:     "validators",
@@ -744,6 +758,7 @@ func TestEnsureValidatorPreservesRemovedGenesisBaseline(t *testing.T) {
 	}
 	baseline := appsv1.ChainNodeSetValidatorStatus{
 		Name:             stale.Name,
+		UID:              stale.UID,
 		Group:            "validators",
 		Init:             true,
 		SigningKeyDigest: "original-digest",
@@ -756,15 +771,16 @@ func TestEnsureValidatorPreservesRemovedGenesisBaseline(t *testing.T) {
 		Status: appsv1.ChainNodeSetStatus{
 			ChainID:    "test-chain",
 			Validators: []appsv1.ChainNodeSetValidatorStatus{baseline},
-			Nodes:      []appsv1.ChainNodeSetNodeStatus{{Name: stale.Name, Group: "validators"}},
+			Nodes:      []appsv1.ChainNodeSetNodeStatus{{Name: stale.Name, UID: stale.UID, Group: "validators"}},
 		},
 	}
 	r := newValidatorTestReconciler(t, nodeSet, stale)
 
 	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
 
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: stale.Name}, &appsv1.ChainNode{})
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode must still be deleted")
+	current := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: stale.Name}, current))
+	assert.False(t, current.DeletionTimestamp.IsZero(), "stale validator ChainNode must still be terminating")
 	assert.Equal(t, []appsv1.ChainNodeSetValidatorStatus{baseline}, nodeSet.Status.Validators)
 	assert.Empty(t, nodeSet.Status.Nodes)
 }
@@ -1005,6 +1021,7 @@ func TestEnsureValidatorRemovesDeletedGroupValidators(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-nodeset-validators-0",
 			Namespace: "default",
+			UID:       types.UID("stale-validator-uid"),
 			Labels: map[string]string{
 				controllers.LabelChainNodeSet:          "test-nodeset",
 				controllers.LabelChainNodeSetGroup:     "validators",
@@ -1018,10 +1035,10 @@ func TestEnsureValidatorRemovesDeletedGroupValidators(t *testing.T) {
 		Status: appsv1.ChainNodeSetStatus{
 			ChainID: "test-chain",
 			Validators: []appsv1.ChainNodeSetValidatorStatus{
-				{Name: staleNode.Name, Group: "validators"},
+				{Name: staleNode.Name, UID: staleNode.UID, Group: "validators"},
 			},
 			Nodes: []appsv1.ChainNodeSetNodeStatus{
-				{Name: staleNode.Name, Group: "validators"},
+				{Name: staleNode.Name, UID: staleNode.UID, Group: "validators"},
 			},
 		},
 	}
@@ -1030,8 +1047,8 @@ func TestEnsureValidatorRemovesDeletedGroupValidators(t *testing.T) {
 	require.NoError(t, r.ensureValidator(context.Background(), nodeSet))
 
 	got := &appsv1.ChainNode{}
-	err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: staleNode.Name}, got)
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode should be deleted")
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: staleNode.Name}, got))
+	assert.False(t, got.DeletionTimestamp.IsZero(), "stale validator ChainNode should be terminating")
 	assert.Empty(t, nodeSet.Status.Validators)
 	assert.Empty(t, nodeSet.Status.Nodes)
 }
@@ -1077,6 +1094,7 @@ func TestEnsureValidatorScaleDownRemovesStale(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-nodeset-validators-1",
 			Namespace: "default",
+			UID:       types.UID("stale-validator-uid"),
 			Labels: map[string]string{
 				controllers.LabelChainNodeSet:          "test-nodeset",
 				controllers.LabelChainNodeSetGroup:     "validators",
@@ -1095,11 +1113,11 @@ func TestEnsureValidatorScaleDownRemovesStale(t *testing.T) {
 			ChainID: "test-chain",
 			Validators: []appsv1.ChainNodeSetValidatorStatus{
 				{Name: "test-nodeset-validators-0", Group: "validators"},
-				{Name: "test-nodeset-validators-1", Group: "validators"},
+				{Name: staleNode.Name, UID: staleNode.UID, Group: "validators"},
 			},
 			Nodes: []appsv1.ChainNodeSetNodeStatus{
 				{Name: "test-nodeset-validators-0", Group: "validators"},
-				{Name: "test-nodeset-validators-1", Group: "validators"},
+				{Name: staleNode.Name, UID: staleNode.UID, Group: "validators"},
 			},
 		},
 	}
@@ -1109,10 +1127,11 @@ func TestEnsureValidatorScaleDownRemovesStale(t *testing.T) {
 	require.NoError(t, r.maybeDeleteNode(context.Background(), nodeSet, staleNode.Name))
 	DeleteValidatorStatus(nodeSet, staleNode.Name)
 
-	// The stale ChainNode is gone from the cluster.
+	// The stale ChainNode is held for durable-resource finalization.
 	got := &appsv1.ChainNode{}
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: staleNode.Name}, got)
-	assert.True(t, errors.IsNotFound(err), "stale validator ChainNode should be deleted")
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: staleNode.Name}, got))
+	assert.False(t, got.DeletionTimestamp.IsZero(), "stale validator ChainNode should be terminating")
+	assert.Contains(t, got.Finalizers, resourcecleanup.Finalizer)
 
 	// Both the node status and validator status entries for the removed validator are gone.
 	require.Len(t, nodeSet.Status.Validators, 1)
@@ -1211,7 +1230,7 @@ func TestUpdateValidatorStatusPublicAddress(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset"}}
 
 	exposed := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-0"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-0", UID: types.UID("exposed-uid")},
 		Status: appsv1.ChainNodeStatus{
 			NodeID:        "nodeid",
 			PublicAddress: "nodeid@1.2.3.4:26656",
@@ -1221,19 +1240,24 @@ func TestUpdateValidatorStatusPublicAddress(t *testing.T) {
 
 	require.Len(t, nodeSet.Status.Nodes, 1)
 	got := nodeSet.Status.Nodes[0]
+	assert.Equal(t, exposed.UID, got.UID)
 	assert.True(t, got.Public)
 	assert.Equal(t, "1.2.3.4", got.PublicAddress)
 	assert.Equal(t, 26656, got.PublicPort)
 
 	// A validator with no public address is recorded as not public.
-	internal := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-1"}}
+	internal := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-1", UID: types.UID("internal-uid")}}
 	updateValidatorStatus(nodeSet, internal, nil, "validators", false, false, nil, false, false)
 
 	require.Len(t, nodeSet.Status.Nodes, 2)
 	got2 := nodeSet.Status.Nodes[1]
+	assert.Equal(t, internal.UID, got2.UID)
 	assert.False(t, got2.Public)
 	assert.Empty(t, got2.PublicAddress)
 	assert.Zero(t, got2.PublicPort)
+	require.Len(t, nodeSet.Status.Validators, 2)
+	assert.Equal(t, exposed.UID, nodeSet.Status.Validators[0].UID)
+	assert.Equal(t, internal.UID, nodeSet.Status.Validators[1].UID)
 }
 
 // TestDeriveGroupValidatorConfigPreservesExistingGenesisValidators verifies that user-specified

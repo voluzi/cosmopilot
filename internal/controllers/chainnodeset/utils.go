@@ -178,7 +178,7 @@ func (r *Reconciler) ensureStatefulSet(ctx context.Context, ss *appsv1.StatefulS
 		return err
 	}
 
-	currentStatefulset.Spec.VolumeClaimTemplates = ss.Spec.VolumeClaimTemplates
+	ss.Spec.VolumeClaimTemplates = currentStatefulset.Spec.VolumeClaimTemplates
 	patchResult, err := patch.DefaultPatchMaker.Calculate(currentStatefulset, ss, patch.IgnoreStatusFields())
 	if err != nil {
 		return err

@@ -7,17 +7,56 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
+
+func (r *Reconciler) migrateExistingAccountSecret(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if !chainNode.IsValidator() {
+		return nil
+	}
+	return r.migrateExistingGeneratedKeySecret(ctx, chainNode, chainNode.Spec.Validator.GetAccountSecretName(chainNode))
+}
+
+// migrateExistingValidatorSecrets stamps durable attribution on the account and consensus key
+// Secrets of a pre-upgrade validator. Only current controller ownership or an existing stamp
+// qualifies: a key imported by the user is byte-identical to a generated one at the same name, so
+// adopting on name and payload shape would place user-supplied key material under
+// .spec.deletionPolicy.generatedKeys: Delete. Unowned Secrets stay retained instead.
+func (r *Reconciler) migrateExistingValidatorSecrets(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if !chainNode.IsValidator() {
+		return nil
+	}
+	if err := r.migrateExistingAccountSecret(ctx, chainNode); err != nil {
+		return err
+	}
+	return r.migrateExistingGeneratedKeySecret(ctx, chainNode, chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
+}
+
+func (r *Reconciler) migrateExistingGeneratedKeySecret(ctx context.Context, chainNode *appsv1.ChainNode, name string) error {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: chainNode.GetNamespace(),
+		Name:      name,
+	}, secret); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	managed, changed, err := resourcecleanup.PrepareGeneratedResource(
+		secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false,
+	)
+	if err != nil || !managed || !changed {
+		return err
+	}
+	return r.Update(ctx, secret)
+}
 
 func (r *Reconciler) ensureAccount(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
-	// We probably want the user to delete the secret with mnemonic when we dont need it anymore.
-	// And we only need it for gentx.
 	if chainNode.Status.ValidatorAddress != "" {
 		return nil
 	}
@@ -45,10 +84,22 @@ func (r *Reconciler) ensureAccount(ctx context.Context, chainNode *appsv1.ChainN
 			return err
 		}
 	}
+	if mustCreate {
+		if _, _, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, true); err != nil {
+			return err
+		}
+	}
 
 	// Ensure private key
 	var validatorAddress, accountAddress string
 	mustUpdate := false
+	if !mustCreate {
+		_, metadataChanged, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+		if err != nil {
+			return err
+		}
+		mustUpdate = metadataChanged
+	}
 	if _, ok := secret.Data[MnemonicKey]; !ok {
 		if !mustCreate {
 			mustUpdate = true

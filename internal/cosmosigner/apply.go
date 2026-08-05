@@ -481,7 +481,8 @@ func DeleteStatefulSet(ctx context.Context, c client.Client, owner client.Object
 	if err != nil || !quiesced {
 		return false, err
 	}
-	if err := c.Delete(ctx, sts); err != nil && !errors.IsNotFound(err) {
+	uid := sts.GetUID()
+	if err := c.Delete(ctx, sts, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
 		return false, err
 	}
 

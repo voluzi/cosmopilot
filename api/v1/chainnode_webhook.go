@@ -75,6 +75,10 @@ func (chainNode *ChainNode) tmKMSDeprecationWarnings() admission.Warnings {
 }
 
 func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error) {
+	if err := chainNode.Spec.DeletionPolicy.Validate(".spec.deletionPolicy"); err != nil {
+		return nil, err
+	}
+
 	// Validate persistence size
 	_, err := resource.ParseQuantity(chainNode.GetPersistenceSize())
 	if err != nil {

@@ -38,6 +38,73 @@ func (nodeSet *ChainNodeSet) GetNamespacedName() string {
 	return types.NamespacedName{Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName()}.String()
 }
 
+// RecordedChildMatch describes how a ChainNode matches a ChainNodeSet's recorded child status.
+// Ordered by increasing confidence that the object is the recorded child, so the strongest match
+// across all status entries wins.
+type RecordedChildMatch int
+
+const (
+	// RecordedChildNone means no status entry uses this child's name.
+	RecordedChildNone RecordedChildMatch = iota
+	// RecordedChildReplaced means the name is recorded against a different, known UID. This object
+	// is provably not the recorded child — it only reuses a name a previous child held.
+	RecordedChildReplaced
+	// RecordedChildUnverified means the name is recorded with no UID, as written before the status
+	// UID field existed. The object can be neither confirmed nor ruled out, so callers deciding
+	// whether a ChainNodeSet still owns a child must treat it as owned.
+	RecordedChildUnverified
+	// RecordedChildExact means name and UID both match.
+	RecordedChildExact
+)
+
+// MatchRecordedChild reports how child matches this ChainNodeSet's recorded node and validator
+// status. Both the parent cleanup path and standalone ChainNode orphan detection authorize on this,
+// and must agree.
+func (nodeSet *ChainNodeSet) MatchRecordedChild(child *ChainNode) RecordedChildMatch {
+	match := RecordedChildNone
+	consider := func(name string, uid types.UID) {
+		if name != child.GetName() {
+			return
+		}
+		candidate := RecordedChildReplaced
+		switch {
+		case uid == "":
+			candidate = RecordedChildUnverified
+		case uid == child.GetUID():
+			candidate = RecordedChildExact
+		}
+		if candidate > match {
+			match = candidate
+		}
+	}
+	for _, status := range nodeSet.Status.Nodes {
+		consider(status.Name, status.UID)
+	}
+	for _, status := range nodeSet.Status.Validators {
+		consider(status.Name, status.UID)
+	}
+	return match
+}
+
+// ClaimsChild reports whether this ChainNodeSet's status still claims child. An unverified record
+// counts: a pre-upgrade status carries no UID, and treating that as unclaimed would let a child
+// finalize outside its parent's root during the upgrade window.
+func (nodeSet *ChainNodeSet) ClaimsChild(child *ChainNode) bool {
+	switch nodeSet.MatchRecordedChild(child) {
+	case RecordedChildExact, RecordedChildUnverified:
+		return true
+	default:
+		return false
+	}
+}
+
+// RecordedChildIdentity reports whether child's name appears in this ChainNodeSet's status, and
+// whether a recorded UID proves it is this exact object.
+func (nodeSet *ChainNodeSet) RecordedChildIdentity(child *ChainNode) (nameRecorded, uidMatches bool) {
+	match := nodeSet.MatchRecordedChild(child)
+	return match != RecordedChildNone, match == RecordedChildExact
+}
+
 func (nodeSet *ChainNodeSet) HasValidator() bool {
 	if nodeSet.Spec.Validator != nil {
 		return true
