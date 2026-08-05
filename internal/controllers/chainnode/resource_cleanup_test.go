@@ -216,6 +216,28 @@ func TestFinalizeResourcesRefusesOrphanedRecordedChild(t *testing.T) {
 	assert.Contains(t, err.Error(), "recorded by ChainNodeSet set")
 }
 
+// Statuses written before the recorded-child UID field carry no UID, so during the upgrade window
+// a name-only record is the only evidence the parent still owns the child.
+func TestFinalizeResourcesRefusesRecordedChildWithoutStatusUID(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: "child-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+	}}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: node.Namespace, UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: node.Name,
+		}}},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, nodeSet).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	_, err := r.finalizeResources(context.Background(), node)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "before recorded child UIDs existed")
+}
+
 func TestFinalizeResourcesAllowsGenuineStandaloneChainNode(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{

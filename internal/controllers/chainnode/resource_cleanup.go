@@ -90,8 +90,9 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 // refuseOrphanedRecordedChild blocks standalone finalization of a generated child that lost its
 // ChainNodeSet controller reference. Such a child resolves to itself as cleanup root and would stamp
 // its durable resources under its own UID, where the parent can no longer reach them during
-// scale-down or root cleanup. A recorded name and UID proves the parent relationship, so this fails
-// closed rather than guessing; restoring the reference lets cleanup proceed under the parent root.
+// scale-down or root cleanup. A status record the parent has not disowned fails closed here, so a
+// pre-upgrade record carrying no UID counts; restoring the reference lets cleanup proceed under the
+// parent root.
 func (r *Reconciler) refuseOrphanedRecordedChild(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	if metav1.GetControllerOf(chainNode) != nil {
 		return nil
@@ -102,12 +103,16 @@ func (r *Reconciler) refuseOrphanedRecordedChild(ctx context.Context, chainNode 
 	}
 	for i := range nodeSets.Items {
 		nodeSet := &nodeSets.Items[i]
-		if _, uidMatches := nodeSet.RecordedChildIdentity(chainNode); !uidMatches {
+		if !nodeSet.ClaimsChild(chainNode) {
 			continue
 		}
+		identity := fmt.Sprintf("UID %s", nodeSet.GetUID())
+		if nodeSet.MatchRecordedChild(chainNode) == appsv1.RecordedChildUnverified {
+			identity = fmt.Sprintf("UID %s by name, from a status written before recorded child UIDs existed", nodeSet.GetUID())
+		}
 		return fmt.Errorf(
-			"refusing standalone durable cleanup of ChainNode %s/%s UID %s recorded by ChainNodeSet %s UID %s; restore its controller reference so its resources are finalized under the ChainNodeSet root",
-			chainNode.GetNamespace(), chainNode.GetName(), chainNode.GetUID(), nodeSet.GetName(), nodeSet.GetUID(),
+			"refusing standalone durable cleanup of ChainNode %s/%s UID %s recorded by ChainNodeSet %s %s; restore its controller reference so its resources are finalized under the ChainNodeSet root",
+			chainNode.GetNamespace(), chainNode.GetName(), chainNode.GetUID(), nodeSet.GetName(), identity,
 		)
 	}
 	return nil
