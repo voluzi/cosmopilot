@@ -9,6 +9,18 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 )
 
+func TestRootProtectionReadinessWaitsForStartupMigration(t *testing.T) {
+	ready := make(chan struct{})
+	check := rootProtectionReadiness(ready)
+	if err := check(nil); err == nil {
+		t.Fatal("readiness must fail before root protection and durable migration complete")
+	}
+	close(ready)
+	if err := check(nil); err != nil {
+		t.Fatalf("readiness remained blocked after startup migration completed: %v", err)
+	}
+}
+
 func TestIsRecordedStartupNodeSetChildRequiresExactUID(t *testing.T) {
 	runOpts.WorkerName = ""
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "set-fullnodes-0", Namespace: "default", UID: types.UID("node-uid")}}

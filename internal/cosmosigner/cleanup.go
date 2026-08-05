@@ -348,6 +348,10 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 }
 
 func deleteOwnedKeyJobPods(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
+	expectedSignerNames, err := signerNamesAttributedToOwner(ctx, c, owner, namespace)
+	if err != nil {
+		return false, err
+	}
 	pods := &corev1.PodList{}
 	if err := c.List(ctx, pods, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -355,8 +359,21 @@ func deleteOwnedKeyJobPods(ctx context.Context, c client.Client, owner client.Ob
 	allDone := true
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !metav1.IsControlledBy(pod, owner) || !isKeyJobPodName(pod.GetName()) {
+		signerName, keyJob := keyJobSignerName(pod.GetName())
+		if !keyJob {
 			continue
+		}
+		controlled := metav1.IsControlledBy(pod, owner)
+		if !controlled {
+			if _, expected := expectedSignerNames[signerName]; !expected {
+				continue
+			}
+			controller := metav1.GetControllerOf(pod)
+			ownership := "has no controller"
+			if controller != nil {
+				ownership = fmt.Sprintf("is controlled by %s %q UID %s", controller.Kind, controller.Name, controller.UID)
+			}
+			return false, fmt.Errorf("refusing Cosmosigner cleanup while deterministic key-job pod %s/%s %s; restore its owner UID %s controller reference or quiesce and remove it", pod.GetNamespace(), pod.GetName(), ownership, owner.GetUID())
 		}
 		if pod.GetDeletionTimestamp().IsZero() {
 			uid := pod.GetUID()
@@ -374,13 +391,53 @@ func deleteOwnedKeyJobPods(ctx context.Context, c client.Client, owner client.Ob
 	return allDone, nil
 }
 
-func isKeyJobPodName(name string) bool {
-	for _, suffix := range []string{"-" + importJobSuffix, "-" + pubkeyJobSuffix} {
-		if strings.HasSuffix(name, suffix) && strings.TrimSuffix(name, suffix) != "" {
-			return true
+func signerNamesAttributedToOwner(ctx context.Context, c client.Client, owner client.Object, namespace string) (map[string]struct{}, error) {
+	names := map[string]struct{}{}
+	statefulSets := &appsv1.StatefulSetList{}
+	if err := c.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if IsOwnedSignerStatefulSet(sts, owner) || isAttributedSignerStatefulSet(sts, owner) {
+			names[sts.GetName()] = struct{}{}
 		}
 	}
-	return false
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	root := resourcecleanup.RootOwnerFor(owner)
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		labelOwned := pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID())
+		attributed := resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassCosmosignerState) &&
+			pvc.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] == string(owner.GetUID())
+		if !labelOwned && !attributed {
+			continue
+		}
+		if name, ok := statefulSetNameFromDataPVC(pvc.GetName()); ok {
+			names[name] = struct{}{}
+		}
+	}
+	return names, nil
+}
+
+func isKeyJobPodName(name string) bool {
+	_, ok := keyJobSignerName(name)
+	return ok
+}
+
+func keyJobSignerName(name string) (string, bool) {
+	for _, suffix := range []string{"-" + importJobSuffix, "-" + pubkeyJobSuffix} {
+		if strings.HasSuffix(name, suffix) {
+			signerName := strings.TrimSuffix(name, suffix)
+			if signerName != "" {
+				return signerName, true
+			}
+		}
+	}
+	return "", false
 }
 
 // FinalizeState applies the configured policy after every signer workload is absent.

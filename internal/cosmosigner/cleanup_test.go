@@ -377,6 +377,33 @@ func TestFinalizeOwnerDeletesOwnedKeyJobPods(t *testing.T) {
 	}
 }
 
+func TestFinalizeOwnerBlocksOnOrphanedKeyJobPodForOwnedSigner(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, UID: "sts-uid",
+		OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}, Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}}}}
+	jobPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-" + importJobSuffix, Namespace: namespace, UID: "job-uid",
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts, jobPod).Build()
+
+	done, err := FinalizeOwner(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyDelete)
+	if err == nil {
+		t.Fatal("an orphaned deterministic signer key-job pod must fail closed")
+	}
+	if done {
+		t.Fatal("cleanup must not complete while an orphaned signer key-job pod is live")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(jobPod), &corev1.Pod{}); err != nil {
+		t.Fatalf("orphaned key-job pod was modified or deleted: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); err != nil {
+		t.Fatalf("signer StatefulSet was torn down before orphaned key-job remediation: %v", err)
+	}
+}
+
 func TestFinalizeOwnerDeletesOwnedKeyJobPodWhenLabelsDrift(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}

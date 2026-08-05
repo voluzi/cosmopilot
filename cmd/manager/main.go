@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -147,7 +148,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err = mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err = mgr.AddReadyzCheck("readyz", rootProtectionReadiness(rootProtectionReady)); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -156,6 +157,17 @@ func main() {
 	if err = mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+func rootProtectionReadiness(ready <-chan struct{}) healthz.Checker {
+	return func(_ *http.Request) error {
+		select {
+		case <-ready:
+			return nil
+		default:
+			return fmt.Errorf("existing-root protection and durable-resource migration are still running")
+		}
 	}
 }
 
