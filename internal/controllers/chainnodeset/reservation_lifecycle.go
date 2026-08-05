@@ -221,9 +221,14 @@ func managedClaimOneShotName(name, claim string) bool {
 	if !strings.HasPrefix(name, claim+"-") {
 		return false
 	}
-	return strings.HasSuffix(name, "-tmkms-generate-identity") ||
-		strings.HasSuffix(name, "-tmkms-vault-upload") ||
-		strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
+	for _, marker := range []string{
+		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
+	} {
+		if strings.HasSuffix(name, marker) || strings.Contains(name, marker+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) finalizeConsensusKeyReservationOwner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {

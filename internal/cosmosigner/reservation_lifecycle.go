@@ -99,6 +99,11 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	podNames := make([]string, 0)
 	for i := range ownedPods.Items {
 		pod := &ownedPods.Items[i]
+		if jobName, ok := managedSigningOneShotPodJobName(pod.GetName()); ok &&
+			managedSigningOneShotBelongsToRoot(jobName, pod.GetLabels(), owner) {
+			oneShotNames = append(oneShotNames, jobName)
+			continue
+		}
 		if !metav1.IsControlledBy(pod, owner) {
 			continue
 		}
@@ -310,6 +315,17 @@ func isManagedSigningOneShotName(name string) bool {
 	return strings.HasSuffix(name, "-tmkms-generate-identity") ||
 		strings.HasSuffix(name, "-tmkms-vault-upload") ||
 		strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
+}
+
+func managedSigningOneShotPodJobName(name string) (string, bool) {
+	for _, marker := range []string{
+		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
+	} {
+		if index := strings.Index(name, marker+"-"); index >= 0 {
+			return name[:index+len(marker)], true
+		}
+	}
+	return "", false
 }
 
 // EnsureConsensusKeyReservationOwnerFinalizer persists the reservation lifecycle finalizer on the
@@ -689,16 +705,8 @@ func staleReservationPodMatches(pod *corev1.Pod, reservation *appsv1.ConsensusKe
 }
 
 func staleReservationOneShotPodMatches(name string, reservation *appsv1.ConsensusKeyReservation) bool {
-	managedJobName := ""
-	for _, marker := range []string{
-		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
-	} {
-		if index := strings.Index(name, marker+"-"); index >= 0 {
-			managedJobName = name[:index+len(marker)]
-			break
-		}
-	}
-	if managedJobName == "" {
+	managedJobName, ok := managedSigningOneShotPodJobName(name)
+	if !ok {
 		return false
 	}
 	return staleReservationJobMatches(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: managedJobName}}, reservation)

@@ -211,6 +211,28 @@ func TestReconcileConsensusKeyReservationClaimsReleasesOnlyUndesiredClaim(t *tes
 	}
 }
 
+func TestReconcileConsensusKeyReservationClaimsBlocksGeneratedOneShotPod(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes", Namespace: "default", UID: "nodes-uid",
+		Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+	}}
+	claim := "nodes-old-validator"
+	stale := nodeSetReservation(nodeSet, "stale", "stale-uid", nodeSetReservationLifecycleOtherPublicKey, claim)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: claim + "-tmkms-vault-upload-generated", Namespace: nodeSet.Namespace, UID: "pod-uid",
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, stale, pod)
+	r.APIReader = r.Client
+
+	done, err := r.reconcileConsensusKeyReservationClaims(context.Background(), nodeSet)
+	if err == nil || done {
+		t.Fatalf("generated one-shot pod must block claim release, done=%v err=%v", done, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("reservation must remain while generated one-shot pod exists: %v", err)
+	}
+}
+
 func TestReconcileTerminatingNamespaceRunsReservationFinalizer(t *testing.T) {
 	now := metav1.NewTime(time.Now())
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{

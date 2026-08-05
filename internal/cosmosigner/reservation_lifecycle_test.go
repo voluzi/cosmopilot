@@ -120,6 +120,25 @@ func TestCleanupManagedSigningPathWaitsForOrphanedJobPod(t *testing.T) {
 	}
 }
 
+func TestFinalizeConsensusKeySigningPathsWaitsForOrphanedRootJobPod(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes", Namespace: "default", UID: "owner-uid",
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes-signer-import-generated", Namespace: owner.Namespace, UID: "pod-uid",
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, pod).Build()
+
+	done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("orphaned generated root Job pod must keep owner finalization pending")
+	}
+}
+
 func TestEnsureConsensusKeyReservationRecoversStaleOwnerWithoutDeletingRetainedState(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	holder := ReservationHolder{
