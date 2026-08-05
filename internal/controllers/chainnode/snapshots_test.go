@@ -770,6 +770,7 @@ func TestIsTarballDeletedRequiresDurableSuccessBeforeReturning(t *testing.T) {
 				Controller: ptr.To(true),
 			}},
 		},
+		Spec: batchv1.JobSpec{BackoffLimit: ptr.To[int32](0)},
 		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
 			Type:   batchv1.JobComplete,
 			Status: corev1.ConditionTrue,
@@ -1629,6 +1630,7 @@ func TestEnsureVolumeSnapshotsDoesNotRestartDeletionForTerminatingOrphanUpload(t
 					Labels:          map[string]string{"exporter": provider.exporter, "owner": chainNode.Name, "type": "delete"},
 					OwnerReferences: []metav1.OwnerReference{ownerReference},
 				},
+				Spec: batchv1.JobSpec{BackoffLimit: ptr.To[int32](0)},
 				Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
 					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
 				}}},

@@ -475,6 +475,7 @@ func (r *Reconciler) mutateSnapshotExportStatus(
 	}
 	if latest != nil {
 		mergeSnapshotExportOwnedStatus(chainNode, latest)
+		chainNode.ResourceVersion = latest.ResourceVersion
 	}
 	return changed, nil
 }

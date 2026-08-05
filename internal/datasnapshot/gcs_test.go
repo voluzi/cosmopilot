@@ -146,7 +146,7 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 			job := getJob(t, provider, "snapshot-delete")
 			assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
 			require.NotNil(t, job.Spec.BackoffLimit)
-			assert.Zero(t, *job.Spec.BackoffLimit)
+			assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *job.Spec.BackoffLimit)
 			podSpec := job.Spec.Template.Spec
 			container := podSpec.Containers[0]
 			assert.Equal(t, tt.wantServiceAccount, podSpec.ServiceAccountName)
@@ -290,7 +290,7 @@ func TestGCSDeleteSnapshotForUploadReturnsPairedActivatedDeletion(t *testing.T) 
 	require.NotNil(t, deleteJob.Spec.Suspend)
 	assert.False(t, *deleteJob.Spec.Suspend)
 	require.NotNil(t, deleteJob.Spec.BackoffLimit)
-	assert.Equal(t, int32(5), *deleteJob.Spec.BackoffLimit)
+	assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *deleteJob.Spec.BackoffLimit)
 	assert.Equal(t, gcsExporter, deleteJob.Labels[labelCleanupExporter])
 	assert.Equal(t, provider.Owner.GetName(), deleteJob.Labels[labelCleanupOwner])
 	assert.Equal(t, typeUpload, deleteJob.Labels[labelCleanupType])
@@ -365,6 +365,32 @@ func TestGCSListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
 	jobs, err := provider.ListSnapshots(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []SnapshotJob{{Name: "snapshot-delete", Purpose: SnapshotJobUpload}}, jobs)
+}
+
+func TestGCSGetSnapshotDeletionStatusReplacesPreUpgradeBackoffJob(t *testing.T) {
+	provider := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	job := getJob(t, provider, "snapshot-delete")
+	require.NotNil(t, job.Spec.BackoffLimit)
+	assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *job.Spec.BackoffLimit)
+
+	status, err = provider.GetSnapshotDeletionStatus(context.Background(), SnapshotJob{
+		Name: "snapshot", UID: job.UID, Purpose: SnapshotJobDelete, RequireDestinationIdentity: true,
+	})
+	assert.Empty(t, status)
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, "spec.backoffLimit", replacement.ConflictingLabel)
+	assert.Equal(t, "5", replacement.PreviousValue)
+	assert.Equal(t, "0", replacement.DesiredValue)
+
+	_, getErr := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(
+		context.Background(), job.Name, metav1.GetOptions{},
+	)
+	assert.True(t, apierrors.IsNotFound(getErr))
 }
 
 func TestGCSGetSnapshotDeletionStatusDoesNotCreateMissingJob(t *testing.T) {

@@ -198,7 +198,7 @@ func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob S
 			ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter),
 		)
 	}
-	desired, err := provider.snapshotDeletionJob(snapshotJob.Name, snapshotJob.Upload)
+	desired, err := provider.snapshotDeletionJob(snapshotJob.Name, snapshotJob.Upload, true)
 	if err != nil {
 		return "", err
 	}
@@ -212,7 +212,15 @@ func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
 }
 
 func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
-	job, err := provider.ensureSnapshotDeletion(ctx, name, nil)
+	return provider.deleteSnapshot(ctx, name, false)
+}
+
+func (provider *S3) DeleteSnapshotBounded(ctx context.Context, name string) (SnapshotStatus, error) {
+	return provider.deleteSnapshot(ctx, name, true)
+}
+
+func (provider *S3) deleteSnapshot(ctx context.Context, name string, bounded bool) (SnapshotStatus, error) {
+	job, err := provider.ensureSnapshotDeletion(ctx, name, nil, bounded)
 	if err != nil {
 		return "", err
 	}
@@ -251,8 +259,9 @@ func (provider *S3) ensureSnapshotDeletion(
 	ctx context.Context,
 	name string,
 	upload *SnapshotJobIdentity,
+	bounded ...bool,
 ) (*batchv1.Job, error) {
-	job, err := provider.snapshotDeletionJob(name, upload)
+	job, err := provider.snapshotDeletionJob(name, upload, len(bounded) > 0 && bounded[0])
 	if err != nil {
 		return nil, err
 	}
@@ -263,10 +272,10 @@ func (provider *S3) ensureSnapshotDeletion(
 	return job, nil
 }
 
-func (provider *S3) snapshotDeletionJob(name string, upload *SnapshotJobIdentity) (*batchv1.Job, error) {
-	backoffLimit := int32(0)
-	if upload != nil {
-		backoffLimit = unboundSnapshotDeleteBackoffLimit
+func (provider *S3) snapshotDeletionJob(name string, upload *SnapshotJobIdentity, bounded bool) (*batchv1.Job, error) {
+	backoffLimit := unboundSnapshotDeleteBackoffLimit
+	if bounded {
+		backoffLimit = 0
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

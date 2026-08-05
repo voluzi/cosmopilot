@@ -364,10 +364,16 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						"Deleted expired PVC snapshot %s", snapshot.GetName(),
 					)
 					if deleteTarball {
+						cleanupProofRequired := true
+						if current := snapshotExportFor(chainNode, &snapshot); current != nil &&
+							current.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
+							current.DeleteAttempts == 0 && !current.DeleteExhausted {
+							cleanupProofRequired = false
+						}
 						if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 							return err
 						}
-						if !cleanupAcknowledged {
+						if cleanupProofRequired && !cleanupAcknowledged {
 							r.recorder.Eventf(chainNode,
 								corev1.EventTypeNormal,
 								appsv1.ReasonTarballDeleted,
@@ -430,10 +436,16 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				"Deleted PVC snapshot %s (exceeded retain count of %d)", snapshot.GetName(), *retainCount,
 			)
 			if deleteTarball {
+				cleanupProofRequired := true
+				if current := snapshotExportFor(chainNode, &snapshot); current != nil &&
+					current.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
+					current.DeleteAttempts == 0 && !current.DeleteExhausted {
+					cleanupProofRequired = false
+				}
 				if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
-				if !cleanupAcknowledged {
+				if cleanupProofRequired && !cleanupAcknowledged {
 					r.recorder.Eventf(chainNode,
 						corev1.EventTypeNormal,
 						appsv1.ReasonTarballDeleted,
@@ -577,7 +589,7 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 	for i := range pendingExports {
 		export := pendingExports[i]
 		if export.Phase != appsv1.SnapshotExportPhaseDeleting &&
-			(export.Phase != appsv1.SnapshotExportPhaseCleanupRequired || export.DeleteExhausted || export.DeleteAttempts == 0) {
+			(export.Phase != appsv1.SnapshotExportPhaseCleanupRequired || export.DeleteExhausted) {
 			continue
 		}
 		if export.Destination.Provider == appsv1.SnapshotExportProviderUnknown {
@@ -1269,7 +1281,7 @@ func (r *Reconciler) reconcileSnapshotExportDeletion(
 		if !started {
 			return datasnapshot.SnapshotActive, nil
 		}
-		status, err = exporter.DeleteSnapshot(ctx, export.ObjectName)
+		status, err = exporter.DeleteSnapshotBounded(ctx, export.ObjectName)
 		r.recordSnapshotJobReplacement(chainNode, err)
 		if err != nil {
 			_, _, recordErr := r.recordSnapshotExportDeleteFailure(ctx, chainNode, export.ID, err.Error(), now)
@@ -1406,6 +1418,14 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 		return false, nil
 	}
 	if status == datasnapshot.SnapshotActive {
+		current := snapshotExportByObjectName(chainNode, export.ObjectName)
+		if current != nil && current.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
+			current.DeleteAttempts == 0 && !current.DeleteExhausted {
+			// No delete Job has been reserved, so there is no in-flight cleanup that
+			// requires the local VolumeSnapshot to remain. Keep the export status for
+			// a later remote cleanup retry, but allow retention to proceed.
+			return true, nil
+		}
 		return false, nil
 	}
 	if status != datasnapshot.SnapshotSucceeded {
@@ -1502,6 +1522,12 @@ func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *apps
 		return exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
 			Name: getTarballName(chainNode, snapshot), Purpose: datasnapshot.SnapshotJobDelete,
 		})
+	}
+	if export.Phase == appsv1.SnapshotExportPhaseCleanupRequired && export.DeleteAttempts == 0 && !export.DeleteExhausted {
+		// Reference validation failed before a delete Job was reserved. There are no
+		// deletion resources to clean up, and the durable export status must remain
+		// so remote cleanup can resume after the reference is restored.
+		return nil
 	}
 	if export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
 		if export.Destination.Provider != appsv1.SnapshotExportProviderUnknown {

@@ -340,8 +340,8 @@ func TestRemovedRecordedCredentialsRequireExplicitCleanup(t *testing.T) {
 	assert.Contains(t, event, "old-s3")
 
 	storedSnapshot := &snapshotv1.VolumeSnapshot{}
-	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot))
-	assert.NotEqual(t, "true", storedSnapshot.Annotations[controllers.AnnotationTarballDeletionComplete])
+	err = reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), storedSnapshot)
+	assert.True(t, apierrors.IsNotFound(err), "missing pre-attempt references must not hold the expired VolumeSnapshot")
 
 	if stored.Annotations == nil {
 		stored.Annotations = make(map[string]string)
@@ -359,6 +359,48 @@ func TestRemovedRecordedCredentialsRequireExplicitCleanup(t *testing.T) {
 	events := drainRecordedEvents(reconciler.recorder.(*record.FakeRecorder))
 	assert.Contains(t, strings.Join(events, "\n"), appsv1.ReasonTarballCleanupAcknowledged)
 	assert.NotContains(t, strings.Join(events, "\n"), appsv1.ReasonTarballDeleted)
+}
+
+func TestMissingRecordedCredentialsBeforeFirstDeleteAttemptDoNotHoldExpiredSnapshot(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	node := destinationTestChainNode(nil)
+	node.CreationTimestamp = metav1.NewTime(now)
+	node.Spec.Persistence.Snapshots.Retention = &retention
+	node.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+	snapshot := destinationTestSnapshot()
+	snapshot.CreationTimestamp = metav1.NewTime(now.Add(-2 * time.Hour))
+	snapshot.Labels = map[string]string{controllers.LabelChainNode: node.Name}
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationPvcSnapshotReady:  "true",
+		controllers.AnnotationExportingTarball:  tarballFinished,
+		controllers.AnnotationSnapshotRetention: retention,
+	}
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "missing-before-attempt", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ObjectName: "old-object",
+		Phase: appsv1.SnapshotExportPhaseUploaded, DeleteOnExpire: true,
+		Destination: appsv1.SnapshotExportDestination{
+			Provider: appsv1.SnapshotExportProviderS3, Bucket: "old-s3", Region: "eu-west-1",
+			CredentialsSecret: &appsv1.SnapshotExportSecretReference{Name: "removed-aws"},
+		},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	assert.True(t, apierrors.IsNotFound(reconciler.Get(
+		context.Background(), client.ObjectKeyFromObject(snapshot), &snapshotv1.VolumeSnapshot{},
+	)))
+	stored := getDestinationTestNode(t, reconciler, node)
+	require.Len(t, stored.Status.SnapshotExports, 1, "remote cleanup identity must remain retryable")
+	export := stored.Status.SnapshotExports[0]
+	assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, export.Phase)
+	assert.Zero(t, export.DeleteAttempts)
+	assert.False(t, export.DeleteExhausted)
+	jobs, err := reconciler.snapshotKubernetesClient().BatchV1().Jobs(node.Namespace).List(
+		context.Background(), metav1.ListOptions{},
+	)
+	require.NoError(t, err)
+	assert.Empty(t, jobs.Items)
 }
 
 func TestSnapshotExportAcknowledgementIsConsumedBeforeItCanAuthorizeFutureCleanup(t *testing.T) {
@@ -470,7 +512,7 @@ func TestFailedDeleteJobPersistsRetryBeforeForegroundRemoval(t *testing.T) {
 	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot, secret})
 	provider, err := reconciler.tarballProviderForExport(node, &export)
 	require.NoError(t, err)
-	_, err = provider.DeleteSnapshot(context.Background(), export.ObjectName)
+	_, err = provider.DeleteSnapshotBounded(context.Background(), export.ObjectName)
 	require.NoError(t, err)
 	clientSet := reconciler.snapshotKubernetesClient().(*fake.Clientset)
 	job, err := clientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), export.ObjectName+"-delete", metav1.GetOptions{})
@@ -562,9 +604,10 @@ func TestCleanupRequiredSnapshotDoesNotBlockUnrelatedCountRetention(t *testing.T
 
 	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
 	oldest := &snapshotv1.VolumeSnapshot{}
-	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshots[0]), oldest))
+	err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshots[0]), oldest)
+	assert.True(t, apierrors.IsNotFound(err), "pre-attempt cleanup failure must not hold the oldest snapshot")
 	acknowledged := &snapshotv1.VolumeSnapshot{}
-	err := reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshots[1]), acknowledged)
+	err = reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshots[1]), acknowledged)
 	assert.True(t, apierrors.IsNotFound(err))
 	newest := &snapshotv1.VolumeSnapshot{}
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshots[2]), newest))
@@ -1645,7 +1688,7 @@ func TestSnapshotExportReferenceLossDoesNotExhaustActiveFinalDeleteAttempt(t *te
 
 			exporter, err := reconciler.tarballProviderForExport(node, &node.Status.SnapshotExports[0])
 			require.NoError(t, err)
-			status, err := exporter.DeleteSnapshot(context.Background(), "recorded-object")
+			status, err := exporter.DeleteSnapshotBounded(context.Background(), "recorded-object")
 			require.NoError(t, err)
 			assert.Equal(t, datasnapshot.SnapshotActive, status)
 			job, err := clientSet.BatchV1().Jobs(node.Namespace).Get(

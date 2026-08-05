@@ -239,7 +239,7 @@ func (gcs *GCS) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob Snaps
 			ctx, gcs.Client, gcs.Owner, snapshotJob, snapshotJobExporter(snapshotJob, gcsExporter),
 		)
 	}
-	desired, err := gcs.snapshotDeletionJob(snapshotJob.Name, snapshotJob.Upload)
+	desired, err := gcs.snapshotDeletionJob(snapshotJob.Name, snapshotJob.Upload, true)
 	if err != nil {
 		return "", err
 	}
@@ -277,7 +277,15 @@ func (gcs *GCS) cleanUp(ctx context.Context, name string) error {
 }
 
 func (gcs *GCS) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
-	job, err := gcs.ensureSnapshotDeletion(ctx, name, nil)
+	return gcs.deleteSnapshot(ctx, name, false)
+}
+
+func (gcs *GCS) DeleteSnapshotBounded(ctx context.Context, name string) (SnapshotStatus, error) {
+	return gcs.deleteSnapshot(ctx, name, true)
+}
+
+func (gcs *GCS) deleteSnapshot(ctx context.Context, name string, bounded bool) (SnapshotStatus, error) {
+	job, err := gcs.ensureSnapshotDeletion(ctx, name, nil, bounded)
 	if err != nil {
 		return "", err
 	}
@@ -316,8 +324,9 @@ func (gcs *GCS) ensureSnapshotDeletion(
 	ctx context.Context,
 	name string,
 	upload *SnapshotJobIdentity,
+	bounded ...bool,
 ) (*batchv1.Job, error) {
-	job, err := gcs.snapshotDeletionJob(name, upload)
+	job, err := gcs.snapshotDeletionJob(name, upload, len(bounded) > 0 && bounded[0])
 	if err != nil {
 		return nil, err
 	}
@@ -328,10 +337,10 @@ func (gcs *GCS) ensureSnapshotDeletion(
 	return job, nil
 }
 
-func (gcs *GCS) snapshotDeletionJob(name string, upload *SnapshotJobIdentity) (*batchv1.Job, error) {
-	backoffLimit := int32(0)
-	if upload != nil {
-		backoffLimit = unboundSnapshotDeleteBackoffLimit
+func (gcs *GCS) snapshotDeletionJob(name string, upload *SnapshotJobIdentity, bounded bool) (*batchv1.Job, error) {
+	backoffLimit := unboundSnapshotDeleteBackoffLimit
+	if bounded {
+		backoffLimit = 0
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{

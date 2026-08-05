@@ -1310,6 +1310,7 @@ type SnapshotExportStatus struct {
 	// DeleteAttempts is the number of logical remote-delete attempts reserved for this export.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3
 	DeleteAttempts int32 `json:"deleteAttempts,omitempty"`
 	// DeleteExhausted records that the final logical delete attempt was observed to fail.
 	// +optional

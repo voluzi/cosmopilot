@@ -143,6 +143,7 @@ type SnapshotProvider interface {
 	GetSnapshotDeletionStatus(context.Context, SnapshotJob) (SnapshotStatus, error)
 	CleanupSnapshot(context.Context, string) error
 	DeleteSnapshot(context.Context, string) (SnapshotStatus, error)
+	DeleteSnapshotBounded(context.Context, string) (SnapshotStatus, error)
 	DeleteSnapshotForUpload(context.Context, SnapshotJob) (SnapshotJob, SnapshotStatus, error)
 	CleanupSnapshotDeletion(context.Context, SnapshotJob) error
 	ListSnapshots(ctx context.Context) ([]SnapshotJob, error)
@@ -1193,10 +1194,42 @@ func reconcileSnapshotDeletionJobForDesired(
 		return "", fmt.Errorf("snapshot deletion job %s/%s has UID %s, expected listed UID %s",
 			job.Namespace, job.Name, job.UID, expected.UID)
 	}
+	if !int32PointersEqual(job.Spec.BackoffLimit, desired.Spec.BackoffLimit) {
+		if job.DeletionTimestamp != nil {
+			return "", fmt.Errorf("stale %s job %s/%s is terminating: %w",
+				typeDelete, job.Namespace, job.Name, ErrStaleJobTerminating)
+		}
+		if err = deleteSnapshotJob(ctx, client, job); err != nil {
+			return "", fmt.Errorf("delete stale %s job %s/%s: %w", typeDelete, job.Namespace, job.Name, err)
+		}
+		return "", &StaleJobReplacedError{
+			Purpose:          typeDelete,
+			Namespace:        job.Namespace,
+			Name:             job.Name,
+			UID:              job.UID,
+			ConflictingLabel: "spec.backoffLimit",
+			PreviousValue:    int32PointerString(job.Spec.BackoffLimit),
+			DesiredValue:     int32PointerString(desired.Spec.BackoffLimit),
+		}
+	}
 	if _, err = reconcileSnapshotJobIdentity(ctx, client, owner, job, desired, typeDelete); err != nil {
 		return "", err
 	}
 	return reconcileSnapshotDeletionJob(ctx, client, owner, expected, exporter)
+}
+
+func int32PointersEqual(left, right *int32) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+func int32PointerString(value *int32) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return strconv.FormatInt(int64(*value), 10)
 }
 
 func cleanupSnapshotDeletionResources(

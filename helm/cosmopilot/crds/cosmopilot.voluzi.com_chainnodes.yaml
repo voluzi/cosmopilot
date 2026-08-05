@@ -6389,6 +6389,7 @@ spec:
                       description: DeleteAttempts is the number of logical remote-delete
                         attempts reserved for this export.
                       format: int32
+                      maximum: 3
                       minimum: 0
                       type: integer
                     deleteExhausted:
