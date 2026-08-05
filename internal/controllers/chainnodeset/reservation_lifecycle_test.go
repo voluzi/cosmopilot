@@ -162,6 +162,22 @@ func TestFinalizeReservationOwnerChildrenBlocksStatusRecordedForeignIdentity(t *
 	}
 }
 
+func TestReservationOwnerPodsGoneBlocksKnownClaimWithoutLabels(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}}
+	reservation := nodeSetReservation(nodeSet, "reserved", "ckr-uid", nodeSetReservationLifecyclePublicKey, "nodes-validator")
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: reservation.Spec.Claim, Namespace: nodeSet.Namespace, UID: "pod-uid"}}
+	r := newValidatorTestReconciler(t, nodeSet, reservation, pod)
+	r.APIReader = r.Client
+
+	done, err := r.reservationOwnerPodsGone(context.Background(), nodeSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("label-less Pod matching an exact reservation claim must block release")
+	}
+}
+
 func TestReconcileConsensusKeyReservationClaimsReleasesOnlyUndesiredClaim(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{

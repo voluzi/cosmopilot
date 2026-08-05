@@ -304,12 +304,33 @@ func (r *Reconciler) finalizeReservationOwnerChildren(ctx context.Context, nodeS
 }
 
 func (r *Reconciler) reservationOwnerPodsGone(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	knownPodNames := make(map[string]struct{}, len(nodeSet.Status.Nodes))
+	for i := range nodeSet.Status.Nodes {
+		if nodeSet.Status.Nodes[i].Name != "" {
+			knownPodNames[nodeSet.Status.Nodes[i].Name] = struct{}{}
+		}
+	}
+	reservations := &appsv1.ConsensusKeyReservationList{}
+	if err := r.uncachedReader().List(ctx, reservations); err != nil {
+		return false, err
+	}
+	for i := range reservations.Items {
+		reservation := &reservations.Items[i]
+		if reservation.Spec.OwnerUID == nodeSet.GetUID() && reservation.Spec.OwnerKind == "ChainNodeSet" &&
+			reservation.Spec.Namespace == nodeSet.GetNamespace() && reservation.Spec.OwnerName == nodeSet.GetName() &&
+			reservation.Spec.Claim != "" {
+			knownPodNames[reservation.Spec.Claim] = struct{}{}
+		}
+	}
 	pods := &corev1.PodList{}
 	if err := r.uncachedReader().List(ctx, pods, client.InNamespace(nodeSet.GetNamespace())); err != nil {
 		return false, err
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		if _, known := knownPodNames[pod.GetName()]; known {
+			return false, nil
+		}
 		if pod.GetLabels()[controllers.LabelChainNodeSet] == nodeSet.GetName() &&
 			(pod.GetLabels()[controllers.LabelValidator] == controllers.StringValueTrue ||
 				pod.GetLabels()[controllers.LabelCosmosignerTarget] != "") {

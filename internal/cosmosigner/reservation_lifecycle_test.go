@@ -139,6 +139,36 @@ func TestFinalizeConsensusKeySigningPathsWaitsForOrphanedRootJobPod(t *testing.T
 	}
 }
 
+func TestFinalizeConsensusKeySigningPathsBlocksExactForeignOneShotPod(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-signer-import", Namespace: owner.Namespace, UID: "pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, pod).Build()
+
+	done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
+	if err == nil || done || !strings.Contains(err.Error(), pod.Name) {
+		t.Fatalf("exact foreign one-shot Pod must block finalization, done=%v err=%v", done, err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("foreign one-shot Pod must remain untouched: %v", err)
+	}
+}
+
+func TestFinalizeConsensusKeySigningPathsWaitsForLabelLessSignerReplica(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-signer-0", Namespace: owner.Namespace, UID: "pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, pod).Build()
+
+	done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("label-less deterministic signer replica must keep finalization pending")
+	}
+}
+
 func TestEnsureConsensusKeyReservationRecoversStaleOwnerWithoutDeletingRetainedState(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	holder := ReservationHolder{
@@ -333,6 +363,24 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForOrphanedManagedJobPod(t *
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
 		t.Fatalf("stale reservation must remain while orphaned Job pod exists: %v", err)
+	}
+}
+
+func TestEnsureConsensusKeyReservationBlocksRecoveryForLabelLessSignerReplica(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	holder := ReservationHolder{UID: "new-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator", Claim: "validator"}
+	stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: "ChainNode", Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+	})
+	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-signer-0", Namespace: holder.Namespace, UID: "pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, pod).Build()
+
+	_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
+	if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), pod.Name) {
+		t.Fatalf("label-less stale signer replica must block recovery, got %v", err)
 	}
 }
 

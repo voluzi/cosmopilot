@@ -48,6 +48,7 @@ type ManagedSigningPathCleanupResult struct {
 // absent without deleting retained state claims. PVC lifecycle remains owned by its dedicated
 // cleanup and retention policy.
 func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader, c client.Client, owner client.Object, namespace string) (bool, error) {
+	signerNames := reservationOwnerSignerNames(owner)
 	statefulSets := &appsk8sv1.StatefulSetList{}
 	if err := reader.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -57,6 +58,7 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 		if !IsOwnedSignerStatefulSet(sts, owner) {
 			continue
 		}
+		signerNames = append(signerNames, sts.GetName())
 		if !sts.GetDeletionTimestamp().IsZero() {
 			return false, nil
 		}
@@ -104,6 +106,10 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 			oneShotNames = append(oneShotNames, jobName)
 			continue
 		}
+		if managedSigningOneShotBelongsToRoot(pod.GetName(), pod.GetLabels(), owner) {
+			oneShotNames = append(oneShotNames, pod.GetName())
+			continue
+		}
 		if !metav1.IsControlledBy(pod, owner) {
 			continue
 		}
@@ -116,8 +122,9 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 		}
 	}
 	cleanup, err := CleanupManagedSigningPath(ctx, reader, c, owner, namespace, ManagedSigningPath{
-		OneShotNames: oneShotNames,
-		PodNames:     podNames,
+		StatefulSetNames: signerNames,
+		OneShotNames:     oneShotNames,
+		PodNames:         podNames,
 	})
 	if err != nil {
 		return false, err
@@ -134,7 +141,8 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 		return false, err
 	}
 	for i := range pods.Items {
-		if signerPodBelongsToRoot(&pods.Items[i], owner) {
+		pod := &pods.Items[i]
+		if signerPodBelongsToRoot(pod, owner) || podMatchesSignerNames(pod, signerNames) {
 			return false, nil
 		}
 	}
@@ -150,6 +158,13 @@ func CleanupManagedSigningPath(ctx context.Context, reader client.Reader, c clie
 		key := client.ObjectKey{Namespace: namespace, Name: name}
 		if err := reader.Get(ctx, key, sts); err != nil {
 			if apierrors.IsNotFound(err) {
+				gone, err := SignerPodsGone(ctx, reader, namespace, name)
+				if err != nil {
+					return ManagedSigningPathCleanupResult{}, err
+				}
+				if !gone {
+					return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for signer Pods for StatefulSet %s/%s to be absent", namespace, name)}, nil
+				}
 				continue
 			}
 			return ManagedSigningPathCleanupResult{}, err
@@ -172,6 +187,13 @@ func CleanupManagedSigningPath(ctx context.Context, reader client.Reader, c clie
 			return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for StatefulSet %s/%s to be absent", namespace, name)}, nil
 		} else if !apierrors.IsNotFound(err) {
 			return ManagedSigningPathCleanupResult{}, err
+		}
+		gone, err := SignerPodsGone(ctx, reader, namespace, name)
+		if err != nil {
+			return ManagedSigningPathCleanupResult{}, err
+		}
+		if !gone {
+			return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for signer Pods for StatefulSet %s/%s to be absent", namespace, name)}, nil
 		}
 	}
 
@@ -694,6 +716,9 @@ func staleReservationPodMatches(pod *corev1.Pod, reservation *appsv1.ConsensusKe
 	if staleReservationOneShotPodMatches(pod.GetName(), reservation) {
 		return true
 	}
+	if staleReservationSignerReplicaPodMatches(pod.GetName(), reservation) {
+		return true
+	}
 	if pod.GetLabels()["app.kubernetes.io/name"] != "cosmosigner" {
 		return false
 	}
@@ -708,6 +733,23 @@ func staleReservationPodMatches(pod *corev1.Pod, reservation *appsv1.ConsensusKe
 		return instance == reservation.Spec.OwnerName+"-signer"
 	}
 	return strings.HasPrefix(instance, reservation.Spec.OwnerName+"-")
+}
+
+func staleReservationSignerReplicaPodMatches(name string, reservation *appsv1.ConsensusKeyReservation) bool {
+	separator := strings.LastIndexByte(name, '-')
+	if separator < 0 || separator == len(name)-1 {
+		return false
+	}
+	for _, char := range name[separator+1:] {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	statefulSetName := name[:separator]
+	if reservation.Spec.OwnerKind == "ChainNode" {
+		return statefulSetName == reservation.Spec.OwnerName+"-signer"
+	}
+	return strings.HasPrefix(statefulSetName, reservation.Spec.OwnerName+"-") && strings.HasSuffix(statefulSetName, "-signer")
 }
 
 func staleReservationOneShotPodMatches(name string, reservation *appsv1.ConsensusKeyReservation) bool {
@@ -744,6 +786,33 @@ func signerPodBelongsToRoot(pod *corev1.Pod, owner client.Object) bool {
 	default:
 		return false
 	}
+}
+
+func reservationOwnerSignerNames(owner client.Object) []string {
+	switch typed := owner.(type) {
+	case *appsv1.ChainNode:
+		return []string{typed.GetName() + "-signer"}
+	case *appsv1.ChainNodeSet:
+		names := make([]string, 0, len(typed.ResolveCosmosigners())+len(typed.Status.Cosmosigners))
+		for _, signer := range typed.ResolveCosmosigners() {
+			names = append(names, typed.CosmosignerResourceName(signer))
+		}
+		for i := range typed.Status.Cosmosigners {
+			names = append(names, appsv1.CosmosignerStatusResourceName(&typed.Status.Cosmosigners[i]))
+		}
+		return sortedUnique(names)
+	default:
+		return nil
+	}
+}
+
+func podMatchesSignerNames(pod *corev1.Pod, signerNames []string) bool {
+	for _, name := range signerNames {
+		if isStatefulSetReplicaPodName(pod.GetName(), name) {
+			return true
+		}
+	}
+	return false
 }
 
 func controlledByUID(obj metav1.Object, uid types.UID) bool {
