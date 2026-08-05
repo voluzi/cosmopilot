@@ -84,6 +84,21 @@ func TestLegacyNodeSetPDBRejectsSelectorExpressions(t *testing.T) {
 	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
 }
 
+func TestLegacyNodeSetPDBRejectsExtraValidatorMatchLabels(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "chain-id"},
+	}
+	pdb := getPdbSpec(nodeSet, "set-validator", 1, map[string]string{
+		controllers.LabelUpgrading:             controllers.StringValueFalse,
+		controllers.LabelChainID:               nodeSet.Status.ChainID,
+		controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
+		"custom-selector":                      "narrower",
+	})
+
+	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
+}
+
 func TestEnsurePodDisruptionBudgetPreservesForeignControlledLegacyShape(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
 	foreignOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "other-uid"}}

@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
@@ -458,6 +459,35 @@ func TestFinalizeResourcesRetainsControlledLegacyCosmoseedSecret(t *testing.T) {
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), retained))
 	assert.Nil(t, metav1.GetControllerOf(retained))
 	assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
+}
+
+func TestMigrateLegacyDurableResourcesAttributesUnownedLegacyCosmoseedSecret(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{Cosmoseed: &appsv1.CosmoseedConfig{
+			Enabled: ptr.To(true), Instances: ptr.To(1),
+		}},
+	}
+	_, key, err := cometbft.GenerateNodeKey()
+	require.NoError(t, err)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-cosmoseed", Namespace: nodeSet.Namespace, UID: "seed-key-uid"},
+		Data:       map[string][]byte{"set-seed-0": key},
+	}
+	ambiguous := secret.DeepCopy()
+	ambiguous.Name = "user-secret"
+	ambiguous.UID = "ambiguous-uid"
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, secret, ambiguous).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	_, err = r.MigrateLegacyDurableResources(context.Background(), nodeSet)
+	require.NoError(t, err)
+	fresh := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(secret), fresh))
+	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(ambiguous), fresh))
+	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassGeneratedKeys))
 }
 
 func TestAttributeControlledLegacyKeysSkipsRegularGroups(t *testing.T) {

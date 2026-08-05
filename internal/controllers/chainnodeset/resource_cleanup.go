@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
@@ -359,21 +360,47 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet 
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
 		if !resourcecleanup.IsLegacyGeneratedKeySecret(secret, known...) ||
-			!metav1.IsControlledBy(secret, nodeSet) ||
+			(!metav1.IsControlledBy(secret, nodeSet) && !isLegacyCosmoseedKeySecret(nodeSet, secret)) ||
 			resourcecleanup.IsAttributed(secret, root, resourcecleanup.ClassGeneratedKeys) {
 			continue
 		}
-		managed, changed, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
-		if err != nil {
-			return err
+		changed := false
+		if metav1.IsControlledBy(secret, nodeSet) {
+			managed, prepared, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+			if err != nil {
+				return err
+			}
+			changed = managed && prepared
+		} else {
+			changed = resourcecleanup.Stamp(secret, root, resourcecleanup.ClassGeneratedKeys)
+			changed = resourcecleanup.StampResourceOwner(secret, nodeSet.GetUID()) || changed
 		}
-		if managed && changed {
+		if changed {
 			if err := r.Update(ctx, secret); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func isLegacyCosmoseedKeySecret(nodeSet *appsv1.ChainNodeSet, secret *corev1.Secret) bool {
+	if secret.GetName() != nodeSet.GetName()+"-cosmoseed" || metav1.GetControllerOf(secret) != nil || len(secret.Data) == 0 {
+		return false
+	}
+	prefix := nodeSet.GetName() + "-seed-"
+	for name, key := range secret.Data {
+		if !strings.HasPrefix(name, prefix) {
+			return false
+		}
+		if _, err := strconv.Atoi(strings.TrimPrefix(name, prefix)); err != nil {
+			return false
+		}
+		if _, err := cometbft.GetNodeID(key); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // MigrateLegacyDurableResources removes cascading ownership from verified root and child durable

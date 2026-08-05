@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
@@ -233,6 +234,32 @@ func TestMigrateLegacyDurableResourcesAttributesAllVerifiedClasses(t *testing.T)
 	freshSigner := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(signerPVC), freshSigner))
 	assert.Contains(t, freshSigner.Finalizers, cosmosigner.RetainedStateFinalizer)
+}
+
+func TestMigrateLegacyDurableResourcesAttributesUnownedLegacyMainPVC(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: node.Name, Namespace: node.Namespace, UID: "data-uid",
+		Labels: WithChainNodeLabels(node),
+		Annotations: map[string]string{
+			controllers.AnnotationDataInitialized: controllers.StringValueTrue,
+			controllers.AnnotationDataHeight:      "123",
+		},
+	}}
+	ambiguous := pvc.DeepCopy()
+	ambiguous.Name = "user-data"
+	ambiguous.UID = "ambiguous-uid"
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, pvc, ambiguous).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	_, err := r.MigrateLegacyDurableResources(context.Background(), node)
+	require.NoError(t, err)
+	fresh := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pvc), fresh))
+	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassDataVolumes))
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(ambiguous), fresh))
+	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassDataVolumes))
 }
 
 func TestFinalizeResourcesRetainsControlledLegacyDataVolumesRemovedFromSpec(t *testing.T) {

@@ -149,20 +149,38 @@ func (r *Reconciler) attributeControlledLegacyDataVolumes(ctx context.Context, c
 	root := resourcecleanup.RootOwnerFor(chainNode)
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
-		if !metav1.IsControlledBy(pvc, chainNode) || resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) {
+		if resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassDataVolumes) ||
+			(!metav1.IsControlledBy(pvc, chainNode) && !isLegacyMainDataPVC(chainNode, pvc)) {
 			continue
 		}
-		managed, changed, err := resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, false)
-		if err != nil {
-			return err
+		changed := false
+		if metav1.IsControlledBy(pvc, chainNode) {
+			managed, prepared, err := resourcecleanup.PrepareGeneratedResource(pvc, chainNode, r.Scheme, resourcecleanup.ClassDataVolumes, false)
+			if err != nil {
+				return err
+			}
+			changed = managed && prepared
+		} else {
+			changed = resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassDataVolumes)
+			changed = resourcecleanup.StampResourceOwner(pvc, chainNode.GetUID()) || changed
 		}
-		if managed && changed {
+		if changed {
 			if err := r.Update(ctx, pvc); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func isLegacyMainDataPVC(chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) bool {
+	if pvc.GetName() != chainNode.GetName() || metav1.GetControllerOf(pvc) != nil {
+		return false
+	}
+	annotations := pvc.GetAnnotations()
+	_, initialized := annotations[controllers.AnnotationDataInitialized]
+	_, height := annotations[controllers.AnnotationDataHeight]
+	return initialized && height
 }
 
 // MigrateLegacyDurableResources removes cascading root ownership from verified pre-upgrade durable

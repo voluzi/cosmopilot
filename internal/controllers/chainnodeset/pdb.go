@@ -178,6 +178,15 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 		labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue {
 		nodeSetLabel := labels[controllers.LabelChainNodeSet]
 		group := labels[controllers.LabelChainNodeSetGroup]
+		if !hasOnlyLabels(labels,
+			controllers.LabelUpgrading,
+			controllers.LabelChainID,
+			controllers.LabelChainNodeSetValidator,
+			controllers.LabelChainNodeSet,
+			controllers.LabelChainNodeSetGroup,
+		) {
+			return false
+		}
 		return (nodeSetLabel == "" || nodeSetLabel == nodeSet.GetName()) &&
 			(group == "" || group == validatorGroupName)
 	}
@@ -207,6 +216,19 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	}
 
 	return pdb.GetName() == name
+}
+
+func hasOnlyLabels(labels map[string]string, allowed ...string) bool {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	for key := range labels {
+		if _, ok := allowedSet[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Reconciler) recordGrouplessPDBHistory(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
