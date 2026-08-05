@@ -182,6 +182,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if ns.DeletionTimestamp != nil {
+		done, err := r.finalizeConsensusKeyReservationOwner(ctx, chainNode)
+		if err != nil || !done {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
 		logger.V(1).Info("namespace is being terminated, skipping reconcile")
 		return ctrl.Result{}, nil
 	}

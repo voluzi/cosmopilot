@@ -195,6 +195,16 @@ func cleanupManagedSigningJob(ctx context.Context, reader client.Reader, c clien
 	key := client.ObjectKey{Namespace: namespace, Name: name}
 	if err := reader.Get(ctx, key, job); err != nil {
 		if apierrors.IsNotFound(err) {
+			pods := &corev1.PodList{}
+			if err := reader.List(ctx, pods, client.InNamespace(namespace)); err != nil {
+				return ManagedSigningPathCleanupResult{}, err
+			}
+			for i := range pods.Items {
+				pod := &pods.Items[i]
+				if strings.HasPrefix(pod.GetName(), name+"-") {
+					return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for orphaned Job Pod %s/%s to terminate", pod.GetNamespace(), pod.GetName())}, nil
+				}
+			}
 			return ManagedSigningPathCleanupResult{Done: true}, nil
 		}
 		return ManagedSigningPathCleanupResult{}, err

@@ -98,6 +98,28 @@ func TestReleaseConsensusKeyReservationsFailsClosedOnOwnerMetadataMismatch(t *te
 	}
 }
 
+func TestCleanupManagedSigningPathWaitsForOrphanedJobPod(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator", Namespace: "default", UID: "owner-uid",
+	}}
+	jobName := owner.Name + "-tmkms-vault-upload"
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: jobName + "-generated", Namespace: owner.Namespace, UID: "pod-uid",
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, pod).Build()
+
+	result, err := CleanupManagedSigningPath(context.Background(), c, c, owner, owner.Namespace, ManagedSigningPath{
+		OneShotNames: []string{jobName},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Done || !strings.Contains(result.Waiting, pod.Name) {
+		t.Fatalf("orphaned generated Job pod must keep cleanup pending: %+v", result)
+	}
+}
+
 func TestEnsureConsensusKeyReservationRecoversStaleOwnerWithoutDeletingRetainedState(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	holder := ReservationHolder{

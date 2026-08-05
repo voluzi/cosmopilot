@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	appsk8sv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -11,8 +12,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -63,6 +66,49 @@ func TestPrepareConsensusKeyReservationOwnerFinalizesChainNodeSetRoot(t *testing
 	}
 	if controllerutil.ContainsFinalizer(freshChild, cosmosigner.ReservationOwnerFinalizer) {
 		t.Fatal("a ChainNodeSet child must not own the root reservation lifecycle")
+	}
+}
+
+func TestReconcileTerminatingNamespaceRunsReservationFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsk8sv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.NewTime(time.Now())
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "terminating", DeletionTimestamp: &now, Finalizers: []string{"kubernetes"},
+	}}
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "validator", Namespace: ns.Name, UID: "owner-uid",
+	}}
+	reservation := &appsv1.ConsensusKeyReservation{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosigner.ConsensusKeyReservationName("chain-1", reservationLifecyclePublicKey), UID: "ckr-uid"},
+		Spec: appsv1.ConsensusKeyReservationSpec{
+			ChainID: "chain-1", PublicKey: reservationLifecyclePublicKey,
+			OwnerUID: owner.UID, OwnerKind: "ChainNode", Namespace: owner.Namespace,
+			OwnerName: owner.Name, Claim: owner.Name,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ns, owner, reservation).Build()
+	r := &Reconciler{Client: c, APIReader: c}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: owner.Namespace, Name: owner.Name,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("terminating namespace stranded reservation: %v", err)
 	}
 }
 
