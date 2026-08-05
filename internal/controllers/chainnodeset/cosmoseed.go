@@ -28,6 +28,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
@@ -78,6 +79,11 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 	ss, err := r.getStatefulSet(nodeSet, configHash, RemoveIdFromFullAddresses(knownPublicAddresses))
 	if err != nil {
 		return err
+	}
+	if pending, err := r.retireLegacyCosmoseedStatefulSetBeforeScaleUp(ctx, nodeSet, ss); err != nil {
+		return err
+	} else if pending {
+		return fmt.Errorf("waiting for legacy Cosmoseed StatefulSet claim-template migration")
 	}
 
 	if err = r.ensureStatefulSet(ctx, ss); err != nil {
@@ -152,9 +158,39 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 	return nil
 }
 
+func (r *Reconciler) retireLegacyCosmoseedStatefulSetBeforeScaleUp(
+	ctx context.Context,
+	nodeSet *v1.ChainNodeSet,
+	desired *appsv1.StatefulSet,
+) (bool, error) {
+	current := &appsv1.StatefulSet{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(desired), current); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if ptr.Deref(desired.Spec.Replicas, 0) <= ptr.Deref(current.Spec.Replicas, 0) {
+		return false, nil
+	}
+	root := resourcecleanup.RootOwnerFor(nodeSet)
+	if len(current.Spec.VolumeClaimTemplates) == 1 &&
+		resourcecleanup.IsAttributed(&current.Spec.VolumeClaimTemplates[0], root, resourcecleanup.ClassDataVolumes) {
+		return false, nil
+	}
+	if !metav1.IsControlledBy(current, nodeSet) {
+		return false, fmt.Errorf("cannot migrate Cosmoseed StatefulSet %s: controller ownership is not the ChainNodeSet", current.GetName())
+	}
+	uid := current.GetUID()
+	if err := r.Delete(ctx, current, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {
 	// Cleanup statefulset
 	logger := log.FromContext(ctx)
+	if err := r.attributeCosmoseedDataVolumes(ctx, nodeSet); err != nil {
+		return err
+	}
 
 	// Cleanup statefulset
 	if err := r.Delete(ctx, &appsv1.StatefulSet{
@@ -251,6 +287,9 @@ func (r *Reconciler) ensureCosmoseedNodeKeys(ctx context.Context, nodeSet *v1.Ch
 				secret.Data[keyName] = key
 				ids[i] = id
 			}
+			if _, _, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, true); err != nil {
+				return nil, err
+			}
 
 			logger.Info("creating secret")
 			return ids, r.Create(ctx, secret)
@@ -258,7 +297,10 @@ func (r *Reconciler) ensureCosmoseedNodeKeys(ctx context.Context, nodeSet *v1.Ch
 		return nil, err
 	}
 
-	needsUpdate := false
+	_, needsUpdate, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+	if err != nil {
+		return nil, err
+	}
 	if secret.Data == nil {
 		secret.Data = make(map[string][]byte, nodeSet.Spec.Cosmoseed.GetInstances())
 	}
@@ -378,6 +420,17 @@ func (r *Reconciler) listChainPeers(ctx context.Context, chainID string) (v1.Pee
 
 func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string, publicAddresses []string) (*appsv1.StatefulSet, error) {
 	replicas := int32(nodeSet.Spec.Cosmoseed.GetInstances())
+	claimTemplate := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "data"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			}},
+		},
+	}
+	resourcecleanup.Stamp(&claimTemplate, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes)
+	resourcecleanup.StampResourceOwner(&claimTemplate, nodeSet.GetUID())
 
 	labels := map[string]string{
 		controllers.LabelApp:          controllers.CosmoseedName,
@@ -490,25 +543,9 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string,
 					},
 				},
 			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "data",
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{
-							corev1.ReadWriteOnce,
-						},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("1Gi"),
-							},
-						},
-					},
-				},
-			},
-			ServiceName:         fmt.Sprintf("%s-seed-headless", nodeSet.GetName()),
-			PodManagementPolicy: appsv1.ParallelPodManagement,
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{claimTemplate},
+			ServiceName:          fmt.Sprintf("%s-seed-headless", nodeSet.GetName()),
+			PodManagementPolicy:  appsv1.ParallelPodManagement,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			},

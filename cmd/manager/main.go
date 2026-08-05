@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	monitoring "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -12,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -23,6 +27,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnodeset"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 var (
@@ -91,13 +96,42 @@ func main() {
 		log.Fatalf("unable to create clientset: %v", err)
 	}
 
-	if _, err = chainnode.New(mgr, clientSet, &runOpts); err != nil {
+	// Controller-runtime starts leader-elected runnables concurrently. Gate both controllers until the
+	// elected worker has protected every pre-upgrade root and migrated its verified durable resources.
+	// Migration failures are scoped to their own root: a root that cannot migrate is logged and left
+	// for its own deletion path to re-attribute, rather than crashlooping the manager and blocking
+	// reconciliation for every other root in the cluster.
+	rootProtectionReady := make(chan struct{})
+	runOpts.RootProtectionReady = rootProtectionReady
+
+	chainNodeReconciler, err := chainnode.New(mgr, clientSet, &runOpts)
+	if err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ChainNode")
 		os.Exit(1)
 	}
 
-	if _, err = chainnodeset.New(mgr, clientSet, &runOpts); err != nil {
+	chainNodeSetReconciler, err := chainnodeset.New(mgr, clientSet, &runOpts)
+	if err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ChainNodeSet")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&resourcecleanup.RootProtector{
+		Client: mgr.GetClient(), WorkerName: runOpts.WorkerName, Ready: rootProtectionReady,
+		Migrate: func(ctx context.Context) error {
+			for {
+				pending, err := migrateLegacyDurableResources(ctx, mgr.GetClient(), chainNodeReconciler, chainNodeSetReconciler)
+				if err != nil || !pending {
+					return err
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Second):
+				}
+			}
+		},
+	}); err != nil {
+		setupLog.Error(err, "unable to register existing-root protection")
 		os.Exit(1)
 	}
 
@@ -117,7 +151,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err = mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err = mgr.AddReadyzCheck("readyz", rootProtectionReadiness(enableLeaderElection, mgr.Elected(), rootProtectionReady)); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -127,4 +161,89 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func rootProtectionReadiness(leaderElectionEnabled bool, elected, ready <-chan struct{}) healthz.Checker {
+	return func(_ *http.Request) error {
+		select {
+		case <-ready:
+			return nil
+		default:
+		}
+		if !leaderElectionEnabled {
+			return fmt.Errorf("existing-root protection and durable-resource migration are still running")
+		}
+		select {
+		case <-elected:
+			return fmt.Errorf("existing-root protection and durable-resource migration are still running")
+		default:
+			// Startup protection is leader-elected. A standby must remain Ready so a rolling
+			// Deployment can terminate the old leader and allow this pod to acquire the lease.
+			return nil
+		}
+	}
+}
+
+func migrateLegacyDurableResources(
+	ctx context.Context,
+	c client.Client,
+	chainNodeReconciler *chainnode.Reconciler,
+	chainNodeSetReconciler *chainnodeset.Reconciler,
+) (bool, error) {
+	pending := false
+	nodeSets := &appsv1.ChainNodeSetList{}
+	if err := c.List(ctx, nodeSets); err != nil {
+		return false, err
+	}
+	for i := range nodeSets.Items {
+		nodeSet := &nodeSets.Items[i]
+		if !controllers.MatchesWorker(nodeSet.GetLabels(), runOpts.WorkerName) {
+			continue
+		}
+		changed, err := chainNodeSetReconciler.MigrateLegacyDurableResources(ctx, nodeSet)
+		if err != nil {
+			setupLog.Error(err, "skipping startup durable-resource migration for root",
+				"kind", "ChainNodeSet", "namespace", nodeSet.GetNamespace(), "name", nodeSet.GetName())
+			continue
+		}
+		pending = pending || changed
+	}
+	nodes := &appsv1.ChainNodeList{}
+	if err := c.List(ctx, nodes); err != nil {
+		return false, err
+	}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if !controllers.MatchesWorker(node.GetLabels(), runOpts.WorkerName) || isRecordedStartupNodeSetChild(node, nodeSets.Items) {
+			continue
+		}
+		changed, err := chainNodeReconciler.MigrateLegacyDurableResources(ctx, node)
+		if err != nil {
+			setupLog.Error(err, "skipping startup durable-resource migration for root",
+				"kind", "ChainNode", "namespace", node.GetNamespace(), "name", node.GetName())
+			continue
+		}
+		pending = pending || changed
+	}
+	return pending, nil
+}
+
+func isRecordedStartupNodeSetChild(node *appsv1.ChainNode, nodeSets []appsv1.ChainNodeSet) bool {
+	for i := range nodeSets {
+		nodeSet := &nodeSets[i]
+		if nodeSet.GetNamespace() != node.GetNamespace() {
+			continue
+		}
+		for _, status := range nodeSet.Status.Nodes {
+			if status.Name == node.GetName() {
+				return status.UID == "" || status.UID == node.GetUID()
+			}
+		}
+		for _, status := range nodeSet.Status.Validators {
+			if status.Name == node.GetName() {
+				return status.UID == "" || status.UID == node.GetUID()
+			}
+		}
+	}
+	return false
 }

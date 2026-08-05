@@ -32,11 +32,11 @@ func TestValidateCreateExemptsControlledChildren(t *testing.T) {
 		// reserved reports whether a standalone create of this name hits a reserved-name check.
 		reserved bool
 	}{
-		{"some-set-validator", false, true},  // "-validator" reserved suffix
-		{"some-set-validator", true, false},  // generated legacy validator child is exempt
-		{"grp-signer-0", false, true},        // reserved StatefulSet-child shape
-		{"grp-signer-0", true, false},        // scaled-up reserved-group child is exempt
-		{"plain-node", false, false},         // ordinary standalone name is fine either way
+		{"some-set-validator", false, true}, // "-validator" reserved suffix
+		{"some-set-validator", true, false}, // generated legacy validator child is exempt
+		{"grp-signer-0", false, true},       // reserved StatefulSet-child shape
+		{"grp-signer-0", true, false},       // scaled-up reserved-group child is exempt
+		{"plain-node", false, false},        // ordinary standalone name is fine either way
 	} {
 		label := tc.name + "/standalone"
 		if tc.child {

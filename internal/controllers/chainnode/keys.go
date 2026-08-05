@@ -8,11 +8,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 func (r *Reconciler) ensureNodeKey(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -33,7 +33,7 @@ func (r *Reconciler) ensureNodeKey(ctx context.Context, chainNode *appsv1.ChainN
 				},
 				Data: make(map[string][]byte),
 			}
-			if err := controllerutil.SetControllerReference(chainNode, secret, r.Scheme); err != nil {
+			if _, _, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, true); err != nil {
 				return err
 			}
 		} else {
@@ -44,6 +44,13 @@ func (r *Reconciler) ensureNodeKey(ctx context.Context, chainNode *appsv1.ChainN
 	// Ensure node key
 	var nodeID string
 	mustUpdate := false
+	if !mustCreate {
+		_, metadataChanged, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+		if err != nil {
+			return err
+		}
+		mustUpdate = metadataChanged
+	}
 	if _, ok := secret.Data[nodeKeyFilename]; !ok {
 		if !mustCreate {
 			mustUpdate = true
@@ -123,9 +130,21 @@ func (r *Reconciler) ensureSigningKey(ctx context.Context, chainNode *appsv1.Cha
 			return err
 		}
 	}
+	if mustCreate {
+		if _, _, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, true); err != nil {
+			return err
+		}
+	}
 
 	// Ensure private key
 	mustUpdate := false
+	if !mustCreate {
+		_, metadataChanged, err := resourcecleanup.PrepareGeneratedResource(secret, chainNode, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+		if err != nil {
+			return err
+		}
+		mustUpdate = metadataChanged
+	}
 	if _, ok := secret.Data[PrivKeyFilename]; !ok {
 		if !mustCreate {
 			mustUpdate = true

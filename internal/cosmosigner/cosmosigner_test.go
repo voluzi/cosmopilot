@@ -10,6 +10,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 func testParams() Params {
@@ -259,7 +262,13 @@ func TestDiscoveryServiceHeadlessPublishNotReady(t *testing.T) {
 }
 
 func TestVolumeClaimTemplateLabeledForCleanup(t *testing.T) {
-	sts := mustStatefulSet(t, testParams())
+	p := testParams()
+	p.RootOwner = resourcecleanup.RootOwner{
+		APIVersion: "cosmopilot.voluzi.com/v1", Kind: "ChainNodeSet", Name: "mychain",
+		Namespace: "default", UID: types.UID("owner-uid"),
+	}
+	p.OwnerUID = p.RootOwner.UID
+	sts := mustStatefulSet(t, p)
 	pvc := sts.Spec.VolumeClaimTemplates[0]
 	want := InstanceLabels("mychain-signer")
 	for k, v := range want {
@@ -269,6 +278,12 @@ func TestVolumeClaimTemplateLabeledForCleanup(t *testing.T) {
 	}
 	if !slices.Contains(pvc.Finalizers, RetainedStateFinalizer) {
 		t.Fatalf("PVC template must protect retained slash state, got finalizers %v", pvc.Finalizers)
+	}
+	if !resourcecleanup.IsAttributed(&pvc, p.RootOwner, resourcecleanup.ClassCosmosignerState) {
+		t.Fatalf("PVC template must carry stable root attribution, got annotations %v", pvc.Annotations)
+	}
+	if got := pvc.Annotations[resourcecleanup.AnnotationResourceOwnerUID]; got != string(p.OwnerUID) {
+		t.Fatalf("PVC template resource owner UID = %q, want %q", got, p.OwnerUID)
 	}
 }
 

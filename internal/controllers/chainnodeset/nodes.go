@@ -24,6 +24,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/informer"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
@@ -238,6 +239,7 @@ func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context
 
 		nodeStatus := appsv1.ChainNodeSetNodeStatus{
 			Name:    node.Name,
+			UID:     node.UID,
 			ID:      node.Status.NodeID,
 			Address: node.Status.IP,
 			Port:    chainutils.P2pPort,
@@ -280,6 +282,7 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 	if err := r.Get(ctx, client.ObjectKeyFromObject(node), currentNode); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("creating chainnode", "chainnode", node.GetName())
+			controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
 			if err := r.Create(ctx, node); err != nil {
 				return err
 			}
@@ -299,10 +302,24 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 		node.Spec.OverrideVersion = currentNode.Spec.OverrideVersion
 	}
 
-	if !currentNode.Equal(node) {
+	metadataDrift := !metav1.IsControlledBy(currentNode, nodeSet) ||
+		!controllerutil.ContainsFinalizer(currentNode, resourcecleanup.Finalizer)
+	if metadataDrift && !metav1.IsControlledBy(currentNode, nodeSet) && !isRecordedNodeSetChild(nodeSet, currentNode) {
+		return fmt.Errorf("refusing to adopt unrecorded ChainNode %s/%s", currentNode.GetNamespace(), currentNode.GetName())
+	}
+	if !currentNode.Equal(node) || metadataDrift {
 		logger.Info("updating chainnode", "chainnode", node.GetName())
 		node.ObjectMeta.ResourceVersion = currentNode.ObjectMeta.ResourceVersion
 		node.Annotations = currentNode.Annotations
+		node.Finalizers = currentNode.Finalizers
+		node.Status = currentNode.Status
+		controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
+		if controller := metav1.GetControllerOf(currentNode); controller != nil && !metav1.IsControlledBy(currentNode, nodeSet) {
+			return fmt.Errorf("refusing to update ChainNode %s/%s controlled by %s UID %s", currentNode.GetNamespace(), currentNode.GetName(), controller.Name, controller.UID)
+		}
+		if err := controllerutil.SetControllerReference(nodeSet, node, r.Scheme); err != nil {
+			return err
+		}
 		if err := r.Update(ctx, node); err != nil {
 			return err
 		}
@@ -341,10 +358,9 @@ func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait
 
 func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group string, index int) error {
 	nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, index)
-	if err := r.Delete(ctx, &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: nodeSet.GetNamespace()}}); err != nil {
+	if err := r.maybeDeleteNode(ctx, nodeSet, nodeName); err != nil {
 		return err
 	}
-	DeleteNodeStatus(nodeSet, nodeName)
 
 	r.recorder.Eventf(nodeSet,
 		corev1.EventTypeNormal,
@@ -388,6 +404,7 @@ func (r *Reconciler) getNodeSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNo
 		Spec: appsv1.ChainNodeSpec{
 			Genesis:                       genesisConfig,
 			App:                           nodeSet.GetAppSpecWithUpgrades(),
+			DeletionPolicy:                nodeSet.Spec.DeletionPolicy.DeepCopy(),
 			Config:                        configForChild(group.Config),
 			Persistence:                   group.Persistence.DeepCopy(),
 			Peers:                         group.Peers,
@@ -590,19 +607,66 @@ func (r *Reconciler) waitChainNode(node *appsv1.ChainNode, validateFunc func(*ap
 }
 
 func (r *Reconciler) maybeDeleteNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
-	node := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: nodeSet.GetNamespace(),
-		},
-	}
-	if err := r.Delete(ctx, node); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
+	if err := r.deleteNodeWithCleanupFinalizer(ctx, nodeSet, name); err != nil {
+		return err
 	}
 	DeleteNodeStatus(nodeSet, name)
 	return nil
+}
+
+func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
+	node := &appsv1.ChainNode{}
+	key := client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}
+	if err := r.Get(ctx, key, node); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(node, nodeSet) && !isRecordedNodeSetChild(nodeSet, node) {
+		return fmt.Errorf("refusing to delete ChainNode %s/%s not controlled by ChainNodeSet UID %s", node.GetNamespace(), node.GetName(), nodeSet.GetUID())
+	}
+	if controller := metav1.GetControllerOf(node); controller != nil && !metav1.IsControlledBy(node, nodeSet) {
+		return fmt.Errorf("refusing to delete ChainNode %s/%s controlled by %s UID %s", node.GetNamespace(), node.GetName(), controller.Name, controller.UID)
+	}
+	if !node.GetDeletionTimestamp().IsZero() && !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) {
+		return fmt.Errorf(
+			"ChainNode %s/%s is terminating without cleanup finalizer %q; retaining ChainNodeSet status because durable-resource cleanup cannot be guaranteed",
+			node.GetNamespace(), node.GetName(), resourcecleanup.Finalizer,
+		)
+	}
+	changed := false
+	workerName := nodeSet.GetLabels()[controllers.LabelWorkerName]
+	if node.GetLabels()[controllers.LabelWorkerName] != workerName {
+		if node.Labels == nil {
+			node.Labels = map[string]string{}
+		}
+		node.Labels[controllers.LabelWorkerName] = workerName
+		changed = true
+	}
+	if !metav1.IsControlledBy(node, nodeSet) {
+		if err := controllerutil.SetControllerReference(nodeSet, node, r.Scheme); err != nil {
+			return err
+		}
+		changed = true
+	}
+	if !controllerutil.ContainsFinalizer(node, resourcecleanup.Finalizer) && node.GetDeletionTimestamp().IsZero() {
+		controllerutil.AddFinalizer(node, resourcecleanup.Finalizer)
+		changed = true
+	}
+	if changed {
+		if err := r.Update(ctx, node); err != nil {
+			return err
+		}
+	}
+	uid := node.GetUID()
+	return client.IgnoreNotFound(r.Delete(ctx, node, client.Preconditions{UID: &uid}))
+}
+
+func isRecordedNodeSetChild(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {
+	_, uidMatches := recordedNodeSetChildIdentity(nodeSet, child)
+	return uidMatches
+}
+
+func recordedNodeSetChildIdentity(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) (nameRecorded, uidMatches bool) {
+	return nodeSet.RecordedChildIdentity(child)
 }
 
 // exposeForInstance returns the ExposeConfig that should be applied to the i-th

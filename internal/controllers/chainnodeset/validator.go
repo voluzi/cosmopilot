@@ -18,6 +18,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 )
 
 func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
@@ -237,6 +238,7 @@ func updateValidatorStatus(
 	}
 	nodeStatus := appsv1.ChainNodeSetNodeStatus{
 		Name:    validator.Name,
+		UID:     validator.UID,
 		ID:      validator.Status.NodeID,
 		Address: validator.Status.IP,
 		Port:    chainutils.P2pPort,
@@ -262,6 +264,7 @@ func updateValidatorStatus(
 	}
 	status := appsv1.ChainNodeSetValidatorStatus{
 		Name:             validator.Name,
+		UID:              validator.UID,
 		Group:            group,
 		Address:          validator.Status.ValidatorAddress,
 		Status:           validator.Status.ValidatorStatus,
@@ -437,10 +440,11 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 			Labels:    labels,
 		},
 		Spec: appsv1.ChainNodeSpec{
-			Genesis:     genesisConfig,
-			App:         nodeSet.GetAppSpecWithUpgrades(),
-			Config:      configForChild(cfg.Config),
-			Persistence: cfg.Persistence,
+			Genesis:        genesisConfig,
+			App:            nodeSet.GetAppSpecWithUpgrades(),
+			DeletionPolicy: nodeSet.Spec.DeletionPolicy.DeepCopy(),
+			Config:         configForChild(cfg.Config),
+			Persistence:    cfg.Persistence,
 			Validator: &appsv1.ValidatorConfig{
 				PrivateKeySecret: cfg.PrivateKeySecret,
 				Info:             cfg.Info,
@@ -606,8 +610,15 @@ func (r *Reconciler) ensureSecret(ctx context.Context, nodeSet *appsv1.ChainNode
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: nodeSet.GetNamespace(), Name: name}, secret)
 	if err == nil {
+		managed, metadataChanged, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, false)
+		if err != nil {
+			return err
+		}
 		missing := missingSecretKeys(secret.Data, requiredKeys)
 		if len(missing) == 0 {
+			if metadataChanged {
+				return r.Update(ctx, secret)
+			}
 			return nil
 		}
 
@@ -616,7 +627,7 @@ func (r *Reconciler) ensureSecret(ctx context.Context, nodeSet *appsv1.ChainNode
 		// its data could corrupt key material we have no authority over. Refuse with a clear error
 		// instead. Secrets created by this controller carry a controller owner reference to the
 		// ChainNodeSet (see the create path below), so legitimately-managed secrets still heal.
-		if !metav1.IsControlledBy(secret, nodeSet) {
+		if !managed {
 			return fmt.Errorf("secret %s exists but is not controlled by this ChainNodeSet; refusing to modify potentially user-managed secret data", name)
 		}
 
@@ -651,7 +662,7 @@ func (r *Reconciler) ensureSecret(ctx context.Context, nodeSet *appsv1.ChainNode
 		},
 		Data: data,
 	}
-	if err := controllerutil.SetControllerReference(nodeSet, secret, r.Scheme); err != nil {
+	if _, _, err := resourcecleanup.PrepareGeneratedResource(secret, nodeSet, r.Scheme, resourcecleanup.ClassGeneratedKeys, true); err != nil {
 		return err
 	}
 

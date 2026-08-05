@@ -119,6 +119,10 @@ func (nodeSet *ChainNodeSet) genesisSignerCollapseWarnings(genesisAlreadyCreated
 }
 
 func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, error) {
+	if err := nodeSet.Spec.DeletionPolicy.Validate(".spec.deletionPolicy"); err != nil {
+		return nil, err
+	}
+
 	// Count validators and how many of them initialize a new genesis.
 	initValidators := 0
 	nonInitValidators := 0

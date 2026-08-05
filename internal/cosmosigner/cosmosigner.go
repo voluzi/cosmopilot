@@ -18,6 +18,7 @@ import (
 
 	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v2/internal/k8s"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
@@ -76,6 +77,9 @@ type Params struct {
 	// OwnerUID is the owning CR's UID, stamped on the per-pod PVCs so teardown distinguishes them from
 	// a same-name signer owned by a different CR. Empty in unit tests that don't exercise teardown.
 	OwnerUID types.UID
+	// RootOwner is stamped on Raft-state PVCs so root deletion can retain or delete them without
+	// inferring ownership from the StatefulSet-derived claim name.
+	RootOwner resourcecleanup.RootOwner
 
 	ChainID           string
 	Image             string
@@ -461,6 +465,26 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 	}
 
+	claim := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName, Labels: p.pvcTemplateLabels(),
+			Finalizers: []string{RetainedStateFinalizer},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: p.StorageClassName,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: storageQty},
+			},
+		},
+	}
+	if p.RootOwner.UID != "" {
+		resourcecleanup.Stamp(&claim, p.RootOwner, resourcecleanup.ClassCosmosignerState)
+	}
+	if p.OwnerUID != "" {
+		resourcecleanup.StampResourceOwner(&claim, p.OwnerUID)
+	}
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.Name,
@@ -493,24 +517,8 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 					Volumes:            volumes,
 				},
 			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					// Label the per-pod PVCs so they can be selected for cleanup when the signer is
-					// removed (StatefulSet PVCs are not garbage-collected automatically), including the
-					// owner UID so a same-name signer owned by a different CR is never conflated.
-					ObjectMeta: metav1.ObjectMeta{
-						Name: dataVolumeName, Labels: p.pvcTemplateLabels(),
-						Finalizers: []string{RetainedStateFinalizer},
-					},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						StorageClassName: p.StorageClassName,
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceStorage: storageQty},
-						},
-					},
-				},
-			},
+			// Raft-state claims carry both signer-instance labels and stable root attribution.
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{claim},
 		},
 	}
 	return sts, nil

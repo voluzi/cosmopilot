@@ -20,6 +20,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
@@ -49,18 +50,6 @@ func (r *Reconciler) prepareCosmosignerOwner(ctx context.Context, chainNode *app
 		return false, nil
 	}
 	return cosmosigner.ProtectRetainedStatePVCs(ctx, r.Client, chainNode, chainNode.GetNamespace())
-}
-
-func (r *Reconciler) finalizeCosmosignerOwner(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if !controllerutil.ContainsFinalizer(chainNode, cosmosigner.OwnerFinalizer) {
-		return true, nil
-	}
-	done, err := cosmosigner.FinalizeOwner(ctx, r.Client, chainNode, chainNode.GetNamespace())
-	if err != nil || !done {
-		return false, err
-	}
-	controllerutil.RemoveFinalizer(chainNode, cosmosigner.OwnerFinalizer)
-	return true, r.Update(ctx, chainNode)
 }
 
 // cosmosignerTargetLabelValue returns the cosmosigner discovery-service selector label value this
@@ -773,6 +762,7 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, chainNode *appsv1.Ch
 		Name:               name,
 		Namespace:          chainNode.GetNamespace(),
 		OwnerUID:           chainNode.GetUID(),
+		RootOwner:          resourcecleanup.RootOwnerFor(chainNode),
 		ChainID:            chainNode.Status.ChainID,
 		Image:              c.GetImage(r.opts.CosmosignerImage),
 		Replicas:           c.GetReplicas(),

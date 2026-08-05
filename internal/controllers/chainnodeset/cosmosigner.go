@@ -21,6 +21,7 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	"github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
@@ -43,18 +44,6 @@ func (r *Reconciler) prepareCosmosignerOwner(ctx context.Context, nodeSet *appsv
 		return false, nil
 	}
 	return cosmosigner.ProtectRetainedStatePVCs(ctx, r.Client, nodeSet, nodeSet.GetNamespace())
-}
-
-func (r *Reconciler) finalizeCosmosignerOwner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
-	if !controllerutil.ContainsFinalizer(nodeSet, cosmosigner.OwnerFinalizer) {
-		return true, nil
-	}
-	done, err := cosmosigner.FinalizeOwner(ctx, r.Client, nodeSet, nodeSet.GetNamespace())
-	if err != nil || !done {
-		return false, err
-	}
-	controllerutil.RemoveFinalizer(nodeSet, cosmosigner.OwnerFinalizer)
-	return true, r.Update(ctx, nodeSet)
 }
 
 func (r *Reconciler) initCosmosignerReplacementNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
@@ -1854,6 +1843,7 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.Chai
 		Name:               nodeSet.CosmosignerResourceName(s),
 		Namespace:          nodeSet.GetNamespace(),
 		OwnerUID:           nodeSet.GetUID(),
+		RootOwner:          resourcecleanup.RootOwnerFor(nodeSet),
 		ChainID:            nodeSet.Status.ChainID,
 		Image:              c.GetImage(r.opts.CosmosignerImage),
 		Replicas:           c.GetReplicas(),

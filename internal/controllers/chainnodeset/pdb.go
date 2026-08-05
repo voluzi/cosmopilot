@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 
 	"golang.org/x/exp/maps"
 	policyv1 "k8s.io/api/policy/v1"
@@ -11,13 +13,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
+const (
+	podDisruptionBudgetFinalizer  = "cosmopilot.voluzi.com/pdb-cleanup"
+	annotationGrouplessPDBHistory = "cosmopilot.voluzi.com/groupless-pdb-history"
+	grouplessPDBHistorySeparator  = ","
+)
+
 func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	if _, err := r.recordGrouplessPDBHistory(ctx, nodeSet); err != nil {
+		return err
+	}
+	desiredPdbNames := map[string]struct{}{}
 	if nodeSet.Spec.Validator.HasPdbEnabled() {
 		pdb := getPdbSpec(
 			nodeSet,
@@ -34,11 +47,12 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 				controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
 			},
 		)
-		if err := r.ensurePodDisruptionBudget(ctx, pdb); err != nil {
+		desiredPdbNames[pdb.GetName()] = struct{}{}
+		if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 			return err
 		}
 	} else {
-		if err := r.maybeDeletePDB(ctx, fmt.Sprintf("%s-validator", nodeSet.GetName()), nodeSet.GetNamespace()); err != nil {
+		if err := r.maybeDeletePDB(ctx, nodeSet, fmt.Sprintf("%s-validator", nodeSet.GetName())); err != nil {
 			return err
 		}
 	}
@@ -59,7 +73,7 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 		// validator reconciled below with the dedicated validator PDB. A regular group PDB
 		// would select zero pods, so skip it and delete any stale one left behind.
 		if group.Validator != nil {
-			if err := r.maybeDeletePDB(ctx, group.GetServiceName(nodeSet), nodeSet.GetNamespace()); err != nil {
+			if err := r.maybeDeletePDB(ctx, nodeSet, group.GetServiceName(nodeSet)); err != nil {
 				return err
 			}
 		} else if group.HasPdbEnabled() {
@@ -78,11 +92,12 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 			maps.Copy(labels, GetGlobalIngressLabels(nodeSet, group.Name))
 
 			pdb := getPdbSpec(nodeSet, group.GetServiceName(nodeSet), group.GetPdbMinAvailable(), labels)
-			if err := r.ensurePodDisruptionBudget(ctx, pdb); err != nil {
+			desiredPdbNames[pdb.GetName()] = struct{}{}
+			if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 				return err
 			}
 		} else {
-			if err := r.maybeDeletePDB(ctx, group.GetServiceName(nodeSet), nodeSet.GetNamespace()); err != nil {
+			if err := r.maybeDeletePDB(ctx, nodeSet, group.GetServiceName(nodeSet)); err != nil {
 				return err
 			}
 		}
@@ -104,20 +119,206 @@ func (r *Reconciler) ensurePodDisruptionBudgets(ctx context.Context, nodeSet *ap
 					controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
 				},
 			)
-			if err := r.ensurePodDisruptionBudget(ctx, pdb); err != nil {
+			desiredPdbNames[pdb.GetName()] = struct{}{}
+			if err := r.ensurePodDisruptionBudget(ctx, nodeSet, pdb); err != nil {
 				return err
 			}
 		} else if _, ownedByRegularGroup := regularGroupServiceNames[validatorPdbName]; !ownedByRegularGroup {
 			// Skip when validatorPdbName is actually a regular group's PDB (its Service name): that
 			// group reconciles this PDB itself above, so deleting it here would remove a live,
 			// correctly-configured PDB on every reconcile.
-			if err := r.maybeDeletePDB(ctx, validatorPdbName, nodeSet.GetNamespace()); err != nil {
+			if err := r.maybeDeletePDB(ctx, nodeSet, validatorPdbName); err != nil {
 				return err
 			}
 		}
 	}
 
+	return r.deleteStalePodDisruptionBudgets(ctx, nodeSet, desiredPdbNames)
+}
+
+func (r *Reconciler) deleteStalePodDisruptionBudgets(
+	ctx context.Context,
+	nodeSet *appsv1.ChainNodeSet,
+	desiredNames map[string]struct{},
+) error {
+	pdbs := &policyv1.PodDisruptionBudgetList{}
+	if err := r.List(ctx, pdbs, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return err
+	}
+
+	for i := range pdbs.Items {
+		pdb := &pdbs.Items[i]
+		if _, desired := desiredNames[pdb.GetName()]; desired {
+			continue
+		}
+		if pdb.GetLabels()[controllers.LabelScope] == scopeCosmoGuard {
+			continue
+		}
+		if !metav1.IsControlledBy(pdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, pdb) {
+			continue
+		}
+		if err := r.maybeDeletePDB(ctx, nodeSet, pdb.GetName()); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptionBudget) bool {
+	if pdb.Spec.Selector == nil || len(pdb.Spec.Selector.MatchExpressions) != 0 ||
+		pdb.Spec.MinAvailable == nil || pdb.Spec.MaxUnavailable != nil {
+		return false
+	}
+
+	labels := pdb.Spec.Selector.MatchLabels
+	if nodeSet.Status.ChainID == "" ||
+		labels[controllers.LabelUpgrading] != controllers.StringValueFalse ||
+		labels[controllers.LabelChainID] != nodeSet.Status.ChainID {
+		return false
+	}
+
+	if pdb.GetName() == fmt.Sprintf("%s-validator", nodeSet.GetName()) &&
+		labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue {
+		nodeSetLabel := labels[controllers.LabelChainNodeSet]
+		group := labels[controllers.LabelChainNodeSetGroup]
+		if !hasOnlyLabels(labels,
+			controllers.LabelUpgrading,
+			controllers.LabelChainID,
+			controllers.LabelChainNodeSetValidator,
+			controllers.LabelChainNodeSet,
+			controllers.LabelChainNodeSetGroup,
+		) {
+			return false
+		}
+		return (nodeSetLabel == "" || nodeSetLabel == nodeSet.GetName()) &&
+			(group == "" || group == validatorGroupName)
+	}
+
+	if labels[controllers.LabelChainNodeSet] != nodeSet.GetName() {
+		return false
+	}
+	if _, present := labels[controllers.LabelChainNodeSetValidator]; present &&
+		labels[controllers.LabelChainNodeSetValidator] != controllers.StringValueTrue {
+		return false
+	}
+	if !hasOnlyLegacyRegularPDBLabels(nodeSet, labels) {
+		return false
+	}
+	group := labels[controllers.LabelChainNodeSetGroup]
+	if group == "" && labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue {
+		return false
+	}
+	if labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue && group != "" {
+		if !hasOnlyLabels(labels,
+			controllers.LabelUpgrading,
+			controllers.LabelChainID,
+			controllers.LabelChainNodeSet,
+			controllers.LabelChainNodeSetGroup,
+			controllers.LabelChainNodeSetValidator,
+		) {
+			return false
+		}
+	}
+	if group == "" {
+		if isRecordedGrouplessPDB(nodeSet, pdb.GetName()) {
+			return true
+		}
+		for _, configuredGroup := range nodeSet.Spec.Nodes {
+			if configuredGroup.Validator == nil &&
+				configuredGroup.HasPdbEnabled() &&
+				configuredGroup.ShouldIgnoreGroupLabelOnDisruptions() &&
+				configuredGroup.GetServiceName(nodeSet) == pdb.GetName() {
+				return true
+			}
+		}
+		return false
+	}
+
+	name := fmt.Sprintf("%s-%s", nodeSet.GetName(), group)
+	if labels[controllers.LabelChainNodeSetValidator] == controllers.StringValueTrue && group != validatorGroupName {
+		name += "-validator"
+	}
+
+	return pdb.GetName() == name
+}
+
+func hasOnlyLegacyRegularPDBLabels(nodeSet *appsv1.ChainNodeSet, labels map[string]string) bool {
+	for key, value := range labels {
+		switch key {
+		case controllers.LabelUpgrading,
+			controllers.LabelChainID,
+			controllers.LabelChainNodeSet,
+			controllers.LabelChainNodeSetGroup,
+			controllers.LabelChainNodeSetValidator:
+			continue
+		}
+		if !strings.HasPrefix(key, nodeSet.GetName()+"-global-") || value != controllers.StringValueTrue {
+			return false
+		}
+	}
+	return true
+}
+
+func hasOnlyLabels(labels map[string]string, allowed ...string) bool {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	for key := range labels {
+		if _, ok := allowedSet[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Reconciler) recordGrouplessPDBHistory(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	names := grouplessPDBHistory(nodeSet)
+	changed := false
+	for _, group := range nodeSet.Spec.Nodes {
+		if group.Validator != nil || !group.HasPdbEnabled() || !group.ShouldIgnoreGroupLabelOnDisruptions() {
+			continue
+		}
+		name := group.GetServiceName(nodeSet)
+		if _, exists := names[name]; !exists {
+			names[name] = struct{}{}
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	values := make([]string, 0, len(names))
+	for name := range names {
+		values = append(values, name)
+	}
+	sort.Strings(values)
+	annotations := nodeSet.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[annotationGrouplessPDBHistory] = strings.Join(values, grouplessPDBHistorySeparator)
+	nodeSet.SetAnnotations(annotations)
+	if err := r.Update(ctx, nodeSet); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func isRecordedGrouplessPDB(nodeSet *appsv1.ChainNodeSet, name string) bool {
+	_, ok := grouplessPDBHistory(nodeSet)[name]
+	return ok
+}
+
+func grouplessPDBHistory(nodeSet *appsv1.ChainNodeSet) map[string]struct{} {
+	names := map[string]struct{}{}
+	for _, name := range strings.Split(nodeSet.GetAnnotations()[annotationGrouplessPDBHistory], grouplessPDBHistorySeparator) {
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names
 }
 
 func getPdbSpec(nodeSet *appsv1.ChainNodeSet, name string, min int, labels map[string]string) *policyv1.PodDisruptionBudget {
@@ -136,45 +337,80 @@ func getPdbSpec(nodeSet *appsv1.ChainNodeSet, name string, min int, labels map[s
 	}
 }
 
-func (r *Reconciler) ensurePodDisruptionBudget(ctx context.Context, pdb *policyv1.PodDisruptionBudget) error {
+func (r *Reconciler) ensurePodDisruptionBudget(
+	ctx context.Context,
+	nodeSet *appsv1.ChainNodeSet,
+	pdb *policyv1.PodDisruptionBudget,
+) error {
 	logger := log.FromContext(ctx)
 
 	currentPdb := &policyv1.PodDisruptionBudget{}
 	err := r.Get(ctx, client.ObjectKeyFromObject(pdb), currentPdb)
 	if err != nil {
 		if errors.IsNotFound(err) {
+			if err := controllerutil.SetControllerReference(nodeSet, pdb, r.Scheme); err != nil {
+				return err
+			}
 			logger.Info("creating pod disruption budget", "pdb", pdb.GetName())
 			return r.Create(ctx, pdb)
 		}
 		return err
 	}
+	if controller := metav1.GetControllerOf(currentPdb); controller != nil && !metav1.IsControlledBy(currentPdb, nodeSet) {
+		logger.Info("skipping pod disruption budget owned by another controller", "pdb", currentPdb.GetName(), "owner", controller.Name)
+		*pdb = *currentPdb
+		return nil
+	}
+	if !metav1.IsControlledBy(currentPdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, currentPdb) {
+		return fmt.Errorf("refusing to adopt pod disruption budget %s/%s without controller ownership or an identifiable legacy Cosmopilot selector", currentPdb.GetNamespace(), currentPdb.GetName())
+	}
 
-	mustUpdate := currentPdb.Spec.MinAvailable.IntValue() != pdb.Spec.MinAvailable.IntValue() ||
-		!reflect.DeepEqual(currentPdb.Spec.Selector.MatchLabels, pdb.Spec.Selector.MatchLabels)
+	desiredMinAvailable := pdb.Spec.MinAvailable
+	desiredSelector := pdb.Spec.Selector
+	mustUpdate := !reflect.DeepEqual(currentPdb.Spec.MinAvailable, desiredMinAvailable) ||
+		currentPdb.Spec.MaxUnavailable != nil ||
+		!reflect.DeepEqual(currentPdb.Spec.Selector, desiredSelector) ||
+		!metav1.IsControlledBy(currentPdb, nodeSet)
 
-	if mustUpdate {
-		logger.Info("updating pod disruption budget", "pdb", pdb.GetName())
+	if !mustUpdate {
+		*pdb = *currentPdb
+		return nil
+	}
 
-		pdb.ObjectMeta.ResourceVersion = currentPdb.ObjectMeta.ResourceVersion
-		if err := r.Update(ctx, pdb); err != nil {
-			return err
-		}
+	currentPdb.Spec.MinAvailable = desiredMinAvailable
+	currentPdb.Spec.MaxUnavailable = nil
+	currentPdb.Spec.Selector = desiredSelector
+	if err := controllerutil.SetControllerReference(nodeSet, currentPdb, r.Scheme); err != nil {
+		return fmt.Errorf("cannot manage pod disruption budget %s/%s: %w", currentPdb.GetNamespace(), currentPdb.GetName(), err)
+	}
+
+	logger.Info("updating pod disruption budget", "pdb", pdb.GetName())
+	if err := r.Update(ctx, currentPdb); err != nil {
+		return err
 	}
 
 	*pdb = *currentPdb
 	return nil
 }
 
-func (r *Reconciler) maybeDeletePDB(ctx context.Context, name, namespace string) error {
+func (r *Reconciler) maybeDeletePDB(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
 	logger := log.FromContext(ctx)
 
-	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
+	pdb := &policyv1.PodDisruptionBudget{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, pdb); err != nil {
+		return client.IgnoreNotFound(err)
 	}
-	err := r.Delete(ctx, pdb)
+
+	if controller := metav1.GetControllerOf(pdb); controller != nil && !metav1.IsControlledBy(pdb, nodeSet) {
+		logger.Info("skipping pod disruption budget owned by another controller", "pdb", pdb.GetName(), "owner", controller.Name)
+		return nil
+	}
+	if !metav1.IsControlledBy(pdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, pdb) {
+		logger.Info("skipping ambiguous pod disruption budget", "pdb", pdb.GetName())
+		return nil
+	}
+
+	_, err := r.deletePodDisruptionBudgetExact(ctx, pdb)
 
 	if err == nil {
 		logger.Info("deleted pod disruption budget", "pdb", pdb.GetName())
@@ -185,4 +421,53 @@ func (r *Reconciler) maybeDeletePDB(ctx context.Context, name, namespace string)
 	}
 
 	return err
+}
+
+func (r *Reconciler) finalizePodDisruptionBudgets(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	pdbs := &policyv1.PodDisruptionBudgetList{}
+	if err := r.List(ctx, pdbs, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return false, err
+	}
+	allDone := true
+	for i := range pdbs.Items {
+		pdb := &pdbs.Items[i]
+		if controller := metav1.GetControllerOf(pdb); controller != nil && !metav1.IsControlledBy(pdb, nodeSet) {
+			continue
+		}
+		if !metav1.IsControlledBy(pdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, pdb) {
+			continue
+		}
+		done, err := r.deletePodDisruptionBudgetExact(ctx, pdb)
+		if err != nil {
+			return false, err
+		}
+		allDone = allDone && done
+	}
+	if !allDone {
+		return false, nil
+	}
+	if controllerutil.ContainsFinalizer(nodeSet, podDisruptionBudgetFinalizer) {
+		controllerutil.RemoveFinalizer(nodeSet, podDisruptionBudgetFinalizer)
+		if err := r.Update(ctx, nodeSet); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func (r *Reconciler) deletePodDisruptionBudgetExact(ctx context.Context, pdb *policyv1.PodDisruptionBudget) (bool, error) {
+	uid := pdb.GetUID()
+	if pdb.GetDeletionTimestamp().IsZero() {
+		if err := r.Delete(ctx, pdb, client.Preconditions{UID: &uid}); err != nil && !errors.IsNotFound(err) {
+			return false, err
+		}
+	}
+	remaining := &policyv1.PodDisruptionBudget{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pdb), remaining); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
