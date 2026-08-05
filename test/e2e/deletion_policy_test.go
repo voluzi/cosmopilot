@@ -73,8 +73,13 @@ var _ = Describe("Deletion policy", func() {
 			if reservations.Items[i].Spec.OwnerUID != node.UID {
 				continue
 			}
-			current := &appsv1.ConsensusKeyReservation{}
-			Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(&reservations.Items[i]), current)).To(Succeed())
+			Eventually(func() bool {
+				current := &appsv1.ConsensusKeyReservation{}
+				err := Framework().Client().Get(
+					Framework().Context(), client.ObjectKeyFromObject(&reservations.Items[i]), current,
+				)
+				return apierrors.IsNotFound(err)
+			}).Should(BeTrue())
 		}
 	}))
 })
