@@ -98,6 +98,9 @@ func main() {
 
 	// Controller-runtime starts leader-elected runnables concurrently. Gate both controllers until the
 	// elected worker has protected every pre-upgrade root and migrated its verified durable resources.
+	// Migration failures are scoped to their own root: a root that cannot migrate is logged and left
+	// for its own deletion path to re-attribute, rather than crashlooping the manager and blocking
+	// reconciliation for every other root in the cluster.
 	rootProtectionReady := make(chan struct{})
 	runOpts.RootProtectionReady = rootProtectionReady
 
@@ -199,7 +202,9 @@ func migrateLegacyDurableResources(
 		}
 		changed, err := chainNodeSetReconciler.MigrateLegacyDurableResources(ctx, nodeSet)
 		if err != nil {
-			return false, err
+			setupLog.Error(err, "skipping startup durable-resource migration for root",
+				"kind", "ChainNodeSet", "namespace", nodeSet.GetNamespace(), "name", nodeSet.GetName())
+			continue
 		}
 		pending = pending || changed
 	}
@@ -214,7 +219,9 @@ func migrateLegacyDurableResources(
 		}
 		changed, err := chainNodeReconciler.MigrateLegacyDurableResources(ctx, node)
 		if err != nil {
-			return false, err
+			setupLog.Error(err, "skipping startup durable-resource migration for root",
+				"kind", "ChainNode", "namespace", node.GetNamespace(), "name", node.GetName())
+			continue
 		}
 		pending = pending || changed
 	}
