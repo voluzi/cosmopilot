@@ -270,17 +270,8 @@ func (r *Reconciler) finalizeReservationOwnerChildren(ctx context.Context, nodeS
 			legacyNames[nodeSet.Status.Nodes[i].Name] = struct{}{}
 		}
 	}
-	reservations := &appsv1.ConsensusKeyReservationList{}
-	if err := r.uncachedReader().List(ctx, reservations); err != nil {
+	if err := r.collectOwnerReservationClaims(ctx, nodeSet, legacyNames); err != nil {
 		return false, err
-	}
-	for i := range reservations.Items {
-		reservation := &reservations.Items[i]
-		if reservation.Spec.OwnerUID == nodeSet.GetUID() && reservation.Spec.OwnerKind == "ChainNodeSet" &&
-			reservation.Spec.Namespace == nodeSet.GetNamespace() && reservation.Spec.OwnerName == nodeSet.GetName() &&
-			reservation.Spec.Claim != "" {
-			legacyNames[reservation.Spec.Claim] = struct{}{}
-		}
 	}
 	children := &appsv1.ChainNodeList{}
 	if err := r.uncachedReader().List(ctx, children, client.InNamespace(nodeSet.GetNamespace())); err != nil {
@@ -322,17 +313,8 @@ func (r *Reconciler) reservationOwnerPodsGone(ctx context.Context, nodeSet *apps
 			knownPodNames[nodeSet.Status.Nodes[i].Name] = struct{}{}
 		}
 	}
-	reservations := &appsv1.ConsensusKeyReservationList{}
-	if err := r.uncachedReader().List(ctx, reservations); err != nil {
+	if err := r.collectOwnerReservationClaims(ctx, nodeSet, knownPodNames); err != nil {
 		return false, err
-	}
-	for i := range reservations.Items {
-		reservation := &reservations.Items[i]
-		if reservation.Spec.OwnerUID == nodeSet.GetUID() && reservation.Spec.OwnerKind == "ChainNodeSet" &&
-			reservation.Spec.Namespace == nodeSet.GetNamespace() && reservation.Spec.OwnerName == nodeSet.GetName() &&
-			reservation.Spec.Claim != "" {
-			knownPodNames[reservation.Spec.Claim] = struct{}{}
-		}
 	}
 	pods := &corev1.PodList{}
 	if err := r.uncachedReader().List(ctx, pods, client.InNamespace(nodeSet.GetNamespace())); err != nil {
@@ -350,6 +332,22 @@ func (r *Reconciler) reservationOwnerPodsGone(ctx context.Context, nodeSet *apps
 		}
 	}
 	return true, nil
+}
+
+func (r *Reconciler) collectOwnerReservationClaims(ctx context.Context, nodeSet *appsv1.ChainNodeSet, claims map[string]struct{}) error {
+	reservations := &appsv1.ConsensusKeyReservationList{}
+	if err := r.uncachedReader().List(ctx, reservations); err != nil {
+		return err
+	}
+	for i := range reservations.Items {
+		reservation := &reservations.Items[i]
+		if reservation.Spec.OwnerUID == nodeSet.GetUID() && reservation.Spec.OwnerKind == "ChainNodeSet" &&
+			reservation.Spec.Namespace == nodeSet.GetNamespace() && reservation.Spec.OwnerName == nodeSet.GetName() &&
+			reservation.Spec.Claim != "" {
+			claims[reservation.Spec.Claim] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) removeConsensusKeyReservationFinalizer(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
