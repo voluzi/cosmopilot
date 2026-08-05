@@ -270,6 +270,18 @@ func (r *Reconciler) finalizeReservationOwnerChildren(ctx context.Context, nodeS
 			legacyNames[nodeSet.Status.Nodes[i].Name] = struct{}{}
 		}
 	}
+	reservations := &appsv1.ConsensusKeyReservationList{}
+	if err := r.uncachedReader().List(ctx, reservations); err != nil {
+		return false, err
+	}
+	for i := range reservations.Items {
+		reservation := &reservations.Items[i]
+		if reservation.Spec.OwnerUID == nodeSet.GetUID() && reservation.Spec.OwnerKind == "ChainNodeSet" &&
+			reservation.Spec.Namespace == nodeSet.GetNamespace() && reservation.Spec.OwnerName == nodeSet.GetName() &&
+			reservation.Spec.Claim != "" {
+			legacyNames[reservation.Spec.Claim] = struct{}{}
+		}
+	}
 	children := &appsv1.ChainNodeList{}
 	if err := r.uncachedReader().List(ctx, children, client.InNamespace(nodeSet.GetNamespace())); err != nil {
 		return false, err

@@ -154,6 +154,34 @@ func TestFinalizeConsensusKeySigningPathsBlocksExactForeignOneShotPod(t *testing
 	}
 }
 
+func TestFinalizeConsensusKeySigningPathsLeavesChildOneShotPodToChainNodeSetCleanup(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "owner-uid"}}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes-validator", Namespace: owner.Namespace, UID: "child-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: owner.Name,
+			UID: owner.UID, Controller: ptr.To(true),
+		}},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: child.Name + "-tmkms-vault-upload", Namespace: owner.Namespace, UID: "pod-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: child.Name,
+			UID: child.UID, Controller: ptr.To(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, child, pod).Build()
+
+	done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
+	if err != nil || !done {
+		t.Fatalf("child-owned one-shot Pod must be left to child cleanup, done=%v err=%v", done, err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("child-owned one-shot Pod must remain untouched: %v", err)
+	}
+}
+
 func TestFinalizeConsensusKeySigningPathsWaitsForLabelLessSignerReplica(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
@@ -363,6 +391,24 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForOrphanedManagedJobPod(t *
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
 		t.Fatalf("stale reservation must remain while orphaned Job pod exists: %v", err)
+	}
+}
+
+func TestEnsureConsensusKeyReservationBlocksRecoveryForExactManagedOneShotPod(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	holder := ReservationHolder{UID: "new-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator", Claim: "validator"}
+	stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: "ChainNode", Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+	})
+	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms-vault-upload", Namespace: holder.Namespace, UID: "pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, pod).Build()
+
+	_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
+	if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), pod.Name) {
+		t.Fatalf("exact managed one-shot Pod must block stale recovery, got %v", err)
 	}
 }
 

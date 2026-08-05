@@ -49,6 +49,20 @@ type ManagedSigningPathCleanupResult struct {
 // cleanup and retention policy.
 func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader, c client.Client, owner client.Object, namespace string) (bool, error) {
 	signerNames := reservationOwnerSignerNames(owner)
+	childControllerUIDs := make(map[types.UID]struct{})
+	childWorkloadUIDs := make(map[types.UID]struct{})
+	if _, ok := owner.(*appsv1.ChainNodeSet); ok {
+		children := &appsv1.ChainNodeList{}
+		if err := reader.List(ctx, children, client.InNamespace(namespace)); err != nil {
+			return false, err
+		}
+		for i := range children.Items {
+			child := &children.Items[i]
+			if metav1.IsControlledBy(child, owner) && child.GetUID() != "" {
+				childControllerUIDs[child.GetUID()] = struct{}{}
+			}
+		}
+	}
 	statefulSets := &appsk8sv1.StatefulSetList{}
 	if err := reader.List(ctx, statefulSets, client.InNamespace(namespace)); err != nil {
 		return false, err
@@ -85,6 +99,12 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	oneShotNames := make([]string, 0)
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
+		if controlledByAnyUID(job, childControllerUIDs) {
+			if job.GetUID() != "" {
+				childWorkloadUIDs[job.GetUID()] = struct{}{}
+			}
+			continue
+		}
 		if !managedSigningOneShotBelongsToRoot(job.GetName(), job.GetLabels(), owner) {
 			continue
 		}
@@ -101,6 +121,9 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	podNames := make([]string, 0)
 	for i := range ownedPods.Items {
 		pod := &ownedPods.Items[i]
+		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) {
+			continue
+		}
 		if jobName, ok := managedSigningOneShotPodJobName(pod.GetName()); ok &&
 			managedSigningOneShotBelongsToRoot(jobName, pod.GetLabels(), owner) {
 			oneShotNames = append(oneShotNames, jobName)
@@ -142,6 +165,9 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) {
+			continue
+		}
 		if signerPodBelongsToRoot(pod, owner) || podMatchesSignerNames(pod, signerNames) {
 			return false, nil
 		}
@@ -753,6 +779,9 @@ func staleReservationSignerReplicaPodMatches(name string, reservation *appsv1.Co
 }
 
 func staleReservationOneShotPodMatches(name string, reservation *appsv1.ConsensusKeyReservation) bool {
+	if isManagedSigningOneShotName(name) {
+		return staleReservationJobMatches(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name}}, reservation)
+	}
 	managedJobName, ok := managedSigningOneShotPodJobName(name)
 	if !ok {
 		return false
@@ -818,6 +847,15 @@ func podMatchesSignerNames(pod *corev1.Pod, signerNames []string) bool {
 func controlledByUID(obj metav1.Object, uid types.UID) bool {
 	owner := metav1.GetControllerOf(obj)
 	return owner != nil && owner.UID == uid
+}
+
+func controlledByAnyUID(obj metav1.Object, uids map[types.UID]struct{}) bool {
+	owner := metav1.GetControllerOf(obj)
+	if owner == nil {
+		return false
+	}
+	_, ok := uids[owner.UID]
+	return ok
 }
 
 func reservationOwnerKind(owner client.Object) (string, error) {

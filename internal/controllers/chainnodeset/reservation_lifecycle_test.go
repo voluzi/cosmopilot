@@ -2,6 +2,7 @@ package chainnodeset
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,6 +160,22 @@ func TestFinalizeReservationOwnerChildrenBlocksStatusRecordedForeignIdentity(t *
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(child), &appsv1.ChainNode{}); err != nil {
 		t.Fatalf("ambiguous child must remain untouched: %v", err)
+	}
+}
+
+func TestFinalizeReservationOwnerChildrenBlocksClaimNamedForeignIdentity(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}}
+	reservation := nodeSetReservation(nodeSet, "reserved", "ckr-uid", nodeSetReservationLifecyclePublicKey, "nodes-validator")
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: reservation.Spec.Claim, Namespace: nodeSet.Namespace, UID: "child-uid"}}
+	r := newValidatorTestReconciler(t, nodeSet, reservation, child)
+	r.APIReader = r.Client
+
+	done, err := r.finalizeReservationOwnerChildren(context.Background(), nodeSet)
+	if err == nil || done || !strings.Contains(err.Error(), child.Name) {
+		t.Fatalf("reservation claim child without exact UID ownership must fail closed, done=%v err=%v", done, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(child), &appsv1.ChainNode{}); err != nil {
+		t.Fatalf("ambiguous claim child must remain untouched: %v", err)
 	}
 }
 
