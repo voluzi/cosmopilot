@@ -465,7 +465,7 @@ func TestFinalizeConsensusKeySigningPathsBlocksForeignManagedJob(t *testing.T) {
 	}
 }
 
-func TestCleanupManagedSigningPathDeletesJobPodBeforeJob(t *testing.T) {
+func TestCleanupManagedSigningPathDeletesJobBeforeWaitingForPod(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 		Name: "validator", Namespace: "default", UID: "owner-uid",
@@ -496,18 +496,21 @@ func TestCleanupManagedSigningPathDeletesJobPodBeforeJob(t *testing.T) {
 	if result.Done || !strings.Contains(result.Waiting, pod.Name) {
 		t.Fatalf("cleanup result = %#v, want wait for Job pod %q", result, pod.Name)
 	}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(job), &batchv1.Job{}); err != nil {
-		t.Fatalf("Job must remain until its pod is confirmed absent: %v", err)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(job), &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Job deletion must be requested before waiting for its pod, got %v", err)
 	}
 	freshPod := &corev1.Pod{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), freshPod); err != nil {
 		t.Fatal(err)
 	}
-	if freshPod.DeletionTimestamp == nil {
-		t.Fatal("Job pod deletion was not requested")
+	if freshPod.DeletionTimestamp != nil {
+		t.Fatal("Job pod must be left for foreground Job deletion")
 	}
 	freshPod.Finalizers = nil
-	if err := c.Update(context.Background(), freshPod); err != nil && !apierrors.IsNotFound(err) {
+	if err := c.Update(context.Background(), freshPod); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), freshPod); err != nil && !apierrors.IsNotFound(err) {
 		t.Fatal(err)
 	}
 

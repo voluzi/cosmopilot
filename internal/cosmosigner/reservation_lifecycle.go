@@ -248,17 +248,7 @@ func cleanupManagedSigningJob(ctx context.Context, reader client.Reader, c clien
 	key := client.ObjectKey{Namespace: namespace, Name: name}
 	if err := reader.Get(ctx, key, job); err != nil {
 		if apierrors.IsNotFound(err) {
-			pods := &corev1.PodList{}
-			if err := reader.List(ctx, pods, client.InNamespace(namespace)); err != nil {
-				return ManagedSigningPathCleanupResult{}, err
-			}
-			for i := range pods.Items {
-				pod := &pods.Items[i]
-				if strings.HasPrefix(pod.GetName(), name+"-") {
-					return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for orphaned Job Pod %s/%s to terminate", pod.GetNamespace(), pod.GetName())}, nil
-				}
-			}
-			return ManagedSigningPathCleanupResult{Done: true}, nil
+			return managedSigningJobPodsGone(ctx, reader, namespace, name)
 		}
 		return ManagedSigningPathCleanupResult{}, err
 	}
@@ -282,21 +272,6 @@ func cleanupManagedSigningJob(ctx context.Context, reader client.Reader, c clien
 		if controller == nil || controller.Kind != "Job" || controller.Name != job.GetName() || controller.UID != job.GetUID() {
 			return ManagedSigningPathCleanupResult{Blocked: fmt.Sprintf("Job Pod %s/%s does not belong to current Job UID %q; refusing claim cleanup", pod.GetNamespace(), pod.GetName(), job.GetUID())}, nil
 		}
-		if pod.GetUID() == "" {
-			return ManagedSigningPathCleanupResult{}, fmt.Errorf("Job Pod %s/%s has no UID; refusing an unguarded delete", pod.GetNamespace(), pod.GetName())
-		}
-		uid := pod.GetUID()
-		if pod.GetDeletionTimestamp().IsZero() {
-			if err := c.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
-				return ManagedSigningPathCleanupResult{}, err
-			}
-		}
-		remaining := &corev1.Pod{}
-		if err := reader.Get(ctx, client.ObjectKeyFromObject(pod), remaining); err == nil {
-			return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for Job Pod %s/%s to terminate", pod.GetNamespace(), pod.GetName())}, nil
-		} else if !apierrors.IsNotFound(err) {
-			return ManagedSigningPathCleanupResult{}, err
-		}
 	}
 
 	uid := job.GetUID()
@@ -311,6 +286,20 @@ func cleanupManagedSigningJob(ctx context.Context, reader client.Reader, c clien
 		return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for Job %s/%s to terminate", namespace, name)}, nil
 	} else if !apierrors.IsNotFound(err) {
 		return ManagedSigningPathCleanupResult{}, err
+	}
+	return managedSigningJobPodsGone(ctx, reader, namespace, name)
+}
+
+func managedSigningJobPodsGone(ctx context.Context, reader client.Reader, namespace, name string) (ManagedSigningPathCleanupResult, error) {
+	pods := &corev1.PodList{}
+	if err := reader.List(ctx, pods, client.InNamespace(namespace)); err != nil {
+		return ManagedSigningPathCleanupResult{}, err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if strings.HasPrefix(pod.GetName(), name+"-") {
+			return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for orphaned Job Pod %s/%s to terminate", pod.GetNamespace(), pod.GetName())}, nil
+		}
 	}
 	return ManagedSigningPathCleanupResult{Done: true}, nil
 }

@@ -279,11 +279,17 @@ func TestFinalizeConsensusKeyReservationOwnerWaitsForManagedJobPod(t *testing.T)
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), freshPod); err != nil {
 		t.Fatal(err)
 	}
-	if freshPod.DeletionTimestamp == nil {
-		t.Fatal("managed Job pod teardown was not requested")
+	if freshPod.DeletionTimestamp != nil {
+		t.Fatal("managed Job pod must be left for foreground Job deletion")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(job), &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("managed Job deletion was not requested before waiting for its pod: %v", err)
 	}
 	freshPod.Finalizers = nil
-	if err := c.Update(context.Background(), freshPod); err != nil && !apierrors.IsNotFound(err) {
+	if err := c.Update(context.Background(), freshPod); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), freshPod); err != nil && !apierrors.IsNotFound(err) {
 		t.Fatal(err)
 	}
 
