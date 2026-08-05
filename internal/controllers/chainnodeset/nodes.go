@@ -666,23 +666,7 @@ func isRecordedNodeSetChild(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNod
 }
 
 func recordedNodeSetChildIdentity(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) (nameRecorded, uidMatches bool) {
-	for _, status := range nodeSet.Status.Nodes {
-		if status.Name == child.GetName() {
-			nameRecorded = true
-			if status.UID != "" && status.UID == child.GetUID() {
-				return true, true
-			}
-		}
-	}
-	for _, status := range nodeSet.Status.Validators {
-		if status.Name == child.GetName() {
-			nameRecorded = true
-			if status.UID != "" && status.UID == child.GetUID() {
-				return true, true
-			}
-		}
-	}
-	return nameRecorded, false
+	return nodeSet.RecordedChildIdentity(child)
 }
 
 // exposeForInstance returns the ExposeConfig that should be applied to the i-th

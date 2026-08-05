@@ -38,6 +38,32 @@ func (nodeSet *ChainNodeSet) GetNamespacedName() string {
 	return types.NamespacedName{Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName()}.String()
 }
 
+// RecordedChildIdentity reports how child matches this ChainNodeSet's recorded node and validator
+// status. A name match alone is ambiguous — a same-name replacement carries a different UID — so
+// only uidMatches proves the recorded child is this exact object. Both the parent cleanup path and
+// standalone ChainNode orphan detection authorize on this, and must agree.
+func (nodeSet *ChainNodeSet) RecordedChildIdentity(child *ChainNode) (nameRecorded, uidMatches bool) {
+	for _, status := range nodeSet.Status.Nodes {
+		if status.Name != child.GetName() {
+			continue
+		}
+		nameRecorded = true
+		if status.UID != "" && status.UID == child.GetUID() {
+			return true, true
+		}
+	}
+	for _, status := range nodeSet.Status.Validators {
+		if status.Name != child.GetName() {
+			continue
+		}
+		nameRecorded = true
+		if status.UID != "" && status.UID == child.GetUID() {
+			return true, true
+		}
+	}
+	return nameRecorded, false
+}
+
 func (nodeSet *ChainNodeSet) HasValidator() bool {
 	if nodeSet.Spec.Validator != nil {
 		return true

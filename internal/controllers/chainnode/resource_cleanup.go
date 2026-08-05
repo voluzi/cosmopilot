@@ -102,7 +102,7 @@ func (r *Reconciler) refuseOrphanedRecordedChild(ctx context.Context, chainNode 
 	}
 	for i := range nodeSets.Items {
 		nodeSet := &nodeSets.Items[i]
-		if !recordsChildIdentity(nodeSet, chainNode) {
+		if _, uidMatches := nodeSet.RecordedChildIdentity(chainNode); !uidMatches {
 			continue
 		}
 		return fmt.Errorf(
@@ -111,20 +111,6 @@ func (r *Reconciler) refuseOrphanedRecordedChild(ctx context.Context, chainNode 
 		)
 	}
 	return nil
-}
-
-func recordsChildIdentity(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {
-	for _, status := range nodeSet.Status.Nodes {
-		if status.Name == child.GetName() && status.UID != "" && status.UID == child.GetUID() {
-			return true
-		}
-	}
-	for _, status := range nodeSet.Status.Validators {
-		if status.Name == child.GetName() && status.UID != "" && status.UID == child.GetUID() {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Reconciler) effectiveDeletionPolicy(ctx context.Context, chainNode *appsv1.ChainNode) (*appsv1.DeletionPolicy, error) {
