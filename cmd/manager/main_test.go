@@ -26,3 +26,17 @@ func TestIsRecordedStartupNodeSetChildRequiresExactUID(t *testing.T) {
 		t.Fatal("same-name replacement must not inherit the recorded ChainNodeSet root")
 	}
 }
+
+func TestIsRecordedStartupNodeSetChildBlocksUIDLessLegacyStatus(t *testing.T) {
+	runOpts.WorkerName = ""
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "set-fullnodes-0", Namespace: "default", UID: types.UID("node-uid")}}
+	nodeSet := appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: node.Name,
+		}}},
+	}
+	if !isRecordedStartupNodeSetChild(node, []appsv1.ChainNodeSet{nodeSet}) {
+		t.Fatal("UID-less pre-upgrade status must block standalone child migration")
+	}
+}

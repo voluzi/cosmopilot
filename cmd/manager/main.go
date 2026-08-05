@@ -206,13 +206,13 @@ func isRecordedStartupNodeSetChild(node *appsv1.ChainNode, nodeSets []appsv1.Cha
 			continue
 		}
 		for _, status := range nodeSet.Status.Nodes {
-			if status.Name == node.GetName() && status.UID != "" && status.UID == node.GetUID() {
-				return true
+			if status.Name == node.GetName() {
+				return status.UID == "" || status.UID == node.GetUID()
 			}
 		}
 		for _, status := range nodeSet.Status.Validators {
-			if status.Name == node.GetName() && status.UID != "" && status.UID == node.GetUID() {
-				return true
+			if status.Name == node.GetName() {
+				return status.UID == "" || status.UID == node.GetUID()
 			}
 		}
 	}

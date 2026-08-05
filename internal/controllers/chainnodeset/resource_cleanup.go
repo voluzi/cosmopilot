@@ -428,8 +428,12 @@ func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNod
 	allDone := true
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !metav1.IsControlledBy(pod, child) {
+		controlled := metav1.IsControlledBy(pod, child)
+		if !controlled && !isDeterministicChildPodName(pod.GetName(), child.GetName()) {
 			continue
+		}
+		if !controlled {
+			return false, fmt.Errorf("refusing durable cleanup while pod %s/%s is not controlled by ChainNode UID %s", pod.GetNamespace(), pod.GetName(), child.GetUID())
 		}
 		if !pod.GetDeletionTimestamp().IsZero() {
 			allDone = false
@@ -447,6 +451,25 @@ func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNod
 		}
 	}
 	return allDone, nil
+}
+
+func isDeterministicChildPodName(podName, childName string) bool {
+	if podName == childName {
+		return true
+	}
+	for _, suffix := range []string{
+		"-init-data",
+		"-config-generator",
+		"-genesis-init",
+		"-create-validator",
+		"-tmkms-generate-identity",
+		"-tmkms-vault-upload",
+	} {
+		if podName == childName+suffix {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) quiesceCosmoseed(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {

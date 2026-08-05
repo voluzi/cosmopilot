@@ -95,6 +95,35 @@ func TestFinalizeResourcesQuiescesLocalSignerAndAppliesDeletionPolicy(t *testing
 	}
 }
 
+func TestFinalizeResourcesBlocksOnOrphanedHelperPod(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "validator", Namespace: "default", UID: "node-uid",
+			Finalizers: []string{resourcecleanup.Finalizer},
+		},
+		Spec: appsv1.ChainNodeSpec{DeletionPolicy: &appsv1.DeletionPolicy{
+			DataVolumes: ptr.To(appsv1.DeletionPolicyDelete),
+		}},
+	}
+	helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: node.Name + "-init-data", Namespace: node.Namespace, UID: "helper-uid",
+	}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "pvc-uid"}}
+	_, _, err := resourcecleanup.PrepareGeneratedResource(pvc, node, scheme, resourcecleanup.ClassDataVolumes, true)
+	require.NoError(t, err)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, helper, pvc).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), node)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), helper.Name)
+	assert.Contains(t, err.Error(), "not controlled by ChainNode UID")
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(helper), &corev1.Pod{}))
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}))
+}
+
 func TestFinalizeResourcesRetainsControlledLegacyGeneratedKeys(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{

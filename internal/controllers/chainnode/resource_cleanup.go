@@ -192,8 +192,12 @@ func (r *Reconciler) quiesceNodePod(ctx context.Context, chainNode *appsv1.Chain
 	allDone := true
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !metav1.IsControlledBy(pod, chainNode) {
+		controlled := metav1.IsControlledBy(pod, chainNode)
+		if !controlled && !isDeterministicChainNodePodName(pod.GetName(), chainNode.GetName()) {
 			continue
+		}
+		if !controlled {
+			return false, fmt.Errorf("refusing durable cleanup while pod %s/%s is not controlled by ChainNode UID %s", pod.GetNamespace(), pod.GetName(), chainNode.GetUID())
 		}
 		if !pod.GetDeletionTimestamp().IsZero() {
 			allDone = false
@@ -211,6 +215,25 @@ func (r *Reconciler) quiesceNodePod(ctx context.Context, chainNode *appsv1.Chain
 		}
 	}
 	return allDone, nil
+}
+
+func isDeterministicChainNodePodName(podName, nodeName string) bool {
+	if podName == nodeName {
+		return true
+	}
+	for _, suffix := range []string{
+		"-init-data",
+		"-config-generator",
+		"-genesis-init",
+		"-create-validator",
+		"-tmkms-generate-identity",
+		"-tmkms-vault-upload",
+	} {
+		if podName == nodeName+suffix {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) namespaceTerminating(ctx context.Context, namespace string) (bool, error) {

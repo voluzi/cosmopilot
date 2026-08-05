@@ -234,6 +234,21 @@ func TestQuiesceAndDeleteChildrenLeavesInitializationPodToTerminatingChild(t *te
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(initPod), &corev1.Pod{}))
 }
 
+func TestQuiesceChildPodBlocksOnOrphanedHelperPod(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "set-fullnodes-0", Namespace: "default", UID: "child-uid"}}
+	helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-init-data", Namespace: child.Namespace, UID: "helper-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child, helper).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceChildPod(context.Background(), child)
+	require.Error(t, err)
+	assert.False(t, done)
+	assert.Contains(t, err.Error(), helper.Name)
+	assert.Contains(t, err.Error(), "not controlled by ChainNode UID")
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(helper), &corev1.Pod{}))
+}
+
 func TestQuiesceAndDeleteChildrenBlocksOnRecordedReplacementWithDifferentUID(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{
