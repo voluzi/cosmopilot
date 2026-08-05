@@ -1194,6 +1194,10 @@ func reconcileSnapshotDeletionJobForDesired(
 		return "", fmt.Errorf("snapshot deletion job %s/%s has UID %s, expected listed UID %s",
 			job.Namespace, job.Name, job.UID, expected.UID)
 	}
+	if !metav1.IsControlledBy(job, owner) {
+		return "", fmt.Errorf("snapshot deletion job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
+	}
 	if !int32PointersEqual(job.Spec.BackoffLimit, desired.Spec.BackoffLimit) {
 		if job.DeletionTimestamp != nil {
 			return "", fmt.Errorf("stale %s job %s/%s is terminating: %w",

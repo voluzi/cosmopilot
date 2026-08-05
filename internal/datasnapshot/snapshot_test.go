@@ -1159,6 +1159,35 @@ func TestEnsureSnapshotJobReportsUIDPreconditionConflict(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
 }
 
+func TestReconcileSnapshotDeletionJobForDesiredRejectsForeignJobBeforeReplacement(t *testing.T) {
+	owner := testJobOwner()
+	foreignOwner := &corev1.ConfigMap{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: owner.Namespace, UID: "foreign-owner-uid"},
+	}
+	job := desiredDeleteJob(owner, gcsExporter)
+	job.UID = "foreign-delete-uid"
+	job.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(foreignOwner)}
+	job.Spec.BackoffLimit = ptr.To[int32](5)
+	desired := job.DeepCopy()
+	desired.OwnerReferences = []metav1.OwnerReference{ownerReferenceTo(owner)}
+	desired.Spec.BackoffLimit = ptr.To[int32](0)
+	client := fake.NewSimpleClientset(job)
+
+	_, err := reconcileSnapshotDeletionJobForDesired(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: job.UID, Purpose: SnapshotJobDelete,
+	}, gcsExporter, desired)
+	require.ErrorContains(t, err, "not controlled by snapshot owner")
+	assert.NotErrorIs(t, err, ErrStaleJobReplaced)
+
+	stored, getErr := client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+	require.NoError(t, getErr, "foreign Job must survive")
+	assert.Equal(t, job.UID, stored.UID)
+	for _, action := range client.Actions() {
+		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "jobs")
+	}
+}
+
 func TestCleanupSnapshotDeletionJobTreatsNotFoundAsSuccess(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	owner := testJobOwner()

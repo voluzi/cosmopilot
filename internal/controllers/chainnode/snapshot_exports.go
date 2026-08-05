@@ -315,6 +315,29 @@ func (r *Reconciler) startSnapshotExportDeleteAttempt(
 	})
 }
 
+func (r *Reconciler) resumeSnapshotExportDeleteAttempt(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	id string,
+) (bool, error) {
+	return r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
+		for i := range fresh.Status.SnapshotExports {
+			export := &fresh.Status.SnapshotExports[i]
+			if export.ID != id {
+				continue
+			}
+			if export.Phase != appsv1.SnapshotExportPhaseCleanupRequired ||
+				export.DeleteAttempts == 0 || snapshotExportDeleteTerminal(export) {
+				return false, nil
+			}
+			export.Phase = appsv1.SnapshotExportPhaseDeleting
+			export.Message = ""
+			return true, nil
+		}
+		return false, nil
+	})
+}
+
 func (r *Reconciler) recordSnapshotExportDeleteFailure(
 	ctx context.Context,
 	chainNode *appsv1.ChainNode,
@@ -475,9 +498,23 @@ func (r *Reconciler) mutateSnapshotExportStatus(
 	}
 	if latest != nil {
 		mergeSnapshotExportOwnedStatus(chainNode, latest)
-		chainNode.ResourceVersion = latest.ResourceVersion
+		refreshSnapshotExportResourceVersion(chainNode, latest)
 	}
 	return changed, nil
+}
+
+func refreshSnapshotExportResourceVersion(chainNode, latest *appsv1.ChainNode) {
+	// Status writes advance ResourceVersion. Carry it forward only if the caller
+	// still matches the freshly read mutable object; pending caller mutations
+	// retain the stale version and must conflict on a later full Update.
+	callerMeta := chainNode.ObjectMeta.DeepCopy()
+	latestMeta := latest.ObjectMeta.DeepCopy()
+	callerMeta.ResourceVersion = ""
+	latestMeta.ResourceVersion = ""
+	if apiequality.Semantic.DeepEqual(callerMeta, latestMeta) &&
+		apiequality.Semantic.DeepEqual(chainNode.Spec, latest.Spec) {
+		chainNode.ResourceVersion = latest.ResourceVersion
+	}
 }
 
 func mergeSnapshotExportOwnedStatus(chainNode, latest *appsv1.ChainNode) {

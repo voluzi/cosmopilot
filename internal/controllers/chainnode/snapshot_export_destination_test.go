@@ -1632,6 +1632,32 @@ func TestPendingSnapshotExportRetryWaitsForRecordedReference(t *testing.T) {
 	}
 }
 
+func TestMutateSnapshotExportStatusDoesNotAdvanceVersionAcrossConcurrentMutableChanges(t *testing.T) {
+	node := destinationTestChainNode(nil)
+	node.Labels = map[string]string{"generation": "caller"}
+	reconciler := destinationTestReconciler(t, node, nil)
+	caller := node.DeepCopy()
+	originalVersion := caller.ResourceVersion
+
+	latest := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), latest))
+	latest.Labels["generation"] = "latest"
+	latest.Spec.Persistence.Snapshots.Frequency = "12h"
+	require.NoError(t, reconciler.Update(context.Background(), latest))
+
+	changed, err := reconciler.mutateSnapshotExportStatus(context.Background(), caller, func(fresh *appsv1.ChainNode) (bool, error) {
+		fresh.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{ID: "export-1"}}
+		return true, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, "caller", caller.Labels["generation"])
+	assert.Equal(t, "240h", caller.Spec.Persistence.Snapshots.Frequency)
+	assert.Equal(t, originalVersion, caller.ResourceVersion)
+	require.Len(t, caller.Status.SnapshotExports, 1)
+	assert.Equal(t, "export-1", caller.Status.SnapshotExports[0].ID)
+}
+
 func TestSnapshotExportReferenceLossDoesNotExhaustActiveFinalDeleteAttempt(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1757,6 +1783,12 @@ func TestSnapshotExportReferenceLossDoesNotExhaustActiveFinalDeleteAttempt(t *te
 			deleted, err = reconciler.isTarballDeleted(context.Background(), stored, snapshot)
 			require.NoError(t, err)
 			assert.False(t, deleted)
+			stored = getDestinationTestNode(t, reconciler, node)
+			export = &stored.Status.SnapshotExports[0]
+			assert.Equal(t, appsv1.SnapshotExportPhaseDeleting, export.Phase)
+			assert.Empty(t, export.Message)
+			condition = findCondition(stored.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
+			assert.Nil(t, condition)
 			active, err = clientSet.BatchV1().Jobs(node.Namespace).Get(
 				context.Background(), job.Name, metav1.GetOptions{},
 			)

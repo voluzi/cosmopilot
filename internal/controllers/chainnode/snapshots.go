@@ -1209,6 +1209,10 @@ func (r *Reconciler) reconcileSnapshotExportDeletion(
 			if _, err = r.startSnapshotExportDeleteAttempt(ctx, chainNode, export.ID, export.DeleteAttempts, now); err != nil {
 				return "", err
 			}
+		} else if export.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
+			if _, err = r.resumeSnapshotExportDeleteAttempt(ctx, chainNode, export.ID); err != nil {
+				return "", err
+			}
 		}
 		return status, nil
 
