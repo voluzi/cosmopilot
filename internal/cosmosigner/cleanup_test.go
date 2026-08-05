@@ -278,6 +278,39 @@ func TestNamespaceTerminationIgnoresSameNamePodForOrphanedStatePVC(t *testing.T)
 	}
 }
 
+func TestNamespaceTerminationBlocksOrphanPodStillMountingRetainedState(t *testing.T) {
+	const namespace, name = "default", "orphaned-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	claimName := dataVolumeName + "-" + name + "-0"
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: claimName, Namespace: namespace,
+		Labels: map[string]string{labelOwnerUID: string(owner.UID)}, Finalizers: []string{RetainedStateFinalizer},
+	}}
+	// Labels and controller reference are both gone, so only the mounted claim ties this pod to the
+	// owner's signing state.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: namespace, UID: "pod-uid"},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: dataVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+			},
+		}}},
+	}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc, pod).Build()
+
+	done, err := QuiesceOwnerForNamespaceTermination(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("a pod still mounting the retained state claim must block state-finalizer release")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+		t.Fatalf("unverified signer pod must remain untouched: %v", err)
+	}
+}
+
 func TestNamespaceTerminationBlocksLabelStrippedSignerPodDerivedFromStatePVC(t *testing.T) {
 	const namespace, name = "default", "orphaned-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}

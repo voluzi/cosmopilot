@@ -267,6 +267,7 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return false, err
 	}
+	ownedClaims := map[string]struct{}{}
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
@@ -277,6 +278,7 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 			name = canonicalName
 		}
 		if isStatefulSetDataPVC(pvc.GetName(), name) {
+			ownedClaims[pvc.GetName()] = struct{}{}
 			if _, exists := ownedNames[name]; !exists {
 				ownedNames[name] = ""
 			}
@@ -309,8 +311,14 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 			continue
 		}
 		controller := metav1.GetControllerOf(pod)
+		// A pod that still mounts a retained state claim is using this owner's signing state
+		// regardless of how far its labels or controller reference have drifted, so block release
+		// instead of skipping it. Mounting the claim is a physical relationship, not an inference.
 		if matchedByName && stsUID == "" &&
 			(controller == nil || controller.Kind != "StatefulSet" || controller.Name != instance) {
+			if podMountsAnyClaim(pod, ownedClaims) {
+				allPodsGone = false
+			}
 			continue
 		}
 		if stsUID == "" || controller == nil || controller.Kind != "StatefulSet" || controller.Name != instance || controller.UID != stsUID {
@@ -354,6 +362,19 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 		}
 	}
 	return allStatefulSetsGone, nil
+}
+
+func podMountsAnyClaim(pod *corev1.Pod, claims map[string]struct{}) bool {
+	for i := range pod.Spec.Volumes {
+		source := pod.Spec.Volumes[i].PersistentVolumeClaim
+		if source == nil {
+			continue
+		}
+		if _, owned := claims[source.ClaimName]; owned {
+			return true
+		}
+	}
+	return false
 }
 
 func deleteOwnedKeyJobPods(ctx context.Context, c client.Client, owner client.Object, namespace string) (bool, error) {
