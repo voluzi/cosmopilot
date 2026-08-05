@@ -629,6 +629,14 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	}
 	if node.GetDeletionTimestamp().IsZero() {
 		changed := false
+		workerName := nodeSet.GetLabels()[controllers.LabelWorkerName]
+		if node.GetLabels()[controllers.LabelWorkerName] != workerName {
+			if node.Labels == nil {
+				node.Labels = map[string]string{}
+			}
+			node.Labels[controllers.LabelWorkerName] = workerName
+			changed = true
+		}
 		if !metav1.IsControlledBy(node, nodeSet) {
 			if err := controllerutil.SetControllerReference(nodeSet, node, r.Scheme); err != nil {
 				return err

@@ -70,6 +70,33 @@ func TestDeleteNodeWithCleanupFinalizerAdoptsRecordedLegacyChild(t *testing.T) {
 	assert.True(t, metav1.IsControlledBy(fresh, nodeSet))
 }
 
+func TestDeleteNodeWithCleanupFinalizerRestoresWorkerLabel(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "set", Namespace: "default", UID: types.UID("set-uid"),
+			Labels: map[string]string{controllers.LabelWorkerName: "worker-a"},
+		},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: types.UID("child-uid"), Group: "fullnodes",
+		}}},
+	}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: types.UID("child-uid"),
+		Labels: map[string]string{
+			controllers.LabelChainNodeSet: nodeSet.Name,
+			controllers.LabelWorkerName:   "none",
+		},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, child)
+
+	require.NoError(t, r.deleteNodeWithCleanupFinalizer(context.Background(), nodeSet, child.Name))
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(child), fresh))
+	assert.Equal(t, "worker-a", fresh.Labels[controllers.LabelWorkerName])
+	assert.False(t, fresh.DeletionTimestamp.IsZero())
+	assert.Contains(t, fresh.Finalizers, resourcecleanup.Finalizer)
+}
+
 func TestEnsureNodeRefusesRecordedValidatorReplacementWithDifferentUID(t *testing.T) {
 	const name = "set-validator"
 	nodeSet := &appsv1.ChainNodeSet{

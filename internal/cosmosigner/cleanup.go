@@ -261,7 +261,15 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 		instance := pod.GetLabels()[labelInstance]
 		stsUID, owned := ownedNames[instance]
 		if !owned {
-			continue
+			for name, uid := range ownedNames {
+				if isStatefulSetReplicaPodName(pod.GetName(), name) {
+					instance, stsUID, owned = name, uid, true
+					break
+				}
+			}
+			if !owned {
+				continue
+			}
 		}
 		if pod.GetLabels()[labelAppName] != appNameCosmosigner && !isStatefulSetReplicaPodName(pod.GetName(), instance) {
 			continue

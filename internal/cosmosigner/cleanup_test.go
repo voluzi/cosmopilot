@@ -199,6 +199,34 @@ func TestNamespaceTerminationDoesNotDeleteForeignSameInstancePod(t *testing.T) {
 	}
 }
 
+func TestNamespaceTerminationRecognizesSignerPodWhenLabelsDrift(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, UID: "owned-sts",
+		OwnerReferences: []metav1.OwnerReference{{UID: owner.UID, Controller: boolPointer(true)}},
+	}, Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: InstanceLabels(name)}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-0", Namespace: namespace, UID: "pod-uid",
+		Labels: map[string]string{labelAppName: "edited", labelInstance: "edited"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1", Kind: "StatefulSet", Name: name, UID: sts.UID, Controller: boolPointer(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts, pod).Build()
+
+	done, err := QuiesceOwnerForNamespaceTermination(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !done {
+		t.Fatal("label-drifted signer pod prevented namespace termination cleanup from converging")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("label-drifted signer pod must be absent, got %v", err)
+	}
+}
+
 func TestFinalizeOwnerWaitsForSignerThenDeletesRetainedClaims(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
