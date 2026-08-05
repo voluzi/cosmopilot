@@ -1225,7 +1225,9 @@ type SnapshotExportSecretReference struct {
 // object store used by an upload. The namespace is always the owning ChainNode's namespace.
 type SnapshotExportDestination struct {
 	Provider SnapshotExportProvider `json:"provider"`
-	Bucket   string                 `json:"bucket"`
+	// Bucket is omitted for unknown legacy destinations that require explicit operator cleanup.
+	// +optional
+	Bucket string `json:"bucket,omitempty"`
 	// +optional
 	Region string `json:"region,omitempty"`
 	// +optional

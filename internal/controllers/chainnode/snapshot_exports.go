@@ -231,7 +231,7 @@ func (r *Reconciler) setSnapshotExportPhase(
 func snapshotExportPhaseTransitionAllowed(from, to appsv1.SnapshotExportPhase) bool {
 	switch from {
 	case appsv1.SnapshotExportPhaseUploading:
-		return to == appsv1.SnapshotExportPhaseUploaded || to == appsv1.SnapshotExportPhaseCleanupRequired
+		return to == appsv1.SnapshotExportPhaseUploaded || to == appsv1.SnapshotExportPhaseCleanupRequired || to == appsv1.SnapshotExportPhaseDeleted
 	case appsv1.SnapshotExportPhaseUploaded:
 		return to == appsv1.SnapshotExportPhaseDeleting || to == appsv1.SnapshotExportPhaseCleanupRequired || to == appsv1.SnapshotExportPhaseDeleted
 	case appsv1.SnapshotExportPhaseDeleting:
@@ -536,8 +536,6 @@ func (r *Reconciler) reconcileSnapshotExportAcknowledgements(ctx context.Context
 				export.Message = "cleanup explicitly acknowledged by operator without deletion proof"
 				applied[export.ID] = struct{}{}
 				mutated = true
-			case appsv1.SnapshotExportPhaseAcknowledged:
-				applied[export.ID] = struct{}{}
 			}
 		}
 		return mutated, nil

@@ -6362,6 +6362,8 @@ spec:
                         object store used by an upload. The namespace is always the owning ChainNode's namespace.
                       properties:
                         bucket:
+                          description: Bucket is omitted for unknown legacy destinations
+                            that require explicit operator cleanup.
                           type: string
                         credentialsSecret:
                           description: |-
@@ -6393,7 +6395,6 @@ spec:
                         serviceAccountName:
                           type: string
                       required:
-                      - bucket
                       - provider
                       type: object
                     id:

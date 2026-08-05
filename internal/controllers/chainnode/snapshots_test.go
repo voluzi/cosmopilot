@@ -359,25 +359,23 @@ func TestStaleUploadJobReplacementDoesNotChargeFailedAttempt(t *testing.T) {
 
 	ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
 	assert.False(t, ready)
-	require.ErrorIs(t, err, datasnapshot.ErrStaleJobReplaced)
+	require.NoError(t, err)
 
 	stored := &snapshotv1.VolumeSnapshot{}
 	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
-	_, exporting := stored.Annotations[controllers.AnnotationExportingTarball]
-	assert.False(t, exporting, "export state must be cleared so a fresh upload starts")
-	_, attempts := stored.Annotations[controllers.AnnotationTarballExportAttempts]
-	assert.False(t, attempts, "the intentional deletion must not count as a failed attempt")
-
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationExportingTarball])
+	assert.Equal(t, strconv.Itoa(tarballExportMaxAttempts-1), stored.Annotations[controllers.AnnotationTarballExportAttempts])
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, storedNode))
+	require.Len(t, storedNode.Status.SnapshotExports, 1)
+	assert.Equal(t, appsv1.SnapshotExportProviderUnknown, storedNode.Status.SnapshotExports[0].Destination.Provider)
+	assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, storedNode.Status.SnapshotExports[0].Phase)
+	jobs, listErr := clientSet.BatchV1().Jobs("default").List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	require.Len(t, jobs.Items, 1)
+	assert.Equal(t, "s3-exporter", jobs.Items[0].Labels["exporter"])
 	event := requireRecordedEvent(t, recorder)
-	assert.Contains(t, event, "Normal "+appsv1.ReasonSnapshotJobReplaced)
-	assert.Contains(t, event, "Replaced stale upload Job default/-00010101000000-upload")
-	assert.Contains(t, event, "11111111-2222-3333-4444-555555555555")
-	assert.Contains(t, event, "s3-exporter")
-	assert.Contains(t, event, "gcs-exporter")
-	assert.NotContains(t, event, "desired-gcs-credentials")
-	assert.NotContains(t, event, "credentials.json")
-	message := strings.TrimPrefix(event, "Normal "+appsv1.ReasonSnapshotJobReplaced+" ")
-	assert.LessOrEqual(t, len(message), 256)
+	assert.Contains(t, event, appsv1.ReasonTarballCleanupRequired)
 }
 
 func TestTarballExportReplacementDoesNotEmitWarningEvent(t *testing.T) {
@@ -655,20 +653,17 @@ func TestTarballExportFailureWaitsForCleanupBeforeRetry(t *testing.T) {
 
 	ready, err := reconciler.isTarballReady(context.Background(), chainNode, snapshot)
 	assert.False(t, ready)
-	require.ErrorContains(t, err, "delete failed")
+	require.NoError(t, err)
 	stored := &snapshotv1.VolumeSnapshot{}
 	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
 	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationExportingTarball])
 	_, hasAttempts := stored.Annotations[controllers.AnnotationTarballExportAttempts]
 	assert.False(t, hasAttempts)
-
-	ready, err = reconciler.isTarballReady(context.Background(), chainNode, stored)
-	assert.False(t, ready)
-	require.NoError(t, err)
-	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "snapshot", Namespace: "default"}, stored))
-	_, exporting := stored.Annotations[controllers.AnnotationExportingTarball]
-	assert.False(t, exporting)
-	assert.Equal(t, "1", stored.Annotations[controllers.AnnotationTarballExportAttempts])
+	assert.Equal(t, 0, deleteCalls)
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(context.Background(), types.NamespacedName{Name: "node", Namespace: "default"}, storedNode))
+	require.Len(t, storedNode.Status.SnapshotExports, 1)
+	assert.Equal(t, appsv1.SnapshotExportProviderUnknown, storedNode.Status.SnapshotExports[0].Destination.Provider)
 }
 
 func TestIsTarballDeletedWaitsForDeleteJobSuccess(t *testing.T) {

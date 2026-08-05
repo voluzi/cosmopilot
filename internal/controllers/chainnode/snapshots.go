@@ -321,7 +321,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					return err
 				}
 				if expired {
-					deleteTarball := chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+					deleteTarball := shouldDeleteSnapshotTarballOnExpire(chainNode, &snapshot)
 					cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
 					tarballName := tarballNameForSnapshot(chainNode, &snapshot)
 					if deleteTarball {
@@ -380,7 +380,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		// Delete oldest snapshots (from the beginning of sorted slice)
 		for i := 0; i < toDelete; i++ {
 			snapshot := snapshots[i]
-			deleteTarball := chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+			deleteTarball := shouldDeleteSnapshotTarballOnExpire(chainNode, &snapshot)
 			cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
 			tarballName := tarballNameForSnapshot(chainNode, &snapshot)
 			if deleteTarball {
@@ -853,14 +853,20 @@ func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainN
 func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
 	export := snapshotExportFor(chainNode, snapshot)
 	if export == nil {
+		if r.Client == nil {
+			return r.isTarballReadyLegacy(ctx, chainNode, snapshot)
+		}
 		var err error
-		export, err = r.ensureSnapshotExportStatus(ctx, chainNode, snapshot)
+		export, err = r.ensureUnknownSnapshotExportStatus(ctx, chainNode, snapshot)
 		if err != nil {
 			if stderrors.Is(err, errSnapshotExportStatusUnavailable) {
 				return r.isTarballReadyLegacy(ctx, chainNode, snapshot)
 			}
 			return false, err
 		}
+	}
+	if export.Destination.Provider == appsv1.SnapshotExportProviderUnknown {
+		return false, nil
 	}
 	exporter, err := r.tarballProviderForExport(chainNode, export)
 	if err != nil {
@@ -1102,6 +1108,15 @@ func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, e
 		appsv1.ReasonSnapshotJobReplaced,
 		message,
 	)
+}
+
+func shouldDeleteSnapshotTarballOnExpire(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {
+	if export := snapshotExportFor(chainNode, snapshot); export != nil {
+		return export.DeleteOnExpire
+	}
+	return chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil &&
+		chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
+		chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
 }
 
 func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {

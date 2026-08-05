@@ -2,8 +2,10 @@ package chainnode
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -170,11 +172,12 @@ func TestRecordedDestinationDeletionSurvivesControllerRestart(t *testing.T) {
 		controllers.AnnotationSnapshotRetention: retention,
 	}
 	exportRecord := appsv1.SnapshotExportStatus{
-		ID:           "export-1",
-		SnapshotName: snapshot.Name,
-		SnapshotUID:  snapshot.UID,
-		ObjectName:   fmt.Sprintf("chain-1-%s-original", snapshot.CreationTimestamp.UTC().Format(timeLayout)),
-		Phase:        appsv1.SnapshotExportPhaseUploaded,
+		ID:             "export-1",
+		SnapshotName:   snapshot.Name,
+		SnapshotUID:    snapshot.UID,
+		ObjectName:     fmt.Sprintf("chain-1-%s-original", snapshot.CreationTimestamp.UTC().Format(timeLayout)),
+		Phase:          appsv1.SnapshotExportPhaseUploaded,
+		DeleteOnExpire: true,
 		Destination: appsv1.SnapshotExportDestination{
 			Provider:          appsv1.SnapshotExportProviderS3,
 			Bucket:            "old-s3",
@@ -300,11 +303,12 @@ func TestRemovedRecordedCredentialsRequireExplicitCleanup(t *testing.T) {
 		controllers.AnnotationSnapshotRetention: retention,
 	}
 	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
-		ID:           "missing-creds",
-		SnapshotName: snapshot.Name,
-		SnapshotUID:  snapshot.UID,
-		ObjectName:   "old-object",
-		Phase:        appsv1.SnapshotExportPhaseUploaded,
+		ID:             "missing-creds",
+		SnapshotName:   snapshot.Name,
+		SnapshotUID:    snapshot.UID,
+		ObjectName:     "old-object",
+		Phase:          appsv1.SnapshotExportPhaseUploaded,
+		DeleteOnExpire: true,
 		Destination: appsv1.SnapshotExportDestination{
 			Provider: appsv1.SnapshotExportProviderS3,
 			Bucket:   "old-s3",
@@ -525,12 +529,13 @@ func TestCleanupRequiredSnapshotDoesNotBlockUnrelatedCountRetention(t *testing.T
 	}
 	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{
 		{
-			ID:           "blocked",
-			SnapshotName: snapshots[0].Name,
-			SnapshotUID:  snapshots[0].UID,
-			ObjectName:   "blocked-object",
-			Phase:        appsv1.SnapshotExportPhaseCleanupRequired,
-			Message:      "operator cleanup required",
+			ID:             "blocked",
+			SnapshotName:   snapshots[0].Name,
+			SnapshotUID:    snapshots[0].UID,
+			ObjectName:     "blocked-object",
+			Phase:          appsv1.SnapshotExportPhaseCleanupRequired,
+			DeleteOnExpire: true,
+			Message:        "operator cleanup required",
 			Destination: appsv1.SnapshotExportDestination{
 				Provider: appsv1.SnapshotExportProviderS3,
 				Bucket:   "old-bucket",
@@ -829,6 +834,57 @@ func (failing *patchFailingClient) Patch(context.Context, client.Object, client.
 	return failing.err
 }
 
+func TestIsTarballReadyRequiresAcknowledgementForLegacyInFlightExport(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "current-bucket"}})
+	snapshot := destinationTestSnapshot()
+	snapshot.Annotations = map[string]string{controllers.AnnotationExportingTarball: strconv.FormatBool(true)}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	ready, err := reconciler.isTarballReady(context.Background(), node, snapshot)
+	require.NoError(t, err)
+	assert.False(t, ready)
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), stored))
+	require.Len(t, stored.Status.SnapshotExports, 1)
+	assert.Equal(t, appsv1.SnapshotExportProviderUnknown, stored.Status.SnapshotExports[0].Destination.Provider)
+	assert.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, stored.Status.SnapshotExports[0].Phase)
+	jobs, listErr := reconciler.snapshotKubernetesClient().BatchV1().Jobs(node.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, listErr)
+	assert.Empty(t, jobs.Items)
+}
+
+func TestSnapshotExportDeletePolicyRemainsBoundToRecordedExport(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "old"}, DeleteOnExpire: ptr.To(true)})
+	snapshot := destinationTestSnapshot()
+	export, err := newSnapshotExportStatus(node, snapshot)
+	require.NoError(t, err)
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{export}
+	node.Spec.Persistence.Snapshots.ExportTarball = nil
+
+	assert.True(t, shouldDeleteSnapshotTarballOnExpire(node, snapshot))
+	node.Status.SnapshotExports[0].DeleteOnExpire = false
+	assert.False(t, shouldDeleteSnapshotTarballOnExpire(node, snapshot))
+}
+
+func TestUploadingSnapshotExportCanConvergeToDeleted(t *testing.T) {
+	assert.True(t, snapshotExportPhaseTransitionAllowed(appsv1.SnapshotExportPhaseUploading, appsv1.SnapshotExportPhaseDeleted))
+}
+
+func TestSnapshotExportAcknowledgementEventsOnlyReportNewTransitions(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	node.Annotations = map[string]string{controllers.AnnotationSnapshotExportCleanupAcknowledgement: "already,new"}
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{
+		{ID: "already", SnapshotName: "old", ObjectName: "old", Phase: appsv1.SnapshotExportPhaseAcknowledged, Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderUnknown}},
+		{ID: "new", SnapshotName: "new", ObjectName: "new", Phase: appsv1.SnapshotExportPhaseCleanupRequired, Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderUnknown}},
+	}
+	reconciler := destinationTestReconciler(t, node, nil)
+
+	require.NoError(t, reconciler.reconcileSnapshotExportAcknowledgements(context.Background(), node))
+	events := strings.Join(drainRecordedEvents(reconciler.recorder.(*record.FakeRecorder)), "\n")
+	assert.Contains(t, events, "cleanup new")
+	assert.NotContains(t, events, "cleanup already")
+}
+
 func TestSnapshotExportStatusIDIsStableAndDNSLabelSafe(t *testing.T) {
 	node := destinationTestChainNode(&appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "bucket", Region: "region"}})
 	snapshot := destinationTestSnapshot()
@@ -841,5 +897,9 @@ func TestSnapshotExportStatusIDIsStableAndDNSLabelSafe(t *testing.T) {
 	assert.Equal(t, first.ID, strings.ToLower(first.ID))
 	assert.NotContains(t, first.ID, "/")
 	assert.NotContains(t, first.ID, "_")
-	assert.True(t, strings.HasPrefix(first.ID, fmt.Sprintf("export-%x", snapshot.UID)[:7]))
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		string(node.UID), snapshot.Name, string(snapshot.UID), first.ObjectName,
+		string(first.Destination.Provider), first.Destination.Bucket, first.Destination.Endpoint,
+	}, "\x00")))
+	assert.Equal(t, fmt.Sprintf("export-%x", digest[:8]), first.ID)
 }

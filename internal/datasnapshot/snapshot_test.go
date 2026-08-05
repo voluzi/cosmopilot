@@ -1068,6 +1068,49 @@ func TestEnsureSnapshotJobRejectsLegacyJobWithDifferentPodIdentity(t *testing.T)
 	assert.Equal(t, labelDestination, replacement.ConflictingLabel)
 }
 
+func TestEnsureSnapshotJobRejectsLegacyJobWithDifferentSecurityOrPullPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*batchv1.Job)
+	}{
+		{
+			name: "pod security context",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)}
+			},
+		},
+		{
+			name: "container security context",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)}
+			},
+		},
+		{
+			name: "image pull policy",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := testJobOwner()
+			desired := desiredDeleteJob(owner, "s3-exporter")
+			desired.Labels[labelDestination] = "destination-id"
+			desired.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+			desired.Spec.Template.Spec.Containers = []corev1.Container{{Name: "dataexporter", Image: "exporter:v1"}}
+			existing := desired.DeepCopy()
+			existing.UID = "legacy-uid"
+			delete(existing.Labels, labelDestination)
+			tt.mutate(existing)
+			client := fake.NewSimpleClientset(existing)
+
+			_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
+			require.ErrorIs(t, err, ErrStaleJobReplaced)
+		})
+	}
+}
+
 func TestEnsureSnapshotJobReportsDeleteFailureOfStaleJob(t *testing.T) {
 	owner := testJobOwner()
 	client := fake.NewSimpleClientset(&batchv1.Job{

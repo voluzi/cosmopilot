@@ -261,6 +261,7 @@ type snapshotJobPodIdentity struct {
 	ServiceAccountName string
 	PriorityClassName  string
 	RestartPolicy      corev1.RestartPolicy
+	SecurityContext    *corev1.PodSecurityContext
 	ImagePullSecrets   []corev1.LocalObjectReference
 	Volumes            []corev1.Volume
 	InitContainers     []snapshotJobContainerIdentity
@@ -268,14 +269,16 @@ type snapshotJobPodIdentity struct {
 }
 
 type snapshotJobContainerIdentity struct {
-	Name         string
-	Image        string
-	Command      []string
-	Args         []string
-	WorkingDir   string
-	Env          []corev1.EnvVar
-	EnvFrom      []corev1.EnvFromSource
-	VolumeMounts []corev1.VolumeMount
+	Name            string
+	Image           string
+	Command         []string
+	Args            []string
+	WorkingDir      string
+	Env             []corev1.EnvVar
+	EnvFrom         []corev1.EnvFromSource
+	VolumeMounts    []corev1.VolumeMount
+	ImagePullPolicy corev1.PullPolicy
+	SecurityContext *corev1.SecurityContext
 }
 
 func snapshotJobPodIdentityMatches(actual, desired *batchv1.Job) bool {
@@ -292,6 +295,7 @@ func snapshotJobIdentity(job *batchv1.Job) snapshotJobPodIdentity {
 		ServiceAccountName: serviceAccountName,
 		PriorityClassName:  pod.PriorityClassName,
 		RestartPolicy:      pod.RestartPolicy,
+		SecurityContext:    pod.SecurityContext,
 		ImagePullSecrets:   pod.ImagePullSecrets,
 		Volumes:            normalizedSnapshotJobVolumes(pod.Volumes),
 		InitContainers:     snapshotJobContainerIdentities(pod.InitContainers),
@@ -315,14 +319,16 @@ func snapshotJobContainerIdentities(containers []corev1.Container) []snapshotJob
 	for i := range containers {
 		container := containers[i]
 		identities[i] = snapshotJobContainerIdentity{
-			Name:         container.Name,
-			Image:        container.Image,
-			Command:      container.Command,
-			Args:         container.Args,
-			WorkingDir:   container.WorkingDir,
-			Env:          container.Env,
-			EnvFrom:      container.EnvFrom,
-			VolumeMounts: container.VolumeMounts,
+			Name:            container.Name,
+			Image:           container.Image,
+			Command:         container.Command,
+			Args:            container.Args,
+			WorkingDir:      container.WorkingDir,
+			Env:             container.Env,
+			EnvFrom:         container.EnvFrom,
+			VolumeMounts:    container.VolumeMounts,
+			ImagePullPolicy: container.ImagePullPolicy,
+			SecurityContext: container.SecurityContext,
 		}
 	}
 	return identities
