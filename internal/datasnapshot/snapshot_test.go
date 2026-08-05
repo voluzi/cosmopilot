@@ -1365,6 +1365,26 @@ func requireJobDeleteAction(t *testing.T, actions []k8stesting.Action) k8stestin
 	return nil
 }
 
+func TestSnapshotJobsFromJobsMarksLegacyUploadWithoutDestinationAsPrevious(t *testing.T) {
+	job := batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "snapshot-upload", UID: "upload-uid",
+			Labels: map[string]string{
+				labelExporter: "gcs-exporter", labelType: typeUpload,
+			},
+		},
+		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "dataexporter", Args: []string{"gcs", "upload", "old-bucket", "snapshot"}}},
+		}}},
+	}
+
+	jobs := snapshotJobsFromJobs([]batchv1.Job{job}, "gcs-exporter", "current-destination")
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "gcs-exporter", jobs[0].Exporter)
+	require.NotNil(t, jobs[0].Source)
+	assert.Empty(t, jobs[0].Source.Labels[labelDestination])
+}
+
 func TestSnapshotJobsFromJobsMarksSameExporterDifferentDestinationUploadAsPrevious(t *testing.T) {
 	job := batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name: "snapshot-upload", UID: "upload-uid",

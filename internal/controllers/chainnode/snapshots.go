@@ -347,15 +347,14 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					}
 					logger.Info("deleting expired pvc snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[controllers.AnnotationSnapshotRetention])
 					snapshotUID := snapshot.UID
-					if !deleteTarball {
-						if export := snapshotExportFor(chainNode, &snapshot); export != nil {
-							if err = r.removeSnapshotExport(ctx, chainNode, export.ID); err != nil {
-								return err
-							}
-						}
-					}
+					retainedExport := snapshotExportFor(chainNode, &snapshot)
 					if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
 						return err
+					}
+					if !deleteTarball && retainedExport != nil {
+						if err = r.removeSnapshotExport(ctx, chainNode, retainedExport.ID); err != nil {
+							return err
+						}
 					}
 					r.recorder.Eventf(chainNode,
 						corev1.EventTypeNormal,
@@ -414,15 +413,14 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			}
 			logger.Info("deleting pvc snapshot due to retain count", "snapshot", snapshot.GetName(), "retain", *retainCount)
 			snapshotUID := snapshot.UID
-			if !deleteTarball {
-				if export := snapshotExportFor(chainNode, &snapshot); export != nil {
-					if err = r.removeSnapshotExport(ctx, chainNode, export.ID); err != nil {
-						return err
-					}
-				}
-			}
+			retainedExport := snapshotExportFor(chainNode, &snapshot)
 			if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
 				return err
+			}
+			if !deleteTarball && retainedExport != nil {
+				if err = r.removeSnapshotExport(ctx, chainNode, retainedExport.ID); err != nil {
+					return err
+				}
 			}
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeNormal,
@@ -442,6 +440,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				}
 			}
 		}
+	}
+
+	// A successful VolumeSnapshot deletion may be followed by a transient status-update failure.
+	// Prune retained-object records before orphan discovery so retries cannot mistake their historical
+	// upload Jobs for objects that should be deleted from the current destination.
+	if err = r.pruneRetainedSnapshotExports(ctx, chainNode, snapshots); err != nil {
+		return err
 	}
 
 	// Remove any dangling jobs whose volumesnapshot does not exist anymore

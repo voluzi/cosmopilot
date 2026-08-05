@@ -568,7 +568,8 @@ func snapshotJobsFromJobs(jobs []batchv1.Job, currentIdentity ...string) []Snaps
 			uploadDestination = group.uploadSource.Labels[labelDestination]
 		}
 		previousDestination := len(currentIdentity) > 1 && group.preferred.Purpose == SnapshotJobUpload &&
-			uploadDestination != "" && uploadDestination != currentIdentity[1]
+			(uploadDestination != "" || snapshotUploadJobHasRecordedExecution(group.uploadSource)) &&
+			uploadDestination != currentIdentity[1]
 		if previousExporter || previousDestination {
 			group.preferred.Exporter = group.preferredExporter
 			if group.preferred.Purpose == SnapshotJobUpload {
@@ -581,6 +582,10 @@ func snapshotJobsFromJobs(jobs []batchv1.Job, currentIdentity ...string) []Snaps
 		return result[i].Name < result[j].Name
 	})
 	return result
+}
+
+func snapshotUploadJobHasRecordedExecution(job *batchv1.Job) bool {
+	return job != nil && len(job.Spec.Template.Spec.Containers) == 1
 }
 
 func listSnapshotJobs(

@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -253,6 +254,37 @@ func snapshotExportPhaseTransitionAllowed(from, to appsv1.SnapshotExportPhase) b
 	default:
 		return false
 	}
+}
+
+func (r *Reconciler) pruneRetainedSnapshotExports(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	snapshots []snapshotv1.VolumeSnapshot,
+) error {
+	present := make(map[string]map[types.UID]struct{}, len(snapshots))
+	for i := range snapshots {
+		snapshot := &snapshots[i]
+		if present[snapshot.Name] == nil {
+			present[snapshot.Name] = make(map[types.UID]struct{})
+		}
+		present[snapshot.Name][snapshot.UID] = struct{}{}
+	}
+	_, err := r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
+		kept := make([]appsv1.SnapshotExportStatus, 0, len(fresh.Status.SnapshotExports))
+		for _, export := range fresh.Status.SnapshotExports {
+			uids, namePresent := present[export.SnapshotName]
+			_, uidPresent := uids[export.SnapshotUID]
+			if export.DeleteOnExpire || (namePresent && (export.SnapshotUID == "" || uidPresent)) {
+				kept = append(kept, export)
+			}
+		}
+		if len(kept) == len(fresh.Status.SnapshotExports) {
+			return false, nil
+		}
+		fresh.Status.SnapshotExports = kept
+		return true, nil
+	})
+	return err
 }
 
 func (r *Reconciler) removeSnapshotExport(ctx context.Context, chainNode *appsv1.ChainNode, id string) error {

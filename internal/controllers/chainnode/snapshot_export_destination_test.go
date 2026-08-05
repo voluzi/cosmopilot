@@ -807,6 +807,18 @@ func destinationTestReconciler(t *testing.T, node *appsv1.ChainNode, objects []c
 	}
 }
 
+type snapshotDeleteFailingClient struct {
+	client.Client
+	err error
+}
+
+func (failing *snapshotDeleteFailingClient) Delete(ctx context.Context, object client.Object, opts ...client.DeleteOption) error {
+	if _, ok := object.(*snapshotv1.VolumeSnapshot); ok {
+		return failing.err
+	}
+	return failing.Client.Delete(ctx, object, opts...)
+}
+
 type statusUpdateFailingClient struct {
 	client.Client
 	err error
@@ -1133,7 +1145,7 @@ func TestEnsureVolumeSnapshotsRetriesRecordedUploadAfterExportRemoval(t *testing
 	assert.Equal(t, strconv.FormatBool(true), storedSnapshot.Annotations[controllers.AnnotationExportingTarball])
 }
 
-func TestEnsureVolumeSnapshotsKeepsRetainedExportRecordWhenStatusPruneFails(t *testing.T) {
+func TestEnsureVolumeSnapshotsKeepsRetainedExportRecordWhenSnapshotDeleteFails(t *testing.T) {
 	node := destinationTestChainNode(nil)
 	retention := "1h"
 	node.Spec.Persistence.Snapshots.Retention = &retention
@@ -1152,13 +1164,31 @@ func TestEnsureVolumeSnapshotsKeepsRetainedExportRecordWhenStatusPruneFails(t *t
 		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket"},
 	}}
 	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
-	pruneErr := errors.New("status prune failed")
-	reconciler.Client = &statusUpdateFailingClient{Client: reconciler.Client, err: pruneErr}
+	deleteErr := errors.New("snapshot delete failed")
+	reconciler.Client = &snapshotDeleteFailingClient{Client: reconciler.Client, err: deleteErr}
 
 	err := reconciler.ensureVolumeSnapshots(context.Background(), node, true)
-	require.ErrorIs(t, err, pruneErr)
-	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), &snapshotv1.VolumeSnapshot{}),
-		"snapshot deletion must wait until retained export status is pruned")
+	require.ErrorIs(t, err, deleteErr)
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), &snapshotv1.VolumeSnapshot{}))
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
+	require.Len(t, storedNode.Status.SnapshotExports, 1, "failed snapshot deletion must preserve historical export identity")
+	assert.Equal(t, "retained-object", storedNode.Status.SnapshotExports[0].ObjectName)
+}
+
+func TestPruneRetainedSnapshotExportsRetriesAfterSnapshotDeletion(t *testing.T) {
+	node := destinationTestChainNode(nil)
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "retained", SnapshotName: "deleted-snapshot", SnapshotUID: "deleted-uid", ObjectName: "retained-object",
+		Phase: appsv1.SnapshotExportPhaseUploaded, DeleteOnExpire: false,
+		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket"},
+	}}
+	reconciler := destinationTestReconciler(t, node, nil)
+
+	require.NoError(t, reconciler.pruneRetainedSnapshotExports(context.Background(), node, nil))
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), storedNode))
+	assert.Empty(t, storedNode.Status.SnapshotExports)
 }
 
 func TestSnapshotExportStatusIDIsStableAndDNSLabelSafe(t *testing.T) {
