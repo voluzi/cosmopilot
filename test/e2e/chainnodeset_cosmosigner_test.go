@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 	chainnodecontroller "github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
 	managedcosmosigner "github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
@@ -49,6 +50,8 @@ var _ = Describe("ChainNodeSet Cosmosigner", func() {
 				// happens if the validator node's remote signer is actually signing.
 				WaitForChainNodeSetHeight(cns, 3)
 				signerName := fmt.Sprintf("%s-signer", cns.GetName())
+				signerStatus := waitForCosmosignerApplied(cns, signerName)
+				reservation := waitForConsensusKeyReservation(cns, signerStatus.PublicKey)
 				validatorPodName := fmt.Sprintf("%s-validator", cns.GetName())
 				validatorPod := waitForReadyCosmosignerTargetPod(
 					ns.Name, validatorPodName, signerName, cns.Spec.App.App,
@@ -57,6 +60,7 @@ var _ = Describe("ChainNodeSet Cosmosigner", func() {
 					validatorPod = replaceCosmosignerTargetPodOnce(
 						cns, validatorPod, signerName, cns.Spec.App.App, cycle,
 					)
+					assertConsensusKeyReservationUnchanged(reservation)
 				}
 
 				sts := &appsv1k8s.StatefulSet{}
@@ -245,6 +249,88 @@ var _ = Describe("ChainNodeSet Cosmosigner", func() {
 			setPodTestFinalizer(ns.Name, heldNames[1], false)
 			waitForReadySignerPods(ns.Name, resourceName, 3)
 		})
+
+		It("should keep a two-sentry retarget migrating until the new target is served, then settle without pod churn", func() {
+			requireCosmosignerE2E()
+			app := apps.Nibiru()
+			ns := CreateTestNamespace()
+			cns := buildSentryRetargetCosmosignerSet(app, ns.Name, createCosmosignerSentryKeySecret(ns.Name))
+			Expect(Framework().Client().Create(Framework().Context(), cns)).To(Succeed())
+
+			// Fresh rollout: the signer dials sentry A, whose app only starts once the discovery
+			// Service publishes that pod to the signer.
+			WaitForChainNodeSetHeight(cns, 3)
+			signerName := fmt.Sprintf("%s-signer", cns.Name)
+			sentryA := fmt.Sprintf("%s-%s-0", cns.Name, cosmosignerSentryGroupA)
+			sentryB := fmt.Sprintf("%s-%s-0", cns.Name, cosmosignerSentryGroupB)
+			appliedOnA := waitForCosmosignerApplied(cns, signerName)
+			Expect(appsv1.CosmosignerStatusResourceName(appliedOnA)).To(Equal(signerName))
+			Expect(appliedOnA.TargetGroups).To(ConsistOf(cosmosignerSentryGroupA))
+			reservation := waitForConsensusKeyReservation(cns, appliedOnA.PublicKey)
+			waitForReadyCosmosignerTargetPod(ns.Name, sentryA, signerName, cns.Spec.App.App)
+			waitForReadySignerPods(ns.Name, signerName, 1)
+
+			retargetTopLevelCosmosigner(cns, cosmosignerSentryGroupB)
+			appliedOnB := waitForCosmosignerRetargetCompletion(cns, signerName, sentryB, appliedOnA.AppliedDigest)
+
+			// The retarget only changes which pods the signer dials, so it keeps the same key and the
+			// same resource identity: a new public key here would mean the sentry stopped signing as
+			// itself, and a new resource name would mean its raft state was abandoned.
+			Expect(appliedOnB.PublicKey).To(Equal(appliedOnA.PublicKey))
+			Expect(appsv1.CosmosignerStatusResourceName(appliedOnB)).To(Equal(signerName))
+			Expect(appliedOnB.TargetGroups).To(ConsistOf(cosmosignerSentryGroupB))
+			assertConsensusKeyReservationUnchanged(reservation)
+
+			targetPod := waitForReadyCosmosignerTargetPod(ns.Name, sentryB, signerName, cns.Spec.App.App)
+			assertNoCosmosignerDiscoveryPubKeyFailure(ns.Name, sentryB, cns.Spec.App.App, 1)
+			signerPods := waitForReadySignerPods(ns.Name, signerName, 1)
+			settledSignerUID := signerPods[0].UID
+
+			// Sentry A must be released back to local signing, not left selected by the discovery
+			// Service alongside B.
+			Eventually(func(g Gomega) {
+				pod := &corev1.Pod{}
+				g.Expect(Framework().Client().Get(
+					Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: sentryA}, pod,
+				)).To(Succeed())
+				g.Expect(pod.DeletionTimestamp).To(BeNil())
+				g.Expect(pod.Labels).NotTo(HaveKey(controllers.LabelCosmosignerTarget))
+				g.Expect(podReady(pod)).To(BeTrue())
+			}, 3*time.Minute, time.Second).Should(Succeed())
+
+			// A settled retarget stays settled: re-opening the migration, or replacing either the
+			// signer pod or the freshly targeted pod again, is the recurring churn this guards.
+			heightAfterRetarget, err := observedChainNodeSetHeight(cns)
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(func(g Gomega) {
+				current := &appsv1.ChainNodeSet{}
+				g.Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current)).To(Succeed())
+				status := current.GetCosmosignerStatus(signerName)
+				g.Expect(status).NotTo(BeNil())
+				g.Expect(status.Migration).To(BeNil(), "the settled retarget must not re-open a migration")
+
+				pods, err := listSignerPods(ns.Name, signerName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(pods).To(HaveLen(1))
+				g.Expect(pods[0].UID).To(Equal(settledSignerUID), "the signer pod must not churn after the retarget")
+
+				pod := &corev1.Pod{}
+				g.Expect(Framework().Client().Get(
+					Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: sentryB}, pod,
+				)).To(Succeed())
+				g.Expect(pod.UID).To(Equal(targetPod.UID), "the new target pod must not be replaced again")
+				g.Expect(podReady(pod)).To(BeTrue())
+				g.Expect(cosmosignerDiscoveryGateSucceeded(pod)).To(BeTrue())
+				restartCount, previousLogs, found := appContainerRestartDetails(ns.Name, pod, cns.Spec.App.App)
+				g.Expect(found).To(BeTrue(), "app container %q status is missing", cns.Spec.App.App)
+				g.Expect(restartCount).To(BeZero(), "the new target's app container restarted; previous logs:\n%s", previousLogs)
+			}, 35*time.Second, 500*time.Millisecond).Should(Succeed())
+
+			Eventually(func() (int64, error) {
+				return observedChainNodeSetHeight(cns)
+			}, time.Minute, time.Second).Should(BeNumerically(">", heightAfterRetarget),
+				"the chain must keep advancing after the retarget settles")
+		})
 	})
 })
 
@@ -252,6 +338,39 @@ func requireCosmosignerE2E() {
 	if !Framework().Config().InstallVault {
 		Skip("cosmosigner e2e is opt-in (enable with the Vault install flag)")
 	}
+}
+
+func waitForConsensusKeyReservation(cns *appsv1.ChainNodeSet, publicKey string) *appsv1.ConsensusKeyReservation {
+	var result *appsv1.ConsensusKeyReservation
+	Eventually(func(g Gomega) {
+		current := &appsv1.ChainNodeSet{}
+		g.Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current)).To(Succeed())
+		g.Expect(current.Status.ChainID).NotTo(BeEmpty())
+		g.Expect(publicKey).NotTo(BeEmpty())
+
+		reservation := &appsv1.ConsensusKeyReservation{}
+		g.Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{
+			Name: managedcosmosigner.ConsensusKeyReservationName(current.Status.ChainID, publicKey),
+		}, reservation)).To(Succeed())
+		g.Expect(reservation.Spec.ChainID).To(Equal(current.Status.ChainID))
+		g.Expect(reservation.Spec.PublicKey).To(Equal(publicKey))
+		g.Expect(reservation.Spec.OwnerUID).To(Equal(current.UID))
+		g.Expect(reservation.Spec.OwnerKind).To(Equal("ChainNodeSet"))
+		g.Expect(reservation.Spec.Namespace).To(Equal(current.Namespace))
+		g.Expect(reservation.Spec.OwnerName).To(Equal(current.Name))
+		g.Expect(reservation.Spec.Claim).NotTo(BeEmpty())
+		result = reservation.DeepCopy()
+	}).Should(Succeed())
+	return result
+}
+
+func assertConsensusKeyReservationUnchanged(want *appsv1.ConsensusKeyReservation) {
+	Consistently(func(g Gomega) {
+		current := &appsv1.ConsensusKeyReservation{}
+		g.Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(want), current)).To(Succeed())
+		g.Expect(current.UID).To(Equal(want.UID), "the consensus-key reservation must not be released and recreated")
+		g.Expect(current.Spec).To(Equal(want.Spec), "the consensus-key reservation owner, claim and public key must remain unchanged")
+	}, 5*time.Second, 500*time.Millisecond).Should(Succeed())
 }
 
 func buildNamedValidatorCosmosignerSet(app apps.TestApp, namespace string, replicas int32) *appsv1.ChainNodeSet {
@@ -300,6 +419,120 @@ func moveTopLevelCosmosignerIntoGroup(cns *appsv1.ChainNodeSet, groupName string
 		}
 		return fmt.Errorf("node group %q not found", groupName)
 	}).Should(Succeed())
+}
+
+const (
+	cosmosignerSentryGroupA = "sentry-a"
+	cosmosignerSentryGroupB = "sentry-b"
+)
+
+// buildSentryRetargetCosmosignerSet builds a ChainNodeSet with a self-signing validator and two
+// interchangeable sentry groups, plus a sentry-mode signer dialing the first of them. The validator
+// signs locally and keeps producing blocks throughout, so the chain height stays an independent
+// witness of the retarget rather than a restatement of it.
+func buildSentryRetargetCosmosignerSet(app apps.TestApp, namespace, keySecretName string) *appsv1.ChainNodeSet {
+	cns := app.BuildChainNodeSet(namespace, 0)
+	cns.Name = fmt.Sprintf("e2e-nibiru-retarget-%s", RandString(6))
+	cns.GenerateName = ""
+
+	// Both sentries reuse the generated fullnode group's config, so the targeted group is the only
+	// difference between A and B.
+	template := cns.Spec.Nodes[0]
+	groups := make([]appsv1.NodeGroupSpec, 0, 2)
+	for _, name := range []string{cosmosignerSentryGroupA, cosmosignerSentryGroupB} {
+		group := template.DeepCopy()
+		group.Name = name
+		group.Instances = ptr.To(1)
+		groups = append(groups, *group)
+	}
+	cns.Spec.Nodes = groups
+
+	cns.Spec.Cosmosigner = &appsv1.Cosmosigner{
+		NodeGroups: []string{cosmosignerSentryGroupA},
+		Replicas:   ptr.To[int32](1),
+		Backend: appsv1.CosmosignerBackend{
+			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To(keySecretName)},
+		},
+	}
+	return cns
+}
+
+// createCosmosignerSentryKeySecret creates the out-of-band consensus key a sentry-mode signer must
+// carry: targeting no validator, it has no controller-registered key to reuse.
+func createCosmosignerSentryKeySecret(namespace string) string {
+	key, err := cometbft.GeneratePrivKey()
+	Expect(err).NotTo(HaveOccurred())
+	const name = "e2e-cosmosigner-sentry-priv-key"
+	Expect(Framework().Client().Create(Framework().Context(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Data:       map[string][]byte{chainnodecontroller.PrivKeyFilename: key},
+	})).To(Succeed())
+	return name
+}
+
+func retargetTopLevelCosmosigner(cns *appsv1.ChainNodeSet, groups ...string) {
+	Eventually(func() error {
+		current := &appsv1.ChainNodeSet{}
+		if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current); err != nil {
+			return err
+		}
+		if current.Spec.Cosmosigner == nil {
+			return fmt.Errorf("top-level cosmosigner is absent")
+		}
+		current.Spec.Cosmosigner.NodeGroups = append([]string(nil), groups...)
+		return Framework().Client().Update(Framework().Context(), current)
+	}).Should(Succeed())
+}
+
+// waitForCosmosignerRetargetCompletion drives a target-group retarget to completion while asserting
+// its ordering guarantee: the migration must stay open until the newly targeted pod is running,
+// ready and past its discovery gate. It samples directly rather than through Eventually because a
+// premature completion has to fail at the sample that observes it — a retry would let the new target
+// turn healthy in the meantime and hide it.
+func waitForCosmosignerRetargetCompletion(cns *appsv1.ChainNodeSet, logicalName, targetPodName, previousDigest string) *appsv1.CosmosignerStatus {
+	const (
+		pollInterval = 500 * time.Millisecond
+		pollTimeout  = 8 * time.Minute
+	)
+	deadline := time.Now().Add(pollTimeout)
+	sawMigration := false
+	for {
+		current := &appsv1.ChainNodeSet{}
+		Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current)).To(Succeed())
+		status := current.GetCosmosignerStatus(logicalName)
+		Expect(status).NotTo(BeNil(), "signer %q lost its status entry during the retarget", logicalName)
+		switch {
+		case status.Migration != nil:
+			sawMigration = true
+		case status.AppliedDigest != "" && status.AppliedDigest != previousDigest:
+			Expect(cosmosignerTargetPodServed(
+				cns.GetNamespace(), targetPodName, appsv1.CosmosignerStatusResourceName(status),
+			)).To(BeTrue(), "the retarget completed before %s was running, ready and past its discovery gate", targetPodName)
+			Expect(sawMigration).To(BeTrue(),
+				"the retarget must run through the migration state machine, not swap targets in place")
+			return status.DeepCopy()
+		}
+		Expect(time.Now()).To(BeTemporally("<", deadline),
+			"timed out waiting for the retarget to %s to complete", targetPodName)
+		time.Sleep(pollInterval)
+	}
+}
+
+// cosmosignerTargetPodServed reports whether a pod is a live endpoint of the given signer: labelled
+// for it, running, ready, and past the discovery gate that exits only once the discovery Service
+// publishes this pod to the signer.
+func cosmosignerTargetPodServed(namespace, name, signerName string) bool {
+	pod := &corev1.Pod{}
+	if err := Framework().Client().Get(
+		Framework().Context(), client.ObjectKey{Namespace: namespace, Name: name}, pod,
+	); err != nil {
+		return false
+	}
+	return pod.DeletionTimestamp == nil &&
+		pod.Labels[controllers.LabelCosmosignerTarget] == signerName &&
+		pod.Status.Phase == corev1.PodRunning &&
+		podReady(pod) &&
+		cosmosignerDiscoveryGateSucceeded(pod)
 }
 
 func waitForCosmosignerApplied(cns *appsv1.ChainNodeSet, logicalName string) *appsv1.CosmosignerStatus {

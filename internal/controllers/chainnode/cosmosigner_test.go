@@ -1580,6 +1580,27 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 			require.NotNil(t, gate.Env[0].ValueFrom)
 			require.NotNil(t, gate.Env[0].ValueFrom.FieldRef)
 			assert.Equal(t, "status.podIP", gate.Env[0].ValueFrom.FieldRef.FieldPath)
+
+			// The gate is a narrow probe: `node-utils wait-for-dns` reads no server configuration, so
+			// it must keep mounting nothing. Mounting the config volume here would be the wrong fix
+			// for the missing /config/upgrades.json this container used to fail on.
+			assert.Empty(t, gate.VolumeMounts, "the discovery gate must not mount runtime configuration")
+			assert.Nil(t, gate.RestartPolicy, "the discovery gate must run to completion, not linger as a sidecar")
+
+			nodeUtilsIndex, gateIndex := -1, -1
+			for i := range pod.Spec.InitContainers {
+				switch pod.Spec.InitContainers[i].Name {
+				case nodeUtilsContainerName:
+					nodeUtilsIndex = i
+				case CosmosignerDiscoveryWaitContainerName:
+					gateIndex = i
+				}
+			}
+			require.NotEqual(t, -1, nodeUtilsIndex, "the node-utils sidecar must be present")
+			assert.Greater(t, gateIndex, nodeUtilsIndex,
+				"the gate must start after the node-utils sidecar, which is the only thing that can confirm an inbound signer connection")
+			assert.Equal(t, len(pod.Spec.InitContainers)-1, gateIndex,
+				"the gate must be the last init container, so the app starts only once discovery is published")
 		})
 	}
 }

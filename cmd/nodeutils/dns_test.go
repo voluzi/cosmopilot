@@ -92,6 +92,42 @@ func TestWaitForDNSCommandAcceptsSignerConfirmationWhileLocalDNSIsStale(t *testi
 	}
 }
 
+// TestWaitForDNSCommandRequiresSignerConfirmationDespiteLocalDNSPublication is the converse of the
+// stale-DNS case: this Pod resolving its own published address only proves its own DNS cache caught
+// up. The signer reads a different cache, so local publication is diagnostic and an authenticated
+// signer connection stays mandatory.
+func TestWaitForDNSCommandRequiresSignerConfirmationDespiteLocalDNSPublication(t *testing.T) {
+	resolver := &sequenceDNSResolver{
+		responses: [][]net.IPAddr{{{IP: net.ParseIP("10.0.0.2")}}},
+	}
+	client := &sequenceHTTPDoer{errors: []error{errors.New("node-utils connection refused")}}
+
+	err := runWaitForDNSCommand(context.Background(), resolver, client,
+		[]string{"signer-privval.default.svc", "10.0.0.2", "20ms"}, time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runWaitForDNSCommand() error = %v, want deadline exceeded", err)
+	}
+	for _, want := range []string{"signer connection", "pod-local DNS: address published"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("runWaitForDNSCommand() error = %v, want it to report %q", err, want)
+		}
+	}
+}
+
+func TestWaitForDNSCommandRejectsInvalidPodAddress(t *testing.T) {
+	// An unexpanded or unset downward-API address is a pod-spec problem: report it now instead of
+	// spending the whole discovery timeout on it.
+	for _, address := range []string{"", "$(POD_IP)", "not-an-ip"} {
+		t.Run(address, func(t *testing.T) {
+			err := runWaitForDNSCommand(context.Background(), &sequenceDNSResolver{}, &sequenceHTTPDoer{},
+				[]string{"signer-privval.default.svc", address, "25s"}, time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), "invalid IP address") {
+				t.Fatalf("runWaitForDNSCommand() error = %v, want invalid-address error", err)
+			}
+		})
+	}
+}
+
 func TestWaitForDNSCommandRejectsWrongArgumentCount(t *testing.T) {
 	tests := []struct {
 		name string
@@ -124,13 +160,14 @@ func TestWaitForDNSCommandRejectsInvalidTimeout(t *testing.T) {
 	}
 }
 
-func TestWaitForDNSCommandTimesOutWithSignerDiscoveryDiagnostics(t *testing.T) {
+func TestWaitForDNSCommandTimesOutWithDiscoveryDiagnostics(t *testing.T) {
 	client := &sequenceHTTPDoer{
 		statuses: []int{0, http.StatusNotAcceptable},
 		errors:   []error{errors.New("node-utils connection refused")},
 	}
+	resolver := &sequenceDNSResolver{responses: [][]net.IPAddr{{{IP: net.ParseIP("10.0.0.1")}}}}
 	started := time.Now()
-	err := runWaitForDNSCommand(context.Background(), &sequenceDNSResolver{}, client,
+	err := runWaitForDNSCommand(context.Background(), resolver, client,
 		[]string{"signer-privval.default.svc", "10.0.0.2", "20ms"}, time.Millisecond)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -139,11 +176,19 @@ func TestWaitForDNSCommandTimesOutWithSignerDiscoveryDiagnostics(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("runWaitForDNSCommand() took %s, want bounded timeout", elapsed)
 	}
-	if !strings.Contains(err.Error(), "last status: Not Acceptable") {
-		t.Fatalf("runWaitForDNSCommand() error = %v, want last HTTP status", err)
-	}
-	if !strings.Contains(err.Error(), "last error: node-utils connection refused") {
-		t.Fatalf("runWaitForDNSCommand() error = %v, want last client error", err)
+	// The signer never confirmed, so the diagnostic lookup must be reported alongside it: whether
+	// the address was published locally is exactly what separates a signer that never dialed from a
+	// Service that never published this Pod.
+	for _, want := range []string{
+		"signer connection",
+		"last status: Not Acceptable",
+		"last error: node-utils connection refused",
+		"pod-local DNS",
+		"observed addresses: 10.0.0.1",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("runWaitForDNSCommand() error = %v, want it to report %q", err, want)
+		}
 	}
 }
 
