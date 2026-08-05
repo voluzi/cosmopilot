@@ -742,6 +742,65 @@ func drainRecordedEvents(recorder *record.FakeRecorder) []string {
 	}
 }
 
+func TestPruneSnapshotExportsRemovesAbsentTerminalDeleteRecords(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{
+		{ID: "deleted", SnapshotName: "gone", SnapshotUID: "gone-uid", ObjectName: "deleted-object", Phase: appsv1.SnapshotExportPhaseDeleted, DeleteOnExpire: true},
+		{ID: "acknowledged", SnapshotName: "also-gone", SnapshotUID: "also-gone-uid", ObjectName: "acknowledged-object", Phase: appsv1.SnapshotExportPhaseAcknowledged, DeleteOnExpire: true},
+		{ID: "deleting", SnapshotName: "pending", SnapshotUID: "pending-uid", ObjectName: "pending-object", Phase: appsv1.SnapshotExportPhaseDeleting, DeleteOnExpire: true},
+	}
+	reconciler := destinationTestReconciler(t, node, nil)
+
+	require.NoError(t, reconciler.pruneRetainedSnapshotExports(context.Background(), node, nil))
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), stored))
+	require.Len(t, stored.Status.SnapshotExports, 1)
+	assert.Equal(t, "deleting", stored.Status.SnapshotExports[0].ID)
+}
+
+func TestAcknowledgedExportCompletesWhenSnapshotsAreDisabled(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	node.Spec.Persistence.Snapshots = nil
+	node.Annotations = map[string]string{controllers.AnnotationSnapshotExportCleanupAcknowledgement: "cleanup"}
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "cleanup", SnapshotName: "snapshot", SnapshotUID: "snapshot-uid", ObjectName: "recorded-object",
+		Phase:       appsv1.SnapshotExportPhaseCleanupRequired,
+		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket"},
+	}}
+	reconciler := destinationTestReconciler(t, node, nil)
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "recorded-object-delete", Namespace: node.Namespace, UID: "job-uid",
+		Labels:          map[string]string{"exporter": "gcs-exporter", "owner": node.Name, "type": "delete"},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: node.APIVersion, Kind: node.Kind, Name: node.Name, UID: node.UID, Controller: ptr.To(true)}},
+	}}
+	reconciler.snapshotClientSet = fake.NewSimpleClientset(job)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), node, true))
+	_, err := reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), stored))
+	assert.Empty(t, stored.Status.SnapshotExports)
+	_, present := stored.Annotations[controllers.AnnotationSnapshotExportCleanupAcknowledgement]
+	assert.False(t, present)
+}
+
+func TestPendingDeletionSuccessRemovesAcknowledgedExport(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	snapshot := destinationTestSnapshot()
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "cleanup", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ObjectName: "recorded-object",
+		Phase:       appsv1.SnapshotExportPhaseAcknowledged,
+		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket"},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	require.NoError(t, reconciler.persistPendingTarballDeletionSuccess(context.Background(), node, "recorded-object"))
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), stored))
+	assert.Empty(t, stored.Status.SnapshotExports)
+}
+
 func destinationTestChainNode(export *appsv1.ExportTarballConfig) *appsv1.ChainNode {
 	return &appsv1.ChainNode{
 		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},

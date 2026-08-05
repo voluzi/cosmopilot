@@ -274,7 +274,10 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 		for _, export := range fresh.Status.SnapshotExports {
 			uids, namePresent := present[export.SnapshotName]
 			_, uidPresent := uids[export.SnapshotUID]
-			if export.DeleteOnExpire || (namePresent && (export.SnapshotUID == "" || uidPresent)) {
+			snapshotPresent := namePresent && (export.SnapshotUID == "" || uidPresent)
+			terminalDeletion := export.Phase == appsv1.SnapshotExportPhaseDeleted ||
+				export.Phase == appsv1.SnapshotExportPhaseAcknowledged
+			if snapshotPresent || (export.DeleteOnExpire && !terminalDeletion) {
 				kept = append(kept, export)
 			}
 		}
@@ -613,6 +616,30 @@ func (r *Reconciler) reconcileSnapshotExportAcknowledgements(ctx context.Context
 		}
 	}
 	return r.removeSnapshotExportAcknowledgementIDs(ctx, chainNode, requested)
+}
+
+func (r *Reconciler) completeAcknowledgedSnapshotExports(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	for i := len(chainNode.Status.SnapshotExports) - 1; i >= 0; i-- {
+		export := chainNode.Status.SnapshotExports[i]
+		if export.Phase != appsv1.SnapshotExportPhaseAcknowledged {
+			continue
+		}
+		if export.Destination.Provider != appsv1.SnapshotExportProviderUnknown {
+			exporter, err := r.tarballProviderForExport(chainNode, &export)
+			if err != nil {
+				return err
+			}
+			if err = exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
+				Name: export.ObjectName, Purpose: datasnapshot.SnapshotJobDelete,
+			}); err != nil {
+				return err
+			}
+		}
+		if err := r.removeSnapshotExport(ctx, chainNode, export.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) removeSnapshotExportAcknowledgementIDs(

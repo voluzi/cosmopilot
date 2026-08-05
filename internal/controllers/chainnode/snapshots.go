@@ -48,8 +48,10 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	if err != nil {
 		return err
 	}
-
 	if !chainNode.SnapshotsEnabled() {
+		if err = r.completeAcknowledgedSnapshotExports(ctx, chainNode); err != nil {
+			return err
+		}
 		// Snapshot configuration can be removed while a snapshot annotation is
 		// still persisted. Do not let obsolete configuration pin setNodePhase in
 		// Snapshotting forever; with snapshots disabled there is no snapshot state
@@ -597,6 +599,9 @@ func (r *Reconciler) persistPendingTarballDeletionSuccess(
 			if err = r.Update(ctx, snapshot); err != nil {
 				return fmt.Errorf("persist pending tarball deletion success: %w", err)
 			}
+		}
+		if export := snapshotExportByObjectName(chainNode, tarballName); export != nil && export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
+			return r.removeSnapshotExport(ctx, chainNode, export.ID)
 		}
 		if export := snapshotExportByObjectName(chainNode, tarballName); export != nil && export.Phase != appsv1.SnapshotExportPhaseDeleted {
 			_, err = r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseDeleted, "remote deletion proven")
