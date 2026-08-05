@@ -323,8 +323,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				if expired {
 					deleteTarball := shouldDeleteSnapshotTarballOnExpire(chainNode, &snapshot)
 					cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
-					tarballName := tarballNameForSnapshot(chainNode, &snapshot)
+					tarballName := ""
 					if deleteTarball {
+						tarballName = tarballNameForSnapshot(chainNode, &snapshot)
 						deleted, deleteErr := r.isTarballDeleted(ctx, chainNode, &snapshot)
 						if deleteErr != nil {
 							return deleteErr
@@ -337,6 +338,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					snapshotUID := snapshot.UID
 					if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
 						return err
+					}
+					if !deleteTarball {
+						if export := snapshotExportFor(chainNode, &snapshot); export != nil {
+							if err = r.removeSnapshotExport(ctx, chainNode, export.ID); err != nil {
+								return err
+							}
+						}
 					}
 					r.recorder.Eventf(chainNode,
 						corev1.EventTypeNormal,
@@ -382,8 +390,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshot := snapshots[i]
 			deleteTarball := shouldDeleteSnapshotTarballOnExpire(chainNode, &snapshot)
 			cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
-			tarballName := tarballNameForSnapshot(chainNode, &snapshot)
+			tarballName := ""
 			if deleteTarball {
+				tarballName = tarballNameForSnapshot(chainNode, &snapshot)
 				deleted, deleteErr := r.isTarballDeleted(ctx, chainNode, &snapshot)
 				if deleteErr != nil {
 					return deleteErr
@@ -396,6 +405,13 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshotUID := snapshot.UID
 			if err = r.Delete(ctx, &snapshot, client.Preconditions{UID: &snapshotUID}); err != nil {
 				return err
+			}
+			if !deleteTarball {
+				if export := snapshotExportFor(chainNode, &snapshot); export != nil {
+					if err = r.removeSnapshotExport(ctx, chainNode, export.ID); err != nil {
+						return err
+					}
+				}
 			}
 			r.recorder.Eventf(chainNode,
 				corev1.EventTypeNormal,
@@ -866,6 +882,16 @@ func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.Chain
 		}
 	}
 	if export.Destination.Provider == appsv1.SnapshotExportProviderUnknown {
+		if export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
+			if snapshot.Annotations == nil {
+				snapshot.Annotations = make(map[string]string)
+			}
+			snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
+			delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
+			if err := r.Update(ctx, snapshot); err != nil {
+				return false, err
+			}
+		}
 		return false, nil
 	}
 	exporter, err := r.tarballProviderForExport(chainNode, export)
@@ -1147,6 +1173,14 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 		return false, nil
 	}
 	tarballName := export.ObjectName
+	if tarballDeletionComplete(snapshot, tarballName, false) {
+		if export.Phase != appsv1.SnapshotExportPhaseDeleted {
+			if _, err := r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseDeleted, "remote deletion proven"); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}
 	if err := r.validateSnapshotExportReferences(ctx, chainNode, export); err != nil {
 		var unavailable *snapshotExportReferenceUnavailableError
 		if stderrors.As(err, &unavailable) {
@@ -1283,6 +1317,17 @@ func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *apps
 		})
 	}
 	if export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
+		if export.Destination.Provider != appsv1.SnapshotExportProviderUnknown {
+			exporter, err := r.tarballProviderForExport(chainNode, export)
+			if err != nil {
+				return err
+			}
+			if err = exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
+				Name: export.ObjectName, Purpose: datasnapshot.SnapshotJobDelete,
+			}); err != nil {
+				return err
+			}
+		}
 		return r.removeSnapshotExport(ctx, chainNode, export.ID)
 	}
 	exporter, err := r.tarballProviderForExport(chainNode, export)

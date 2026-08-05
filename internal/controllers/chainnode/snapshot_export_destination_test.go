@@ -853,6 +853,86 @@ func TestIsTarballReadyRequiresAcknowledgementForLegacyInFlightExport(t *testing
 	assert.Empty(t, jobs.Items)
 }
 
+func TestUnknownLegacyExportPreservesCleanupIntentWithoutGuessingObjectName(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{
+		GCS:            &appsv1.GcsExportConfig{Bucket: "current-bucket"},
+		Suffix:         ptr.To("new-suffix"),
+		DeleteOnExpire: ptr.To(true),
+	})
+	snapshot := destinationTestSnapshot()
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	export, err := reconciler.ensureUnknownSnapshotExportStatus(context.Background(), node, snapshot)
+	require.NoError(t, err)
+	assert.Empty(t, export.ObjectName)
+	assert.True(t, export.DeleteOnExpire)
+	assert.NotContains(t, export.Message, "new-suffix")
+}
+
+func TestAcknowledgedUnknownInFlightExportUnblocksSnapshotLifecycle(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "current-bucket"}})
+	snapshot := destinationTestSnapshot()
+	snapshot.Annotations = map[string]string{controllers.AnnotationExportingTarball: strconv.FormatBool(true)}
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "legacy", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID,
+		Phase:       appsv1.SnapshotExportPhaseAcknowledged,
+		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderUnknown},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	ready, err := reconciler.isTarballReady(context.Background(), node, snapshot)
+	require.NoError(t, err)
+	assert.False(t, ready)
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
+	assert.Equal(t, tarballFinished, stored.Annotations[controllers.AnnotationExportingTarball])
+}
+
+func TestRecordedDeletionProofIsHonoredBeforeReferenceValidation(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "current-bucket"}})
+	snapshot := destinationTestSnapshot()
+	snapshot.Annotations = map[string]string{
+		controllers.AnnotationTarballDeletionComplete: "true",
+		controllers.AnnotationTarballDeletionName:     "recorded-object",
+	}
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "recorded", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ObjectName: "recorded-object",
+		Phase: appsv1.SnapshotExportPhaseUploaded,
+		Destination: appsv1.SnapshotExportDestination{
+			Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket",
+			CredentialsSecret: &appsv1.SnapshotExportSecretReference{Name: "missing", Key: "credentials.json"},
+		},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+
+	deleted, err := reconciler.isTarballDeleted(context.Background(), node, snapshot)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.Equal(t, appsv1.SnapshotExportPhaseDeleted, node.Status.SnapshotExports[0].Phase)
+}
+
+func TestAcknowledgedKnownExportCleansDeletionJobBeforeRemovingStatus(t *testing.T) {
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "current-bucket"}})
+	snapshot := destinationTestSnapshot()
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID: "recorded", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ObjectName: "recorded-object",
+		Phase:       appsv1.SnapshotExportPhaseAcknowledged,
+		Destination: appsv1.SnapshotExportDestination{Provider: appsv1.SnapshotExportProviderGCS, Bucket: "old-bucket"},
+	}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "recorded-object-delete", Namespace: node.Namespace, UID: "job-uid",
+		Labels:          map[string]string{"exporter": "gcs-exporter", "owner": node.Name, "type": "delete"},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: node.APIVersion, Kind: node.Kind, Name: node.Name, UID: node.UID, Controller: ptr.To(true)}},
+	}}
+	reconciler := destinationTestReconciler(t, node, []client.Object{snapshot})
+	reconciler.snapshotClientSet = fake.NewSimpleClientset(job)
+
+	require.NoError(t, reconciler.cleanUpTarballDeletion(context.Background(), node, snapshot))
+	_, err := reconciler.snapshotClientSet.BatchV1().Jobs(node.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	assert.Empty(t, node.Status.SnapshotExports)
+}
+
 func TestSnapshotExportDeletePolicyRemainsBoundToRecordedExport(t *testing.T) {
 	node := destinationTestChainNode(&appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "old"}, DeleteOnExpire: ptr.To(true)})
 	snapshot := destinationTestSnapshot()

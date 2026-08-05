@@ -164,16 +164,17 @@ func (r *Reconciler) ensureUnknownSnapshotExportStatus(
 	if export := snapshotExportFor(chainNode, snapshot); export != nil {
 		return export, nil
 	}
-	objectName := fmt.Sprintf("%s-%s", chainNode.Status.ChainID, snapshot.CreationTimestamp.UTC().Format(timeLayout))
-	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil &&
-		chainNode.Spec.Persistence.Snapshots.ExportTarball != nil {
-		objectName = getTarballName(chainNode, snapshot)
-	}
-	digest := sha256.Sum256([]byte(strings.Join([]string{string(chainNode.UID), snapshot.Name, string(snapshot.UID), objectName, "unknown"}, "\x00")))
+	// The legacy upload may have used a suffix or destination that has since changed. Do not guess an
+	// object name from mutable current configuration; the operator must identify the original object.
+	objectName := ""
+	deleteOnExpire := chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Snapshots != nil &&
+		chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() &&
+		chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+	digest := sha256.Sum256([]byte(strings.Join([]string{string(chainNode.UID), snapshot.Name, string(snapshot.UID), "unknown"}, "\x00")))
 	id := fmt.Sprintf("export-%x", digest[:8])
 	message := fmt.Sprintf(
-		"snapshot export %s for object %q has no controller-owned upload destination; verify and clean up the original object, then acknowledge with annotation %q=%q",
-		id, objectName, controllers.AnnotationSnapshotExportCleanupAcknowledgement, id,
+		"snapshot export %s has no controller-owned object name or upload destination; identify and clean up the original object, then acknowledge with annotation %q=%q",
+		id, controllers.AnnotationSnapshotExportCleanupAcknowledgement, id,
 	)
 	changed, err := r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
 		if snapshotExportFor(fresh, snapshot) != nil {
@@ -187,8 +188,9 @@ func (r *Reconciler) ensureUnknownSnapshotExportStatus(
 			Destination: appsv1.SnapshotExportDestination{
 				Provider: appsv1.SnapshotExportProviderUnknown,
 			},
-			Phase:   appsv1.SnapshotExportPhaseCleanupRequired,
-			Message: message,
+			Phase:          appsv1.SnapshotExportPhaseCleanupRequired,
+			Message:        message,
+			DeleteOnExpire: deleteOnExpire,
 		})
 		return true, nil
 	})
