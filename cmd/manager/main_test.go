@@ -7,13 +7,24 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
-func TestRootProtectionReadinessWaitsForStartupMigration(t *testing.T) {
+func TestRootProtectionReadinessAllowsStandbyBeforeLeadership(t *testing.T) {
+	elected := make(chan struct{})
 	ready := make(chan struct{})
-	check := rootProtectionReadiness(ready)
+	if err := rootProtectionReadiness(elected, ready)(nil); err != nil {
+		t.Fatalf("standby readiness must not wait for leader-only startup migration: %v", err)
+	}
+}
+
+func TestRootProtectionReadinessWaitsForStartupMigrationAfterLeadership(t *testing.T) {
+	elected := make(chan struct{})
+	ready := make(chan struct{})
+	check := rootProtectionReadiness(elected, ready)
+	close(elected)
 	if err := check(nil); err == nil {
-		t.Fatal("readiness must fail before root protection and durable migration complete")
+		t.Fatal("elected leader readiness must fail before root protection and durable migration complete")
 	}
 	close(ready)
 	if err := check(nil); err != nil {
@@ -53,16 +64,15 @@ func TestIsRecordedStartupNodeSetChildBlocksUIDLessLegacyStatus(t *testing.T) {
 	}
 }
 
-func TestIsRecordedStartupNodeSetChildChecksNodeSetsAcrossWorkers(t *testing.T) {
-	runOpts.WorkerName = "worker-a"
+func TestIsRecordedStartupNodeSetChildIgnoresWorkerPartition(t *testing.T) {
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 		Name: "set-fullnodes-0", Namespace: "default", UID: types.UID("node-uid"),
-		Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-a"},
+		Labels: map[string]string{controllers.LabelWorkerName: "worker-a"},
 	}}
 	nodeSet := appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "set", Namespace: "default",
-			Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-b"},
+			Labels: map[string]string{controllers.LabelWorkerName: "worker-b"},
 		},
 		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{Name: node.Name, UID: node.UID}}},
 	}

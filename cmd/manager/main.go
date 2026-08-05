@@ -148,7 +148,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err = mgr.AddReadyzCheck("readyz", rootProtectionReadiness(rootProtectionReady)); err != nil {
+	if err = mgr.AddReadyzCheck("readyz", rootProtectionReadiness(mgr.Elected(), rootProtectionReady)); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -160,13 +160,20 @@ func main() {
 	}
 }
 
-func rootProtectionReadiness(ready <-chan struct{}) healthz.Checker {
+func rootProtectionReadiness(elected, ready <-chan struct{}) healthz.Checker {
 	return func(_ *http.Request) error {
 		select {
 		case <-ready:
 			return nil
 		default:
+		}
+		select {
+		case <-elected:
 			return fmt.Errorf("existing-root protection and durable-resource migration are still running")
+		default:
+			// Startup protection is leader-elected. A standby must remain Ready so a rolling
+			// Deployment can terminate the old leader and allow this pod to acquire the lease.
+			return nil
 		}
 	}
 }
