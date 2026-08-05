@@ -331,6 +331,150 @@ func TestRemovedCosmosignerStatusRetainedUntilResourceOneShotsAreGone(t *testing
 	}
 }
 
+func TestRemovedCosmosignerStatusWithoutPublicKeyRetainedForExactOwnerRetirement(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes", Namespace: "default", UID: "nodes-uid",
+		Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+	}, Status: appsv1.ChainNodeSetStatus{Cosmosigners: []appsv1.CosmosignerStatus{{
+		Name: "retired", ResourceName: "nodes-retired-signer",
+	}}}}
+	reservation := nodeSetReservation(nodeSet, "retired", "ckr-uid", nodeSetReservationLifecyclePublicKey, "signer-retired-hash")
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes-retired-signer-import", Namespace: nodeSet.Namespace, UID: "job-uid",
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, reservation, job)
+	r.APIReader = r.Client
+
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
+	if err != nil || !done {
+		t.Fatalf("absent retired signer should finish workload teardown, done=%v err=%v", done, err)
+	}
+	fresh := &appsv1.ChainNodeSet{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(nodeSet), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.GetCosmosignerStatus("retired") == nil {
+		t.Fatal("incomplete retired signer status must remain while an exact-owner reservation is retiring")
+	}
+
+	done, err = r.reconcileConsensusKeyReservationClaims(context.Background(), fresh)
+	if err == nil || done || !strings.Contains(err.Error(), job.Name) {
+		t.Fatalf("resource-named one-shot Job must block claim release, done=%v err=%v", done, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("reservation must remain while retired-resource one-shot Job exists: %v", err)
+	}
+}
+
+func TestReconcileConsensusKeyReservationClaimsBlocksDeterministicSignerOneShotsAfterStatusLoss(t *testing.T) {
+	tests := []struct {
+		name string
+		path func(*appsv1.ChainNodeSet) client.Object
+	}{
+		{
+			name: "exact-owner Job",
+			path: func(nodeSet *appsv1.ChainNodeSet) client.Object {
+				return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+					Name: "nodes-sentry-signer-import", Namespace: nodeSet.Namespace, UID: "job-uid",
+					Labels: map[string]string{"nodeset": "foreign"},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: nodeSet.Name,
+						UID: nodeSet.UID, Controller: ptr.To(true),
+					}},
+				}}
+			},
+		},
+		{
+			name: "exact-labelled direct Pod",
+			path: func(nodeSet *appsv1.ChainNodeSet) client.Object {
+				return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "nodes-sentry-signer-pubkey", Namespace: nodeSet.Namespace, UID: "pod-uid",
+					Labels: map[string]string{"nodeset": nodeSet.Name},
+				}}
+			},
+		},
+		{
+			name: "exact-labelled generated Job Pod",
+			path: func(nodeSet *appsv1.ChainNodeSet) client.Object {
+				return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "nodes-sentry-signer-import-generated", Namespace: nodeSet.Namespace, UID: "pod-uid",
+					Labels: map[string]string{"nodeset": nodeSet.Name},
+				}}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+				Name: "nodes", Namespace: "default", UID: "nodes-uid",
+				Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+			}}
+			reservation := nodeSetReservation(nodeSet, "retired", "ckr-uid", nodeSetReservationLifecyclePublicKey, "signer-retired-hash")
+			path := tt.path(nodeSet)
+			r := newValidatorTestReconciler(t, nodeSet, reservation, path)
+			r.APIReader = r.Client
+
+			done, err := r.reconcileConsensusKeyReservationClaims(context.Background(), nodeSet)
+			if err == nil || done || !strings.Contains(err.Error(), path.GetName()) {
+				t.Fatalf("deterministic retired signer one-shot must block claim release, done=%v err=%v", done, err)
+			}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); err != nil {
+				t.Fatalf("reservation must remain while %q exists: %v", path.GetName(), err)
+			}
+		})
+	}
+}
+
+func TestReconcileConsensusKeyReservationClaimsUsesExactOneShotLabelsBeforeNodeSetPrefixFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		path client.Object
+	}{
+		{
+			name: "Job",
+			path: &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-bar-sentry-signer-import", Namespace: "default", UID: "job-uid",
+				Labels: map[string]string{"nodeset": "foo-bar"},
+			}},
+		},
+		{
+			name: "direct Pod",
+			path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-bar-sentry-signer-pubkey", Namespace: "default", UID: "pod-uid",
+				Labels: map[string]string{"chain-node": "foo-bar-validator"},
+			}},
+		},
+		{
+			name: "generated Job Pod",
+			path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo-bar-sentry-signer-import-generated", Namespace: "default", UID: "pod-uid",
+				Labels: map[string]string{"nodeset": "foo-bar"},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+				Name: "foo", Namespace: "default", UID: "nodes-uid",
+				Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+			}}
+			reservation := nodeSetReservation(nodeSet, "retired", "ckr-uid", nodeSetReservationLifecyclePublicKey, "signer-retired-hash")
+			r := newValidatorTestReconciler(t, nodeSet, reservation, tt.path)
+			r.APIReader = r.Client
+
+			done, err := r.reconcileConsensusKeyReservationClaims(context.Background(), nodeSet)
+			if err != nil || !done {
+				t.Fatalf("foreign exact labels must override the node-set prefix fallback, done=%v err=%v", done, err)
+			}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(tt.path), tt.path); err != nil {
+				t.Fatalf("foreign-attributed one-shot was modified: %v", err)
+			}
+		})
+	}
+}
+
 func TestRemovedCosmosignerStatusDroppedWhenReservationClaimStaysDesired(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"},

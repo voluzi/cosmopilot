@@ -343,7 +343,8 @@ func TestEnsureConsensusKeyReservationEmitsBlockedStaleRecoveryEvent(t *testing.
 			UID: "old-owner-uid", Controller: ptr.To(true),
 		}},
 	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, reservation, job).Build()
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: owner.Namespace}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace, owner, reservation, job).Build()
 	recorder := record.NewFakeRecorder(10)
 	r := &Reconciler{Client: c, APIReader: c, recorder: recorder}
 

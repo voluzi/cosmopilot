@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -401,7 +402,9 @@ func TestEnsureConsensusKeyReservationRecoversStaleOwnerWithoutDeletingRetainedS
 	}}
 	retainedKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: holder.Namespace}}
 	retainedPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: holder.Namespace}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, retainedKey, retainedPVC).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, retainedKey, retainedPVC,
+	).Build()
 
 	result, err := EnsureConsensusKeyReservationWithResult(
 		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
@@ -428,6 +431,46 @@ func TestEnsureConsensusKeyReservationRecoversStaleOwnerWithoutDeletingRetainedS
 	}
 }
 
+func TestEnsureConsensusKeyReservationRecoversStaleOwnerAfterNamespaceDeletion(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	holder := ReservationHolder{
+		UID: "new-owner-uid", Kind: "ChainNodeSet", Namespace: "deleted", Name: "nodes", Claim: "signer-current",
+	}
+	stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: holder.Kind, Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+	})
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale).Build()
+	reader := &namespaceNotFoundListReader{Reader: base, namespace: holder.Namespace}
+
+	result, err := EnsureConsensusKeyReservationWithResult(
+		context.Background(), reader, base, "chain-1", reservationTestPublicKey, holder,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RecoveredReservation != stale.Name {
+		t.Fatalf("recovered reservation = %q, want %q", result.RecoveredReservation, stale.Name)
+	}
+	if reader.namespacedLists != 0 {
+		t.Fatalf("deleted namespace recovery attempted %d namespaced Lists", reader.namespacedLists)
+	}
+}
+
+func TestStaleReservationSigningPathsGonePreservesListNotFoundForExistingNamespace(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "existing"}}
+	stale := reservationLifecycleObject("stale", "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: "ChainNodeSet", Namespace: namespace.Name, Name: "nodes", Claim: "signer-current",
+	})
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace).Build()
+	reader := &namespaceNotFoundListReader{Reader: base, namespace: namespace.Name}
+
+	gone, _, err := staleReservationSigningPathsGone(context.Background(), reader, stale, ReservationHolder{})
+	if err == nil || gone || !apierrors.IsNotFound(err) {
+		t.Fatalf("List NotFound in an existing namespace must be preserved, gone=%v err=%v", gone, err)
+	}
+}
+
 func TestEnsureConsensusKeyReservationKeepsStaleReservationWhenReplacementClaimConflicts(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	holder := ReservationHolder{
@@ -441,7 +484,9 @@ func TestEnsureConsensusKeyReservationKeepsStaleReservationWhenReplacementClaimC
 	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, conflictingClaim).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, conflictingClaim,
+	).Build()
 
 	_, err := EnsureConsensusKeyReservationWithResult(
 		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
@@ -469,7 +514,9 @@ func TestEnsureConsensusKeyReservationKeepsStaleReservationWhenLegacyOwnerConfli
 		ObjectMeta: metav1.ObjectMeta{Name: "other-validator", Namespace: holder.Namespace, UID: "other-owner-uid"},
 		Status:     appsv1.ChainNodeStatus{ChainID: "chain-1", CosmosignerPublicKey: reservationTestPublicKey},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, legacyOwner, stale).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, legacyOwner, stale,
+	).Build()
 
 	_, err := EnsureConsensusKeyReservationWithResult(
 		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
@@ -521,7 +568,9 @@ func TestEnsureConsensusKeyReservationRefusesStaleRecoveryWhileSigningPathExists
 			currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 				Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 			}}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, tt.path).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+				reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, tt.path,
+			).Build()
 
 			_, err := EnsureConsensusKeyReservationWithResult(
 				context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
@@ -554,7 +603,9 @@ func TestEnsureConsensusKeyReservationRefusesStaleChainNodeSetRecoveryWhileChild
 			UID: "old-owner-uid", Controller: ptr.To(true),
 		}},
 	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, child).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, child,
+	).Build()
 
 	_, err := EnsureConsensusKeyReservationWithResult(
 		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
@@ -645,7 +696,7 @@ func TestEnsureConsensusKeyReservationUsesExactLabelsBeforeChainNodeSetNameFallb
 			currentOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
 				Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 			}}
-			objects := []client.Object{currentOwner, stale}
+			objects := []client.Object{reservationLifecycleNamespace(holder.Namespace), currentOwner, stale}
 			objects = append(objects, tt.objects(holder)...)
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 
@@ -688,7 +739,9 @@ func TestEnsureConsensusKeyReservationBlocksOrphanedChainNodeSetSignerBeforePods
 				ObjectMeta: metav1.ObjectMeta{Name: "foo-signer", Namespace: holder.Namespace, UID: "orphan-sts-uid"},
 				Spec:       appsk8sv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: tt.labels}}},
 			}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, sts).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+				reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, sts,
+			).Build()
 
 			_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 			if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), sts.Name) {
@@ -722,7 +775,9 @@ func TestEnsureConsensusKeyReservationKeepsLabelLessChainNodeSetStalePaths(t *te
 			currentOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
 				Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 			}}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, tt.path).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+				reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, tt.path,
+			).Build()
 
 			_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 			if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), tt.path.GetName()) {
@@ -760,7 +815,9 @@ func TestEnsureConsensusKeyReservationReportsBlockedStaleRecoveryWhileManagedJob
 			UID: job.UID, Controller: ptr.To(true),
 		}},
 	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, job, pod).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, job, pod,
+	).Build()
 
 	_, err := EnsureConsensusKeyReservationWithResult(
 		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
@@ -794,7 +851,9 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForOrphanedManagedJobPod(t *
 			Name: "validator-tmkms-vault-upload", UID: "deleted-job-uid", Controller: ptr.To(true),
 		}},
 	}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, pod).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, pod,
+	).Build()
 
 	_, err := EnsureConsensusKeyReservationWithResult(
 		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
@@ -820,7 +879,9 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForExactManagedOneShotPod(t 
 		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms-vault-upload", Namespace: holder.Namespace, UID: "pod-uid"}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, pod).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, pod,
+	).Build()
 
 	_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 	if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), pod.Name) {
@@ -838,7 +899,9 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForLabelLessSignerReplica(t 
 		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-signer-0", Namespace: holder.Namespace, UID: "pod-uid"}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, pod).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, pod,
+	).Build()
 
 	_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
 	if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), pod.Name) {
@@ -1062,6 +1125,10 @@ func reservationLifecycleObject(name, uid string, holder ReservationHolder) *app
 	}
 }
 
+func reservationLifecycleNamespace(name string) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -1076,6 +1143,22 @@ type reservationLifecycleTrackingClient struct {
 	deleteUID       types.UID
 	deletedName     string
 	confirmedAbsent bool
+}
+
+type namespaceNotFoundListReader struct {
+	client.Reader
+	namespace       string
+	namespacedLists int
+}
+
+func (r *namespaceNotFoundListReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	options := &client.ListOptions{}
+	options.ApplyOptions(opts)
+	if options.Namespace == r.namespace {
+		r.namespacedLists++
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, r.namespace)
+	}
+	return r.Reader.List(ctx, list, opts...)
 }
 
 func (c *reservationLifecycleTrackingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {

@@ -613,6 +613,14 @@ func reservationOwnerIsStale(ctx context.Context, reader client.Reader, reservat
 }
 
 func staleReservationSigningPathsGone(ctx context.Context, reader client.Reader, reservation *appsv1.ConsensusKeyReservation, holder ReservationHolder) (bool, string, error) {
+	namespace := &corev1.Namespace{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: reservation.Spec.Namespace}, namespace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, "", nil
+		}
+		return false, "", err
+	}
+
 	currentHolderControllerUIDs := make(map[types.UID]struct{})
 	nodes := &appsv1.ChainNodeList{}
 	if err := reader.List(ctx, nodes, client.InNamespace(reservation.Spec.Namespace)); err != nil {

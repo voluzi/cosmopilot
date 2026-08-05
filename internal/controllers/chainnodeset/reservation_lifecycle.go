@@ -146,6 +146,9 @@ func cosmosignerStatusHasReservation(status *appsv1.CosmosignerStatus, reservati
 	if status == nil {
 		return false
 	}
+	if status.ResourceName != "" && status.PublicKey == "" && len(reservationPublicKeys) > 0 {
+		return true
+	}
 	if _, ok := reservationPublicKeys[status.PublicKey]; ok && status.PublicKey != "" {
 		return true
 	}
@@ -186,8 +189,12 @@ func (r *Reconciler) consensusKeyReservationClaimSigningPathsGone(ctx context.Co
 	}
 
 	matchedResource := ""
+	retiredSignerResources := make(map[string]struct{})
 	for i := range nodeSet.Status.Cosmosigners {
 		status := &nodeSet.Status.Cosmosigners[i]
+		if _, desired := desiredSignerClaims[status.Name]; !desired && status.ResourceName != "" && status.PublicKey == "" {
+			retiredSignerResources[appsv1.CosmosignerStatusResourceName(status)] = struct{}{}
+		}
 		matchesKey := status.PublicKey == reservation.Spec.PublicKey ||
 			(status.Migration != nil && status.Migration.DesiredPublicKey == reservation.Spec.PublicKey)
 		if !matchesKey {
@@ -203,10 +210,19 @@ func (r *Reconciler) consensusKeyReservationClaimSigningPathsGone(ctx context.Co
 		matchedResource = resourceName
 	}
 
+	resourcesToCleanup := retiredSignerResources
 	if matchedResource != "" {
+		resourcesToCleanup[matchedResource] = struct{}{}
+	}
+	resourceNames := make([]string, 0, len(resourcesToCleanup))
+	for resourceName := range resourcesToCleanup {
+		resourceNames = append(resourceNames, resourceName)
+	}
+	sort.Strings(resourceNames)
+	for _, resourceName := range resourceNames {
 		cleanup, err := cosmosigner.CleanupManagedSigningPath(ctx, r.uncachedReader(), r.Client, nodeSet, nodeSet.GetNamespace(), cosmosigner.ManagedSigningPath{
-			StatefulSetNames: []string{matchedResource},
-			OneShotNames:     []string{matchedResource + "-import", matchedResource + "-pubkey"},
+			StatefulSetNames: []string{resourceName},
+			OneShotNames:     []string{resourceName + "-import", resourceName + "-pubkey"},
 		})
 		if err != nil {
 			return false, err
@@ -240,8 +256,10 @@ func (r *Reconciler) consensusKeyReservationClaimSigningPathsGone(ctx context.Co
 		return false, err
 	}
 	for i := range jobs.Items {
-		if managedClaimOneShotName(jobs.Items[i].GetName(), claim) {
-			return false, fmt.Errorf("Job %s/%s still matches undesired reservation claim %q", jobs.Items[i].GetNamespace(), jobs.Items[i].GetName(), claim)
+		job := &jobs.Items[i]
+		if managedClaimOneShotName(job.GetName(), claim) ||
+			managedRetiredNodeSetSignerOneShot(job, nodeSet, desiredSignerResources) {
+			return false, fmt.Errorf("Job %s/%s still matches undesired reservation claim %q", job.GetNamespace(), job.GetName(), claim)
 		}
 	}
 	pods := &corev1.PodList{}
@@ -249,11 +267,52 @@ func (r *Reconciler) consensusKeyReservationClaimSigningPathsGone(ctx context.Co
 		return false, err
 	}
 	for i := range pods.Items {
-		if managedClaimOneShotName(pods.Items[i].GetName(), claim) {
-			return false, fmt.Errorf("Pod %s/%s still matches undesired reservation claim %q", pods.Items[i].GetNamespace(), pods.Items[i].GetName(), claim)
+		pod := &pods.Items[i]
+		if managedClaimOneShotName(pod.GetName(), claim) ||
+			managedRetiredNodeSetSignerOneShot(pod, nodeSet, desiredSignerResources) {
+			return false, fmt.Errorf("Pod %s/%s still matches undesired reservation claim %q", pod.GetNamespace(), pod.GetName(), claim)
 		}
 	}
 	return true, nil
+}
+
+func managedRetiredNodeSetSignerOneShot(obj client.Object, nodeSet *appsv1.ChainNodeSet, desired map[string]struct{}) bool {
+	resourceName, ok := managedSignerOneShotResourceName(obj.GetName())
+	if !ok {
+		return false
+	}
+	if _, current := desired[resourceName]; current {
+		return false
+	}
+	if metav1.IsControlledBy(obj, nodeSet) {
+		return deterministicNodeSetSignerResourceName(resourceName, nodeSet.GetName())
+	}
+	labels := obj.GetLabels()
+	if ownerName := labels[controllers.LabelChainNodeSet]; ownerName != "" {
+		return ownerName == nodeSet.GetName() && deterministicNodeSetSignerResourceName(resourceName, nodeSet.GetName())
+	}
+	if labels[controllers.LabelChainNode] != "" {
+		return false
+	}
+	return deterministicNodeSetSignerResourceName(resourceName, nodeSet.GetName())
+}
+
+func managedSignerOneShotResourceName(name string) (string, bool) {
+	lastIndex := -1
+	for _, marker := range []string{"-import", "-pubkey"} {
+		if index := strings.LastIndex(name, marker); index > lastIndex &&
+			(index+len(marker) == len(name) || name[index+len(marker)] == '-') {
+			lastIndex = index
+		}
+	}
+	if lastIndex <= 0 {
+		return "", false
+	}
+	return name[:lastIndex], true
+}
+
+func deterministicNodeSetSignerResourceName(name, nodeSetName string) bool {
+	return strings.HasPrefix(name, nodeSetName+"-") && strings.HasSuffix(name, "-signer")
 }
 
 func managedClaimOneShotName(name, claim string) bool {
