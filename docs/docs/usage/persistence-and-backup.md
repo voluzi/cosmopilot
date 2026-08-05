@@ -155,8 +155,9 @@ To hand a pre-upgrade Secret over to the policy deliberately, annotate it with t
 :::
 
 :::note[PVCs created before the upgrade]
-Two classes of pre-upgrade PVC carry no owner reference and are therefore **retained even when `dataVolumes` is `Delete`**:
+`deletionPolicy` governs resources Cosmopilot can prove it generated. Three classes of pre-upgrade PVC carry no owner reference and are therefore **retained even when `dataVolumes` is `Delete`**:
 
+- **The main node volume (`<chainnode>`).** Cosmopilot never owner-referenced the primary data PVC before this release, and it can be pre-provisioned to restore a node from existing data, so a claim at that name is not proof of origin. This is not a change in behaviour: these PVCs were never deleted on node removal previously either.
 - **Additional node volumes left at `deleteWithNode: false`.** Cosmopilot only owner-referenced an additional volume's PVC when `deleteWithNode` was `true`, so an unowned claim records your earlier decision to keep that volume. Adopting it would reverse that choice on upgrade. Additional volumes that had `deleteWithNode: true` are attributed and deleted normally.
 - **Cosmoseed `data-<set>-seed-<ordinal>` claims.** These were provisioned from the seed StatefulSet's volume claim template without a retention policy, so Kubernetes left them with no owner reference. They may also have been pre-provisioned by you, which is indistinguishable after the fact.
 

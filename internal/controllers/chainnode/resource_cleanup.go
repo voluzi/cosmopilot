@@ -87,32 +87,33 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 	return true, nil
 }
 
-// refuseOrphanedRecordedChild blocks standalone finalization of a generated child that lost its
-// ChainNodeSet controller reference. Such a child resolves to itself as cleanup root and would stamp
-// its durable resources under its own UID, where the parent can no longer reach them during
-// scale-down or root cleanup. A status record the parent has not disowned fails closed here, so a
-// pre-upgrade record carrying no UID counts; restoring the reference lets cleanup proceed under the
-// parent root.
+// refuseOrphanedRecordedChild blocks finalization of a generated child whose controller reference no
+// longer points at the ChainNodeSet that still records it. Such a child resolves to the wrong cleanup
+// root — itself when the reference is gone, or a foreign ChainNodeSet when it has drifted — and would
+// stamp its durable resources there, beyond the recording parent's reach during scale-down or root
+// cleanup. A status record the parent has not disowned fails closed, so a pre-upgrade record carrying
+// no UID counts; restoring the reference lets cleanup proceed under the parent root.
 func (r *Reconciler) refuseOrphanedRecordedChild(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	if metav1.GetControllerOf(chainNode) != nil {
-		return nil
-	}
 	nodeSets := &appsv1.ChainNodeSetList{}
 	if err := r.List(ctx, nodeSets, client.InNamespace(chainNode.GetNamespace())); err != nil {
 		return err
 	}
 	for i := range nodeSets.Items {
 		nodeSet := &nodeSets.Items[i]
-		if !nodeSet.ClaimsChild(chainNode) {
+		if !nodeSet.ClaimsChild(chainNode) || metav1.IsControlledBy(chainNode, nodeSet) {
 			continue
 		}
 		identity := fmt.Sprintf("UID %s", nodeSet.GetUID())
 		if nodeSet.MatchRecordedChild(chainNode) == appsv1.RecordedChildUnverified {
 			identity = fmt.Sprintf("UID %s by name, from a status written before recorded child UIDs existed", nodeSet.GetUID())
 		}
+		observed := "has no controller"
+		if controller := metav1.GetControllerOf(chainNode); controller != nil {
+			observed = fmt.Sprintf("is controlled by %s %q UID %s", controller.Kind, controller.Name, controller.UID)
+		}
 		return fmt.Errorf(
-			"refusing standalone durable cleanup of ChainNode %s/%s UID %s recorded by ChainNodeSet %s %s; restore its controller reference so its resources are finalized under the ChainNodeSet root",
-			chainNode.GetNamespace(), chainNode.GetName(), chainNode.GetUID(), nodeSet.GetName(), identity,
+			"refusing durable cleanup of ChainNode %s/%s UID %s recorded by ChainNodeSet %s %s: it %s; restore its controller reference so its resources are finalized under the ChainNodeSet root",
+			chainNode.GetNamespace(), chainNode.GetName(), chainNode.GetUID(), nodeSet.GetName(), identity, observed,
 		)
 	}
 	return nil

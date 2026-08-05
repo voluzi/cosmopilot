@@ -613,3 +613,49 @@ func resourceCleanupScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	return scheme
 }
+
+// A drifted controller reference resolves the child to a foreign cleanup root, putting its resources
+// beyond the reach of the ChainNodeSet that still records it.
+func TestFinalizeResourcesRefusesRecordedChildWithForeignController(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	recording := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-a", Namespace: "default", UID: "set-a-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-a-fullnodes-0", UID: "child-uid",
+		}}},
+	}
+	foreign := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set-b", Namespace: "default", UID: "set-b-uid"}}
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-a-fullnodes-0", Namespace: "default", UID: "child-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(foreign, node, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, recording, foreign).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	_, err := r.finalizeResources(context.Background(), node)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded by ChainNodeSet set-a")
+	assert.Contains(t, err.Error(), "set-b")
+}
+
+func TestFinalizeResourcesAllowsChildControlledByItsRecordingNodeSet(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: "child-uid",
+		}}},
+	}
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: "child-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+	}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, node, scheme))
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, nodeSet).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.finalizeResources(context.Background(), node)
+	require.NoError(t, err)
+	assert.True(t, done)
+}
