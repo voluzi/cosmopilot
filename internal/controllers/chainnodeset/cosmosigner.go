@@ -154,6 +154,14 @@ func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv
 			stale = append(stale, st.Name)
 		}
 	}
+	reservationPublicKeys := map[string]struct{}{}
+	if len(stale) > 0 {
+		var err error
+		reservationPublicKeys, err = r.retiringConsensusKeyReservationPublicKeys(ctx, nodeSet)
+		if err != nil {
+			return false, err
+		}
+	}
 
 	allDone := true
 	changed := false
@@ -189,6 +197,12 @@ func (r *Reconciler) reconcileSignerTeardown(ctx context.Context, nodeSet *appsv
 		}
 		if !tornDown {
 			allDone = false
+			continue
+		}
+		// Keep the retired resource identity available until claim retirement has used it to audit
+		// exact <resource>-import/-pubkey Jobs and generated Pods. The CKR is released later in this
+		// reconcile; a following pass can then safely drop the status entry.
+		if cosmosignerStatusHasReservation(st, reservationPublicKeys) {
 			continue
 		}
 		nodeSet.RemoveCosmosignerStatus(name)

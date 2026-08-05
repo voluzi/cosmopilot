@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -263,6 +264,41 @@ func TestReconcileConsensusKeyReservationClaimsBlocksGeneratedOneShotPod(t *test
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
 		t.Fatalf("reservation must remain while generated one-shot pod exists: %v", err)
+	}
+}
+
+func TestRemovedCosmosignerStatusRetainedUntilResourceOneShotsAreGone(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes", Namespace: "default", UID: "nodes-uid",
+		Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+	}, Status: appsv1.ChainNodeSetStatus{Cosmosigners: []appsv1.CosmosignerStatus{{
+		Name: "nodes-signer", ResourceName: "nodes-retired-signer", PublicKey: nodeSetReservationLifecyclePublicKey,
+	}}}}
+	reservation := nodeSetReservation(nodeSet, "retired", "ckr-uid", nodeSetReservationLifecyclePublicKey, "nodes-validator")
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes-retired-signer-import", Namespace: nodeSet.Namespace, UID: "job-uid",
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, reservation, job)
+	r.APIReader = r.Client
+
+	done, err := r.reconcileSignerTeardown(context.Background(), nodeSet)
+	if err != nil || !done {
+		t.Fatalf("absent retired signer should finish workload teardown, done=%v err=%v", done, err)
+	}
+	fresh := &appsv1.ChainNodeSet{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(nodeSet), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.GetCosmosignerStatus("nodes-signer") == nil {
+		t.Fatal("retired signer status must remain while its reservation still needs the resource name")
+	}
+
+	done, err = r.reconcileConsensusKeyReservationClaims(context.Background(), fresh)
+	if err == nil || done {
+		t.Fatalf("foreign retired-resource one-shot Job must block claim release, done=%v err=%v", done, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("reservation must remain while retired-resource one-shot Job exists: %v", err)
 	}
 }
 

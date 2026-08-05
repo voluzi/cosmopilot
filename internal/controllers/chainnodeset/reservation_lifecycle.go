@@ -118,6 +118,40 @@ func desiredConsensusKeyReservationClaims(nodeSet *appsv1.ChainNodeSet) map[stri
 	return claims
 }
 
+func (r *Reconciler) retiringConsensusKeyReservationPublicKeys(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (map[string]struct{}, error) {
+	reservations := &appsv1.ConsensusKeyReservationList{}
+	if err := r.uncachedReader().List(ctx, reservations); err != nil {
+		return nil, err
+	}
+	publicKeys := make(map[string]struct{})
+	for i := range reservations.Items {
+		reservation := &reservations.Items[i]
+		if reservation.Spec.OwnerUID != nodeSet.GetUID() {
+			continue
+		}
+		if reservation.Spec.OwnerKind != "ChainNodeSet" || reservation.Spec.Namespace != nodeSet.GetNamespace() ||
+			reservation.Spec.OwnerName != nodeSet.GetName() || reservation.Spec.Claim == "" || reservation.Spec.PublicKey == "" {
+			return nil, fmt.Errorf("reservation %q matches ChainNodeSet UID %q but has inconsistent owner, claim, or public-key metadata", reservation.GetName(), nodeSet.GetUID())
+		}
+		publicKeys[reservation.Spec.PublicKey] = struct{}{}
+	}
+	return publicKeys, nil
+}
+
+func cosmosignerStatusHasReservation(status *appsv1.CosmosignerStatus, reservationPublicKeys map[string]struct{}) bool {
+	if status == nil {
+		return false
+	}
+	if _, ok := reservationPublicKeys[status.PublicKey]; ok && status.PublicKey != "" {
+		return true
+	}
+	if status.Migration != nil && status.Migration.DesiredPublicKey != "" {
+		_, ok := reservationPublicKeys[status.Migration.DesiredPublicKey]
+		return ok
+	}
+	return false
+}
+
 func (r *Reconciler) consensusKeyReservationClaimSigningPathsGone(ctx context.Context, nodeSet *appsv1.ChainNodeSet, reservation *appsv1.ConsensusKeyReservation) (bool, error) {
 	claim := reservation.Spec.Claim
 	child := &appsv1.ChainNode{}
