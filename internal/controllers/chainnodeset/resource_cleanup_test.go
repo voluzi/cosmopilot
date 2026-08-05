@@ -498,8 +498,11 @@ func TestQuiesceCosmoseedBlocksOnDeterministicPodWithDriftedOwner(t *testing.T) 
 	r := &Reconciler{Client: base, Scheme: scheme}
 
 	done, err := r.quiesceCosmoseed(context.Background(), nodeSet)
-	require.NoError(t, err)
+	require.Error(t, err)
 	assert.False(t, done)
+	assert.Contains(t, err.Error(), "set-seed-0")
+	assert.Contains(t, err.Error(), "foreign-sts-uid")
+	assert.Contains(t, err.Error(), "delete the drifted pod")
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(seed), &k8sappsv1.StatefulSet{}))
 	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
 }

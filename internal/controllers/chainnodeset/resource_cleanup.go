@@ -521,8 +521,11 @@ func (r *Reconciler) deleteControlledPods(ctx context.Context, owner client.Obje
 			continue
 		}
 		if !controlled {
-			allDone = false
-			continue
+			ownership := "has no controller"
+			if controller := metav1.GetControllerOf(pod); controller != nil {
+				ownership = fmt.Sprintf("is controlled by %s %q UID %s", controller.Kind, controller.Name, controller.UID)
+			}
+			return false, fmt.Errorf("refusing to delete StatefulSet %s/%s while canonical pod %s/%s %s instead of StatefulSet UID %s; restore the expected controller reference, or delete the drifted pod and wait for it to terminate", owner.GetNamespace(), owner.GetName(), pod.GetNamespace(), pod.GetName(), ownership, owner.GetUID())
 		}
 		if pod.GetDeletionTimestamp().IsZero() {
 			uid := pod.GetUID()
