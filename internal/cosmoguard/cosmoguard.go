@@ -380,7 +380,7 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 		},
 		StartupProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: metricsPort, Scheme: corev1.URISchemeHTTP},
+				HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: metricsPort, Scheme: corev1.URISchemeHTTP},
 			},
 			PeriodSeconds:    2,
 			FailureThreshold: 30,
