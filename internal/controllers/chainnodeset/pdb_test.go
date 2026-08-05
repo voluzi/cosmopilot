@@ -115,6 +115,40 @@ func TestLegacyNodeSetPDBRejectsExtraRegularMatchLabels(t *testing.T) {
 	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
 }
 
+func TestLegacyNodeSetPDBRejectsValidatorFalseOnRegularPDB(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "chain-id"},
+	}
+	pdb := getPdbSpec(nodeSet, "set-fullnodes", 1, map[string]string{
+		controllers.LabelUpgrading:             controllers.StringValueFalse,
+		controllers.LabelChainID:               nodeSet.Status.ChainID,
+		controllers.LabelChainNodeSet:          nodeSet.Name,
+		controllers.LabelChainNodeSetGroup:     "fullnodes",
+		controllers.LabelChainNodeSetValidator: controllers.StringValueFalse,
+	})
+
+	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
+}
+
+func TestLegacyNodeSetPDBRejectsMaxUnavailableBudget(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "chain-id"},
+	}
+	pdb := getPdbSpec(nodeSet, "set-fullnodes", 1, map[string]string{
+		controllers.LabelUpgrading:         controllers.StringValueFalse,
+		controllers.LabelChainID:           nodeSet.Status.ChainID,
+		controllers.LabelChainNodeSet:      nodeSet.Name,
+		controllers.LabelChainNodeSetGroup: "fullnodes",
+	})
+	maxUnavailable := intstr.FromInt32(1)
+	pdb.Spec.MinAvailable = nil
+	pdb.Spec.MaxUnavailable = &maxUnavailable
+
+	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
+}
+
 func TestLegacyNodeSetPDBAcceptsHistoricalGlobalIngressMatchLabel(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
@@ -661,9 +695,10 @@ func TestEnsurePodDisruptionBudgetsDeletesRecordedRemovedGroupPDBWithoutGroupSel
 		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
 	}
 	r := newPdbTestReconciler(t, nodeSet)
+	minAvailable := intstr.FromInt32(1)
 	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-removed", Namespace: "default"},
-		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+		Spec: policyv1.PodDisruptionBudgetSpec{MinAvailable: &minAvailable, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
 			controllers.LabelUpgrading:    controllers.StringValueFalse,
 			controllers.LabelChainID:      nodeSet.Status.ChainID,
 			controllers.LabelChainNodeSet: nodeSet.Name,
@@ -725,9 +760,10 @@ func TestFinalizePodDisruptionBudgetsDeletesOwnedAndHistoricalSingleton(t *testi
 	owned := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-removed", Namespace: "default", UID: "owned-uid"}}
 	require.NoError(t, controllerutil.SetControllerReference(nodeSet, owned, r.Scheme))
 	require.NoError(t, r.Create(context.Background(), owned))
+	minAvailable := intstr.FromInt32(1)
 	require.NoError(t, r.Create(context.Background(), &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validator", Namespace: "default", UID: "legacy-uid"},
-		Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+		Spec: policyv1.PodDisruptionBudgetSpec{MinAvailable: &minAvailable, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
 			controllers.LabelUpgrading:             controllers.StringValueFalse,
 			controllers.LabelChainID:               nodeSet.Status.ChainID,
 			controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,

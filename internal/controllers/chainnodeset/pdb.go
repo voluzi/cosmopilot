@@ -166,7 +166,8 @@ func (r *Reconciler) deleteStalePodDisruptionBudgets(
 }
 
 func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptionBudget) bool {
-	if pdb.Spec.Selector == nil || len(pdb.Spec.Selector.MatchExpressions) != 0 {
+	if pdb.Spec.Selector == nil || len(pdb.Spec.Selector.MatchExpressions) != 0 ||
+		pdb.Spec.MinAvailable == nil || pdb.Spec.MaxUnavailable != nil {
 		return false
 	}
 
@@ -195,6 +196,10 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	}
 
 	if labels[controllers.LabelChainNodeSet] != nodeSet.GetName() {
+		return false
+	}
+	if _, present := labels[controllers.LabelChainNodeSetValidator]; present &&
+		labels[controllers.LabelChainNodeSetValidator] != controllers.StringValueTrue {
 		return false
 	}
 	if !hasOnlyLegacyRegularPDBLabels(nodeSet, labels) {

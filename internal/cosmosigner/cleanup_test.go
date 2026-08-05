@@ -594,6 +594,28 @@ func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *test
 	}
 }
 
+func TestReleaseOwnerStateFinalizersDerivesSignerNameAfterInstanceLabelDrift(t *testing.T) {
+	const namespace = "default"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-owner-signer-0", Namespace: namespace,
+		Labels:     map[string]string{labelInstance: "drifted", labelOwnerUID: string(owner.UID)},
+		Finalizers: []string{RetainedStateFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
+
+	if err := ReleaseOwnerStateFinalizers(context.Background(), c, owner, namespace); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(fresh, RetainedStateFinalizer) {
+		t.Fatal("canonical owner-labeled state PVC must release its finalizer despite mutable instance-label drift")
+	}
+}
+
 func TestAttributeOwnedStatePVCsDerivesSignerNameAfterInstanceLabelDrift(t *testing.T) {
 	const namespace = "default"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
