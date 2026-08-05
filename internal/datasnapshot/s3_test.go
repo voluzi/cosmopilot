@@ -137,6 +137,60 @@ func TestS3DeleteSnapshotUsesSameAuthentication(t *testing.T) {
 	assert.Equal(t, "/app", container.WorkingDir)
 }
 
+func TestS3DestinationIdentityIncludesAuthenticationReference(t *testing.T) {
+	withFirstSecret := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:            "snapshots",
+		Region:            "eu-west-1",
+		CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-first"},
+	}})
+	withSecondSecret := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:            "snapshots",
+		Region:            "eu-west-1",
+		CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-second"},
+	}})
+	withServiceAccount := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:             "snapshots",
+		Region:             "eu-west-1",
+		ServiceAccountName: ptr.To("snapshot-exporter"),
+	}})
+
+	assert.NotEqual(t, withFirstSecret.destinationLabel(), withSecondSecret.destinationLabel())
+	assert.NotEqual(t, withFirstSecret.destinationLabel(), withServiceAccount.destinationLabel())
+}
+
+func TestS3GetSnapshotStatusRejectsSameExporterWithDifferentDestination(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket: "old-bucket",
+		Region: "eu-west-1",
+	}})
+	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+	provider.Config.Bucket = "new-bucket"
+
+	_, err := provider.GetSnapshotStatus(context.Background(), "snapshot")
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	_, getErr := provider.Client.BatchV1().Jobs("default").Get(context.Background(), "snapshot-upload", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr))
+}
+
+func TestS3GetSnapshotStatusAdoptsMatchingLegacyJob(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket:            "snapshots",
+		Region:            "eu-west-1",
+		CredentialsSecret: &corev1.LocalObjectReference{Name: "aws-creds"},
+	}})
+	require.NoError(t, provider.CreateSnapshot(context.Background(), "snapshot", testVolumeSnapshot()))
+	job := getS3Job(t, provider, "snapshot-upload")
+	delete(job.Labels, labelDestination)
+	_, err := provider.Client.BatchV1().Jobs("default").Update(context.Background(), job, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	status, err := provider.GetSnapshotStatus(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	job = getS3Job(t, provider, "snapshot-upload")
+	assert.Equal(t, provider.destinationLabel(), job.Labels[labelDestination])
+}
+
 func TestS3DeleteSnapshotReportsTerminalStatus(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -322,15 +376,10 @@ func TestS3GetSnapshotStatusPreservesUploadResources(t *testing.T) {
 				Region: "eu-west-1",
 			}})
 			if tt.createJob {
-				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:            "snapshot-upload",
-						Namespace:       "default",
-						Labels:          map[string]string{labelExporter: s3Exporter},
-						OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
-					},
-					Status: tt.jobStatus,
-				}, metav1.CreateOptions{})
+				job := provider.uploadJob("snapshot")
+				job.OwnerReferences = []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)}
+				job.Status = tt.jobStatus
+				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), job, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
 			_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), &corev1.PersistentVolumeClaim{

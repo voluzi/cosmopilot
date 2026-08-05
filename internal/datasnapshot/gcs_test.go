@@ -156,6 +156,30 @@ func TestGCSDeleteSnapshotAuthModes(t *testing.T) {
 	}
 }
 
+func TestGCSDestinationIdentityIncludesAuthenticationReference(t *testing.T) {
+	withFirstKey := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
+		Bucket: "snapshots",
+		CredentialsSecret: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "gcs-creds"},
+			Key:                  "first.json",
+		},
+	}})
+	withSecondKey := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
+		Bucket: "snapshots",
+		CredentialsSecret: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "gcs-creds"},
+			Key:                  "second.json",
+		},
+	}})
+	withServiceAccount := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
+		Bucket:             "snapshots",
+		ServiceAccountName: ptr.To("snapshot-publisher"),
+	}})
+
+	assert.NotEqual(t, withFirstKey.destinationLabel(), withSecondKey.destinationLabel())
+	assert.NotEqual(t, withFirstKey.destinationLabel(), withServiceAccount.destinationLabel())
+}
+
 func TestGCSDeleteSnapshotReportsTerminalStatus(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -385,15 +409,10 @@ func TestGCSGetSnapshotStatusPreservesUploadResources(t *testing.T) {
 				ServiceAccountName: ptr.To("snapshot-exporter"),
 			}})
 			if tt.createJob {
-				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), &batchv1.Job{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:            "snapshot-upload",
-						Namespace:       "default",
-						Labels:          map[string]string{labelExporter: gcsExporter},
-						OwnerReferences: []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)},
-					},
-					Status: tt.jobStatus,
-				}, metav1.CreateOptions{})
+				job := provider.uploadJob("snapshot")
+				job.OwnerReferences = []metav1.OwnerReference{ownerReferenceToObject(provider.Owner)}
+				job.Status = tt.jobStatus
+				_, err := provider.Client.BatchV1().Jobs("default").Create(context.Background(), job, metav1.CreateOptions{})
 				require.NoError(t, err)
 			}
 			_, err := provider.Client.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), &corev1.PersistentVolumeClaim{

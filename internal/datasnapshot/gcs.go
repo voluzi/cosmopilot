@@ -118,25 +118,16 @@ func (gcs *GCS) serviceAccountName() string {
 	return *gcs.Config.ServiceAccountName
 }
 
-func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.VolumeSnapshot) error {
-	if vs.Status.RestoreSize == nil {
-		return fmt.Errorf("restore size is not available yet")
-	}
-
-	apiVersion := strings.Split(vs.APIVersion, "/")
-	if len(apiVersion) == 0 {
-		return fmt.Errorf("unsupported api version")
-	}
-
-	// Create job to compress and upload tarball
-	job := &batchv1.Job{
+func (gcs *GCS) uploadJob(name string) *batchv1.Job {
+	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-upload", name),
 			Namespace: gcs.Owner.GetNamespace(),
 			Labels: map[string]string{
-				labelExporter: gcsExporter,
-				labelOwner:    gcs.Owner.GetName(),
-				labelType:     typeUpload,
+				labelExporter:    gcsExporter,
+				labelOwner:       gcs.Owner.GetName(),
+				labelType:        typeUpload,
+				labelDestination: gcs.destinationLabel(),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -147,62 +138,51 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 					PriorityClassName:  gcs.priorityClass,
 					ServiceAccountName: gcs.serviceAccountName(),
 					ImagePullSecrets:   gcs.imagePullSecrets,
-					Volumes: append([]corev1.Volume{
-						{
-							Name: "data",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: fmt.Sprintf("%s-upload", name),
-								},
+					Volumes: append([]corev1.Volume{{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: fmt.Sprintf("%s-upload", name),
 							},
 						},
-					}, gcs.credentialsVolume()...),
-					Containers: []corev1.Container{
-						{
-							Name:            "dataexporter",
-							Image:           gcs.dataExporterImage,
-							ImagePullPolicy: corev1.PullAlways,
-							SecurityContext: k8s.RestrictedSecurityContext(),
-							Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
-							WorkingDir:      "/home/app",
-							Env: append(gcs.credentialsEnv(),
-								corev1.EnvVar{
-									Name:  "COMPRESSION",
-									Value: string(gcs.ExportConfig.GetCompression()),
-								},
-								corev1.EnvVar{
-									Name:  "SIZE_LIMIT",
-									Value: gcs.Config.GetSizeLimit(),
-								},
-								corev1.EnvVar{
-									Name:  "PART_SIZE",
-									Value: gcs.Config.GetPartSize(),
-								},
-								corev1.EnvVar{
-									Name:  "CHUNK_SIZE",
-									Value: gcs.Config.GetChunkSize(),
-								},
-								corev1.EnvVar{
-									Name:  "BUFFER_SIZE",
-									Value: gcs.Config.GetBufferSize(),
-								},
-								corev1.EnvVar{
-									Name:  "CONCURRENT_JOBS",
-									Value: strconv.Itoa(gcs.Config.GetConcurrentJobs()),
-								},
-							),
-							VolumeMounts: append(gcs.credentialsVolumeMount(),
-								corev1.VolumeMount{
-									Name:      "data",
-									MountPath: "/home/app/data",
-								},
-							),
-						},
-					},
+					}}, gcs.credentialsVolume()...),
+					Containers: []corev1.Container{{
+						Name:            "dataexporter",
+						Image:           gcs.dataExporterImage,
+						ImagePullPolicy: corev1.PullAlways,
+						SecurityContext: k8s.RestrictedSecurityContext(),
+						Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
+						WorkingDir:      "/home/app",
+						Env: append(gcs.credentialsEnv(),
+							corev1.EnvVar{Name: "COMPRESSION", Value: string(gcs.ExportConfig.GetCompression())},
+							corev1.EnvVar{Name: "SIZE_LIMIT", Value: gcs.Config.GetSizeLimit()},
+							corev1.EnvVar{Name: "PART_SIZE", Value: gcs.Config.GetPartSize()},
+							corev1.EnvVar{Name: "CHUNK_SIZE", Value: gcs.Config.GetChunkSize()},
+							corev1.EnvVar{Name: "BUFFER_SIZE", Value: gcs.Config.GetBufferSize()},
+							corev1.EnvVar{Name: "CONCURRENT_JOBS", Value: strconv.Itoa(gcs.Config.GetConcurrentJobs())},
+						),
+						VolumeMounts: append(gcs.credentialsVolumeMount(), corev1.VolumeMount{
+							Name:      "data",
+							MountPath: "/home/app/data",
+						}),
+					}},
 				},
 			},
 		},
 	}
+}
+
+func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.VolumeSnapshot) error {
+	if vs.Status.RestoreSize == nil {
+		return fmt.Errorf("restore size is not available yet")
+	}
+
+	apiVersion := strings.Split(vs.APIVersion, "/")
+	if len(apiVersion) == 0 {
+		return fmt.Errorf("unsupported api version")
+	}
+
+	job := gcs.uploadJob(name)
 
 	err := controllerutil.SetControllerReference(gcs.Owner, job, gcs.Scheme)
 	if err != nil {
@@ -235,8 +215,22 @@ func (gcs *GCS) CreateSnapshot(ctx context.Context, name string, vs *snapshotv1.
 	return ensureUploadResources(ctx, gcs.Client, gcs.Scheme, gcs.Owner, job, pvc)
 }
 
+func (gcs *GCS) destinationLabel() string {
+	credentialsSecretName := ""
+	credentialsSecretKey := ""
+	if gcs.Config.CredentialsSecret != nil {
+		credentialsSecretName = gcs.Config.CredentialsSecret.Name
+		credentialsSecretKey = gcs.Config.CredentialsSecret.Key
+	}
+	return SnapshotDestinationLabel(
+		string(appsv1.SnapshotExportProviderGCS), gcs.Config.Bucket, "", "", false,
+		"credentialsSecret", credentialsSecretName, credentialsSecretKey,
+		"serviceAccount", gcs.serviceAccountName(),
+	)
+}
+
 func (gcs *GCS) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	return uploadJobStatus(ctx, gcs.Client, gcs.Owner, gcs.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), gcsExporter)
+	return uploadJobStatusForDesired(ctx, gcs.Client, gcs.Owner, gcs.uploadJob(name))
 }
 
 func (gcs *GCS) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
@@ -317,9 +311,10 @@ func (gcs *GCS) ensureSnapshotDeletion(
 			Name:      fmt.Sprintf("%s-delete", name),
 			Namespace: gcs.Owner.GetNamespace(),
 			Labels: map[string]string{
-				labelExporter: gcsExporter,
-				labelOwner:    gcs.Owner.GetName(),
-				labelType:     typeDelete,
+				labelExporter:    gcsExporter,
+				labelOwner:       gcs.Owner.GetName(),
+				labelType:        typeDelete,
+				labelDestination: gcs.destinationLabel(),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -373,5 +368,5 @@ func (gcs *GCS) CleanupSnapshotDeletion(ctx context.Context, snapshotJob Snapsho
 }
 
 func (gcs *GCS) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
-	return listSnapshotJobs(ctx, gcs.Client, gcs.Owner, gcsExporter)
+	return listSnapshotJobs(ctx, gcs.Client, gcs.Owner, gcsExporter, gcs.destinationLabel())
 }

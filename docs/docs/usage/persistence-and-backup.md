@@ -265,6 +265,15 @@ The resulting extensions are `.tar`, `.tar.gz`, `.tar.zst`, and `.tar.lz4`.
 
 Exactly one provider, `gcs` or `s3`, must be configured.
 
+The controller records each upload's provider, bucket, object name, endpoint/routing
+settings, and Kubernetes Secret or ServiceAccount references in
+`ChainNode.status.snapshotExports` before creating the upload Job. Changing provider,
+bucket, endpoint, suffix, or credentials later therefore does not redirect cleanup to
+the new destination. If an old authentication reference is unavailable, the record
+is retained and the `SnapshotExportCleanup` condition names the destination requiring
+operator action. Restore the named reference to resume automatic cleanup; use the
+documented cleanup acknowledgement annotation only after manual cleanup or verification.
+
 ### Google Cloud Storage
 
 The following fields are available for GCS:

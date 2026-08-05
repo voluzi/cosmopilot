@@ -1017,6 +1017,100 @@ func TestEnsureSnapshotJobKeepsJobWithMatchingLabels(t *testing.T) {
 	assert.Equal(t, "existing-uid", string(job.UID))
 }
 
+func TestEnsureSnapshotJobAdoptsLegacyJobWithMatchingPodIdentity(t *testing.T) {
+	owner := testJobOwner()
+	desired := desiredDeleteJob(owner, "s3-exporter")
+	desired.Labels[labelDestination] = "destination-id"
+	desired.Spec.Template.Spec = corev1.PodSpec{
+		RestartPolicy:      corev1.RestartPolicyNever,
+		ServiceAccountName: "snapshot-cleaner",
+		Containers: []corev1.Container{{
+			Name: "dataexporter",
+			Args: []string{"s3", "delete", "bucket", "object"},
+		}},
+	}
+	existing := desired.DeepCopy()
+	existing.UID = "legacy-uid"
+	delete(existing.Labels, labelDestination)
+	client := fake.NewSimpleClientset(existing)
+
+	job, created, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, "legacy-uid", string(job.UID))
+	assert.Equal(t, "destination-id", job.Labels[labelDestination])
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "delete", action.GetVerb())
+	}
+}
+
+func TestEnsureSnapshotJobRejectsLegacyJobWithDifferentPodIdentity(t *testing.T) {
+	owner := testJobOwner()
+	desired := desiredDeleteJob(owner, "s3-exporter")
+	desired.Labels[labelDestination] = "destination-id"
+	desired.Spec.Template.Spec = corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Containers: []corev1.Container{{
+			Name: "dataexporter",
+			Args: []string{"s3", "delete", "desired-bucket", "object"},
+		}},
+	}
+	existing := desired.DeepCopy()
+	existing.UID = "legacy-uid"
+	delete(existing.Labels, labelDestination)
+	existing.Spec.Template.Spec.Containers[0].Args[2] = "other-bucket"
+	client := fake.NewSimpleClientset(existing)
+
+	_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, labelDestination, replacement.ConflictingLabel)
+}
+
+func TestEnsureSnapshotJobRejectsLegacyJobWithDifferentSecurityOrPullPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*batchv1.Job)
+	}{
+		{
+			name: "pod security context",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)}
+			},
+		},
+		{
+			name: "container security context",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)}
+			},
+		},
+		{
+			name: "image pull policy",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := testJobOwner()
+			desired := desiredDeleteJob(owner, "s3-exporter")
+			desired.Labels[labelDestination] = "destination-id"
+			desired.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+			desired.Spec.Template.Spec.Containers = []corev1.Container{{Name: "dataexporter", Image: "exporter:v1"}}
+			existing := desired.DeepCopy()
+			existing.UID = "legacy-uid"
+			delete(existing.Labels, labelDestination)
+			tt.mutate(existing)
+			client := fake.NewSimpleClientset(existing)
+
+			_, _, err := ensureSnapshotJob(context.Background(), client, owner, desired, "delete")
+			require.ErrorIs(t, err, ErrStaleJobReplaced)
+		})
+	}
+}
+
 func TestEnsureSnapshotJobReportsDeleteFailureOfStaleJob(t *testing.T) {
 	owner := testJobOwner()
 	client := fake.NewSimpleClientset(&batchv1.Job{
@@ -1269,4 +1363,39 @@ func requireJobDeleteAction(t *testing.T, actions []k8stesting.Action) k8stestin
 	}
 	require.FailNow(t, "job delete action not found")
 	return nil
+}
+
+func TestSnapshotJobsFromJobsMarksLegacyUploadWithoutDestinationAsPrevious(t *testing.T) {
+	job := batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "snapshot-upload", UID: "upload-uid",
+			Labels: map[string]string{
+				labelExporter: "gcs-exporter", labelType: typeUpload,
+			},
+		},
+		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "dataexporter", Args: []string{"gcs", "upload", "old-bucket", "snapshot"}}},
+		}}},
+	}
+
+	jobs := snapshotJobsFromJobs([]batchv1.Job{job}, "gcs-exporter", "current-destination")
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "gcs-exporter", jobs[0].Exporter)
+	require.NotNil(t, jobs[0].Source)
+	assert.Empty(t, jobs[0].Source.Labels[labelDestination])
+}
+
+func TestSnapshotJobsFromJobsMarksSameExporterDifferentDestinationUploadAsPrevious(t *testing.T) {
+	job := batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "snapshot-upload", UID: "upload-uid",
+		Labels: map[string]string{
+			labelExporter: "gcs-exporter", labelType: typeUpload, labelDestination: "old-destination",
+		},
+	}}
+
+	jobs := snapshotJobsFromJobs([]batchv1.Job{job}, "gcs-exporter", "new-destination")
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "gcs-exporter", jobs[0].Exporter)
+	require.NotNil(t, jobs[0].Source)
+	assert.Equal(t, "old-destination", jobs[0].Source.Labels[labelDestination])
 }

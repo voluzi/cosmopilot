@@ -91,23 +91,16 @@ func (provider *S3) uploadEnv() []corev1.EnvVar {
 	)
 }
 
-func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *snapshotv1.VolumeSnapshot) error {
-	if snapshot.Status.RestoreSize == nil {
-		return fmt.Errorf("restore size is not available yet")
-	}
-	apiVersion := strings.Split(snapshot.APIVersion, "/")
-	if len(apiVersion) == 0 {
-		return fmt.Errorf("unsupported api version")
-	}
-
-	job := &batchv1.Job{
+func (provider *S3) uploadJob(name string) *batchv1.Job {
+	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-upload", name),
 			Namespace: provider.Owner.GetNamespace(),
 			Labels: map[string]string{
-				labelExporter: s3Exporter,
-				labelOwner:    provider.Owner.GetName(),
-				labelType:     typeUpload,
+				labelExporter:    s3Exporter,
+				labelOwner:       provider.Owner.GetName(),
+				labelType:        typeUpload,
+				labelDestination: provider.destinationLabel(),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -144,6 +137,18 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 			},
 		},
 	}
+}
+
+func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *snapshotv1.VolumeSnapshot) error {
+	if snapshot.Status.RestoreSize == nil {
+		return fmt.Errorf("restore size is not available yet")
+	}
+	apiVersion := strings.Split(snapshot.APIVersion, "/")
+	if len(apiVersion) == 0 {
+		return fmt.Errorf("unsupported api version")
+	}
+
+	job := provider.uploadJob(name)
 	if err := controllerutil.SetControllerReference(provider.Owner, job, provider.Scheme); err != nil {
 		return err
 	}
@@ -167,8 +172,24 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 	return ensureUploadResources(ctx, provider.Client, provider.Scheme, provider.Owner, job, pvc)
 }
 
+func (provider *S3) destinationLabel() string {
+	credentialsSecret := ""
+	if provider.Config.CredentialsSecret != nil {
+		credentialsSecret = provider.Config.CredentialsSecret.Name
+	}
+	return SnapshotDestinationLabel(
+		string(appsv1.SnapshotExportProviderS3),
+		provider.Config.Bucket,
+		provider.Config.Region,
+		provider.Config.GetEndpoint(),
+		provider.Config.ShouldForcePathStyle(),
+		"credentialsSecret", credentialsSecret,
+		"serviceAccount", provider.serviceAccountName(),
+	)
+}
+
 func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (SnapshotStatus, error) {
-	return uploadJobStatus(ctx, provider.Client, provider.Owner, provider.Owner.GetNamespace(), fmt.Sprintf("%s-upload", name), s3Exporter)
+	return uploadJobStatusForDesired(ctx, provider.Client, provider.Owner, provider.uploadJob(name))
 }
 
 func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
@@ -225,9 +246,10 @@ func (provider *S3) ensureSnapshotDeletion(
 			Name:      fmt.Sprintf("%s-delete", name),
 			Namespace: provider.Owner.GetNamespace(),
 			Labels: map[string]string{
-				labelExporter: s3Exporter,
-				labelOwner:    provider.Owner.GetName(),
-				labelType:     typeDelete,
+				labelExporter:    s3Exporter,
+				labelOwner:       provider.Owner.GetName(),
+				labelType:        typeDelete,
+				labelDestination: provider.destinationLabel(),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -285,5 +307,5 @@ func (provider *S3) cleanUp(ctx context.Context, name string) error {
 }
 
 func (provider *S3) ListSnapshots(ctx context.Context) ([]SnapshotJob, error) {
-	return listSnapshotJobs(ctx, provider.Client, provider.Owner, s3Exporter)
+	return listSnapshotJobs(ctx, provider.Client, provider.Owner, s3Exporter, provider.destinationLabel())
 }

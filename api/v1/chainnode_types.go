@@ -51,6 +51,8 @@ const (
 const (
 	// ConditionUpgrade indicates an upgrade condition.
 	ConditionUpgrade = "Upgrade"
+	// ConditionSnapshotExportCleanup indicates that exported snapshot data requires operator cleanup.
+	ConditionSnapshotExportCleanup = "SnapshotExportCleanup"
 
 	// ReasonUpgradeSuccess indicates that the upgrade completed successfully.
 	ReasonUpgradeSuccess = "UpgradeSuccessful"
@@ -332,6 +334,11 @@ type ChainNodeStatus struct {
 	// migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand.
 	// +optional
 	CosmosignerAtEstablishment *string `json:"cosmosignerAtEstablishment,omitempty"`
+
+	// SnapshotExports records the controller-owned destination and lifecycle state of snapshot tarballs.
+	// It is stored in status so VolumeSnapshot metadata cannot redirect privileged cleanup Jobs.
+	// +optional
+	SnapshotExports []SnapshotExportStatus `json:"snapshotExports,omitempty"`
 
 	// CosmosignerServingIdentity records the effective signing identity of the rolled-out
 	// validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on
