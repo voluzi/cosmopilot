@@ -1000,7 +1000,7 @@ SnapshotExportDestination contains the routing and authentication references req
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | provider |  | SnapshotExportProvider | true |
-| bucket |  | string | true |
+| bucket | Bucket is omitted for unknown legacy destinations that require explicit operator cleanup. | string | false |
 | region |  | string | false |
 | endpoint |  | string | false |
 | forcePathStyle |  | bool | false |
