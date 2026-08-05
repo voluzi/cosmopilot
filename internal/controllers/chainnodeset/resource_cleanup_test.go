@@ -730,6 +730,56 @@ func TestMigrateLegacyDurableResourcesRecoversRecordedChildOwnership(t *testing.
 	assert.Nil(t, metav1.GetControllerOf(freshPVC))
 }
 
+// Deleting a controllerless recorded child would let it resolve to itself as cleanup root, putting
+// its durable resources beyond the parent's reach.
+func TestQuiesceAndDeleteChildrenRestoresRecordedChildOwnershipBeforeDeleting(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: "child-uid",
+		}}},
+	}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "set-fullnodes-0", Namespace: nodeSet.Namespace, UID: "child-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceAndDeleteChildren(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, done)
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(child), fresh))
+	assert.True(t, metav1.IsControlledBy(fresh, nodeSet))
+	assert.True(t, fresh.GetDeletionTimestamp().IsZero(), "ownership must be restored before the child is deleted")
+	assert.Equal(t, resourcecleanup.RootOwnerFor(nodeSet).UID, resourcecleanup.RootOwnerFor(fresh).UID)
+}
+
+func TestQuiesceCosmoseedBlocksOnCanonicalPodAfterStatefulSetRemoval(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	// The StatefulSet is absent, so only the surviving pod can report that the seed is still running.
+	orphan := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "set-seed-0", Namespace: nodeSet.Namespace, UID: "pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, orphan).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceCosmoseed(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, done, "a running canonical seed pod must block cleanup even with no StatefulSet")
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(orphan), &corev1.Pod{}))
+}
+
+func TestQuiesceCosmoseedCompletesWhenNoSeedPodsRemain(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	unrelated := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "set-seed-keeper", Namespace: nodeSet.Namespace, UID: "pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, unrelated).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	done, err := r.quiesceCosmoseed(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.True(t, done, "a non-ordinal name must not be mistaken for a seed replica")
+}
+
 // A recorded child does not make its unowned key Secrets adoptable: valid key material at the
 // generated default names is indistinguishable from a key the user imported.
 func TestMigrateLegacyDurableResourcesPreservesRecordedChildUnownedDefaultKeys(t *testing.T) {

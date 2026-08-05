@@ -202,6 +202,18 @@ func (r *Reconciler) quiesceAndDeleteChildren(ctx context.Context, nodeSet *apps
 				child.GetNamespace(), child.GetName(), child.GetUID(), controller.Name, controller.UID,
 			)
 		}
+		// A recorded child that lost its controller reference would resolve to itself as cleanup
+		// root, stamping its durable resources under the child UID where this parent can no longer
+		// reach them. The recorded UID proves the relationship, so restore it before deleting.
+		if !controlled {
+			if err := controllerutil.SetControllerReference(nodeSet, child, r.Scheme); err != nil {
+				return false, err
+			}
+			if err := r.Update(ctx, child); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
 		if child.GetDeletionTimestamp().IsZero() {
 			if !controllerutil.ContainsFinalizer(child, resourcecleanup.Finalizer) {
 				controllerutil.AddFinalizer(child, resourcecleanup.Finalizer)
@@ -486,12 +498,27 @@ func (r *Reconciler) quiesceChildPod(ctx context.Context, child *appsv1.ChainNod
 	return allDone, nil
 }
 
+func (r *Reconciler) canonicalSeedPodsGone(ctx context.Context, nodeSet *appsv1.ChainNodeSet, seedName string) (bool, error) {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return false, err
+	}
+	for i := range pods.Items {
+		if hasCanonicalOrdinal(pods.Items[i].GetName(), seedName+"-") {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (r *Reconciler) quiesceCosmoseed(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
 	sts := &k8sappsv1.StatefulSet{}
 	key := client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName() + "-seed"}
 	if err := r.Get(ctx, key, sts); err != nil {
 		if errors.IsNotFound(err) {
-			return true, nil
+			// An orphan-deleted StatefulSet leaves its pods running and still mounting the seed
+			// claims, so a missing StatefulSet alone does not mean the seed is quiesced.
+			return r.canonicalSeedPodsGone(ctx, nodeSet, key.Name)
 		}
 		return false, err
 	}

@@ -267,11 +267,17 @@ func QuiesceOwnerForNamespaceTermination(ctx context.Context, c client.Client, o
 	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return false, err
 	}
+	// Claim discovery must accept every proof ReleaseOwnerStateFinalizers accepts. If quiescence
+	// recognized fewer claims than the release path, a pod using one it missed would be skipped and
+	// the finalizer dropped while that pod still ran.
 	ownedClaims := map[string]struct{}{}
+	root := resourcecleanup.RootOwnerFor(owner)
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
-		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) {
+		attributed := resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassCosmosignerState) &&
+			pvc.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] == string(owner.GetUID())
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) && !attributed {
 			continue
 		}
 		if canonicalName, ok := statefulSetNameFromDataPVC(pvc.GetName()); ok {

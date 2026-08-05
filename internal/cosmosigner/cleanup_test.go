@@ -278,6 +278,37 @@ func TestNamespaceTerminationIgnoresSameNamePodForOrphanedStatePVC(t *testing.T)
 	}
 }
 
+// Quiescence must recognize a claim proven by stable attribution alone, because
+// ReleaseOwnerStateFinalizers would drop that claim's finalizer on the same proof.
+func TestNamespaceTerminationBlocksPodOnAttributedStatePVCWithoutOwnerLabel(t *testing.T) {
+	const namespace, name = "default", "attributed-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	claimName := dataVolumeName + "-" + name + "-0"
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: claimName, Namespace: namespace, Finalizers: []string{RetainedStateFinalizer},
+	}}
+	resourcecleanup.Stamp(pvc, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState)
+	resourcecleanup.StampResourceOwner(pvc, owner.GetUID())
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: namespace, UID: "pod-uid"},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: dataVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+			},
+		}}},
+	}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc, pod).Build()
+
+	done, err := QuiesceOwnerForNamespaceTermination(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("an attributed state claim must be discovered even when the owner-UID label is absent")
+	}
+}
+
 func TestNamespaceTerminationBlocksOrphanPodStillMountingRetainedState(t *testing.T) {
 	const namespace, name = "default", "orphaned-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
