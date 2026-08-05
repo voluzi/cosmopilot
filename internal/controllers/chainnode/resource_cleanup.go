@@ -98,9 +98,14 @@ func (r *Reconciler) refuseOrphanedRecordedChild(ctx context.Context, chainNode 
 	if err := r.List(ctx, nodeSets, client.InNamespace(chainNode.GetNamespace())); err != nil {
 		return err
 	}
+	// Compare the resolved cleanup roots rather than the controller reference: this is the identity
+	// attribution will actually use, so the guard cannot disagree with it. metav1.IsControlledBy would
+	// match on UID alone and let a reference carrying the parent's UID under a different name, kind or
+	// API version through, which RootOwnerFor then resolves somewhere else entirely.
+	childRoot := resourcecleanup.RootOwnerFor(chainNode)
 	for i := range nodeSets.Items {
 		nodeSet := &nodeSets.Items[i]
-		if !nodeSet.ClaimsChild(chainNode) || metav1.IsControlledBy(chainNode, nodeSet) {
+		if !nodeSet.ClaimsChild(chainNode) || childRoot == resourcecleanup.RootOwnerFor(nodeSet) {
 			continue
 		}
 		identity := fmt.Sprintf("UID %s", nodeSet.GetUID())

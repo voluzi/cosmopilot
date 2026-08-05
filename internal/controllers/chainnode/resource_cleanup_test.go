@@ -659,3 +659,31 @@ func TestFinalizeResourcesAllowsChildControlledByItsRecordingNodeSet(t *testing.
 	require.NoError(t, err)
 	assert.True(t, done)
 }
+
+// metav1.IsControlledBy matches on UID alone, so a reference carrying the parent's UID under a
+// different kind still resolves the child to its own root. The guard must compare resolved roots.
+func TestFinalizeResourcesRefusesRecordedChildWithUIDOnlyControllerMatch(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: "child-uid",
+		}}},
+	}
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: "child-uid",
+		Finalizers: []string{resourcecleanup.Finalizer},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1", Kind: "StatefulSet", Name: "impostor",
+			UID: nodeSet.UID, Controller: ptr.To(true),
+		}},
+	}}
+	require.True(t, metav1.IsControlledBy(node, nodeSet), "fixture must reproduce the UID-only match")
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, nodeSet).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	_, err := r.finalizeResources(context.Background(), node)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded by ChainNodeSet set")
+	assert.Contains(t, err.Error(), "impostor")
+}
