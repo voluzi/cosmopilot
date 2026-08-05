@@ -237,6 +237,60 @@ func TestEnsureConsensusKeyReservationRecoversStaleOwnerWithoutDeletingRetainedS
 	}
 }
 
+func TestEnsureConsensusKeyReservationKeepsStaleReservationWhenReplacementClaimConflicts(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	holder := ReservationHolder{
+		UID: "new-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator", Claim: "validator",
+	}
+	stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: holder.Kind, Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+	})
+	conflictingClaim := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationOtherPublicKey), "ckr-conflict", holder)
+	conflictingClaim.Spec.PublicKey = reservationOtherPublicKey
+	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, conflictingClaim).Build()
+
+	_, err := EnsureConsensusKeyReservationWithResult(
+		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
+	)
+	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
+		t.Fatalf("conflicting replacement claim must reject stale recovery, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("stale reservation must remain when replacement claim conflicts: %v", err)
+	}
+}
+
+func TestEnsureConsensusKeyReservationKeepsStaleReservationWhenLegacyOwnerConflicts(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	holder := ReservationHolder{
+		UID: "new-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator", Claim: "validator",
+	}
+	stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: holder.Kind, Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+	})
+	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+	}}
+	legacyOwner := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-validator", Namespace: holder.Namespace, UID: "other-owner-uid"},
+		Status:     appsv1.ChainNodeStatus{ChainID: "chain-1", CosmosignerPublicKey: reservationTestPublicKey},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, legacyOwner, stale).Build()
+
+	_, err := EnsureConsensusKeyReservationWithResult(
+		context.Background(), c, c, "chain-1", reservationTestPublicKey, holder,
+	)
+	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
+		t.Fatalf("legacy replacement owner must reject stale recovery, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("stale reservation must remain when a legacy owner conflicts: %v", err)
+	}
+}
+
 func TestEnsureConsensusKeyReservationRefusesStaleRecoveryWhileSigningPathExists(t *testing.T) {
 	tests := []struct {
 		name string
@@ -316,6 +370,177 @@ func TestEnsureConsensusKeyReservationRefusesStaleChainNodeSetRecoveryWhileChild
 	)
 	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
 		t.Fatalf("an old root child must keep stale reservation conflict, got %v", err)
+	}
+}
+
+func TestEnsureConsensusKeyReservationUsesExactLabelsBeforeChainNodeSetNameFallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		objects func(ReservationHolder) []client.Object
+	}{
+		{
+			name: "prefix-related signer StatefulSet",
+			objects: func(holder ReservationHolder) []client.Object {
+				return []client.Object{&appsk8sv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{Name: "foo-bar-signer", Namespace: holder.Namespace, UID: "foreign-sts-uid"},
+					Spec: appsk8sv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+						"app.kubernetes.io/name": "cosmosigner", "nodeset": "foo-bar",
+					}}}},
+				}}
+			},
+		},
+		{
+			name: "prefix-related one-shot Job",
+			objects: func(holder ReservationHolder) []client.Object {
+				return []client.Object{&batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar-signer-import", Namespace: holder.Namespace, UID: "foreign-job-uid",
+					Labels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "foo-bar"},
+				}}}
+			},
+		},
+		{
+			name: "prefix-related direct one-shot Pod",
+			objects: func(holder ReservationHolder) []client.Object {
+				return []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar-signer-import", Namespace: holder.Namespace, UID: "foreign-pod-uid",
+					Labels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "foo-bar"},
+				}}}
+			},
+		},
+		{
+			name: "prefix-related signer replica Pod",
+			objects: func(holder ReservationHolder) []client.Object {
+				return []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar-signer-0", Namespace: holder.Namespace, UID: "foreign-pod-uid",
+					Labels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "foo-bar"},
+				}}}
+			},
+		},
+		{
+			name: "current-holder signer and replica",
+			objects: func(holder ReservationHolder) []client.Object {
+				sts := &appsk8sv1.StatefulSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "foo-signer", Namespace: holder.Namespace, UID: "current-sts-uid",
+						OwnerReferences: []metav1.OwnerReference{{
+							APIVersion: appsv1.GroupVersion.String(), Kind: holder.Kind, Name: holder.Name,
+							UID: holder.UID, Controller: ptr.To(true),
+						}},
+					},
+					Spec: appsk8sv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+						"app.kubernetes.io/name": "cosmosigner", "nodeset": holder.Name,
+					}}}},
+				}
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: sts.Name + "-0", Namespace: holder.Namespace, UID: "current-pod-uid",
+					Labels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": holder.Name},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: appsk8sv1.SchemeGroupVersion.String(), Kind: "StatefulSet", Name: sts.Name,
+						UID: sts.UID, Controller: ptr.To(true),
+					}},
+				}}
+				return []client.Object{sts, pod}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := reservationLifecycleScheme(t)
+			holder := ReservationHolder{UID: "new-owner-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "foo", Claim: "signer-current"}
+			stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+				UID: "old-owner-uid", Kind: holder.Kind, Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+			})
+			currentOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+				Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+			}}
+			objects := []client.Object{currentOwner, stale}
+			objects = append(objects, tt.objects(holder)...)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+
+			result, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
+			if err != nil {
+				t.Fatalf("exact labels identifying a different owner must not block recovery: %v", err)
+			}
+			if result.RecoveredReservation != stale.Name {
+				t.Fatalf("recovered reservation = %q, want %q", result.RecoveredReservation, stale.Name)
+			}
+		})
+	}
+}
+
+func TestEnsureConsensusKeyReservationBlocksOrphanedChainNodeSetSignerBeforePodsExist(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+	}{
+		{
+			name: "exact pod-template labels",
+			labels: map[string]string{
+				"app.kubernetes.io/name": "cosmosigner", "nodeset": "foo",
+			},
+		},
+		{name: "legacy label-less deterministic name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := reservationLifecycleScheme(t)
+			holder := ReservationHolder{UID: "new-owner-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "foo", Claim: "signer-current"}
+			stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+				UID: "old-owner-uid", Kind: holder.Kind, Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+			})
+			currentOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+				Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+			}}
+			sts := &appsk8sv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo-signer", Namespace: holder.Namespace, UID: "orphan-sts-uid"},
+				Spec:       appsk8sv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: tt.labels}}},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, sts).Build()
+
+			_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
+			if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), sts.Name) {
+				t.Fatalf("orphaned stale signer StatefulSet must block recovery before it creates Pods, got %v", err)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+				t.Fatalf("stale reservation must remain while orphaned signer StatefulSet exists: %v", err)
+			}
+		})
+	}
+}
+
+func TestEnsureConsensusKeyReservationKeepsLabelLessChainNodeSetStalePaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path client.Object
+	}{
+		{name: "managed Job", path: &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "foo-signer-import", Namespace: "default", UID: "job-uid"}}},
+		{name: "direct one-shot Pod", path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo-signer-pubkey", Namespace: "default", UID: "pod-uid"}}},
+		{name: "generated Job Pod", path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo-signer-import-generated", Namespace: "default", UID: "pod-uid"}}},
+		{name: "signer replica Pod", path: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo-signer-0", Namespace: "default", UID: "pod-uid"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := reservationLifecycleScheme(t)
+			holder := ReservationHolder{UID: "new-owner-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "foo", Claim: "signer-current"}
+			stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+				UID: "old-owner-uid", Kind: holder.Kind, Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+			})
+			currentOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+				Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+			}}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale, tt.path).Build()
+
+			_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
+			if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), tt.path.GetName()) {
+				t.Fatalf("label-less deterministic stale path must block recovery, got %v", err)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+				t.Fatalf("stale reservation must remain while %q exists: %v", tt.path.GetName(), err)
+			}
+		})
 	}
 }
 

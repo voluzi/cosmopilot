@@ -547,6 +547,12 @@ func recoverStaleConsensusKeyReservation(ctx context.Context, reader client.Read
 	if !gone {
 		return false, &reservationRecoveryBlockedError{reservation: reservation.GetName(), detail: blockedBy}
 	}
+	if err := ensureNoConflictingReservationClaim(ctx, reader, chainID, publicKey, holder); err != nil {
+		return false, err
+	}
+	if err := ensureNoLegacyConsensusKeyOwner(ctx, reader, chainID, publicKey, holder); err != nil {
+		return false, err
+	}
 	if reservation.GetUID() == "" {
 		return false, nil
 	}
@@ -615,7 +621,7 @@ func staleReservationSigningPathsGone(ctx context.Context, reader client.Reader,
 		if controlledByUID(sts, reservation.Spec.OwnerUID) {
 			return false, fmt.Sprintf("StatefulSet %s/%s is still controlled by stale owner UID %q", sts.GetNamespace(), sts.GetName(), reservation.Spec.OwnerUID), nil
 		}
-		if staleReservationSignerLabelsMatch(sts.GetLabels(), reservation) {
+		if staleReservationStatefulSetMatches(sts, reservation) {
 			if heldByReservationHolder(sts, holder) {
 				if sts.GetUID() != "" {
 					currentHolderControllerUIDs[sts.GetUID()] = struct{}{}
@@ -701,10 +707,10 @@ func staleReservationJobMatches(job *batchv1.Job, reservation *appsv1.ConsensusK
 	if !isManagedSigningOneShotName(job.GetName()) {
 		return false
 	}
-	if strings.HasPrefix(job.GetName(), reservation.Spec.Claim+"-") {
-		return true
+	if matches, exact := staleReservationSignerLabelAttribution(job.GetLabels(), reservation); exact {
+		return matches
 	}
-	if staleReservationSignerLabelsMatch(job.GetLabels(), reservation) {
+	if strings.HasPrefix(job.GetName(), reservation.Spec.Claim+"-") {
 		return true
 	}
 	if reservation.Spec.OwnerKind == "ChainNode" {
@@ -713,17 +719,45 @@ func staleReservationJobMatches(job *batchv1.Job, reservation *appsv1.ConsensusK
 	return strings.HasPrefix(job.GetName(), reservation.Spec.OwnerName+"-")
 }
 
-func staleReservationSignerLabelsMatch(labels map[string]string, reservation *appsv1.ConsensusKeyReservation) bool {
-	if labels["app.kubernetes.io/name"] != "cosmosigner" {
-		return false
+func staleReservationSignerLabelAttribution(labels map[string]string, reservation *appsv1.ConsensusKeyReservation) (bool, bool) {
+	chainNode := labels["chain-node"]
+	nodeSet := labels["nodeset"]
+	if reservation.Spec.OwnerKind == "ChainNode" {
+		if chainNode != "" {
+			return chainNode == reservation.Spec.OwnerName, true
+		}
+		if nodeSet != "" {
+			return false, true
+		}
+		return false, false
+	}
+	if nodeSet != "" {
+		return nodeSet == reservation.Spec.OwnerName, true
+	}
+	if chainNode != "" {
+		return chainNode == reservation.Spec.Claim, true
+	}
+	return false, false
+}
+
+func staleReservationStatefulSetMatches(sts *appsk8sv1.StatefulSet, reservation *appsv1.ConsensusKeyReservation) bool {
+	if matches, exact := staleReservationSignerLabelAttribution(sts.Spec.Template.GetLabels(), reservation); exact {
+		return matches
+	}
+	if matches, exact := staleReservationSignerLabelAttribution(sts.GetLabels(), reservation); exact {
+		return matches
 	}
 	if reservation.Spec.OwnerKind == "ChainNode" {
-		return labels["chain-node"] == reservation.Spec.OwnerName
+		return sts.GetName() == reservation.Spec.OwnerName+"-signer"
 	}
-	return labels["nodeset"] == reservation.Spec.OwnerName
+	return strings.HasPrefix(sts.GetName(), reservation.Spec.OwnerName+"-") && strings.HasSuffix(sts.GetName(), "-signer")
 }
 
 func staleReservationPodMatches(pod *corev1.Pod, reservation *appsv1.ConsensusKeyReservation) bool {
+	labelsMatch, exactLabels := staleReservationSignerLabelAttribution(pod.GetLabels(), reservation)
+	if exactLabels && !labelsMatch {
+		return false
+	}
 	if pod.GetName() == reservation.Spec.Claim ||
 		(reservation.Spec.OwnerKind == "ChainNode" && pod.GetName() == reservation.Spec.OwnerName) {
 		return true
@@ -737,11 +771,8 @@ func staleReservationPodMatches(pod *corev1.Pod, reservation *appsv1.ConsensusKe
 	if pod.GetLabels()["app.kubernetes.io/name"] != "cosmosigner" {
 		return false
 	}
-	if reservation.Spec.OwnerKind == "ChainNode" && pod.GetLabels()["chain-node"] == reservation.Spec.OwnerName {
-		return true
-	}
-	if reservation.Spec.OwnerKind == "ChainNodeSet" && pod.GetLabels()["nodeset"] == reservation.Spec.OwnerName {
-		return true
+	if exactLabels {
+		return labelsMatch
 	}
 	instance := pod.GetLabels()["app.kubernetes.io/instance"]
 	if reservation.Spec.OwnerKind == "ChainNode" {
