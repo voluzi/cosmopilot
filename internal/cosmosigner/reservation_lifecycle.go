@@ -70,7 +70,7 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	for i := range statefulSets.Items {
 		sts := &statefulSets.Items[i]
 		if !IsOwnedSignerStatefulSet(sts, owner) &&
-			!(metav1.IsControlledBy(sts, owner) && deterministicSignerStatefulSetBelongsToRoot(sts.GetName(), owner)) {
+			!IsOwnedDeterministicSignerStatefulSet(sts, owner) {
 			continue
 		}
 		signerNames = append(signerNames, sts.GetName())
@@ -856,6 +856,12 @@ func managedSigningOneShotBelongsToRoot(name string, labels map[string]string, o
 	default:
 		return false
 	}
+}
+
+// IsOwnedDeterministicSignerStatefulSet reports whether sts has a signer resource name derived from
+// owner and is controlled by the owner's exact UID, even when signer labels are missing.
+func IsOwnedDeterministicSignerStatefulSet(sts *appsk8sv1.StatefulSet, owner client.Object) bool {
+	return metav1.IsControlledBy(sts, owner) && deterministicSignerStatefulSetBelongsToRoot(sts.GetName(), owner)
 }
 
 func deterministicSignerStatefulSetBelongsToRoot(name string, owner client.Object) bool {

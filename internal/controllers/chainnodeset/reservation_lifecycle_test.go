@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	appsk8sv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -264,6 +265,34 @@ func TestReconcileConsensusKeyReservationClaimsBlocksGeneratedOneShotPod(t *test
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
 		t.Fatalf("reservation must remain while generated one-shot pod exists: %v", err)
+	}
+}
+
+func TestReconcileConsensusKeyReservationClaimsBlocksLabelLessOwnedSignerAfterStatusLoss(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes", Namespace: "default", UID: "nodes-uid",
+		Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+	}}
+	reservation := nodeSetReservation(nodeSet, "retired", "ckr-uid", nodeSetReservationLifecyclePublicKey, "signer-retired-hash")
+	sts := &appsk8sv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "nodes-retired-signer", Namespace: nodeSet.Namespace, UID: "signer-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: nodeSet.Name,
+			UID: nodeSet.UID, Controller: ptr.To(true),
+		}},
+	}}
+	r := newValidatorTestReconciler(t, nodeSet, reservation, sts)
+	r.APIReader = r.Client
+
+	done, err := r.reconcileConsensusKeyReservationClaims(context.Background(), nodeSet)
+	if err == nil || done || !strings.Contains(err.Error(), sts.Name) {
+		t.Fatalf("label-less owned signer must block claim release after status loss, done=%v err=%v", done, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("reservation must remain while the label-less owned signer exists: %v", err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsk8sv1.StatefulSet{}); err != nil {
+		t.Fatalf("ambiguous signer StatefulSet must remain untouched: %v", err)
 	}
 }
 

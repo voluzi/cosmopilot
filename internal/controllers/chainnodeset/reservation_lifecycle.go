@@ -225,7 +225,8 @@ func (r *Reconciler) consensusKeyReservationClaimSigningPathsGone(ctx context.Co
 	}
 	for i := range statefulSets.Items {
 		sts := &statefulSets.Items[i]
-		if !cosmosigner.IsOwnedSignerStatefulSet(sts, nodeSet) {
+		if !cosmosigner.IsOwnedSignerStatefulSet(sts, nodeSet) &&
+			!cosmosigner.IsOwnedDeterministicSignerStatefulSet(sts, nodeSet) {
 			continue
 		}
 		if _, desired := desiredSignerResources[sts.GetName()]; desired {
