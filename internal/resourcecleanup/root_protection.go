@@ -53,7 +53,7 @@ func protectChainNodes(ctx context.Context, c client.Client, workerName string) 
 		return err
 	}
 	for i := range list.Items {
-		if list.Items[i].GetLabels()[controllers.LabelWorkerName] != workerName {
+		if !controllers.MatchesWorker(list.Items[i].GetLabels(), workerName) {
 			continue
 		}
 		if err := protectRoot(ctx, c, &list.Items[i]); err != nil {
@@ -69,7 +69,7 @@ func protectChainNodeSets(ctx context.Context, c client.Client, workerName strin
 		return err
 	}
 	for i := range list.Items {
-		if list.Items[i].GetLabels()[controllers.LabelWorkerName] != workerName {
+		if !controllers.MatchesWorker(list.Items[i].GetLabels(), workerName) {
 			continue
 		}
 		if err := protectRoot(ctx, c, &list.Items[i]); err != nil {

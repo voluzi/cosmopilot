@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -114,6 +115,54 @@ func (r *Reconciler) attributeCosmoseedDataVolumes(ctx context.Context, nodeSet 
 		}
 	}
 	return nil
+}
+
+func (r *Reconciler) attributeControlledLegacyCosmoseedDataVolumes(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
+	seed := &k8sappsv1.StatefulSet{}
+	key := client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName() + "-seed"}
+	if err := r.Get(ctx, key, seed); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(seed, nodeSet) {
+		return nil
+	}
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcs, client.InNamespace(nodeSet.GetNamespace())); err != nil {
+		return err
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if !isCosmoseedDataVolume(nodeSet, pvc) || !metav1.IsControlledBy(pvc, seed) {
+			continue
+		}
+		root := resourcecleanup.RootOwnerFor(nodeSet)
+		changed := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassDataVolumes)
+		changed = resourcecleanup.StampResourceOwner(pvc, nodeSet.GetUID()) || changed
+		changed = removeControllerReferenceByUID(pvc, seed.GetUID()) || changed
+		if changed {
+			if err := r.Update(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func removeControllerReferenceByUID(object metav1.Object, uid types.UID) bool {
+	references := object.GetOwnerReferences()
+	filtered := make([]metav1.OwnerReference, 0, len(references))
+	changed := false
+	for _, reference := range references {
+		if reference.UID == uid && reference.Controller != nil && *reference.Controller {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, reference)
+	}
+	if changed {
+		object.SetOwnerReferences(filtered)
+	}
+	return changed
 }
 
 func isCosmoseedDataVolume(nodeSet *appsv1.ChainNodeSet, pvc *corev1.PersistentVolumeClaim) bool {
@@ -327,6 +376,9 @@ func (r *Reconciler) attributeControlledLegacyKeys(ctx context.Context, nodeSet 
 // resources before deletion reconciliation is allowed to start.
 func (r *Reconciler) MigrateLegacyDurableResources(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
 	if err := r.attributeControlledLegacyKeys(ctx, nodeSet); err != nil {
+		return false, err
+	}
+	if err := r.attributeControlledLegacyCosmoseedDataVolumes(ctx, nodeSet); err != nil {
 		return false, err
 	}
 	children := &appsv1.ChainNodeList{}

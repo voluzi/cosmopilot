@@ -164,6 +164,48 @@ func TestMigrateExistingAccountSecretRunsAfterAccountStatusCompleted(t *testing.
 	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), resourcecleanup.ClassGeneratedKeys))
 }
 
+func TestMigrateLegacyDurableResourcesAttributesAllVerifiedClasses(t *testing.T) {
+	scheme := resourceCleanupScheme(t)
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"},
+		Spec:       appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{}},
+	}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, UID: "data-uid"}}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Spec.Validator.GetAccountSecretName(node), Namespace: node.Namespace, UID: "account-uid"},
+		Data:       map[string][]byte{MnemonicKey: []byte("legacy mnemonic")},
+	}
+	for _, object := range []client.Object{pvc, secret} {
+		require.NoError(t, controllerutil.SetControllerReference(node, object, scheme))
+	}
+	signerPVC := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-validator-signer-0", Namespace: node.Namespace, UID: "signer-state-uid",
+		Labels: map[string]string{
+			"app.kubernetes.io/name":                  "cosmosigner",
+			"app.kubernetes.io/instance":              "validator-signer",
+			"cosmopilot.voluzi.com/cosmosigner-owner": string(node.UID),
+		},
+	}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "signer-volume"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	require.NoError(t, controllerutil.SetControllerReference(node, signerPVC, scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, pvc, secret, signerPVC).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	pending, err := r.MigrateLegacyDurableResources(context.Background(), node)
+	require.NoError(t, err)
+	assert.True(t, pending, "protecting the signer claim should request another startup pass")
+	for object, class := range map[client.Object]resourcecleanup.ResourceClass{
+		pvc: resourcecleanup.ClassDataVolumes, secret: resourcecleanup.ClassGeneratedKeys, signerPVC: resourcecleanup.ClassCosmosignerState,
+	} {
+		fresh := object.DeepCopyObject().(client.Object)
+		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(object), fresh))
+		assert.Nil(t, metav1.GetControllerOf(fresh), "%s retained a cascading controller reference", object.GetName())
+		assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(node), class), "%s was not attributed", object.GetName())
+	}
+	freshSigner := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(signerPVC), freshSigner))
+	assert.Contains(t, freshSigner.Finalizers, cosmosigner.RetainedStateFinalizer)
+}
+
 func TestFinalizeResourcesRetainsControlledLegacyDataVolumesRemovedFromSpec(t *testing.T) {
 	scheme := resourceCleanupScheme(t)
 	node := &appsv1.ChainNode{

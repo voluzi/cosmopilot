@@ -172,7 +172,7 @@ func migrateLegacyDurableResources(
 	}
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
-		if node.GetLabels()[controllers.LabelWorkerName] != runOpts.WorkerName || !node.GetDeletionTimestamp().IsZero() {
+		if !controllers.MatchesWorker(node.GetLabels(), runOpts.WorkerName) || !node.GetDeletionTimestamp().IsZero() {
 			continue
 		}
 		changed, err := chainNodeReconciler.MigrateLegacyDurableResources(ctx, node)
@@ -187,7 +187,7 @@ func migrateLegacyDurableResources(
 	}
 	for i := range nodeSets.Items {
 		nodeSet := &nodeSets.Items[i]
-		if nodeSet.GetLabels()[controllers.LabelWorkerName] != runOpts.WorkerName || !nodeSet.GetDeletionTimestamp().IsZero() {
+		if !controllers.MatchesWorker(nodeSet.GetLabels(), runOpts.WorkerName) || !nodeSet.GetDeletionTimestamp().IsZero() {
 			continue
 		}
 		changed, err := chainNodeSetReconciler.MigrateLegacyDurableResources(ctx, nodeSet)

@@ -47,3 +47,10 @@ func TestWaitForRootProtectionBlocksUntilMigrationCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMatchesWorkerUsesEmptyNameForUnpartitionedRoots(t *testing.T) {
+	assert.True(t, MatchesWorker(nil, ""))
+	assert.True(t, MatchesWorker(map[string]string{LabelWorkerName: "worker-a"}, "worker-a"))
+	assert.False(t, MatchesWorker(map[string]string{LabelWorkerName: "worker-b"}, "worker-a"))
+	assert.False(t, MatchesWorker(map[string]string{LabelWorkerName: "worker-a"}, ""))
+}

@@ -549,6 +549,32 @@ func TestAttributeCosmoseedDataVolumesPreservesBoundPreprovisionedClaimWithContr
 	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
 }
 
+func TestMigrateLegacyDurableResourcesAttributesOwnedCosmoseedClaim(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	one := int32(1)
+	seed := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid",
+	}, Spec: k8sappsv1.StatefulSetSpec{Replicas: &one, VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}}}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
+	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-set-seed-0", Namespace: nodeSet.Namespace, UID: "claim-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(seed, claim, scheme))
+	preprovisioned := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data-set-seed-1", Namespace: nodeSet.Namespace, UID: "foreign-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, claim, preprovisioned).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	pending, err := r.MigrateLegacyDurableResources(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, pending)
+	fresh := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(claim), fresh))
+	assert.Nil(t, metav1.GetControllerOf(fresh))
+	assert.True(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
+	untouched := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(preprovisioned), untouched))
+	assert.False(t, resourcecleanup.IsAttributed(untouched, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
+}
+
 func TestQuiesceCosmoseedBlocksOnUnownedLiveDeterministicStatefulSet(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}

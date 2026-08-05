@@ -42,6 +42,10 @@ func (opts *ControllerRunOptions) MatchesWorker(labels map[string]string) bool {
 	if opts != nil {
 		workerName = opts.WorkerName
 	}
+	return MatchesWorker(labels, workerName)
+}
+
+func MatchesWorker(labels map[string]string, workerName string) bool {
 	return labels[LabelWorkerName] == workerName
 }
 

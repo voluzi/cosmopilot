@@ -204,6 +204,30 @@ func TestRootProtectorRunsDurableMigrationBeforeReleasingControllerGate(t *testi
 	}
 }
 
+func TestRootProtectorKeepsControllerGateClosedWhenMigrationFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	wantErr := errors.New("legacy durable migration failed")
+	err := (&RootProtector{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Ready:  ready,
+		Migrate: func(context.Context) error {
+			return wantErr
+		},
+	}).Start(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Start error = %v, want %v", err, wantErr)
+	}
+	select {
+	case <-ready:
+		t.Fatal("controller gate opened after legacy durable-resource migration failed")
+	default:
+	}
+}
+
 const concurrentFinalizer = "example.com/concurrent"
 
 type conflictOnceRootClient struct {
