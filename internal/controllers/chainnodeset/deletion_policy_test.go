@@ -140,6 +140,28 @@ func TestCosmoseedScaleUpRetiresLegacyClaimTemplate(t *testing.T) {
 	assert.Error(t, r.Get(context.Background(), client.ObjectKeyFromObject(existing), &k8sappsv1.StatefulSet{}))
 }
 
+func TestCosmoseedScaleUpKeepsAttributedClaimTemplateWithAPIDefaults(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{
+			Cosmoseed: &appsv1.CosmoseedConfig{Enabled: ptr.To(true), Instances: ptr.To(2)},
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	existing, err := r.getStatefulSet(nodeSet, "old-config", nil)
+	require.NoError(t, err)
+	existing.Spec.Replicas = ptr.To(int32(1))
+	existing.Spec.VolumeClaimTemplates[0].Spec.VolumeMode = ptr.To(corev1.PersistentVolumeFilesystem)
+	require.NoError(t, r.Create(context.Background(), existing))
+	desired, err := r.getStatefulSet(nodeSet, "new-config", nil)
+	require.NoError(t, err)
+
+	pending, err := r.retireLegacyCosmoseedStatefulSetBeforeScaleUp(context.Background(), nodeSet, desired)
+	require.NoError(t, err)
+	assert.False(t, pending)
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(existing), &k8sappsv1.StatefulSet{}))
+}
+
 func TestCosmoseedMutableUpdateKeepsLegacyClaimTemplateWithoutScaleUp(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},

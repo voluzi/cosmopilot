@@ -167,8 +167,12 @@ func (r *Reconciler) retireLegacyCosmoseedStatefulSetBeforeScaleUp(
 	if err := r.Get(ctx, client.ObjectKeyFromObject(desired), current); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
-	if ptr.Deref(desired.Spec.Replicas, 0) <= ptr.Deref(current.Spec.Replicas, 0) ||
-		reflect.DeepEqual(current.Spec.VolumeClaimTemplates, desired.Spec.VolumeClaimTemplates) {
+	if ptr.Deref(desired.Spec.Replicas, 0) <= ptr.Deref(current.Spec.Replicas, 0) {
+		return false, nil
+	}
+	root := resourcecleanup.RootOwnerFor(nodeSet)
+	if len(current.Spec.VolumeClaimTemplates) == 1 &&
+		resourcecleanup.IsAttributed(&current.Spec.VolumeClaimTemplates[0], root, resourcecleanup.ClassDataVolumes) {
 		return false, nil
 	}
 	if !metav1.IsControlledBy(current, nodeSet) {

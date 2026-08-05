@@ -168,9 +168,9 @@ func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptio
 	}
 
 	labels := pdb.Spec.Selector.MatchLabels
-	if labels[controllers.LabelUpgrading] != controllers.StringValueFalse ||
-		labels[controllers.LabelChainID] == "" ||
-		(nodeSet.Status.ChainID != "" && labels[controllers.LabelChainID] != nodeSet.Status.ChainID) {
+	if nodeSet.Status.ChainID == "" ||
+		labels[controllers.LabelUpgrading] != controllers.StringValueFalse ||
+		labels[controllers.LabelChainID] != nodeSet.Status.ChainID {
 		return false
 	}
 

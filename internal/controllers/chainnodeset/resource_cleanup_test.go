@@ -549,6 +549,32 @@ func TestAttributeCosmoseedDataVolumesPreservesBoundPreprovisionedClaimWithContr
 	assert.False(t, resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(nodeSet), resourcecleanup.ClassDataVolumes))
 }
 
+func TestMigrateLegacyDurableResourcesRecoversRecordedChildOwnership(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{
+			Name: "set-fullnodes-0", UID: "child-uid",
+		}}},
+	}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "set-fullnodes-0", Namespace: nodeSet.Namespace, UID: "child-uid"}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: child.Name, Namespace: child.Namespace, UID: "pvc-uid"}}
+	require.NoError(t, controllerutil.SetControllerReference(child, pvc, scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child, pvc).Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	pending, err := r.MigrateLegacyDurableResources(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, pending)
+	freshChild := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(child), freshChild))
+	assert.True(t, metav1.IsControlledBy(freshChild, nodeSet))
+	freshPVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pvc), freshPVC))
+	assert.True(t, resourcecleanup.IsAttributed(freshPVC, resourcecleanup.RootOwnerFor(freshChild), resourcecleanup.ClassDataVolumes))
+	assert.Nil(t, metav1.GetControllerOf(freshPVC))
+}
+
 func TestMigrateLegacyDurableResourcesAttributesOwnedCosmoseedClaim(t *testing.T) {
 	scheme := nodeSetCleanupScheme(t)
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}

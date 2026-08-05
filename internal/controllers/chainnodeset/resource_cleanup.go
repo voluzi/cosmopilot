@@ -387,8 +387,20 @@ func (r *Reconciler) MigrateLegacyDurableResources(ctx context.Context, nodeSet 
 	}
 	for i := range children.Items {
 		child := &children.Items[i]
-		if !metav1.IsControlledBy(child, nodeSet) {
+		_, recordedUID := recordedNodeSetChildIdentity(nodeSet, child)
+		if !metav1.IsControlledBy(child, nodeSet) && !recordedUID {
 			continue
+		}
+		if controller := metav1.GetControllerOf(child); controller != nil && !metav1.IsControlledBy(child, nodeSet) {
+			continue
+		}
+		if !metav1.IsControlledBy(child, nodeSet) {
+			if err := controllerutil.SetControllerReference(nodeSet, child, r.Scheme); err != nil {
+				return false, err
+			}
+			if err := r.Update(ctx, child); err != nil {
+				return false, err
+			}
 		}
 		if err := r.attributeControlledLegacyChildResources(ctx, child); err != nil {
 			return false, err

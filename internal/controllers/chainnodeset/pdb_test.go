@@ -53,6 +53,19 @@ func getPdb(t *testing.T, r *Reconciler, namespace, name string) *policyv1.PodDi
 	return pdb
 }
 
+func TestLegacyNodeSetPDBRequiresKnownChainID(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	pdb := getPdbSpec(nodeSet, "set-fullnodes", 1, map[string]string{
+		controllers.LabelUpgrading:         controllers.StringValueFalse,
+		controllers.LabelChainID:           "other-chain",
+		controllers.LabelChainNodeSet:      nodeSet.Name,
+		controllers.LabelChainNodeSetGroup: "fullnodes",
+	})
+	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
+	nodeSet.Status.ChainID = "other-chain"
+	assert.True(t, isLegacyNodeSetPDB(nodeSet, pdb))
+}
+
 func TestEnsurePodDisruptionBudgetPreservesForeignControlledLegacyShape(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
 	foreignOwner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "other-uid"}}

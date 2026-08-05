@@ -166,28 +166,13 @@ func migrateLegacyDurableResources(
 	chainNodeSetReconciler *chainnodeset.Reconciler,
 ) (bool, error) {
 	pending := false
-	nodes := &appsv1.ChainNodeList{}
-	if err := c.List(ctx, nodes); err != nil {
-		return false, err
-	}
-	for i := range nodes.Items {
-		node := &nodes.Items[i]
-		if !controllers.MatchesWorker(node.GetLabels(), runOpts.WorkerName) || !node.GetDeletionTimestamp().IsZero() {
-			continue
-		}
-		changed, err := chainNodeReconciler.MigrateLegacyDurableResources(ctx, node)
-		if err != nil {
-			return false, err
-		}
-		pending = pending || changed
-	}
 	nodeSets := &appsv1.ChainNodeSetList{}
 	if err := c.List(ctx, nodeSets); err != nil {
 		return false, err
 	}
 	for i := range nodeSets.Items {
 		nodeSet := &nodeSets.Items[i]
-		if !controllers.MatchesWorker(nodeSet.GetLabels(), runOpts.WorkerName) || !nodeSet.GetDeletionTimestamp().IsZero() {
+		if !controllers.MatchesWorker(nodeSet.GetLabels(), runOpts.WorkerName) {
 			continue
 		}
 		changed, err := chainNodeSetReconciler.MigrateLegacyDurableResources(ctx, nodeSet)
@@ -196,5 +181,40 @@ func migrateLegacyDurableResources(
 		}
 		pending = pending || changed
 	}
+	nodes := &appsv1.ChainNodeList{}
+	if err := c.List(ctx, nodes); err != nil {
+		return false, err
+	}
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		if !controllers.MatchesWorker(node.GetLabels(), runOpts.WorkerName) || isRecordedStartupNodeSetChild(node, nodeSets.Items) {
+			continue
+		}
+		changed, err := chainNodeReconciler.MigrateLegacyDurableResources(ctx, node)
+		if err != nil {
+			return false, err
+		}
+		pending = pending || changed
+	}
 	return pending, nil
+}
+
+func isRecordedStartupNodeSetChild(node *appsv1.ChainNode, nodeSets []appsv1.ChainNodeSet) bool {
+	for i := range nodeSets {
+		nodeSet := &nodeSets[i]
+		if nodeSet.GetNamespace() != node.GetNamespace() || !controllers.MatchesWorker(nodeSet.GetLabels(), runOpts.WorkerName) {
+			continue
+		}
+		for _, status := range nodeSet.Status.Nodes {
+			if status.Name == node.GetName() && status.UID != "" && status.UID == node.GetUID() {
+				return true
+			}
+		}
+		for _, status := range nodeSet.Status.Validators {
+			if status.Name == node.GetName() && status.UID != "" && status.UID == node.GetUID() {
+				return true
+			}
+		}
+	}
+	return false
 }
