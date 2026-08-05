@@ -46,7 +46,8 @@ func (r *Reconciler) prepareConsensusKeyReservationOwner(ctx context.Context, no
 func (r *Reconciler) ensureConsensusKeyReservation(ctx context.Context, nodeSet *appsv1.ChainNodeSet, chainID, publicKey string, holder cosmosigner.ReservationHolder) error {
 	result, err := cosmosigner.EnsureConsensusKeyReservationWithResult(ctx, r.uncachedReader(), r.Client, chainID, publicKey, holder)
 	if err != nil {
-		if errors.Is(err, cosmosigner.ErrConsensusKeyReservationRecoveryBlocked) && r.recorder != nil {
+		if (errors.Is(err, cosmosigner.ErrConsensusKeyReservationRecoveryBlocked) ||
+			errors.Is(err, cosmosigner.ErrConsensusKeyReservationConflict)) && r.recorder != nil {
 			r.recorder.Eventf(nodeSet, corev1.EventTypeWarning, appsv1.ReasonConsensusKeyReservationBlocked, "%v", err)
 		}
 		return err
@@ -227,7 +228,10 @@ func managedClaimOneShotName(name, claim string) bool {
 
 func (r *Reconciler) finalizeConsensusKeyReservationOwner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
 	if !controllerutil.ContainsFinalizer(nodeSet, cosmosigner.ReservationOwnerFinalizer) {
-		return true, nil
+		hasReservations, err := cosmosigner.HasConsensusKeyReservationsForOwner(ctx, r.uncachedReader(), nodeSet)
+		if err != nil || !hasReservations {
+			return !hasReservations, err
+		}
 	}
 	pathsGone, err := cosmosigner.FinalizeConsensusKeySigningPaths(ctx, r.uncachedReader(), r.Client, nodeSet, nodeSet.GetNamespace())
 	if err != nil || !pathsGone {
@@ -255,6 +259,12 @@ func (r *Reconciler) finalizeConsensusKeyReservationOwner(ctx context.Context, n
 }
 
 func (r *Reconciler) finalizeReservationOwnerChildren(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
+	legacyNames := make(map[string]struct{}, len(nodeSet.Status.Nodes))
+	for i := range nodeSet.Status.Nodes {
+		if nodeSet.Status.Nodes[i].Name != "" {
+			legacyNames[nodeSet.Status.Nodes[i].Name] = struct{}{}
+		}
+	}
 	children := &appsv1.ChainNodeList{}
 	if err := r.uncachedReader().List(ctx, children, client.InNamespace(nodeSet.GetNamespace())); err != nil {
 		return false, err
@@ -263,6 +273,9 @@ func (r *Reconciler) finalizeReservationOwnerChildren(ctx context.Context, nodeS
 		child := &children.Items[i]
 		owner := metav1.GetControllerOf(child)
 		if owner == nil || owner.UID != nodeSet.GetUID() {
+			if _, recorded := legacyNames[child.GetName()]; recorded {
+				return false, fmt.Errorf("ChainNode %s/%s is recorded in ChainNodeSet status but is not controlled by exact parent UID %q; refusing reservation release", child.GetNamespace(), child.GetName(), nodeSet.GetUID())
+			}
 			continue
 		}
 		if child.GetUID() == "" {

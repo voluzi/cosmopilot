@@ -122,6 +122,46 @@ func TestFinalizeConsensusKeyReservationOwnerWaitsForOwnedChild(t *testing.T) {
 	}
 }
 
+func TestFinalizeConsensusKeyReservationOwnerWithoutNewFinalizerReleasesUpgradeReservation(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}}
+	reservation := &appsv1.ConsensusKeyReservation{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosigner.ConsensusKeyReservationName("chain-1", nodeSetReservationLifecyclePublicKey), UID: "ckr-uid"},
+		Spec: appsv1.ConsensusKeyReservationSpec{
+			ChainID: "chain-1", PublicKey: nodeSetReservationLifecyclePublicKey,
+			OwnerUID: nodeSet.UID, OwnerKind: "ChainNodeSet", Namespace: nodeSet.Namespace,
+			OwnerName: nodeSet.Name, Claim: "nodes-validator",
+		},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, reservation)
+	r.APIReader = r.Client
+
+	done, err := r.finalizeConsensusKeyReservationOwner(context.Background(), nodeSet)
+	if err != nil || !done {
+		t.Fatalf("upgrade reservation cleanup failed: done=%v err=%v", done, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("exact-owner upgrade reservation still exists: %v", err)
+	}
+}
+
+func TestFinalizeReservationOwnerChildrenBlocksStatusRecordedForeignIdentity(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"},
+		Status:     appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{Name: "nodes-validator"}}},
+	}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "nodes-validator", Namespace: nodeSet.Namespace, UID: "child-uid"}}
+	r := newValidatorTestReconciler(t, nodeSet, child)
+	r.APIReader = r.Client
+
+	done, err := r.finalizeReservationOwnerChildren(context.Background(), nodeSet)
+	if err == nil || done {
+		t.Fatalf("status-recorded child without exact UID ownership must fail closed, done=%v err=%v", done, err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(child), &appsv1.ChainNode{}); err != nil {
+		t.Fatalf("ambiguous child must remain untouched: %v", err)
+	}
+}
+
 func TestReconcileConsensusKeyReservationClaimsReleasesOnlyUndesiredClaim(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{

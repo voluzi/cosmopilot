@@ -57,6 +57,9 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 		if !IsOwnedSignerStatefulSet(sts, owner) {
 			continue
 		}
+		if !sts.GetDeletionTimestamp().IsZero() {
+			return false, nil
+		}
 		deleted, err := DeleteStatefulSet(ctx, c, owner, namespace, sts.GetName())
 		if err != nil || !deleted {
 			return false, err
@@ -80,9 +83,13 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	oneShotNames := make([]string, 0)
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
-		if metav1.IsControlledBy(job, owner) && isManagedSigningOneShotName(job.GetName()) {
-			oneShotNames = append(oneShotNames, job.GetName())
+		if !managedSigningOneShotBelongsToRoot(job.GetName(), job.GetLabels(), owner) {
+			continue
 		}
+		if !metav1.IsControlledBy(job, owner) {
+			return false, fmt.Errorf("Job %s/%s matches a managed signing path but is not controlled by %T UID %q", job.GetNamespace(), job.GetName(), owner, owner.GetUID())
+		}
+		oneShotNames = append(oneShotNames, job.GetName())
 	}
 
 	ownedPods := &corev1.PodList{}
@@ -144,6 +151,9 @@ func CleanupManagedSigningPath(ctx context.Context, reader client.Reader, c clie
 		}
 		if !metav1.IsControlledBy(sts, owner) {
 			return ManagedSigningPathCleanupResult{Blocked: fmt.Sprintf("StatefulSet %s/%s is not controlled by %T UID %q; refusing claim cleanup", namespace, name, owner, owner.GetUID())}, nil
+		}
+		if !sts.GetDeletionTimestamp().IsZero() {
+			return ManagedSigningPathCleanupResult{Waiting: fmt.Sprintf("waiting for StatefulSet %s/%s to be absent", namespace, name)}, nil
 		}
 		deleted, err := DeleteStatefulSet(ctx, c, owner, namespace, name)
 		if err != nil {
@@ -442,6 +452,18 @@ func recoverStaleConsensusKeyReservation(ctx context.Context, reader client.Read
 		reservation.Spec.PublicKey != publicKey || reservation.GetName() != ConsensusKeyReservationName(chainID, publicKey) {
 		return false, nil
 	}
+	if reservation.Spec.OwnerKind != holder.Kind || reservation.Spec.Namespace != holder.Namespace ||
+		reservation.Spec.OwnerName != holder.Name {
+		return false, nil
+	}
+	if reservation.Spec.OwnerUID == "" ||
+		(reservation.Spec.OwnerKind != "ChainNode" && reservation.Spec.OwnerKind != "ChainNodeSet") ||
+		reservation.Spec.Namespace == "" || reservation.Spec.OwnerName == "" || reservation.Spec.Claim == "" {
+		return false, fmt.Errorf("%w: reservation %q has incomplete stale-owner metadata; refusing automatic recovery", ErrConsensusKeyReservationConflict, reservation.GetName())
+	}
+	if reservation.Spec.Claim != holder.Claim {
+		return false, nil
+	}
 	stale, err := reservationOwnerIsStale(ctx, reader, reservation)
 	if err != nil {
 		return false, err
@@ -670,6 +692,20 @@ func staleReservationOneShotPodMatches(name string, reservation *appsv1.Consensu
 		return false
 	}
 	return staleReservationJobMatches(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: managedJobName}}, reservation)
+}
+
+func managedSigningOneShotBelongsToRoot(name string, labels map[string]string, owner client.Object) bool {
+	if !isManagedSigningOneShotName(name) {
+		return false
+	}
+	switch owner.(type) {
+	case *appsv1.ChainNode:
+		return strings.HasPrefix(name, owner.GetName()+"-") || labels["chain-node"] == owner.GetName()
+	case *appsv1.ChainNodeSet:
+		return strings.HasPrefix(name, owner.GetName()+"-") || labels["nodeset"] == owner.GetName()
+	default:
+		return false
+	}
 }
 
 func signerPodBelongsToRoot(pod *corev1.Pod, owner client.Object) bool {

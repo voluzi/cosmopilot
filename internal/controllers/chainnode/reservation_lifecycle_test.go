@@ -154,6 +154,25 @@ func TestFinalizeConsensusKeyReservationOwnerWaitsForPodAndPreservesState(t *tes
 	}
 }
 
+func TestFinalizeOwnedSigningPodsBlocksForeignHelperPod(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: owner.Name + "-create-validator", Namespace: owner.Namespace, UID: "foreign-pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, pod).Build()
+	r := &Reconciler{Client: c, APIReader: c}
+
+	done, err := r.finalizeOwnedSigningPods(context.Background(), owner)
+	if err == nil || done || !strings.Contains(err.Error(), pod.Name) {
+		t.Fatalf("foreign helper pod must block reservation release, done=%v err=%v", done, err)
+	}
+}
+
 func TestFinalizeConsensusKeyReservationOwnerWaitsForManagedJobPod(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {

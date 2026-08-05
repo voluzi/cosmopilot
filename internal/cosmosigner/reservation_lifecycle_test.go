@@ -295,6 +295,41 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForOrphanedManagedJobPod(t *
 	}
 }
 
+func TestEnsureConsensusKeyReservationRefusesMalformedStaleReservation(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	holder := ReservationHolder{UID: "new-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator", Claim: "validator"}
+	stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+		UID: "old-owner-uid", Kind: "ChainNode", Namespace: "default", Name: "validator",
+	})
+	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentOwner, stale).Build()
+
+	_, err := EnsureConsensusKeyReservationWithResult(context.Background(), c, c, "chain-1", reservationTestPublicKey, holder)
+	if !errors.Is(err, ErrConsensusKeyReservationConflict) {
+		t.Fatalf("malformed stale reservation must fail closed, got %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+		t.Fatalf("malformed stale reservation must remain for inspection: %v", err)
+	}
+}
+
+func TestFinalizeConsensusKeySigningPathsBlocksForeignManagedJob(t *testing.T) {
+	scheme := reservationLifecycleScheme(t)
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms-vault-upload", Namespace: owner.Namespace, UID: "foreign-job-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, job).Build()
+
+	done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
+	if err == nil || done || !strings.Contains(err.Error(), job.Name) {
+		t.Fatalf("foreign managed Job must block finalization, done=%v err=%v", done, err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(job), &batchv1.Job{}); err != nil {
+		t.Fatalf("foreign managed Job must not be modified: %v", err)
+	}
+}
+
 func TestCleanupManagedSigningPathDeletesJobPodBeforeJob(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
