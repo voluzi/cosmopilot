@@ -52,3 +52,21 @@ func TestIsRecordedStartupNodeSetChildBlocksUIDLessLegacyStatus(t *testing.T) {
 		t.Fatal("UID-less pre-upgrade status must block standalone child migration")
 	}
 }
+
+func TestIsRecordedStartupNodeSetChildChecksNodeSetsAcrossWorkers(t *testing.T) {
+	runOpts.WorkerName = "worker-a"
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-fullnodes-0", Namespace: "default", UID: types.UID("node-uid"),
+		Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-a"},
+	}}
+	nodeSet := appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "set", Namespace: "default",
+			Labels: map[string]string{"cosmopilot.voluzi.com/worker-name": "worker-b"},
+		},
+		Status: appsv1.ChainNodeSetStatus{Nodes: []appsv1.ChainNodeSetNodeStatus{{Name: node.Name, UID: node.UID}}},
+	}
+	if !isRecordedStartupNodeSetChild(node, []appsv1.ChainNodeSet{nodeSet}) {
+		t.Fatal("a child recorded by another worker's ChainNodeSet must not be migrated as standalone")
+	}
+}

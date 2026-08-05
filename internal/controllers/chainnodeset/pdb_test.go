@@ -131,6 +131,23 @@ func TestLegacyNodeSetPDBAcceptsHistoricalGlobalIngressMatchLabel(t *testing.T) 
 	assert.True(t, isLegacyNodeSetPDB(nodeSet, pdb))
 }
 
+func TestLegacyNodeSetPDBRejectsGlobalIngressLabelOnGroupValidator(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Status:     appsv1.ChainNodeSetStatus{ChainID: "chain-id"},
+	}
+	pdb := getPdbSpec(nodeSet, "set-sentries-validator", 1, map[string]string{
+		controllers.LabelUpgrading:             controllers.StringValueFalse,
+		controllers.LabelChainID:               nodeSet.Status.ChainID,
+		controllers.LabelChainNodeSet:          nodeSet.Name,
+		controllers.LabelChainNodeSetGroup:     "sentries",
+		controllers.LabelChainNodeSetValidator: controllers.StringValueTrue,
+		"set-global-removed":                   controllers.StringValueTrue,
+	})
+
+	assert.False(t, isLegacyNodeSetPDB(nodeSet, pdb))
+}
+
 func TestEnsurePodDisruptionBudgetsPreservesCosmoGuardPDB(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},

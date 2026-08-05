@@ -214,7 +214,7 @@ func migrateLegacyDurableResources(
 func isRecordedStartupNodeSetChild(node *appsv1.ChainNode, nodeSets []appsv1.ChainNodeSet) bool {
 	for i := range nodeSets {
 		nodeSet := &nodeSets[i]
-		if nodeSet.GetNamespace() != node.GetNamespace() || !controllers.MatchesWorker(nodeSet.GetLabels(), runOpts.WorkerName) {
+		if nodeSet.GetNamespace() != node.GetNamespace() {
 			continue
 		}
 		for _, status := range nodeSet.Status.Nodes {

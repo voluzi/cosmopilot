@@ -594,6 +594,35 @@ func TestReleaseOwnerStateFinalizersUsesStableAttributionAfterLabelDrift(t *test
 	}
 }
 
+func TestAttributeOwnedStatePVCsDerivesSignerNameAfterInstanceLabelDrift(t *testing.T) {
+	const namespace = "default"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data-owner-signer-0", Namespace: namespace,
+		Labels:     map[string]string{labelInstance: "drifted", labelOwnerUID: string(owner.UID)},
+		Finalizers: []string{RetainedStateFinalizer},
+	}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc).Build()
+
+	changed, err := attributeOwnedStatePVCs(context.Background(), c, owner, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("canonical owner-labeled state PVC must be attributed despite mutable instance-label drift")
+	}
+	fresh := &corev1.PersistentVolumeClaim{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), fresh); err != nil {
+		t.Fatal(err)
+	}
+	if !resourcecleanup.IsAttributed(fresh, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState) {
+		t.Fatal("legacy state PVC was not attributed")
+	}
+	if fresh.Annotations[resourcecleanup.AnnotationResourceOwnerUID] != string(owner.UID) {
+		t.Fatal("legacy state PVC did not record its signer owner UID")
+	}
+}
+
 func TestReleaseOwnerStateFinalizersPreservesSiblingStateWithSharedRoot(t *testing.T) {
 	const namespace = "default"
 	scheme := lockScheme(t)

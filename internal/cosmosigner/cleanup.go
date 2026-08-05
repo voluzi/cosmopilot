@@ -498,8 +498,10 @@ func attributeOwnedStatePVCs(ctx context.Context, c client.Client, owner client.
 	changed := false
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
-		name := pvc.GetLabels()[labelInstance]
-		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) || !isStatefulSetDataPVC(pvc.GetName(), name) {
+		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) {
+			continue
+		}
+		if _, ok := statefulSetNameFromDataPVC(pvc.GetName()); !ok {
 			continue
 		}
 		metadataChanged := resourcecleanup.Stamp(pvc, root, resourcecleanup.ClassCosmosignerState)
