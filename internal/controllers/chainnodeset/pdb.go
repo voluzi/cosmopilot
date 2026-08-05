@@ -163,7 +163,7 @@ func (r *Reconciler) deleteStalePodDisruptionBudgets(
 }
 
 func isLegacyNodeSetPDB(nodeSet *appsv1.ChainNodeSet, pdb *policyv1.PodDisruptionBudget) bool {
-	if pdb.Spec.Selector == nil {
+	if pdb.Spec.Selector == nil || len(pdb.Spec.Selector.MatchExpressions) != 0 {
 		return false
 	}
 

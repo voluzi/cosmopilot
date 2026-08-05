@@ -482,6 +482,28 @@ func TestQuiesceCosmoseedStopsPodsBeforeDeletingStatefulSet(t *testing.T) {
 	assert.Equal(t, []string{"Pod/set-seed-0", "StatefulSet/set-seed"}, c.deleted)
 }
 
+func TestQuiesceCosmoseedBlocksOnDeterministicPodWithDriftedOwner(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	zero := int32(0)
+	seed := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-seed", Namespace: nodeSet.Namespace, UID: "seed-uid",
+	}, Spec: k8sappsv1.StatefulSetSpec{Replicas: &zero}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, seed, scheme))
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "set-seed-0", Namespace: nodeSet.Namespace, UID: "seed-pod-uid",
+		OwnerReferences: []metav1.OwnerReference{{Kind: "StatefulSet", Name: seed.Name, UID: "foreign-sts-uid", Controller: ptr.To(true)}},
+	}}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, seed, pod).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	done, err := r.quiesceCosmoseed(context.Background(), nodeSet)
+	require.NoError(t, err)
+	assert.False(t, done)
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(seed), &k8sappsv1.StatefulSet{}))
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
+}
+
 func TestFinalizeResourcesAppliesDataPolicyToCosmoseedClaims(t *testing.T) {
 	for _, policy := range []appsv1.DeletionPolicyType{appsv1.DeletionPolicyRetain, appsv1.DeletionPolicyDelete} {
 		t.Run(string(policy), func(t *testing.T) {

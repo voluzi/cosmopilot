@@ -180,6 +180,32 @@ func TestQuiesceOwnerRecognizesSignerWhenTemplateLabelsDrift(t *testing.T) {
 	}
 }
 
+func TestQuiesceOwnerFailsClosedOnAttributedSignerWithDriftedController(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	foreign := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: namespace, UID: types.UID("foreign-uid")}}
+	claim := corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName, Labels: pvcOwnerLabels(name, owner.UID),
+	}}
+	resourcecleanup.Stamp(&claim, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, UID: "sts-uid",
+		OwnerReferences: []metav1.OwnerReference{{UID: foreign.UID, Controller: boolPointer(true)}},
+	}, Spec: appsv1.StatefulSetSpec{VolumeClaimTemplates: []corev1.PersistentVolumeClaim{claim}}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(sts).Build()
+
+	done, err := QuiesceOwner(context.Background(), c, owner, namespace)
+	if err == nil {
+		t.Fatal("attributed signer with a drifted controller must fail closed")
+	}
+	if done {
+		t.Fatal("unsafe signer ownership must not report quiesced")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsv1.StatefulSet{}); err != nil {
+		t.Fatalf("drifted signer StatefulSet was modified or deleted: %v", err)
+	}
+}
+
 func TestNamespaceTerminationDoesNotDeleteForeignSameInstancePod(t *testing.T) {
 	const namespace, name = "default", "mychain-signer"
 	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
@@ -481,6 +507,31 @@ func TestFinalizeOwnerFindsRetainedPVCWithoutAppLabel(t *testing.T) {
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("retained claim with a stripped app label must be deleted, got %v", err)
+	}
+}
+
+func TestFinalizeStateGatesAttributedPVCOnPodAfterLabelDrift(t *testing.T) {
+	const namespace, name = "default", "mychain-signer"
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: namespace, UID: types.UID("owner-uid")}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: dataVolumeName + "-" + name + "-0", Namespace: namespace, UID: "pvc-uid",
+		Labels:     map[string]string{labelInstance: "edited", labelOwnerUID: "edited"},
+		Finalizers: []string{RetainedStateFinalizer},
+	}}
+	resourcecleanup.Stamp(pvc, resourcecleanup.RootOwnerFor(owner), resourcecleanup.ClassCosmosignerState)
+	resourcecleanup.StampResourceOwner(pvc, owner.UID)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: namespace, UID: "pod-uid"}}
+	c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(pvc, pod).Build()
+
+	done, err := FinalizeState(context.Background(), c, owner, namespace, cosmopilotv1.DeletionPolicyDelete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Fatal("attributed state must remain protected while its deterministic signer pod exists")
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}); err != nil {
+		t.Fatalf("attributed state PVC was deleted while its signer pod remained: %v", err)
 	}
 }
 

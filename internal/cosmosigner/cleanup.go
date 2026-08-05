@@ -52,6 +52,24 @@ func statefulSetPVCTemplateReadyForCleanup(sts *appsv1.StatefulSet, root resourc
 	return false
 }
 
+func isAttributedSignerStatefulSet(sts *appsv1.StatefulSet, owner client.Object) bool {
+	root := resourcecleanup.RootOwnerFor(owner)
+	for i := range sts.Spec.VolumeClaimTemplates {
+		claim := &sts.Spec.VolumeClaimTemplates[i]
+		if claim.GetName() != dataVolumeName {
+			continue
+		}
+		labelAttributed := claim.GetLabels()[labelAppName] == appNameCosmosigner &&
+			claim.GetLabels()[labelInstance] == sts.GetName() &&
+			claim.GetLabels()[labelOwnerUID] == string(owner.GetUID())
+		stableAttributed := resourcecleanup.IsAttributed(claim, root, resourcecleanup.ClassCosmosignerState)
+		if labelAttributed || stableAttributed {
+			return true
+		}
+	}
+	return false
+}
+
 // DeletePVCs deletes the per-pod raft-state PVCs of a signer instance owned by owner. StatefulSet
 // PVCs are not garbage-collected with the StatefulSet, so they are cleaned up explicitly on teardown;
 // the retained-state finalizer is released only in this controlled path.
@@ -204,6 +222,14 @@ func QuiesceOwner(ctx context.Context, c client.Client, owner client.Object, nam
 	for i := range statefulSets.Items {
 		sts := &statefulSets.Items[i]
 		if !IsOwnedSignerStatefulSet(sts, owner) {
+			if isAttributedSignerStatefulSet(sts, owner) {
+				controller := metav1.GetControllerOf(sts)
+				ownership := "has no controller"
+				if controller != nil {
+					ownership = fmt.Sprintf("is controlled by %s %q UID %s", controller.Kind, controller.Name, controller.UID)
+				}
+				return false, fmt.Errorf("refusing Cosmosigner state cleanup while attributed StatefulSet %s/%s %s; restore its owner UID %s controller reference or quiesce and remove it", sts.GetNamespace(), sts.GetName(), ownership, owner.GetUID())
+			}
 			continue
 		}
 		if !sts.GetDeletionTimestamp().IsZero() {
@@ -369,12 +395,22 @@ func FinalizeState(
 	if err := c.List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
 		return false, err
 	}
+	root := resourcecleanup.RootOwnerFor(owner)
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
 		name := pvc.GetLabels()[labelInstance]
-		if pvc.GetLabels()[labelOwnerUID] != string(owner.GetUID()) ||
-			!isStatefulSetDataPVC(pvc.GetName(), name) {
+		labelOwned := pvc.GetLabels()[labelOwnerUID] == string(owner.GetUID()) && isStatefulSetDataPVC(pvc.GetName(), name)
+		attributed := resourcecleanup.IsAttributed(pvc, root, resourcecleanup.ClassCosmosignerState) &&
+			pvc.GetAnnotations()[resourcecleanup.AnnotationResourceOwnerUID] == string(owner.GetUID())
+		if !labelOwned && !attributed {
 			continue
+		}
+		if !labelOwned {
+			var ok bool
+			name, ok = statefulSetNameFromDataPVC(pvc.GetName())
+			if !ok {
+				return false, fmt.Errorf("refusing Cosmosigner state cleanup for attributed PVC %s/%s with an invalid StatefulSet claim name", pvc.GetNamespace(), pvc.GetName())
+			}
 		}
 		gone, err := SignerPodsGone(ctx, c, namespace, name)
 		if err != nil || !gone {
@@ -385,7 +421,7 @@ func FinalizeState(
 	return resourcecleanup.FinalizeClass(
 		ctx,
 		c,
-		resourcecleanup.RootOwnerFor(owner),
+		root,
 		resourcecleanup.ClassCosmosignerState,
 		policy,
 		owner.GetUID(),
@@ -546,6 +582,23 @@ func statefulSetDataPVCOrdinal(pvcName, stsName string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+func statefulSetNameFromDataPVC(pvcName string) (string, bool) {
+	prefix := dataVolumeName + "-"
+	if !strings.HasPrefix(pvcName, prefix) {
+		return "", false
+	}
+	nameAndOrdinal := strings.TrimPrefix(pvcName, prefix)
+	separator := strings.LastIndex(nameAndOrdinal, "-")
+	if separator <= 0 {
+		return "", false
+	}
+	name := nameAndOrdinal[:separator]
+	if !isStatefulSetDataPVC(pvcName, name) {
+		return "", false
+	}
+	return name, true
 }
 
 func isStatefulSetReplicaPodName(podName, stsName string) bool {

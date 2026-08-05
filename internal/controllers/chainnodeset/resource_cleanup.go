@@ -516,7 +516,12 @@ func (r *Reconciler) deleteControlledPods(ctx context.Context, owner client.Obje
 	allDone := true
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !metav1.IsControlledBy(pod, owner) {
+		controlled := metav1.IsControlledBy(pod, owner)
+		if !controlled && !hasCanonicalOrdinal(pod.GetName(), owner.GetName()+"-") {
+			continue
+		}
+		if !controlled {
+			allDone = false
 			continue
 		}
 		if pod.GetDeletionTimestamp().IsZero() {
