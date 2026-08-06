@@ -103,6 +103,8 @@ func TestRunRejectsMalformedMockArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"mock"},
 		{"mock", "get", "extra"},
+		{"mock", "bogus"},
+		{"mock", "bogus", "extra"},
 		{"mock", "set-cpu"},
 		{"mock", "set-cpu", "500", "extra"},
 		{"mock", "set-memory"},

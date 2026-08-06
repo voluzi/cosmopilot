@@ -38,6 +38,14 @@ var (
 // mount none of the server's runtime configuration, so they must never reach startServer.
 var subcommands = []string{"help", "mock", "wait-for-dns"}
 
+// mockCommandArity is the single command contract used before mock dispatch. Keeping command
+// recognition and exact arity together prevents validation from drifting from execution.
+var mockCommandArity = map[string]int{
+	"get":        1,
+	"set-cpu":    2,
+	"set-memory": 2,
+}
+
 // commands are the entry points run dispatches to. Tests replace them to assert which one a given
 // argument list selects.
 type commands struct {
@@ -109,9 +117,9 @@ func validateMockArgs(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: node-utils mock <set-cpu <millicores>|set-memory <mib>|get>")
 	}
-	want := 1
-	if args[0] == "set-cpu" || args[0] == "set-memory" {
-		want = 2
+	want, ok := mockCommandArity[args[0]]
+	if !ok {
+		return fmt.Errorf("unknown node-utils mock command %q", args[0])
 	}
 	if len(args) != want {
 		return fmt.Errorf("invalid arguments for node-utils mock %s", args[0])
@@ -197,10 +205,6 @@ func handleMockCommand(args []string) {
 
 	switch args[0] {
 	case "set-cpu":
-		if len(args) < 2 {
-			fmt.Println("Usage: node-utils mock set-cpu <millicores>")
-			os.Exit(1)
-		}
 		url := fmt.Sprintf("%s/mock/cpu?millicores=%s", baseURL, args[1])
 		resp, err := http.Post(url, "text/plain", bytes.NewBuffer(nil))
 		if err != nil {
@@ -216,10 +220,6 @@ func handleMockCommand(args []string) {
 		fmt.Printf("CPU set to %s millicores\n", args[1])
 
 	case "set-memory":
-		if len(args) < 2 {
-			fmt.Println("Usage: node-utils mock set-memory <mib>")
-			os.Exit(1)
-		}
 		url := fmt.Sprintf("%s/mock/memory?mib=%s", baseURL, args[1])
 		fmt.Printf("DEBUG: POST %s\n", url)
 		resp, err := http.Post(url, "text/plain", bytes.NewBuffer(nil))
