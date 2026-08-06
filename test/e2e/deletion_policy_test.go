@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -107,6 +108,7 @@ var _ = Describe("Deletion policy", func() {
 		// controller cannot have released anything yet, so the stream starts from a revision at which
 		// this exact reservation is known to be held and every later transition is delivered on it.
 		releaseWatch := armReservationReleaseWatch(surface, record)
+		DeferCleanup(releaseWatch.stop)
 		releaseHold()
 		releaseWatch.awaitRelease()
 		waitForSigningSurfaceGone(surface)
@@ -183,6 +185,7 @@ var _ = Describe("Deletion policy", func() {
 		// As above, the watch is armed while the pod is still pinned so the release cannot be observed
 		// only after the fact.
 		releaseWatch := armReservationReleaseWatch(surface, record)
+		DeferCleanup(releaseWatch.stop)
 		releaseHold()
 		releaseWatch.awaitRelease()
 		waitForSigningSurfaceGone(surface)
@@ -901,9 +904,10 @@ func assertReservationHeldDuringSigningTeardown(surface signingSurface, want res
 // what covers the window that must never be missed, since no release at all is possible while it
 // stands; this watch shrinks what is left from a sampling interval to a single request.
 type reservationReleaseWatch struct {
-	surface signingSurface
-	want    reservationRecord
-	stream  watch.Interface
+	surface  signingSurface
+	want     reservationRecord
+	stream   watch.Interface
+	stopOnce sync.Once
 }
 
 // armReservationReleaseWatch asserts the recorded reservation is still held and opens the watch that
@@ -939,7 +943,7 @@ func armReservationReleaseWatch(surface signingSurface, want reservationRecord) 
 // miss the exact short ordering regression this test exists to catch.
 func (w *reservationReleaseWatch) awaitRelease() {
 	deadline := time.Now().Add(reservationReleaseTimeout)
-	defer w.stream.Stop()
+	defer w.stop()
 
 	expired := time.NewTimer(time.Until(deadline))
 	defer expired.Stop()
@@ -971,6 +975,12 @@ func (w *reservationReleaseWatch) awaitRelease() {
 			return
 		}
 	}
+}
+
+// stop makes the watch lifetime safe across every failure boundary between arming and awaiting it.
+// Both the call-site cleanup and awaitRelease own a stop, and sync.Once keeps that ownership idempotent.
+func (w *reservationReleaseWatch) stop() {
+	w.stopOnce.Do(w.stream.Stop)
 }
 
 // assertReleasedAfterSigningTeardown checks the surface against the release the watch just reported.
