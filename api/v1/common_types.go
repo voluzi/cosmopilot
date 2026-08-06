@@ -3,6 +3,7 @@ package v1
 import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -50,6 +51,7 @@ const (
 	ReasonTarballDeleted                   = "TarballDeleted"
 	ReasonTarballExportError               = "TarballExportError"
 	ReasonTarballDeleteError               = "TarballDeleteError"
+	ReasonTarballDeleteAttemptsExhausted   = "TarballDeleteAttemptsExhausted"
 	ReasonTarballCleanupRequired           = "TarballCleanupRequired"
 	ReasonTarballCleanupAcknowledged       = "TarballCleanupAcknowledged"
 	ReasonSnapshotJobReplaced              = "SnapshotJobReplaced"
@@ -1305,6 +1307,20 @@ type SnapshotExportStatus struct {
 	// DeleteOnExpire records the cleanup policy bound to this upload.
 	// +optional
 	DeleteOnExpire bool `json:"deleteOnExpire,omitempty"`
+	// DeleteAttempts is the number of logical remote-delete attempts reserved for this export.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3
+	DeleteAttempts int32 `json:"deleteAttempts,omitempty"`
+	// DeleteExhausted records that the final logical delete attempt was observed to fail.
+	// +optional
+	DeleteExhausted bool `json:"deleteExhausted,omitempty"`
+	// LastDeleteError is the terminal error reported by the most recent logical delete attempt.
+	// +optional
+	LastDeleteError string `json:"lastDeleteError,omitempty"`
+	// NextDeleteRetryAt is when the controller may reserve the next logical delete attempt.
+	// +optional
+	NextDeleteRetryAt *metav1.Time `json:"nextDeleteRetryAt,omitempty"`
 }
 
 // UpgradePhase indicates the current phase of an upgrade.

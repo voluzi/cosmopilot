@@ -2,14 +2,36 @@ package v1
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	"github.com/voluzi/cosmopilot/v2/pkg/dataexporter"
 )
+
+func TestSnapshotExportStatusDeepCopyPreservesDeleteRetryState(t *testing.T) {
+	retryAt := metav1.NewTime(time.Date(2026, time.August, 5, 12, 0, 0, 0, time.UTC))
+	status := &SnapshotExportStatus{
+		DeleteAttempts:    2,
+		DeleteExhausted:   true,
+		LastDeleteError:   "provider denied deletion",
+		NextDeleteRetryAt: &retryAt,
+	}
+
+	copy := status.DeepCopy()
+	require.NotSame(t, status.NextDeleteRetryAt, copy.NextDeleteRetryAt)
+	assert.Equal(t, status.DeleteAttempts, copy.DeleteAttempts)
+	assert.Equal(t, status.DeleteExhausted, copy.DeleteExhausted)
+	assert.Equal(t, status.LastDeleteError, copy.LastDeleteError)
+	assert.Equal(t, status.NextDeleteRetryAt, copy.NextDeleteRetryAt)
+
+	copy.NextDeleteRetryAt.Time = copy.NextDeleteRetryAt.Add(time.Hour)
+	assert.Equal(t, retryAt.Time, status.NextDeleteRetryAt.Time)
+}
 
 func TestExportTarballConfigValidate(t *testing.T) {
 	gcs := &GcsExportConfig{

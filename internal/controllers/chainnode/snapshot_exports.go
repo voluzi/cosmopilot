@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -244,7 +245,8 @@ func (r *Reconciler) setSnapshotExportPhase(
 func snapshotExportPhaseTransitionAllowed(from, to appsv1.SnapshotExportPhase) bool {
 	switch from {
 	case appsv1.SnapshotExportPhaseUploading:
-		return to == appsv1.SnapshotExportPhaseUploaded || to == appsv1.SnapshotExportPhaseCleanupRequired || to == appsv1.SnapshotExportPhaseDeleted
+		return to == appsv1.SnapshotExportPhaseUploaded || to == appsv1.SnapshotExportPhaseDeleting ||
+			to == appsv1.SnapshotExportPhaseCleanupRequired || to == appsv1.SnapshotExportPhaseDeleted
 	case appsv1.SnapshotExportPhaseUploaded:
 		return to == appsv1.SnapshotExportPhaseDeleting || to == appsv1.SnapshotExportPhaseCleanupRequired || to == appsv1.SnapshotExportPhaseDeleted
 	case appsv1.SnapshotExportPhaseDeleting:
@@ -254,6 +256,138 @@ func snapshotExportPhaseTransitionAllowed(from, to appsv1.SnapshotExportPhase) b
 	default:
 		return false
 	}
+}
+
+func (r *Reconciler) snapshotDeleteTime() time.Time {
+	if r.snapshotDeleteNow != nil {
+		return r.snapshotDeleteNow().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func snapshotDeleteRetryDelay(attempt int32) time.Duration {
+	if attempt <= 1 {
+		return tarballDeleteRetryBaseDelay
+	}
+	return tarballDeleteRetryBaseDelay * time.Duration(1<<(attempt-1))
+}
+
+func snapshotExportDeleteTerminal(export *appsv1.SnapshotExportStatus) bool {
+	return export.DeleteExhausted
+}
+
+func (r *Reconciler) startSnapshotExportDeleteAttempt(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	id string,
+	expectedAttempts int32,
+	now time.Time,
+) (bool, error) {
+	return r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
+		for i := range fresh.Status.SnapshotExports {
+			export := &fresh.Status.SnapshotExports[i]
+			if export.ID != id {
+				continue
+			}
+			if export.DeleteAttempts != expectedAttempts {
+				return false, nil
+			}
+			if snapshotExportDeleteTerminal(export) || export.DeleteAttempts >= tarballDeleteMaxAttempts {
+				return false, nil
+			}
+			if export.DeleteAttempts > 0 && export.NextDeleteRetryAt == nil {
+				return false, nil
+			}
+			if export.NextDeleteRetryAt != nil && now.Before(export.NextDeleteRetryAt.Time) {
+				return false, nil
+			}
+			if export.Phase != appsv1.SnapshotExportPhaseDeleting &&
+				!snapshotExportPhaseTransitionAllowed(export.Phase, appsv1.SnapshotExportPhaseDeleting) {
+				return false, fmt.Errorf("snapshot export %q cannot start deletion from phase %q", id, export.Phase)
+			}
+			export.DeleteAttempts++
+			export.NextDeleteRetryAt = nil
+			export.Phase = appsv1.SnapshotExportPhaseDeleting
+			export.Message = ""
+			return true, nil
+		}
+		return false, nil
+	})
+}
+
+func (r *Reconciler) resumeSnapshotExportDeleteAttempt(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	id string,
+) (bool, error) {
+	return r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
+		for i := range fresh.Status.SnapshotExports {
+			export := &fresh.Status.SnapshotExports[i]
+			if export.ID != id {
+				continue
+			}
+			if export.Phase != appsv1.SnapshotExportPhaseCleanupRequired ||
+				export.DeleteAttempts == 0 || snapshotExportDeleteTerminal(export) {
+				return false, nil
+			}
+			export.Phase = appsv1.SnapshotExportPhaseDeleting
+			export.Message = ""
+			return true, nil
+		}
+		return false, nil
+	})
+}
+
+func (r *Reconciler) recordSnapshotExportDeleteFailure(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	id string,
+	failure string,
+	now time.Time,
+) (bool, bool, error) {
+	terminal := false
+	changed, err := r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
+		for i := range fresh.Status.SnapshotExports {
+			export := &fresh.Status.SnapshotExports[i]
+			if export.ID != id {
+				continue
+			}
+			if snapshotExportDeleteTerminal(export) {
+				terminal = true
+				return false, nil
+			}
+			if export.NextDeleteRetryAt != nil {
+				return false, nil
+			}
+			if export.DeleteAttempts == 0 {
+				export.DeleteAttempts = 1
+			}
+			export.LastDeleteError = failure
+			if export.DeleteAttempts >= tarballDeleteMaxAttempts {
+				terminal = true
+				export.DeleteExhausted = true
+				export.NextDeleteRetryAt = nil
+				export.Phase = appsv1.SnapshotExportPhaseCleanupRequired
+				export.Message = terminalSnapshotExportDeleteMessage(export)
+				return true, nil
+			}
+			retryAt := metav1.NewTime(now.Add(snapshotDeleteRetryDelay(export.DeleteAttempts)))
+			export.NextDeleteRetryAt = &retryAt
+			export.Phase = appsv1.SnapshotExportPhaseDeleting
+			export.Message = fmt.Sprintf("delete attempt %d failed; retry after %s", export.DeleteAttempts, retryAt.UTC().Format(time.RFC3339))
+			return true, nil
+		}
+		return false, nil
+	})
+	return changed, terminal, err
+}
+
+func terminalSnapshotExportDeleteMessage(export *appsv1.SnapshotExportStatus) string {
+	return fmt.Sprintf(
+		"automatic deletion of %s failed after %d attempts: %s; retries are exhausted, or acknowledge cleanup with annotation %q=%q",
+		describeSnapshotExport(export), export.DeleteAttempts, export.LastDeleteError,
+		controllers.AnnotationSnapshotExportCleanupAcknowledgement, export.ID,
+	)
 }
 
 func (r *Reconciler) pruneRetainedSnapshotExports(
@@ -364,8 +498,23 @@ func (r *Reconciler) mutateSnapshotExportStatus(
 	}
 	if latest != nil {
 		mergeSnapshotExportOwnedStatus(chainNode, latest)
+		refreshSnapshotExportResourceVersion(chainNode, latest)
 	}
 	return changed, nil
+}
+
+func refreshSnapshotExportResourceVersion(chainNode, latest *appsv1.ChainNode) {
+	// Status writes advance ResourceVersion. Carry it forward only if the caller
+	// still matches the freshly read mutable object; pending caller mutations
+	// retain the stale version and must conflict on a later full Update.
+	callerMeta := chainNode.ObjectMeta.DeepCopy()
+	latestMeta := latest.ObjectMeta.DeepCopy()
+	callerMeta.ResourceVersion = ""
+	latestMeta.ResourceVersion = ""
+	if apiequality.Semantic.DeepEqual(callerMeta, latestMeta) &&
+		apiequality.Semantic.DeepEqual(chainNode.Spec, latest.Spec) {
+		chainNode.ResourceVersion = latest.ResourceVersion
+	}
 }
 
 func mergeSnapshotExportOwnedStatus(chainNode, latest *appsv1.ChainNode) {
@@ -401,14 +550,25 @@ func syncSnapshotExportCleanupCondition(chainNode *appsv1.ChainNode) {
 		apiMeta.RemoveStatusCondition(&chainNode.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
 		return
 	}
-	message := pending[0].Message
+	primary := &pending[0]
+	for i := range pending {
+		if snapshotExportDeleteTerminal(&pending[i]) {
+			primary = &pending[i]
+			break
+		}
+	}
+	reason := appsv1.ReasonTarballCleanupRequired
+	if snapshotExportDeleteTerminal(primary) {
+		reason = appsv1.ReasonTarballDeleteAttemptsExhausted
+	}
+	message := primary.Message
 	if len(pending) > 1 {
 		message = fmt.Sprintf("%d snapshot exports require operator cleanup; first: %s", len(pending), message)
 	}
 	apiMeta.SetStatusCondition(&chainNode.Status.Conditions, metav1.Condition{
 		Type:               appsv1.ConditionSnapshotExportCleanup,
 		Status:             metav1.ConditionTrue,
-		Reason:             appsv1.ReasonTarballCleanupRequired,
+		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: chainNode.Generation,
 	})
@@ -561,6 +721,25 @@ func (r *Reconciler) validateSnapshotExportReferences(
 		}
 	}
 	return nil
+}
+
+func (r *Reconciler) snapshotExportReferencesAvailable(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	export *appsv1.SnapshotExportStatus,
+) (bool, error) {
+	err := r.validateSnapshotExportReferences(ctx, chainNode, export)
+	if err == nil {
+		return true, nil
+	}
+	var unavailable *snapshotExportReferenceUnavailableError
+	if !errors.As(err, &unavailable) {
+		return false, err
+	}
+	if err = r.requireSnapshotExportCleanup(ctx, chainNode, export, unavailable.Error()); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func describeSnapshotExport(export *appsv1.SnapshotExportStatus) string {

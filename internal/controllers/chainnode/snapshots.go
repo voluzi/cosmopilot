@@ -364,10 +364,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 						"Deleted expired PVC snapshot %s", snapshot.GetName(),
 					)
 					if deleteTarball {
+						cleanupProofRequired := !snapshotExportPreAttemptCleanup(snapshotExportFor(chainNode, &snapshot))
 						if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 							return err
 						}
-						if !cleanupAcknowledged {
+						if cleanupProofRequired && !cleanupAcknowledged {
 							r.recorder.Eventf(chainNode,
 								corev1.EventTypeNormal,
 								appsv1.ReasonTarballDeleted,
@@ -430,10 +431,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				"Deleted PVC snapshot %s (exceeded retain count of %d)", snapshot.GetName(), *retainCount,
 			)
 			if deleteTarball {
+				cleanupProofRequired := !snapshotExportPreAttemptCleanup(snapshotExportFor(chainNode, &snapshot))
 				if err = r.cleanUpTarballDeletion(ctx, chainNode, &snapshot); err != nil {
 					return err
 				}
-				if !cleanupAcknowledged {
+				if cleanupProofRequired && !cleanupAcknowledged {
 					r.recorder.Eventf(chainNode,
 						corev1.EventTypeNormal,
 						appsv1.ReasonTarballDeleted,
@@ -530,11 +532,20 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 		return false, err
 	}
 	pending := false
+	seen := make(map[string]struct{}, len(jobs))
 	for _, job := range jobs {
 		if job.Purpose != datasnapshot.SnapshotJobDelete {
 			continue
 		}
-		status, reconcileErr := datasnapshot.ReconcileSnapshotDeletionJob(ctx, clientSet, chainNode, job)
+		seen[job.Name] = struct{}{}
+		export := snapshotExportByObjectName(chainNode, job.Name)
+		var status datasnapshot.SnapshotStatus
+		var reconcileErr error
+		if export != nil && export.Phase != appsv1.SnapshotExportPhaseDeleted && export.Phase != appsv1.SnapshotExportPhaseAcknowledged {
+			status, reconcileErr = r.reconcileSnapshotExportDeletion(ctx, chainNode, export)
+		} else {
+			status, reconcileErr = datasnapshot.ReconcileSnapshotDeletionJob(ctx, clientSet, chainNode, job)
+		}
 		if reconcileErr != nil {
 			return pending, reconcileErr
 		}
@@ -543,11 +554,13 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 			pending = true
 		case datasnapshot.SnapshotFailed:
 			pending = true
-			r.recorder.Eventf(chainNode,
-				corev1.EventTypeWarning,
-				appsv1.ReasonTarballDeleteError,
-				"Failed deleting tarball %s; delete Job retained for inspection", job.Name,
-			)
+			if export == nil {
+				r.recorder.Eventf(chainNode,
+					corev1.EventTypeWarning,
+					appsv1.ReasonTarballDeleteError,
+					"Failed deleting tarball %s; delete Job retained for inspection", job.Name,
+				)
+			}
 		case datasnapshot.SnapshotSucceeded:
 			if err = r.persistPendingTarballDeletionSuccess(ctx, chainNode, job.Name); err != nil {
 				return pending, err
@@ -560,6 +573,41 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 				appsv1.ReasonTarballDeleted,
 				"Deleted tarball %s", job.Name,
 			)
+		}
+	}
+	pendingExports := append([]appsv1.SnapshotExportStatus(nil), chainNode.Status.SnapshotExports...)
+	for i := range pendingExports {
+		export := pendingExports[i]
+		if export.Phase != appsv1.SnapshotExportPhaseDeleting &&
+			(export.Phase != appsv1.SnapshotExportPhaseCleanupRequired || export.DeleteExhausted) {
+			continue
+		}
+		if export.Destination.Provider == appsv1.SnapshotExportProviderUnknown {
+			continue
+		}
+		if _, ok := seen[export.ObjectName]; ok {
+			continue
+		}
+		status, reconcileErr := r.reconcileSnapshotExportDeletion(ctx, chainNode, &export)
+		if reconcileErr != nil {
+			return pending, reconcileErr
+		}
+		switch status {
+		case datasnapshot.SnapshotActive, datasnapshot.SnapshotFailed:
+			pending = true
+		case datasnapshot.SnapshotSucceeded:
+			if err = r.persistPendingTarballDeletionSuccess(ctx, chainNode, export.ObjectName); err != nil {
+				return pending, err
+			}
+			exporter, providerErr := r.tarballProviderForExport(chainNode, &export)
+			if providerErr != nil {
+				return pending, providerErr
+			}
+			if err = exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
+				Name: export.ObjectName, Purpose: datasnapshot.SnapshotJobDelete,
+			}); err != nil {
+				return pending, err
+			}
 		}
 	}
 	return pending, nil
@@ -1113,6 +1161,156 @@ func (r *Reconciler) deleteTarballWithProvider(
 	return status, err
 }
 
+func (r *Reconciler) reconcileSnapshotExportDeletion(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	export *appsv1.SnapshotExportStatus,
+) (datasnapshot.SnapshotStatus, error) {
+	exporter, err := r.tarballProviderForExport(chainNode, export)
+	if err != nil {
+		return "", err
+	}
+	job := datasnapshot.SnapshotJob{
+		Name: export.ObjectName, Purpose: datasnapshot.SnapshotJobDelete, RequireDestinationIdentity: true,
+	}
+	if snapshotExportDeleteTerminal(export) {
+		if err = exporter.CleanupSnapshotDeletion(ctx, job); err != nil {
+			return "", err
+		}
+		return datasnapshot.SnapshotFailed, nil
+	}
+	status, err := exporter.GetSnapshotDeletionStatus(ctx, job)
+	if err != nil {
+		r.recordSnapshotJobReplacement(chainNode, err)
+		return "", err
+	}
+	now := r.snapshotDeleteTime()
+
+	switch status {
+	case datasnapshot.SnapshotActive:
+		referencesAvailable, referenceErr := r.snapshotExportReferencesAvailable(ctx, chainNode, export)
+		if referenceErr != nil {
+			return "", referenceErr
+		}
+		if !referencesAvailable {
+			return status, nil
+		}
+		if export.DeleteAttempts == 0 {
+			if _, err = r.startSnapshotExportDeleteAttempt(ctx, chainNode, export.ID, export.DeleteAttempts, now); err != nil {
+				return "", err
+			}
+		} else if export.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
+			if _, err = r.resumeSnapshotExportDeleteAttempt(ctx, chainNode, export.ID); err != nil {
+				return "", err
+			}
+		}
+		return status, nil
+
+	case datasnapshot.SnapshotFailed:
+		if export.DeleteAttempts == 0 {
+			if _, err = r.startSnapshotExportDeleteAttempt(ctx, chainNode, export.ID, export.DeleteAttempts, now); err != nil {
+				return "", err
+			}
+		}
+		failure, failureErr := r.snapshotDeletionFailure(ctx, chainNode, export.ObjectName)
+		if failureErr != nil {
+			return "", failureErr
+		}
+		if failure == "" {
+			failure = "delete Job failed"
+		}
+		changed, terminal, recordErr := r.recordSnapshotExportDeleteFailure(ctx, chainNode, export.ID, failure, now)
+		if recordErr != nil {
+			return "", recordErr
+		}
+		if changed {
+			current := snapshotExportByObjectName(chainNode, export.ObjectName)
+			if terminal {
+				r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonTarballCleanupRequired, "%s", current.Message)
+			} else {
+				r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonTarballDeleteError,
+					"Delete attempt %d for %s failed: %s; retry after %s",
+					current.DeleteAttempts, describeSnapshotExport(current), current.LastDeleteError,
+					current.NextDeleteRetryAt.UTC().Format(time.RFC3339),
+				)
+			}
+		}
+		if err = exporter.CleanupSnapshotDeletion(ctx, job); err != nil {
+			return "", err
+		}
+		return status, nil
+
+	case datasnapshot.SnapshotNotFound:
+		if export.DeleteAttempts > 0 && export.NextDeleteRetryAt == nil && !export.DeleteExhausted {
+			failure := fmt.Sprintf("delete Job for %s disappeared before completion", describeSnapshotExport(export))
+			changed, terminal, recordErr := r.recordSnapshotExportDeleteFailure(ctx, chainNode, export.ID, failure, now)
+			if recordErr != nil {
+				return "", recordErr
+			}
+			if changed {
+				current := snapshotExportByObjectName(chainNode, export.ObjectName)
+				if terminal {
+					r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonTarballCleanupRequired, "%s", current.Message)
+				} else {
+					r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonTarballDeleteError,
+						"%s; retry after %s", failure, current.NextDeleteRetryAt.UTC().Format(time.RFC3339))
+				}
+			}
+			return datasnapshot.SnapshotFailed, nil
+		}
+		referencesAvailable, referenceErr := r.snapshotExportReferencesAvailable(ctx, chainNode, export)
+		if referenceErr != nil {
+			return "", referenceErr
+		}
+		if !referencesAvailable {
+			return datasnapshot.SnapshotActive, nil
+		}
+		if export.NextDeleteRetryAt != nil && now.Before(export.NextDeleteRetryAt.Time) {
+			return datasnapshot.SnapshotActive, nil
+		}
+		started, startErr := r.startSnapshotExportDeleteAttempt(ctx, chainNode, export.ID, export.DeleteAttempts, now)
+		if startErr != nil {
+			return "", startErr
+		}
+		if !started {
+			return datasnapshot.SnapshotActive, nil
+		}
+		status, err = exporter.DeleteSnapshotBounded(ctx, export.ObjectName)
+		r.recordSnapshotJobReplacement(chainNode, err)
+		if err != nil {
+			_, _, recordErr := r.recordSnapshotExportDeleteFailure(ctx, chainNode, export.ID, err.Error(), now)
+			if recordErr != nil {
+				return "", recordErr
+			}
+			return "", err
+		}
+		if status == datasnapshot.SnapshotFailed {
+			return r.reconcileSnapshotExportDeletion(ctx, chainNode, snapshotExportByObjectName(chainNode, export.ObjectName))
+		}
+		return status, nil
+
+	default:
+		return status, nil
+	}
+}
+
+func (r *Reconciler) snapshotDeletionFailure(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	objectName string,
+) (string, error) {
+	jobs, err := datasnapshot.ListSnapshotDeletionJobs(ctx, r.snapshotKubernetesClient(), chainNode)
+	if err != nil {
+		return "", err
+	}
+	for _, job := range jobs {
+		if job.Name == objectName {
+			return job.Failure, nil
+		}
+	}
+	return "", nil
+}
+
 func (r *Reconciler) recordTarballExportError(chainNode *appsv1.ChainNode, err error) {
 	if stderrors.Is(err, datasnapshot.ErrStaleJobReplaced) || stderrors.Is(err, datasnapshot.ErrStaleJobTerminating) {
 		return
@@ -1190,6 +1388,10 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 	if export.Phase == appsv1.SnapshotExportPhaseDeleted {
 		return true, nil
 	}
+	if snapshotExportDeleteTerminal(export) {
+		_, err := r.reconcileSnapshotExportDeletion(ctx, chainNode, export)
+		return false, err
+	}
 	if export.Destination.Provider == appsv1.SnapshotExportProviderUnknown {
 		return false, nil
 	}
@@ -1202,43 +1404,20 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 		}
 		return true, nil
 	}
-	if err := r.validateSnapshotExportReferences(ctx, chainNode, export); err != nil {
-		var unavailable *snapshotExportReferenceUnavailableError
-		if stderrors.As(err, &unavailable) {
-			if statusErr := r.requireSnapshotExportCleanup(ctx, chainNode, export, unavailable.Error()); statusErr != nil {
-				return false, statusErr
-			}
-			return false, nil
-		}
-		return false, err
-	}
-	if export.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
-		exporter, err := r.tarballProviderForExport(chainNode, export)
-		if err != nil {
-			return false, err
-		}
-		if err = exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{Name: export.ObjectName, Purpose: datasnapshot.SnapshotJobDelete}); err != nil {
-			return false, err
-		}
-	}
-
-	status, err := r.deleteTarball(ctx, chainNode, snapshot)
+	status, err := r.reconcileSnapshotExportDeletion(ctx, chainNode, export)
 	if err != nil {
 		return false, err
 	}
 	if status == datasnapshot.SnapshotFailed {
-		message := fmt.Sprintf("failed deleting %s; delete Job retained for inspection, or acknowledge cleanup with annotation %q=%q",
-			describeSnapshotExport(export), controllers.AnnotationSnapshotExportCleanupAcknowledgement, export.ID)
-		if err = r.requireSnapshotExportCleanup(ctx, chainNode, export, message); err != nil {
-			return false, err
-		}
 		return false, nil
 	}
 	if status == datasnapshot.SnapshotActive {
-		if export.Phase == appsv1.SnapshotExportPhaseUploaded || export.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
-			if _, err = r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseDeleting, ""); err != nil {
-				return false, err
-			}
+		current := snapshotExportByObjectName(chainNode, export.ObjectName)
+		if snapshotExportPreAttemptCleanup(current) {
+			// No delete Job has been reserved, so there is no in-flight cleanup that
+			// requires the local VolumeSnapshot to remain. Keep the export status for
+			// a later remote cleanup retry, but allow retention to proceed.
+			return true, nil
 		}
 		return false, nil
 	}
@@ -1326,6 +1505,11 @@ func tarballDeletionComplete(snapshot *snapshotv1.VolumeSnapshot, tarballName st
 	return deletedName == tarballName || allowLegacy && deletedName == ""
 }
 
+func snapshotExportPreAttemptCleanup(export *appsv1.SnapshotExportStatus) bool {
+	return export != nil && export.Phase == appsv1.SnapshotExportPhaseCleanupRequired &&
+		export.DeleteAttempts == 0 && !export.DeleteExhausted
+}
+
 func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
 	export := snapshotExportFor(chainNode, snapshot)
 	if export == nil {
@@ -1336,6 +1520,12 @@ func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *apps
 		return exporter.CleanupSnapshotDeletion(ctx, datasnapshot.SnapshotJob{
 			Name: getTarballName(chainNode, snapshot), Purpose: datasnapshot.SnapshotJobDelete,
 		})
+	}
+	if snapshotExportPreAttemptCleanup(export) {
+		// Reference validation failed before a delete Job was reserved. There are no
+		// deletion resources to clean up, and the durable export status must remain
+		// so remote cleanup can resume after the reference is restored.
+		return nil
 	}
 	if export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
 		if export.Destination.Provider != appsv1.SnapshotExportProviderUnknown {

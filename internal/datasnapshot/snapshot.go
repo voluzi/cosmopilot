@@ -49,6 +49,10 @@ type SnapshotJob struct {
 	// provider. Deletion Jobs are self-contained, so they can still be resumed and
 	// cleaned up after the ChainNode switches providers.
 	Exporter string
+	Failure  string
+	// RequireDestinationIdentity binds status observation to the caller's desired
+	// destination. Legacy orphan workflows leave it false and remain self-contained.
+	RequireDestinationIdentity bool
 }
 
 const (
@@ -76,6 +80,8 @@ const (
 	typeUpload           = string(SnapshotJobUpload)
 	typeDelete           = string(SnapshotJobDelete)
 	typePostUploadDelete = "post-upload-delete"
+
+	unboundSnapshotDeleteBackoffLimit int32 = 5
 )
 
 func snapshotDestinationLabel(values ...string) string {
@@ -137,6 +143,7 @@ type SnapshotProvider interface {
 	GetSnapshotDeletionStatus(context.Context, SnapshotJob) (SnapshotStatus, error)
 	CleanupSnapshot(context.Context, string) error
 	DeleteSnapshot(context.Context, string) (SnapshotStatus, error)
+	DeleteSnapshotBounded(context.Context, string) (SnapshotStatus, error)
 	DeleteSnapshotForUpload(context.Context, SnapshotJob) (SnapshotJob, SnapshotStatus, error)
 	CleanupSnapshotDeletion(context.Context, SnapshotJob) error
 	ListSnapshots(ctx context.Context) ([]SnapshotJob, error)
@@ -515,6 +522,7 @@ func snapshotJobFromJob(job *batchv1.Job) SnapshotJob {
 		UID:         job.UID,
 		Purpose:     SnapshotJobPurpose(job.Labels[labelType]),
 		Terminating: job.DeletionTimestamp != nil,
+		Failure:     snapshotJobFailure(job),
 	}
 	if snapshotJob.Purpose == SnapshotJobDelete && job.Labels[labelCleanupUploadUID] != "" {
 		snapshotJob.Upload = &SnapshotJobIdentity{
@@ -523,6 +531,27 @@ func snapshotJobFromJob(job *batchv1.Job) SnapshotJob {
 		}
 	}
 	return snapshotJob
+}
+
+func snapshotJobFailure(job *batchv1.Job) string {
+	for _, condition := range job.Status.Conditions {
+		if condition.Type != batchv1.JobFailed || condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		reason := strings.TrimSpace(condition.Reason)
+		message := strings.TrimSpace(condition.Message)
+		switch {
+		case reason != "" && message != "":
+			return reason + ": " + message
+		case reason != "":
+			return reason
+		case message != "":
+			return message
+		default:
+			return "delete Job failed"
+		}
+	}
+	return ""
 }
 
 func snapshotJobsFromJobs(jobs []batchv1.Job, currentIdentity ...string) []SnapshotJob {
@@ -747,7 +776,7 @@ func deletionJobFromUpload(
 			Labels:          map[string]string{labelExporter: exporter, labelOwner: owner.GetName(), labelType: typeDelete},
 			OwnerReferences: append([]metav1.OwnerReference(nil), upload.OwnerReferences...),
 		},
-		Spec: batchv1.JobSpec{BackoffLimit: ptr.To[int32](5), Template: template},
+		Spec: batchv1.JobSpec{BackoffLimit: ptr.To(unboundSnapshotDeleteBackoffLimit), Template: template},
 	}
 	if destination := upload.Labels[labelDestination]; destination != "" {
 		job.Labels[labelDestination] = destination
@@ -1144,6 +1173,98 @@ func reconcileSnapshotDeletionJob(
 			updated.Namespace, updated.Name, updated.UID, deletionJob.UID)
 	}
 	return snapshotJobStatus(updated), nil
+}
+
+func ensureSnapshotDeletionJobForDesired(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	desired *batchv1.Job,
+) (*batchv1.Job, error) {
+	job, _, err := ensureSnapshotJob(ctx, client, owner, desired, typeDelete)
+	if err != nil {
+		return nil, err
+	}
+	if int32PointersEqual(job.Spec.BackoffLimit, desired.Spec.BackoffLimit) {
+		return job, nil
+	}
+	if job.DeletionTimestamp != nil {
+		return nil, fmt.Errorf("stale %s job %s/%s is terminating: %w",
+			typeDelete, job.Namespace, job.Name, ErrStaleJobTerminating)
+	}
+	if err = deleteSnapshotJob(ctx, client, job); err != nil {
+		return nil, fmt.Errorf("delete stale %s job %s/%s: %w", typeDelete, job.Namespace, job.Name, err)
+	}
+	return nil, &StaleJobReplacedError{
+		Purpose:          typeDelete,
+		Namespace:        job.Namespace,
+		Name:             job.Name,
+		UID:              job.UID,
+		ConflictingLabel: "spec.backoffLimit",
+		PreviousValue:    int32PointerString(job.Spec.BackoffLimit),
+		DesiredValue:     int32PointerString(desired.Spec.BackoffLimit),
+	}
+}
+
+func reconcileSnapshotDeletionJobForDesired(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	expected SnapshotJob,
+	exporter string,
+	desired *batchv1.Job,
+) (SnapshotStatus, error) {
+	job, err := client.BatchV1().Jobs(desired.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return SnapshotNotFound, nil
+		}
+		return "", err
+	}
+	if expected.UID != "" && job.UID != expected.UID {
+		return "", fmt.Errorf("snapshot deletion job %s/%s has UID %s, expected listed UID %s",
+			job.Namespace, job.Name, job.UID, expected.UID)
+	}
+	if !metav1.IsControlledBy(job, owner) {
+		return "", fmt.Errorf("snapshot deletion job %s/%s is not controlled by snapshot owner %s",
+			job.Namespace, job.Name, owner.GetName())
+	}
+	if !int32PointersEqual(job.Spec.BackoffLimit, desired.Spec.BackoffLimit) {
+		if job.DeletionTimestamp != nil {
+			return "", fmt.Errorf("stale %s job %s/%s is terminating: %w",
+				typeDelete, job.Namespace, job.Name, ErrStaleJobTerminating)
+		}
+		if err = deleteSnapshotJob(ctx, client, job); err != nil {
+			return "", fmt.Errorf("delete stale %s job %s/%s: %w", typeDelete, job.Namespace, job.Name, err)
+		}
+		return "", &StaleJobReplacedError{
+			Purpose:          typeDelete,
+			Namespace:        job.Namespace,
+			Name:             job.Name,
+			UID:              job.UID,
+			ConflictingLabel: "spec.backoffLimit",
+			PreviousValue:    int32PointerString(job.Spec.BackoffLimit),
+			DesiredValue:     int32PointerString(desired.Spec.BackoffLimit),
+		}
+	}
+	if _, err = reconcileSnapshotJobIdentity(ctx, client, owner, job, desired, typeDelete); err != nil {
+		return "", err
+	}
+	return reconcileSnapshotDeletionJob(ctx, client, owner, expected, exporter)
+}
+
+func int32PointersEqual(left, right *int32) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+func int32PointerString(value *int32) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return strconv.FormatInt(int64(*value), 10)
 }
 
 func cleanupSnapshotDeletionResources(

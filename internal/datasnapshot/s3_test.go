@@ -131,6 +131,8 @@ func TestS3DeleteSnapshotUsesSameAuthentication(t *testing.T) {
 
 	job := getS3Job(t, provider, "snapshot-delete")
 	assert.Nil(t, job.Spec.TTLSecondsAfterFinished)
+	require.NotNil(t, job.Spec.BackoffLimit)
+	assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *job.Spec.BackoffLimit)
 	container := job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, "aws-credentials", secretEnvFromName(container.EnvFrom))
 	assert.Equal(t, []string{"s3", "delete", "snapshots", "snapshot"}, container.Args)
@@ -303,6 +305,8 @@ func TestS3DeleteSnapshotForUploadReturnsPairedActivatedDeletion(t *testing.T) {
 	deleteJob := getS3Job(t, provider, "snapshot-delete")
 	require.NotNil(t, deleteJob.Spec.Suspend)
 	assert.False(t, *deleteJob.Spec.Suspend)
+	require.NotNil(t, deleteJob.Spec.BackoffLimit)
+	assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *deleteJob.Spec.BackoffLimit)
 	assert.Equal(t, s3Exporter, deleteJob.Labels[labelCleanupExporter])
 	assert.Equal(t, provider.Owner.GetName(), deleteJob.Labels[labelCleanupOwner])
 	assert.Equal(t, typeUpload, deleteJob.Labels[labelCleanupType])
@@ -328,6 +332,60 @@ func TestS3ListSnapshotsPreservesDeleteSuffixInArchiveName(t *testing.T) {
 	jobs, err := provider.ListSnapshots(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, []SnapshotJob{{Name: "snapshot-delete", Purpose: SnapshotJobUpload}}, jobs)
+}
+
+func TestS3DeleteSnapshotBoundedReplacesExistingLegacyBackoffJob(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}})
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	legacy, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, legacy.Spec.BackoffLimit)
+	assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *legacy.Spec.BackoffLimit)
+
+	status, err = provider.DeleteSnapshotBounded(context.Background(), "snapshot")
+	assert.Empty(t, status)
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, "spec.backoffLimit", replacement.ConflictingLabel)
+	assert.Equal(t, "5", replacement.PreviousValue)
+	assert.Equal(t, "0", replacement.DesiredValue)
+
+	_, getErr := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(context.Background(), "snapshot-delete", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(getErr))
+}
+
+func TestS3GetSnapshotDeletionStatusReplacesPreUpgradeBackoffJob(t *testing.T) {
+	provider := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		Bucket: "snapshots", Region: "eu-west-1",
+	}})
+	status, err := provider.DeleteSnapshot(context.Background(), "snapshot")
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+	job, err := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(
+		context.Background(), "snapshot-delete", metav1.GetOptions{},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, job.Spec.BackoffLimit)
+	assert.Equal(t, unboundSnapshotDeleteBackoffLimit, *job.Spec.BackoffLimit)
+
+	status, err = provider.GetSnapshotDeletionStatus(context.Background(), SnapshotJob{
+		Name: "snapshot", UID: job.UID, Purpose: SnapshotJobDelete, RequireDestinationIdentity: true,
+	})
+	assert.Empty(t, status)
+	require.ErrorIs(t, err, ErrStaleJobReplaced)
+	var replacement *StaleJobReplacedError
+	require.ErrorAs(t, err, &replacement)
+	assert.Equal(t, "spec.backoffLimit", replacement.ConflictingLabel)
+	assert.Equal(t, "5", replacement.PreviousValue)
+	assert.Equal(t, "0", replacement.DesiredValue)
+
+	_, getErr := provider.Client.BatchV1().Jobs(provider.Owner.GetNamespace()).Get(
+		context.Background(), job.Name, metav1.GetOptions{},
+	)
+	assert.True(t, apierrors.IsNotFound(getErr))
 }
 
 func TestS3GetSnapshotDeletionStatusDoesNotCreateMissingJob(t *testing.T) {

@@ -18,7 +18,8 @@ const (
 	tarballFailed      = "failed"
 	upgradesConfigFile = "upgrades.json"
 
-	tarballExportMaxAttempts = 3
+	tarballExportMaxAttempts       = 3
+	tarballDeleteMaxAttempts int32 = 3
 
 	timeoutPodRunning              = 5 * time.Minute
 	timeoutPodDeleted              = 2 * time.Minute
@@ -48,8 +49,9 @@ const (
 	defaultStateSyncTrustPeriod = "168h0m0s"
 	defaultLogsLineCount        = 50
 
-	snapshotCheckPeriod   = 15 * time.Second
-	pvcDeletionWaitPeriod = 15 * time.Second
+	snapshotCheckPeriod         = 15 * time.Second
+	tarballDeleteRetryBaseDelay = time.Minute
+	pvcDeletionWaitPeriod       = 15 * time.Second
 	// dashboardRouteCheckPeriod is how soon to re-check a dashboard HTTPRoute that has not yet been
 	// accepted by its parent Gateway. Route acceptance is reported by the Gateway controller as a
 	// STATUS update, which no watch here admits (Gateway API CRDs are optional, so the controller

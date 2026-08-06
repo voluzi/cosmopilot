@@ -73,6 +73,7 @@ type Reconciler struct {
 	disruptionLocks    *lockManager
 	configLocks        *configLockManager
 	statsClientFactory StatsClientFactory
+	snapshotDeleteNow  func() time.Time
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {

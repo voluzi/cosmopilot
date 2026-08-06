@@ -193,7 +193,18 @@ func (provider *S3) GetSnapshotStatus(ctx context.Context, name string) (Snapsho
 }
 
 func (provider *S3) GetSnapshotDeletionStatus(ctx context.Context, snapshotJob SnapshotJob) (SnapshotStatus, error) {
-	return reconcileSnapshotDeletionJob(ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter))
+	if !snapshotJob.RequireDestinationIdentity || snapshotJob.Exporter != "" && snapshotJob.Exporter != s3Exporter {
+		return reconcileSnapshotDeletionJob(
+			ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter),
+		)
+	}
+	desired, err := provider.snapshotDeletionJob(snapshotJob.Name, snapshotJob.Upload, true)
+	if err != nil {
+		return "", err
+	}
+	return reconcileSnapshotDeletionJobForDesired(
+		ctx, provider.Client, provider.Owner, snapshotJob, snapshotJobExporter(snapshotJob, s3Exporter), desired,
+	)
 }
 
 func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
@@ -201,7 +212,15 @@ func (provider *S3) CleanupSnapshot(ctx context.Context, name string) error {
 }
 
 func (provider *S3) DeleteSnapshot(ctx context.Context, name string) (SnapshotStatus, error) {
-	job, err := provider.ensureSnapshotDeletion(ctx, name, nil)
+	return provider.deleteSnapshot(ctx, name, false)
+}
+
+func (provider *S3) DeleteSnapshotBounded(ctx context.Context, name string) (SnapshotStatus, error) {
+	return provider.deleteSnapshot(ctx, name, true)
+}
+
+func (provider *S3) deleteSnapshot(ctx context.Context, name string, bounded bool) (SnapshotStatus, error) {
+	job, err := provider.ensureSnapshotDeletion(ctx, name, nil, bounded)
 	if err != nil {
 		return "", err
 	}
@@ -240,7 +259,27 @@ func (provider *S3) ensureSnapshotDeletion(
 	ctx context.Context,
 	name string,
 	upload *SnapshotJobIdentity,
+	bounded ...bool,
 ) (*batchv1.Job, error) {
+	job, err := provider.snapshotDeletionJob(name, upload, len(bounded) > 0 && bounded[0])
+	if err != nil {
+		return nil, err
+	}
+	if len(bounded) > 0 && bounded[0] {
+		return ensureSnapshotDeletionJobForDesired(ctx, provider.Client, provider.Owner, job)
+	}
+	job, _, err = ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, typeDelete)
+	if err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+func (provider *S3) snapshotDeletionJob(name string, upload *SnapshotJobIdentity, bounded bool) (*batchv1.Job, error) {
+	backoffLimit := unboundSnapshotDeleteBackoffLimit
+	if bounded {
+		backoffLimit = 0
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-delete", name),
@@ -253,7 +292,7 @@ func (provider *S3) ensureSnapshotDeletion(
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To[int32](5),
+			BackoffLimit: ptr.To(backoffLimit),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -279,10 +318,6 @@ func (provider *S3) ensureSnapshotDeletion(
 	}
 	if upload != nil {
 		setSnapshotDeletionUploadIdentity(job, provider.Owner, s3Exporter, *upload)
-	}
-	job, _, err := ensureSnapshotJob(ctx, provider.Client, provider.Owner, job, "delete")
-	if err != nil {
-		return nil, err
 	}
 	return job, nil
 }
