@@ -456,7 +456,7 @@ func TestValidateCosmosignerRejectsPromotingSentrySignerToCreateValidator(t *tes
 
 	_, err := updated.Validate(old)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "software backend or vault.uploadGenerated")
+	assert.Contains(t, err.Error(), "software backend, vault.uploadGenerated or gcpKms.import")
 }
 
 func TestValidateCosmosignerRequiresCompletedRegistrationForMigrationWaiver(t *testing.T) {
@@ -490,7 +490,7 @@ func TestValidateCosmosignerRequiresCompletedRegistrationForMigrationWaiver(t *t
 
 	_, err := updated.Validate(old)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "software backend or vault.uploadGenerated")
+	assert.Contains(t, err.Error(), "software backend, vault.uploadGenerated or gcpKms.import")
 }
 
 // TestValidateCosmosignerNoWebhookWaiverRequiresMatchingSigningDigest verifies the no-webhook
@@ -499,7 +499,7 @@ func TestValidateCosmosignerRequiresCompletedRegistrationForMigrationWaiver(t *t
 // The waiver requires a recorded signing digest that matches the current signer — proof this exact
 // signer identity rolled out and served — otherwise a newly configured backend's key is unproven.
 func TestValidateCosmosignerNoWebhookWaiverRequiresMatchingSigningDigest(t *testing.T) {
-	const want = "software backend or vault.uploadGenerated"
+	const want = "software backend, vault.uploadGenerated or gcpKms.import"
 	base := func() *ChainNodeSet {
 		return &ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "cs"},

@@ -208,6 +208,34 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
 	})
 
+	It("accepts managed GCP import when a validator with an importable key is targeted", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+				GcpKMS: &appsv1.CosmosignerGcpKmsBackend{Import: &appsv1.CosmosignerGcpKmsImport{
+					Project: "project", KeyRing: "validators", Key: "consensus",
+				}},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			&appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("existing-val-key")},
+		)
+		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
+	})
+
+	It("rejects managed GCP import without a validator target", func() {
+		cs := newNodeSet(
+			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
+				GcpKMS: &appsv1.CosmosignerGcpKmsBackend{Import: &appsv1.CosmosignerGcpKmsImport{
+					Project: "project", KeyRing: "validators", Key: "consensus",
+				}},
+			}},
+			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
+			nil,
+		)
+		err := Framework().Client().Create(Framework().Context(), cs)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("requires targeting a validator"))
+	})
+
 	It("rejects an explicit software key when a validator is targeted", func() {
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
@@ -223,8 +251,8 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 
 	It("rejects a pre-provisioned GCP key for a genesis-init validator target", func() {
 		// Vault gets uploadGenerated auto-defaulted for init targets (accepted — covered by a unit
-		// test, since creating a live init nodeset here would starve envtest workers). GCP has no
-		// import path, so an init target with a pre-provisioned GCP key is still rejected.
+		// test, since creating a live init nodeset here would starve envtest workers). Managed GCP import
+		// is accepted through the existing-key case above; a pre-provisioned version is still rejected.
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
 				GcpKMS: &appsv1.CosmosignerGcpKmsBackend{KeyVersion: "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"},
@@ -238,7 +266,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		cs.Spec.Genesis = nil
 		err := Framework().Client().Create(Framework().Context(), cs)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("requires the software backend or vault.uploadGenerated"))
+		Expect(err.Error()).To(ContainSubstring("requires the software backend, vault.uploadGenerated or gcpKms.import"))
 	})
 
 	It("rejects targeting a zero-instance group", func() {
@@ -356,8 +384,8 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 	})
 
 	It("rejects a pre-provisioned GCP key for a standalone genesis-init validator", func() {
-		// Vault gets uploadGenerated auto-defaulted for init validators (accepted); GCP has no
-		// import path, so it is still rejected for a pending genesis-init registration.
+		// Vault gets uploadGenerated auto-defaulted for init validators (accepted); managed GCP import
+		// is accepted separately below, while a pre-provisioned key cannot prove identity continuity.
 		cn := &appsv1.ChainNode{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
 			Spec: appsv1.ChainNodeSpec{
@@ -372,7 +400,25 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}
 		err := Framework().Client().Create(Framework().Context(), cn)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("requires the software backend or vault.uploadGenerated"))
+		Expect(err.Error()).To(ContainSubstring("requires the software backend, vault.uploadGenerated or gcpKms.import"))
+	})
+
+	It("accepts managed GCP import for a standalone genesis-init validator", func() {
+		cn := &appsv1.ChainNode{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
+			Spec: appsv1.ChainNodeSpec{
+				App: DefaultChainNodeTestApp,
+				Validator: &appsv1.ValidatorConfig{Init: &appsv1.GenesisInitConfig{
+					ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi",
+				}},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					GcpKMS: &appsv1.CosmosignerGcpKmsBackend{Import: &appsv1.CosmosignerGcpKmsImport{
+						Project: "project", KeyRing: "validators", Key: "consensus",
+					}},
+				}},
+			},
+		}
+		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
 	})
 
 	It("rejects an explicit software key on a standalone validator", func() {

@@ -2866,13 +2866,56 @@ spec:
                             - key
                             type: object
                             x-kubernetes-map-type: atomic
+                          import:
+                            description: |-
+                              Import requests a one-shot, controller-managed import of the targeted validator's existing
+                              consensus key into Cloud KMS (BYOK). The resulting crypto key version does not exist until the
+                              import completes, so it is recorded in status rather than configured here. Mutually exclusive
+                              with keyVersion.
+                            properties:
+                              importJob:
+                                description: |-
+                                  ImportJob is the Cloud KMS import job ID used to wrap the key material. Defaults to
+                                  `<key>-import`. Cloud KMS import jobs expire; name a fresh one to retry after expiry — it does
+                                  not change the imported identity.
+                                type: string
+                              key:
+                                description: Key is the Cloud KMS crypto key ID the
+                                  consensus key is imported into.
+                                type: string
+                              keyRing:
+                                description: KeyRing is the Cloud KMS key ring ID
+                                  holding the destination crypto key.
+                                type: string
+                              location:
+                                default: global
+                                description: Location is the Cloud KMS location of
+                                  the destination key ring. Defaults to `global`.
+                                type: string
+                              project:
+                                description: Project is the Google Cloud project ID
+                                  owning the destination key ring.
+                                type: string
+                              protectionLevel:
+                                default: software
+                                description: |-
+                                  ProtectionLevel is the protection level of the destination crypto key, applied only when the
+                                  key is created. Defaults to `software`.
+                                enum:
+                                - software
+                                - hsm
+                                type: string
+                            required:
+                            - key
+                            - keyRing
+                            - project
+                            type: object
                           keyVersion:
                             description: |-
-                              KeyVersion is the full resource name of the KMS crypto key version used for signing
-                              (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`).
+                              KeyVersion is the full resource name of a pre-provisioned KMS crypto key version used for
+                              signing (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`). Mutually
+                              exclusive with import.
                             type: string
-                        required:
-                        - keyVersion
                         type: object
                       software:
                         description: |-
@@ -6235,11 +6278,21 @@ spec:
                   excluded. It protects incomplete first rollouts and supports recovery of legacy status; managed
                   migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand.
                 type: string
+              cosmosignerImportedKeyVersion:
+                description: |-
+                  CosmosignerImportedKeyVersion is the full Cloud KMS crypto key version resource name produced by
+                  a managed GCP KMS import, as reported by the import pod. It is recorded before the import is
+                  verified (so a restart resumes against the exact version that was created rather than importing
+                  a second one) and is the only import-derived value configured on the signer. Not meant to be set
+                  by hand.
+                type: string
               cosmosignerKeyImported:
                 description: |-
-                  CosmosignerKeyImported is the fingerprint of a completed Vault key import (Vault target + source
-                  secret + key material). It lets the controller skip a repeated import and detect a source/target
-                  change without trusting user-editable metadata. Not meant to be set by hand.
+                  CosmosignerKeyImported is the fingerprint of a completed managed key import (backend-namespaced
+                  target + source secret + key material). It lets the controller skip a repeated import and detect
+                  a source/target change without trusting user-editable metadata. For a GCP KMS import it is
+                  written only once the imported version is verified: CosmosignerImportedKeyVersion is recorded,
+                  readable, and serving the source consensus key. Not meant to be set by hand.
                 type: string
               cosmosignerMigration:
                 description: CosmosignerMigration records an in-progress break-before-make

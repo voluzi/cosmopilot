@@ -23,10 +23,12 @@ import (
 
 const (
 	jobActiveDeadlineSeconds int64 = 300
-	// jobWaitTimeout is the pod's own execution deadline (ActiveDeadlineSeconds — which only starts
-	// counting once the pod is scheduled) plus an allowance for scheduling latency, so the
-	// controller never gives up on a pod the kubelet would still have let finish.
-	jobWaitTimeout = time.Duration(jobActiveDeadlineSeconds)*time.Second + 2*time.Minute
+	// gcpImportActiveDeadlineSeconds is the budget for a Cloud KMS BYOK import, which waits for an
+	// ImportJob's wrapping key to be generated (minutes for an HSM job) and then up to two more
+	// minutes for the imported version to leave PENDING_IMPORT. The flow is idempotent, so an
+	// overrunning pod is retried rather than lost — but a budget this size avoids churning through
+	// deadline-exceeded pods for an import that was progressing normally.
+	gcpImportActiveDeadlineSeconds int64 = 900
 	// jobDeleteTimeout bounds waiting for a previous run's pod to finish terminating before
 	// recreating it (pod deletion is asynchronous; an immediate Create races AlreadyExists).
 	jobDeleteTimeout = time.Minute
@@ -37,15 +39,23 @@ const (
 	importSourceFile   = importSourceDir + "/priv_validator_key.json"
 
 	// importJobSuffix names the one-shot `cosmosigner import` pod: <signer>-import.
-	importJobSuffix = "import"
+	importJobSuffix        = "import"
+	importTargetAnnotation = "cosmopilot.voluzi.com/cosmosigner-import-target"
 	// pubkeyJobSuffix names the one-shot `cosmosigner pubkey` pod: <signer>-pubkey.
 	pubkeyJobSuffix = "pubkey"
 )
 
+// jobWaitTimeout is the pod's own execution deadline (ActiveDeadlineSeconds — which only starts
+// counting once the pod is scheduled) plus an allowance for scheduling latency, so the controller
+// never gives up on a pod the kubelet would still have let finish.
+func jobWaitTimeout(deadlineSeconds int64) time.Duration {
+	return time.Duration(deadlineSeconds)*time.Second + 2*time.Minute
+}
+
 // JobRunner runs the one-shot cosmosigner key-management pods (pubkey, import). It needs the
 // clientset for pod log scraping, mirroring the TmKMS identity/upload pattern.
 type JobRunner struct {
-	Client *kubernetes.Clientset
+	Client kubernetes.Interface
 	Scheme *runtime.Scheme
 	Owner  metav1.Object
 	Params Params
@@ -82,9 +92,11 @@ func (b Backend) backendEnv() []corev1.EnvVar {
 		}
 		return env
 	case b.GCP != nil:
-		env := []corev1.EnvVar{
-			{Name: "COSMOSIGNER_BACKEND", Value: backendGcpKms},
-			{Name: "COSMOSIGNER_GCP_KEY_VERSION", Value: b.GCP.KeyVersion},
+		env := []corev1.EnvVar{{Name: "COSMOSIGNER_BACKEND", Value: backendGcpKms}}
+		// A managed import has no key version until it runs. Emitting an empty one would look like a
+		// deliberate (invalid) backend selection rather than an absent value.
+		if b.GCP.KeyVersion != "" {
+			env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_GCP_KEY_VERSION", Value: b.GCP.KeyVersion})
 		}
 		if b.GCP.CredentialsSecret != nil {
 			env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_GCP_CREDENTIALS_FILE", Value: gcpCredsFile})
@@ -102,13 +114,53 @@ func (b Backend) backendArgs() []string {
 	return nil
 }
 
-// runJob creates a one-shot pod, waits for it to succeed, returns its logs and always cleans up.
-func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string, extraVolumes []corev1.Volume, extraMounts []corev1.VolumeMount) (string, error) {
+// importArgs is the full `cosmosigner import` invocation for this backend. Vault addresses its
+// destination through the backend env (mount + key name); GCP KMS addresses the destination key ring
+// and crypto key through FLAGS, which is a distinct set from the backend's own env — in particular
+// --gcp-key-version is never passed, since the version is precisely what the import creates.
+func (b Backend) importArgs() []string {
+	args := []string{"import", "--from", importSourceFile}
+	if b.GCP == nil || b.GCP.Import == nil {
+		return args
+	}
+	i := b.GCP.Import
+	return append(args,
+		"--gcp-project", i.Project,
+		"--gcp-location", i.Location,
+		"--gcp-keyring", i.KeyRing,
+		"--gcp-key", i.Key,
+		"--gcp-protection", i.ProtectionLevel,
+		"--gcp-import-job", i.ImportJob,
+	)
+	// The credentials file, when configured, arrives through COSMOSIGNER_GCP_CREDENTIALS_FILE in
+	// backendEnv(); repeating it as a flag would be redundant.
+}
+
+// importSourceVolume mounts the source consensus key for `cosmosigner import`. Only
+// priv_validator_key.json is projected: the referenced Secret may hold unrelated material (e.g. a
+// validator's account mnemonic in a shared Secret) that the import pod has no business reading.
+func importSourceMount(sourceSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
+	return []corev1.Volume{{
+			Name: importSourceVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: sourceSecret,
+					Items:      []corev1.KeyToPath{{Key: "priv_validator_key.json", Path: "priv_validator_key.json"}},
+				},
+			},
+		}}, []corev1.VolumeMount{
+			{Name: importSourceVolume, ReadOnly: true, MountPath: importSourceDir},
+		}
+}
+
+// buildPod renders a one-shot cosmosigner pod. It is pure so the rendered command line, mounts and
+// security posture can be asserted without a cluster.
+func (j JobRunner) buildPod(nameSuffix string, args []string, extraVolumes []corev1.Volume, extraMounts []corev1.VolumeMount, deadline int64) *corev1.Pod {
 	args = append(args, j.Params.Backend.backendArgs()...)
 	volumes := append(j.Params.Backend.volumes(), extraVolumes...)
 	mounts := append(j.Params.Backend.volumeMounts(), extraMounts...)
 
-	pod := &corev1.Pod{
+	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", j.Params.Name, nameSuffix),
 			Namespace: j.Params.Namespace,
@@ -117,11 +169,12 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			// Kubelet reaps the pod even if cosmopilot dies mid-call before the deferred delete runs.
-			ActiveDeadlineSeconds: ptr.To(jobActiveDeadlineSeconds),
+			ActiveDeadlineSeconds: ptr.To(deadline),
 			SecurityContext:       k8s.RestrictedPodSecurityContext(),
 			// Same service account as the signer pods: it may carry the imagePullSecrets or identity
 			// bindings the cosmosigner image needs, without which this one-shot pod could never start.
 			ServiceAccountName: j.Params.ServiceAccountName,
+			ImagePullSecrets:   j.Params.ImagePullSecrets,
 			Volumes:            volumes,
 			Containers: []corev1.Container{
 				{
@@ -135,6 +188,43 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 			},
 		},
 	}
+}
+
+// buildImportPod renders the one-shot `cosmosigner import` pod for this backend.
+func (j JobRunner) buildImportPod(sourceSecret string) *corev1.Pod {
+	volumes, mounts := importSourceMount(sourceSecret)
+	pod := j.buildPod(importJobSuffix, j.Params.Backend.importArgs(), volumes, mounts, j.importDeadline())
+	if j.Params.Backend.GCP != nil && j.Params.Backend.GCP.Import != nil {
+		pod.Annotations = map[string]string{importTargetAnnotation: j.Params.Backend.GCP.Import.CryptoKeyName()}
+	}
+	return pod
+}
+
+// buildPubkeyPod renders the one-shot `cosmosigner pubkey` pod. keyVersion pins a GCP KMS crypto key
+// version explicitly; it is empty for every other backend (and for a pre-provisioned GCP signer,
+// whose version already comes from the backend env).
+func (j JobRunner) buildPubkeyPod(keyVersion string) *corev1.Pod {
+	args := []string{"pubkey"}
+	if keyVersion != "" {
+		args = append(args, "--gcp-key-version", keyVersion)
+	}
+	return j.buildPod(pubkeyJobSuffix, args, nil, nil, jobActiveDeadlineSeconds)
+}
+
+// importDeadline is the pod-side execution budget for an import. A GCP KMS import waits for an
+// ImportJob to be generated (minutes for HSM) and then up to two more minutes for the imported
+// version to leave PENDING_IMPORT, which does not fit the default one-shot budget.
+func (j JobRunner) importDeadline() int64 {
+	if j.Params.Backend.GCP != nil && j.Params.Backend.GCP.Import != nil {
+		return gcpImportActiveDeadlineSeconds
+	}
+	return jobActiveDeadlineSeconds
+}
+
+// runJob creates a one-shot pod, waits for it to succeed and returns its logs. When retainSucceeded
+// is true, an existing owned succeeded pod is resumed and a freshly succeeded pod is retained so the
+// caller can durably persist its result before cleanup.
+func (j JobRunner) runJob(ctx context.Context, pod *corev1.Pod, nameSuffix string, deadline int64, retainSucceeded bool) (string, error) {
 	if err := controllerutil.SetControllerReference(j.Owner, pod, j.Scheme); err != nil {
 		return "", err
 	}
@@ -146,6 +236,29 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 	if existing, err := j.Client.CoreV1().Pods(j.Params.Namespace).Get(ctx, pod.GetName(), metav1.GetOptions{}); err == nil {
 		if !metav1.IsControlledBy(existing, j.Owner) {
 			return "", fmt.Errorf("pod %q already exists and is managed by another owner; rename the ChainNode/ChainNodeSet to avoid the name collision", pod.GetName())
+		}
+		if retainSucceeded && existing.Annotations[importTargetAnnotation] == pod.Annotations[importTargetAnnotation] {
+			// Only a same-owner pod from the CURRENT destination is recovery evidence. A pod from a
+			// previous destination (or one with no matching annotation) must not be re-read — its old
+			// logs would wedge the new destination migration — so we fall through to delete+recreate.
+			existingHelper := k8s.NewPodHelper(j.Client, nil, existing)
+			switch existing.Status.Phase {
+			case corev1.PodSucceeded, corev1.PodFailed:
+				// Even a Failed pod may have created the Cloud KMS version before a later verification
+				// step failed. Its logs are durable evidence; ImportKey validates whether they contain a
+				// usable version and the controllers verify that version against the source key.
+				return existingHelper.GetLogs(ctx, containerName)
+			default:
+				// Never replace an in-flight GCP import: Cloud KMS may already have accepted the wrapped
+				// key even though the Pod has not reached a terminal phase. Wait for this exact pod.
+				if err := existingHelper.WaitForPodSucceeded(ctx, jobWaitTimeout(deadline)); err != nil {
+					if logs, logErr := existingHelper.GetLogs(ctx, containerName); logErr == nil && logs != "" {
+						return logs, nil
+					}
+					return "", err
+				}
+				return existingHelper.GetLogs(ctx, containerName)
+			}
 		}
 		uid := existing.GetUID()
 		if err := j.Client.CoreV1().Pods(j.Params.Namespace).Delete(ctx, pod.GetName(), metav1.DeleteOptions{
@@ -178,41 +291,127 @@ func (j JobRunner) runJob(ctx context.Context, nameSuffix string, args []string,
 		return "", err
 	}
 	// Cleanup is only deferred once THIS controller created the pod, so a failed Create (e.g.
-	// AlreadyExists from a concurrent same-named owner) never deletes a pod that is not ours.
-	defer func() { _ = ph.Delete(ctx) }()
+	// AlreadyExists from a concurrent same-named owner) never deletes a pod that is not ours. Managed
+	// GCP imports retain a succeeded pod until the created key version is durably persisted.
+	if !retainSucceeded {
+		defer func() { _ = ph.Delete(ctx) }()
+	}
 
-	if err := ph.WaitForPodSucceeded(ctx, jobWaitTimeout); err != nil {
+	// Re-read once before starting the watch. Besides avoiding a needless watch when a very short job
+	// has already completed, this closes the create→watch race where the terminal update lands before
+	// the watch is established (and makes the protocol deterministic with the client-go fake tracker).
+	created, err := j.Client.CoreV1().Pods(j.Params.Namespace).Get(ctx, pod.GetName(), metav1.GetOptions{})
+	if err != nil {
 		return "", err
+	}
+	if created.Status.Phase != corev1.PodSucceeded {
+		if err := ph.WaitForPodSucceeded(ctx, jobWaitTimeout(deadline)); err != nil {
+			return "", err
+		}
 	}
 	return ph.GetLogs(ctx, containerName)
 }
 
 // ImportKey runs `cosmosigner import` to import an existing priv_validator_key.json (held in
-// sourceSecret) into the configured backend. Only meaningful for the Vault backend.
-func (j JobRunner) ImportKey(ctx context.Context, sourceSecret string) error {
-	volumes := []corev1.Volume{
-		{
-			Name: importSourceVolume,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: sourceSecret},
-			},
-		},
+// sourceSecret) into the configured backend. For a GCP KMS managed import it returns the exact
+// crypto key version the import created, verified to live under the configured destination key; for
+// Vault (whose destination is the named transit key itself) it returns "".
+//
+// A successful pod is NOT proof of a durably usable key: the CLI exits zero when Cloud KMS is still
+// finalizing the version. Callers must persist the returned version and then read the public key
+// back from it before treating the import as complete.
+func (j JobRunner) ImportKey(ctx context.Context, sourceSecret string) (string, error) {
+	pod := j.buildImportPod(sourceSecret)
+	retainSucceeded := j.Params.Backend.GCP != nil && j.Params.Backend.GCP.Import != nil
+	out, err := j.runJob(ctx, pod, importJobSuffix, j.importDeadline(), retainSucceeded)
+	if err != nil {
+		return "", err
 	}
-	mounts := []corev1.VolumeMount{
-		{Name: importSourceVolume, ReadOnly: true, MountPath: importSourceFile, SubPath: "priv_validator_key.json"},
+	if j.Params.Backend.GCP == nil || j.Params.Backend.GCP.Import == nil {
+		return "", nil
 	}
-	_, err := j.runJob(ctx, importJobSuffix, []string{"import", "--from", importSourceFile}, volumes, mounts)
-	return err
+	return ParseImportedKeyVersion(out, j.Params.Backend.GCP.Import.CryptoKeyName())
+}
+
+// importPodName is the one-shot `cosmosigner import` pod of this signer.
+func (j JobRunner) importPodName() string {
+	return fmt.Sprintf("%s-%s", j.Params.Name, importJobSuffix)
+}
+
+// CleanupImportPod deletes the one-shot import pod once the caller has durably persisted its result.
+// Cleanup is deliberately NOT deferred inside ImportKey: a Cloud KMS import creates a new crypto key
+// version on every invocation, so between the pod succeeding and the controller recording the version
+// it created, that pod's logs are the ONLY record of it — deleting it earlier turns a crash into a
+// second imported version. A pod that is already gone, or one another owner now holds (the UID
+// precondition rejects it), is left alone.
+func (j JobRunner) CleanupImportPod(ctx context.Context) error {
+	pods := j.Client.CoreV1().Pods(j.Params.Namespace)
+	existing, err := pods.Get(ctx, j.importPodName(), metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !metav1.IsControlledBy(existing, j.Owner) {
+		return nil
+	}
+	uid := existing.GetUID()
+	err = pods.Delete(ctx, existing.GetName(), metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	})
+	if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+		return err
+	}
+	return nil
 }
 
 // PublicKey runs `cosmosigner pubkey` against the configured backend and returns the canonical
 // base64 Ed25519 public key. Controllers use it to decide whether a migration may retain raft state.
 func (j JobRunner) PublicKey(ctx context.Context) (string, error) {
-	out, err := j.runJob(ctx, pubkeyJobSuffix, []string{"pubkey"}, nil, nil)
+	return j.publicKey(ctx, "")
+}
+
+// PublicKeyAtVersion reads the public key of one exact Cloud KMS crypto key version. The managed
+// import verifies its result through this rather than PublicKey: the backend must be proven to serve
+// the version that was just created, not whichever version it would otherwise resolve.
+func (j JobRunner) PublicKeyAtVersion(ctx context.Context, keyVersion string) (string, error) {
+	if keyVersion == "" {
+		return "", fmt.Errorf("cosmosigner pubkey requires a key version")
+	}
+	return j.publicKey(ctx, keyVersion)
+}
+
+func (j JobRunner) publicKey(ctx context.Context, keyVersion string) (string, error) {
+	out, err := j.runJob(ctx, j.buildPubkeyPod(keyVersion), pubkeyJobSuffix, jobActiveDeadlineSeconds, false)
 	if err != nil {
 		return "", err
 	}
 	return ParsePublicKeyOutput(out)
+}
+
+// ParseImportedKeyVersion extracts the crypto key version `cosmosigner import` reports and requires
+// it to belong to cryptoKeyName. Anything else — a truncated resource name, a non-numeric version, or
+// a version under a different crypto key — would retarget the validator at an unintended identity, so
+// it is rejected rather than persisted.
+func ParseImportedKeyVersion(out, cryptoKeyName string) (string, error) {
+	const prefix = "imported key version:"
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		version := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		suffix, ok := strings.CutPrefix(version, cryptoKeyName+"/cryptoKeyVersions/")
+		if !ok || cryptoKeyName == "" {
+			return "", fmt.Errorf("cosmosigner imported key version %q is not a version of %q; refusing to retarget the validator", version, cryptoKeyName)
+		}
+		if suffix == "" || strings.Trim(suffix, "0123456789") != "" {
+			return "", fmt.Errorf("cosmosigner imported key version %q does not end in a numeric version", version)
+		}
+		return version, nil
+	}
+	return "", fmt.Errorf("cosmosigner import output did not contain %q", prefix)
 }
 
 // ParsePublicKeyOutput extracts and validates the stable public-key line emitted by cosmosigner.

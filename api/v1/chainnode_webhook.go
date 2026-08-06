@@ -191,6 +191,18 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			}
 		}
 
+		// A managed GCP KMS import needs the same source, for the same reason: it uploads the node's own
+		// consensus key into Cloud KMS. Without one there is nothing to import, and the import would only
+		// create an empty crypto key while the signer stays quiesced forever.
+		if c.GcpImportsKey() {
+			switch {
+			case !isValidator:
+				return nil, fmt.Errorf(".spec.cosmosigner.backend.gcpKms.import requires the node to be a validator whose key can be imported")
+			case !registers && !hasValidatorKey:
+				return nil, fmt.Errorf(".spec.cosmosigner.backend.gcpKms.import requires the validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import")
+			}
+		}
+
 		// A validator that registers a freshly-generated key on-chain must sign with that same key,
 		// so the backend must be software (which references it) or Vault uploadGenerated (which
 		// imports it — auto-defaulted for genesis-init validators, matching the documented tmKMS
@@ -213,9 +225,11 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			(old == nil && chainNode.Status.ChainID != "" && registrationRecorded(chainNode) &&
 				recordedDigest != "" && recordedDigest == chainNode.CosmosignerSigningDigest())
 		if registers && !migrationWaiver {
-			matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(initializesGenesis)
+			// A managed GCP KMS import qualifies for the same reason uploadGenerated does: it takes the
+			// registered key as its source. A pre-provisioned gcpKms.keyVersion does not.
+			matches := c.UsesSoftwareBackend() || c.ImportsGeneratedKey(initializesGenesis)
 			if !matches {
-				return nil, fmt.Errorf(".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer")
+				return nil, fmt.Errorf(".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend, vault.uploadGenerated or gcpKms.import so the registered consensus key matches the signer")
 			}
 		}
 	}

@@ -61,19 +61,22 @@ func (r *Reconciler) SetStatsClientFactory(factory StatsClientFactory) {
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
 	client.Client
-	APIReader          client.Reader
-	ClientSet          *kubernetes.Clientset
-	snapshotClientSet  kubernetes.Interface
-	RestConfig         *rest.Config
-	Scheme             *runtime.Scheme
-	configCache        *ttlcache.Cache[string, map[string]interface{}]
-	nodeClients        *ttlcache.Cache[string, *chainutils.Client]
-	recorder           record.EventRecorder
-	opts               *controllers.ControllerRunOptions
-	disruptionLocks    *lockManager
-	configLocks        *configLockManager
-	statsClientFactory StatsClientFactory
-	snapshotDeleteNow  func() time.Time
+	APIReader         client.Reader
+	ClientSet         *kubernetes.Clientset
+	snapshotClientSet kubernetes.Interface
+	// cosmosignerClientSet overrides ClientSet for the one-shot cosmosigner pods, so the
+	// import/pubkey pod protocol can be exercised without a cluster. Nil in production.
+	cosmosignerClientSet kubernetes.Interface
+	RestConfig           *rest.Config
+	Scheme               *runtime.Scheme
+	configCache          *ttlcache.Cache[string, map[string]interface{}]
+	nodeClients          *ttlcache.Cache[string, *chainutils.Client]
+	recorder             record.EventRecorder
+	opts                 *controllers.ControllerRunOptions
+	disruptionLocks      *lockManager
+	configLocks          *configLockManager
+	statsClientFactory   StatsClientFactory
+	snapshotDeleteNow    func() time.Time
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {

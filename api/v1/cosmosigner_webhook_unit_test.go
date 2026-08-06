@@ -207,7 +207,7 @@ func TestChainNodeCreateValidatorWaiverRequiresOldValidator(t *testing.T) {
 	if err == nil {
 		t.Fatal("promoting a non-validator with a pre-provisioned signer to create-validator must be rejected")
 	}
-	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer"
+	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend, vault.uploadGenerated or gcpKms.import so the registered consensus key matches the signer"
 	if err.Error() != want {
 		t.Fatalf("expected create-validator signer mismatch error %q, got %q", want, err)
 	}
@@ -227,7 +227,7 @@ func TestChainNodeCreateValidatorWaiverRequiresCompletedRegistration(t *testing.
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
 		Key:                  "token",
 	}
-	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer"
+	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend, vault.uploadGenerated or gcpKms.import so the registered consensus key matches the signer"
 
 	base := func() *ChainNode {
 		return &ChainNode{

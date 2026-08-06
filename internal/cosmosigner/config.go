@@ -110,3 +110,17 @@ func (c *Config) Render() (string, error) {
 	}
 	return string(out), nil
 }
+
+// GcpKeyVersionFromConfigYAML returns the Cloud KMS key version rendered into a live signer
+// ConfigMap. Controllers use this as a status-recovery source after a partial status restore: the
+// running signer configuration is controller-owned and already proved by its recorded signing digest.
+func GcpKeyVersionFromConfigYAML(data string) (string, error) {
+	cfg := &Config{}
+	if err := yaml.Unmarshal([]byte(data), cfg); err != nil {
+		return "", fmt.Errorf("parsing cosmosigner config: %w", err)
+	}
+	if cfg.Backend.Type != backendGcpKms || cfg.Backend.GCP == nil {
+		return "", nil
+	}
+	return cfg.Backend.GCP.KeyVersion, nil
+}

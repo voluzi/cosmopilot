@@ -35,6 +35,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [Cosmosigner](#cosmosigner)
 * [CosmosignerBackend](#cosmosignerbackend)
 * [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
+* [CosmosignerGcpKmsImport](#cosmosignergcpkmsimport)
 * [CosmosignerMigrationStatus](#cosmosignermigrationstatus)
 * [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
 * [CosmosignerStatus](#cosmosignerstatus)
@@ -169,7 +170,8 @@ ChainNodeStatus defines the observed state of ChainNode
 | cosmosignerAppliedDigest | CosmosignerAppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. It is recorded for both validator and sentry signers. | string | false |
 | cosmosignerPublicKey | CosmosignerPublicKey is the canonical base64 consensus public key of the applied signer. | string | false |
 | cosmosignerMigration | CosmosignerMigration records an in-progress break-before-make signer migration. | *[CosmosignerMigrationStatus](#cosmosignermigrationstatus) | false |
-| cosmosignerKeyImported | CosmosignerKeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change without trusting user-editable metadata. Not meant to be set by hand. | string | false |
+| cosmosignerKeyImported | CosmosignerKeyImported is the fingerprint of a completed managed key import (backend-namespaced target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change without trusting user-editable metadata. For a GCP KMS import it is written only once the imported version is verified: CosmosignerImportedKeyVersion is recorded, readable, and serving the source consensus key. Not meant to be set by hand. | string | false |
+| cosmosignerImportedKeyVersion | CosmosignerImportedKeyVersion is the full Cloud KMS crypto key version resource name produced by a managed GCP KMS import, as reported by the import pod. It is recorded before the import is verified (so a restart resumes against the exact version that was created rather than importing a second one) and is the only import-derived value configured on the signer. Not meant to be set by hand. | string | false |
 | cosmosignerReplicas | CosmosignerReplicas records the raft replica count the managed signer was rolled out with, captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. Not meant to be set by hand. | *int32 | false |
 | cosmosignerValidatorTargeted | CosmosignerValidatorTargeted records whether the managed signer targeted this node as a validator when its deployment locks were initialized. The nullable marker lets the no-webhook path distinguish a pending validator rollout from a sentry after the current spec has already removed both .spec.cosmosigner and .spec.validator. Not meant to be set by hand. | *bool | false |
 | cosmosignerStateStorageSize | CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. Not meant to be set by hand. | string | false |
@@ -1296,12 +1298,28 @@ CosmosignerBackend selects the signing backend. Exactly one field must be set.
 
 #### CosmosignerGcpKmsBackend
 
-CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend.
+CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend. Exactly one of keyVersion (a key version that already exists) or import (a controller-managed BYOK import of the targeted validator's consensus key) must be set.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| keyVersion | KeyVersion is the full resource name of the KMS crypto key version used for signing (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`). | string | true |
+| keyVersion | KeyVersion is the full resource name of a pre-provisioned KMS crypto key version used for signing (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`). Mutually exclusive with import. | string | false |
+| import | Import requests a one-shot, controller-managed import of the targeted validator's existing consensus key into Cloud KMS (BYOK). The resulting crypto key version does not exist until the import completes, so it is recorded in status rather than configured here. Mutually exclusive with keyVersion. | *[CosmosignerGcpKmsImport](#cosmosignergcpkmsimport) | false |
 | credentialsSecret | CredentialsSecret references a secret containing a Google service account JSON key. When unset, Workload Identity / Application Default Credentials are used. | *corev1.SecretKeySelector | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerGcpKmsImport
+
+CosmosignerGcpKmsImport describes the Cloud KMS destination of a controller-managed BYOK import. The key ring, crypto key (without an initial version) and import job are created when absent and reused when they already exist, so repeated reconciles converge on a single imported identity.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| project | Project is the Google Cloud project ID owning the destination key ring. | string | true |
+| location | Location is the Cloud KMS location of the destination key ring. Defaults to `global`. | *string | false |
+| keyRing | KeyRing is the Cloud KMS key ring ID holding the destination crypto key. | string | true |
+| key | Key is the Cloud KMS crypto key ID the consensus key is imported into. | string | true |
+| importJob | ImportJob is the Cloud KMS import job ID used to wrap the key material. Defaults to `<key>-import`. Cloud KMS import jobs expire; name a fresh one to retry after expiry — it does not change the imported identity. | *string | false |
+| protectionLevel | ProtectionLevel is the protection level of the destination crypto key, applied only when the key is created. Defaults to `software`. | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -1349,7 +1367,8 @@ CosmosignerStatus is the controller-recorded state of one managed cosmosigner de
 | servingIdentity | ServingIdentity records the effective signing identity this validator-targeted signer served, captured with SigningDigest and cleared on teardown. Together with ServingGroup it identifies the validator protected by a stale status entry during removal or manifest-placement migration. | string | false |
 | servingGroup | ServingGroup records the validator group this signer targets (the reserved \"validator\" name for the legacy singleton). It identifies the protected validator during removal and replacement. | string | false |
 | localKeyEverServed | LocalKeyEverServed is a monotonic record of whether this validator signer may ever have served through the validator's local key secret. False is recorded only when the controller observes a pre-provisioned external signer at chain establishment; nil means the history is unknown. | *bool | false |
-| keyImported | KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change. | string | false |
+| keyImported | KeyImported is the fingerprint of a completed managed key import (backend-namespaced target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change. For a GCP KMS import it is written only once the imported version is verified: ImportedKeyVersion is recorded, readable, and serving the source consensus key. | string | false |
+| importedKeyVersion | ImportedKeyVersion is the full Cloud KMS crypto key version resource name produced by a managed GCP KMS import, as reported by the import pod. It is recorded before the import is verified (so a restart resumes against the exact version that was created rather than importing a second one) and is the only import-derived value configured on the signer. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 

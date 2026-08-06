@@ -203,12 +203,17 @@ func (s ResolvedSigner) TargetsValidator() bool {
 
 // SignerUsesLocalValidatorKey reports whether the desired signer path consumes the targeted
 // validator's local priv-key secret, either directly through software signing or by importing it
-// into Vault. It is false for sentries and pre-provisioned Vault/GCP validator signers.
+// into an external backend (Vault uploadGenerated, GCP KMS managed import). It is false for
+// sentries and for pre-provisioned Vault/GCP validator signers, whose key material never came from
+// the local secret.
 func (nodeSet *ChainNodeSet) SignerUsesLocalValidatorKey(s ResolvedSigner) bool {
 	if !s.TargetsValidator() || s.Spec == nil {
 		return false
 	}
 	if s.Spec.UsesSoftwareBackend() {
+		return true
+	}
+	if s.Spec.GcpImportsKey() {
 		return true
 	}
 	if !s.Spec.UsesVaultBackend() {

@@ -884,6 +884,9 @@ func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s Resolve
 		if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
 			return fmt.Errorf("%s.backend.vault.uploadGenerated requires targeting a validator whose generated key can be imported", path)
 		}
+		if c.GcpImportsKey() {
+			return fmt.Errorf("%s.backend.gcpKms.import requires targeting a validator whose generated key can be imported", path)
+		}
 		return nil
 	}
 
@@ -928,9 +931,11 @@ func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s Resolve
 		migrationWaiver = registrationRecorded(nodeSet) && st != nil && st.SigningDigest != "" && st.SigningDigest == s.Digest()
 	}
 	if registers && !migrationWaiver {
-		matches := c.UsesSoftwareBackend() || c.VaultUploadsGenerated(targetValidator.Init != nil)
+		// A managed GCP KMS import qualifies for the same reason uploadGenerated does: it takes the
+		// registered key as its source. A pre-provisioned gcpKms.keyVersion does not.
+		matches := c.UsesSoftwareBackend() || c.ImportsGeneratedKey(targetValidator.Init != nil)
 		if !matches {
-			return fmt.Errorf("%s targeting a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer", path)
+			return fmt.Errorf("%s targeting a validator that initializes genesis or uses createValidator requires the software backend, vault.uploadGenerated or gcpKms.import so the registered consensus key matches the signer", path)
 		}
 	}
 
@@ -942,6 +947,11 @@ func (nodeSet *ChainNodeSet) validateResolvedSigner(old *ChainNodeSet, s Resolve
 		if !registers && !hasExplicitKey {
 			return fmt.Errorf("%s.backend.vault.uploadGenerated requires the targeted validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import", path)
 		}
+	}
+
+	// A managed GCP KMS import uploads that same key into Cloud KMS, so it needs the same source.
+	if c.GcpImportsKey() && !registers && !hasExplicitKey {
+		return fmt.Errorf("%s.backend.gcpKms.import requires the targeted validator to initialize genesis, use createValidator, or set an explicit privateKeySecret to import", path)
 	}
 
 	// The software backend mounts the targeted validator's key secret. A plain external-genesis
@@ -1618,11 +1628,12 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	}
 
 	// cosmosignerLeavesLocalKeyUnused reports whether the group's validator is targeted by a
-	// pre-provisioned external cosmosigner backend (Vault without uploadGenerated, or GCP) and its
-	// local secret provably never held the live consensus key. Before establishment there is no live
-	// key yet; afterward, only the write-once at-establishment signer record proves the external
-	// backend served from the start. A signer added later must keep the former local secret reserved.
-	// Software, vault.uploadGenerated, Init, and CreateValidator targets always consume the local key.
+	// pre-provisioned external cosmosigner backend (Vault without uploadGenerated, or a GCP KMS key
+	// version) and its local secret provably never held the live consensus key. Before establishment
+	// there is no live key yet; afterward, only the write-once at-establishment signer record proves
+	// the external backend served from the start. A signer added later must keep the former local
+	// secret reserved. Software, vault.uploadGenerated, gcpKms.import, Init, and CreateValidator
+	// targets always consume the local key: an import READS that secret as its source.
 	cosmosignerLeavesLocalKeyUnused := func(group string, v *NodeSetValidatorConfig) bool {
 		c := nodeSet.groupCosmosigner(group)
 		if c == nil {
@@ -1635,6 +1646,9 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 			return false
 		}
 		if c.UsesVaultBackend() && c.Backend.Vault.UploadGenerated {
+			return false
+		}
+		if c.GcpImportsKey() {
 			return false
 		}
 		if nodeSet.Status.ChainID == "" {
@@ -1766,6 +1780,15 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		case c.UsesGcpKmsBackend():
 			if kv := c.Backend.GcpKMS.KeyVersion; kv != "" {
 				if err := registerGcp(path, kv); err != nil {
+					return err
+				}
+			}
+			if c.GcpImportsKey() {
+				// A managed import has no key version until it runs, so the DESTINATION crypto key is
+				// the identity. Two signers importing into the same key would race for one destination
+				// and end up serving one identity from two independent raft clusters. The identity is
+				// NUL-separated, so it can never equal a pre-provisioned "/"-separated key version.
+				if err := registerGcp(path+".backend.gcpKms.import", c.Backend.GcpKMS.Import.gcpImportIdentity()); err != nil {
 					return err
 				}
 			}

@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -24,6 +25,18 @@ import (
 	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
+
+// cosmosignerKubernetesClient returns the clientset the one-shot signer pods run against, or nil when
+// none is wired (callers surface that as a configuration error rather than panicking).
+func (r *Reconciler) cosmosignerKubernetesClient() kubernetes.Interface {
+	if r.cosmosignerClientSet != nil {
+		return r.cosmosignerClientSet
+	}
+	if r.ClientSet != nil {
+		return r.ClientSet
+	}
+	return nil
+}
 
 func (r *Reconciler) prepareCosmosignerOwner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
 	needsFinalizer := len(nodeSet.ResolveCosmosigners()) > 0 || len(nodeSet.Status.Cosmosigners) > 0
@@ -93,6 +106,9 @@ func (r *Reconciler) initCosmosignerReplacementNames(ctx context.Context, nodeSe
 			st.StateStorageSize = old.StateStorageSize
 			st.StateStorageClassName = old.StateStorageClassName
 			st.KeyImported = old.KeyImported
+			// The imported crypto key version must travel with the fingerprint: without it a managed GCP
+			// import re-runs after a placement move and creates a second version of the same key.
+			st.ImportedKeyVersion = old.ImportedKeyVersion
 			if st.AppliedDigest != "" && st.PublicKey != "" {
 				st.Migration = &appsv1.CosmosignerMigrationStatus{
 					DesiredDigest:    s.Digest(),
@@ -270,10 +286,10 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		}
 		// Run the same deploy-time blockers ApplyOwned would hit when it creates the StatefulSet (name
 		// collision, foreign/ambiguous or missing required raft-state PVCs), so a signer that can never
-		// be created does not retarget children to a remote signer that will never come up. Only an
-		// uploadGenerated signer runs the one-shot <name>-import pod, so only it checks that name.
-		usesImportPod := s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s))
-		usesPubkeyPod := !s.Spec.UsesSoftwareBackend() && !usesImportPod
+		// be created does not retarget children to a remote signer that will never come up. Only a signer
+		// that imports a generated key runs the one-shot <name>-import pod, so only it checks that name.
+		usesImportPod := s.Spec.ImportsGeneratedKey(signerTargetInitializesGenesis(nodeSet, s))
+		usesPubkeyPod := s.Spec.UsesPubkeyPod(signerTargetInitializesGenesis(nodeSet, s))
 		st := nodeSet.GetCosmosignerStatus(s.Name)
 		established := st != nil && (st.AppliedDigest != "" || st.SigningDigest != "" || st.PublicKey != "" || st.ServingIdentity != "")
 		var migration *appsv1.CosmosignerMigrationStatus
@@ -326,31 +342,33 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		if err := cosmosigner.RequireServiceAccount(ctx, r.Client, nodeSet.GetNamespace(), s.Spec.GetServiceAccountName()); err != nil {
 			return err
 		}
-		// A Vault uploadGenerated signer imports the validator's own key; if that source secret is
-		// missing and no controller flow will create it, the signer can never roll out, so fail before
-		// children switch. But the source is only bootstrap material: once the import for the CURRENT
-		// target/source has completed (matching KeyImported, mirroring maybeImportCosmosignerKey's
-		// absent-source fast path), or the current signer digest has served, Vault already holds the key
-		// and the missing Secret is fine. A changed digest must validate its import source before teardown.
-		if s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) {
+		// A signer that imports a generated key (Vault uploadGenerated, managed GCP KMS import) takes the
+		// validator's own key; if that source secret is missing and no controller flow will create it, the
+		// signer can never roll out, so fail before children switch. But the source is only bootstrap
+		// material: once the import for the CURRENT target/source has completed (matching KeyImported,
+		// mirroring maybeImportCosmosignerKey's absent-source fast path), or the current signer digest has
+		// served, the backend already holds the key and the missing Secret is fine. A changed digest must
+		// validate its import source before teardown.
+		if s.Spec.ImportsGeneratedKey(signerTargetInitializesGenesis(nodeSet, s)) {
 			if st != nil && st.SigningDigest != "" && s.Digest() == st.SigningDigest {
 				continue
 			}
-			if st != nil && s.Spec.Backend.Vault.ImportRecordMatchesTarget(st.KeyImported, s.SoftwareKeySecret) {
+			if st != nil && cosmosignerImportRecordMatchesTarget(s.Spec, st.KeyImported, s.SoftwareKeySecret) {
 				continue
 			}
 			if r.signerImportSourcePending(nodeSet, s) {
 				continue
 			}
+			label := cosmosignerImportLabel(s.Spec)
 			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
 			if err != nil {
 				return err
 			}
 			if len(keyMaterial) == 0 {
-				return fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q is missing %s: provide the validator key to import", s.Name, s.SoftwareKeySecret, privKeyFilename)
+				return fmt.Errorf("cosmosigner %q %s source secret %q is missing %s: provide the validator key to import", s.Name, label, s.SoftwareKeySecret, privKeyFilename)
 			}
 			if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
-				return fmt.Errorf("cosmosigner %q Vault uploadGenerated source secret %q contains an invalid %s: %w", s.Name, s.SoftwareKeySecret, privKeyFilename, err)
+				return fmt.Errorf("cosmosigner %q %s source secret %q contains an invalid %s: %w", s.Name, label, s.SoftwareKeySecret, privKeyFilename, err)
 			}
 		}
 	}
@@ -368,7 +386,7 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 	desired := nodeSet.ResolveCosmosigners()
 	for _, s := range desired {
 		if r.signerImportSourcePending(nodeSet, s) &&
-			(s.Spec.UsesSoftwareBackend() || s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s))) {
+			(s.Spec.UsesSoftwareBackend() || s.Spec.ImportsGeneratedKey(signerTargetInitializesGenesis(nodeSet, s))) {
 			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
 			if err != nil {
 				return nil, err
@@ -1042,22 +1060,27 @@ func (r *Reconciler) cosmosignerPublicKeyWithParams(ctx context.Context, nodeSet
 	if params.Backend.Software != nil {
 		return cosmosigner.PublicKeyFromSecret(ctx, r.Client, nodeSet.GetNamespace(), params.Backend.Software.SecretName)
 	}
-	if s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) && s.SoftwareKeySecret != "" {
+	// A signer that imports a generated key holds the same consensus key as its source secret, so the
+	// public key is read locally rather than through a pod — and for a GCP import that must happen
+	// BEFORE the import lands, while the backend still has no readable version at all.
+	if s.Spec.ImportsGeneratedKey(signerTargetInitializesGenesis(nodeSet, s)) && s.SoftwareKeySecret != "" {
 		publicKey, err := cosmosigner.PublicKeyFromSecret(ctx, r.Client, nodeSet.GetNamespace(), s.SoftwareKeySecret)
 		if err == nil {
 			return publicKey, nil
 		}
 		status := nodeSet.GetCosmosignerStatus(s.Name)
-		vault := s.Spec.Backend.Vault
-		if !errors.IsNotFound(err) || status == nil || vault == nil ||
-			!vault.ImportRecordMatchesTarget(status.KeyImported, s.SoftwareKeySecret) {
+		// Only a completed import for this exact target may fall through to the backend: the source is
+		// then disposable bootstrap material and the backend is the authority.
+		if !errors.IsNotFound(err) || status == nil ||
+			!cosmosignerImportRecordMatchesTarget(s.Spec, status.KeyImported, s.SoftwareKeySecret) {
 			return "", err
 		}
 	}
-	if r.ClientSet == nil {
+	clientSet := r.cosmosignerKubernetesClient()
+	if clientSet == nil {
 		return "", fmt.Errorf("cosmosigner %q public-key preflight requires a Kubernetes clientset", s.Name)
 	}
-	runner := cosmosigner.JobRunner{Client: r.ClientSet, Scheme: r.Scheme, Owner: nodeSet, Params: params}
+	runner := cosmosigner.JobRunner{Client: clientSet, Scheme: r.Scheme, Owner: nodeSet, Params: params}
 	return runner.PublicKey(ctx)
 }
 
@@ -1178,7 +1201,8 @@ func independentRemovedSignerFallbackStateError(st *appsv1.CosmosignerStatus) er
 }
 
 func (r *Reconciler) fallbackTmKMSPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, st *appsv1.CosmosignerStatus, hashicorp *appsv1.TmKmsHashicorpProvider, serviceAccountName string) (string, error) {
-	if r.ClientSet == nil {
+	clientSet := r.cosmosignerKubernetesClient()
+	if clientSet == nil {
 		return "", fmt.Errorf("fallback public-key preflight requires a Kubernetes clientset")
 	}
 	image := appsv1.DefaultCosmosignerImage
@@ -1186,7 +1210,7 @@ func (r *Reconciler) fallbackTmKMSPublicKey(ctx context.Context, nodeSet *appsv1
 		image = r.opts.CosmosignerImage
 	}
 	runner := cosmosigner.JobRunner{
-		Client: r.ClientSet,
+		Client: clientSet,
 		Scheme: r.Scheme,
 		Owner:  nodeSet,
 		Params: cosmosigner.Params{
@@ -1276,7 +1300,7 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 			blocked[s.Name] = struct{}{}
 			continue
 		}
-		if !s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) {
+		if !s.Spec.ImportsGeneratedKey(signerTargetInitializesGenesis(nodeSet, s)) {
 			continue
 		}
 		if nodeSet.Status.ChainID == "" {
@@ -1299,7 +1323,7 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 			return nil, false, err
 		}
 		if len(keyMaterial) == 0 {
-			if st != nil && s.Spec.Backend.Vault.ImportRecordMatchesTarget(st.KeyImported, s.SoftwareKeySecret) {
+			if st != nil && cosmosignerImportRecordMatchesTarget(s.Spec, st.KeyImported, s.SoftwareKeySecret) {
 				continue
 			}
 			if r.signerImportSourcePending(nodeSet, s) {
@@ -1313,7 +1337,10 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 				blocked[s.Name] = struct{}{}
 				continue
 			}
-		} else if st != nil && st.KeyImported == s.Spec.Backend.Vault.ImportFingerprint(s.SoftwareKeySecret, keyMaterial) {
+			// A GCP import whose recorded version was lost still has work to do even though its fingerprint
+			// matches, so completeness is asked of the backend rather than compared here: re-importing the
+			// same bytes yields a new version of the same identity, which is self-healing.
+		} else if st != nil && cosmosignerImportComplete(s.Spec, st.KeyImported, st.ImportedKeyVersion, s.SoftwareKeySecret, keyMaterial) {
 			continue
 		}
 
@@ -1855,6 +1882,8 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.Chai
 		ServiceAccountName: c.GetServiceAccountName(),
 		Backend:            backend,
 		Labels:             labels,
+		// One-shot import/pubkey pods only — the signer StatefulSet keeps its existing lifecycle digest.
+		ImagePullSecrets: signerImagePullSecrets(nodeSet, s),
 		TargetSelector: map[string]string{
 			controllers.LabelChainNodeSet:      nodeSet.GetName(),
 			controllers.LabelCosmosignerTarget: nodeSet.CosmosignerResourceName(s),
@@ -1970,22 +1999,53 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "GCP credentials", g.CredentialsSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
+		// A managed import serves the version this controller recorded after verifying it — never a
+		// fabricated `/cryptoKeyVersions/1`. It stays empty until the import completes, and the signer is
+		// kept from rolling out until then. Import coordinates are carried for the one-shot import pod
+		// only; the StatefulSet sees just the resolved key version.
+		st := nodeSet.GetCosmosignerStatus(s.Name)
+		importedKeyVersion := ""
+		if st != nil {
+			importedKeyVersion = st.ImportedKeyVersion
+		}
+		if g.Import != nil && importedKeyVersion == "" && st != nil && st.SigningDigest != "" {
+			configMap := &corev1.ConfigMap{}
+			resourceName := nodeSet.CosmosignerResourceName(s)
+			if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: resourceName}, configMap); err == nil && metav1.IsControlledBy(configMap, nodeSet) {
+				recovered, err := cosmosigner.GcpKeyVersionFromConfigYAML(configMap.Data["config.yaml"])
+				if err != nil {
+					return cosmosigner.Backend{}, err
+				}
+				if g.Import.OwnsKeyVersion(recovered) {
+					st.ImportedKeyVersion = recovered
+					if err := r.Status().Update(ctx, nodeSet); err != nil {
+						return cosmosigner.Backend{}, err
+					}
+					importedKeyVersion = recovered
+				}
+			}
+		}
 		return cosmosigner.Backend{GCP: &cosmosigner.GcpBackend{
-			KeyVersion:        g.KeyVersion,
+			KeyVersion:        g.ResolvedKeyVersion(importedKeyVersion),
 			CredentialsSecret: g.CredentialsSecret,
+			Import:            gcpImportParams(g.Import),
 		}}, nil
 	}
 	return cosmosigner.Backend{}, fmt.Errorf("cosmosigner has no backend configured")
 }
 
-// maybeImportCosmosignerKey imports the targeted validator's generated consensus key into Vault once,
-// when uploadGenerated is set. The source is the validator instance's own priv-key secret (created by
-// its genesis/create-validator flow), so Vault holds exactly the key registered on-chain. The import
+// maybeImportCosmosignerKey imports the targeted validator's generated consensus key into the signing
+// backend once, when the backend is configured to hold it: Vault uploadGenerated, or a managed GCP KMS
+// BYOK import. The source is the validator instance's own priv-key secret (created by its
+// genesis/create-validator flow), so the backend holds exactly the key registered on-chain. The import
 // fingerprint is tracked per signer in its CosmosignerStatus.KeyImported; this mutates nodeSet.Status
 // in memory and returns whether it changed (the caller batches the status write). importPending is
 // true while the signer must not be rolled out yet.
 func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, params cosmosigner.Params) (importPending, changed bool, err error) {
 	c := s.Spec
+	if c.GcpImportsKey() {
+		return r.maybeImportCosmosignerKeyToGcp(ctx, nodeSet, s, params)
+	}
 	// uploadGenerated is auto-defaulted for genesis-init targets (their consensus key is always
 	// generated locally, so it must be imported), matching the documented tmKMS-parity behavior.
 	if !c.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) {
@@ -2067,12 +2127,12 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 	}
 
 	runner := cosmosigner.JobRunner{
-		Client: r.ClientSet,
+		Client: r.cosmosignerKubernetesClient(),
 		Scheme: r.Scheme,
 		Owner:  nodeSet,
 		Params: params,
 	}
-	if err := runner.ImportKey(ctx, sourceSecret); err != nil {
+	if _, err := runner.ImportKey(ctx, sourceSecret); err != nil {
 		r.recorder.Event(nodeSet, corev1.EventTypeWarning, appsv1.ReasonUploadFailure,
 			controllers.FormatErrorEvent("failed to import cosmosigner key to Vault", err))
 		return false, false, err
@@ -2090,6 +2150,240 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return false, false, err
 	}
 	return false, false, nil
+}
+
+// maybeImportCosmosignerKeyToGcp runs the managed GCP KMS BYOK import for one signer. Cloud KMS
+// finalizes an imported version asynchronously and `cosmosigner import` exits ZERO while it is still
+// PENDING_IMPORT, so a succeeded pod proves only that a version was CREATED. Durable completion needs
+// three things, in this order: the exact version persisted, its public key readable, and that key
+// equal to the source. NextGcpImportStep is shared with the ChainNode controller so both import
+// protocols stay in lockstep.
+func (r *Reconciler) maybeImportCosmosignerKeyToGcp(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, params cosmosigner.Params) (importPending, changed bool, err error) {
+	g := s.Spec.Backend.GcpKMS
+	sourceSecret := s.SoftwareKeySecret
+	if sourceSecret == "" {
+		// The webhook rejects a managed import without a validator target; guard defensively.
+		return false, false, fmt.Errorf("cosmosigner %q GCP KMS import requires a targeted validator whose key can be imported", s.Name)
+	}
+
+	st := nodeSet.EnsureCosmosignerStatus(s.Name)
+
+	// A matching served digest proves the recorded key version already serves this signer. A signer
+	// migration has a different desired digest and must import into its new target before rollout.
+	// A missing ImportedKeyVersion must first be recovered from the controller-owned live ConfigMap.
+	if st.ImportedKeyVersion != "" && st.SigningDigest != "" && s.Digest() == st.SigningDigest {
+		return false, false, nil
+	}
+
+	// Read the source material first: the fingerprint hashes the actual bytes (not just the secret
+	// name), so an in-place update of the source Secret is detected rather than silently accepted.
+	keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), sourceSecret, privKeyFilename)
+	if err != nil {
+		return false, false, err
+	}
+	if len(keyMaterial) > 0 {
+		if _, err := cometbft.LoadPrivKey(keyMaterial); err != nil {
+			return false, false, fmt.Errorf("cosmosigner %q GCP KMS import source secret %q contains an invalid %s: %w", s.Name, sourceSecret, privKeyFilename, err)
+		}
+	}
+
+	switch g.NextGcpImportStep(st.KeyImported, st.ImportedKeyVersion, sourceSecret, keyMaterial) {
+	case appsv1.GcpImportComplete:
+		// Retry cleanup of crash residue even after completion. Leaving an old succeeded import pod
+		// would make a later destination migration recover stale logs instead of running the new import.
+		if clientSet := r.cosmosignerKubernetesClient(); clientSet != nil {
+			runner := cosmosigner.JobRunner{Client: clientSet, Scheme: r.Scheme, Owner: nodeSet, Params: params}
+			_ = runner.CleanupImportPod(ctx)
+		}
+		return false, false, nil
+
+	case appsv1.GcpImportSourceMissing:
+		// Wait only while a controller-owned key-generation flow is genuinely pending. Otherwise
+		// nothing will ever create this source: neither the import nor its verification can proceed.
+		if r.signerImportSourcePending(nodeSet, s) {
+			return true, false, nil
+		}
+		return false, false, fmt.Errorf("cosmosigner %q GCP KMS import source secret %q is missing %s: retain the validator key until the imported version is verified", s.Name, sourceSecret, privKeyFilename)
+
+	case appsv1.GcpImportMismatch:
+		// Terminal: this destination already holds a different consensus identity for this source.
+		// Importing again would add a version with the new bytes and silently retarget the validator,
+		// so the signer is quiesced and left that way until the spec names a different destination key.
+		if _, err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name); err != nil {
+			return false, false, err
+		}
+		return false, false, fmt.Errorf("cosmosigner %q GCP KMS import source key changed after import: %q already holds a different consensus key and Cosmopilot does not rotate validator consensus keys — migrate to a new gcpKms.import.key", s.Name, g.Import.CryptoKeyName())
+
+	case appsv1.GcpImportVerify:
+		// A version was created but never proven. Keep the signer from serving it while we probe.
+		quiesced, err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name)
+		if err != nil {
+			return false, false, err
+		}
+		if !quiesced {
+			return true, false, nil
+		}
+		pending, err := r.verifyGcpImportedKey(ctx, nodeSet, s, params, sourceSecret, keyMaterial)
+		return pending, false, err
+	}
+
+	// GcpImportRun. Quiesce any already-running signer BEFORE the synchronous import, so it cannot
+	// keep signing with a previously imported key while the new one lands. Scale-down is asynchronous —
+	// until every signer pod is gone the import stays pending and is retried next reconcile.
+	quiesced, err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), params.Name)
+	if err != nil {
+		return false, false, err
+	}
+	if !quiesced {
+		return true, false, nil
+	}
+	clientSet := r.cosmosignerKubernetesClient()
+	if clientSet == nil {
+		return false, false, fmt.Errorf("cosmosigner %q GCP KMS import requires a Kubernetes clientset", s.Name)
+	}
+
+	runner := cosmosigner.JobRunner{Client: clientSet, Scheme: r.Scheme, Owner: nodeSet, Params: params}
+	version, err := runner.ImportKey(ctx, sourceSecret)
+	if err != nil {
+		r.recorder.Event(nodeSet, corev1.EventTypeWarning, appsv1.ReasonUploadFailure,
+			controllers.FormatErrorEvent("failed to import cosmosigner key to GCP KMS", err))
+		return false, false, err
+	}
+	// Persist the EXACT version BEFORE verifying it: a controller restart in the PENDING_IMPORT window
+	// must resume against the version that was just created rather than import the key a second time.
+	st.ImportedKeyVersion = version
+	if err := r.Status().Update(ctx, nodeSet); err != nil {
+		return false, false, err
+	}
+	// The import pod's logs were the only recovery record until the version write above completed.
+	// Cleanup is best-effort and retried by the verify/completed path after restarts.
+	_ = runner.CleanupImportPod(ctx)
+	if _, err := r.verifyGcpImportedKey(ctx, nodeSet, s, params, sourceSecret, keyMaterial); err != nil {
+		return false, false, err
+	}
+	// Pending regardless of the verification outcome: `params` were rendered before this version
+	// existed, so the signer would be configured with an empty key version. The status writes above
+	// re-trigger a reconcile that renders it correctly.
+	return true, false, nil
+}
+
+// verifyGcpImportedKey closes the PENDING_IMPORT gap. It reads the public key of the EXACT recorded
+// crypto key version back from Cloud KMS — not whichever version the backend would otherwise resolve
+// — and requires it to equal the source consensus key. Only then is the import durably complete and
+// the source key free to be deleted.
+func (r *Reconciler) verifyGcpImportedKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, params cosmosigner.Params, sourceSecret string, keyMaterial []byte) (bool, error) {
+	clientSet := r.cosmosignerKubernetesClient()
+	if clientSet == nil {
+		return false, fmt.Errorf("cosmosigner %q GCP KMS import verification requires a Kubernetes clientset", s.Name)
+	}
+	expected, err := cosmosigner.PublicKeyFromSecret(ctx, r.Client, nodeSet.GetNamespace(), sourceSecret)
+	if err != nil {
+		return false, err
+	}
+
+	st := nodeSet.EnsureCosmosignerStatus(s.Name)
+	keyVersion := st.ImportedKeyVersion
+	runner := cosmosigner.JobRunner{Client: clientSet, Scheme: r.Scheme, Owner: nodeSet, Params: params}
+	// A version still finalizing in Cloud KMS cannot be read. The error is surfaced (and retried with
+	// backoff) rather than swallowed: an import stuck in PENDING_IMPORT and one that will never
+	// succeed are indistinguishable from here, and silence would look like progress.
+	imported, err := runner.PublicKeyAtVersion(ctx, keyVersion)
+	if err != nil {
+		r.recorder.Event(nodeSet, corev1.EventTypeWarning, appsv1.ReasonUploadFailure,
+			controllers.FormatErrorEvent(fmt.Sprintf("cosmosigner %q imported key version %q is not readable yet", s.Name, keyVersion), err))
+		return true, err
+	}
+	if imported != expected {
+		return false, fmt.Errorf("cosmosigner %q imported key version %q serves a different consensus key than source secret %q; refusing to retarget the validator", s.Name, keyVersion, sourceSecret)
+	}
+
+	// Durable completion: the version is persisted, readable, and proven to serve the source key.
+	st.KeyImported = s.Spec.Backend.GcpKMS.ImportFingerprint(sourceSecret, keyMaterial)
+	if err := r.Status().Update(ctx, nodeSet); err != nil {
+		return false, err
+	}
+	_ = runner.CleanupImportPod(ctx)
+	return false, nil
+}
+
+// cosmosignerImportRecordMatchesTarget reports whether a recorded import belongs to the signer's
+// CURRENT import destination and source, whichever backend holds the key. Shared by the absent-source
+// fast paths, which must not re-mark a completed import pending just because the bootstrap Secret was
+// deleted after it landed.
+func cosmosignerImportRecordMatchesTarget(c *appsv1.Cosmosigner, record, sourceSecret string) bool {
+	switch {
+	case c.GcpImportsKey():
+		return c.Backend.GcpKMS.ImportRecordMatchesTarget(record, sourceSecret)
+	case c.UsesVaultBackend():
+		return c.Backend.Vault.ImportRecordMatchesTarget(record, sourceSecret)
+	}
+	return false
+}
+
+// cosmosignerImportComplete reports whether the recorded status needs no further import work for the
+// current spec, so callers can skip the signer without resolving params. A GCP import additionally
+// requires its created version to be recorded and verified — a fingerprint alone is not completion.
+func cosmosignerImportComplete(c *appsv1.Cosmosigner, record, keyVersion, sourceSecret string, keyMaterial []byte) bool {
+	switch {
+	case c.GcpImportsKey():
+		return c.Backend.GcpKMS.NextGcpImportStep(record, keyVersion, sourceSecret, keyMaterial) == appsv1.GcpImportComplete
+	case c.UsesVaultBackend():
+		return record == c.Backend.Vault.ImportFingerprint(sourceSecret, keyMaterial)
+	}
+	return false
+}
+
+// cosmosignerImportLabel names the managed import flow in source-key errors, so each backend reports
+// the path the operator actually configured.
+func cosmosignerImportLabel(c *appsv1.Cosmosigner) string {
+	if c.GcpImportsKey() {
+		return "GCP KMS import"
+	}
+	return "Vault uploadGenerated"
+}
+
+// gcpImportParams renders the Cloud KMS destination coordinates for the one-shot import pod, with the
+// CLI's own defaults (location, import job, protection level) resolved explicitly so the rendered
+// args never depend on the binary's defaults. They never reach the signer StatefulSet.
+func gcpImportParams(i *appsv1.CosmosignerGcpKmsImport) *cosmosigner.GcpImport {
+	if i == nil {
+		return nil
+	}
+	return &cosmosigner.GcpImport{
+		Project:         i.Project,
+		Location:        i.GetLocation(),
+		KeyRing:         i.KeyRing,
+		Key:             i.Key,
+		ImportJob:       i.GetImportJob(),
+		ProtectionLevel: i.GetProtectionLevel(),
+	}
+}
+
+// signerImagePullSecrets returns the image pull secrets of the group whose pods a signer fronts, so
+// the one-shot import/pubkey pods can pull the cosmosigner image from the same private registry as
+// the nodes they sign for. They deliberately never reach the signer StatefulSet: adding them there
+// would change the lifecycle digest of every existing signer.
+func signerImagePullSecrets(nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) []corev1.LocalObjectReference {
+	group := s.ValidatorGroup
+	if group == "" && len(s.TargetGroups) > 0 {
+		group = s.TargetGroups[0]
+	}
+	if group == appsv1.ReservedValidatorGroupName {
+		if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Config != nil {
+			return nodeSet.Spec.Validator.Config.ImagePullSecrets
+		}
+		return nil
+	}
+	for i := range nodeSet.Spec.Nodes {
+		if nodeSet.Spec.Nodes[i].Name != group {
+			continue
+		}
+		if cfg := nodeSet.Spec.Nodes[i].GetServiceConfig(); cfg != nil {
+			return cfg.ImagePullSecrets
+		}
+		return nil
+	}
+	return nil
 }
 
 // signerNameForNode returns the name of the managed signer that targets a group's nodes, and

@@ -100,6 +100,30 @@ func (c *Cosmosigner) VaultUploadsGenerated(initTarget bool) bool {
 	return c.UsesVaultBackend() && (c.Backend.Vault.UploadGenerated || initTarget)
 }
 
+// GcpImportsKey reports whether the GCP KMS backend performs a controller-managed BYOK import of
+// the targeted validator's consensus key. Unlike Vault's uploadGenerated it is never auto-enabled
+// for a genesis-initializing target: the Cloud KMS destination and protection level are operator
+// decisions that cannot be inferred from the chain configuration.
+func (c *Cosmosigner) GcpImportsKey() bool {
+	return c.UsesGcpKmsBackend() && c.Backend.GcpKMS.Import != nil
+}
+
+// ImportsGeneratedKey reports whether ANY backend imports the targeted validator's locally-held
+// consensus key through the one-shot `<signer>-import` pod. Callers use it to decide whether that
+// pod name is reserved and whether the source key secret must be reachable.
+func (c *Cosmosigner) ImportsGeneratedKey(initTarget bool) bool {
+	return c.VaultUploadsGenerated(initTarget) || c.GcpImportsKey()
+}
+
+// UsesPubkeyPod reports whether the signer's consensus public key is read back from the BACKEND
+// through the one-shot `<signer>-pubkey` pod. The software backend reads it from the mounted secret,
+// and a Vault uploadGenerated import resolves it from the source secret it is about to upload; every
+// other backend — including a managed GCP KMS import, which must verify the version it created —
+// needs the pod, so its name is reserved.
+func (c *Cosmosigner) UsesPubkeyPod(initTarget bool) bool {
+	return c != nil && !c.UsesSoftwareBackend() && !c.VaultUploadsGenerated(initTarget)
+}
+
 // groupCosmosigner returns the Cosmosigner block targeting the given group: the group's own
 // .spec.nodes[].cosmosigner, or the top-level .spec.cosmosigner when it lists that group. Returns nil
 // when no signer targets the group.
@@ -198,6 +222,185 @@ func (b *CosmosignerVaultBackend) ImportFingerprint(sourceSecret string, keyMate
 // version 1.
 func (b *CosmosignerVaultBackend) LegacyImportFingerprint(sourceSecret string, keyMaterial []byte) string {
 	return b.LegacyImportTargetFingerprint(sourceSecret) + "." + utils.Sha256(string(keyMaterial))
+}
+
+// GetLocation returns the Cloud KMS location of the import destination, defaulting to
+// DefaultCosmosignerGcpLocation.
+func (i *CosmosignerGcpKmsImport) GetLocation() string {
+	if i != nil && i.Location != nil && *i.Location != "" {
+		return *i.Location
+	}
+	return DefaultCosmosignerGcpLocation
+}
+
+// GetImportJob returns the Cloud KMS import job ID, defaulting to `<key>-import` (the cosmosigner
+// CLI's own default, made explicit here so the rendered args never depend on the binary's default).
+func (i *CosmosignerGcpKmsImport) GetImportJob() string {
+	if i == nil {
+		return ""
+	}
+	if i.ImportJob != nil && *i.ImportJob != "" {
+		return *i.ImportJob
+	}
+	return i.Key + "-import"
+}
+
+// GetProtectionLevel returns the destination crypto key protection level, defaulting to
+// CosmosignerGcpProtectionSoftware.
+func (i *CosmosignerGcpKmsImport) GetProtectionLevel() string {
+	if i != nil && i.ProtectionLevel != nil && *i.ProtectionLevel != "" {
+		return *i.ProtectionLevel
+	}
+	return CosmosignerGcpProtectionSoftware
+}
+
+// CryptoKeyName is the destination CryptoKey resource name of the import. The imported version lives
+// under it, so it is also the containment check every recorded key version is held to.
+func (i *CosmosignerGcpKmsImport) CryptoKeyName() string {
+	if i == nil {
+		return ""
+	}
+	return fmt.Sprintf("projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s", i.Project, i.GetLocation(), i.KeyRing, i.Key)
+}
+
+// OwnsKeyVersion reports whether keyVersion is a numbered version of THIS import's destination key.
+// The whole durability gate rests on it: a version recorded for another crypto key, another project,
+// or an alias such as "latest" would configure the validator's signer against a different consensus
+// identity, so only a fully-qualified numeric version of the configured destination is accepted.
+func (i *CosmosignerGcpKmsImport) OwnsKeyVersion(keyVersion string) bool {
+	name := i.CryptoKeyName()
+	if name == "" {
+		return false
+	}
+	version, ok := strings.CutPrefix(keyVersion, name+"/cryptoKeyVersions/")
+	return ok && version != "" && strings.Trim(version, "0123456789") == ""
+}
+
+// ResolvedKeyVersion is the crypto key version the signer must be configured with, given the version
+// recorded in controller-owned status. A pre-provisioned backend always serves its explicit
+// keyVersion. A managed import serves NOTHING until the recorded version provably belongs to the
+// configured destination — never a fabricated "/cryptoKeyVersions/1", and never a leftover version
+// of a destination the spec has since moved away from.
+func (b *CosmosignerGcpKmsBackend) ResolvedKeyVersion(recorded string) string {
+	if b == nil {
+		return ""
+	}
+	if b.Import == nil {
+		return b.KeyVersion
+	}
+	if b.Import.OwnsKeyVersion(recorded) {
+		return recorded
+	}
+	return ""
+}
+
+// GcpImportStep is the next action a managed GCP KMS import requires.
+type GcpImportStep string
+
+const (
+	// GcpImportRun runs the one-shot import pod: nothing usable has been imported yet.
+	GcpImportRun GcpImportStep = "Run"
+	// GcpImportVerify reads the recorded key version back and compares it with the source. A pod that
+	// exited zero only proves the import was ACCEPTED — Cloud KMS may still be finalizing the version.
+	GcpImportVerify GcpImportStep = "Verify"
+	// GcpImportComplete means the destination provably holds the source consensus key.
+	GcpImportComplete GcpImportStep = "Complete"
+	// GcpImportMismatch is terminal: the destination already holds a different consensus identity for
+	// this source, and importing again would retarget the validator.
+	GcpImportMismatch GcpImportStep = "Mismatch"
+	// GcpImportSourceMissing is terminal: the source key needed to perform or verify the import cannot
+	// be read. The backup must be retained through the verification gate.
+	GcpImportSourceMissing GcpImportStep = "SourceMissing"
+)
+
+// NextGcpImportStep classifies a managed GCP KMS import from controller-owned status (the import
+// record and the recorded key version), the resolved source secret name and the source key material
+// ("" / nil when the source cannot be read).
+//
+// The property this encodes, and the reason it is a pure function shared by both controllers: a
+// recorded key version is NEVER completion on its own. `cosmosigner import` exits zero while Cloud
+// KMS is still finalizing the version (PENDING_IMPORT), so the version must be read back and matched
+// against the source before the signer may serve it.
+//
+// A non-managed backend has nothing to import and is reported complete.
+func (b *CosmosignerGcpKmsBackend) NextGcpImportStep(record, keyVersion, sourceSecret string, keyMaterial []byte) GcpImportStep {
+	if b == nil || b.Import == nil {
+		return GcpImportComplete
+	}
+	if len(keyMaterial) == 0 {
+		// The source is gone. Only a record for the CURRENT destination and source proves the backend
+		// already holds the registered key, and the exact usable version must still be recorded.
+		if b.ImportRecordMatchesTarget(record, sourceSecret) && b.Import.OwnsKeyVersion(keyVersion) {
+			return GcpImportComplete
+		}
+		return GcpImportSourceMissing
+	}
+	if b.ImportRecordMatches(record, sourceSecret, keyMaterial) {
+		if b.Import.OwnsKeyVersion(keyVersion) {
+			return GcpImportComplete
+		}
+		// The verified version was lost (or belongs to a previous destination). Re-importing the SAME
+		// bytes adds another version of the same consensus identity, so recovery is safe.
+		return GcpImportRun
+	}
+	if b.ImportRecordMatchesTarget(record, sourceSecret) {
+		// Same destination and source secret, different key bytes: Cloud KMS would happily hold a second
+		// identity, and adopting it would retarget the validator.
+		return GcpImportMismatch
+	}
+	if b.Import.OwnsKeyVersion(keyVersion) {
+		return GcpImportVerify
+	}
+	return GcpImportRun
+}
+
+// gcpImportIdentity fingerprints the ADDRESSING coordinates of a Cloud KMS import destination: the
+// crypto key the consensus identity ends up in. The import job (rotatable — Cloud KMS import jobs
+// expire) and the protection level (applied only when the key is first created) are deliberately
+// excluded: neither changes which key is signed with, so neither may invalidate a completed import.
+func (i *CosmosignerGcpKmsImport) gcpImportIdentity() string {
+	if i == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s", i.Project, i.GetLocation(), i.KeyRing, i.Key)
+}
+
+// ImportTargetFingerprint fingerprints the import TARGET half of a GCP KMS key import: the Cloud
+// KMS destination key plus the resolved source secret name, namespaced by backend so a Vault record
+// can never satisfy a GCP target (and vice versa). Like the Vault equivalent it excludes the key
+// material, so a controller that can no longer read the source Secret can still prove that a
+// recorded import belongs to the CURRENT target/source.
+func (b *CosmosignerGcpKmsBackend) ImportTargetFingerprint(sourceSecret string) string {
+	if b == nil || b.Import == nil {
+		return ""
+	}
+	return utils.Sha256(fmt.Sprintf("gcpkms\x00%s\x00%s", b.Import.gcpImportIdentity(), sourceSecret))
+}
+
+// ImportFingerprint returns the full fingerprint of a completed GCP KMS key import:
+// "<targetFingerprint>.<materialHash>". It mirrors the Vault two-part form so the shared
+// ImportRecordMatchesTarget fast path works for both backends.
+func (b *CosmosignerGcpKmsBackend) ImportFingerprint(sourceSecret string, keyMaterial []byte) string {
+	target := b.ImportTargetFingerprint(sourceSecret)
+	if target == "" {
+		return ""
+	}
+	return target + "." + utils.Sha256(string(keyMaterial))
+}
+
+// ImportRecordMatchesTarget reports whether record proves an import into this Cloud KMS destination
+// from this source secret, regardless of which key bytes were imported.
+func (b *CosmosignerGcpKmsBackend) ImportRecordMatchesTarget(record, sourceSecret string) bool {
+	target := b.ImportTargetFingerprint(sourceSecret)
+	return target != "" && ImportRecordMatchesTarget(record, target)
+}
+
+// ImportRecordMatches reports whether record proves that these exact source bytes were imported
+// into this Cloud KMS destination. There is no legacy format: managed GCP imports are new in this
+// API version.
+func (b *CosmosignerGcpKmsBackend) ImportRecordMatches(record, sourceSecret string, keyMaterial []byte) bool {
+	want := b.ImportFingerprint(sourceSecret, keyMaterial)
+	return want != "" && record == want
 }
 
 // ImportRecordMatchesTarget reports whether a recorded key import belongs to the given import target
@@ -396,10 +599,41 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 			return fmt.Errorf("%s.backend.vault.certificateSecret.name and .key are required when set", path)
 		}
 	case c.Backend.GcpKMS != nil:
-		if c.Backend.GcpKMS.KeyVersion == "" {
-			return fmt.Errorf("%s.backend.gcpKms.keyVersion is required", path)
+		g := c.Backend.GcpKMS
+		// A managed import CREATES the crypto key version, so it cannot be declared alongside one that
+		// already exists: the two would name different signing identities and there would be no way to
+		// tell which the operator meant.
+		switch {
+		case g.KeyVersion == "" && g.Import == nil:
+			return fmt.Errorf("%s.backend.gcpKms requires exactly one of keyVersion (a pre-provisioned key version) or import (a managed key import)", path)
+		case g.KeyVersion != "" && g.Import != nil:
+			return fmt.Errorf("%s.backend.gcpKms.keyVersion and .import are mutually exclusive: a managed import creates the key version", path)
 		}
-		if cs := c.Backend.GcpKMS.CredentialsSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
+		if i := g.Import; i != nil {
+			if i.Project == "" {
+				return fmt.Errorf("%s.backend.gcpKms.import.project is required", path)
+			}
+			if i.KeyRing == "" {
+				return fmt.Errorf("%s.backend.gcpKms.import.keyRing is required", path)
+			}
+			if i.Key == "" {
+				return fmt.Errorf("%s.backend.gcpKms.import.key is required", path)
+			}
+			// An explicitly empty value is never the same as an absent one: it would render an empty
+			// flag value into the import pod instead of falling back to the documented default.
+			if i.Location != nil && *i.Location == "" {
+				return fmt.Errorf("%s.backend.gcpKms.import.location must not be empty when set", path)
+			}
+			if i.ImportJob != nil && *i.ImportJob == "" {
+				return fmt.Errorf("%s.backend.gcpKms.import.importJob must not be empty when set", path)
+			}
+			switch i.GetProtectionLevel() {
+			case CosmosignerGcpProtectionSoftware, CosmosignerGcpProtectionHSM:
+			default:
+				return fmt.Errorf("%s.backend.gcpKms.import.protectionLevel must be %q or %q", path, CosmosignerGcpProtectionSoftware, CosmosignerGcpProtectionHSM)
+			}
+		}
+		if cs := g.CredentialsSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
 			return fmt.Errorf("%s.backend.gcpKms.credentialsSecret.name and .key are required when set", path)
 		}
 	}
@@ -437,6 +671,11 @@ func (c *Cosmosigner) effectiveSigningIdentity(softwareKeySecret string) string 
 			ns = *v.Namespace
 		}
 		return normalizedVaultIdentity(v.Address, ns, v.GetVaultMount(), v.KeyName, v.GetKeyVersion())
+	case c.GcpImportsKey():
+		// A managed import's crypto key version does not exist until the import runs, so the identity
+		// is the DESTINATION KEY. That keeps every digest derived from it stable across the import
+		// completing — resolving the version must not look like a signer migration.
+		return "gcpkms-import\x00" + c.Backend.GcpKMS.Import.gcpImportIdentity()
 	case c.UsesGcpKmsBackend():
 		return "gcpkms\x00" + c.Backend.GcpKMS.KeyVersion
 	case c.UsesSoftwareBackend():
