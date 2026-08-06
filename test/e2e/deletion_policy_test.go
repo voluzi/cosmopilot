@@ -738,6 +738,20 @@ func (o signingObservation) String() string {
 }
 
 func (s signingSurface) observe() (signingObservation, error) {
+	return s.observeAt("")
+}
+
+// observeAt reads the surface as of the store revision resourceVersion names, or as of whatever is
+// current when it is empty.
+//
+// A revision makes the read a historical fact rather than a sample: resourceVersionMatch=Exact is
+// served from the backing store at that revision instead of from the API server's watch cache, so
+// what comes back is the surface as it stood then and nothing that happened after. That is what lets
+// a release be ordered against the surface rather than merely followed by a look at it. The revision
+// need not come from these resources: a list resourceVersion names a revision of the whole backing
+// store rather than a per-resource counter, so the revision a reservation was deleted at pins pod and
+// endpoint reads to that same instant.
+func (s signingSurface) observeAt(resourceVersion string) (signingObservation, error) {
 	var observed signingObservation
 
 	names := make(map[string]struct{}, len(s.claimPods))
@@ -746,7 +760,9 @@ func (s signingSurface) observe() (signingObservation, error) {
 	}
 
 	pods := &corev1.PodList{}
-	if err := Framework().Client().List(Framework().Context(), pods, client.InNamespace(s.namespace)); err != nil {
+	if err := Framework().Client().List(
+		Framework().Context(), pods, signingSurfaceListOptions(s.namespace, resourceVersion)...,
+	); err != nil {
 		return observed, err
 	}
 	for i := range pods.Items {
@@ -761,7 +777,7 @@ func (s signingSurface) observe() (signingObservation, error) {
 	}
 	sort.Strings(observed.pods)
 
-	endpoints, err := s.observeEndpoints(names)
+	endpoints, err := s.observeEndpoints(names, resourceVersion)
 	if err != nil {
 		return observed, err
 	}
@@ -769,14 +785,37 @@ func (s signingSurface) observe() (signingObservation, error) {
 	return observed, nil
 }
 
+// signingSurfaceListOptions scopes a surface read to the namespace, and to one exact store revision
+// when resourceVersion is set. They are rebuilt per list because flattening them mutates the raw
+// options they carry.
+//
+// An empty resourceVersion is left meaning "whatever is current" rather than being refused here:
+// most surface reads are ordinary progress checks with no revision to anchor to. The one caller that
+// must anchor to a revision asserts it has one before it calls.
+func signingSurfaceListOptions(namespace, resourceVersion string) []client.ListOption {
+	options := []client.ListOption{client.InNamespace(namespace)}
+	if resourceVersion != "" {
+		options = append(options, &client.ListOptions{Raw: &metav1.ListOptions{
+			ResourceVersion:      resourceVersion,
+			ResourceVersionMatch: metav1.ResourceVersionMatchExact,
+		}})
+	}
+	return options
+}
+
 // observeEndpoints collects every Service endpoint still targeting one of the claim pods, from
 // both EndpointSlices and the legacy Endpoints API — the same pair the signer teardown itself waits
 // on. Terminating pods stay published because the internal Service sets PublishNotReadyAddresses.
-func (s signingSurface) observeEndpoints(podNames map[string]struct{}) ([]string, error) {
+//
+// Both lists are read at the caller's revision, so an endpoint half read at one moment and a pod half
+// read at another can never be reported as one observation.
+func (s signingSurface) observeEndpoints(podNames map[string]struct{}, resourceVersion string) ([]string, error) {
 	var refs []string
 
 	slices := &discoveryv1.EndpointSliceList{}
-	if err := Framework().Client().List(Framework().Context(), slices, client.InNamespace(s.namespace)); err != nil {
+	if err := Framework().Client().List(
+		Framework().Context(), slices, signingSurfaceListOptions(s.namespace, resourceVersion)...,
+	); err != nil {
 		return nil, err
 	}
 	for i := range slices.Items {
@@ -794,7 +833,9 @@ func (s signingSurface) observeEndpoints(podNames map[string]struct{}) ([]string
 	}
 
 	legacy := &corev1.EndpointsList{}
-	if err := Framework().Client().List(Framework().Context(), legacy, client.InNamespace(s.namespace)); err != nil {
+	if err := Framework().Client().List(
+		Framework().Context(), legacy, signingSurfaceListOptions(s.namespace, resourceVersion)...,
+	); err != nil {
 		return nil, err
 	}
 	for i := range legacy.Items {
@@ -894,15 +935,15 @@ func assertReservationHeldDuringSigningTeardown(surface signingSurface, want res
 //
 // Pods and endpoints are both hard gates on the ordering. A published endpoint is a live route into the
 // signing workload, so releasing the key while one still targets a claim pod is the same fault as
-// releasing it while the pod exists. The surface only ever drains during teardown, so a surface still
-// showing either at that read was necessarily still up when the delete was committed — that direction
-// is a proof, not a heuristic.
+// releasing it while the pod exists.
 //
-// The reverse direction cannot be closed from a client, and the comment says so rather than implying
-// otherwise: Kubernetes orders nothing between a reservation watch and a Pod or EndpointSlice read, so
-// a violation narrower than the round trip that follows the event stays invisible. The pinned pod is
-// what covers the window that must never be missed, since no release at all is possible while it
-// stands; this watch shrinks what is left from a sampling interval to a single request.
+// Both directions are closed, because the surface is not sampled after the release but read at it. The
+// Deleted event carries the reservation as of the store revision its delete was committed at, and the
+// surface is listed at exactly that revision, so what comes back is the pod and endpoint state at the
+// instant the reservation ceased to exist. A read of "now" could only ever answer a later question, and
+// since the surface drains monotonically during teardown it would answer it more favourably; anchoring
+// removes that drift entirely. A violation shorter than the round trip that follows the event — the one
+// a post-hoc look would have missed — is therefore still reported.
 type reservationReleaseWatch struct {
 	surface  signingSurface
 	want     reservationRecord
@@ -983,16 +1024,23 @@ func (w *reservationReleaseWatch) stop() {
 	w.stopOnce.Do(w.stream.Stop)
 }
 
-// assertReleasedAfterSigningTeardown checks the surface against the release the watch just reported.
+// assertReleasedAfterSigningTeardown checks the surface against the release the watch just reported,
+// read at the revision that release was committed at rather than at whatever is current by the time
+// the read lands. An event carrying no resourceVersion is refused instead of being read as "now": an
+// unanchored read is the sampling this watch exists to replace, and silently falling back to it would
+// turn a proof into a guess without anything saying so.
 func (w *reservationReleaseWatch) assertReleasedAfterSigningTeardown(event watch.Event, deadline time.Time) {
 	reservation, ok := event.Object.(*appsv1.ConsensusKeyReservation)
 	Expect(ok).To(BeTrue(), "unexpected %T on the watch for reservation %q", event.Object, w.want.Name)
 	Expect(reservation.UID).To(Equal(w.want.UID),
 		"a reservation other than the recorded %q was released during teardown", w.want.Name)
+	Expect(reservation.ResourceVersion).NotTo(BeEmpty(),
+		"the release of reservation %q arrived without a resourceVersion, so it cannot be ordered against the signing surface",
+		w.want.Name)
 
-	observed, err := observeSigningSurface(w.surface, deadline)
+	observed, err := observeSigningSurfaceAt(w.surface, reservation.ResourceVersion, deadline)
 	Expect(err).NotTo(HaveOccurred(),
-		"the signing surface stayed unreadable after reservation %q was released, so the release could not be ordered against it",
+		"the signing surface could not be read at the revision reservation %q was released at, so the release could not be ordered against it",
 		w.want.Name)
 	Expect(observed.pods).To(BeEmpty(),
 		"reservation %q was released while signing pods were still up (%s)", w.want.Name, observed)
@@ -1001,16 +1049,22 @@ func (w *reservationReleaseWatch) assertReleasedAfterSigningTeardown(event watch
 		w.want.Name, observed)
 }
 
-// observeSigningSurface reads the surface once, retrying transient API errors to deadline. Retrying
-// costs nothing in soundness: the surface only drains, so a read that lands later than the moment of
-// interest can only understate what was up then, never invent it.
-func observeSigningSurface(surface signingSurface, deadline time.Time) (signingObservation, error) {
+// observeSigningSurfaceAt reads the surface as of resourceVersion, retrying transient API errors to
+// deadline. Retrying costs nothing in soundness: the state at a fixed revision is immutable, so a later
+// attempt returns exactly what the first one would have.
+//
+// A compacted revision is the one error that is not transient. Once the backing store has dropped that
+// revision no retry can ever answer, and no other read answers the same question — "now" is a different
+// moment, and refusing to substitute it is the entire point of anchoring. So it is returned at once and
+// the caller fails the spec, rather than spending the budget on a read that cannot succeed or passing on
+// the strength of one that was never asked.
+func observeSigningSurfaceAt(surface signingSurface, resourceVersion string, deadline time.Time) (signingObservation, error) {
 	for {
-		observed, err := surface.observe()
+		observed, err := surface.observeAt(resourceVersion)
 		if err == nil {
 			return observed, nil
 		}
-		if !time.Now().Before(deadline) {
+		if apierrors.IsResourceExpired(err) || apierrors.IsGone(err) || !time.Now().Before(deadline) {
 			return observed, err
 		}
 		time.Sleep(reservationSampleInterval)
