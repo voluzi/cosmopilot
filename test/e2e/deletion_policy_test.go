@@ -10,7 +10,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -99,8 +102,12 @@ var _ = Describe("Deletion policy", func() {
 		waitForPodTerminating(ns.Name, node.Name, podUID)
 		assertReservationHeldDuringSigningTeardown(surface, record, reservationHeldWindow)
 
+		// Arm the release watch before lifting the hold, never after: with the pod still pinned the
+		// controller cannot have released anything yet, so the stream starts from a revision at which
+		// this exact reservation is known to be held and every later transition is delivered on it.
+		releaseWatch := armReservationReleaseWatch(surface, record)
 		releaseHold()
-		waitForReservationReleasedAfterSigningTeardown(surface, record)
+		releaseWatch.awaitRelease()
 		waitForSigningSurfaceGone(surface)
 		assertReservationAbsent(record)
 		Eventually(func() bool {
@@ -172,8 +179,11 @@ var _ = Describe("Deletion policy", func() {
 		waitForPodTerminating(ns.Name, validator, podUID)
 		assertReservationHeldDuringSigningTeardown(surface, record, reservationHeldWindow)
 
+		// As above, the watch is armed while the pod is still pinned so the release cannot be observed
+		// only after the fact.
+		releaseWatch := armReservationReleaseWatch(surface, record)
 		releaseHold()
-		waitForReservationReleasedAfterSigningTeardown(surface, record)
+		releaseWatch.awaitRelease()
 		waitForSigningSurfaceGone(surface)
 		assertReservationAbsent(record)
 		Eventually(func() bool {
@@ -297,13 +307,20 @@ func deferReservationCleanupForOwner(ownerKind, namespace, ownerName string, own
 		OwnerUID:  ownerUID,
 	}
 	DeferCleanup(func() {
-		held := reservationsHeldByOwner(owner)
+		// Start teardown before resolving reservations. A transiently unreadable cluster must not
+		// consume the whole cleanup budget while the owner remains live and able to claim one.
+		deleteReservationOwner(owner)
+		held, listed := reservationsHeldByOwner(owner, time.Now().Add(reservationReleaseTimeout))
+		if !listed {
+			By(fmt.Sprintf("could not resolve reservations for owner %s %s/%s: the cluster-scoped list stayed "+
+				"unreadable for the whole cleanup budget", owner.OwnerKind, owner.Namespace, owner.OwnerName))
+		}
 		if len(held) == 0 {
-			// Nothing cluster-scoped is attributed to this owner, so there is nothing to reclaim and no
-			// teardown to confirm. The owner is still deleted, through the same UID-preconditioned path:
-			// that is what keeps a half-reconciled owner from claiming a reservation after this cleanup
-			// has already looked, and its own finalizer releases anything it did claim.
-			deleteReservationOwner(owner)
+			// Either nothing cluster-scoped is attributed to this owner or the list could not be read, and
+			// neither is grounds for deleting a reservation. The owner is still deleted, through the same
+			// UID-preconditioned path: that is what keeps a half-reconciled owner from claiming a
+			// reservation after this cleanup has already looked, and its own finalizer releases anything it
+			// did claim.
 			return
 		}
 		for _, record := range held {
@@ -322,18 +339,21 @@ func deferReservationCleanupForOwner(ownerKind, namespace, ownerName string, own
 //
 // A teardown that does not converge leaves the reservation in place: leaking one cluster-scoped object
 // is the safe failure here, deleting a live consensus-key reservation is not.
+//
+// Every read below shares one budget. Owner teardown starts without depending on a reservation read;
+// after the owner is terminating and the signing surface is drained, only a definite "still the
+// recorded object" answer earns the fallback delete. An unreadable reservation is no proof of what
+// would be destroyed.
 func reclaimReservation(record reservationRecord) {
-	if _, held := reservationStillRecorded(record); !held {
-		return
-	}
+	deadline := time.Now().Add(reservationReleaseTimeout)
 	deleteReservationOwner(record)
-	if !confirmReservationOwnerTeardown(record) {
+	if !confirmReservationOwnerTeardown(record, deadline) {
 		By(fmt.Sprintf("leaving ConsensusKeyReservation %q in place: teardown of owner %s %s/%s was not confirmed",
 			record.Name, record.OwnerKind, record.Namespace, record.OwnerName))
 		return
 	}
-	current, held := reservationStillRecorded(record)
-	if !held {
+	current, lookup := reservationStillRecorded(record, deadline)
+	if lookup != reservationHeld {
 		return
 	}
 	uid := current.UID
@@ -343,46 +363,79 @@ func reclaimReservation(record reservationRecord) {
 // reservationsHeldByOwner resolves every reservation the cluster currently attributes to owner into a
 // record the reclaim can act on. Attribution is by owner UID, which a reservation's immutable spec can
 // never have retargeted, so a reservation that merely shares a name with one this owner once held is
-// never picked up. A list error yields nothing: an unreadable cluster is no evidence that anything is
-// reclaimable.
-func reservationsHeldByOwner(owner reservationRecord) []reservationRecord {
-	list := &appsv1.ConsensusKeyReservationList{}
-	if err := Framework().Client().List(Framework().Context(), list); err != nil {
-		return nil
-	}
-	var held []reservationRecord
-	for i := range list.Items {
-		reservation := &list.Items[i]
-		if reservation.Spec.OwnerUID != owner.OwnerUID {
-			continue
+// never picked up.
+//
+// A list error is transient until proven otherwise, so it is retried to the deadline rather than read
+// as an empty cluster. Only the answer is reported alongside the records: an unreadable list is no
+// evidence that nothing is reclaimable, and the caller must not treat it as one.
+func reservationsHeldByOwner(owner reservationRecord, deadline time.Time) ([]reservationRecord, bool) {
+	for {
+		list := &appsv1.ConsensusKeyReservationList{}
+		err := Framework().Client().List(Framework().Context(), list)
+		if err == nil {
+			var held []reservationRecord
+			for i := range list.Items {
+				reservation := &list.Items[i]
+				if reservation.Spec.OwnerUID != owner.OwnerUID {
+					continue
+				}
+				held = append(held, reservationRecord{
+					Name:      reservation.Name,
+					UID:       reservation.UID,
+					OwnerUID:  reservation.Spec.OwnerUID,
+					OwnerKind: reservation.Spec.OwnerKind,
+					Namespace: reservation.Spec.Namespace,
+					OwnerName: reservation.Spec.OwnerName,
+					ChainID:   reservation.Spec.ChainID,
+					PublicKey: reservation.Spec.PublicKey,
+					Claim:     reservation.Spec.Claim,
+				})
+			}
+			return held, true
 		}
-		held = append(held, reservationRecord{
-			Name:      reservation.Name,
-			UID:       reservation.UID,
-			OwnerUID:  reservation.Spec.OwnerUID,
-			OwnerKind: reservation.Spec.OwnerKind,
-			Namespace: reservation.Spec.Namespace,
-			OwnerName: reservation.Spec.OwnerName,
-			ChainID:   reservation.Spec.ChainID,
-			PublicKey: reservation.Spec.PublicKey,
-			Claim:     reservation.Spec.Claim,
-		})
+		if !time.Now().Before(deadline) {
+			return nil, false
+		}
+		time.Sleep(reservationSampleInterval)
 	}
-	return held
 }
 
-// reservationStillRecorded reports whether the cluster still holds the exact object the record was
-// taken from. Anything else — released, replaced under the same name, or unreadable — means this
-// cleanup has nothing of its own left to reclaim.
-func reservationStillRecorded(record reservationRecord) (*appsv1.ConsensusKeyReservation, bool) {
-	current := &appsv1.ConsensusKeyReservation{}
-	if err := Framework().Client().Get(Framework().Context(), client.ObjectKey{Name: record.Name}, current); err != nil {
-		return nil, false
+// reservationLookup is what a cleanup managed to establish about the exact object a record was taken
+// from. Unknown is the zero value so a lookup that was never resolved cannot be mistaken for either
+// definite answer.
+type reservationLookup int
+
+const (
+	// reservationUnknown means every read failed transiently within the budget, so the cluster said
+	// nothing in either direction.
+	reservationUnknown reservationLookup = iota
+	// reservationHeld means the recorded object UID is still there.
+	reservationHeld
+	// reservationReleased means the API server answered definitively that the recorded object is not:
+	// either NotFound, or a different object now living under the same name.
+	reservationReleased
+)
+
+// reservationStillRecorded resolves whether the cluster still holds the exact object the record was
+// taken from, retrying to deadline so a transient API error is not read as a released reservation.
+// That distinction is the whole point: treating an unreadable Get as "already gone" would let a
+// cleanup walk away from a reservation it is still responsible for, and treating it as "still held"
+// would let one delete an object it never actually saw.
+func reservationStillRecorded(record reservationRecord, deadline time.Time) (*appsv1.ConsensusKeyReservation, reservationLookup) {
+	for {
+		current := &appsv1.ConsensusKeyReservation{}
+		err := Framework().Client().Get(Framework().Context(), client.ObjectKey{Name: record.Name}, current)
+		switch {
+		case err == nil && current.UID == record.UID:
+			return current, reservationHeld
+		case err == nil, apierrors.IsNotFound(err):
+			return nil, reservationReleased
+		}
+		if !time.Now().Before(deadline) {
+			return nil, reservationUnknown
+		}
+		time.Sleep(reservationSampleInterval)
 	}
-	if current.UID != record.UID {
-		return nil, false
-	}
-	return current, true
 }
 
 // reservationOwnerObject returns an empty object of the recorded owner's kind. An unrecognised kind
@@ -418,23 +471,26 @@ func deleteReservationOwner(record reservationRecord) {
 	_ = Framework().Client().Delete(Framework().Context(), owner, client.Preconditions{UID: &uid})
 }
 
-// confirmReservationOwnerTeardown blocks until the recorded owner CR is gone and the signing surface
-// of its claim has drained, and reports whether that happened within the drain budget. The claim is
-// the validator node name in every spec here, which is also its pod name, so the same surface the
-// release assertions watch is reachable from the record alone. An owner whose kind cannot be resolved
-// is refused up front rather than waited out, since no read would ever confirm it gone.
+// confirmReservationOwnerTeardown blocks until the recorded owner has reached a state its reservation
+// may be deleted from and the signing surface of its claim has drained, and reports whether that
+// happened within the shared budget. The claim is the validator node name in every spec here, which is
+// also its pod name, so the same surface the release assertions watch is reachable from the record
+// alone. An owner whose kind cannot be resolved is refused up front rather than waited out, since no
+// read would ever confirm anything about it.
+//
+// The drained surface is the safety gate, not the owner state: with no claim pod and no endpoint
+// routing to one, nothing can sign under this key whatever the owner is still doing.
 //
 // It reports rather than asserts on purpose: this only ever runs after something else already failed,
 // and a cleanup that cannot confirm teardown has exactly one correct move, which is to leave the
 // reservation alone rather than to add a second failure by deleting it.
-func confirmReservationOwnerTeardown(record reservationRecord) bool {
+func confirmReservationOwnerTeardown(record reservationRecord, deadline time.Time) bool {
 	if _, ok := reservationOwnerObject(record.OwnerKind); !ok {
 		return false
 	}
 	surface := signingSurface{namespace: record.Namespace, claimPods: []string{record.Claim}}
-	deadline := time.Now().Add(reservationReleaseTimeout)
 	for {
-		if reservationOwnerGone(record) {
+		if reservationOwnerReleasable(record) {
 			observed, err := surface.observe()
 			if err == nil && len(observed.pods) == 0 && len(observed.endpoints) == 0 {
 				return true
@@ -447,10 +503,23 @@ func confirmReservationOwnerTeardown(record reservationRecord) bool {
 	}
 }
 
-// reservationOwnerGone reports whether the recorded owner CR is absent. Only an explicit NotFound
-// counts: a read error proves nothing, and a live object under the same name is something this
-// cleanup cannot reason about, so both keep the reservation off limits.
-func reservationOwnerGone(record reservationRecord) bool {
+// reservationOwnerReleasable reports whether the recorded owner has reached a state in which deleting
+// its reservation cannot strand a live one. Exactly two states qualify, and only for the exact
+// recorded UID:
+//
+//   - Absent. The owner finished deleting, so its finalizer already released everything it held and a
+//     reservation still standing is one nothing will come back for.
+//   - Terminating. Requiring absence alone would make this fallback unreachable on the one path it
+//     exists for: the reservation-owner finalizer holds the exact owner in Terminating precisely until
+//     the reservation is released, so an owner that is stuck mid-finalize never becomes NotFound and
+//     the reservation it is stuck on would leak past the run. An owner carrying a deletion timestamp
+//     cannot start signing again, and the caller pairs this with a fully drained signing surface.
+//
+// Everything else keeps the reservation off limits. A read error proves nothing. An owner with no
+// deletion timestamp is live and may still be signing under this key. A different UID under the same
+// name is a replacement, whose own lifecycle this cleanup has no standing to act on — and whose
+// reservation this is not, since attribution is by owner UID.
+func reservationOwnerReleasable(record reservationRecord) bool {
 	owner, ok := reservationOwnerObject(record.OwnerKind)
 	if !ok {
 		return false
@@ -458,7 +527,10 @@ func reservationOwnerGone(record reservationRecord) bool {
 	err := Framework().Client().Get(
 		Framework().Context(), client.ObjectKey{Namespace: record.Namespace, Name: record.OwnerName}, owner,
 	)
-	return apierrors.IsNotFound(err)
+	if err != nil {
+		return apierrors.IsNotFound(err)
+	}
+	return owner.GetUID() == record.OwnerUID && !owner.GetDeletionTimestamp().IsZero()
 }
 
 // signingSurface describes what must be gone before a reservation may be released: the pods that
@@ -624,42 +696,135 @@ func assertReservationHeldDuringSigningTeardown(surface signingSurface, want res
 		"no Service endpoint referenced the terminating signing pod, so the endpoint half of the surface went unproven")
 }
 
-// waitForReservationReleasedAfterSigningTeardown drives the second teardown phase, once the hold has
-// been lifted. It keeps the same reservation-then-surface read order, so a sample showing the
-// reservation gone while the surface is still up proves an early release rather than a race: the
-// surface only ever drains here, so whatever the later read still sees was already there at the
-// earlier one.
+// reservationReleaseWatch drives the second teardown phase, once the hold has been lifted, from a
+// Kubernetes watch that is armed while the caller still has the signing surface pinned.
 //
-// Pods and endpoints are both hard gates on that ordering. A published endpoint is a live route into
-// the signing workload, so releasing the key while one still targets a claim pod is the same fault as
-// releasing it while the pod exists. Merely waiting the endpoints out afterwards would accept a
-// release that raced ahead of them, which is the half of the surface the claim rests on.
-func waitForReservationReleasedAfterSigningTeardown(surface signingSurface, want reservationRecord) {
-	var observed signingObservation
+// Arming order is what makes the ordering assertion sound instead of lucky. A polled wait only ever
+// learns of a release at its next sample, so a release that beat the endpoint drain by less than one
+// sampling interval had already left nothing to see by the time the test looked. Here instead:
+//
+//   - The reservation is read once, by exact object UID, before the stream opens, and the stream starts
+//     from that read's resourceVersion. No transition can fall into the gap between the two: everything
+//     after the read is delivered as an event.
+//   - That read happens while the hold is still on. The controller cannot release before the claim pod
+//     object is gone, and the pod object cannot go while the test's finalizer is on it, so a reservation
+//     present here is proof that nothing was released across the whole held phase.
+//   - The Deleted event is handled inline, in the same goroutine: the surface is read immediately after
+//     it arrives rather than on the next tick of a poll.
+//
+// Pods and endpoints are both hard gates on the ordering. A published endpoint is a live route into the
+// signing workload, so releasing the key while one still targets a claim pod is the same fault as
+// releasing it while the pod exists. The surface only ever drains during teardown, so a surface still
+// showing either at that read was necessarily still up when the delete was committed — that direction
+// is a proof, not a heuristic.
+//
+// The reverse direction cannot be closed from a client, and the comment says so rather than implying
+// otherwise: Kubernetes orders nothing between a reservation watch and a Pod or EndpointSlice read, so
+// a violation narrower than the round trip that follows the event stays invisible. The pinned pod is
+// what covers the window that must never be missed, since no release at all is possible while it
+// stands; this watch shrinks what is left from a sampling interval to a single request.
+type reservationReleaseWatch struct {
+	surface signingSurface
+	want    reservationRecord
+	stream  watch.Interface
+}
+
+// armReservationReleaseWatch asserts the recorded reservation is still held and opens the watch that
+// will observe its release. It must be called before the caller lifts its hold on the signing surface.
+func armReservationReleaseWatch(surface signingSurface, want reservationRecord) *reservationReleaseWatch {
+	armed := &reservationReleaseWatch{surface: surface, want: want}
+
+	current := &appsv1.ConsensusKeyReservation{}
+	Expect(Framework().Client().Get(
+		Framework().Context(), client.ObjectKey{Name: want.Name}, current,
+	)).To(Succeed(), "reservation %q must still be held when the release watch is armed", want.Name)
+	Expect(current.UID).To(Equal(want.UID),
+		"reservation %q was released and recreated before the release watch was armed", want.Name)
+
+	watcher, err := client.NewWithWatch(Framework().RestConfig(), client.Options{
+		Scheme: Framework().Client().Scheme(),
+		Mapper: Framework().Client().RESTMapper(),
+	})
+	Expect(err).NotTo(HaveOccurred(), "create watch client for reservation %q", want.Name)
+	stream, err := watcher.Watch(Framework().Context(), &appsv1.ConsensusKeyReservationList{}, &client.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", want.Name),
+		Raw:           &metav1.ListOptions{ResourceVersion: current.ResourceVersion},
+	})
+	Expect(err).NotTo(HaveOccurred(), "open release watch for reservation %q", want.Name)
+	armed.stream = stream
+	return armed
+}
+
+// awaitRelease blocks until the recorded reservation is released and asserts the signing surface was
+// already gone at that moment. Anything that ends the stream without a Deleted event — a closed
+// channel from an API-server restart or a compacted resourceVersion, or an Error event — proves
+// nothing in either direction. The spec fails instead of silently falling back to sampling that can
+// miss the exact short ordering regression this test exists to catch.
+func (w *reservationReleaseWatch) awaitRelease() {
 	deadline := time.Now().Add(reservationReleaseTimeout)
+	defer w.stream.Stop()
+
+	expired := time.NewTimer(time.Until(deadline))
+	defer expired.Stop()
 	for {
-		current := &appsv1.ConsensusKeyReservation{}
-		getErr := Framework().Client().Get(Framework().Context(), client.ObjectKey{Name: want.Name}, current)
-		sampled, observeErr := surface.observe()
-		if observeErr == nil {
-			observed = sampled
-		}
-		// As above, a transient API error is dropped rather than failed; the deadline still applies.
-		if observeErr == nil && (getErr == nil || apierrors.IsNotFound(getErr)) {
-			if apierrors.IsNotFound(getErr) {
-				Expect(observed.pods).To(BeEmpty(),
-					"reservation %q was released while signing pods were still up (%s)", want.Name, observed)
-				Expect(observed.endpoints).To(BeEmpty(),
-					"reservation %q was released while Service endpoints still routed to the signing workload (%s)",
-					want.Name, observed)
+		select {
+		case event, open := <-w.stream.ResultChan():
+			if !open {
+				Fail(fmt.Sprintf("release watch on reservation %q ended before the release", w.want.Name))
 				return
 			}
-			Expect(current.UID).To(Equal(want.UID),
-				"reservation %q was released and recreated during teardown", want.Name)
+			switch event.Type {
+			case watch.Deleted:
+				w.assertReleasedAfterSigningTeardown(event, deadline)
+				return
+			case watch.Error:
+				Fail(fmt.Sprintf("release watch on reservation %q reported %v", w.want.Name, event.Object))
+				return
+			case watch.Added, watch.Modified:
+				// The stream is filtered to this one name, and the watch was armed from a revision at which
+				// the recorded object existed, so any object arriving here before its Deleted event is the
+				// recorded one. A different UID means it was released and recreated in place.
+				reservation, ok := event.Object.(*appsv1.ConsensusKeyReservation)
+				Expect(ok).To(BeTrue(), "unexpected %T on the watch for reservation %q", event.Object, w.want.Name)
+				Expect(reservation.UID).To(Equal(w.want.UID),
+					"reservation %q was released and recreated during teardown", w.want.Name)
+			}
+		case <-expired.C:
+			Fail(fmt.Sprintf("reservation %q was not released after signing teardown", w.want.Name))
+			return
 		}
+	}
+}
 
+// assertReleasedAfterSigningTeardown checks the surface against the release the watch just reported.
+func (w *reservationReleaseWatch) assertReleasedAfterSigningTeardown(event watch.Event, deadline time.Time) {
+	reservation, ok := event.Object.(*appsv1.ConsensusKeyReservation)
+	Expect(ok).To(BeTrue(), "unexpected %T on the watch for reservation %q", event.Object, w.want.Name)
+	Expect(reservation.UID).To(Equal(w.want.UID),
+		"a reservation other than the recorded %q was released during teardown", w.want.Name)
+
+	observed, err := observeSigningSurface(w.surface, deadline)
+	Expect(err).NotTo(HaveOccurred(),
+		"the signing surface stayed unreadable after reservation %q was released, so the release could not be ordered against it",
+		w.want.Name)
+	Expect(observed.pods).To(BeEmpty(),
+		"reservation %q was released while signing pods were still up (%s)", w.want.Name, observed)
+	Expect(observed.endpoints).To(BeEmpty(),
+		"reservation %q was released while Service endpoints still routed to the signing workload (%s)",
+		w.want.Name, observed)
+}
+
+// observeSigningSurface reads the surface once, retrying transient API errors to deadline. Retrying
+// costs nothing in soundness: the surface only drains, so a read that lands later than the moment of
+// interest can only understate what was up then, never invent it.
+func observeSigningSurface(surface signingSurface, deadline time.Time) (signingObservation, error) {
+	for {
+		observed, err := surface.observe()
+		if err == nil {
+			return observed, nil
+		}
 		if !time.Now().Before(deadline) {
-			Fail(fmt.Sprintf("reservation %q was not released after signing teardown (%s)", want.Name, observed))
+			return observed, err
 		}
 		time.Sleep(reservationSampleInterval)
 	}
