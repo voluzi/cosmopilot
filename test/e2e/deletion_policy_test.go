@@ -119,13 +119,11 @@ var _ = Describe("Deletion policy", func() {
 		RefreshChainNode(recreated)
 		Expect(recreated.UID).NotTo(Equal(node.UID), "the recreated ChainNode must be a new object, not the old one")
 
-		// The reacquired reservation is deliberately left out of deferReservationCleanup: it is live
-		// state belonging to a running ChainNode, and that cleanup reclaims a reservation by first
-		// deleting its owner, which here would mean tearing down the very node this spec just proved
-		// healthy. Namespace teardown deletes the recreated node, whose own reservation finalizer
-		// releases it. The pre-deletion record above stays registered and is already a no-op against
-		// this object, because its UID precondition no longer matches.
+		// Register the same ownership-aware cleanup for the reacquired reservation. It only runs after
+		// the spec finishes, deletes the recreated owner before touching its reservation, and prevents
+		// a stalled namespace teardown from leaking this cluster-scoped object into a reused cluster.
 		reacquired := recordConsensusKeyReservation("ChainNode", ns.Name, recreated.Name, recreated.UID)
+		deferReservationCleanup(reacquired)
 		Expect(reacquired.Name).To(Equal(record.Name),
 			"the retained consensus key must resolve to the same deterministic reservation name")
 		Expect(reacquired.ChainID).To(Equal(record.ChainID))
