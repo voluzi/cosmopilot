@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,6 +37,11 @@ func runWaitForDNSCommand(ctx context.Context, resolver dnsResolver, client http
 	if len(args) != 3 {
 		return fmt.Errorf("usage: node-utils wait-for-dns <hostname> <ip-address> <timeout>")
 	}
+	if net.ParseIP(args[1]) == nil {
+		// Fail immediately rather than after the whole timeout: an unset downward-API address is a
+		// pod-spec problem, not a publication delay.
+		return fmt.Errorf("invalid IP address %q", args[1])
+	}
 	timeout, err := time.ParseDuration(args[2])
 	if err != nil || timeout <= 0 {
 		return fmt.Errorf("invalid DNS wait timeout %q", args[2])
@@ -46,28 +50,42 @@ func runWaitForDNSCommand(ctx context.Context, resolver dnsResolver, client http
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// An inbound signer connection is definitive evidence that the signer has
-	// discovered this Pod. Keep the Pod-local DNS lookup running for diagnostics,
-	// but do not make it a prerequisite: the target and signer may use different
-	// DNS caches, and either cache can observe publication first.
-	dnsCtx, stopDNS := context.WithCancel(ctx)
-	defer stopDNS()
-	dnsResult := make(chan error, 1)
+	// Only an inbound signer connection releases this gate: it is the one observation that could only
+	// follow the signer resolving this Pod and authenticating against it. This Pod resolving its own
+	// published address proves nothing about the signer, which reads a different DNS cache, so the
+	// lookup runs alongside purely as a diagnostic for a gate that times out.
+	diagnosticCtx, stopDiagnostic := context.WithCancel(ctx)
+	defer stopDiagnostic()
+	dnsObservations := make(chan error, 1)
 	go func() {
-		dnsResult <- waitForDNSAddress(dnsCtx, resolver, args[0], args[1], interval)
+		dnsObservations <- waitForDNSAddress(diagnosticCtx, resolver, args[0], args[1], interval)
 	}()
 
-	if err := waitForSignerDiscovery(ctx, client, signerDiscoveryURL, interval); err != nil {
-		select {
-		case dnsErr := <-dnsResult:
-			if dnsErr != nil && !errors.Is(dnsErr, context.Canceled) {
-				return fmt.Errorf("%w; pod-local DNS observation: %v", err, dnsErr)
-			}
-		default:
-		}
-		return err
+	signerErr := waitForSignerDiscovery(ctx, client, signerDiscoveryURL, interval)
+	// Stop the diagnostic lookup and wait for it, so no lookup outlives this call.
+	stopDiagnostic()
+	dnsErr := <-dnsObservations
+
+	if signerErr == nil {
+		log.WithFields(log.Fields{
+			"hostname":       args[0],
+			"target_address": args[1],
+		}).Info("remote signer discovery confirmed")
+		return nil
 	}
-	return nil
+
+	dnsStatus := "address published"
+	if dnsErr != nil {
+		dnsStatus = dnsErr.Error()
+	}
+	failures := strings.Join([]string{
+		fmt.Sprintf("signer connection: %v", signerErr),
+		fmt.Sprintf("pod-local DNS: %s", dnsStatus),
+	}, "; ")
+	if cause := ctx.Err(); cause != nil {
+		return fmt.Errorf("remote signer discovery was not confirmed (%s): %w", failures, cause)
+	}
+	return fmt.Errorf("remote signer discovery was not confirmed (%s)", failures)
 }
 
 func waitForDNSAddress(ctx context.Context, resolver dnsResolver, hostname, address string, interval time.Duration) error {

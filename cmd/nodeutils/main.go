@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,25 +34,104 @@ var (
 	haltHeight       int64
 )
 
+// subcommands are the standalone entry points this binary implements. They run in containers that
+// mount none of the server's runtime configuration, so they must never reach startServer.
+var subcommands = []string{"help", "mock", "wait-for-dns"}
+
+// mockCommandArity is the single command contract used before mock dispatch. Keeping command
+// recognition and exact arity together prevents validation from drifting from execution.
+var mockCommandArity = map[string]int{
+	"get":        1,
+	"set-cpu":    2,
+	"set-memory": 2,
+}
+
+// commands are the entry points run dispatches to. Tests replace them to assert which one a given
+// argument list selects.
+type commands struct {
+	waitForDNS func([]string) error
+	mock       func([]string)
+	serve      func() error
+}
+
+func defaultCommands() commands {
+	return commands{
+		waitForDNS: handleWaitForDNSCommand,
+		mock:       handleMockCommand,
+		serve:      startServer,
+	}
+}
+
 func main() {
-	// Check for CLI subcommands before parsing flags
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "mock":
-			handleMockCommand(os.Args[2:])
-			return
-		case "wait-for-dns":
-			if err := handleWaitForDNSCommand(os.Args[2:]); err != nil {
-				log.Fatal(err)
-			}
-			return
-		case "help", "--help", "-h":
+	if err := run(os.Args[1:], defaultCommands()); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run selects a standalone subcommand before any server configuration is touched, and rejects a
+// leading argument that is neither a flag nor a subcommand this binary implements.
+//
+// The rejection is the point: flag.Parse stops at the first non-flag argument and reports nothing,
+// so an argument list this build does not recognise — a typo, or a subcommand emitted by a newer
+// cosmopilot than the node-utils image it deployed — used to fall through to startServer. The
+// containers that run subcommands mount no /config volume, so that fall-through surfaced as a
+// missing default /config/upgrades.json instead of the argument that was never understood.
+func run(args []string, cmds commands) error {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "help":
 			printHelp()
-			return
+			return nil
+		case "mock":
+			if err := validateMockArgs(args[1:]); err != nil {
+				return err
+			}
+			cmds.mock(args[1:])
+			return nil
+		case "wait-for-dns":
+			return cmds.waitForDNS(args[1:])
+		default:
+			return fmt.Errorf("unknown subcommand %q: this node-utils build implements %s",
+				args[0], strings.Join(subcommands, ", "))
 		}
 	}
 
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
+		printHelp()
+		return nil
+	}
+
+	return cmds.serve()
+}
+
+// rejectPositionalArgs turns the arguments flag.Parse stopped at into an error, so a stray
+// positional after the flags cannot be silently dropped either.
+func rejectPositionalArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unexpected argument %q after flags: run `node-utils help`", args[0])
+}
+
+func validateMockArgs(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: node-utils mock <set-cpu <millicores>|set-memory <mib>|get>")
+	}
+	want, ok := mockCommandArity[args[0]]
+	if !ok {
+		return fmt.Errorf("unknown node-utils mock command %q", args[0])
+	}
+	if len(args) != want {
+		return fmt.Errorf("invalid arguments for node-utils mock %s", args[0])
+	}
+	return nil
+}
+
+func startServer() error {
 	flag.Parse()
+	if err := rejectPositionalArgs(flag.Args()); err != nil {
+		return err
+	}
 
 	if level, err := log.ParseLevel(logLevel); err == nil {
 		log.SetLevel(level)
@@ -75,7 +155,7 @@ func main() {
 		nodeutils.WithMockMode(mockMode),
 	)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	go func() {
@@ -86,9 +166,7 @@ func main() {
 		}
 	}()
 
-	if err := nodeUtilsServer.Start(); err != nil {
-		log.Fatal(err)
-	}
+	return nodeUtilsServer.Start()
 }
 
 func printHelp() {
@@ -127,10 +205,6 @@ func handleMockCommand(args []string) {
 
 	switch args[0] {
 	case "set-cpu":
-		if len(args) < 2 {
-			fmt.Println("Usage: node-utils mock set-cpu <millicores>")
-			os.Exit(1)
-		}
 		url := fmt.Sprintf("%s/mock/cpu?millicores=%s", baseURL, args[1])
 		resp, err := http.Post(url, "text/plain", bytes.NewBuffer(nil))
 		if err != nil {
@@ -146,10 +220,6 @@ func handleMockCommand(args []string) {
 		fmt.Printf("CPU set to %s millicores\n", args[1])
 
 	case "set-memory":
-		if len(args) < 2 {
-			fmt.Println("Usage: node-utils mock set-memory <mib>")
-			os.Exit(1)
-		}
 		url := fmt.Sprintf("%s/mock/memory?mib=%s", baseURL, args[1])
 		fmt.Printf("DEBUG: POST %s\n", url)
 		resp, err := http.Post(url, "text/plain", bytes.NewBuffer(nil))
