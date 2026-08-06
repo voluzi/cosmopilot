@@ -74,6 +74,25 @@ func TestStatefulSet_StaticUpstream(t *testing.T) {
 	assert.Equal(t, int32(2), *dep.Spec.Replicas)
 }
 
+func TestStatefulSet_ProbeSemantics(t *testing.T) {
+	p := baseParams()
+	p.UpstreamHost = "host"
+
+	container := p.StatefulSet().Spec.Template.Spec.Containers[0]
+
+	require.NotNil(t, container.StartupProbe)
+	require.NotNil(t, container.StartupProbe.HTTPGet)
+	assert.Equal(t, "/healthz", container.StartupProbe.HTTPGet.Path)
+
+	require.NotNil(t, container.ReadinessProbe)
+	require.NotNil(t, container.ReadinessProbe.HTTPGet)
+	assert.Equal(t, "/readyz", container.ReadinessProbe.HTTPGet.Path)
+
+	require.NotNil(t, container.LivenessProbe)
+	require.NotNil(t, container.LivenessProbe.HTTPGet)
+	assert.Equal(t, "/healthz", container.LivenessProbe.HTTPGet.Path)
+}
+
 func TestStatefulSet_DiscoveryUpstream(t *testing.T) {
 	p := baseParams()
 	p.DiscoveryHost = "chain-group-cg-upstream.ns.svc.cluster.local"
