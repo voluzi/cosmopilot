@@ -558,8 +558,15 @@ func ensureReservationOwnerDeleted(record reservationRecord, deadline time.Time)
 // long-lived pod would let this fallback delete a reservation at a moment the controller itself would
 // refuse to. The surface is widened to those pods here, scoped to the exact node they must belong to.
 //
-// The drained surface is the safety gate, not the owner state: with no signing pod and no endpoint
-// routing to one, nothing can sign under this key whatever the owner is still doing.
+// A drained surface is necessary but not sufficient, and the claim's own node is the rest of the gate.
+// Production releases a set-owned reservation only once finalizeReservationOwnerChildren has driven
+// that child ChainNode out of the cluster, because a child that is still live reconciles on its own
+// clock: a moment with no pod and no endpoint is then a gap between two pods rather than the end of the
+// signing path, and the child brings its signing pod straight back under a key this cleanup has just
+// deleted. So an empty surface only counts once the claim's node is itself gone, or terminating under
+// the exact recorded owner and therefore past the point its controller creates pods. What is left is
+// the case the surface was always the gate for: an owner or child already committed to teardown, with
+// nothing up that could sign under this key.
 //
 // It reports rather than asserts on purpose: this only ever runs after something else already failed,
 // and a cleanup that cannot confirm teardown has exactly one correct move, which is to leave the
@@ -573,7 +580,7 @@ func confirmReservationOwnerTeardown(record reservationRecord, deadline time.Tim
 			// Resolved per pass, not once: the claim's node may still be terminating when this starts
 			// and gone by the time it ends, and only the answer that holds for the pass being decided
 			// on may scope it.
-			if owners, resolved := claimSigningPodOwners(record); resolved {
+			if owners, settled := claimSigningPodOwners(record); settled {
 				surface := signingSurface{
 					namespace:        record.Namespace,
 					claimPods:        []string{record.Claim},
@@ -592,35 +599,69 @@ func confirmReservationOwnerTeardown(record reservationRecord, deadline time.Tim
 	}
 }
 
-// claimSigningPodOwners resolves the ChainNode whose temporary signing pods the fallback must wait
-// out for this record, and reports whether the cluster gave a definite answer.
+// claimSigningPodOwners resolves the claim side of the teardown gate from a single read: the ChainNode
+// whose temporary signing pods the fallback must wait out for this record, and whether that node has
+// settled far enough for an empty signing surface to mean anything. One read answers both because they
+// are one question about one object; two reads could answer it about two different moments.
 //
 // The claim names a ChainNode in both owner shapes this suite records: a standalone validator claims
 // under its own name, and a ChainNodeSet claims under its validator child's name. The two are
 // resolved differently on purpose. For the standalone shape the exact UID is already in the record,
-// so no read is needed and no same-named replacement can be picked up by mistake. For the set shape
-// the child is a separate object the record does not carry, so it must be read.
-//
-// Only two answers are usable. Found scopes the match to that child's UID. NotFound means there is no
-// such node, so nothing can be attributed to it — and production confirmed that node's signing pods
-// were gone before it let the node itself go, so there is nothing left to wait for. Anything else,
-// including a read error or an object with no UID, resolves nothing, and the caller retries rather
-// than treats silence as an all-clear.
+// so no read is needed and no same-named replacement can be picked up by mistake — and that node is
+// the owner the caller has already confirmed absent-or-terminating, so there is nothing further to
+// gate on. For the set shape the child is a separate object the record does not carry, with a
+// lifecycle of its own that outlives its parent's deletion timestamp, so it must be read and gated.
 func claimSigningPodOwners(record reservationRecord) ([]signingPodOwner, bool) {
 	if record.OwnerKind == "ChainNode" && record.Claim == record.OwnerName {
 		return []signingPodOwner{{chainNode: record.Claim, uid: record.OwnerUID}}, true
 	}
-	node := &appsv1.ChainNode{}
+	child := &appsv1.ChainNode{}
 	err := Framework().Client().Get(
-		Framework().Context(), client.ObjectKey{Namespace: record.Namespace, Name: record.Claim}, node,
+		Framework().Context(), client.ObjectKey{Namespace: record.Namespace, Name: record.Claim}, child,
 	)
+	return claimChildSigningPodOwners(record, child, err)
+}
+
+// claimChildSigningPodOwners turns one read of the claim's ChainNode into that answer. For a set-owned
+// claim, only a child attributed to the exact recorded parent UID is this record's to reason about, and
+// only two states of it let an empty surface count:
+//
+//   - NotFound. There is no such node, so nothing can be attributed to it — and production confirmed
+//     that node's signing pods were gone before it let the node itself go, so there is nothing left to
+//     wait for.
+//   - Terminating under the recorded owner. Its controller runs the finalizer path from here and
+//     creates no pods, so the pods it still has can only drain; the caller's surface check is what
+//     waits them out, scoped to this child's UID.
+//
+// A live child under the recorded owner is the case this gate exists for, and settles nothing however
+// empty the surface looks. Its parent being Terminating does not stop it: production deletes it in
+// finalizeReservationOwnerChildren and waits for it to be gone before releasing, and until that lands
+// the child reconciles normally and brings the signing pod back a moment later — under a key this
+// cleanup would already have dropped.
+//
+// Everything else resolves nothing and the caller retries rather than treating silence as an all-clear:
+// a read error, an object with no UID, or a child this record cannot attribute — controlled by some
+// other UID, or by nothing at all. A same-named replacement is another parent's child and may be
+// signing under this very key, so it is never grounds for dropping the reservation either.
+func claimChildSigningPodOwners(record reservationRecord, child *appsv1.ChainNode, err error) ([]signingPodOwner, bool) {
 	switch {
-	case err == nil && node.GetUID() != "":
-		return []signingPodOwner{{chainNode: record.Claim, uid: node.GetUID()}}, true
 	case apierrors.IsNotFound(err):
 		return nil, true
+	case err != nil, child.GetUID() == "":
+		return nil, false
 	}
-	return nil, false
+	owners := []signingPodOwner{{chainNode: record.Claim, uid: child.GetUID()}}
+	// Only a set-owned claim is gated on its child. A standalone owner claims under its own name and is
+	// handled by the caller above; its one other claim shape, a cosmosigner claim, names no ChainNode,
+	// so that read comes back NotFound.
+	if record.OwnerKind != "ChainNodeSet" {
+		return owners, true
+	}
+	controller := metav1.GetControllerOf(child)
+	if controller == nil || controller.UID != record.OwnerUID || child.GetDeletionTimestamp().IsZero() {
+		return nil, false
+	}
+	return owners, true
 }
 
 // reservationOwnerReleasable reports whether the recorded owner has reached a state in which deleting
