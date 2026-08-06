@@ -3,6 +3,7 @@ package e2e
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -298,6 +299,10 @@ func deferReservationCleanup(record reservationRecord) {
 // time the controller may not have created it. Attribution stays exact: only a reservation whose
 // immutable spec names this owner UID is ever considered, and the delete that ends the reclaim is
 // still preconditioned on the object UID that resolution returned.
+//
+// An empty result is only clean once the owner is confirmed gone. Until then it is indistinguishable
+// from an owner that has not yet claimed the reservation it is about to claim, so the owner delete is
+// driven to a confirmed absent-or-terminating state before the empty list is allowed to mean anything.
 func deferReservationCleanupForOwner(ownerKind, namespace, ownerName string, ownerUID types.UID) {
 	Expect(ownerUID).NotTo(BeEmpty(), "an owner-scoped reservation cleanup needs the created owner's UID")
 	owner := reservationRecord{
@@ -307,20 +312,29 @@ func deferReservationCleanupForOwner(ownerKind, namespace, ownerName string, own
 		OwnerUID:  ownerUID,
 	}
 	DeferCleanup(func() {
-		// Start teardown before resolving reservations. A transiently unreadable cluster must not
-		// consume the whole cleanup budget while the owner remains live and able to claim one.
-		deleteReservationOwner(owner)
-		held, listed := reservationsHeldByOwner(owner, time.Now().Add(reservationReleaseTimeout))
+		// Both reads share one budget, and teardown gets it first. A transiently unreadable cluster must
+		// not consume the whole of it on the list while the owner remains live and able to claim a
+		// reservation the list was too early to see.
+		deadline := time.Now().Add(reservationReleaseTimeout)
+		ownerGone := ensureReservationOwnerDeleted(owner, deadline)
+		held, listed := reservationsHeldByOwner(owner, deadline)
 		if !listed {
 			By(fmt.Sprintf("could not resolve reservations for owner %s %s/%s: the cluster-scoped list stayed "+
 				"unreadable for the whole cleanup budget", owner.OwnerKind, owner.Namespace, owner.OwnerName))
 		}
 		if len(held) == 0 {
 			// Either nothing cluster-scoped is attributed to this owner or the list could not be read, and
-			// neither is grounds for deleting a reservation. The owner is still deleted, through the same
-			// UID-preconditioned path: that is what keeps a half-reconciled owner from claiming a
-			// reservation after this cleanup has already looked, and its own finalizer releases anything it
-			// did claim.
+			// neither is grounds for deleting a reservation. What the empty list is worth depends entirely
+			// on the owner: gone, and its own finalizer has already released anything it held, so there is
+			// nothing to reclaim; still standing, and the list proves nothing at all, because the owner can
+			// claim a reservation the moment after this cleanup looked and there is no one left to reclaim
+			// it. That case is reported rather than acted on — a reservation this cleanup never saw is one
+			// it cannot safely delete.
+			if !ownerGone {
+				By(fmt.Sprintf("owner %s %s/%s was neither confirmed torn down nor observed holding a "+
+					"reservation: any reservation it claims from here outlives the run",
+					owner.OwnerKind, owner.Namespace, owner.OwnerName))
+			}
 			return
 		}
 		for _, record := range held {
@@ -346,18 +360,51 @@ func deferReservationCleanupForOwner(ownerKind, namespace, ownerName string, own
 // would be destroyed.
 func reclaimReservation(record reservationRecord) {
 	deadline := time.Now().Add(reservationReleaseTimeout)
-	deleteReservationOwner(record)
-	if !confirmReservationOwnerTeardown(record, deadline) {
+	if !ensureReservationOwnerDeleted(record, deadline) || !confirmReservationOwnerTeardown(record, deadline) {
 		By(fmt.Sprintf("leaving ConsensusKeyReservation %q in place: teardown of owner %s %s/%s was not confirmed",
 			record.Name, record.OwnerKind, record.Namespace, record.OwnerName))
 		return
 	}
-	current, lookup := reservationStillRecorded(record, deadline)
-	if lookup != reservationHeld {
-		return
+	switch deleteRecordedReservation(record, deadline) {
+	case reservationReleased:
+	case reservationHeld:
+		By(fmt.Sprintf("ConsensusKeyReservation %q was still the recorded object %q when the cleanup budget ran "+
+			"out, so the reclaim outlives the run", record.Name, record.UID))
+	case reservationUnknown:
+		By(fmt.Sprintf("could not confirm ConsensusKeyReservation %q was reclaimed: it stayed unreadable for the "+
+			"rest of the cleanup budget", record.Name))
 	}
-	uid := current.UID
-	_ = Framework().Client().Delete(Framework().Context(), current, client.Preconditions{UID: &uid})
+}
+
+// deleteRecordedReservation deletes the exact recorded reservation and reports what the cluster last
+// said about it. A single Delete call is a request, not a release: it can fail transiently, it can be
+// swallowed by a finalizer that holds the object in Terminating, and even a successful one is
+// unconfirmed until a later read says the object is gone. So the delete is retried to the deadline and
+// the verdict comes from a read, never from the delete's own return.
+//
+// Retrying is safe because every attempt carries the recorded object UID as a precondition. Once the
+// recorded reservation is gone, no attempt can reach a replacement that took its name — which is also
+// why a different UID under that name counts as released here: the object this record was taken from
+// is provably no longer there, and its successor belongs to whoever claimed it.
+func deleteRecordedReservation(record reservationRecord, deadline time.Time) reservationLookup {
+	for {
+		current, lookup := reservationStillRecorded(record, deadline)
+		if lookup != reservationHeld {
+			return lookup
+		}
+		uid := current.UID
+		// The delete's error is deliberately not the answer. NotFound and a failed precondition are
+		// already the released verdict the next read returns, and a transient failure is evidence of
+		// nothing in either direction.
+		_ = Framework().Client().Delete(Framework().Context(), current, client.Preconditions{UID: &uid})
+		if !time.Now().Before(deadline) {
+			// Last word: read once more so a delete that did land is reported as the release it was,
+			// rather than as the unconfirmed state it was in before it.
+			_, lookup = reservationStillRecorded(record, deadline)
+			return lookup
+		}
+		time.Sleep(reservationSampleInterval)
+	}
 }
 
 // reservationsHeldByOwner resolves every reservation the cluster currently attributes to owner into a
@@ -471,6 +518,30 @@ func deleteReservationOwner(record reservationRecord) {
 	_ = Framework().Client().Delete(Framework().Context(), owner, client.Preconditions{UID: &uid})
 }
 
+// ensureReservationOwnerDeleted drives the exact recorded owner into a state where it can no longer
+// claim a reservation, and reports whether it got there within the budget.
+//
+// One call to deleteReservationOwner is not that. It swallows both its Get and its Delete error, so a
+// transient failure in either leaves a live owner behind and says nothing about it — and a live owner
+// that simply has not reconciled yet presents exactly the same empty reservation list as an owner with
+// nothing left to release. Only a confirmed absent-or-terminating owner tells those two apart, so the
+// delete is retried until the cluster shows one.
+//
+// Every attempt is preconditioned on the recorded owner UID, which is what makes retrying safe: once
+// that object is gone, no later attempt can reach whatever has taken its name.
+func ensureReservationOwnerDeleted(record reservationRecord, deadline time.Time) bool {
+	for {
+		deleteReservationOwner(record)
+		if reservationOwnerReleasable(record) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(reservationSampleInterval)
+	}
+}
+
 // confirmReservationOwnerTeardown blocks until the recorded owner has reached a state its reservation
 // may be deleted from and the signing surface of its claim has drained, and reports whether that
 // happened within the shared budget. The claim is the validator node name in every spec here, which is
@@ -478,7 +549,13 @@ func deleteReservationOwner(record reservationRecord) {
 // alone. An owner whose kind cannot be resolved is refused up front rather than waited out, since no
 // read would ever confirm anything about it.
 //
-// The drained surface is the safety gate, not the owner state: with no claim pod and no endpoint
+// The claim pod is not the whole gate. Production will not release a reservation while any pod
+// carrying that ChainNode's deterministic signing-pod name is still up — a create-validator pod
+// submitting a staking tx, or a signer-import pod loading the consensus key — so waiting only for the
+// long-lived pod would let this fallback delete a reservation at a moment the controller itself would
+// refuse to. The surface is widened to those pods here, scoped to the exact node they must belong to.
+//
+// The drained surface is the safety gate, not the owner state: with no signing pod and no endpoint
 // routing to one, nothing can sign under this key whatever the owner is still doing.
 //
 // It reports rather than asserts on purpose: this only ever runs after something else already failed,
@@ -488,12 +565,21 @@ func confirmReservationOwnerTeardown(record reservationRecord, deadline time.Tim
 	if _, ok := reservationOwnerObject(record.OwnerKind); !ok {
 		return false
 	}
-	surface := signingSurface{namespace: record.Namespace, claimPods: []string{record.Claim}}
 	for {
 		if reservationOwnerReleasable(record) {
-			observed, err := surface.observe()
-			if err == nil && len(observed.pods) == 0 && len(observed.endpoints) == 0 {
-				return true
+			// Resolved per pass, not once: the claim's node may still be terminating when this starts
+			// and gone by the time it ends, and only the answer that holds for the pass being decided
+			// on may scope it.
+			if owners, resolved := claimSigningPodOwners(record); resolved {
+				surface := signingSurface{
+					namespace:        record.Namespace,
+					claimPods:        []string{record.Claim},
+					signingPodOwners: owners,
+				}
+				observed, err := surface.observe()
+				if err == nil && len(observed.pods) == 0 && len(observed.endpoints) == 0 {
+					return true
+				}
 			}
 		}
 		if !time.Now().Before(deadline) {
@@ -501,6 +587,37 @@ func confirmReservationOwnerTeardown(record reservationRecord, deadline time.Tim
 		}
 		time.Sleep(reservationSampleInterval)
 	}
+}
+
+// claimSigningPodOwners resolves the ChainNode whose temporary signing pods the fallback must wait
+// out for this record, and reports whether the cluster gave a definite answer.
+//
+// The claim names a ChainNode in both owner shapes this suite records: a standalone validator claims
+// under its own name, and a ChainNodeSet claims under its validator child's name. The two are
+// resolved differently on purpose. For the standalone shape the exact UID is already in the record,
+// so no read is needed and no same-named replacement can be picked up by mistake. For the set shape
+// the child is a separate object the record does not carry, so it must be read.
+//
+// Only two answers are usable. Found scopes the match to that child's UID. NotFound means there is no
+// such node, so nothing can be attributed to it — and production confirmed that node's signing pods
+// were gone before it let the node itself go, so there is nothing left to wait for. Anything else,
+// including a read error or an object with no UID, resolves nothing, and the caller retries rather
+// than treats silence as an all-clear.
+func claimSigningPodOwners(record reservationRecord) ([]signingPodOwner, bool) {
+	if record.OwnerKind == "ChainNode" && record.Claim == record.OwnerName {
+		return []signingPodOwner{{chainNode: record.Claim, uid: record.OwnerUID}}, true
+	}
+	node := &appsv1.ChainNode{}
+	err := Framework().Client().Get(
+		Framework().Context(), client.ObjectKey{Namespace: record.Namespace, Name: record.Claim}, node,
+	)
+	switch {
+	case err == nil && node.GetUID() != "":
+		return []signingPodOwner{{chainNode: record.Claim, uid: node.GetUID()}}, true
+	case apierrors.IsNotFound(err):
+		return nil, true
+	}
+	return nil, false
 }
 
 // reservationOwnerReleasable reports whether the recorded owner has reached a state in which deleting
@@ -547,6 +664,65 @@ type signingSurface struct {
 	// name rather than by label because a plain validator pod carries no owner label (only signer
 	// targets do), and because an endpoint outlives the pod whose labels it was derived from.
 	claimPods []string
+
+	// signingPodOwners widens the pod half of the surface to the temporary signing pods production
+	// blocks a reservation release on, for callers that must gate on the whole of what the controller
+	// gates on rather than only on the long-lived claim pod. The spec-level assertions leave it empty
+	// on purpose: they pin one named pod and must keep proving their point against that pod alone,
+	// never against some unrelated helper that happened to be up at the same moment.
+	signingPodOwners []signingPodOwner
+}
+
+// signingPodOwner is one ChainNode whose temporary signing pods must be gone before its reservation
+// may be deleted: the node name their deterministic names are derived from, and the exact object UID
+// they must belong to.
+type signingPodOwner struct {
+	chainNode string
+	uid       types.UID
+}
+
+// chainNodeTemporaryPodSuffixes mirrors temporaryPodSuffixes in
+// internal/controllers/chainnode/predicate.go. It is copied rather than imported because the
+// production list and its matcher are unexported and the e2e suite has no business widening the
+// controller's API surface to read them. Keep it in sync: a suffix added there and missing here
+// narrows the fallback teardown gate back toward the claim pod alone, which is the gap this list
+// exists to close.
+var chainNodeTemporaryPodSuffixes = []string{
+	"config-generator", "data-init", "init-data", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity",
+	"write-file", "create-validator", "signer-pubkey", "signer-import",
+}
+
+// chainNodeSigningPodName mirrors isChainNodeSigningPodName: the ChainNode's own pod, plus every
+// temporary pod whose deterministic name is derived from it — matched with the trailing "-" prefix
+// form too, since a Job names its pods by appending a generated suffix.
+func chainNodeSigningPodName(name, chainNodeName string) bool {
+	if name == chainNodeName {
+		return true
+	}
+	for _, suffix := range chainNodeTemporaryPodSuffixes {
+		base := chainNodeName + "-" + suffix
+		if name == base || strings.HasPrefix(name, base+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// blocksAsSigningPod mirrors finalizeOwnedSigningPods for each exact ChainNode owner. Production waits
+// for every pod controlled by the ChainNode, regardless of name, and also refuses release when a pod
+// with one of the ChainNode's deterministic signing-path names is not controlled by that exact UID.
+// The latter includes Job-generated create-validator and signer-import pod names as well as orphans or
+// same-named replacement pods; treating those as somebody else's teardown would be weaker than the
+// production safety gate.
+func (s signingSurface) blocksAsSigningPod(pod *corev1.Pod) bool {
+	controller := metav1.GetControllerOf(pod)
+	for _, owner := range s.signingPodOwners {
+		owned := controller != nil && controller.UID == owner.uid
+		if owned || chainNodeSigningPodName(pod.Name, owner.chainNode) {
+			return true
+		}
+	}
+	return false
 }
 
 type signingObservation struct {
@@ -572,7 +748,8 @@ func (s signingSurface) observe() (signingObservation, error) {
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if _, claimed := names[pod.Name]; !claimed {
+		_, claimed := names[pod.Name]
+		if !claimed && !s.blocksAsSigningPod(pod) {
 			continue
 		}
 		// A Terminating pod still counts: the signing path is torn down only once the object is
