@@ -7,7 +7,7 @@ import (
 
 const (
 	LabelWorkerName          = "worker-name"
-	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.0.0"
+	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.0.1"
 )
 
 type ControllerRunOptions struct {

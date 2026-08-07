@@ -116,7 +116,7 @@ func (h *PvcHelper) DownloadGenesis(ctx context.Context, url, path, pc string, a
 	cmd := buildGenesisDownloadCommand(url, destPath)
 
 	// Use node-tools image which has compression tools (gzip, zstd)
-	image := "ghcr.io/voluzi/node-tools"
+	image := "ghcr.io/voluzi/node-tools:1.4.3"
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
