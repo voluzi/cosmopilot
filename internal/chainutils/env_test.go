@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 func testAppEnv() []corev1.EnvVar {

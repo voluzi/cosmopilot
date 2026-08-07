@@ -6,7 +6,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 
-	"github.com/voluzi/cosmopilot/v2/pkg/environ"
+	"github.com/voluzi/cosmopilot/v3/pkg/environ"
 )
 
 // currentArch returns the current CPU architecture in Docker/OCI format

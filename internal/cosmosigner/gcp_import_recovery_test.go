@@ -14,7 +14,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	cosmopilotv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	cosmopilotv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 // A Cloud KMS import is NOT idempotent: every `cosmosigner import` run calls ImportCryptoKeyVersion

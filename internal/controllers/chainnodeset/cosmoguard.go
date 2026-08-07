@@ -18,11 +18,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
-	"github.com/voluzi/cosmopilot/v2/internal/cosmoguard"
-	"github.com/voluzi/cosmopilot/v2/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/cosmoguard"
+	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
 // groupCosmoGuardName returns the name of the CosmoGuard Deployment/Service fronting a node group.

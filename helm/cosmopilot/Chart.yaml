@@ -1,4 +1,6 @@
 apiVersion: v2
 name: cosmopilot
-version: 2.3.1
+# version and appVersion are placeholders: `make helm.package` overrides both from git tags
+# (--version from the chart/v* tag, --app-version from the cosmopilot v* tag) at release time.
+version: 0.0.0
 appVersion: 0.0.0

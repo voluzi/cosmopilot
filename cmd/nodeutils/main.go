@@ -15,8 +15,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	_ "go.uber.org/automaxprocs"
 
-	"github.com/voluzi/cosmopilot/v2/pkg/environ"
-	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
+	"github.com/voluzi/cosmopilot/v3/pkg/environ"
+	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
 
 var (

@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	cosmopilotv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	cosmopilotv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 func TestReconcileStatefulSetMigrationWaitsForTerminatingPod(t *testing.T) {

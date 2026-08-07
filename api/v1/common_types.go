@@ -7,7 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/voluzi/cosmopilot/v2/internal/tmkms"
+	"github.com/voluzi/cosmopilot/v3/internal/tmkms"
 )
 
 // Reasons for events.
