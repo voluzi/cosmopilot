@@ -152,9 +152,10 @@ var _ = Describe("Deletion policy", func() {
 	It("releases a ChainNodeSet reservation only after its validator signing workload is gone", WithNs(func(ns *corev1.Namespace) {
 		app := apps.Nibiru()
 		cns := app.BuildChainNodeSet(ns.Name, 0)
-		// This spec exercises the legacy validator owner path only. Drop the zero-instance fullnode
-		// group because its inherited snapshotNodeIndex is invalid when there are no instances.
-		cns.Spec.Nodes = nil
+		// This spec exercises the legacy validator owner path only. Keep the required nodes field,
+		// but drop the zero-instance fullnode group because its inherited snapshotNodeIndex is invalid
+		// when there are no instances.
+		cns.Spec.Nodes = []appsv1.NodeGroupSpec{}
 		Expect(Framework().Client().Create(Framework().Context(), cns)).To(Succeed())
 		WaitForChainNodeSetHeight(cns, 1)
 		RefreshChainNodeSet(cns)
