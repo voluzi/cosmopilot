@@ -82,6 +82,24 @@ func TestVaultImportFingerprintAcceptsLegacyFormatOnlyForVersionOne(t *testing.T
 	}
 }
 
+func TestVaultImportFingerprintIgnoresEquivalentJSONSerialization(t *testing.T) {
+	vault := &CosmosignerVaultBackend{Address: "https://vault.example", KeyName: "validator"}
+	compact := []byte(`{"address":"AA","pub_key":{"type":"tendermint/PubKeyEd25519","value":"pub"},"priv_key":{"type":"tendermint/PrivKeyEd25519","value":"priv"}}`)
+	reformatted := []byte(`{
+  "priv_key": {"value": "priv", "type": "tendermint/PrivKeyEd25519"},
+  "pub_key": {"value": "pub", "type": "tendermint/PubKeyEd25519"},
+  "address": "AA"
+}`)
+
+	record := vault.ImportFingerprint("val-priv-key", compact)
+	if record != vault.ImportFingerprint("val-priv-key", reformatted) {
+		t.Fatal("equivalent private-validator key JSON must have the same Vault import fingerprint")
+	}
+	if !vault.ImportRecordMatches(record, "val-priv-key", reformatted) {
+		t.Fatal("reserializing the same consensus key must not trigger a Vault re-import")
+	}
+}
+
 func TestImplicitVaultImportRequiresInitialKeyVersion(t *testing.T) {
 	tokenSecret := &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token",
@@ -207,7 +225,7 @@ func TestChainNodeCreateValidatorWaiverRequiresOldValidator(t *testing.T) {
 	if err == nil {
 		t.Fatal("promoting a non-validator with a pre-provisioned signer to create-validator must be rejected")
 	}
-	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer"
+	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend, vault.uploadGenerated or gcpKms.import so the registered consensus key matches the signer"
 	if err.Error() != want {
 		t.Fatalf("expected create-validator signer mismatch error %q, got %q", want, err)
 	}
@@ -227,7 +245,7 @@ func TestChainNodeCreateValidatorWaiverRequiresCompletedRegistration(t *testing.
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
 		Key:                  "token",
 	}
-	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend or vault.uploadGenerated so the registered consensus key matches the signer"
+	const want = ".spec.cosmosigner on a validator that initializes genesis or uses createValidator requires the software backend, vault.uploadGenerated or gcpKms.import so the registered consensus key matches the signer"
 
 	base := func() *ChainNode {
 		return &ChainNode{

@@ -38,6 +38,9 @@ type Reconciler struct {
 	Scheme     *runtime.Scheme
 	recorder   record.EventRecorder
 	opts       *controllers.ControllerRunOptions
+	// cosmosignerClientSet overrides ClientSet for the one-shot cosmosigner pods, so the
+	// import/pubkey pod protocol can be exercised without a cluster. Nil in production.
+	cosmosignerClientSet kubernetes.Interface
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {

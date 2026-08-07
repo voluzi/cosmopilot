@@ -20,6 +20,15 @@ const (
 	// DefaultCosmosignerVaultMount is the default Vault transit mount path.
 	DefaultCosmosignerVaultMount = "transit"
 
+	// DefaultCosmosignerGcpLocation is the Cloud KMS location used when a managed import does not
+	// name one, matching the cosmosigner CLI's own --gcp-location default.
+	DefaultCosmosignerGcpLocation = "global"
+
+	// CosmosignerGcpProtectionSoftware and CosmosignerGcpProtectionHSM are the Cloud KMS protection
+	// levels accepted by `cosmosigner import --gcp-protection`.
+	CosmosignerGcpProtectionSoftware = "software"
+	CosmosignerGcpProtectionHSM      = "hsm"
+
 	// DefaultCosmosignerCpu and DefaultCosmosignerMemory are the default compute resources.
 	DefaultCosmosignerCpu    = "100m"
 	DefaultCosmosignerMemory = "128Mi"
@@ -169,16 +178,59 @@ type CosmosignerVaultBackend struct {
 	UploadGenerated bool `json:"uploadGenerated,omitempty"`
 }
 
-// CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend.
+// CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend. Exactly one of
+// keyVersion (a key version that already exists) or import (a controller-managed BYOK import of
+// the targeted validator's consensus key) must be set.
 type CosmosignerGcpKmsBackend struct {
-	// KeyVersion is the full resource name of the KMS crypto key version used for signing
-	// (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`).
-	KeyVersion string `json:"keyVersion"`
+	// KeyVersion is the full resource name of a pre-provisioned KMS crypto key version used for
+	// signing (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`). Mutually
+	// exclusive with import.
+	// +optional
+	KeyVersion string `json:"keyVersion,omitempty"`
+
+	// Import requests a one-shot, controller-managed import of the targeted validator's existing
+	// consensus key into Cloud KMS (BYOK). The resulting crypto key version does not exist until the
+	// import completes, so it is recorded in status rather than configured here. Mutually exclusive
+	// with keyVersion.
+	// +optional
+	Import *CosmosignerGcpKmsImport `json:"import,omitempty"`
 
 	// CredentialsSecret references a secret containing a Google service account JSON key. When
 	// unset, Workload Identity / Application Default Credentials are used.
 	// +optional
 	CredentialsSecret *corev1.SecretKeySelector `json:"credentialsSecret,omitempty"`
+}
+
+// CosmosignerGcpKmsImport describes the Cloud KMS destination of a controller-managed BYOK import.
+// The key ring, crypto key (without an initial version) and import job are created when absent and
+// reused when they already exist, so repeated reconciles converge on a single imported identity.
+type CosmosignerGcpKmsImport struct {
+	// Project is the Google Cloud project ID owning the destination key ring.
+	Project string `json:"project"`
+
+	// Location is the Cloud KMS location of the destination key ring. Defaults to `global`.
+	// +optional
+	// +default="global"
+	Location *string `json:"location,omitempty"`
+
+	// KeyRing is the Cloud KMS key ring ID holding the destination crypto key.
+	KeyRing string `json:"keyRing"`
+
+	// Key is the Cloud KMS crypto key ID the consensus key is imported into.
+	Key string `json:"key"`
+
+	// ImportJob is the Cloud KMS import job ID used to wrap the key material. Defaults to
+	// `<key>-import`. Cloud KMS import jobs expire; name a fresh one to retry after expiry — it does
+	// not change the imported identity.
+	// +optional
+	ImportJob *string `json:"importJob,omitempty"`
+
+	// ProtectionLevel is the protection level of the destination crypto key, applied only when the
+	// key is created. Defaults to `software`.
+	// +optional
+	// +default="software"
+	// +kubebuilder:validation:Enum=software;hsm
+	ProtectionLevel *string `json:"protectionLevel,omitempty"`
 }
 
 // CosmosignerMigrationPhase is the persisted stage of a break-before-make signer migration.
@@ -303,8 +355,17 @@ type CosmosignerStatus struct {
 	// +optional
 	LocalKeyEverServed *bool `json:"localKeyEverServed,omitempty"`
 
-	// KeyImported is the fingerprint of a completed Vault key import (Vault target + source secret +
-	// key material). It lets the controller skip a repeated import and detect a source/target change.
+	// KeyImported is the fingerprint of a completed managed key import (backend-namespaced target +
+	// source secret + key material). It lets the controller skip a repeated import and detect a
+	// source/target change. For a GCP KMS import it is written only once the imported version is
+	// verified: ImportedKeyVersion is recorded, readable, and serving the source consensus key.
 	// +optional
 	KeyImported string `json:"keyImported,omitempty"`
+
+	// ImportedKeyVersion is the full Cloud KMS crypto key version resource name produced by a
+	// managed GCP KMS import, as reported by the import pod. It is recorded before the import is
+	// verified (so a restart resumes against the exact version that was created rather than
+	// importing a second one) and is the only import-derived value configured on the signer.
+	// +optional
+	ImportedKeyVersion string `json:"importedKeyVersion,omitempty"`
 }

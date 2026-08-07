@@ -248,13 +248,15 @@ Transit identity.
 :::note[Key provenance]
 When cosmosigner targets a validator, the signer uses the **validator's own consensus key** — with
 the software backend it references the validator's private-key secret, and with Vault
-`uploadGenerated` it imports that same key. When no validator is targeted (a sentry-mode signer over
-regular groups), you must supply the key yourself: set `backend.software.privateKeySecret`, or
-pre-provision the Vault/GCP key. This guarantees the signer signs with exactly the key registered
-on-chain.
+`uploadGenerated` or GCP KMS `import` it imports that same key. When no validator is targeted (a
+sentry-mode signer over regular groups), you must supply the key yourself: set
+`backend.software.privateKeySecret`, or pre-provision the Vault/GCP key. This guarantees the signer
+signs with exactly the key registered on-chain.
 :::
 
 ### Google Cloud KMS
+
+Use `keyVersion` when the consensus key already exists in Cloud KMS:
 
 ```yaml
 cosmosigner:
@@ -264,6 +266,43 @@ cosmosigner:
       keyVersion: projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1
       # credentialsSecret omitted -> Workload Identity / ADC
 ```
+
+To migrate the targeted validator's existing `priv_validator_key.json` into Cloud KMS without
+changing its consensus identity, configure a managed BYOK import instead of `keyVersion`:
+
+```yaml
+cosmosigner:
+  serviceAccountName: cosmosigner   # KSA bound to a Google SA, or set credentialsSecret below
+  backend:
+    gcpKms:
+      import:
+        project: my-project
+        location: global             # optional; defaults to global
+        keyRing: validators
+        key: consensus-key
+        importJob: consensus-import  # optional; defaults to <key>-import
+        protectionLevel: hsm         # optional; software or hsm; defaults to software
+      # credentialsSecret:
+      #   name: gcp-kms-credentials
+      #   key: credentials.json
+```
+
+Managed import is explicit and validator-only. The signer must target a validator that initializes
+genesis, uses `createValidator`, or names an existing `privateKeySecret`; sentry-only signers cannot
+request an import. Cosmopilot mounts only `priv_validator_key.json` into the one-shot import Pod and
+uses the signer's ServiceAccount, image pull secrets, restricted security context, and either
+Workload Identity/ADC or `credentialsSecret`.
+
+The import is break-before-make. Cosmopilot quiesces an existing signer, runs the import once, records
+the exact `cryptoKeyVersion` returned by Cosmosigner, and then reads that same version back until its
+public key is available and matches the source key. Cloud KMS may leave a version in `PENDING_IMPORT`
+after accepting it; a successful import Pod alone is therefore **not** completion. Retain the source
+Secret and all out-of-cluster backups until the import is verified and the signer has rolled out with
+the recorded version. A mismatched key is a hard error and never retargets the validator.
+
+If an ImportJob expires before the import completes, choose a new `importJob` name. Changing the job
+does not change the destination consensus identity; changing `project`, `location`, `keyRing`, or
+`key` selects a different destination and is handled as a managed signer migration.
 
 :::note[Workload Identity]
 When `credentialsSecret` is omitted, the signer authenticates via Application Default Credentials.

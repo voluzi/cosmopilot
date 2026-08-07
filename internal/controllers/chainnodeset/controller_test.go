@@ -19,6 +19,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
@@ -270,6 +271,77 @@ func TestPrepareCosmosignerImportsBootstrapsCreateValidatorLocally(t *testing.T)
 	}, validator))
 	assert.False(t, validator.Spec.RemoteSignerTarget, "the validator must generate and register its key locally before Vault import")
 	assert.NotContains(t, validator.Labels, controllers.LabelCosmosignerTarget)
+}
+
+func TestPrepareCosmosignerImportsAdoptsVaultKeyUploadedByTmKMS(t *testing.T) {
+	backend := appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+		Address: "https://vault.example:8200",
+		KeyName: "val-key",
+		TokenSecret: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token",
+		},
+	}}
+	for _, tc := range []struct {
+		name        string
+		mutateChild func(*appsv1.ChainNode)
+		wantAdopted bool
+	}{
+		{name: "matching owned tmKMS upload", wantAdopted: true},
+		{name: "different Vault key", mutateChild: func(child *appsv1.ChainNode) {
+			child.Spec.Validator.TmKMS.Provider.Hashicorp.Key = "other-key"
+		}},
+		{name: "missing upload proof", mutateChild: func(child *appsv1.ChainNode) {
+			delete(child.Annotations, controllers.AnnotationVaultKeyUploaded)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeSet := cosmosignerValidatorNodeSet(backend)
+			nodeSet.UID = types.UID("nodeset-uid")
+			nodeSet.Spec.Cosmosigner.NodeGroups = nil
+			nodeSet.Spec.Validator = &appsv1.NodeSetValidatorConfig{Init: &appsv1.GenesisInitConfig{ChainID: "test-localnet"}}
+			nodeSet.Spec.Nodes = nil
+			signer := resolveSingleSigner(t, nodeSet)
+			key, err := cometbft.GeneratePrivKey()
+			require.NoError(t, err)
+			source := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: nodeSet.Namespace},
+				Data:       map[string][]byte{privKeyFilename: key},
+			}
+			token := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: nodeSet.Namespace},
+				Data:       map[string][]byte{"token": []byte("token")},
+			}
+			child := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: validatorNodeName(nodeSet, appsv1.ReservedValidatorGroupName, 0), Namespace: nodeSet.Namespace,
+					Annotations: map[string]string{controllers.AnnotationVaultKeyUploaded: controllers.StringValueTrue},
+				},
+				Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+					Hashicorp: &appsv1.TmKmsHashicorpProvider{
+						Address: backend.Vault.Address, Key: backend.Vault.KeyName, UploadGenerated: true,
+						TokenSecret: backend.Vault.TokenSecret,
+					},
+				}}}},
+			}
+			if tc.mutateChild != nil {
+				tc.mutateChild(child)
+			}
+			scheme := newValidatorTestReconciler(t).Scheme
+			require.NoError(t, controllerutil.SetControllerReference(nodeSet, child, scheme))
+			parsed, err := cometbft.LoadPrivKey(key)
+			require.NoError(t, err)
+			clientSet := fakeSignerPods("pubkey (base64): " + parsed.PubKey.Value + "\n")
+			r := gcpImportRecoveryReconciler(t, clientSet, interceptor.Funcs{}, nodeSet, source, token, child)
+
+			adopted, err := r.adoptTmKMSVaultImport(context.Background(), nodeSet, signer, key)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantAdopted, adopted)
+			if tc.wantAdopted {
+				require.Equal(t, backend.Vault.ImportFingerprint(signer.SoftwareKeySecret, key),
+					nodeSet.GetCosmosignerStatus(signer.Name).KeyImported)
+			}
+		})
+	}
 }
 
 func TestPrepareCosmosignerImportsBootstrapsSoftwareKeyLocally(t *testing.T) {

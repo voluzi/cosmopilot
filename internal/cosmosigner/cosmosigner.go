@@ -93,6 +93,12 @@ type Params struct {
 	RaftTLSSecret      *string
 	ServiceAccountName string
 
+	// ImagePullSecrets are applied to the ONE-SHOT key-management pods only (import, pubkey). The
+	// signer StatefulSet deliberately does not carry them: its pod template feeds LifecycleDigest, so
+	// adding a field there would migrate every already-running signer on upgrade. Signer pods pull
+	// through the service account's own imagePullSecrets, as they always have.
+	ImagePullSecrets []corev1.LocalObjectReference
+
 	Backend Backend
 
 	// Labels are stamped on every owned resource and on signer pods.

@@ -1,6 +1,8 @@
 package cosmosigner
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -29,10 +31,34 @@ type VaultBackend struct {
 	SkipCertificateVerify bool
 }
 
-// GcpBackend holds the GCP KMS backend configuration.
+// GcpBackend holds the GCP KMS backend configuration. KeyVersion is the version the signer signs
+// with; for a controller-managed import it is empty until the import resolves it.
 type GcpBackend struct {
 	KeyVersion        string
+	Import            *GcpImport
 	CredentialsSecret *corev1.SecretKeySelector
+}
+
+// GcpImport are the Cloud KMS destination coordinates of a controller-managed BYOK import. They are
+// passed as flags to the one-shot `cosmosigner import` pod ONLY and never reach the signer
+// StatefulSet, whose backend is configured purely from the resolved KeyVersion — so resolving an
+// import does not perturb an existing signer's pod template or lifecycle digest.
+type GcpImport struct {
+	Project         string
+	Location        string
+	KeyRing         string
+	Key             string
+	ImportJob       string
+	ProtectionLevel string
+}
+
+// CryptoKeyName is the destination CryptoKey resource name. Every version the import pod reports
+// must live under it, otherwise the controller would persist a version pointing somewhere else.
+func (g *GcpImport) CryptoKeyName() string {
+	if g == nil {
+		return ""
+	}
+	return fmt.Sprintf("projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s", g.Project, g.Location, g.KeyRing, g.Key)
 }
 
 const (

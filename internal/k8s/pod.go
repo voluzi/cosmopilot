@@ -23,12 +23,12 @@ import (
 )
 
 type PodHelper struct {
-	client     *kubernetes.Clientset
+	client     kubernetes.Interface
 	restConfig *rest.Config
 	pod        *corev1.Pod
 }
 
-func NewPodHelper(client *kubernetes.Clientset, cfg *rest.Config, pod *corev1.Pod) *PodHelper {
+func NewPodHelper(client kubernetes.Interface, cfg *rest.Config, pod *corev1.Pod) *PodHelper {
 	return &PodHelper{
 		client:     client,
 		restConfig: cfg,

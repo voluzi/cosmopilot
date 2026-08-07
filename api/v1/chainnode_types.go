@@ -296,11 +296,21 @@ type ChainNodeStatus struct {
 	// +optional
 	CosmosignerMigration *CosmosignerMigrationStatus `json:"cosmosignerMigration,omitempty"`
 
-	// CosmosignerKeyImported is the fingerprint of a completed Vault key import (Vault target + source
-	// secret + key material). It lets the controller skip a repeated import and detect a source/target
-	// change without trusting user-editable metadata. Not meant to be set by hand.
+	// CosmosignerKeyImported is the fingerprint of a completed managed key import (backend-namespaced
+	// target + source secret + key material). It lets the controller skip a repeated import and detect
+	// a source/target change without trusting user-editable metadata. For a GCP KMS import it is
+	// written only once the imported version is verified: CosmosignerImportedKeyVersion is recorded,
+	// readable, and serving the source consensus key. Not meant to be set by hand.
 	// +optional
 	CosmosignerKeyImported string `json:"cosmosignerKeyImported,omitempty"`
+
+	// CosmosignerImportedKeyVersion is the full Cloud KMS crypto key version resource name produced by
+	// a managed GCP KMS import, as reported by the import pod. It is recorded before the import is
+	// verified (so a restart resumes against the exact version that was created rather than importing
+	// a second one) and is the only import-derived value configured on the signer. Not meant to be set
+	// by hand.
+	// +optional
+	CosmosignerImportedKeyVersion string `json:"cosmosignerImportedKeyVersion,omitempty"`
 
 	// CosmosignerReplicas records the raft replica count the managed signer was rolled out with,
 	// captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path
