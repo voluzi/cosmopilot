@@ -534,11 +534,19 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}
 		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
 
-		// Mark the chain as established and record the applied signer identity/public key.
-		cn.Status.ChainID = "test-chain-1"
-		cn.Status.CosmosignerAppliedDigest = cn.CosmosignerSigningDigest()
-		cn.Status.CosmosignerPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-		Expect(Framework().Client().Status().Update(Framework().Context(), cn)).To(Succeed())
+		// Mark the chain as established and record the applied signer identity/public key. The
+		// controller adds its cleanup finalizer right after creation, so re-fetch and retry on the
+		// resulting stale-write conflict.
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-chain-1"
+			fresh.Status.CosmosignerAppliedDigest = fresh.CosmosignerSigningDigest()
+			fresh.Status.CosmosignerPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
 
 		// Changing the Vault key is admitted for break-before-make migration.
 		Eventually(func() error {
@@ -582,8 +590,14 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 			},
 		}
 		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
-		cn.Status.ChainID = "test-chain-1"
-		Expect(Framework().Client().Status().Update(Framework().Context(), cn)).To(Succeed())
+		Eventually(func() error {
+			fresh := &appsv1.ChainNode{}
+			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
+				return err
+			}
+			fresh.Status.ChainID = "test-chain-1"
+			return Framework().Client().Status().Update(Framework().Context(), fresh)
+		}).Should(Succeed())
 
 		// Switch to cosmosigner pointing at the same Vault transit key (default mount, no namespace).
 		Eventually(func() error {
