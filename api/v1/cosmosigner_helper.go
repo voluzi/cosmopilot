@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -208,13 +209,14 @@ func (b *CosmosignerVaultBackend) LegacyImportTargetFingerprint(sourceSecret str
 
 // ImportFingerprint returns the full fingerprint of a completed key import:
 // "<targetFingerprint>.<materialHash>". A change to the Vault target, the source secret name, or the
-// key BYTES (an in-place Secret update) produces a different value and so triggers a fresh import —
-// preventing Vault from silently holding a stale key while genesis/signing flows consume new bytes.
+// canonical key JSON (an in-place Secret update to a different key) produces a different value and so
+// triggers a fresh import. JSON whitespace and object-key order are ignored: they do not change the
+// consensus identity and must not be treated as an unsafe key rotation.
 // The two-part form lets the absent-source fast-path match on the target half alone (see
 // ImportTargetFingerprint). Both controllers stamp this value into controller-owned status;
 // sharing one implementation keeps their import protocols in lockstep.
 func (b *CosmosignerVaultBackend) ImportFingerprint(sourceSecret string, keyMaterial []byte) string {
-	return b.ImportTargetFingerprint(sourceSecret) + "." + utils.Sha256(string(keyMaterial))
+	return b.ImportTargetFingerprint(sourceSecret) + "." + importKeyMaterialHash(keyMaterial)
 }
 
 // LegacyImportFingerprint reproduces the full import proof written before Vault key versions were
@@ -385,7 +387,7 @@ func (b *CosmosignerGcpKmsBackend) ImportFingerprint(sourceSecret string, keyMat
 	if target == "" {
 		return ""
 	}
-	return target + "." + utils.Sha256(string(keyMaterial))
+	return target + "." + importKeyMaterialHash(keyMaterial)
 }
 
 // ImportRecordMatchesTarget reports whether record proves an import into this Cloud KMS destination
@@ -400,7 +402,12 @@ func (b *CosmosignerGcpKmsBackend) ImportRecordMatchesTarget(record, sourceSecre
 // API version.
 func (b *CosmosignerGcpKmsBackend) ImportRecordMatches(record, sourceSecret string, keyMaterial []byte) bool {
 	want := b.ImportFingerprint(sourceSecret, keyMaterial)
-	return want != "" && record == want
+	if want != "" && record == want {
+		return true
+	}
+	// Compatibility with status written before key JSON was canonicalized.
+	target := b.ImportTargetFingerprint(sourceSecret)
+	return target != "" && record == target+"."+utils.Sha256(string(keyMaterial))
 }
 
 // ImportRecordMatchesTarget reports whether a recorded key import belongs to the given import target
@@ -428,7 +435,25 @@ func (b *CosmosignerVaultBackend) ImportRecordMatches(record, sourceSecret strin
 	if record == b.ImportFingerprint(sourceSecret, keyMaterial) {
 		return true
 	}
+	// Compatibility with status written before key JSON was canonicalized.
+	if record == b.ImportTargetFingerprint(sourceSecret)+"."+utils.Sha256(string(keyMaterial)) {
+		return true
+	}
 	return b.GetKeyVersion() == 1 && record == b.LegacyImportFingerprint(sourceSecret, keyMaterial)
+}
+
+// importKeyMaterialHash canonicalizes JSON before hashing it. CometBFT private-validator keys are
+// validated by both controllers before these helpers are used; canonicalization here only removes
+// serialization differences such as whitespace and object-key order. Non-JSON input is retained for
+// backwards-compatible helper behavior and unit fixtures.
+func importKeyMaterialHash(keyMaterial []byte) string {
+	var value any
+	if err := json.Unmarshal(keyMaterial, &value); err == nil {
+		if canonical, err := json.Marshal(value); err == nil {
+			return utils.Sha256(string(canonical))
+		}
+	}
+	return utils.Sha256(string(keyMaterial))
 }
 
 // CosmosignerValidatorTargetedIdentity returns the signer's effective signing identity ONLY when it

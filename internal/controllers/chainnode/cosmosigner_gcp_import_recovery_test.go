@@ -142,9 +142,10 @@ func TestGcpImportPodOutlivesFailedVersionPersist(t *testing.T) {
 		"the import pod is cleaned up once its version is durably persisted")
 }
 
-// TestGcpImportPodSurvivesUntilVersionPersisted pins the ORDER the recovery protocol depends on. The
-// pod may only be deleted after the version it reported is durably persisted; deleting it first is
-// what makes a crash in that window import the key twice.
+// TestGcpImportPodSurvivesUntilVersionPersisted pins the persistence boundary the recovery protocol
+// depends on. The pod may only be deleted after a status write carrying its reported version;
+// deleting it first is what makes a crash in that window import the key twice. The test deliberately
+// does not require the version and verified fingerprint to be separate status writes.
 func TestGcpImportPodSurvivesUntilVersionPersisted(t *testing.T) {
 	chainNode := gcpImportNode()
 	scheme := gcpImportTestScheme(t)
@@ -159,10 +160,10 @@ func TestGcpImportPodSurvivesUntilVersionPersisted(t *testing.T) {
 		WithObjects(chainNode.DeepCopy(), source).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, cl client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-				// The version write is the one that ends the window: it is the first status write that
-				// records a key version and it precedes the verified-import record.
+				// Any status write carrying the version ends the recovery window, whether or not a future
+				// implementation persists the verified fingerprint in the same update.
 				status := obj.(*appsv1.ChainNode).Status
-				if podLivedThroughVersionWrite == nil && status.CosmosignerImportedKeyVersion != "" && status.CosmosignerKeyImported == "" {
+				if podLivedThroughVersionWrite == nil && status.CosmosignerImportedKeyVersion != "" {
 					lived := signerPodExists(t, clientSet, chainNode.Namespace, gcpImportPodName)
 					podLivedThroughVersionWrite = &lived
 				}

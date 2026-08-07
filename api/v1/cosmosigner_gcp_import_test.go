@@ -226,6 +226,24 @@ func TestGcpImportFingerprintIsBackendNamespaced(t *testing.T) {
 	}
 }
 
+func TestGcpImportFingerprintIgnoresEquivalentJSONSerialization(t *testing.T) {
+	gcp := gcpImportSigner().Backend.GcpKMS
+	compact := []byte(`{"address":"AA","pub_key":{"type":"tendermint/PubKeyEd25519","value":"pub"},"priv_key":{"type":"tendermint/PrivKeyEd25519","value":"priv"}}`)
+	reformatted := []byte(`{
+  "priv_key": {"value": "priv", "type": "tendermint/PrivKeyEd25519"},
+  "pub_key": {"value": "pub", "type": "tendermint/PubKeyEd25519"},
+  "address": "AA"
+}`)
+
+	record := gcp.ImportFingerprint("val-priv-key", compact)
+	if record != gcp.ImportFingerprint("val-priv-key", reformatted) {
+		t.Fatal("equivalent private-validator key JSON must have the same import fingerprint")
+	}
+	if !gcp.ImportRecordMatches(record, "val-priv-key", reformatted) {
+		t.Fatal("reserializing the same consensus key must not be treated as a key rotation")
+	}
+}
+
 // TestGcpImportSigningIdentityStability protects two invariants at once: existing pre-provisioned
 // GCP signers keep their exact identity string (and therefore their persisted digests and
 // lifecycle fingerprints), and a managed import's identity is derived from the destination

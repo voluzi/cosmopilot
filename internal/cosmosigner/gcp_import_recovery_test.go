@@ -2,6 +2,7 @@ package cosmosigner
 
 import (
 	"context"
+	stderrors "errors"
 	"testing"
 	"time"
 
@@ -53,10 +54,24 @@ func importedVersion(params Params, ordinal string) string {
 	return params.Backend.GCP.Import.CryptoKeyName() + "/cryptoKeyVersions/" + ordinal
 }
 
+// podLogResponse is one container-log read: either what the pod printed, or the failure a controller
+// gets when the logs of a terminated pod can no longer be read.
+type podLogResponse struct {
+	out string
+	err error
+}
+
 // fakeSignerPods stands in for the kubelet and for the cosmosigner CLI: a one-shot pod succeeds the
 // moment it is created, and every container log read returns logs. What is under test is what the
 // controller does with the pod, not what the binary does inside it.
 func fakeSignerPods(logs string, objects ...runtime.Object) *k8sfake.Clientset {
+	return fakeSignerPodLogs([]podLogResponse{{out: logs}}, objects...)
+}
+
+// fakeSignerPodLogs serves one response per container-log read, in order, repeating the last once the
+// sequence runs out. It lets a test tell apart what a pod that ALREADY ran reported from what its
+// replacement reports — the distinction the failed-import recovery path turns on.
+func fakeSignerPodLogs(responses []podLogResponse, objects ...runtime.Object) *k8sfake.Clientset {
 	clientSet := k8sfake.NewSimpleClientset(objects...)
 	clientSet.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		pod := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod).DeepCopy()
@@ -64,11 +79,17 @@ func fakeSignerPods(logs string, objects ...runtime.Object) *k8sfake.Clientset {
 		err := clientSet.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), pod, action.GetNamespace())
 		return true, pod, err
 	})
+	reads := 0
 	clientSet.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "log" {
 			return false, nil, nil
 		}
-		return true, &runtime.Unknown{Raw: []byte(logs)}, nil
+		next := responses[min(reads, len(responses)-1)]
+		reads++
+		if next.err != nil {
+			return true, nil, next.err
+		}
+		return true, &runtime.Unknown{Raw: []byte(next.out)}, nil
 	})
 	return clientSet
 }
@@ -196,6 +217,72 @@ func TestImportKeyRecoversFailedImportPod(t *testing.T) {
 	}
 	if deleted := podVerbs(clientSet, "delete"); deleted != 0 {
 		t.Fatalf("recovering a failed import deleted the evidence pod %d time(s)", deleted)
+	}
+}
+
+// TestImportKeyRetriesFailedImportPodWithoutUsableVersion is the anti-wedge half of the same rule. A
+// Failed pod is only evidence while its logs name a usable version of the CURRENT destination;
+// without one there is nothing to lose by running the import again, and re-reading the same unusable
+// output every reconcile would leave the import stuck forever with no operator recourse.
+func TestImportKeyRetriesFailedImportPodWithoutUsableVersion(t *testing.T) {
+	params := gcpImportParams()
+	otherKey := "projects/example-project/locations/europe-west1/keyRings/validators/cryptoKeys/other"
+	for _, tc := range []struct {
+		name string
+		read podLogResponse
+	}{
+		{"no version line", podLogResponse{out: "Error: import job consensus-import is not enabled yet\n"}},
+		{"empty logs", podLogResponse{out: ""}},
+		{"unreadable logs", podLogResponse{err: stderrors.New("container log unavailable")}},
+		{"version of another crypto key", podLogResponse{out: "imported key version: " + otherKey + "/cryptoKeyVersions/1\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := importOwner()
+			scheme := importPodScheme(t)
+			retried := importedVersion(params, "4")
+			existing := ownedImportPod(t, owner, scheme, params, corev1.PodFailed)
+			clientSet := fakeSignerPodLogs([]podLogResponse{tc.read, {out: "imported key version: " + retried + "\n"}}, existing)
+
+			runner := JobRunner{Client: clientSet, Scheme: scheme, Owner: owner, Params: params}
+			got, err := runner.ImportKey(context.Background(), importSourceSecretName)
+			if err != nil {
+				t.Fatalf("a failed import carrying no usable version must be retried, not wedged: %v", err)
+			}
+			if got != retried {
+				t.Fatalf("ImportKey() = %q, want the version the replacement pod reported (%q)", got, retried)
+			}
+			if created := podVerbs(clientSet, "create"); created != 1 {
+				t.Fatalf("the unusable pod must be replaced exactly once, created %d pod(s)", created)
+			}
+			if deleted := podVerbs(clientSet, "delete"); deleted != 1 {
+				t.Fatalf("the unusable pod must be deleted before the retry, deleted %d time(s)", deleted)
+			}
+		})
+	}
+}
+
+// TestImportKeyNeverReplacesSucceededImportPod keeps the retry strictly scoped to pods that failed. A
+// pod that EXITED ZERO reported an accepted import whatever its logs turned out to say, so replacing
+// it would add a second Cloud KMS version; the unusable output is surfaced as an error instead.
+func TestImportKeyNeverReplacesSucceededImportPod(t *testing.T) {
+	owner := importOwner()
+	scheme := importPodScheme(t)
+	params := gcpImportParams()
+	existing := ownedImportPod(t, owner, scheme, params, corev1.PodSucceeded)
+	clientSet := fakeSignerPodLogs([]podLogResponse{
+		{out: "verified: backend public key matches the source file\n"},
+		{out: "imported key version: " + importedVersion(params, "4") + "\n"},
+	}, existing)
+
+	runner := JobRunner{Client: clientSet, Scheme: scheme, Owner: owner, Params: params}
+	if got, err := runner.ImportKey(context.Background(), importSourceSecretName); err == nil {
+		t.Fatalf("a succeeded pod with no readable version must be reported, got version %q", got)
+	}
+	if created := podVerbs(clientSet, "create"); created != 0 {
+		t.Fatalf("a succeeded import pod was replaced by %d new pod(s); each one is another Cloud KMS crypto key version", created)
+	}
+	if deleted := podVerbs(clientSet, "delete"); deleted != 0 {
+		t.Fatalf("a succeeded import pod was deleted %d time(s) before its result could be persisted", deleted)
 	}
 }
 

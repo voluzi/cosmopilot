@@ -2126,8 +2126,17 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return true, false, nil
 	}
 
+	// The import runs as a one-shot pod whose logs the runner scrapes, which needs a clientset the
+	// controller-runtime client cannot provide. Without it the runner would panic on a nil interface
+	// after the signer has already been scaled to zero, so fail loudly while the state is still
+	// recoverable — matching the managed GCP KMS path.
+	clientSet := r.cosmosignerKubernetesClient()
+	if clientSet == nil {
+		return false, false, fmt.Errorf("cosmosigner %q Vault uploadGenerated import requires a Kubernetes clientset", s.Name)
+	}
+
 	runner := cosmosigner.JobRunner{
-		Client: r.cosmosignerKubernetesClient(),
+		Client: clientSet,
 		Scheme: r.Scheme,
 		Owner:  nodeSet,
 		Params: params,

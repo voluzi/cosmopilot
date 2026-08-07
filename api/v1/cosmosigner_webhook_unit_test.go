@@ -82,6 +82,24 @@ func TestVaultImportFingerprintAcceptsLegacyFormatOnlyForVersionOne(t *testing.T
 	}
 }
 
+func TestVaultImportFingerprintIgnoresEquivalentJSONSerialization(t *testing.T) {
+	vault := &CosmosignerVaultBackend{Address: "https://vault.example", KeyName: "validator"}
+	compact := []byte(`{"address":"AA","pub_key":{"type":"tendermint/PubKeyEd25519","value":"pub"},"priv_key":{"type":"tendermint/PrivKeyEd25519","value":"priv"}}`)
+	reformatted := []byte(`{
+  "priv_key": {"value": "priv", "type": "tendermint/PrivKeyEd25519"},
+  "pub_key": {"value": "pub", "type": "tendermint/PubKeyEd25519"},
+  "address": "AA"
+}`)
+
+	record := vault.ImportFingerprint("val-priv-key", compact)
+	if record != vault.ImportFingerprint("val-priv-key", reformatted) {
+		t.Fatal("equivalent private-validator key JSON must have the same Vault import fingerprint")
+	}
+	if !vault.ImportRecordMatches(record, "val-priv-key", reformatted) {
+		t.Fatal("reserializing the same consensus key must not trigger a Vault re-import")
+	}
+}
+
 func TestImplicitVaultImportRequiresInitialKeyVersion(t *testing.T) {
 	tokenSecret := &corev1.SecretKeySelector{
 		LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token",

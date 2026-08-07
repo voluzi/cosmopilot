@@ -222,8 +222,8 @@ func (j JobRunner) importDeadline() int64 {
 }
 
 // runJob creates a one-shot pod, waits for it to succeed and returns its logs. When retainSucceeded
-// is true, an existing owned succeeded pod is resumed and a freshly succeeded pod is retained so the
-// caller can durably persist its result before cleanup.
+// is true, an existing owned pod that already carries a result is resumed instead of replaced, and a
+// freshly succeeded pod is retained so the caller can durably persist its result before cleanup.
 func (j JobRunner) runJob(ctx context.Context, pod *corev1.Pod, nameSuffix string, deadline int64, retainSucceeded bool) (string, error) {
 	if err := controllerutil.SetControllerReference(j.Owner, pod, j.Scheme); err != nil {
 		return "", err
@@ -243,16 +243,28 @@ func (j JobRunner) runJob(ctx context.Context, pod *corev1.Pod, nameSuffix strin
 			// logs would wedge the new destination migration — so we fall through to delete+recreate.
 			existingHelper := k8s.NewPodHelper(j.Client, nil, existing)
 			switch existing.Status.Phase {
-			case corev1.PodSucceeded, corev1.PodFailed:
-				// Even a Failed pod may have created the Cloud KMS version before a later verification
-				// step failed. Its logs are durable evidence; ImportKey validates whether they contain a
-				// usable version and the controllers verify that version against the source key.
+			case corev1.PodSucceeded:
+				// A succeeded pod is the record of a version Cloud KMS accepted, whatever its logs say:
+				// re-running the import would create a second version, so the logs are returned as-is and
+				// the caller reports an unusable result rather than importing again.
 				return existingHelper.GetLogs(ctx, containerName)
+			case corev1.PodFailed:
+				// A Failed pod may still have created the version before a later verification step failed,
+				// and then its logs are the only record of it. But only logs that actually NAME a usable
+				// version of the current destination are that record: a pod that died before importing
+				// (and logs that can no longer be read) would otherwise be re-read verbatim on every
+				// reconcile, failing the same way forever with no way out. Nothing recoverable means
+				// nothing to lose, so fall through to delete+recreate and retry the import — re-importing
+				// the same source bytes only ever adds another version of the same consensus identity.
+				if logs, logErr := existingHelper.GetLogs(ctx, containerName); logErr == nil && j.recoverableImportLogs(logs) {
+					return logs, nil
+				}
 			default:
 				// Never replace an in-flight GCP import: Cloud KMS may already have accepted the wrapped
-				// key even though the Pod has not reached a terminal phase. Wait for this exact pod.
+				// key even though the Pod has not reached a terminal phase. Wait for this exact pod, and
+				// on timeout surface the wait error unless the pod already reported a usable version.
 				if err := existingHelper.WaitForPodSucceeded(ctx, jobWaitTimeout(deadline)); err != nil {
-					if logs, logErr := existingHelper.GetLogs(ctx, containerName); logErr == nil && logs != "" {
+					if logs, logErr := existingHelper.GetLogs(ctx, containerName); logErr == nil && j.recoverableImportLogs(logs) {
 						return logs, nil
 					}
 					return "", err
@@ -310,6 +322,19 @@ func (j JobRunner) runJob(ctx context.Context, pod *corev1.Pod, nameSuffix strin
 		}
 	}
 	return ph.GetLogs(ctx, containerName)
+}
+
+// recoverableImportLogs reports whether the output of an import pod that did NOT succeed still names
+// a crypto key version of the current destination — i.e. whether re-running the import would risk
+// creating a second version of an already-imported consensus key. It applies the same containment
+// check the caller does (ParseImportedKeyVersion), so evidence accepted here is evidence the caller
+// can act on.
+func (j JobRunner) recoverableImportLogs(logs string) bool {
+	if j.Params.Backend.GCP == nil || j.Params.Backend.GCP.Import == nil {
+		return false
+	}
+	_, err := ParseImportedKeyVersion(logs, j.Params.Backend.GCP.Import.CryptoKeyName())
+	return err == nil
 }
 
 // ImportKey runs `cosmosigner import` to import an existing priv_validator_key.json (held in
