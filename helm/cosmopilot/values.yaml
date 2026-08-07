@@ -3,7 +3,7 @@ nodeUtilsImage: ghcr.io/voluzi/node-utils:2.10.0
 cosmoGuardImage: ghcr.io/voluzi/cosmoguard:4.0.3
 cosmoseedImage: ghcr.io/voluzi/cosmoseed:0.11.0
 cosmosignerImage: ghcr.io/voluzi/cosmosigner:0.2.1
-dataExporterImage: ghcr.io/voluzi/dataexporter:2.0.0
+dataExporterImage: ghcr.io/voluzi/dataexporter:2.0.1
 replicas: 1
 imagePullSecrets: []
 workerCount: 10

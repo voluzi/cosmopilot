@@ -51,7 +51,7 @@ require the discovery-gate command introduced in 2.10.0 and cannot start with an
 
 ### `dataExporterImage`
 - **Description**: The container image of Data Exporter (with version tag included) used by snapshot tarball upload and deletion Jobs.
-- **Default**: `ghcr.io/voluzi/dataexporter:2.0.0`
+- **Default**: `ghcr.io/voluzi/dataexporter:2.0.1`
 
 ### `imagePullSecrets`
 - **Description**: Secrets for pulling images from private repositories.

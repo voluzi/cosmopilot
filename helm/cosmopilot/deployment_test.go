@@ -22,8 +22,8 @@ func TestDataExporterImageDefault(t *testing.T) {
 	if err := yaml.Unmarshal(valuesSource, &values); err != nil {
 		t.Fatalf("decode values: %v", err)
 	}
-	if values.DataExporterImage != "ghcr.io/voluzi/dataexporter:2.0.0" {
-		t.Errorf("dataExporterImage = %q, want %q", values.DataExporterImage, "ghcr.io/voluzi/dataexporter:2.0.0")
+	if values.DataExporterImage != "ghcr.io/voluzi/dataexporter:2.0.1" {
+		t.Errorf("dataExporterImage = %q, want %q", values.DataExporterImage, "ghcr.io/voluzi/dataexporter:2.0.1")
 	}
 }
 

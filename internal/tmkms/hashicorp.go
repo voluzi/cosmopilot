@@ -21,7 +21,7 @@ const (
 
 	tokenRenewerCpu        = "100m"
 	tokenRenewerMemory     = "64Mi"
-	vaultTokenRenewerImage = "ghcr.io/voluzi/vault-renewer:1.0.0@sha256:55532cbf4c7a7c5038e1b7cf759fa5748216075719afde776226a4025cb8e579"
+	vaultTokenRenewerImage = "ghcr.io/voluzi/vault-renewer:1.0.1"
 )
 
 var (
