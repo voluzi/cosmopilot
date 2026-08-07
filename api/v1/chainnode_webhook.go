@@ -368,10 +368,13 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			case oldHasInit && newHasInit:
 				// A managed signer migration may intentionally change signing keys. When cosmosigner is
 				// involved, keep the non-signing genesis configuration immutable while leaving the
-				// on-chain key choice to the user.
+				// on-chain key choice to the user. A ChainNodeSet-generated child never carries
+				// .spec.cosmosigner — the signer belongs to its parent and the child is marked with
+				// .spec.remoteSignerTarget — so both shapes must be recognised here, otherwise a
+				// nodeset validator can never migrate off tmKMS once genesis exists.
 				oldFP := old.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
 				newFP := chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
-				if old.Spec.Cosmosigner != nil || chainNode.Spec.Cosmosigner != nil {
+				if old.IsSignerTarget() || chainNode.IsSignerTarget() {
 					oldFP = genesisConfigurationFingerprint(old.Spec.Validator.Init, old.Spec.Validator.Info, old.Spec.Validator.GetAccountPrefix(), old.Spec.Validator.GetValPrefix(), old.Spec.Validator.GetAccountHDPath())
 					newFP = genesisConfigurationFingerprint(chainNode.Spec.Validator.Init, chainNode.Spec.Validator.Info, chainNode.Spec.Validator.GetAccountPrefix(), chainNode.Spec.Validator.GetValPrefix(), chainNode.Spec.Validator.GetAccountHDPath())
 				}

@@ -233,6 +233,60 @@ func TestChainNodeValidateRejectsInitChangeAfterCreation(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestChainNodeValidateAllowsSignerMigrationOnGeneratedValidator covers the ChainNodeSet-generated
+// validator child: it never carries .spec.cosmosigner (the signer belongs to its parent) and is marked
+// with .spec.remoteSignerTarget instead. Dropping its tmKMS sidecar for that managed signer changes the
+// signing key choice, which must be admitted for the same reason it is on a standalone ChainNode — while
+// the non-signing genesis configuration stays immutable.
+func TestChainNodeValidateAllowsSignerMigrationOnGeneratedValidator(t *testing.T) {
+	init := func() *GenesisInitConfig {
+		return &GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1unibi"}, StakeAmount: "1unibi"}
+	}
+	// .spec.remoteSignerTarget is only accepted on a generated child, so the fixture carries the
+	// controller owner reference the ChainNodeSet controller sets.
+	ownedByNodeSet := []metav1.OwnerReference{{
+		APIVersion: GroupVersion.String(), Kind: "ChainNodeSet", Name: "cns",
+		UID: "11111111-1111-1111-1111-111111111111", Controller: ptr.To(true),
+	}}
+	tmkmsChild := func() *ChainNode {
+		return &ChainNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "cns-validator", OwnerReferences: ownedByNodeSet},
+			Spec: ChainNodeSpec{Validator: &ValidatorConfig{
+				Init: init(),
+				TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
+					Address:     "https://vault:8200",
+					Key:         "myval",
+					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
+				}}},
+			}},
+			Status: ChainNodeStatus{ChainID: "test-localnet"},
+		}
+	}
+
+	// tmKMS sidecar -> parent-owned cosmosigner: the child drops TmKMS and gains the target marker.
+	migrated := tmkmsChild()
+	migrated.Status = ChainNodeStatus{}
+	migrated.Spec.Validator.TmKMS = nil
+	migrated.Spec.RemoteSignerTarget = true
+	_, err := migrated.Validate(tmkmsChild())
+	assert.NoError(t, err)
+
+	// The relaxation is scoped to the signing key: genesis configuration stays immutable.
+	changedStake := migrated.DeepCopy()
+	changedStake.Spec.Validator.Init.StakeAmount = "2unibi"
+	_, err = changedStake.Validate(tmkmsChild())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "immutable after genesis")
+
+	// Without either signer marker the signing key stays immutable: dropping tmKMS for a local key is
+	// still rejected, so this does not become a blanket escape hatch.
+	local := migrated.DeepCopy()
+	local.Spec.RemoteSignerTarget = false
+	_, err = local.Validate(tmkmsChild())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "immutable after genesis")
+}
+
 // TestChainNodeValidateRejectsInitChangeNoWebhook verifies the no-webhook reconcile path (Validate with
 // old == nil): a post-genesis .validator.init change is rejected by diffing the current spec against the
 // genesis fingerprint recorded in the object's own status. Without a recorded digest (legacy/upgrade)
