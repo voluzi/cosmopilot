@@ -11,8 +11,8 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/voluzi/cosmopilot/v2/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/v2/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 )
 
 func (a *App) buildCreateValidatorPod(

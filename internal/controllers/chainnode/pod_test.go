@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 func TestPodSpecHash(t *testing.T) {

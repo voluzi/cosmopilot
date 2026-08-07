@@ -6,7 +6,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 // RetainedStateRequired reports whether an established signer must still have every locked Raft PVC.

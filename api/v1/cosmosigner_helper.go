@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 
-	"github.com/voluzi/cosmopilot/v2/pkg/utils"
+	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
 // GetReplicas returns the configured number of signer replicas, defaulting to

@@ -8,7 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
 )
 
 func TestParsePublicKeyOutput(t *testing.T) {

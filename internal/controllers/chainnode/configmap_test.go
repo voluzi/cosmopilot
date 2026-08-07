@@ -9,8 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 )
 
 func TestConfigGenerationCacheKeyIncludesAppEnv(t *testing.T) {

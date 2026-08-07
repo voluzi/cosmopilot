@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 )
 
 func TestNewAppPropagatesStandaloneChainNodeEnvWithoutAliasing(t *testing.T) {

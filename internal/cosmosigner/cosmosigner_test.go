@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
 )
 
 func testParams() Params {

@@ -14,11 +14,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
-	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
 )
 
 func (r *Reconciler) ensureValidator(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {

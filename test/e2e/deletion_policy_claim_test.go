@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 // These are plain Go tests rather than Ginkgo specs: the decision they cover is what the reservation

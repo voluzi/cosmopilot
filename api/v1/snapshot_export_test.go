@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	"github.com/voluzi/cosmopilot/v2/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v3/pkg/dataexporter"
 )
 
 func TestSnapshotExportStatusDeepCopyPreservesDeleteRetryState(t *testing.T) {

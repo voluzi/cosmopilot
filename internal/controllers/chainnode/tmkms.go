@@ -8,11 +8,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
-	"github.com/voluzi/cosmopilot/v2/internal/tmkms"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/tmkms"
 )
 
 func (r *Reconciler) ensureTmKMSConfig(ctx context.Context, chainNode *appsv1.ChainNode) error {

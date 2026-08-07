@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/voluzi/cosmopilot/v2/pkg/proxy"
+	"github.com/voluzi/cosmopilot/v3/pkg/proxy"
 )
 
 type blockingSignerPeerResolver struct {

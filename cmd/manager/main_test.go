@@ -15,11 +15,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers/chainnodeset"
-	"github.com/voluzi/cosmopilot/v2/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers/chainnode"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers/chainnodeset"
+	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
 )
 
 func TestRootProtectionReadinessAllowsStandbyBeforeLeadership(t *testing.T) {

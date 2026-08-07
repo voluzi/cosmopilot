@@ -25,12 +25,12 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v2/internal/controllers"
-	chainnodecontroller "github.com/voluzi/cosmopilot/v2/internal/controllers/chainnode"
-	managedcosmosigner "github.com/voluzi/cosmopilot/v2/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v2/test/e2e/apps"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	chainnodecontroller "github.com/voluzi/cosmopilot/v3/internal/controllers/chainnode"
+	managedcosmosigner "github.com/voluzi/cosmopilot/v3/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v3/test/e2e/apps"
 )
 
 var _ = Describe("ChainNodeSet Cosmosigner", func() {

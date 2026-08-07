@@ -8,7 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cosmopilotv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	cosmopilotv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 const (

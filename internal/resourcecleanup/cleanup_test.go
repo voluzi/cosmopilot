@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
 func TestRootOwnerForChainNodeSetChild(t *testing.T) {
