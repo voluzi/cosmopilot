@@ -433,7 +433,7 @@ func (t TestApp) BuildChainNodeWithTmKMS(namespace string, tmkmsConfig TmKMSConf
 // validator signs through a TMKMS Vault sidecar. This is the pre-migration shape of a set that later
 // moves onto a Cosmopilot-managed cosmosigner over the same Vault key.
 func (t TestApp) BuildChainNodeSetWithTmKMS(namespace string, tmkmsConfig TmKMSConfig) *appsv1.ChainNodeSet {
-	cns := t.BuildChainNodeSet(namespace, 0)
+	cns := t.BuildChainNodeSet(namespace, 1)
 	cns.Spec.Validator.TmKMS = t.tmKMS(tmkmsConfig)
 	return cns
 }
