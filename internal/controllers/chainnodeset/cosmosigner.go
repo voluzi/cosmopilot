@@ -1343,6 +1343,11 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 		} else if st != nil && cosmosignerImportComplete(s.Spec, st.KeyImported, st.ImportedKeyVersion, s.SoftwareKeySecret, keyMaterial) {
 			continue
 		}
+		if adopted, err := r.adoptTmKMSVaultImport(ctx, nodeSet, s, keyMaterial); err != nil {
+			return nil, false, err
+		} else if adopted {
+			continue
+		}
 
 		params, ok := prepared[s.Name]
 		if !ok {
@@ -1367,6 +1372,52 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 		}
 	}
 	return blocked, true, nil
+}
+
+// adoptTmKMSVaultImport recognizes a break-before-make migration from a legacy tmKMS HashiCorp
+// sidecar to a managed Vault cosmosigner over the exact same Transit key. tmKMS already uploaded the
+// validator's local key and records that fact on the generated child. Adoption is allowed only while
+// the source Secret is retained, because the Vault key is read back and compared to that source before
+// the durable import record is written; without the source, identity continuity cannot be proven.
+func (r *Reconciler) adoptTmKMSVaultImport(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, keyMaterial []byte) (bool, error) {
+	if !s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) || len(keyMaterial) == 0 || s.ValidatorGroup == "" {
+		return false, nil
+	}
+	child := &appsv1.ChainNode{}
+	name := validatorNodeName(nodeSet, s.ValidatorGroup, 0)
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, child); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !metav1.IsControlledBy(child, nodeSet) ||
+		child.Annotations[controllers.AnnotationVaultKeyUploaded] != controllers.StringValueTrue ||
+		!child.ValidatorResolvesSigningIdentity(s.Identity()) ||
+		child.Spec.Validator == nil || child.Spec.Validator.TmKMS == nil ||
+		child.Spec.Validator.TmKMS.Provider.Hashicorp == nil {
+		return false, nil
+	}
+	h := child.Spec.Validator.TmKMS.Provider.Hashicorp
+	expected, err := cosmosigner.PublicKeyFromSecret(ctx, r.Client, nodeSet.GetNamespace(), s.SoftwareKeySecret)
+	if err != nil {
+		return false, err
+	}
+	actual, err := r.fallbackTmKMSPublicKey(ctx, nodeSet, nodeSet.EnsureCosmosignerStatus(s.Name), h, s.Spec.GetServiceAccountName())
+	if err != nil {
+		return false, fmt.Errorf("cosmosigner %q could not verify the tmKMS-uploaded Vault key before adoption: %w", s.Name, err)
+	}
+	if actual != expected {
+		return false, fmt.Errorf("cosmosigner %q cannot adopt tmKMS Vault key: backend public key does not match source secret %q", s.Name, s.SoftwareKeySecret)
+	}
+	st := nodeSet.EnsureCosmosignerStatus(s.Name)
+	st.KeyImported = s.Spec.Backend.Vault.ImportFingerprint(s.SoftwareKeySecret, keyMaterial)
+	if err := r.Status().Update(ctx, nodeSet); err != nil {
+		return false, err
+	}
+	r.recorder.Event(nodeSet, corev1.EventTypeNormal, appsv1.ReasonNodeKeyImported,
+		fmt.Sprintf("Cosmosigner %q adopted tmKMS-uploaded Vault key %q from child %q", s.Name, h.Key, child.Name))
+	return true, nil
 }
 
 func (r *Reconciler) ownedSignerStatefulSetExists(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) (bool, error) {

@@ -1077,6 +1077,11 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 	if chainNode.Status.CosmosignerKeyImported == want {
 		return false, nil
 	}
+	if adopted, err := r.adoptTmKMSVaultImport(ctx, chainNode, params, sourceSecret, keyMaterial); err != nil {
+		return false, err
+	} else if adopted {
+		return false, nil
+	}
 	if c.Backend.Vault.ImportRecordMatches(chainNode.Status.CosmosignerKeyImported, sourceSecret, keyMaterial) {
 		if err := r.markCosmosignerKeyImported(ctx, chainNode, want); err != nil {
 			return false, err
@@ -1121,6 +1126,41 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, chainNode *a
 		return false, err
 	}
 	return false, nil
+}
+
+// adoptTmKMSVaultImport proves and records a same-key migration from a standalone tmKMS HashiCorp
+// validator to Cosmosigner. The current spec no longer carries tmKMS, so the durable reservation
+// identity recorded while tmKMS served is the ownership-safe evidence that this Vault target is the
+// previous signing path; the backend public key is still read back and matched to the retained source.
+func (r *Reconciler) adoptTmKMSVaultImport(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params, sourceSecret string, keyMaterial []byte) (bool, error) {
+	if chainNode.Annotations[controllers.AnnotationVaultKeyUploaded] != controllers.StringValueTrue ||
+		chainNode.Status.TmKMSReservationIdentity == "" ||
+		chainNode.Status.TmKMSReservationIdentity != chainNode.CosmosignerSigningIdentity() {
+		return false, nil
+	}
+	expected, err := cosmosigner.PublicKeyFromSecret(ctx, r.Client, chainNode.GetNamespace(), sourceSecret)
+	if err != nil {
+		return false, err
+	}
+	clientSet := r.cosmosignerKubernetesClient()
+	if clientSet == nil {
+		return false, fmt.Errorf("cosmosigner tmKMS Vault adoption requires a Kubernetes clientset")
+	}
+	runner := cosmosigner.JobRunner{Client: clientSet, Scheme: r.Scheme, Owner: chainNode, Params: params}
+	actual, err := runner.PublicKey(ctx)
+	if err != nil {
+		return false, fmt.Errorf("cosmosigner could not verify the tmKMS-uploaded Vault key before adoption: %w", err)
+	}
+	if actual != expected {
+		return false, fmt.Errorf("cosmosigner cannot adopt tmKMS Vault key: backend public key does not match source secret %q", sourceSecret)
+	}
+	want := chainNode.Spec.Cosmosigner.Backend.Vault.ImportFingerprint(sourceSecret, keyMaterial)
+	if err := r.markCosmosignerKeyImported(ctx, chainNode, want); err != nil {
+		return false, err
+	}
+	r.recorder.Event(chainNode, corev1.EventTypeNormal, appsv1.ReasonNodeKeyImported,
+		"Cosmosigner adopted the previously verified tmKMS Vault signing key")
+	return true, nil
 }
 
 // maybeImportCosmosignerKeyToGcp drives the managed Cloud KMS BYOK import: it imports the node's
