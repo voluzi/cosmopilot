@@ -1733,6 +1733,35 @@ func TestInitCosmosignerLocksRecordsPreRolloutTargetKind(t *testing.T) {
 		assert.True(t, *fresh.Status.Cosmosigners[0].LocalKeyEverServed)
 	})
 
+	// The top-level .spec.cosmosigner over the legacy singleton .spec.validator records the RESERVED
+	// group name, and that name must resolve back to the generated validator child — which is the claim
+	// that child holds on the shared consensus-key reservation. legacyCosmosignerStatusMatchesClaim
+	// relies on exactly this to tell a same-root status entry apart from a foreign owner, and it fails
+	// closed on an unrecorded group, so a regression here would silently re-deadlock the
+	// tmKMS-to-cosmosigner migration rather than misfire.
+	t.Run("top-level validator target", func(t *testing.T) {
+		nodeSet := &appsv1.ChainNodeSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default"},
+			Spec: appsv1.ChainNodeSetSpec{
+				Validator:   &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("val-priv-key")},
+				Cosmosigner: &appsv1.Cosmosigner{Backend: cosmosignerVaultBackend()},
+			},
+			Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
+		}
+		r := newValidatorTestReconciler(t, nodeSet)
+		changed, err := r.initCosmosignerLocks(context.Background(), nodeSet)
+		require.NoError(t, err)
+		assert.True(t, changed)
+
+		fresh := &appsv1.ChainNodeSet{}
+		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-nodeset"}, fresh))
+		require.Len(t, fresh.Status.Cosmosigners, 1)
+		servingGroup := fresh.Status.Cosmosigners[0].ServingGroup
+		assert.Equal(t, appsv1.ReservedValidatorGroupName, servingGroup)
+		assert.Equal(t, "test-nodeset-validator", fresh.GeneratedValidatorNodeName(servingGroup, 0),
+			"the recorded group must resolve to the generated child whose name is the reservation claim")
+	})
+
 	t.Run("migration to a local key records monotonic history before rollout", func(t *testing.T) {
 		nodeSet := cosmosignerValidatorNodeSet(cosmosignerVaultBackend())
 		require.NotNil(t, nodeSet.Status.Cosmosigners[0].LocalKeyEverServed)

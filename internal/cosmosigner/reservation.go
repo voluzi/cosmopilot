@@ -170,7 +170,8 @@ func ensureNoLegacyConsensusKeyOwner(ctx context.Context, reader client.Reader, 
 		}
 		for _, signer := range set.Status.Cosmosigners {
 			if signer.PublicKey == publicKey {
-				if set.UID == holder.UID && holder.matchesLegacyStatus(signer.Name) {
+				if set.UID == holder.UID &&
+					(holder.matchesLegacyStatus(signer.Name) || legacyCosmosignerStatusMatchesClaim(set, signer.ServingGroup, holder.Claim)) {
 					continue
 				}
 				return fmt.Errorf("%w: consensus key on chain %q is already recorded by ChainNodeSet %s/%s",
@@ -219,6 +220,21 @@ func legacyChainNodeMatchesClaim(node *appsv1.ChainNode, holder ReservationHolde
 	}
 	return belongsToRoot(node, holder.UID) &&
 		(node.GetName() == holder.Claim || holder.matchesLegacyNode(node.GetName()))
+}
+
+// legacyCosmosignerStatusMatchesClaim reports whether a managed signer recorded in a ChainNodeSet's
+// status protects exactly the consensus identity the holder is claiming. It is only consulted for a
+// same-root status entry (the caller compares owner UIDs), so it never relaxes cross-root conflicts.
+//
+// A ChainNodeSet-generated validator child acquires its reservation under the root's UID with its own
+// node name as the claim, while the root records the signer serving it under the signer's own name —
+// which the child cannot enumerate in LegacyStatusNames. The recorded ServingGroup resolves back to
+// the same generated instance-0 child name the root's signer preflight uses as its claim, so exact
+// equality with the holder's claim proves both name one logical validator. An entry with no recorded
+// ServingGroup (a sentry signer, or one whose served group predates the field) proves nothing and
+// fails closed.
+func legacyCosmosignerStatusMatchesClaim(set *appsv1.ChainNodeSet, servingGroup, claim string) bool {
+	return servingGroup != "" && set.GeneratedValidatorNodeName(servingGroup, 0) == claim
 }
 
 func legacyChainNodeSetAliasMatchesClaim(set *appsv1.ChainNodeSet, holder ReservationHolder, publicKey string) bool {

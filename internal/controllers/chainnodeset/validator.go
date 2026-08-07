@@ -306,12 +306,9 @@ func updateValidatorStatus(
 }
 
 func validatorNodeName(nodeSet *appsv1.ChainNodeSet, group string, index int) string {
-	// validatorGroupName is reserved for the legacy singleton .spec.validator (rejected as a
-	// real group name by the webhook), so it is the only caller that reaches this branch.
-	if group == validatorGroupName {
-		return fmt.Sprintf("%s-validator", nodeSet.GetName())
-	}
-	return fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, index)
+	// Shared with the consensus-key reservation scan, which resolves a recorded ServingGroup back to
+	// the child holding that validator identity and must derive the exact same name.
+	return nodeSet.GeneratedValidatorNodeName(group, index)
 }
 
 func (r *Reconciler) getValidatorSpec(nodeSet *appsv1.ChainNodeSet, group string, index int, cfg *appsv1.NodeSetValidatorConfig) (*appsv1.ChainNode, error) {

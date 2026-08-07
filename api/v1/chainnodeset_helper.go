@@ -105,6 +105,18 @@ func (nodeSet *ChainNodeSet) RecordedChildIdentity(child *ChainNode) (nameRecord
 	return match != RecordedChildNone, match == RecordedChildExact
 }
 
+// GeneratedValidatorNodeName returns the name of the child ChainNode this ChainNodeSet generates for
+// one instance of a validator group. ReservedValidatorGroupName is the legacy singleton
+// .spec.validator (rejected as a real group name by the webhook), which is a single node with no
+// ordinal suffix. Callers outside the controller use it to resolve a recorded validator group back to
+// the child that carries its consensus identity.
+func (nodeSet *ChainNodeSet) GeneratedValidatorNodeName(group string, index int) string {
+	if group == ReservedValidatorGroupName {
+		return fmt.Sprintf("%s-validator", nodeSet.GetName())
+	}
+	return fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, index)
+}
+
 func (nodeSet *ChainNodeSet) HasValidator() bool {
 	if nodeSet.Spec.Validator != nil {
 		return true

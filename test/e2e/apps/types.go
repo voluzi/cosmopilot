@@ -425,9 +425,23 @@ func (t TestApp) BuildChainNodeSetWithCosmosigner(namespace string, cfg Cosmosig
 // BuildChainNodeWithTmKMS creates a ChainNode resource with TMKMS Vault configuration
 func (t TestApp) BuildChainNodeWithTmKMS(namespace string, tmkmsConfig TmKMSConfig) *appsv1.ChainNode {
 	chainNode := t.BuildChainNode(namespace)
+	chainNode.Spec.Validator.TmKMS = t.tmKMS(tmkmsConfig)
+	return chainNode
+}
 
-	// Configure TMKMS with Vault provider
-	chainNode.Spec.Validator.TmKMS = &appsv1.TmKMS{
+// BuildChainNodeSetWithTmKMS creates a genesis-initializing ChainNodeSet whose legacy singleton
+// validator signs through a TMKMS Vault sidecar. This is the pre-migration shape of a set that later
+// moves onto a Cosmopilot-managed cosmosigner over the same Vault key.
+func (t TestApp) BuildChainNodeSetWithTmKMS(namespace string, tmkmsConfig TmKMSConfig) *appsv1.ChainNodeSet {
+	cns := t.BuildChainNodeSet(namespace, 0)
+	cns.Spec.Validator.TmKMS = t.tmKMS(tmkmsConfig)
+	return cns
+}
+
+// tmKMS builds the Vault-provider TMKMS configuration shared by the ChainNode and ChainNodeSet
+// builders, so both describe the same signing sidecar.
+func (t TestApp) tmKMS(tmkmsConfig TmKMSConfig) *appsv1.TmKMS {
+	return &appsv1.TmKMS{
 		Provider: appsv1.TmKmsProvider{
 			Hashicorp: &appsv1.TmKmsHashicorpProvider{
 				Address: tmkmsConfig.VaultAddress,
@@ -453,6 +467,4 @@ func (t TestApp) BuildChainNodeWithTmKMS(namespace string, tmkmsConfig TmKMSConf
 			ConsensusKeyPrefix: t.ValidatorConfig.ValPrefix + "conspub",
 		},
 	}
-
-	return chainNode
 }

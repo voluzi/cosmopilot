@@ -331,6 +331,106 @@ var _ = Describe("ChainNodeSet Cosmosigner", func() {
 			}, time.Minute, time.Second).Should(BeNumerically(">", heightAfterRetarget),
 				"the chain must keep advancing after the retarget settles")
 		})
+
+		// Serial: this spec restarts the shared Cosmopilot deployment, which every other spec depends
+		// on, so it must not run alongside them.
+		It("should migrate a ChainNodeSet validator from tmKMS Vault to a top-level cosmosigner across a controller restart", Serial, func() {
+			requireCosmosignerE2E()
+			app := apps.Nibiru()
+			ns := CreateTestNamespace()
+			tokenSecretName, caSecretName := CopyVaultSecretsToNamespace(ns.Name)
+			keyName := fmt.Sprintf("%s-nodeset-cosmosigner-%s", app.ValidatorConfig.ChainID, RandString(6))
+			cns := app.BuildChainNodeSetWithTmKMS(ns.Name, apps.TmKMSConfig{
+				VaultAddress:    GetVaultAddress(),
+				KeyName:         keyName,
+				TokenSecretName: tokenSecretName,
+				CASecretName:    caSecretName,
+			})
+			Expect(Framework().Client().Create(Framework().Context(), cns)).To(Succeed())
+
+			// The legacy singleton validator is a generated child ChainNode, so the tmKMS-era waits
+			// apply to it directly.
+			validatorName := fmt.Sprintf("%s-validator", cns.Name)
+			signerName := fmt.Sprintf("%s-signer", cns.Name)
+			WaitForChainNodeSetHeight(cns, 3)
+			WaitForTmkmsContainerRunning(&appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: validatorName},
+			})
+			Eventually(func() string {
+				child := &appsv1.ChainNode{}
+				if err := Framework().Client().Get(Framework().Context(),
+					client.ObjectKey{Namespace: ns.Name, Name: validatorName}, child); err != nil {
+					return ""
+				}
+				return child.Annotations[controllers.AnnotationVaultKeyUploaded]
+			}).Should(Equal(controllers.StringValueTrue), "the cosmosigner can only adopt a key tmKMS already uploaded")
+
+			var publicKey string
+			var heightBeforeMigration int64
+			Eventually(func(g Gomega) {
+				current := &appsv1.ChainNodeSet{}
+				g.Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current)).To(Succeed())
+				publicKey = managedcosmosigner.CanonicalSDKPublicKey(current.Status.PubKey)
+				g.Expect(publicKey).NotTo(BeEmpty())
+				heightBeforeMigration = current.Status.LatestHeight
+			}).Should(Succeed())
+			reservation := waitForConsensusKeyReservation(cns, publicKey)
+			Expect(reservation.Spec.Claim).To(Equal(validatorName),
+				"the tmKMS-era validator child claims its key under the root ChainNodeSet")
+
+			// Hold the old pod in Terminating so the migration parks in its break-before-make window:
+			// the tmKMS signer is gone and the replacement cannot be created yet.
+			tmkmsPod := &corev1.Pod{}
+			Expect(Framework().Client().Get(Framework().Context(),
+				client.ObjectKey{Namespace: ns.Name, Name: validatorName}, tmkmsPod)).To(Succeed())
+			tmkmsPodUID := string(tmkmsPod.UID)
+			setPodTestFinalizer(ns.Name, validatorName, true)
+			DeferCleanup(func() { setPodTestFinalizer(ns.Name, validatorName, false) })
+
+			migrateNodeSetValidatorToCosmosigner(cns, keyName, tokenSecretName, caSecretName)
+			waitForBrokenTmKMSValidatorPod(ns.Name, validatorName, signerName, tmkmsPodUID)
+
+			// A restart drops every cached decision, so the controller must re-derive the migration
+			// from live state alone — including the reservation its own root already recorded against
+			// the managed signer, which VLZ-799 read back as a conflicting legacy owner and deadlocked
+			// on, leaving the validator quiesced with no replacement.
+			restartCosmopilotController()
+			setPodTestFinalizer(ns.Name, validatorName, false)
+
+			replacement := waitForCosmosignerTargetedValidatorPod(ns.Name, validatorName, signerName, tmkmsPodUID, cns.Spec.App.App)
+			Expect(replacement.Labels[controllers.LabelCosmosignerTarget]).To(Equal(signerName))
+			assertNoCosmosignerDiscoveryPubKeyFailure(ns.Name, validatorName, cns.Spec.App.App, 1)
+
+			signerStatus := waitForCosmosignerApplied(cns, signerName)
+			Expect(signerStatus.PublicKey).To(Equal(publicKey),
+				"the managed signer must adopt the tmKMS consensus key, not mint a new one")
+			// Same-root alias matching keys on the recorded served group and fails closed without it, so
+			// assert it directly: otherwise a regression that stopped recording it would surface only as
+			// the replacement-pod wait timing out, with nothing pointing at the cause.
+			Expect(signerStatus.ServingGroup).To(Equal(appsv1.ReservedValidatorGroupName),
+				"the signer must record the validator group it serves for the child's reservation to be recognised as same-root")
+			waitForReadySignerPods(ns.Name, signerName, 1)
+
+			Eventually(func(g Gomega) {
+				current := &appsv1.ChainNodeSet{}
+				g.Expect(Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current)).To(Succeed())
+				g.Expect(managedcosmosigner.CanonicalSDKPublicKey(current.Status.PubKey)).To(Equal(publicKey))
+				g.Expect(current.Status.LatestHeight).To(BeNumerically(">", heightBeforeMigration),
+					"the migrated validator must resume signing")
+			}).Should(Succeed())
+
+			// The sidecar's configuration must be removed, not merely left unused.
+			Eventually(func() bool {
+				configMap := &corev1.ConfigMap{}
+				err := Framework().Client().Get(Framework().Context(),
+					client.ObjectKey{Namespace: ns.Name, Name: validatorName + "-tmkms"}, configMap)
+				return apierrors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			// One consensus key, one reservation, held continuously across the whole migration: a
+			// released-and-recreated reservation would mean the key went unguarded in between.
+			assertConsensusKeyReservationUnchanged(reservation)
+		})
 	})
 })
 
@@ -419,6 +519,138 @@ func moveTopLevelCosmosignerIntoGroup(cns *appsv1.ChainNodeSet, groupName string
 		}
 		return fmt.Errorf("node group %q not found", groupName)
 	}).Should(Succeed())
+}
+
+// migrateNodeSetValidatorToCosmosigner switches the legacy singleton validator from its tmKMS
+// sidecar to a top-level cosmosigner over the same Vault key. Both must move in a single update: the
+// webhook rejects a spec carrying .spec.validator.tmKMS and .spec.cosmosigner at once, which is also
+// what makes the switch a break-before-make rather than an overlap.
+func migrateNodeSetValidatorToCosmosigner(cns *appsv1.ChainNodeSet, keyName, tokenSecretName, caSecretName string) {
+	Eventually(func() error {
+		current := &appsv1.ChainNodeSet{}
+		if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cns), current); err != nil {
+			return err
+		}
+		if current.Spec.Validator == nil {
+			return fmt.Errorf("the legacy singleton validator is absent")
+		}
+		current.Spec.Validator.TmKMS = nil
+		current.Spec.Cosmosigner = &appsv1.Cosmosigner{
+			Replicas: ptr.To[int32](1),
+			Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
+				Address: GetVaultAddress(),
+				KeyName: keyName,
+				TokenSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: tokenSecretName},
+					Key:                  "token",
+				},
+				CertificateSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: caSecretName},
+					Key:                  "ca.crt",
+				},
+			}},
+		}
+		return Framework().Client().Update(Framework().Context(), current)
+	}).Should(Succeed())
+}
+
+// waitForBrokenTmKMSValidatorPod waits until the tmKMS validator pod is being torn down, which is
+// where a break-before-make migration is at its most exposed: the old signing path is gone and the
+// replacement does not exist yet.
+func waitForBrokenTmKMSValidatorPod(namespace, name, signerName, uid string) {
+	Eventually(func(g Gomega) {
+		pod := &corev1.Pod{}
+		g.Expect(Framework().Client().Get(
+			Framework().Context(), client.ObjectKey{Namespace: namespace, Name: name}, pod,
+		)).To(Succeed())
+		assertNoTmKMSSigningOverlap(pod, signerName)
+		g.Expect(string(pod.UID)).To(Equal(uid), "the tmKMS pod was replaced before the test observed the break")
+		g.Expect(pod.DeletionTimestamp).NotTo(BeNil())
+	}, 8*time.Minute, time.Second).Should(Succeed())
+}
+
+// waitForCosmosignerTargetedValidatorPod waits for the replacement validator pod that closes a
+// tmKMS-to-cosmosigner migration: a new pod, without the sidecar, serving the managed signer.
+func waitForCosmosignerTargetedValidatorPod(namespace, name, signerName, previousUID, appContainer string) *corev1.Pod {
+	var result *corev1.Pod
+	Eventually(func(g Gomega) {
+		pod := &corev1.Pod{}
+		g.Expect(Framework().Client().Get(
+			Framework().Context(), client.ObjectKey{Namespace: namespace, Name: name}, pod,
+		)).To(Succeed())
+		assertNoTmKMSSigningOverlap(pod, signerName)
+		g.Expect(string(pod.UID)).NotTo(Equal(previousUID), "the tmKMS pod must be replaced, not adopted")
+		g.Expect(pod.DeletionTimestamp).To(BeNil())
+		g.Expect(podHasTmKMSContainer(pod)).To(BeFalse())
+		g.Expect(pod.Labels[controllers.LabelCosmosignerTarget]).To(Equal(signerName))
+		g.Expect(pod.Status.Phase).To(Equal(corev1.PodRunning))
+		g.Expect(podReady(pod)).To(BeTrue())
+		g.Expect(cosmosignerDiscoveryGateSucceeded(pod)).To(BeTrue())
+		restartCount, previousLogs, found := appContainerRestartDetails(namespace, pod, appContainer)
+		g.Expect(found).To(BeTrue(), "app container %q status is missing", appContainer)
+		g.Expect(restartCount).To(BeZero(), "the replacement app container restarted; previous logs:\n%s", previousLogs)
+		result = pod.DeepCopy()
+	}, 8*time.Minute, time.Second).Should(Succeed())
+	return result
+}
+
+// assertNoTmKMSSigningOverlap fails at the sample that observes a pod running its tmKMS sidecar while
+// also selected as a cosmosigner target. Two signing paths holding one consensus key at the same
+// instant is the double-sign the break-before-make migration exists to prevent, so it must fail where
+// it is seen rather than be retried past.
+func assertNoTmKMSSigningOverlap(pod *corev1.Pod, signerName string) {
+	Expect(podHasTmKMSContainer(pod) && pod.Labels[controllers.LabelCosmosignerTarget] == signerName).To(BeFalse(),
+		"pod %q carries the tmKMS sidecar and the cosmosigner target label at the same time", pod.Name)
+}
+
+func podHasTmKMSContainer(pod *corev1.Pod) bool {
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "tmkms" {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	cosmopilotNamespace      = "cosmopilot-system"
+	cosmopilotDeploymentName = "cosmopilot"
+)
+
+// restartCosmopilotController deletes the controller pods and waits for their replacements to become
+// ready, leaving the operator with no cached state about work already in flight.
+func restartCosmopilotController() {
+	By("restarting the Cosmopilot controller")
+	deployment := &appsv1k8s.Deployment{}
+	Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{
+		Namespace: cosmopilotNamespace, Name: cosmopilotDeploymentName,
+	}, deployment)).To(Succeed())
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	Expect(err).NotTo(HaveOccurred())
+	listOptions := []client.ListOption{
+		client.InNamespace(cosmopilotNamespace),
+		client.MatchingLabelsSelector{Selector: selector},
+	}
+
+	running := &corev1.PodList{}
+	Expect(Framework().Client().List(Framework().Context(), running, listOptions...)).To(Succeed())
+	Expect(running.Items).NotTo(BeEmpty(), "the Cosmopilot controller has no pods to restart")
+	previousUIDs := make(map[string]struct{}, len(running.Items))
+	for i := range running.Items {
+		previousUIDs[string(running.Items[i].UID)] = struct{}{}
+		Expect(Framework().Client().Delete(Framework().Context(), &running.Items[i])).To(Succeed())
+	}
+
+	Eventually(func(g Gomega) {
+		pods := &corev1.PodList{}
+		g.Expect(Framework().Client().List(Framework().Context(), pods, listOptions...)).To(Succeed())
+		g.Expect(pods.Items).To(HaveLen(len(previousUIDs)))
+		for i := range pods.Items {
+			g.Expect(previousUIDs).NotTo(HaveKey(string(pods.Items[i].UID)))
+			g.Expect(pods.Items[i].DeletionTimestamp).To(BeNil())
+			g.Expect(podReady(&pods.Items[i])).To(BeTrue())
+		}
+	}, 3*time.Minute, time.Second).Should(Succeed())
 }
 
 const (
