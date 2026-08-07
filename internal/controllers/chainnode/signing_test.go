@@ -139,6 +139,87 @@ func TestEnsureValidatorConsensusKeyReservationUsesChainNodeSetRoot(t *testing.T
 	}
 }
 
+func TestEnsureValidatorConsensusKeyReservationAllowsGeneratedChildDuringCosmosignerMigration(t *testing.T) {
+	const (
+		namespace = "default"
+		name      = "nodes-validator"
+		publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	)
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: namespace, UID: "child-uid",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "nodes",
+				UID: "nodeset-uid", Controller: ptr.To(true),
+			}},
+		},
+		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
+			Hashicorp: &appsv1.TmKmsHashicorpProvider{
+				Address: "https://vault:8200",
+				Key:     "validator",
+				TokenSecret: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"},
+					Key:                  "token",
+				},
+			},
+		}}}},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain-1", PubKey: `{"key":"` + publicKey + `"}`},
+	}
+	chainNode.Status.TmKMSReservationIdentity = chainNode.EffectiveSigningIdentity()
+
+	// The top-level Cosmosigner has rolled out over the same Vault key, so the root records it, but the
+	// child is not yet stamped as its target: this is the break-before-make window the migration deadlocked in.
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: namespace, UID: "nodeset-uid"},
+		Status: appsv1.ChainNodeSetStatus{
+			ChainID: "chain-1",
+			PubKey:  `{"key":"` + publicKey + `"}`,
+			Validators: []appsv1.ChainNodeSetValidatorStatus{
+				{Name: name, UID: chainNode.UID, Group: appsv1.ReservedValidatorGroupName, PubKey: `{"key":"` + publicKey + `"}`},
+			},
+			Cosmosigners: []appsv1.CosmosignerStatus{{
+				Name: "cosmosigner", PublicKey: publicKey, ServingGroup: appsv1.ReservedValidatorGroupName,
+			}},
+		},
+	}
+	token := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vault-token", Namespace: namespace},
+		Data:       map[string][]byte{"token": []byte("token")},
+	}
+	reservation := &appsv1.ConsensusKeyReservation{
+		ObjectMeta: metav1.ObjectMeta{Name: cosmosigner.ConsensusKeyReservationName("chain-1", publicKey)},
+		Spec: appsv1.ConsensusKeyReservationSpec{
+			ChainID: "chain-1", PublicKey: publicKey, OwnerUID: "nodeset-uid",
+			OwnerKind: "ChainNodeSet", Namespace: namespace, OwnerName: "nodes", Claim: name,
+		},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: name,
+			UID: chainNode.UID, Controller: ptr.To(true),
+		}},
+	}}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(chainNode, nodeSet, token, reservation, pod).Build()}
+
+	if _, err := r.ensureValidatorConsensusKeyReservation(context.Background(), chainNode); err != nil {
+		t.Fatalf("a generated validator child must not conflict with its own root's signer status: %v", err)
+	}
+	remaining := &corev1.Pod{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, remaining); err != nil {
+		t.Fatalf("the validator pod must survive the migration window, got %v", err)
+	}
+}
+
 func TestEnsureValidatorConsensusKeyReservationSkipsRemoteSignerTarget(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {
