@@ -1,0 +1,1390 @@
+# Custom Resource Definitions (CRDs) API Reference
+
+This page provides a detailed reference for the available Custom Resource Definitions (CRDs) in Cosmopilot. Each CRD defines the specifications and configuration options for managing Cosmos-based blockchain nodes in Kubernetes.
+### Custom Resources
+
+* [ChainNode](#chainnode)
+* [ChainNodeSet](#chainnodeset)
+* [ConsensusKeyReservation](#consensuskeyreservation)
+
+### Sub Resources
+
+* [AccountAssets](#accountassets)
+* [AppSpec](#appspec)
+* [ChainNodeAssets](#chainnodeassets)
+* [ChainNodeList](#chainnodelist)
+* [ChainNodeSetList](#chainnodesetlist)
+* [ChainNodeSetNodeStatus](#chainnodesetnodestatus)
+* [ChainNodeSetSpec](#chainnodesetspec)
+* [ChainNodeSetStatus](#chainnodesetstatus)
+* [ChainNodeSetValidatorStatus](#chainnodesetvalidatorstatus)
+* [ChainNodeSpec](#chainnodespec)
+* [ChainNodeStatus](#chainnodestatus)
+* [Config](#config)
+* [ConsensusKeyReservationList](#consensuskeyreservationlist)
+* [ConsensusKeyReservationSpec](#consensuskeyreservationspec)
+* [CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig)
+* [CosmoGuardConfig](#cosmoguardconfig)
+* [CosmoGuardDashboardAuth](#cosmoguarddashboardauth)
+* [CosmoGuardDashboardConfig](#cosmoguarddashboardconfig)
+* [CosmoGuardDashboardGateway](#cosmoguarddashboardgateway)
+* [CosmoGuardDashboardIngress](#cosmoguarddashboardingress)
+* [CosmoseedConfig](#cosmoseedconfig)
+* [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
+* [CosmoseedIngressConfig](#cosmoseedingressconfig)
+* [Cosmosigner](#cosmosigner)
+* [CosmosignerBackend](#cosmosignerbackend)
+* [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
+* [CosmosignerGcpKmsImport](#cosmosignergcpkmsimport)
+* [CosmosignerMigrationStatus](#cosmosignermigrationstatus)
+* [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
+* [CosmosignerStatus](#cosmosignerstatus)
+* [CosmosignerVaultBackend](#cosmosignervaultbackend)
+* [CreateValidatorConfig](#createvalidatorconfig)
+* [DeletionPolicy](#deletionpolicy)
+* [DiscoveryResourceRequirements](#discoveryresourcerequirements)
+* [ExportTarballConfig](#exporttarballconfig)
+* [ExposeConfig](#exposeconfig)
+* [ExposeGatewayConfig](#exposegatewayconfig)
+* [FromNodeRPCConfig](#fromnoderpcconfig)
+* [GatewayConfig](#gatewayconfig)
+* [GatewayRef](#gatewayref)
+* [GcsExportConfig](#gcsexportconfig)
+* [GenesisConfig](#genesisconfig)
+* [GenesisInitConfig](#genesisinitconfig)
+* [GenesisValidator](#genesisvalidator)
+* [GlobalGatewayConfig](#globalgatewayconfig)
+* [GlobalIngressConfig](#globalingressconfig)
+* [IndividualIngressConfig](#individualingressconfig)
+* [IngressConfig](#ingressconfig)
+* [InitCommand](#initcommand)
+* [NodeGroupSpec](#nodegroupspec)
+* [NodeSetValidatorConfig](#nodesetvalidatorconfig)
+* [PdbConfig](#pdbconfig)
+* [Peer](#peer)
+* [Persistence](#persistence)
+* [PvcSnapshot](#pvcsnapshot)
+* [S3ExportConfig](#s3exportconfig)
+* [SdkOptions](#sdkoptions)
+* [SeedStatus](#seedstatus)
+* [SidecarSpec](#sidecarspec)
+* [SnapshotExportDestination](#snapshotexportdestination)
+* [SnapshotExportSecretReference](#snapshotexportsecretreference)
+* [SnapshotExportStatus](#snapshotexportstatus)
+* [StateSyncConfig](#statesyncconfig)
+* [SubdomainsConfig](#subdomainsconfig)
+* [TmKMS](#tmkms)
+* [TmKmsHashicorpProvider](#tmkmshashicorpprovider)
+* [TmKmsKeyFormat](#tmkmskeyformat)
+* [TmKmsProvider](#tmkmsprovider)
+* [Upgrade](#upgrade)
+* [UpgradeSpec](#upgradespec)
+* [ValidatorConfig](#validatorconfig)
+* [ValidatorInfo](#validatorinfo)
+* [VerticalAutoscalingConfig](#verticalautoscalingconfig)
+* [VerticalAutoscalingMetricConfig](#verticalautoscalingmetricconfig)
+* [VerticalAutoscalingRule](#verticalautoscalingrule)
+* [VolumeSnapshotsConfig](#volumesnapshotsconfig)
+* [VolumeSpec](#volumespec)
+
+#### ChainNode
+
+ChainNode is the Schema for the chainnodes API.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ObjectMeta | false |
+| spec |  | [ChainNodeSpec](#chainnodespec) | false |
+| status |  | [ChainNodeStatus](#chainnodestatus) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeList
+
+ChainNodeList contains a list of ChainNode.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ListMeta | false |
+| items |  | [][ChainNode](#chainnode) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeSpec
+
+ChainNodeSpec defines the desired state of ChainNode.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| genesis | Indicates where this node will get the genesis from. Can be omitted when .spec.validator.init is specified. | *[GenesisConfig](#genesisconfig) | true |
+| app | Specifies image, version and binary name of the chain application to run. It also allows to schedule upgrades, or setting/updating the image for an on-chain upgrade. | [AppSpec](#appspec) | true |
+| config | Allows setting specific configurations for this node. | *[Config](#config) | false |
+| persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. | *[Persistence](#persistence) | false |
+| deletionPolicy | DeletionPolicy controls whether durable resources generated by Cosmopilot are retained or deleted with this ChainNode. All resource classes default to Retain. | *[DeletionPolicy](#deletionpolicy) | false |
+| validator | Indicates this node is going to be a validator and allows configuring it. | *[ValidatorConfig](#validatorconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer for this node. When configured, the node listens for the signer on its priv_validator_laddr and no local key is mounted. | *[Cosmosigner](#cosmosigner) | false |
+| remoteSignerTarget | RemoteSignerTarget marks this node as a signing endpoint for a cosmosigner deployment owned by a parent ChainNodeSet. It is set by the ChainNodeSet controller on nodes of targeted groups and makes the node listen for the remote signer without mounting a local key. It is not meant to be set by hand. | bool | false |
+| autoDiscoverPeers | Ensures peers with same chain ID are connected with each other. Enabled by default. | *bool | false |
+| stateSyncRestore | Configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
+| stateSyncResources | Compute Resources to be used while the node is state-syncing. | corev1.ResourceRequirements | false |
+| peers | Additional persistent peers that should be added to this node. | [][Peer](#peer) | false |
+| expose | Allows exposing P2P traffic to public. | *[ExposeConfig](#exposeconfig) | false |
+| resources | Compute Resources required by the app container. | corev1.ResourceRequirements | false |
+| nodeSelector | Selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. | map[string]string | false |
+| affinity | If specified, the pod's scheduling constraints. | *corev1.Affinity | false |
+| ignoreGroupOnDisruptionChecks | Whether ChainNodeSet group label should be ignored on pod disruption checks. This is useful to ensure no downtime globally or per global ingress, instead of just per group. Defaults to `false`. | *bool | false |
+| vpa | Vertical Pod Autoscaling configuration for this node. | *[VerticalAutoscalingConfig](#verticalautoscalingconfig) | false |
+| overrideVersion | OverrideVersion will force this node to use the specified version. NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version based on upgrade history. | *string | false |
+| ingress | Indicates if an ingress should be created to access API endpoints of this node and configures it. | *[IngressConfig](#ingressconfig) | false |
+| gateway | Configures Gateway API routes for exposing API endpoints of this node. Mutually exclusive with ingress. | *[GatewayConfig](#gatewayconfig) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeStatus
+
+ChainNodeStatus defines the observed state of ChainNode
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| phase | Indicates the current phase for this ChainNode. | ChainNodePhase | false |
+| conditions | Conditions to track state of the ChainNode. | []metav1.Condition | false |
+| nodeID | Indicates this node's ID. | string | false |
+| ip | Internal IP address of this node. | string | false |
+| publicAddress | Public address for P2P when enabled. | string | false |
+| chainID | Indicates the chain ID. | string | false |
+| pvcSize | Current size of the data PVC for this node. | string | false |
+| dataUsage | Usage percentage of data volume. | string | false |
+| validator | Indicates if this node is a validator. | bool | true |
+| accountAddress | Account address of this validator. Omitted when not a validator. | string | false |
+| validatorAddress | Validator address is the valoper address of this validator. Omitted when not a validator. | string | false |
+| jailed | Indicates if this validator is jailed. Always false if not a validator node. | bool | false |
+| genesisSigningDigest | GenesisSigningDigest is a controller-internal fingerprint of the genesis-initializing validator's signing material and init config, recorded when this node initializes genesis. It lets the no-webhook reconcile path reject post-genesis changes to .spec.validator.init without a previous spec to diff against. Set only for genesis-initializing validators; not meant to be set by hand. | string | false |
+| appVersion | Application version currently deployed. | string | false |
+| latestHeight | Last height read on the node by cosmopilot. | int64 | false |
+| seedMode | Indicates if this node is running with seed mode enabled. | bool | false |
+| upgrades | All scheduled/completed upgrades performed by cosmopilot on this ChainNode. | [][Upgrade](#upgrade) | false |
+| pubKey | Public key of the validator. | string | false |
+| tmKMSReservationIdentity | TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was verified against PubKey before its consensus-key reservation was created. An unchanged identity can reuse the canonical recorded public key without launching another key-discovery pod. | string | false |
+| validatorStatus | Indicates the current status of validator if this node is one. | ValidatorStatus | false |
+| cosmosignerSigningDigest | CosmosignerSigningDigest is a controller-recorded fingerprint of the managed cosmosigner's effective signing identity, captured once a validator signer rolls out. The applied digest and public key below are the lifecycle baseline used for managed migrations. Not meant to be set by hand. | string | false |
+| cosmosignerAppliedDigest | CosmosignerAppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. It is recorded for both validator and sentry signers. | string | false |
+| cosmosignerPublicKey | CosmosignerPublicKey is the canonical base64 consensus public key of the applied signer. | string | false |
+| cosmosignerMigration | CosmosignerMigration records an in-progress break-before-make signer migration. | *[CosmosignerMigrationStatus](#cosmosignermigrationstatus) | false |
+| cosmosignerKeyImported | CosmosignerKeyImported is the fingerprint of a completed managed key import (backend-namespaced target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change without trusting user-editable metadata. For a GCP KMS import it is written only once the imported version is verified: CosmosignerImportedKeyVersion is recorded, readable, and serving the source consensus key. Not meant to be set by hand. | string | false |
+| cosmosignerImportedKeyVersion | CosmosignerImportedKeyVersion is the full Cloud KMS crypto key version resource name produced by a managed GCP KMS import, as reported by the import pod. It is recorded before the import is verified (so a restart resumes against the exact version that was created rather than importing a second one) and is the only import-derived value configured on the signer. Not meant to be set by hand. | string | false |
+| cosmosignerReplicas | CosmosignerReplicas records the raft replica count the managed signer was rolled out with, captured for every signer (validator and sentry alike). It lets the no-webhook reconcile path reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. Not meant to be set by hand. | *int32 | false |
+| cosmosignerValidatorTargeted | CosmosignerValidatorTargeted records whether the managed signer targeted this node as a validator when its deployment locks were initialized. The nullable marker lets the no-webhook path distinguish a pending validator rollout from a sentry after the current spec has already removed both .spec.cosmosigner and .spec.validator. Not meant to be set by hand. | *bool | false |
+| cosmosignerStateStorageSize | CosmosignerStateStorageSize records the per-replica raft-state PVC size the managed signer was rolled out with. Together with CosmosignerStateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. Not meant to be set by hand. | string | false |
+| cosmosignerStateStorageClassName | CosmosignerStateStorageClassName records the storage class of the managed signer's raft-state PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default class was selected, while an explicit \"\" means no class was requested. See CosmosignerStateStorageSize. Not meant to be set by hand. | *string | false |
+| cosmosignerAtEstablishment | CosmosignerAtEstablishment is a write-once record of the VALIDATOR-TARGETED signer identity at the moment the chain ID was first recorded. Empty string when no signer targeted a validator at chain establishment — including sentry-mode signers, whose key identity is deliberately excluded. It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use CosmosignerAppliedDigest and CosmosignerPublicKey. Not meant to be set by hand. | *string | false |
+| snapshotExports | SnapshotExports records the controller-owned destination and lifecycle state of snapshot tarballs. It is stored in status so VolumeSnapshot metadata cannot redirect privileged cleanup Jobs. | [][SnapshotExportStatus](#snapshotexportstatus) | false |
+| cosmosignerServingIdentity | CosmosignerServingIdentity records the effective signing identity of the rolled-out validator-targeted signer, captured together with CosmosignerSigningDigest and cleared on teardown. It records that this signer protected the node's validator role across removal and migration recovery. Not meant to be set by hand. | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ValidatorConfig
+
+ValidatorConfig contains the configuration for running a node as validator.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| privateKeySecret | Indicates the secret containing the private key to be used by this validator. Defaults to `<chainnode>-priv-key`. Will be created if it does not exist. | *string | false |
+| info | Contains information details about this validator. | *[ValidatorInfo](#validatorinfo) | false |
+| init | Specifies configs and initialization commands for creating a new genesis. | *[GenesisInitConfig](#genesisinitconfig) | false |
+| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.\n\nDeprecated: use .spec.cosmosigner instead. TmKMS will be removed in a future version. | *[TmKMS](#tmkms) | false |
+| createValidator | Indicates that cosmopilot should run create-validator tx to make this node a validator. | *[CreateValidatorConfig](#createvalidatorconfig) | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
+| accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
+| valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeSet
+
+ChainNodeSet is the Schema for the chainnodesets API.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ObjectMeta | false |
+| spec |  | [ChainNodeSetSpec](#chainnodesetspec) | false |
+| status |  | [ChainNodeSetStatus](#chainnodesetstatus) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeSetList
+
+ChainNodeSetList contains a list of ChainNodeSet.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ListMeta | false |
+| items |  | [][ChainNodeSet](#chainnodeset) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeSetNodeStatus
+
+ChainNodeSetNodeStatus contains information about a node running on this ChainNodeSet.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name of the node. | string | true |
+| uid | UID identifies the exact ChainNode instance recorded under this name. | types.UID | false |
+| public | Whether this node can be accessed publicly. | bool | true |
+| seed | Indicates if this node is running in seed mode. | bool | true |
+| id | ID of this node. | string | true |
+| address | Hostname or IP address to reach this node internally. | string | true |
+| publicAddress | Hostname or IP address to reach this node publicly. | string | false |
+| publicPort | Port to reach this node publicly. | int | false |
+| port | P2P port for connecting to this node. | int | true |
+| group | Group to which this ChainNode belongs. | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeSetSpec
+
+ChainNodeSetSpec defines the desired state of ChainNode.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| app | Specifies image, version and binary name of the chain application to run. It also allows to schedule upgrades, or setting/updating the image for an on-chain upgrade. | [AppSpec](#appspec) | true |
+| genesis | Indicates where this node will get the genesis from. Can be omitted when a single validator initializes a new genesis via .spec.validator.init or .spec.nodes[].validator.init, and no other validator relies on an external genesis. | *[GenesisConfig](#genesisconfig) | true |
+| deletionPolicy | DeletionPolicy controls whether durable resources generated for this set and its child ChainNodes are retained or deleted with the root ChainNodeSet. All resource classes default to Retain. | *[DeletionPolicy](#deletionpolicy) | false |
+| validator | Indicates this node set will run a validator and allows configuring it. | *[NodeSetValidatorConfig](#nodesetvalidatorconfig) | false |
+| nodes | List of groups of ChainNodes to be run. | [][NodeGroupSpec](#nodegroupspec) | true |
+| ingresses | List of ingresses to create for this ChainNodeSet. This allows to create ingresses targeting multiple groups of nodes. | [][GlobalIngressConfig](#globalingressconfig) | false |
+| gatewayRoutes | List of Gateway API route configs for this ChainNodeSet. This allows to create HTTPRoute/GRPCRoute resources targeting multiple groups of nodes. | [][GlobalGatewayConfig](#globalgatewayconfig) | false |
+| cosmoseed | Allows deploying seed nodes using Cosmoseed. | *[CosmoseedConfig](#cosmoseedconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer that signs for one or more node groups (or the validator group by default). Targeted nodes listen for the signer instead of mounting a local key or running TmKMS. | *[Cosmosigner](#cosmosigner) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeSetStatus
+
+ChainNodeSetStatus defines the observed state of ChainNodeSet.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| phase | Indicates the current phase for this ChainNodeSet. | ChainNodeSetPhase | false |
+| chainID | Indicates the chain ID. | string | false |
+| genesisInitGenerated | GenesisInitGenerated records whether this chain's genesis was generated by a genesis-initializing validator (true) or imported from an external source (false), captured the first time genesis exists. Controller-managed; it lets the no-webhook reconcile path reject adding init validators to an external-genesis chain even when no validators are recorded yet. Nil on chains upgraded from a version that predates it. Not meant to be set by hand. | *bool | false |
+| instances | Indicates the total number of ChainNode instances on this ChainNodeSet. | int | false |
+| readyInstances | Indicates how many of the ChainNode instances on this ChainNodeSet are currently serving, i.e. their phase is Running or Syncing, or Snapshotting without stopping the node. A value below .status.instances means the nodeset is degraded even while .status.phase is Running. Always serialized (no omitempty) so that a total outage reads as an explicit 0 instead of an absent field. | int | true |
+| appVersion | The application version currently deployed. | string | false |
+| nodes | Nodes available on this nodeset, including validator nodes. | [][ChainNodeSetNodeStatus](#chainnodesetnodestatus) | false |
+| validators | Validators available on this nodeset. | [][ChainNodeSetValidatorStatus](#chainnodesetvalidatorstatus) | false |
+| validatorAddress | Validator address of the first validator in spec order (legacy .spec.validator, then group validators) if one is available. This is a legacy alias; see .status.validators for the full list. Omitted when no validator is present in the ChainNodeSet. | string | false |
+| validatorStatus | Current status of the first validator in spec order (legacy alias). See .status.validators for the full list. | ValidatorStatus | false |
+| pubKey | Public key of the first validator in spec order (legacy alias). See .status.validators for the full list. | string | false |
+| upgrades | All scheduled or completed upgrades performed by cosmopilot on ChainNodes of this ChainNodeSet. | [][Upgrade](#upgrade) | false |
+| latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
+| seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
+| cosmosigners | Cosmosigners records controller-managed state for each managed cosmosigner deployment (the top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner). Keyed by the signer's resource name. Not meant to be set by hand. | [][CosmosignerStatus](#cosmosignerstatus) | false |
+| legacySignerServiceNames | LegacySignerServiceNames records pre-existing owned group/global Service names ending in -signer/-signer-privval — suffixes now reserved for a standalone ChainNode's raft/discovery Services. The controller initializes this once from Services already owned by the ChainNodeSet, so validateCosmosigner can grandfather legacy names on the no-webhook path without trusting the current, possibly edited spec. Both scopes are captured because a group OR a global route named `<x>-signer` materializes the colliding Service. | []string | false |
+| legacySignerServiceNamesInitialized | LegacySignerServiceNamesInitialized distinguishes a recorded empty legacy-name set from an old ChainNodeSet whose status predates LegacySignerServiceNames. | bool | false |
+| legacyReservedChildGroupNames | LegacyReservedChildGroupNames records pre-existing owned node-group base Service names (scope \"group\", instances > 0) ending in -cg/-signer/-seed, i.e. groups that already materialize child ChainNodes `<base>-<n>` under a now-reserved StatefulSet-child suffix. Unlike LegacySignerServiceNames this excludes global routes and zero-instance groups — neither creates such children — so validateGroupChildReservedNames grandfathers only genuinely child-bearing groups on the no-webhook path and never lets a later same-named group strand its children. | []string | false |
+| legacyReservedChildGroupNamesInitialized | LegacyReservedChildGroupNamesInitialized distinguishes a recorded empty set from a ChainNodeSet whose status predates LegacyReservedChildGroupNames (so it is back-filled once after upgrade). | bool | false |
+| legacyServiceNameCollisions | LegacyServiceNameCollisions records Service names derived by two distinct owners (node groups, global routes) whose colliding resource already existed as a live owned object when this validation was first enforced — the \"already reconciled\" signal, so a brand-new object (nothing materialized yet) records none. validateServiceNameCollisions grandfathers these on the no-webhook path (old == nil), where the controller cannot diff against a previous revision, so a pre-existing (already-broken) ChainNodeSet keeps reconciling while a collision newly introduced on a later revision is still rejected. | []string | false |
+| legacyServiceNameCollisionsInitialized | LegacyServiceNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose status predates LegacyServiceNameCollisions (so it is back-filled once after upgrade). | bool | false |
+| legacyIngressNameCollisions | LegacyIngressNameCollisions records Ingress names derived by two distinct owners whose colliding resource already existed as a live owned object when this validation was first enforced (see LegacyServiceNameCollisions for the live-resource gating rationale). validateIngressNameCollisions grandfathers these on the no-webhook path (old == nil), matching LegacyServiceNameCollisions. | []string | false |
+| legacyIngressNameCollisionsInitialized | LegacyIngressNameCollisionsInitialized distinguishes a recorded empty set from a ChainNodeSet whose status predates LegacyIngressNameCollisions (so it is back-filled once after upgrade). | bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeSetValidatorStatus
+
+ChainNodeSetValidatorStatus contains information about a validator running on this ChainNodeSet.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name of the validator ChainNode. | string | true |
+| uid | UID identifies the exact validator ChainNode instance recorded under this name. | types.UID | false |
+| group | Group to which this validator belongs. | string | true |
+| address | Validator address. | string | false |
+| status | Current validator status. | ValidatorStatus | false |
+| pubKey | Public key of the validator. | string | false |
+| init | Init indicates this validator initialized the chain genesis and is therefore part of the immutable genesis validator set. Controller-managed; recorded for every instance of a genesis-initializing validator group (and the legacy singleton .spec.validator.init). | bool | false |
+| signingKeyDigest | SigningKeyDigest is a controller-internal fingerprint of a genesis validator's signing material (resolved private-key secret, tmKMS identity, init chainID and genesis validator list). It is used to detect disallowed post-genesis changes to the immutable genesis validator set when the validating webhooks are disabled and no previous spec is available to diff against. Set only for genesis (init) validators; not meant to be set by hand. | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoseedConfig
+
+CosmoseedConfig defines settings for deploying seed nodes via Cosmoseed.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enabled | Whether to enable deployment of Cosmoseed. If false or unset, no seed node instances will be created. | *bool | false |
+| instances | Number of seed node instances to deploy. Defaults to 1. | *int | false |
+| expose | Configuration for exposing the P2P endpoint (e.g., via LoadBalancer or NodePort). | *[ExposeConfig](#exposeconfig) | false |
+| resources | Compute Resources to be applied on the cosmoseed container. | corev1.ResourceRequirements | false |
+| allowNonRoutable | Used to enforce strict routability rules for peer addresses. Set to false to only accept publicly routable IPs (recommended for public networks). Set to true to allow local/private IPs (e.g., in testnets or dev environments). Defaults to `false`. | *bool | false |
+| maxInboundPeers | Maximum number of inbound P2P connections. Defaults to `2000`. | *int | false |
+| maxOutboundPeers | Maximum number of outbound P2P connections. Defaults to `20`. | *int | false |
+| peerQueueSize | Size of the internal peer queue used by dial workers in the PEX reactor. This queue holds peers to be dialed; dial workers consume from it. If the queue is full, new discovered peers may be discarded. Use together with `DialWorkers` to control peer discovery throughput. Defaults to `1000`. | *int | false |
+| dialWorkers | Number of concurrent dialer workers used for outbound peer discovery. Each worker fetches peers from the queue (`PeerQueueSize`) and attempts to dial them. Higher values increase parallelism, but may increase CPU/network load. Defaults to `20`. | *int | false |
+| maxPacketMsgPayloadSize | Maximum size (in bytes) of packet message payloads over P2P. Defaults to `1024`. | *int | false |
+| additionalSeeds | Additional seed nodes to append to the node’s default seed list. Comma-separated list in the format `nodeID@ip:port`. | *string | false |
+| logLevel | Log level of cosmoseed. Defaults to `info`. | *string | false |
+| ingress | Ingress configuration for cosmoseed nodes. | *[CosmoseedIngressConfig](#cosmoseedingressconfig) | false |
+| gateway | Gateway API configuration for cosmoseed nodes. Mutually exclusive with ingress. | *[CosmoseedGatewayConfig](#cosmoseedgatewayconfig) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoseedGatewayConfig
+
+CosmoseedGatewayConfig is a simplified gateway config for seed nodes.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| gateway | Gateway to attach routes to. | [GatewayRef](#gatewayref) | true |
+| host | Host in which cosmoseed nodes will be exposed. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoseedIngressConfig
+
+CosmoseedIngressConfig configures ingress for cosmoseed nodes.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| host | Host in which cosmoseed nodes will be exposed. | string | true |
+| annotations | Annotations to be appended to the ingress. | map[string]string | false |
+| disableTLS | Whether to disable TLS on ingress resource. | bool | false |
+| tlsSecretName | Name of the secret containing TLS certificate. | *string | false |
+| ingressClass | IngressClass specifies the ingress class to be used on ingresses | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GatewayConfig
+
+GatewayConfig configures Gateway API HTTPRoute/GRPCRoute resources for exposing blockchain node APIs. TLS is handled at the Gateway level, not per-route.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| gateway | Gateway to attach routes to. | [GatewayRef](#gatewayref) | true |
+| host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
+| enableRPC | Enable RPC endpoint. | bool | false |
+| enableGRPC | Enable gRPC endpoint. | bool | false |
+| enableLCD | Enable LCD endpoint. | bool | false |
+| enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
+| useInternalServices | UseInternalServices configures routes to point directly to the node services, bypassing Cosmoguard and any readiness checks. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GatewayRef
+
+GatewayRef identifies the Gateway resource routes should attach to. Each field is copied verbatim into a Gateway API ParentReference, so all three carry that API's grammar: ObjectName and SectionName are RFC 1123 subdomains, Namespace an RFC 1123 label. Enforcing it here rejects a malformed reference at admission rather than letting the rendered route be refused by the API server, which leaves reconciliation unable to converge.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name of the Gateway resource. | string | true |
+| namespace | Namespace of the Gateway. Defaults to the resource's namespace. | *string | false |
+| sectionName | SectionName selects a specific listener on the Gateway. When omitted, the route may attach to every listener that accepts it. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GlobalGatewayConfig
+
+GlobalGatewayConfig configures Gateway API routes for cross-group routing in ChainNodeSet.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | The name of this gateway route config. | string | true |
+| groups | Groups of nodes to which this gateway route will point to. | []string | true |
+| gateway | Gateway to attach routes to. | [GatewayRef](#gatewayref) | true |
+| host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
+| enableRPC | Enable RPC endpoint. | bool | false |
+| enableGRPC | Enable gRPC endpoint. | bool | false |
+| enableLCD | Enable LCD endpoint. | bool | false |
+| enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
+| useInternalServices | UseInternalServices configures routes to point directly to the node services, bypassing Cosmoguard and any readiness checks. | *bool | false |
+| servicesOnly | ServicesOnly indicates that only global services should be created. No route resources will be created. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GlobalIngressConfig
+
+GlobalIngressConfig specifies configurations for ingress to expose API endpoints of several groups of nodes.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | The name of this ingress. | string | true |
+| groups | Groups of nodes to which this ingress will point to. | []string | true |
+| enableRPC | Enable RPC endpoint. | bool | false |
+| enableGRPC | Enable gRPC endpoint. | bool | false |
+| enableLCD | Enable LCD endpoint. | bool | false |
+| enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
+| host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
+| annotations | Annotations to be set on ingress resource. | map[string]string | false |
+| disableTLS | Whether to disable TLS on ingress resource. | bool | false |
+| tlsSecretName | Name of the secret containing TLS certificate. | *string | false |
+| grpcAnnotations | GrpcAnnotations to be set on grpc ingress resource. Defaults to nginx annotation `nginx.ingress.kubernetes.io/backend-protocol: GRPC` if nginx ingress class is used. | map[string]string | false |
+| ingressClass | IngressClass specifies the ingress class to be used on ingresses | *string | false |
+| useInternalServices | UseInternalServices configures Ingress to route traffic directly to the node services, bypassing Cosmoguard and any readiness checks. This is only recommended for debugging or for private/internal traffic (e.g., when accessing the cluster over a VPN). | *bool | false |
+| servicesOnly | ServicesOnly indicates that only global services should be created. No ingress resources will be created. Useful for usage with custom controllers that have their own CRDs. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### IndividualIngressConfig
+
+IndividualIngressConfig provides host configuration for individual node ingresses.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| host |  | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### IngressConfig
+
+IngressConfig specifies configurations for ingress to expose API endpoints.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enableRPC | Enable RPC endpoint. | bool | false |
+| enableGRPC | Enable gRPC endpoint. | bool | false |
+| enableLCD | Enable LCD endpoint. | bool | false |
+| enableEvmRPC | Enable EVM RPC endpoint. | bool | false |
+| enableEvmRpcWS | Enable EVM RPC Websocket endpoint. | bool | false |
+| host | Host in which endpoints will be exposed. Endpoints are exposed on corresponding subdomain of this host. An example host `nodes.example.com` will have endpoints exposed at `rpc.nodes.example.com`, `grpc.nodes.example.com` and `lcd.nodes.example.com`. | string | true |
+| subdomains | Subdomains overrides the default DNS subdomain prefix for each endpoint (rpc, lcd, grpc, evm-rpc, evm-rpc-ws). Any unset field keeps its default. | *[SubdomainsConfig](#subdomainsconfig) | false |
+| annotations | Annotations to be appended to the ingress. | map[string]string | false |
+| disableTLS | Whether to disable TLS on ingress resource. | bool | false |
+| tlsSecretName | Name of the secret containing TLS certificate. | *string | false |
+| grpcAnnotations | GrpcAnnotations to be set on grpc ingress resource. Defaults to nginx annotation `nginx.ingress.kubernetes.io/backend-protocol: GRPC` if nginx ingress class is used. | map[string]string | false |
+| ingressClass | IngressClass specifies the ingress class to be used on ingresses | *string | false |
+| useInternalServices | UseInternalServices configures Ingress to route traffic directly to the node services, bypassing Cosmoguard and any readiness checks. This is only recommended for debugging or for private/internal traffic (e.g., when accessing the cluster over a VPN). | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### NodeGroupSpec
+
+NodeGroupSpec sets chainnode configurations for a group.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name of this group. | string | true |
+| instances | Number of ChainNode instances to run on this group. | *int | false |
+| config | Specific configurations for these nodes. Ignored when this group has a `validator` block; use `.validator.config` instead. | *[Config](#config) | false |
+| validator | Validator config for this node group. When set, every instance in this group is reconciled as a validator with its own consensus key and account secrets. A validator group is configured entirely from this block: group-level `config`, `persistence`, `resources`, `nodeSelector`, `affinity`, `stateSyncRestore`, `stateSyncResources`, `vpa`, `pdb` and `overrideVersion` are ignored in favour of their `.validator.*` counterparts. Setting one of them at group level produces an admission warning. | *[NodeSetValidatorConfig](#nodesetvalidatorconfig) | false |
+| cosmosigner | Cosmosigner deploys a managed cosmosigner remote signer for this group. When the group is a validator group, the signer signs for that group's single consensus identity — a multi-instance group is ONE validator whose instances are redundant signing endpoints, not N validators (multiple validators require multiple groups, each with its own signer). When the group has no validator, its nodes are the signing endpoints of a single out-of-band-registered identity (sentry mode). Its `nodeGroups` field must be empty — the enclosing group is the target. | *[Cosmosigner](#cosmosigner) | false |
+| persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. Ignored when this group has a `validator` block; use `.validator.persistence` instead. | *[Persistence](#persistence) | false |
+| peers | Additional persistent peers that should be added to these nodes. | [][Peer](#peer) | false |
+| expose | Allows exposing P2P traffic to public. | *[ExposeConfig](#exposeconfig) | false |
+| individualIngresses | IndividualIngresses defines configuration for exposing API endpoints through separate Ingress resources per node in the set. Each Ingress routes traffic directly to its corresponding node's Service (i.e., no load balancing across nodes).\n\nThe same IngressConfig is reused for all nodes, but the `host` field will be prefixed with the node index to generate unique subdomains. For example, if `host = \"fullnodes.cosmopilot.local\"`, then node ingress domains will be:\n  - 0.fullnodes.cosmopilot.local\n  - 1.fullnodes.cosmopilot.local\n  - etc.\n\nMutually exclusive with individualGatewayRoutes. | *[IngressConfig](#ingressconfig) | false |
+| individualGatewayRoutes | IndividualGatewayRoutes configures per-node Gateway API routes. Each node gets its own HTTPRoute/GRPCRoute with hostname prefixed by node index (e.g., 0.host, 1.host). Mutually exclusive with individualIngresses. | *[GatewayConfig](#gatewayconfig) | false |
+| resources | Compute Resources required by the app container. Ignored when this group has a `validator` block; use `.validator.resources` instead. | corev1.ResourceRequirements | false |
+| nodeSelector | Selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. Ignored when this group has a `validator` block; use `.validator.nodeSelector` instead. | map[string]string | false |
+| affinity | If specified, the pod's scheduling constraints. Ignored when this group has a `validator` block; use `.validator.affinity` instead. | *corev1.Affinity | false |
+| stateSyncRestore | Configures these nodes to find state-sync snapshots on the network and restore from it. This is disabled by default. Ignored when this group has a `validator` block; use `.validator.stateSyncRestore` instead. | *bool | false |
+| stateSyncResources | Compute Resources to be used while the node is state-syncing. Ignored when this group has a `validator` block; use `.validator.stateSyncResources` instead. | corev1.ResourceRequirements | false |
+| inheritValidatorGasPrice | Whether these nodes should inherit gas price from validator (if there is not configured on this ChainNodeSet) Defaults to `true`. Has no effect when this group has a `validator` block: a validator group is itself the gas-price source. | *bool | false |
+| ignoreGroupOnDisruptionChecks | Whether ChainNodeSet group label should be ignored on pod disruption checks. This is useful to ensure no downtime globally or per global ingress, instead of just per group. Defaults to `false`. Has no effect when this group has a `validator` block: validator pods already coordinate disruptions chain-wide, across every nodeset and group. | *bool | false |
+| vpa | Vertical Pod Autoscaling configuration for this node. Ignored when this group has a `validator` block; use `.validator.vpa` instead. | *[VerticalAutoscalingConfig](#verticalautoscalingconfig) | false |
+| pdb | Pod Disruption Budget configuration for this group. Ignored when this group has a `validator` block; use `.validator.pdb` instead. | *[PdbConfig](#pdbconfig) | false |
+| snapshotNodeIndex | Index of the node in the group to take volume snapshots from (if enabled). Defaults to `0`. | *int | false |
+| overrideVersion | OverrideVersion will force this group to use the specified version. NOTE: when this is set, cosmopilot will not upgrade the nodes, nor will set the version based on upgrade history. For unsetting this, you will have to do it here and individually per ChainNode Ignored when this group has a `validator` block; use `.validator.overrideVersion` instead. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### NodeSetValidatorConfig
+
+NodeSetValidatorConfig contains validator configurations.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| privateKeySecret | Secret containing the private key to be used by this validator. Defaults to `<chainnode>-priv-key`. Will be created if it does not exist. | *string | false |
+| info | Contains information details about the validator. | *[ValidatorInfo](#validatorinfo) | false |
+| init | Specifies configs and initialization commands for creating a new genesis. | *[GenesisInitConfig](#genesisinitconfig) | false |
+| config | Allows setting specific configurations for the validator. | *[Config](#config) | false |
+| persistence | Configures PVC for persisting data. Automated data snapshots can also be configured in this section. | *[Persistence](#persistence) | false |
+| resources | Compute Resources required by the app container. | corev1.ResourceRequirements | false |
+| nodeSelector | Selector which must be true for the pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. | map[string]string | false |
+| affinity | If specified, the pod's scheduling constraints. | *corev1.Affinity | false |
+| tmKMS | TmKMS configuration for signing commits for this validator. When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.\n\nDeprecated: use the corresponding Cosmosigner field instead. TmKMS will be removed in a future version. | *[TmKMS](#tmkms) | false |
+| stateSyncRestore | Configures this node to find a state-sync snapshot on the network and restore from it. This is disabled by default. | *bool | false |
+| stateSyncResources | Compute Resources to be used while the node is state-syncing. | corev1.ResourceRequirements | false |
+| createValidator | Indicates cosmopilot should run create-validator tx to make this node a validator. | *[CreateValidatorConfig](#createvalidatorconfig) | false |
+| vpa | Vertical Pod Autoscaling configuration for this node. | *[VerticalAutoscalingConfig](#verticalautoscalingconfig) | false |
+| pdb | Pod Disruption Budget configuration for the validator pod. This is mainly useful in testnets where multiple validators might run in the same namespace. In production mainnet environments, where typically only one validator runs per namespace, this is rarely needed. | *[PdbConfig](#pdbconfig) | false |
+| overrideVersion | OverrideVersion will force validator to use the specified version. NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version based on upgrade history. For unsetting this, you will have to do it here and on the ChainNode itself. | *string | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. | *string | false |
+| accountPrefix | Prefix for accounts. Defaults to `cosmos`. | *string | false |
+| valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### PdbConfig
+
+PdbConfig configures the Pod Disruption Budget for a pod.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enabled | Enabled specifies whether to deploy a Pod Disruption Budget. | bool | true |
+| minAvailable | MinAvailable indicates minAvailable field set in PDB. Defaults to the number of instances in the group minus 1, i.e. it allows only a single disruption. | *int | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SeedStatus
+
+SeedStatus contains status information about a cosmoseed node.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name |  | string | true |
+| id |  | string | true |
+| publicAddress |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservation
+
+ConsensusKeyReservation atomically prevents independent roots or claims from managing separate double-sign state for the same chain and consensus public key.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ObjectMeta | false |
+| spec |  | [ConsensusKeyReservationSpec](#consensuskeyreservationspec) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationList
+
+ConsensusKeyReservationList contains consensus-key reservations.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| metadata |  | metav1.ListMeta | false |
+| items |  | [][ConsensusKeyReservation](#consensuskeyreservation) | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ConsensusKeyReservationSpec
+
+ConsensusKeyReservationSpec records the controller root and logical claim allowed to manage one consensus public key on one chain. The owning root's reservation lifecycle finalizer releases the immutable reservation only after all attributable signing workloads are confirmed absent.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| chainID |  | string | true |
+| publicKey |  | string | true |
+| ownerUID | OwnerUID identifies the controller root that owns this reservation for conflict detection. | types.UID | true |
+| ownerKind |  | string | true |
+| namespace |  | string | true |
+| ownerName |  | string | true |
+| claim |  | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### AccountAssets
+
+AccountAssets represents the assets associated with an account.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| address | Address of the account. | string | true |
+| assets | Assets assigned to this account. | []string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### AppSpec
+
+AppSpec specifies the source image, version and binary name of the app to run. Also allows specifying upgrades for the app and enabling automatic check of upgrade proposals on chain.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| image | Container image to be used. | string | true |
+| version | Image tag to be used. Once there are completed or skipped upgrades this will be ignored. For a new node that will be state-synced, this will be the version used during state-sync. Only after that, the cosmopilot will switch to the version of last upgrade. Defaults to `latest`. | *string | false |
+| imagePullPolicy | Indicates the desired pull policy when creating nodes. Defaults to `Always` if `version` is `latest` and `IfNotPresent` otherwise. | corev1.PullPolicy | false |
+| app | Binary name of the application to be run. | string | true |
+| sdkVersion | SdkVersion specifies the version of cosmos-sdk used by this app. Valid options are: - \"v0.53\" (default) - \"v0.50\" - \"v0.47\" - \"v0.45\" | *SdkVersion | false |
+| checkGovUpgrades | Whether cosmopilot should query gov proposals to find and schedule upgrades. Defaults to `true`. | *bool | false |
+| upgrades | List of upgrades to schedule for this node. | [][UpgradeSpec](#upgradespec) | false |
+| sdkOptions | SdkOptions allows customizing SDK command behavior for chains that diverge from standard SDK CLI. | *[SdkOptions](#sdkoptions) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ChainNodeAssets
+
+ChainNodeAssets represents the assets associated with an account from another ChainNode.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| chainNode | Name of the ChainNode. | string | true |
+| assets | Assets assigned to this account. | []string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### Config
+
+Config allows setting specific configurations for a node, including overriding configs in app.toml and config.toml.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| override | Allows overriding configs on `.toml` configuration files. | *map[string]runtime.RawExtension | false |
+| sidecars | Allows configuring additional containers to run alongside the node. | [][SidecarSpec](#sidecarspec) | false |
+| imagePullSecrets | Optional list of references to secrets in the same namespace to use for pulling any of the images used by this node. | []corev1.LocalObjectReference | false |
+| blockThreshold | The time to wait for a block before considering node unhealthy. Defaults to `0s`. | *string | false |
+| reconcilePeriod | Period at which a reconcile loop will happen for this ChainNode. Defaults to `15s`. | *string | false |
+| stateSync | Allows configuring this node to perform state-sync snapshots. | *[StateSyncConfig](#statesyncconfig) | false |
+| seedMode | Configures this node to run on seed mode. Defaults to `false`. | *bool | false |
+| env | List of environment variables to set in the app container. | []corev1.EnvVar | false |
+| podAnnotations | PodAnnotations allows setting additional annotations on the node's pod. | map[string]string | false |
+| safeToEvict | SafeToEvict sets cluster-autoscaler.kubernetes.io/safe-to-evict annotation to the given value. It allows/disallows cluster-autoscaler to evict this node's pod. | *bool | false |
+| cosmoGuard | Deploys a standalone CosmoGuard deployment fronting this node's API endpoints. | *[CosmoGuardConfig](#cosmoguardconfig) | false |
+| nodeUtilsLogLevel | Log level for node-utils container. Defaults to `info`. | *string | false |
+| startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
+| ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
+| nodeUtilsResources | Compute Resources for node-utils container. | *corev1.ResourceRequirements | false |
+| cosmosignerDiscoveryResources | Compute resources for the remote-signer discovery startup gate. When omitted, lightweight defaults are used independently from nodeUtilsResources because both init containers overlap. Resource claims are not supported because the gate does not add Pod-level resource claims. | *[DiscoveryResourceRequirements](#discoveryresourcerequirements) | false |
+| nodeUtilsEnv | Additional environment variables for the node-utils container. | []corev1.EnvVar | false |
+| persistAddressBook | Whether to persist address book file in data directory. Defaults to `true`. | *bool | false |
+| terminationGracePeriodSeconds | Optional duration in seconds the pod needs to terminate gracefully. | *int64 | false |
+| evmEnabled | Whether EVM is enabled on this node. Will add evm-rpc port to services. Defaults to `false`. | *bool | false |
+| runFlags | List of flags to be appended to app container when starting the node. | []string | false |
+| dashedConfigToml | Whether field naming in config.toml should use dashes instead of underscores. Defaults to `false`. | *bool | false |
+| haltHeight | The block height at which the node should stop. Cosmopilot will not attempt to restart the node beyond this height. | *int64 | false |
+| securityContext | SecurityContext allows overriding the default restricted security context for the main app container. When not specified, a restricted security context is applied (runAsNonRoot, runAsUser=1000, drop all capabilities). Use this only if your app image requires running as root or with different security settings. | *corev1.SecurityContext | false |
+| podSecurityContext | PodSecurityContext allows overriding the default restricted pod security context. When not specified, a restricted pod security context is applied (runAsNonRoot, runAsUser=1000, fsGroup=1000). Use this only if your app or sidecars require running as root or with different security settings. | *corev1.PodSecurityContext | false |
+| serviceAccountName | ServiceAccountName is the name of the ServiceAccount to use for the node's pod. If not specified, the default service account in the namespace is used. This is useful when sidecars need specific permissions (e.g., for leader election using leases). | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardAutoscalingConfig
+
+CosmoGuardAutoscalingConfig configures a HorizontalPodAutoscaler for CosmoGuard.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enable | Whether to enable horizontal autoscaling for CosmoGuard. | bool | true |
+| minReplicas | Minimum number of replicas. Defaults to `1`. | *int32 | false |
+| maxReplicas | Maximum number of replicas. | int32 | true |
+| targetCPUUtilizationPercentage | Target average CPU utilization (percentage) that triggers scaling. Defaults to `80`. | *int32 | false |
+| targetMemoryUtilizationPercentage | Target average memory utilization (percentage) that triggers scaling. Disabled when unset. | *int32 | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardConfig
+
+CosmoGuardConfig allows configuring CosmoGuard - a standalone firewall/policy proxy deployed in front of the node API endpoints (RPC/LCD/gRPC/EVM).
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enable | Whether to enable CosmoGuard on this node or group. | bool | true |
+| config | ConfigMap containing the CosmoGuard rules configuration. Only rules should be set here; upstream, listener, metrics and dashboard settings are managed by Cosmopilot. | *corev1.ConfigMapKeySelector | true |
+| image | Container image to use for CosmoGuard. Overrides the operator-wide default image. | *string | false |
+| replicas | Number of CosmoGuard replicas to run. Defaults to `1`. Ignored when autoscaling is enabled. | *int32 | false |
+| autoscaling | Autoscaling configures a HorizontalPodAutoscaler for the CosmoGuard deployment. | *[CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig) | false |
+| dashboard | Dashboard exposes CosmoGuard's read-only web dashboard. | *[CosmoGuardDashboardConfig](#cosmoguarddashboardconfig) | false |
+| resources | Compute Resources for each CosmoGuard pod. | *corev1.ResourceRequirements | false |
+| restartPodOnFailure | Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes, so this field has no effect and will be removed in a future release. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardAuth
+
+CosmoGuardDashboardAuth references Secret keys holding basic-auth credentials for the dashboard.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| username | Username credential. | corev1.SecretKeySelector | true |
+| password | Password credential. | corev1.SecretKeySelector | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardConfig
+
+CosmoGuardDashboardConfig configures CosmoGuard's read-only web dashboard.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enable | Whether to enable the CosmoGuard dashboard. | bool | true |
+| port | Port the dashboard listens on. Defaults to `8080`. | *int32 | false |
+| basicAuth | BasicAuth protects the dashboard with HTTP basic authentication using credentials sourced from a Secret. | *[CosmoGuardDashboardAuth](#cosmoguarddashboardauth) | false |
+| ingress | Ingress exposes the dashboard through an Ingress resource. | *[CosmoGuardDashboardIngress](#cosmoguarddashboardingress) | false |
+| gateway | Gateway exposes the dashboard through Gateway API HTTPRoutes. Mutually exclusive with Ingress. | *[CosmoGuardDashboardGateway](#cosmoguarddashboardgateway) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardGateway
+
+CosmoGuardDashboardGateway exposes the CosmoGuard dashboard through Gateway API HTTPRoutes.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| host | Host is the hostname to route dashboard traffic from. | string | true |
+| gateway | Gateway is the parent Gateway listener for dashboard traffic. | [GatewayRef](#gatewayref) | true |
+| httpRedirect | HTTPRedirect optionally creates a second HTTPRoute that redirects this host to HTTPS. It must select a different listener from Gateway. | *[GatewayRef](#gatewayref) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardDashboardIngress
+
+CosmoGuardDashboardIngress exposes the CosmoGuard dashboard through an Ingress.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| host | Host is the hostname to route dashboard traffic from. | string | true |
+| ingressClassName | IngressClassName is the name of the IngressClass to use. | *string | false |
+| annotations | Annotations to add to the dashboard Ingress. | map[string]string | false |
+| tlsSecretName | TLS enables TLS for the dashboard Ingress using the given secret name for the certificate. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CreateValidatorConfig
+
+CreateValidatorConfig holds configuration for cosmopilot to submit a create-validator transaction.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| accountMnemonicSecret | Name of the secret containing the mnemonic of the account to be used by this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist. | *string | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. Deprecated: Use `.validator.accountHDPath` instead. | *string | false |
+| accountPrefix | Prefix for accounts. Defaults to `cosmos`. Deprecated: Use `.validator.accountPrefix` instead. | *string | false |
+| valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. Deprecated: Use `.validator.valPrefix` instead. | *string | false |
+| commissionMaxChangeRate | Maximum commission change rate percentage (per day). Defaults to `0.1`. | *string | false |
+| commissionMaxRate | Maximum commission rate percentage. Defaults to `0.1`. | *string | false |
+| commissionRate | Initial commission rate percentage. Defaults to `0.1`. | *string | false |
+| minSelfDelegation | Minimum self delegation required on the validator. Defaults to `1`. | *string | false |
+| stakeAmount | Amount to be staked by this validator. | string | true |
+| gasPrices | Gas prices in decimal format to determine the transaction fee. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### DeletionPolicy
+
+DeletionPolicy configures deletion of durable resources generated by Cosmopilot. Every field defaults to Retain; deletion always requires an explicit Delete value.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| dataVolumes | DataVolumes controls operator-generated main and additional node PVCs and, for a ChainNodeSet, Cosmoseed `data-<set>-seed-<ordinal>` PVCs. | *DeletionPolicyType | false |
+| generatedKeys | GeneratedKeys controls operator-generated node, consensus, account, genesis-validator, and Cosmoseed key Secrets. Existing user-provided Secrets are never classified from their name alone. | *DeletionPolicyType | false |
+| cosmosignerState | CosmosignerState controls operator-generated Cosmosigner Raft-state PVCs. | *DeletionPolicyType | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### DiscoveryResourceRequirements
+
+DiscoveryResourceRequirements describes compute resources for the remote-signer discovery gate. It intentionally excludes resource claims, which require corresponding PodSpec.ResourceClaims.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| limits | Limits describes the maximum amount of compute resources allowed. | corev1.ResourceList | false |
+| requests | Requests describes the minimum amount of compute resources required. | corev1.ResourceList | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ExportTarballConfig
+
+ExportTarballConfig holds config options for tarball upload.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| suffix | Suffix to add to archive name. The name of the tarball will be `<chain-id>-<timestamp>-<suffix>`. | *string | false |
+| deleteOnExpire | Whether to delete the tarball when the snapshot expires. Default is `false`. | *bool | false |
+| compression | Compression applied to the tar archive. Defaults to `gzip` for compatibility with existing exports. | *TarballCompression | false |
+| gcs | Configuration to upload tarballs to a GCS bucket. | *[GcsExportConfig](#gcsexportconfig) | false |
+| s3 | Configuration to upload tarballs to Amazon S3 or an S3-compatible object store. | *[S3ExportConfig](#s3exportconfig) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ExposeConfig
+
+ExposeConfig allows configuring how P2P endpoint is exposed to public.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| p2p | Whether to expose p2p endpoint for this node. Defaults to `false`. | *bool | false |
+| p2pServiceType | P2pServiceType indicates how P2P port will be exposed. Valid values are: - `LoadBalancer` - `NodePort` (default) The default is applied at runtime so that the mutual-exclusion CEL rule with `gateway` does not match merely because the schema default was applied. | *corev1.ServiceType | false |
+| annotations | Annotations to be appended to the p2p service. | map[string]string | false |
+| gateway | Gateway configures P2P exposure via a Gateway API TCPRoute instead of a dedicated Service. When set, a TCPRoute is created that routes P2P TCP traffic through the referenced Gateway. This is mutually exclusive with p2pServiceType. | *[ExposeGatewayConfig](#exposegatewayconfig) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ExposeGatewayConfig
+
+ExposeGatewayConfig configures P2P exposure through a Gateway API TCPRoute.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| port | Port is the external port on the Gateway listener for P2P traffic. This is the port that peers will use to connect. Defaults to 26656.\n\nWhen this config is applied to a group of nodes with more than one instance (NodeGroupSpec.instances or CosmoseedConfig.instances > 1), this value is treated as the BASE port and each instance attaches to a distinct listener: instance 0 uses Port, instance 1 uses Port+1, instance i uses Port+i. The Gateway must be configured with a matching TCP listener for each port. Because those listeners differ per instance, sectionName cannot be set in the multi-instance case: a single listener name cannot address them all. | *int32 | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### FromNodeRPCConfig
+
+FromNodeRPCConfig holds configuration to retrieve genesis from an existing node using RPC endpoint.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| secure | Defines protocol to use. Defaults to `false`. | bool | false |
+| hostname | Hostname or IP address of the RPC server. | string | true |
+| port | TCP port used for RPC queries on the RPC server. Defaults to `26657`. | *int | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GcsExportConfig
+
+GcsExportConfig holds required settings to upload to GCS.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| bucket | Name of the bucket to upload tarballs to. | string | true |
+| credentialsSecret | Secret with the JSON credentials to upload to bucket. Exactly one of `credentialsSecret` or `serviceAccountName` must be set. When set, the snapshot Jobs mount this secret and use it as `GOOGLE_APPLICATION_CREDENTIALS`. | *corev1.SecretKeySelector | false |
+| serviceAccountName | ServiceAccountName is the name of the Kubernetes ServiceAccount that the snapshot Jobs run as, so they authenticate to GCS through Workload Identity / Application Default Credentials (ADC) instead of a credentials secret. Exactly one of `credentialsSecret` or `serviceAccountName` must be set. | *string | false |
+| sizeLimit | Size limit at which the file will be split into multiple parts. Defaults to `5TB`. | *string | false |
+| partSize | Size of each part when size-limit is crossed. Defaults to `500GB`. | *string | false |
+| chunkSize | Size of each chunk uploaded in parallel to GCS. Defaults to `250MB`. | *string | false |
+| bufferSize | Size of the buffer when streaming data to GCS. Defaults to `32MB`. | *string | false |
+| concurrentJobs | Number of concurrent upload or delete jobs. Defaults to `10`. | *int | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GenesisConfig
+
+GenesisConfig specifies how genesis will be retrieved.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| url | URL to download the genesis from. | *string | false |
+| fromNodeRPC | Get the genesis from an existing node using its RPC endpoint. | *[FromNodeRPCConfig](#fromnoderpcconfig) | false |
+| genesisSHA | SHA256 to validate the genesis. | *string | false |
+| configMap | ConfigMap specifies a configmap to load the genesis from. It can also be used to specify the name of the configmap to store the genesis when retrieving genesis using other methods. | *string | false |
+| useDataVolume | UseDataVolume indicates that cosmopilot should save the genesis in the same volume as node data instead of a ConfigMap. This is useful for genesis whose size is bigger than ConfigMap limit of 1MiB. Ignored when genesis source is a ConfigMap. Defaults to `false`. | *bool | false |
+| chainID | The chain-id of the network. This is only used when useDataVolume is true. If not set, cosmopilot will download the genesis and extract chain-id from it. If set, cosmopilot will not download it and use a container to download the genesis directly into the volume instead. This is useful for huge genesis that might kill cosmopilot container for using too much memory. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GenesisInitConfig
+
+GenesisInitConfig specifies configs and initialization commands for creating a new genesis.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| chainID | ChainID of the chain to initialize. | string | true |
+| accountMnemonicSecret | Name of the secret containing the mnemonic of the account to be used by this validator. Defaults to `<chainnode>-account`. Will be created if it does not exist. | *string | false |
+| accountHDPath | HD path of accounts. Defaults to `m/44'/118'/0'/0/0`. Deprecated: Use `.validator.accountHDPath` instead. | *string | false |
+| accountPrefix | Prefix for accounts. Defaults to `cosmos`. Deprecated: Use `.validator.accountPrefix` instead. | *string | false |
+| valPrefix | Prefix for validator operator accounts. Defaults to `cosmosvaloper`. Deprecated: Use `.validator.valPrefix` instead. | *string | false |
+| commissionMaxChangeRate | Maximum commission change rate percentage (per day). Defaults to `0.1`. | *string | false |
+| commissionMaxRate | Maximum commission rate percentage. Defaults to `0.1`. | *string | false |
+| commissionRate | Initial commission rate percentage. Defaults to `0.1`. | *string | false |
+| minSelfDelegation | Minimum self delegation required on the validator. Defaults to `1`. NOTE: In most chains this is a required flag. However, in a few other chains (Cosmos Hub for example), this flag does not even exist anymore. In those cases, set it to an empty string and cosmopilot will skip it. | *string | false |
+| assets | Assets is the list of tokens and their amounts to be assigned to this validators account. | []string | true |
+| stakeAmount | Amount to be staked by this validator. | string | true |
+| accounts | Accounts specify additional accounts and respective assets to be added to this chain. | [][AccountAssets](#accountassets) | false |
+| chainNodeAccounts | List of ChainNodes whose accounts should be included in genesis. NOTE: Cosmopilot will wait for the ChainNodes to exist and have accounts before proceeding. | [][ChainNodeAssets](#chainnodeassets) | false |
+| unbondingTime | Time required to totally unbond delegations. If not set, the chain's default is used. | *string | false |
+| votingPeriod | Voting period for governance proposals. If not set, the chain's default is used. | *string | false |
+| expeditedVotingPeriod | Expedited voting period for governance proposals. If not set, the chain's default is used. Only supported in SDK >= v0.50. | *string | false |
+| additionalInitCommands | Additional commands to run on genesis initialization. Note: App home is at `/home/app` and `/temp` is a temporary volume shared by all init containers. | [][InitCommand](#initcommand) | false |
+| genesisValidators | GenesisValidators lists additional validators (besides the one performing the initialization) to be included as genesis validators. For each entry, cosmopilot adds the account to genesis and generates a gentx using the referenced secrets, so the validator becomes part of the initial validator set.\n\nThis field is primarily populated by ChainNodeSet when a validator group initializes genesis with more than one instance: every instance of the group is then included in the same generated genesis. It is generally not meant to be set by hand. | [][GenesisValidator](#genesisvalidator) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### GenesisValidator
+
+GenesisValidator references the material needed to include an additional validator in a genesis being initialized by another ChainNode. The referenced secrets must already exist (they are created deterministically by the ChainNodeSet controller for group validators).
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| privKeySecret | PrivKeySecret is the name of the secret holding this validator's priv_validator_key.json. | string | true |
+| accountMnemonicSecret | AccountMnemonicSecret is the name of the secret holding this validator's account mnemonic. | string | true |
+| moniker | Moniker for this validator's gentx. | string | true |
+| assets | Assets is the list of tokens and amounts assigned to this validator's account in genesis. | []string | true |
+| stakeAmount | StakeAmount to be self-delegated by this validator in its gentx. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### InitCommand
+
+InitCommand represents an initialization command. It may be used for running additional commands on genesis or volume initialization.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| image | Image to be used to run this command. Defaults to app image. | *string | false |
+| command | Command to be used. Defaults to image entrypoint. | []string | false |
+| args | Args to be passed to this command. | []string | true |
+| resources | Resources specifies the resource requirements for this init command container. | corev1.ResourceRequirements | false |
+| env | Env specifies additional environment variables for this init command container. | []corev1.EnvVar | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### Peer
+
+Peer represents a peer.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| id | Tendermint node ID for this node. | string | true |
+| address | Hostname or IP address of this peer. | string | true |
+| port | P2P port to be used. Defaults to `26656`. | *int | false |
+| unconditional | Indicates this peer is unconditional. | *bool | false |
+| private | Indicates this peer is private. | *bool | false |
+| seed | Indicates this is a seed. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### Persistence
+
+Persistence configuration for a node.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| size | Size of the persistent volume for storing data. Can't be updated when autoResize is enabled. Defaults to `50Gi`. | *string | false |
+| storageClass | Name of the storage class to use for the PVC. Uses the default class if not specified. to create persistent volumes. | *string | false |
+| autoResize | Automatically resize PVC. Defaults to `true`. | *bool | false |
+| autoResizeThreshold | Percentage of data usage at which an auto-resize event should occur. Defaults to `80`. | *int | false |
+| autoResizeIncrement | Increment size on each auto-resize event. Defaults to `50Gi`. | *string | false |
+| autoResizeMaxSize | Size at which auto-resize will stop incrementing PVC size. Defaults to `2Ti`. | *string | false |
+| additionalInitCommands | Additional commands to run on data initialization. Useful for downloading and extracting snapshots. App home is at `/home/app` and data dir is at `/home/app/data`. There is also `/temp`, a temporary volume shared by all init containers. | [][InitCommand](#initcommand) | false |
+| snapshots | Whether cosmopilot should create volume snapshots according to this config. | *[VolumeSnapshotsConfig](#volumesnapshotsconfig) | false |
+| restoreFromSnapshot | Restore from the specified snapshot when creating the PVC for this node. | *[PvcSnapshot](#pvcsnapshot) | false |
+| initTimeout | Time to wait for data initialization pod to be successful. Defaults to `5m`. | *string | false |
+| additionalVolumes | Additional volumes to be created and mounted on this node. These volumes are also mounted during data initialization, so they can be used with `additionalInitCommands` to extract snapshots or initialize data. | [][VolumeSpec](#volumespec) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### PvcSnapshot
+
+PvcSnapshot represents a snapshot to be used to restore a PVC.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name of the volume snapshot being referenced. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### S3ExportConfig
+
+S3ExportConfig holds settings for Amazon S3 and S3-compatible object stores.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| bucket | Name of the bucket to upload tarballs to. | string | true |
+| region | AWS region used to sign S3 requests. S3-compatible stores commonly accept `us-east-1`. | string | true |
+| endpoint | Custom S3-compatible API endpoint, including the `http` or `https` scheme. | *string | false |
+| forcePathStyle | Use path-style bucket addressing. This is commonly required by MinIO and other compatible stores. | *bool | false |
+| credentialsSecret | Secret whose keys are exposed to the exporter as environment variables. Use the standard AWS names `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`. Mutually exclusive with `serviceAccountName`. When both are omitted, the AWS SDK default credential chain is used, including EKS Pod Identity and EC2 instance roles. | *corev1.LocalObjectReference | false |
+| serviceAccountName | Kubernetes ServiceAccount used by snapshot Jobs. On EKS this enables IRSA or EKS Pod Identity. Mutually exclusive with `credentialsSecret`. | *string | false |
+| sizeLimit | Size limit at which the archive is split into multiple objects. Defaults to `5TB`. The S3 multipart part-count limit can require splitting at a smaller size. | *string | false |
+| partSize | Maximum size of each archive object after `sizeLimit` is crossed. Defaults to `500GB`. | *string | false |
+| chunkSize | Size of each S3 multipart upload chunk. Must be between 5MiB and 5GiB. Defaults to `64MB`. | *string | false |
+| bufferSize | Size of the buffer used to stage multipart chunks. Must not exceed 64MiB. Defaults to `32MB`. | *string | false |
+| concurrentJobs | Number of concurrent multipart upload workers. Defaults to `10`. | *int | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SdkOptions
+
+SdkOptions allows customizing SDK command behavior for chains that diverge from standard SDK CLI structure.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| genesisSubcommand | GenesisSubcommand controls whether genesis commands use the \"genesis\" subcommand (e.g., \"genesis gentx\" vs \"gentx\"). Some chains like Osmosis don't use this subcommand. Defaults to true for sdkVersion >= v0.47, false otherwise. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SidecarSpec
+
+SidecarSpec allows configuring additional containers to run alongside the node.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name to be assigned to the container. | string | true |
+| image | Container image to be used. Defaults to app image being used by ChainNode. | *string | true |
+| imagePullPolicy | Indicates the desired pull policy when creating nodes. Defaults to `Always` if `version` is `latest` and `IfNotPresent` otherwise. | corev1.PullPolicy | false |
+| mountDataVolume | Where data volume will be mounted on this container. It is not mounted if not specified. | *string | false |
+| mountConfig | Directory where config files from ConfigMap will be mounted on this container. They are not mounted if not specified. | *string | false |
+| command | Command to be run by this container. Defaults to entrypoint defined in image. | []string | false |
+| args | Args to be passed to this container. Defaults to cmd defined in image. | []string | false |
+| env | Environment variables to be passed to this container. | []corev1.EnvVar | false |
+| securityContext | Security options the container should be run with. | *corev1.SecurityContext | false |
+| resources | Compute Resources for the sidecar container. | corev1.ResourceRequirements | false |
+| restartPodOnFailure | Whether the pod of this node should be restarted when this sidecar container fails. Defaults to `false`. | *bool | false |
+| runBeforeNode | When enabled, this container turns into an init container instead of a sidecar as it will have to finish before the node container starts. Defaults to `false`. | *bool | false |
+| deferUntilHealthy | DeferUntilHealthy determines whether this container should be deferred until the group is healthy. When enabled, this container will only be added to the pod if the group to which the node belongs is healthy (has the minimum pods available as defined in its PodDisruptionBudget). This makes the container optional, allowing for faster node startup when the group is unhealthy. Note: this is ignored on orphan ChainNodes. It is only useful when using ChainNodeSet. Defaults to `false`. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportDestination
+
+SnapshotExportDestination contains the routing and authentication references required to reach the object store used by an upload. The namespace is always the owning ChainNode's namespace.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| provider |  | SnapshotExportProvider | true |
+| bucket | Bucket is omitted for unknown legacy destinations that require explicit operator cleanup. | string | false |
+| region |  | string | false |
+| endpoint |  | string | false |
+| forcePathStyle |  | bool | false |
+| credentialsSecret |  | *[SnapshotExportSecretReference](#snapshotexportsecretreference) | false |
+| serviceAccountName |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportSecretReference
+
+SnapshotExportSecretReference is a local Secret reference used by snapshot export Jobs. Key is set for GCS credentials and empty for S3 credentials exposed with envFrom. Secret contents are never copied into status.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name |  | string | true |
+| key |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportStatus
+
+SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is persisted before its upload Job is created and retained until remote deletion succeeds or an operator explicitly acknowledges cleanup.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| id |  | string | true |
+| snapshotName |  | string | true |
+| snapshotUID |  | types.UID | false |
+| objectName |  | string | true |
+| destination |  | [SnapshotExportDestination](#snapshotexportdestination) | true |
+| phase |  | SnapshotExportPhase | true |
+| message |  | string | false |
+| compression |  | TarballCompression | false |
+| sizeLimit |  | string | false |
+| partSize |  | string | false |
+| chunkSize |  | string | false |
+| bufferSize |  | string | false |
+| concurrentJobs |  | int | false |
+| deleteOnExpire | DeleteOnExpire records the cleanup policy bound to this upload. | bool | false |
+| deleteAttempts | DeleteAttempts is the number of logical remote-delete attempts reserved for this export. | int32 | false |
+| deleteExhausted | DeleteExhausted records that the final logical delete attempt was observed to fail. | bool | false |
+| lastDeleteError | LastDeleteError is the terminal error reported by the most recent logical delete attempt. | string | false |
+| nextDeleteRetryAt | NextDeleteRetryAt is when the controller may reserve the next logical delete attempt. | *metav1.Time | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### StateSyncConfig
+
+StateSyncConfig holds configurations for enabling state-sync snapshots on a node.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| snapshotInterval | Block interval at which local state sync snapshots are taken (0 to disable). | int | true |
+| snapshotKeepRecent | Number of recent snapshots to keep and serve (0 to keep all). Defaults to 2. | *int | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SubdomainsConfig
+
+SubdomainsConfig allows overriding the default DNS subdomain prefixes used for each exposed endpoint. Any field left empty falls back to its default (rpc, lcd, grpc, evm-rpc, evm-rpc-ws).
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| rpc | RPC subdomain prefix. Defaults to \"rpc\". | *string | false |
+| grpc | GRPC subdomain prefix. Defaults to \"grpc\". | *string | false |
+| lcd | LCD subdomain prefix. Defaults to \"lcd\". | *string | false |
+| evmRPC | EvmRPC subdomain prefix. Defaults to \"evm-rpc\". | *string | false |
+| evmRpcWS | EvmRpcWs subdomain prefix. Defaults to \"evm-rpc-ws\". | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### TmKMS
+
+TmKMS allows configuring tmkms for signing for this validator node instead of using plaintext private key file.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| provider | Signing provider to be used by tmkms. Currently only `vault` is supported. | [TmKmsProvider](#tmkmsprovider) | true |
+| keyFormat | Format and type of key for chain. Defaults to `{\"type\": \"bech32\", \"account_key_prefix\": \"cosmospub\", \"consensus_key_prefix\": \"cosmosvalconspub\"}`. | *[TmKmsKeyFormat](#tmkmskeyformat) | false |
+| validatorProtocol | Tendermint's protocol version to be used. Valid options are: - `v0.34` (default) - `v0.33` - `legacy` | *tmkms.ProtocolVersion | false |
+| persistState | Whether to persist \"priv_validator_state.json\" file on a PVC. Defaults to `true`. | *bool | false |
+| resources | Compute Resources for tmkms container. | *corev1.ResourceRequirements | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### TmKmsHashicorpProvider
+
+TmKmsHashicorpProvider holds `hashicorp` provider specific configurations.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| address | Full address of the Vault cluster. | string | true |
+| key | Key to be used by this validator. | string | true |
+| certificateSecret | Secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
+| tokenSecret | Secret containing the token to be used. | *corev1.SecretKeySelector | true |
+| uploadGenerated | UploadGenerated indicates if the controller should upload the generated private key to vault. Defaults to `false`. Will be set to `true` if this validator is initializing a new genesis. This should not be used in production. | bool | false |
+| autoRenewToken | Deprecated: AutoRenewToken deploys vault-token-renewer for legacy tmKMS configurations and defaults to `false`. Cosmosigner renews Vault tokens internally and does not use this sidecar. | bool | false |
+| skipCertificateVerify | Whether to skip certificate verification. Defaults to `false`. | bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### TmKmsKeyFormat
+
+TmKmsKeyFormat represents key format for tmKMS.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| type | Type specifies the key format type. | string | true |
+| account_key_prefix | AccountKeyPrefix is the prefix used for account keys. | string | true |
+| consensus_key_prefix | ConsensusKeyPrefix is the prefix used for consensus keys. | string | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### TmKmsProvider
+
+TmKmsProvider allows configuring providers for tmKMS. Note that only one should be configured.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| hashicorp | Hashicorp provider. | *[TmKmsHashicorpProvider](#tmkmshashicorpprovider) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### Upgrade
+
+Upgrade represents an upgrade processed by cosmopilot and added to status.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| height | Height at which the upgrade should occur. | int64 | true |
+| image | Container image replacement to be used in the upgrade. | string | true |
+| status | Upgrade status. | UpgradePhase | true |
+| source | Where cosmopilot got this upgrade from. | UpgradeSource | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### UpgradeSpec
+
+UpgradeSpec represents a manual upgrade.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| height | Height at which the upgrade should occur. | int64 | true |
+| image | Container image replacement to be used in the upgrade. | string | true |
+| forceOnChain | Whether to force this upgrade to be processed as a gov planned upgrade. Defaults to `false`. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### ValidatorInfo
+
+ValidatorInfo contains information about this validator.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| moniker | Moniker to be used by this validator. Defaults to the ChainNode name. | *string | false |
+| details | Details of this validator. | *string | false |
+| website | Website of the validator. | *string | false |
+| identity | Identity signature of this validator. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### VerticalAutoscalingConfig
+
+VerticalAutoscalingConfig defines rules and thresholds for vertical autoscaling of a pod.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| enabled | Enables vertical autoscaling for the pod. | bool | true |
+| resetVpaAfterNodeUpgrade | ResetVpaAfterNodeUpgrade, when true, clears VPA-applied resources when a node upgrade completes. This reverts resources to user-specified values while setting cooldown timestamps to prevent immediate VPA action after upgrade. | bool | false |
+| cpu | CPU resource autoscaling configuration. | *[VerticalAutoscalingMetricConfig](#verticalautoscalingmetricconfig) | false |
+| memory | Memory resource autoscaling configuration. | *[VerticalAutoscalingMetricConfig](#verticalautoscalingmetricconfig) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### VerticalAutoscalingMetricConfig
+
+VerticalAutoscalingMetricConfig defines autoscaling behavior for a specific resource type (CPU or memory).
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| min | Minimum resource value allowed during scaling (e.g. \"100m\" or \"128Mi\"). | resource.Quantity | true |
+| max | Maximum resource value allowed during scaling (e.g. \"8000m\" or \"2Gi\"). | resource.Quantity | true |
+| rules | Rules define when and how scaling should occur based on sustained usage levels. | []*[VerticalAutoscalingRule](#verticalautoscalingrule) | true |
+| cooldown | Cooldown is the minimum duration to wait between consecutive scaling actions. Defaults to \"5m\". | *string | false |
+| limitStrategy | LimitStrategy controls how resource limits should be updated after autoscaling. Valid values are: `retain` (default) (keep original limits) `equal` (match request value) `max` (use configured VPA Max) `percentage` (request × percentage) `unset` (remove the limits field entirely) | *LimitUpdateStrategy | false |
+| limitPercentage | LimitPercentage defines the percentage multiplier to apply when using \"percentage\" LimitStrategy. For example, 150 means limit = request * 1.5. Only used when LimitStrategy = \"percentage\". Defaults to `150` when not set. | *int | false |
+| safetyMarginPercent | SafetyMarginPercent prevents scaling down below (current_usage * (1 + margin/100)). Provides headroom to prevent OOM from usage spikes. Defaults to 15. | *int | false |
+| hysteresisPercent | HysteresisPercent creates a deadband between scale-up and scale-down zones. For scale-down rules, effective threshold = configured threshold - hysteresis. This prevents oscillation when usage hovers near a threshold. Defaults to 5. | *int | false |
+| emergencyScaleUpPercent | EmergencyScaleUpPercent defines how much to scale up on OOM detection. Only applicable to memory. Defaults to 25. | *int | false |
+| maxOOMRecoveries | MaxOOMRecoveries limits how many OOM emergency scale-ups can happen within OOMRecoveryWindow. Prevents runaway scaling on apps with memory leaks. Defaults to 3. | *int | false |
+| oomRecoveryWindow | OOMRecoveryWindow is the time window for counting OOM recoveries. Defaults to \"1h\". | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### VerticalAutoscalingRule
+
+VerticalAutoscalingRule defines a single rule for when to trigger a scaling adjustment.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| direction | Direction of scaling: \"up\" or \"down\". | ScalingDirection | true |
+| usagePercent | UsagePercent is the resource usage percentage (0–100) that must be met. Usage is compared against the selected Source value. | int | true |
+| duration | Duration is the length of time the usage must remain above/below the threshold before scaling. Defaults to \"5m\". | *string | false |
+| stepPercent | StepPercent defines how much to adjust the resource by, as a percentage of the current value. For example, 50 = scale by 50% of current value. | int | true |
+| cooldown | Cooldown is the minimum time to wait between scaling actions for this rule. If not specified, falls back to the metric-level cooldown. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### VolumeSnapshotsConfig
+
+VolumeSnapshotsConfig holds the configuration of snapshotting feature.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| frequency | How often a snapshot should be created. | string | true |
+| retention | How long a snapshot should be retained. Default is indefinite retention. Cannot be used together with Retain. | *string | false |
+| retain | How many snapshots should be retained. When set, only the most recent N snapshots are kept. Cannot be used together with Retention. | *int32 | false |
+| preserveLastSnapshot | If true, retention policies will not be enforced when only a single snapshot exists. Ensures at least one snapshot is always available. Defaults to true. | *bool | false |
+| snapshotClass | Name of the volume snapshot class to be used. Uses the default class if not specified. | *string | false |
+| stopNode | Whether the node should be stopped while the snapshot is taken. Defaults to `false`. | *bool | false |
+| exportTarball | Whether to create a tarball of data directory in each snapshot and upload it to external storage. | *[ExportTarballConfig](#exporttarballconfig) | false |
+| verify | Whether cosmopilot should verify the snapshot for corruption after it is ready. Defaults to `false`. | *bool | false |
+| disableWhileSyncing | Whether to disable snapshots while the node is syncing. Defaults to `true`. | *bool | false |
+| disableWhileUnhealthy | Whether to disable snapshots while the node is unhealthy. Defaults to `true`. | *bool | false |
+| resources | Compute resources for the integrity-check job pod (applied only when `verify` is true). | corev1.ResourceRequirements | false |
+| nodeSelector | Selector which must be true for the integrity-check job pod to fit on a node. Selector which must match a node's labels for the pod to be scheduled on that node. | map[string]string | false |
+| affinity | If specified, the integrity-check job pod's scheduling constraints. | *corev1.Affinity | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### VolumeSpec
+
+VolumeSpec describes an additional volume to mount on a node.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | The name of the volume. | string | true |
+| size | Size of the volume. | string | true |
+| path | Path specifies where this volume should be mounted. | string | true |
+| storageClass | Name of the storage class to use for this volume. If not specified, defaults to .persistence.storageClass. If that is also not specified, the cluster default storage class will be used. | *string | false |
+| deleteWithNode | Deprecated compatibility field. Root deletion is controlled by .spec.deletionPolicy.dataVolumes; this field is not used for cleanup. | *bool | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### Cosmosigner
+
+Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment (github.com/voluzi/cosmosigner). Unlike TmKMS, which runs as a sidecar in the validator pod, cosmosigner runs as a separate StatefulSet that dials the targeted nodes' priv_validator_laddr over the network. This allows any group of nodes to act as the signing endpoint for a single consensus identity (horcrux-style fan-out), and enables raft-based high availability across multiple signer replicas.\n\nOn a ChainNodeSet, .nodeGroups selects which node groups the signer connects to; when it is empty and a validator is configured, the validator group is targeted by default. On a standalone ChainNode, the ChainNode itself is the target and .nodeGroups must be empty.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| nodeGroups | NodeGroups is the list of node group names (.spec.nodes[].name) the signer will connect to and sign for. Only valid on a ChainNodeSet. When empty, the configured validator group is targeted by default. Every targeted node listens for the signer and shares the single consensus identity held by the configured backend. | []string | false |
+| replicas | Replicas is the number of signer instances to run. Must be an odd number so the embedded raft cluster can form a quorum. Defaults to `1` (a single-instance signer with no HA). | *int32 | false |
+| image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:0.2.1`). Set this to pin or override the image for this specific signer only. | *string | false |
+| backend | Backend selects and configures where the consensus key material lives and how signing is performed. Exactly one backend must be configured. | [CosmosignerBackend](#cosmosignerbackend) | true |
+| stateStorageSize | StateStorageSize is the size of the per-replica PVC used for the raft double-sign protection state and the persisted connection key. Defaults to `1Gi`. | *string | false |
+| storageClassName | StorageClassName is the storage class for the per-replica state PVC. Defaults to the cluster default storage class when unset. | *string | false |
+| resources | Resources are the compute resources for the signer container. | *corev1.ResourceRequirements | false |
+| raftTLSSecret | RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to secure the inter-replica raft transport with mutual TLS. It is required when replicas is greater than one unless unsafeAllowInsecureRaft explicitly opts into plain TCP. | *string | false |
+| unsafeAllowInsecureRaft | UnsafeAllowInsecureRaft permits a multi-replica signer to use plain TCP for Raft. This is an explicit security opt-out for isolated test networks; production HA signers should set raftTLSSecret instead. | bool | false |
+| logLevel | LogLevel is the log level for the signer. Defaults to `info`. | *string | false |
+| serviceAccountName | ServiceAccountName is the Kubernetes service account the signer pods run as. Required in practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google service account to a specific Kubernetes service account). Defaults to the namespace default. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerBackend
+
+CosmosignerBackend selects the signing backend. Exactly one field must be set.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| software | Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is the simplest backend and is mainly intended for testnets and testing. | *[CosmosignerSoftwareBackend](#cosmosignersoftwarebackend) | false |
+| vault | Vault uses a non-exportable ed25519 key in HashiCorp Vault Transit. | *[CosmosignerVaultBackend](#cosmosignervaultbackend) | false |
+| gcpKms | GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS. | *[CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend) | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerGcpKmsBackend
+
+CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend. Exactly one of keyVersion (a key version that already exists) or import (a controller-managed BYOK import of the targeted validator's consensus key) must be set.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| keyVersion | KeyVersion is the full resource name of a pre-provisioned KMS crypto key version used for signing (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`). Mutually exclusive with import. | string | false |
+| import | Import requests a one-shot, controller-managed import of the targeted validator's existing consensus key into Cloud KMS (BYOK). The resulting crypto key version does not exist until the import completes, so it is recorded in status rather than configured here. Mutually exclusive with keyVersion. | *[CosmosignerGcpKmsImport](#cosmosignergcpkmsimport) | false |
+| credentialsSecret | CredentialsSecret references a secret containing a Google service account JSON key. When unset, Workload Identity / Application Default Credentials are used. | *corev1.SecretKeySelector | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerGcpKmsImport
+
+CosmosignerGcpKmsImport describes the Cloud KMS destination of a controller-managed BYOK import. The key ring, crypto key (without an initial version) and import job are created when absent and reused when they already exist, so repeated reconciles converge on a single imported identity.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| project | Project is the Google Cloud project ID owning the destination key ring. | string | true |
+| location | Location is the Cloud KMS location of the destination key ring. Defaults to `global`. | *string | false |
+| keyRing | KeyRing is the Cloud KMS key ring ID holding the destination crypto key. | string | true |
+| key | Key is the Cloud KMS crypto key ID the consensus key is imported into. | string | true |
+| importJob | ImportJob is the Cloud KMS import job ID used to wrap the key material. Defaults to `<key>-import`. Cloud KMS import jobs expire; name a fresh one to retry after expiry — it does not change the imported identity. | *string | false |
+| protectionLevel | ProtectionLevel is the protection level of the destination crypto key, applied only when the key is created. Defaults to `software`. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerMigrationStatus
+
+CosmosignerMigrationStatus records enough progress to resume a migration after a controller restart without ever recreating a signer before the previous pods are confirmed gone.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| desiredDigest | DesiredDigest is the desired signer's lifecycle fingerprint. | string | true |
+| desiredPublicKey | DesiredPublicKey is the canonical base64 consensus public key resolved during preflight. | string | true |
+| phase | Phase is the current break-before-make migration stage. | CosmosignerMigrationPhase | true |
+| resetState | ResetState is true when the desired public key differs from the applied key, requiring the old raft-state PVCs to be deleted before recreation. | bool | false |
+| rolloutObservedAt | RolloutObservedAt records when the replacement StatefulSet was first observed fully rolled out. Target health evidence must be newer than this timestamp before the migration can complete. | *metav1.Time | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerSoftwareBackend
+
+CosmosignerSoftwareBackend configures the local software signing backend.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| privateKeySecret | PrivateKeySecret is the name of the secret holding `priv_validator_key.json`. When the signer targets a validator this must be left empty — the validator's own key secret is used (created by its genesis/create-validator flow when it generates one). For a sentry-mode signer (no validator targeted) it is required and must reference a pre-provisioned secret whose consensus key is already registered on-chain (e.g. via init.genesisValidators): a fresh key is never generated here, since it could not be in the validator set. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerStatus
+
+CosmosignerStatus is the controller-recorded state of one managed cosmosigner deployment. All fields are controller-managed and not meant to be set by hand.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name | Name is the signer's resource name (`<nodeset>-signer` \| `<nodeset>-<group>-signer` \| `<nodeset>-<group>-<index>-signer`) and the key of this entry. | string | true |
+| resourceName | ResourceName is the stable Kubernetes resource base name used by this signer. It differs from Name only after moving a signer between manifest placements, allowing the new configuration to reuse the old StatefulSet PVCs without renaming them. | string | false |
+| appliedDigest | AppliedDigest is the lifecycle fingerprint of the configuration currently represented by the signer StatefulSet. Unlike SigningDigest, it is recorded for sentry and validator signers. | string | false |
+| publicKey | PublicKey is the canonical base64 consensus public key of the applied signer backend. | string | false |
+| targetGroups | TargetGroups records the applied target-group set so a signer moved between manifest placements can inherit the stable resource name even when it is not validator-targeted. | []string | false |
+| migration | Migration records an in-progress break-before-make configuration migration. | *[CosmosignerMigrationStatus](#cosmosignermigrationstatus) | false |
+| replicas | Replicas records the raft replica count this signer was rolled out with, so the no-webhook reconcile path can reject a later replica change: scaling the embedded raft cluster is not a plain Kubernetes scale, since the membership baked into the existing per-pod raft state is not migrated by rendering a new bootstrap list. | *int32 | false |
+| stateStorageSize | StateStorageSize records the per-replica raft-state PVC size this signer was rolled out with. Together with StateStorageClassName it locks the PVC template while the signer (or its still-terminating PVCs, on a remove-and-re-add) exists: StatefulSet volumeClaimTemplates cannot be updated and surviving claims would be re-bound at their old size/class. | string | false |
+| stateStorageClassName | StateStorageClassName records the storage class of this signer's raft-state PVCs, mirroring the spec's storageClassName semantics: absent (nil) means the cluster default class was selected, while an explicit \"\" means no class was requested. See StateStorageSize. | *string | false |
+| signingDigest | SigningDigest is a fingerprint of this signer's effective signing identity, replica count and target-group set, captured once a validator-targeted signer has rolled out. AppliedDigest is the lifecycle baseline used for managed migrations; this field retains validator-serving history. | string | false |
+| atEstablishment | AtEstablishment is a write-once record of the on-chain consensus identity this signer was responsible for at the moment the chain ID was first recorded: its validator-targeted identity, or — for a SOFTWARE sentry signer whose privateKeySecret is listed in an ACTIVE (non-zero-instance) validator's spec.validator.init.genesisValidators or spec.nodes[].validator.init.genesisValidators — that sentry key's identity. It is the empty string when the signer was responsible for no such provable on-chain key then; this includes sentries the controller cannot tie to a genesis entry from spec alone (a Vault/GCP-backed sentry, a sentry for an externally-imported genesis, or a key listed only under a zero-instance group, which contributes nothing to genesis). It protects incomplete first rollouts and supports recovery of legacy status; managed migrations use AppliedDigest and PublicKey. | *string | false |
+| servingIdentity | ServingIdentity records the effective signing identity this validator-targeted signer served, captured with SigningDigest and cleared on teardown. Together with ServingGroup it identifies the validator protected by a stale status entry during removal or manifest-placement migration. | string | false |
+| servingGroup | ServingGroup records the validator group this signer targets (the reserved \"validator\" name for the legacy singleton). It identifies the protected validator during removal and replacement. | string | false |
+| localKeyEverServed | LocalKeyEverServed is a monotonic record of whether this validator signer may ever have served through the validator's local key secret. False is recorded only when the controller observes a pre-provisioned external signer at chain establishment; nil means the history is unknown. | *bool | false |
+| keyImported | KeyImported is the fingerprint of a completed managed key import (backend-namespaced target + source secret + key material). It lets the controller skip a repeated import and detect a source/target change. For a GCP KMS import it is written only once the imported version is verified: ImportedKeyVersion is recorded, readable, and serving the source consensus key. | string | false |
+| importedKeyVersion | ImportedKeyVersion is the full Cloud KMS crypto key version resource name produced by a managed GCP KMS import, as reported by the import pod. It is recorded before the import is verified (so a restart resumes against the exact version that was created rather than importing a second one) and is the only import-derived value configured on the signer. | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerVaultBackend
+
+CosmosignerVaultBackend configures the HashiCorp Vault Transit signing backend.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| address | Address is the full address of the Vault cluster (e.g. `https://vault:8200`). | string | true |
+| keyName | KeyName is the name of the Vault transit key used for signing. | string | true |
+| keyVersion | KeyVersion is the immutable Vault Transit key version used for public-key resolution and every signing request. Pinning the version prevents a Transit rotation from changing validator identity across signer restarts. Defaults to `1`. uploadGenerated requires version 1 because a new Vault import creates the initial key version. | *int | false |
+| mount | Mount is the Vault transit mount path. Defaults to `transit`. | *string | false |
+| tokenSecret | TokenSecret references the secret containing the Vault token used to authenticate. | *corev1.SecretKeySelector | true |
+| certificateSecret | CertificateSecret references the secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
+| namespace | Namespace is the Vault namespace (Vault Enterprise), when applicable. | *string | false |
+| uploadGenerated | UploadGenerated indicates that the controller should generate a consensus key locally and import it into Vault. Defaults to `false`. It is set to `true` automatically when this validator initializes a new genesis. This should not be used in production. | bool | false |
+
+[Back to Custom Resources](#custom-resources)
