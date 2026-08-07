@@ -242,6 +242,9 @@ func TestEnsureConsensusKeyReservationBlocksForeignRootCosmosignerStatusAlias(t 
 	// Same object name in another namespace, so the alias derived from the served group collides with
 	// the holder's claim and only the owner UID separates the two roots.
 	set := generatedValidatorChildNodeSet("nodes", "other", "other-uid", appsv1.ReservedValidatorGroupName, "nodes-validator")
+	// Isolate the serving-group alias path: no validator status may claim the key first.
+	set.Status.Validators = nil
+	set.Status.PubKey = ""
 	set.Status.Cosmosigners = []appsv1.CosmosignerStatus{
 		{Name: "cosmosigner", PublicKey: reservationTestPublicKey, ServingGroup: appsv1.ReservedValidatorGroupName},
 	}
