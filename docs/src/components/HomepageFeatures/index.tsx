@@ -54,9 +54,11 @@ const FeatureList: FeatureItem[] = [
     description: <>Automatically configures state-sync between nodes, simplifying node recovery when needed.</>,
   },
   {
-    title: 'TmKMS Integration',
+    title: 'Cosmosigner Integration',
     image: {light: '/features/signing.png', dark: '/features/signing-dark.png'},
-    description: <>Securely manages private keys with TmKMS (with support for HashiCorp Vault as the key provider).</>,
+    description: (
+      <>Securely manages validator keys with Cosmosigner, supporting HashiCorp Vault, Google Cloud KMS, and raft-based high availability.</>
+    ),
   },
 ];
 
