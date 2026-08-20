@@ -61,7 +61,9 @@ func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []app
 			// ChainNode receives it from a matching manual upgrade.
 			if upgrades[i].Image == "" && upgrade.Image != "" {
 				upgrades[i].Image = upgrade.Image
-				upgrades[i].Source = upgrade.Source
+				if u.Status == appsv1.UpgradeImageMissing {
+					upgrades[i].Status = upgrade.Status
+				}
 			}
 
 			// ChainNodeSet might contain nodes that actually did the upgrade and others that skipped it.
