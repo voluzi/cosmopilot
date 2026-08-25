@@ -229,21 +229,41 @@ func addUpgradeStatusCondition(chainNode *appsv1.ChainNode, upgrade *appsv1.Upgr
 // still `scheduled` at or below the current height, so suppressing the upgrade only in the operator
 // would leave node-utils halting each recreated pod, producing a stop/recreate loop for as long as
 // the override remains.
-func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *appsv1.ChainNode) error {
+// halted reports whether node-utils has stopped the application for a scheduled upgrade, i.e. that
+// /must_upgrade answered affirmatively for this reconcile.
+func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *appsv1.ChainNode, halted bool) error {
 	logger := log.FromContext(ctx)
 
 	// Mirror node-utils' own trigger condition — it halts for any scheduled upgrade with
 	// `height >= upgrade.Height` (pkg/nodeutils/upgrades.go), not just one at the exact current
-	// height. An exact-height lookup would miss an upgrade the node has already advanced past (the
-	// chain can move on between ensureUpgrades and ensurePod) and leave node-utils halting the pinned
-	// pod on every recreation.
+	// height. An exact-height lookup would miss an upgrade the node has already advanced past and
+	// leave node-utils halting the pinned pod on every recreation.
 	skipped := make([]int64, 0)
+	lowestPending := -1
 	for i, u := range chainNode.Status.Upgrades {
-		if u.Status == appsv1.UpgradeScheduled && u.Height <= chainNode.Status.LatestHeight {
+		if u.Status != appsv1.UpgradeScheduled {
+			continue
+		}
+		if u.Height <= chainNode.Status.LatestHeight {
 			chainNode.Status.Upgrades[i].Status = appsv1.UpgradeSkipped
 			skipped = append(skipped, u.Height)
+			continue
+		}
+		if lowestPending < 0 || u.Height < chainNode.Status.Upgrades[lowestPending].Height {
+			lowestPending = i
 		}
 	}
+
+	// .status.latestHeight and the /must_upgrade answer come from two separate calls, so the node can
+	// cross an upgrade height between them and leave the recorded height behind what node-utils saw.
+	// When node-utils has halted but our height explains none of it, the lowest still-scheduled
+	// upgrade is provably one it halted for: if any scheduled upgrade satisfies `height >= u.Height`,
+	// the lowest-height one does. Skipping only that one keeps genuinely future upgrades intact.
+	if halted && len(skipped) == 0 && lowestPending >= 0 {
+		chainNode.Status.Upgrades[lowestPending].Status = appsv1.UpgradeSkipped
+		skipped = append(skipped, chainNode.Status.Upgrades[lowestPending].Height)
+	}
+
 	if len(skipped) == 0 {
 		return nil
 	}
