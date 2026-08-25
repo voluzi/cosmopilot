@@ -297,15 +297,7 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 		return err
 	}
 
-	// Require overrideVersion to be removed individually from each node
-	if currentNode.Spec.OverrideVersion != nil && node.Spec.OverrideVersion == nil {
-		node.Spec.OverrideVersion = currentNode.Spec.OverrideVersion
-	}
-
-	// Same for overrideImage
-	if currentNode.Spec.OverrideImage != nil && node.Spec.OverrideImage == nil {
-		node.Spec.OverrideImage = currentNode.Spec.OverrideImage
-	}
+	preserveImageOverrides(node, currentNode)
 
 	metadataDrift := !metav1.IsControlledBy(currentNode, nodeSet) ||
 		!controllerutil.ContainsFinalizer(currentNode, resourcecleanup.Finalizer)
@@ -716,4 +708,20 @@ func configForChild(src *appsv1.Config) *appsv1.Config {
 	dashboard.Ingress = nil
 	dashboard.Gateway = nil
 	return out
+}
+
+// preserveImageOverrides carries a ChainNode's existing image override forward when the ChainNodeSet
+// no longer asks for one, keeping the documented behaviour that an override must be removed
+// individually from each node.
+//
+// Both fields are preserved together and only when the desired spec asks for neither. Preserving
+// them independently would break switching a group from overrideImage to overrideVersion (or back):
+// the child would end up carrying both, and its own webhook rejects that pair as mutually exclusive,
+// leaving the ChainNodeSet unable to reconcile.
+func preserveImageOverrides(desired, current *appsv1.ChainNode) {
+	if desired.Spec.OverrideVersion != nil || desired.Spec.OverrideImage != nil {
+		return
+	}
+	desired.Spec.OverrideVersion = current.Spec.OverrideVersion
+	desired.Spec.OverrideImage = current.Spec.OverrideImage
 }
