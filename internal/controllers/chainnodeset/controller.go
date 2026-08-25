@@ -423,12 +423,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Compare full images: two repositories may share a tag, so comparing versions alone would miss
 	// an upgrade that only moves the nodeset to a different repository.
-	if nodeSet.Status.Phase != appsv1.PhaseChainNodeSetRunning || nodeSet.GetLastUpgradeImage() != nodeSet.Status.AppImage {
-		log.FromContext(ctx).Info("updating .status.appImage", "image", nodeSet.GetLastUpgradeImage())
-		nodeSet.Status.AppImage = nodeSet.GetLastUpgradeImage()
+	desiredImage := nodeSet.GetLastUpgradeImage()
+	imageChanged := desiredImage != nodeSet.Status.AppImage
+	phaseWasRunning := nodeSet.Status.Phase == appsv1.PhaseChainNodeSetRunning
+	if !phaseWasRunning || imageChanged {
+		log.FromContext(ctx).Info("updating .status.appImage", "image", desiredImage)
+		nodeSet.Status.AppImage = desiredImage
 		nodeSet.Status.AppVersion = nodeSet.GetLastUpgradeVersion()
 		if err := r.updatePhase(ctx, nodeSet, appsv1.PhaseChainNodeSetRunning); err != nil {
 			return ctrl.Result{}, err
+		}
+		// updatePhase writes the status only when the phase actually changes. On an already-Running
+		// nodeset an image-only change would otherwise stay in memory and be dropped, leaving
+		// .status.appImage permanently stale while this branch re-logs it every reconcile.
+		if phaseWasRunning && imageChanged {
+			if err := r.Status().Update(ctx, nodeSet); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		// The status write triggers no reconcile of its own (the predicate filters status-only
 		// updates), so a pending dashboard route would otherwise be stranded on this path: nothing

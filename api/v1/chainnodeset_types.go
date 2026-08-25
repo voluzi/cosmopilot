@@ -131,7 +131,10 @@ type ChainNodeSetStatus struct {
 	AppVersion string `json:"appVersion,omitempty"`
 
 	// Full application image currently deployed, including its repository. Upgrades may move nodes
-	// to a different repository, so this is the authoritative record of what is running.
+	// to a different repository, so this records the image this nodeset resolves to.
+	// NOTE: this is the nodeset-wide image and does not account for a per-group or validator
+	// `overrideImage`/`overrideVersion`. Read the `.status.appImage` of an individual ChainNode for
+	// the image that node is actually running.
 	// +optional
 	AppImage string `json:"appImage,omitempty"`
 

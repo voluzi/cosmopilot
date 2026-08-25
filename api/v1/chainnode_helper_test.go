@@ -130,11 +130,35 @@ func TestGetAppImageWithoutUpgradesUsesSpec(t *testing.T) {
 }
 
 func TestGetAppImageIgnoresUpgradesAboveLatestHeight(t *testing.T) {
+	// The above-height upgrade is Completed on purpose: a Scheduled one is already excluded by the
+	// status check, so it would pass this assertion even without the height guard.
 	chainNode := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 500,
 		Upgrade{Height: 100, Image: "repo/app:v2", Status: UpgradeCompleted},
-		Upgrade{Height: 900, Image: "repo/app:v3", Status: UpgradeScheduled},
+		Upgrade{Height: 900, Image: "repo/app:v3", Status: UpgradeCompleted},
 	)
 	assert.Equal(t, "repo/app:v2", chainNode.GetAppImage())
+
+	// GetLatestAppImage has no height bound, so it does select the newer upgrade.
+	assert.Equal(t, "repo/app:v3", chainNode.GetLatestAppImage())
+}
+
+func TestImageRefVersion(t *testing.T) {
+	for _, tc := range []struct {
+		image string
+		want  string
+	}{
+		{"alloranetwork/allora-chain:v0.17.1", "v0.17.1"},
+		{"registry.local:5000/foo/allorad:v1.2.3", "v1.2.3"},
+		// A registry port must not be mistaken for a tag; this falls back instead.
+		{"registry.local:5000/foo/allorad", DefaultImageVersion},
+		{"alloranetwork/allora-chain", DefaultImageVersion},
+		{"", DefaultImageVersion},
+		{"alloranetwork/allora-chain@sha256:abc123", "sha256:abc123"},
+	} {
+		t.Run(tc.image, func(t *testing.T) {
+			assert.Equal(t, tc.want, ImageRefVersion(tc.image))
+		})
+	}
 }
 
 func TestGetAppImagePicksHighestReachedUpgrade(t *testing.T) {
