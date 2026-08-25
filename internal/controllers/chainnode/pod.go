@@ -218,6 +218,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			if upgraded {
 				// If there was an error on pod creation or watching but the image was already swapped, we mark the upgrade
 				// completed anyway to avoid downgrading and corrupt data.
+				chainNode.Status.AppImage = upgrade.Image
 				chainNode.Status.AppVersion = upgrade.GetVersion()
 				upgradeStatus = appsv1.UpgradeCompleted
 				if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
@@ -234,6 +235,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			"Upgraded node to %s on height %d",
 			upgrade.Image, upgrade.Height,
 		)
+		chainNode.Status.AppImage = upgrade.Image
 		chainNode.Status.AppVersion = upgrade.GetVersion()
 		if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
 			return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
@@ -537,7 +539,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 	return corev1.Container{
 		Name:            chainNode.Spec.App.App,
 		Image:           chainNode.GetAppImage(),
-		ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
+		ImagePullPolicy: chainNode.GetAppImagePullPolicy(),
 		SecurityContext: securityContext,
 		Command:         []string{chainNode.Spec.App.App},
 		Args: append([]string{"start",
@@ -1205,6 +1207,7 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeStateSyncing,
 				"Node is state-syncing",
 			)
+			chainNode.Status.AppImage = chainNode.GetAppImage()
 			chainNode.Status.AppVersion = chainNode.GetAppVersion()
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeStateSyncing)
 		}
@@ -1227,6 +1230,7 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeSyncing,
 				"Node is syncing",
 			)
+			chainNode.Status.AppImage = chainNode.GetAppImage()
 			chainNode.Status.AppVersion = chainNode.GetAppVersion()
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSyncing)
 		}
@@ -1239,8 +1243,18 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 			appsv1.ReasonNodeRunning,
 			"Node is synced and running",
 		)
+		chainNode.Status.AppImage = chainNode.GetAppImage()
 		chainNode.Status.AppVersion = chainNode.GetAppVersion()
 		return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRunning)
+	}
+
+	// Keep the recorded image in sync while the node stays Running. Without this, a node that is
+	// already Running when cosmopilot is upgraded would keep an empty .status.appImage until its
+	// next phase transition.
+	if chainNode.Status.AppImage != chainNode.GetAppImage() {
+		chainNode.Status.AppImage = chainNode.GetAppImage()
+		chainNode.Status.AppVersion = chainNode.GetAppVersion()
+		return r.Status().Update(ctx, chainNode)
 	}
 
 	return nil

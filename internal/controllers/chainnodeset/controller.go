@@ -421,8 +421,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	if nodeSet.Status.Phase != appsv1.PhaseChainNodeSetRunning || nodeSet.GetLastUpgradeVersion() != nodeSet.Status.AppVersion {
-		log.FromContext(ctx).Info("updating .status.appVersion", "version", nodeSet.GetLastUpgradeVersion())
+	// Compare full images: two repositories may share a tag, so comparing versions alone would miss
+	// an upgrade that only moves the nodeset to a different repository.
+	if nodeSet.Status.Phase != appsv1.PhaseChainNodeSetRunning || nodeSet.GetLastUpgradeImage() != nodeSet.Status.AppImage {
+		log.FromContext(ctx).Info("updating .status.appImage", "image", nodeSet.GetLastUpgradeImage())
+		nodeSet.Status.AppImage = nodeSet.GetLastUpgradeImage()
 		nodeSet.Status.AppVersion = nodeSet.GetLastUpgradeVersion()
 		if err := r.updatePhase(ctx, nodeSet, appsv1.PhaseChainNodeSetRunning); err != nil {
 			return ctrl.Result{}, err

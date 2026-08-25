@@ -302,6 +302,11 @@ func (r *Reconciler) ensureNode(ctx context.Context, nodeSet *appsv1.ChainNodeSe
 		node.Spec.OverrideVersion = currentNode.Spec.OverrideVersion
 	}
 
+	// Same for overrideImage
+	if currentNode.Spec.OverrideImage != nil && node.Spec.OverrideImage == nil {
+		node.Spec.OverrideImage = currentNode.Spec.OverrideImage
+	}
+
 	metadataDrift := !metav1.IsControlledBy(currentNode, nodeSet) ||
 		!controllerutil.ContainsFinalizer(currentNode, resourcecleanup.Finalizer)
 	if metadataDrift && !metav1.IsControlledBy(currentNode, nodeSet) && !isRecordedNodeSetChild(nodeSet, currentNode) {
@@ -417,6 +422,7 @@ func (r *Reconciler) getNodeSpecWithBlockedSignerTargets(nodeSet *appsv1.ChainNo
 			IgnoreGroupOnDisruptionChecks: group.IgnoreGroupOnDisruptionChecks,
 			VPA:                           group.VPA,
 			OverrideVersion:               group.OverrideVersion,
+			OverrideImage:                 group.OverrideImage,
 		},
 	}
 

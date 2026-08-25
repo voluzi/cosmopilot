@@ -125,9 +125,15 @@ type ChainNodeSetStatus struct {
 	// +optional
 	ReadyInstances int `json:"readyInstances"`
 
-	// The application version currently deployed.
+	// The application version currently deployed. This is the tag or digest of `.status.appImage`,
+	// kept for display purposes.
 	// +optional
 	AppVersion string `json:"appVersion,omitempty"`
+
+	// Full application image currently deployed, including its repository. Upgrades may move nodes
+	// to a different repository, so this is the authoritative record of what is running.
+	// +optional
+	AppImage string `json:"appImage,omitempty"`
 
 	// Nodes available on this nodeset, including validator nodes.
 	// +optional
@@ -372,12 +378,22 @@ type NodeSetValidatorConfig struct {
 	// +optional
 	PDB *PdbConfig `json:"pdb,omitempty"`
 
-	// OverrideVersion will force validator to use the specified version.
+	// OverrideVersion will force validator to use the specified version. It is a tag-only shorthand:
+	// the repository still comes from `.spec.app.image`. Use `overrideImage` to also replace the
+	// repository.
 	// NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version
 	// based on upgrade history. For unsetting this, you will have to do it here and on
 	// the ChainNode itself.
 	// +optional
 	OverrideVersion *string `json:"overrideVersion,omitempty"`
+
+	// OverrideImage will force validator to use the specified image, replacing both repository and
+	// tag. Takes precedence over `overrideVersion`, which may not be set at the same time.
+	// NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the image
+	// based on upgrade history. For unsetting this, you will have to do it here and on
+	// the ChainNode itself.
+	// +optional
+	OverrideImage *string `json:"overrideImage,omitempty"`
 
 	// HD path of accounts. Defaults to `m/44'/118'/0'/0/0`.
 	// +optional
@@ -523,13 +539,24 @@ type NodeGroupSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	SnapshotNodeIndex *int `json:"snapshotNodeIndex,omitempty"`
 
-	// OverrideVersion will force this group to use the specified version.
+	// OverrideVersion will force this group to use the specified version. It is a tag-only shorthand:
+	// the repository still comes from `.spec.app.image`. Use `overrideImage` to also replace the
+	// repository.
 	// NOTE: when this is set, cosmopilot will not upgrade the nodes, nor will set the version
 	// based on upgrade history. For unsetting this, you will have to do it here and individually
 	// per ChainNode
 	// Ignored when this group has a `validator` block; use `.validator.overrideVersion` instead.
 	// +optional
 	OverrideVersion *string `json:"overrideVersion,omitempty"`
+
+	// OverrideImage will force this group to use the specified image, replacing both repository and
+	// tag. Takes precedence over `overrideVersion`, which may not be set at the same time.
+	// NOTE: when this is set, cosmopilot will not upgrade the nodes, nor will set the image
+	// based on upgrade history. For unsetting this, you will have to do it here and individually
+	// per ChainNode
+	// Ignored when this group has a `validator` block; use `.validator.overrideImage` instead.
+	// +optional
+	OverrideImage *string `json:"overrideImage,omitempty"`
 }
 
 // IngressConfig specifies configurations for ingress to expose API endpoints.

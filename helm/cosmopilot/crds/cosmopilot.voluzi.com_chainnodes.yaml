@@ -3472,9 +3472,18 @@ spec:
                   Selector which must be true for the pod to fit on a node.
                   Selector which must match a node's labels for the pod to be scheduled on that node.
                 type: object
+              overrideImage:
+                description: |-
+                  OverrideImage will force this node to use the specified image, replacing both repository and
+                  tag. Takes precedence over `overrideVersion`, which may not be set at the same time.
+                  NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the image
+                  based on upgrade history.
+                type: string
               overrideVersion:
                 description: |-
-                  OverrideVersion will force this node to use the specified version.
+                  OverrideVersion will force this node to use the specified version. It is a tag-only shorthand:
+                  the repository still comes from `.spec.app.image`. Use `overrideImage` to also replace the
+                  repository.
                   NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version
                   based on upgrade history.
                 type: string
@@ -6202,8 +6211,15 @@ spec:
                 description: Account address of this validator. Omitted when not a
                   validator.
                 type: string
+              appImage:
+                description: |-
+                  Full application image currently deployed, including its repository. Upgrades may move a node
+                  to a different repository, so this is the authoritative record of what is running.
+                type: string
               appVersion:
-                description: Application version currently deployed.
+                description: |-
+                  Application version currently deployed. This is the tag or digest of `.status.appImage`, kept
+                  for display purposes.
                 type: string
               chainID:
                 description: Indicates the chain ID.

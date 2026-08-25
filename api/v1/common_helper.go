@@ -117,7 +117,7 @@ const (
 
 // GetImage returns the versioned image to be used
 func (app *AppSpec) GetImage() string {
-	return fmt.Sprintf("%s:%s", app.Image, app.GetImageVersion())
+	return JoinImageRef(app.Image, app.GetImageVersion())
 }
 
 // GetImageVersion returns the image version to be used
@@ -1071,10 +1071,7 @@ func (s3 *S3ExportConfig) GetConcurrentJobs() int {
 // Upgrade helper methods
 
 func (u *UpgradeSpec) GetVersion() string {
-	if parts := strings.Split(u.Image, ":"); len(parts) == 2 {
-		return parts[1]
-	}
-	return DefaultImageVersion
+	return ImageRefVersion(u.Image)
 }
 
 func (u *UpgradeSpec) ForceGovUpgrade() bool {
@@ -1085,10 +1082,49 @@ func (u *UpgradeSpec) ForceGovUpgrade() bool {
 }
 
 func (u *Upgrade) GetVersion() string {
-	if parts := strings.Split(u.Image, ":"); len(parts) == 2 {
-		return parts[1]
+	return ImageRefVersion(u.Image)
+}
+
+// ValidateImageOverrides rejects an invalid combination of image and version overrides at path.
+func ValidateImageOverrides(path string, overrideVersion, overrideImage *string) error {
+	if overrideVersion != nil && overrideImage != nil {
+		return fmt.Errorf("%s.overrideVersion and %s.overrideImage are mutually exclusive", path, path)
 	}
-	return DefaultImageVersion
+	if overrideImage != nil && !ImageRefHasVersion(*overrideImage) {
+		return fmt.Errorf("%s.overrideImage (%q) must include a tag or digest", path, *overrideImage)
+	}
+	return nil
+}
+
+// UpgradeImageWarnings reports upgrade images that are likely to be mistakes.
+//
+// These are warnings rather than errors: upgrades copied from `.status` into generated child
+// ChainNodes may legitimately carry no image yet (an on-chain plan that did not include one), and
+// rejecting those would fail child creation.
+func (app *AppSpec) UpgradeImageWarnings(path string) []string {
+	var warnings []string
+	baseRepository, _ := SplitImageRef(app.Image)
+
+	for i, u := range app.Upgrades {
+		if u.Image == "" {
+			continue
+		}
+
+		if !ImageRefHasVersion(u.Image) {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s.upgrades[%d].image (%q) has no tag or digest and will resolve to %q",
+				path, i, u.Image, DefaultImageVersion))
+		}
+
+		// An upgrade image is used verbatim, so a differing repository moves the node to another
+		// registry. That is supported, but it is more often a mistake than an intention.
+		if repository, _ := SplitImageRef(u.Image); repository != baseRepository {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s.upgrades[%d].image uses repository %q rather than %q from %s.image; nodes will be moved to that repository",
+				path, i, repository, baseRepository, path))
+		}
+	}
+	return warnings
 }
 
 // Sidecar helper methods

@@ -174,11 +174,20 @@ type ChainNodeSpec struct {
 	// +optional
 	VPA *VerticalAutoscalingConfig `json:"vpa,omitempty"`
 
-	// OverrideVersion will force this node to use the specified version.
+	// OverrideVersion will force this node to use the specified version. It is a tag-only shorthand:
+	// the repository still comes from `.spec.app.image`. Use `overrideImage` to also replace the
+	// repository.
 	// NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version
 	// based on upgrade history.
 	// +optional
 	OverrideVersion *string `json:"overrideVersion,omitempty"`
+
+	// OverrideImage will force this node to use the specified image, replacing both repository and
+	// tag. Takes precedence over `overrideVersion`, which may not be set at the same time.
+	// NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the image
+	// based on upgrade history.
+	// +optional
+	OverrideImage *string `json:"overrideImage,omitempty"`
 
 	// Indicates if an ingress should be created to access API endpoints of this node and configures it.
 	// +optional
@@ -246,9 +255,15 @@ type ChainNodeStatus struct {
 	// +optional
 	GenesisSigningDigest string `json:"genesisSigningDigest,omitempty"`
 
-	// Application version currently deployed.
+	// Application version currently deployed. This is the tag or digest of `.status.appImage`, kept
+	// for display purposes.
 	// +optional
 	AppVersion string `json:"appVersion,omitempty"`
+
+	// Full application image currently deployed, including its repository. Upgrades may move a node
+	// to a different repository, so this is the authoritative record of what is running.
+	// +optional
+	AppImage string `json:"appImage,omitempty"`
 
 	// Last height read on the node by cosmopilot.
 	// +optional

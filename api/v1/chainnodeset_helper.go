@@ -141,16 +141,27 @@ func (nodeSet *ChainNodeSet) ShouldInitGenesis() bool {
 	return false
 }
 
-func (nodeSet *ChainNodeSet) GetLastUpgradeVersion() string {
-	version := nodeSet.Spec.App.GetImageVersion()
+// GetLastUpgradeImage returns the full image of the highest upgrade this nodeset has reached,
+// falling back to the initial image from `.spec.app`. Upgrades without an image are ignored so the
+// last known good image is kept.
+func (nodeSet *ChainNodeSet) GetLastUpgradeImage() string {
+	image := nodeSet.Spec.App.GetImage()
 	var h int64 = 0
 	for _, u := range nodeSet.Status.Upgrades {
+		if u.Image == "" {
+			continue
+		}
 		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height > h && u.Height <= nodeSet.Status.LatestHeight {
 			h = u.Height
-			version = u.GetVersion()
+			image = u.Image
 		}
 	}
-	return version
+	return image
+}
+
+// GetLastUpgradeVersion returns the tag or digest of GetLastUpgradeImage.
+func (nodeSet *ChainNodeSet) GetLastUpgradeVersion() string {
+	return ImageRefVersion(nodeSet.GetLastUpgradeImage())
 }
 
 func (nodeSet *ChainNodeSet) GetAppSpecWithUpgrades() AppSpec {

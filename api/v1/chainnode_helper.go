@@ -264,46 +264,95 @@ func (chainNode *ChainNode) GetMoniker() string {
 	return chainNode.GetName()
 }
 
-func (chainNode *ChainNode) GetAppVersion() string {
-	if chainNode.Spec.OverrideVersion != nil {
-		return *chainNode.Spec.OverrideVersion
-	}
-	version := chainNode.Spec.App.GetImageVersion()
-	var h int64 = 0
+// appliedUpgradeImage returns the image of the highest upgrade whose height the node has already
+// reached. Upgrades without an image (an on-chain plan that did not carry one) are ignored, so the
+// last known good image is kept instead of falling back to the initial one.
+func (chainNode *ChainNode) appliedUpgradeImage() string {
+	var h int64
+	var image string
 	for _, u := range chainNode.Status.Upgrades {
-		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped || u.Status == UpgradeOnGoing) && u.Height > h && u.Height <= chainNode.Status.LatestHeight {
+		if u.Image == "" {
+			continue
+		}
+		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped || u.Status == UpgradeOnGoing) &&
+			u.Height > h && u.Height <= chainNode.Status.LatestHeight {
 			h = u.Height
-			version = u.GetVersion()
+			image = u.Image
 		}
 	}
-	return version
+	return image
 }
 
-func (chainNode *ChainNode) GetLatestVersion() string {
-	if chainNode.Spec.OverrideVersion != nil {
-		return *chainNode.Spec.OverrideVersion
-	}
-	version := chainNode.Spec.App.GetImageVersion()
-	var h int64 = 0
+// latestUpgradeImage returns the image of the highest processed upgrade, whether or not the node has
+// reached its height.
+func (chainNode *ChainNode) latestUpgradeImage() string {
+	var h int64
+	var image string
 	for _, u := range chainNode.Status.Upgrades {
+		if u.Image == "" {
+			continue
+		}
 		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height > h {
 			h = u.Height
-			version = u.GetVersion()
+			image = u.Image
 		}
 	}
-	return version
+	return image
+}
+
+// resolveAppImage applies the image precedence: an explicit image override wins, then a version
+// override against the configured repository, then the given upgrade image, and finally the initial
+// image from `.spec.app`.
+//
+// An upgrade image is used verbatim: it replaces the repository as well as the tag, so an upgrade
+// may move a node to a different registry.
+func (chainNode *ChainNode) resolveAppImage(upgradeImage string) string {
+	if chainNode.Spec.OverrideImage != nil {
+		return *chainNode.Spec.OverrideImage
+	}
+	if chainNode.Spec.OverrideVersion != nil {
+		return JoinImageRef(chainNode.Spec.App.Image, *chainNode.Spec.OverrideVersion)
+	}
+	if upgradeImage != "" {
+		return upgradeImage
+	}
+	return chainNode.Spec.App.GetImage()
+}
+
+// GetAppImage returns the image this node should currently be running.
+func (chainNode *ChainNode) GetAppImage() string {
+	return chainNode.resolveAppImage(chainNode.appliedUpgradeImage())
+}
+
+// GetLatestAppImage returns the image of the most recent upgrade known for this node.
+func (chainNode *ChainNode) GetLatestAppImage() string {
+	return chainNode.resolveAppImage(chainNode.latestUpgradeImage())
+}
+
+// GetAppVersion returns the tag or digest of the image this node should currently be running.
+func (chainNode *ChainNode) GetAppVersion() string {
+	return ImageRefVersion(chainNode.GetAppImage())
+}
+
+// GetLatestVersion returns the tag or digest of the most recent upgrade known for this node.
+func (chainNode *ChainNode) GetLatestVersion() string {
+	return ImageRefVersion(chainNode.GetLatestAppImage())
 }
 
 func (chainNode *ChainNode) GetAppImageWithVersion(version string) string {
-	return fmt.Sprintf("%s:%s", chainNode.Spec.App.Image, version)
+	return JoinImageRef(chainNode.Spec.App.Image, version)
 }
 
-func (chainNode *ChainNode) GetAppImage() string {
-	return chainNode.GetAppImageWithVersion(chainNode.GetAppVersion())
-}
-
-func (chainNode *ChainNode) GetLatestAppImage() string {
-	return chainNode.GetAppImageWithVersion(chainNode.GetLatestVersion())
+// GetAppImagePullPolicy returns the pull policy for the resolved app image. It is derived from the
+// image actually being run, so an upgrade or an override onto `latest` still pulls on every start.
+func (chainNode *ChainNode) GetAppImagePullPolicy() corev1.PullPolicy {
+	if chainNode.Spec.App.ImagePullPolicy != "" {
+		return chainNode.Spec.App.ImagePullPolicy
+	}
+	if ImageRefVersion(chainNode.GetAppImage()) == DefaultImageVersion {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
 }
 
 func (chainNode *ChainNode) GetAdditionalRunFlags() []string {

@@ -123,6 +123,19 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, err
 	}
 
+	if nodeSet.Spec.Validator != nil {
+		if err := ValidateImageOverrides(".spec.validator",
+			nodeSet.Spec.Validator.OverrideVersion, nodeSet.Spec.Validator.OverrideImage); err != nil {
+			return nil, err
+		}
+	}
+	for i, group := range nodeSet.Spec.Nodes {
+		if err := ValidateImageOverrides(fmt.Sprintf(".spec.nodes[%d]", i),
+			group.OverrideVersion, group.OverrideImage); err != nil {
+			return nil, err
+		}
+	}
+
 	// Count validators and how many of them initialize a new genesis.
 	initValidators := 0
 	nonInitValidators := 0
@@ -610,6 +623,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 	}
 
 	warnings := append(nodeSet.tmKMSDeprecationWarnings(), nodeSet.validatorGroupMisplacedFieldWarnings()...)
+	warnings = append(warnings, nodeSet.Spec.App.UpgradeImageWarnings(".spec.app")...)
 	return append(warnings, nodeSet.genesisSignerCollapseWarnings(genesisAlreadyCreated)...), nil
 }
 
