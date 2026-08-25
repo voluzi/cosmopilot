@@ -205,3 +205,38 @@ func TestGetAppImagePullPolicyFollowsResolvedImage(t *testing.T) {
 	explicit.Spec.App.ImagePullPolicy = corev1.PullNever
 	assert.Equal(t, corev1.PullNever, explicit.GetAppImagePullPolicy())
 }
+
+func TestHasImageOverride(t *testing.T) {
+	node := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 100)
+	assert.False(t, node.HasImageOverride())
+
+	node.Spec.OverrideVersion = ptr.To("v2")
+	assert.True(t, node.HasImageOverride())
+
+	node = chainNodeWithUpgrades("repo/app", ptr.To("v1"), 100)
+	node.Spec.OverrideImage = ptr.To("other/app:v2")
+	assert.True(t, node.HasImageOverride())
+}
+
+func TestGetRunningAppImageUsesLatestForStateSyncRestore(t *testing.T) {
+	// A state-sync restore from scratch runs the latest known image, not the one for the current
+	// height. Pod spec and .status.appImage must agree on that, so both go through this helper.
+	node := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 0,
+		Upgrade{Height: 500, Image: "repo/app:v5", Status: UpgradeCompleted},
+	)
+	node.Spec.StateSyncRestore = ptr.To(true)
+
+	// At height 0 the upgrade at 500 is not yet "reached", so the ordinary image is the initial one.
+	assert.Equal(t, "repo/app:v1", node.GetAppImage())
+	assert.Equal(t, "repo/app:v5", node.GetRunningAppImage())
+
+	// Once the node has a height, the running image is the ordinary resolved image again.
+	node.Status.LatestHeight = 600
+	assert.Equal(t, "repo/app:v5", node.GetRunningAppImage())
+
+	// Without state-sync restore the two never diverge.
+	plain := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 0,
+		Upgrade{Height: 500, Image: "repo/app:v5", Status: UpgradeCompleted},
+	)
+	assert.Equal(t, plain.GetAppImage(), plain.GetRunningAppImage())
+}

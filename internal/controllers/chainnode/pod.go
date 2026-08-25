@@ -159,6 +159,21 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return fmt.Errorf("failed to check if upgrade is required for %s: %w", chainNode.GetName(), err)
 	}
 
+	// A node pinned through .spec.overrideImage or .spec.overrideVersion must not be upgraded. The
+	// overrides win over upgrade history when the pod spec is built, so swapping the binary here
+	// would be reverted on the next reconcile — downgrading a node that has already written data
+	// with the upgraded version.
+	if requiresUpgrade && chainNode.HasImageOverride() {
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonUpgradeSkippedByOverride,
+			"Not upgrading at height %d: node is pinned to %s by an image override",
+			chainNode.Status.LatestHeight, chainNode.GetAppImage(),
+		)
+		logger.Info("skipping upgrade because an image override is set", "image", chainNode.GetAppImage())
+		requiresUpgrade = false
+	}
+
 	if requiresUpgrade {
 		// Get upgrade from scheduled upgrades list
 		upgrade := r.getUpgrade(chainNode, chainNode.Status.LatestHeight)
@@ -537,8 +552,10 @@ func cosmosignerDiscoveryResources(config *appsv1.Config) corev1.ResourceRequire
 // buildAppContainer creates the main application container with its configuration.
 func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesMounts []corev1.VolumeMount, readinessPath string, appResources corev1.ResourceRequirements, securityContext *corev1.SecurityContext) corev1.Container {
 	return corev1.Container{
-		Name:            chainNode.Spec.App.App,
-		Image:           chainNode.GetAppImage(),
+		Name: chainNode.Spec.App.App,
+		// GetRunningAppImage, not GetAppImage: a state-sync restore from scratch runs the latest
+		// known image. Resolving it here keeps the pod and `.status.appImage` from diverging.
+		Image:           chainNode.GetRunningAppImage(),
 		ImagePullPolicy: chainNode.GetAppImagePullPolicy(),
 		SecurityContext: securityContext,
 		Command:         []string{chainNode.Spec.App.App},
@@ -778,11 +795,6 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			ContainerPort: controllers.EvmRpcWsPort,
 			Protocol:      corev1.ProtocolTCP,
 		})
-	}
-
-	// Always use latest version we know if we are doing state-sync restore
-	if chainNode.StateSyncRestoreEnabled() && chainNode.Status.LatestHeight == 0 {
-		pod.Spec.Containers[0].Image = chainNode.GetLatestAppImage()
 	}
 
 	if !chainNode.Spec.Genesis.ShouldUseDataVolume() {
@@ -1207,8 +1219,8 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeStateSyncing,
 				"Node is state-syncing",
 			)
-			chainNode.Status.AppImage = chainNode.GetAppImage()
-			chainNode.Status.AppVersion = chainNode.GetAppVersion()
+			chainNode.Status.AppImage = chainNode.GetRunningAppImage()
+			chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeStateSyncing)
 		}
 		return nil
@@ -1230,8 +1242,8 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeSyncing,
 				"Node is syncing",
 			)
-			chainNode.Status.AppImage = chainNode.GetAppImage()
-			chainNode.Status.AppVersion = chainNode.GetAppVersion()
+			chainNode.Status.AppImage = chainNode.GetRunningAppImage()
+			chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSyncing)
 		}
 		return nil
@@ -1243,17 +1255,17 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 			appsv1.ReasonNodeRunning,
 			"Node is synced and running",
 		)
-		chainNode.Status.AppImage = chainNode.GetAppImage()
-		chainNode.Status.AppVersion = chainNode.GetAppVersion()
+		chainNode.Status.AppImage = chainNode.GetRunningAppImage()
+		chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
 		return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRunning)
 	}
 
 	// Keep the recorded image in sync while the node stays Running. Without this, a node that is
 	// already Running when cosmopilot is upgraded would keep an empty .status.appImage until its
 	// next phase transition.
-	if chainNode.Status.AppImage != chainNode.GetAppImage() {
-		chainNode.Status.AppImage = chainNode.GetAppImage()
-		chainNode.Status.AppVersion = chainNode.GetAppVersion()
+	if chainNode.Status.AppImage != chainNode.GetRunningAppImage() {
+		chainNode.Status.AppImage = chainNode.GetRunningAppImage()
+		chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
 		return r.Status().Update(ctx, chainNode)
 	}
 

@@ -2079,3 +2079,47 @@ func TestChainNodeSetValidateWarnsOnGenesisSignerCollapse(t *testing.T) {
 		assert.Empty(t, warnings)
 	})
 }
+
+func TestChainNodeSetValidateRejectsInvalidImageOverrides(t *testing.T) {
+	nodeSet := func(mutate func(*ChainNodeSet)) *ChainNodeSet {
+		ns := &ChainNodeSet{
+			Spec: ChainNodeSetSpec{
+				App:     AppSpec{Image: "repo/app", App: "appd"},
+				Genesis: &GenesisConfig{},
+				Nodes:   []NodeGroupSpec{{Name: "fullnodes"}},
+			},
+		}
+		mutate(ns)
+		return ns
+	}
+
+	// Both overrides on the same scope are mutually exclusive.
+	_, err := nodeSet(func(ns *ChainNodeSet) {
+		ns.Spec.Nodes[0].OverrideVersion = ptr.To("v1")
+		ns.Spec.Nodes[0].OverrideImage = ptr.To("repo/app:v1")
+	}).Validate(nil)
+	require.Error(t, err)
+
+	// A validator group is reconciled from .validator.<field>, so those must be validated too.
+	_, err = nodeSet(func(ns *ChainNodeSet) {
+		ns.Spec.Nodes[0].Validator = &NodeSetValidatorConfig{
+			OverrideVersion: ptr.To("v1"),
+			OverrideImage:   ptr.To("repo/app:v1"),
+		}
+	}).Validate(nil)
+	require.Error(t, err)
+
+	// A tagless overrideImage inside a validator group is rejected rather than deferred to the child.
+	_, err = nodeSet(func(ns *ChainNodeSet) {
+		ns.Spec.Nodes[0].Validator = &NodeSetValidatorConfig{OverrideImage: ptr.To("repo/app")}
+	}).Validate(nil)
+	require.Error(t, err)
+}
+
+func TestMisplacedValidatorScopedFieldsIncludesOverrideImage(t *testing.T) {
+	group := &NodeGroupSpec{
+		Validator:     &NodeSetValidatorConfig{},
+		OverrideImage: ptr.To("repo/app:v1"),
+	}
+	assert.Contains(t, group.MisplacedValidatorScopedFields(), "overrideImage")
+}

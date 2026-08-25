@@ -316,6 +316,9 @@ func (group *NodeGroupSpec) MisplacedValidatorScopedFields() []string {
 	if group.OverrideVersion != nil {
 		fields = append(fields, "overrideVersion")
 	}
+	if group.OverrideImage != nil {
+		fields = append(fields, "overrideImage")
+	}
 	return fields
 }
 

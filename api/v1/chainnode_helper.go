@@ -321,9 +321,27 @@ func (chainNode *ChainNode) resolveAppImage(upgradeImage string) string {
 	return chainNode.Spec.App.GetImage()
 }
 
+// HasImageOverride reports whether this node is pinned to an image through either override field.
+// A pinned node is never upgraded: the overrides take precedence over upgrade history, so applying
+// an upgrade would be undone on the next reconcile.
+func (chainNode *ChainNode) HasImageOverride() bool {
+	return chainNode.Spec.OverrideImage != nil || chainNode.Spec.OverrideVersion != nil
+}
+
 // GetAppImage returns the image this node should currently be running.
 func (chainNode *ChainNode) GetAppImage() string {
 	return chainNode.resolveAppImage(chainNode.appliedUpgradeImage())
+}
+
+// GetRunningAppImage returns the image the node's pod is actually started with. It differs from
+// GetAppImage only for a state-sync restore from scratch, which always uses the latest known image.
+// Both the pod spec and the recorded status must use this, or `.status.appImage` would misreport
+// what is running.
+func (chainNode *ChainNode) GetRunningAppImage() string {
+	if chainNode.StateSyncRestoreEnabled() && chainNode.Status.LatestHeight == 0 {
+		return chainNode.GetLatestAppImage()
+	}
+	return chainNode.GetAppImage()
 }
 
 // GetLatestAppImage returns the image of the most recent upgrade known for this node.
@@ -351,7 +369,7 @@ func (chainNode *ChainNode) GetAppImagePullPolicy() corev1.PullPolicy {
 	if chainNode.Spec.App.ImagePullPolicy != "" {
 		return chainNode.Spec.App.ImagePullPolicy
 	}
-	if ImageRefVersion(chainNode.GetAppImage()) == DefaultImageVersion {
+	if ImageRefVersion(chainNode.GetRunningAppImage()) == DefaultImageVersion {
 		return corev1.PullAlways
 	}
 	return corev1.PullIfNotPresent
