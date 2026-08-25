@@ -164,6 +164,14 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	// would be reverted on the next reconcile — downgrading a node that has already written data
 	// with the upgraded version.
 	if requiresUpgrade && chainNode.HasImageOverride() {
+		// Mark the upgrade skipped instead of only suppressing this reconcile. node-utils halts the
+		// application for any upgrade still `scheduled` at or below the current height
+		// (pkg/nodeutils/upgrades.go), so leaving it scheduled would halt every recreated pod again
+		// and spin a stop/recreate loop for as long as the override is in place. Skipping also means
+		// that removing the override later moves the node onto this upgrade's image, as intended.
+		if err := r.skipUpgradeForOverride(ctx, chainNode); err != nil {
+			return fmt.Errorf("failed to skip upgrade for pinned node %s: %w", chainNode.GetName(), err)
+		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonUpgradeSkippedByOverride,

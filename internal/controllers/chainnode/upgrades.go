@@ -221,3 +221,21 @@ func addUpgradeStatusCondition(chainNode *appsv1.ChainNode, upgrade *appsv1.Upgr
 		Message:            fmt.Sprintf("Successfully upgraded node to image %s", upgrade.Image),
 	})
 }
+
+// skipUpgradeForOverride marks the upgrade scheduled at the node's current height as skipped and
+// republishes the upgrades config consumed by node-utils.
+//
+// It is used when an image override pins the node. node-utils halts the application for any upgrade
+// still `scheduled` at or below the current height, so suppressing the upgrade only in the operator
+// would leave node-utils halting each recreated pod, producing a stop/recreate loop for as long as
+// the override remains.
+func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	upgrade := r.getUpgrade(chainNode, chainNode.Status.LatestHeight)
+	if upgrade == nil {
+		return nil
+	}
+	if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeSkipped); err != nil {
+		return err
+	}
+	return r.ensureUpgradesConfig(ctx, chainNode)
+}
