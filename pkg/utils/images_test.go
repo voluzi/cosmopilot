@@ -1,4 +1,4 @@
-package v1
+package utils
 
 import "testing"
 
@@ -28,27 +28,7 @@ func TestSplitImageRef(t *testing.T) {
 	}
 }
 
-func TestImageRefVersion(t *testing.T) {
-	for _, tc := range []struct {
-		image string
-		want  string
-	}{
-		{"alloranetwork/allora-chain:v0.17.1", "v0.17.1"},
-		{"registry.local:5000/foo/allorad:v1.2.3", "v1.2.3"},
-		// A registry port must not be mistaken for a tag, which would otherwise yield "5000/foo/allorad".
-		{"registry.local:5000/foo/allorad", DefaultImageVersion},
-		{"alloranetwork/allora-chain", DefaultImageVersion},
-		{"alloranetwork/allora-chain@sha256:abc123", "sha256:abc123"},
-	} {
-		t.Run(tc.image, func(t *testing.T) {
-			if got := ImageRefVersion(tc.image); got != tc.want {
-				t.Fatalf("ImageRefVersion(%q) = %q, want %q", tc.image, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestImageRefHasVersion(t *testing.T) {
+func TestImageHasVersion(t *testing.T) {
 	for _, tc := range []struct {
 		image string
 		want  bool
@@ -56,11 +36,12 @@ func TestImageRefHasVersion(t *testing.T) {
 		{"alloranetwork/allora-chain:v0.17.1", true},
 		{"alloranetwork/allora-chain@sha256:abc123", true},
 		{"alloranetwork/allora-chain", false},
+		// A registry port must not be mistaken for a tag.
 		{"registry.local:5000/foo/allorad", false},
 	} {
 		t.Run(tc.image, func(t *testing.T) {
-			if got := ImageRefHasVersion(tc.image); got != tc.want {
-				t.Fatalf("ImageRefHasVersion(%q) = %v, want %v", tc.image, got, tc.want)
+			if got := ImageHasVersion(tc.image); got != tc.want {
+				t.Fatalf("ImageHasVersion(%q) = %v, want %v", tc.image, got, tc.want)
 			}
 		})
 	}

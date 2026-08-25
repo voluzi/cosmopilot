@@ -366,3 +366,31 @@ func TestChainNodeValidateRejectsAddingInitToExternalGenesisNoWebhook(t *testing
 	_, err = consumer.Validate(nil)
 	require.NoError(t, err)
 }
+
+func TestValidateImageOverrides(t *testing.T) {
+	assert.NoError(t, ValidateImageOverrides(".spec", nil, nil))
+	assert.NoError(t, ValidateImageOverrides(".spec", ptr.To("v1"), nil))
+	assert.NoError(t, ValidateImageOverrides(".spec", nil, ptr.To("repo/app:v1")))
+
+	assert.Error(t, ValidateImageOverrides(".spec", ptr.To("v1"), ptr.To("repo/app:v1")))
+	assert.Error(t, ValidateImageOverrides(".spec", nil, ptr.To("repo/app")))
+}
+
+func TestUpgradeImageWarnings(t *testing.T) {
+	app := AppSpec{
+		Image: "repo/app",
+		Upgrades: []UpgradeSpec{
+			{Height: 1, Image: "repo/app:v2"},
+			{Height: 2, Image: "other/app:v3"},
+			{Height: 3, Image: "repo/app"},
+			{Height: 4, Image: ""},
+		},
+	}
+
+	warnings := app.UpgradeImageWarnings(".spec.app")
+	assert.Len(t, warnings, 2)
+	assert.Contains(t, warnings[0], "upgrades[1]")
+	assert.Contains(t, warnings[0], "other/app")
+	assert.Contains(t, warnings[1], "upgrades[2]")
+	assert.Contains(t, warnings[1], "no tag or digest")
+}

@@ -1,4 +1,4 @@
-package v1
+package utils
 
 import "strings"
 
@@ -20,17 +20,8 @@ func SplitImageRef(image string) (repository, reference string) {
 	return image[:i], image[i+1:]
 }
 
-// ImageRefVersion returns the tag or digest of image, falling back to DefaultImageVersion when the
-// image carries neither.
-func ImageRefVersion(image string) string {
-	if _, reference := SplitImageRef(image); reference != "" {
-		return reference
-	}
-	return DefaultImageVersion
-}
-
-// ImageRefHasVersion reports whether image carries an explicit tag or digest.
-func ImageRefHasVersion(image string) bool {
+// ImageHasVersion reports whether image carries an explicit tag or digest.
+func ImageHasVersion(image string) bool {
 	_, reference := SplitImageRef(image)
 	return reference != ""
 }

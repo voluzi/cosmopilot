@@ -12,6 +12,8 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
 const (
@@ -311,7 +313,7 @@ func (chainNode *ChainNode) resolveAppImage(upgradeImage string) string {
 		return *chainNode.Spec.OverrideImage
 	}
 	if chainNode.Spec.OverrideVersion != nil {
-		return JoinImageRef(chainNode.Spec.App.Image, *chainNode.Spec.OverrideVersion)
+		return utils.JoinImageRef(chainNode.Spec.App.Image, *chainNode.Spec.OverrideVersion)
 	}
 	if upgradeImage != "" {
 		return upgradeImage
@@ -340,7 +342,7 @@ func (chainNode *ChainNode) GetLatestVersion() string {
 }
 
 func (chainNode *ChainNode) GetAppImageWithVersion(version string) string {
-	return JoinImageRef(chainNode.Spec.App.Image, version)
+	return utils.JoinImageRef(chainNode.Spec.App.Image, version)
 }
 
 // GetAppImagePullPolicy returns the pull policy for the resolved app image. It is derived from the

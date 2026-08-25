@@ -31,3 +31,21 @@ func TestGetValidatorMinimumGasPricesSkipsZeroInstanceGroups(t *testing.T) {
 
 	assert.Equal(t, "0.25stake", nodeSet.GetValidatorMinimumGasPrices())
 }
+
+func TestGetLastUpgradeImageOnNodeSet(t *testing.T) {
+	nodeSet := &ChainNodeSet{
+		Spec: ChainNodeSetSpec{
+			App: AppSpec{Image: "alloranetwork/allora-chain", Version: ptr.To("v0.8.2"), App: "allorad"},
+		},
+		Status: ChainNodeSetStatus{
+			LatestHeight: 10618000,
+			Upgrades: []Upgrade{
+				{Height: 8824055, Image: "alloranetwork/allora-chain:v0.16.0", Status: UpgradeCompleted},
+				{Height: 10511421, Image: "registry.ops.allora.run/bryn-test/allorad:986-test", Status: UpgradeCompleted},
+			},
+		},
+	}
+
+	assert.Equal(t, "registry.ops.allora.run/bryn-test/allorad:986-test", nodeSet.GetLastUpgradeImage())
+	assert.Equal(t, "986-test", nodeSet.GetLastUpgradeVersion())
+}
