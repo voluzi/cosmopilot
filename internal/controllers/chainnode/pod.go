@@ -178,8 +178,16 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			"Not upgrading at height %d: node is pinned to %s by an image override",
 			chainNode.Status.LatestHeight, chainNode.GetAppImage(),
 		)
-		logger.Info("skipping upgrade because an image override is set", "image", chainNode.GetAppImage())
-		requiresUpgrade = false
+
+		// node-utils latches requiresUpgrade in memory and never clears it (pkg/nodeutils/node.go),
+		// and serves /must_upgrade as its own readiness probe. On the on-chain path it does not stop
+		// the application either, so nothing restarts the process on its own: reloading the
+		// now-clean upgrades ConfigMap cannot reset the flag, and the container would stay unready —
+		// dropping the pod from the Service endpoints indefinitely. Recreate the pod so a fresh
+		// node-utils starts with a clear flag and reads the upgrade as already skipped.
+		logger.Info("recreating pod to clear the latched node-utils upgrade flag",
+			"image", chainNode.GetAppImage())
+		return r.recreatePod(ctx, chainNode, pod, false)
 	}
 
 	if requiresUpgrade {
