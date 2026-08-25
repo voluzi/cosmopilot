@@ -92,3 +92,85 @@ func TestSkipUpgradeForOverrideIsNoopWithoutScheduledUpgrade(t *testing.T) {
 	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
 	assert.Equal(t, appsv1.UpgradeCompleted, chainNode.Status.Upgrades[0].Status)
 }
+
+// node-utils halts for any scheduled upgrade at or *below* the current height, so a pinned node that
+// has already advanced past the upgrade height must still have it skipped. An exact-height lookup
+// would miss this and leave node-utils halting every recreated pod.
+func TestSkipUpgradeForOverrideSkipsUpgradesBelowCurrentHeight(t *testing.T) {
+	stored := pinnedNodeAtUpgradeHeight()
+	stored.Status.LatestHeight = 900
+	stored.Status.Upgrades = []appsv1.Upgrade{
+		{Height: 500, Image: "repo/app:v2", Status: appsv1.UpgradeScheduled},
+		{Height: 800, Image: "repo/app:v3", Status: appsv1.UpgradeScheduled},
+		{Height: 1500, Image: "repo/app:v4", Status: appsv1.UpgradeScheduled},
+	}
+	scheme := gcpImportTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(stored).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+
+	chainNode := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
+
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
+
+	// Both upgrades at or below the current height are skipped; the future one is untouched so it
+	// still applies once the override is removed.
+	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[0].Status)
+	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[1].Status)
+	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[2].Status)
+
+	cm := &corev1.ConfigMap{}
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "pinned-upgrades", Namespace: "default"}, cm))
+	var published struct {
+		Upgrades []appsv1.Upgrade `json:"upgrades"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(cm.Data[upgradesConfigFile]), &published))
+	for _, u := range published.Upgrades {
+		if u.Height <= 900 {
+			assert.NotEqual(t, nodeutils.UpgradeScheduled, string(u.Status),
+				"upgrade at height %d would still halt the pinned pod", u.Height)
+		}
+	}
+}
+
+// A node that is already Syncing/StateSyncing/Running when cosmopilot is upgraded never hits a phase
+// transition, so the recorded image must be backfilled in the steady state too — syncing can last
+// hours, and .status.appImage is documented as the authoritative record of what is running.
+func TestSyncRecordedAppImageBackfillsWithoutPhaseChange(t *testing.T) {
+	stored := pinnedNodeAtUpgradeHeight()
+	stored.Spec.OverrideImage = nil
+	stored.Status.Phase = appsv1.PhaseChainNodeSyncing
+	stored.Status.AppImage = ""
+	stored.Status.AppVersion = ""
+	scheme := gcpImportTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(stored).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+
+	chainNode := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
+
+	require.NoError(t, r.syncRecordedAppImage(context.Background(), chainNode))
+	assert.Equal(t, "repo/app:v1", chainNode.Status.AppImage)
+	assert.Equal(t, "v1", chainNode.Status.AppVersion)
+	assert.Equal(t, appsv1.PhaseChainNodeSyncing, chainNode.Status.Phase, "backfill must not change phase")
+
+	persisted := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "pinned", Namespace: "default"}, persisted))
+	assert.Equal(t, "repo/app:v1", persisted.Status.AppImage)
+
+	// Idempotent: a second call with nothing to change issues no write.
+	require.NoError(t, r.syncRecordedAppImage(context.Background(), chainNode))
+	assert.Equal(t, "repo/app:v1", chainNode.Status.AppImage)
+}

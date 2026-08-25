@@ -1227,11 +1227,10 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeStateSyncing,
 				"Node is state-syncing",
 			)
-			chainNode.Status.AppImage = chainNode.GetRunningAppImage()
-			chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeStateSyncing)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	logger.V(1).Info("check if node is syncing")
@@ -1250,11 +1249,10 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeSyncing,
 				"Node is syncing",
 			)
-			chainNode.Status.AppImage = chainNode.GetRunningAppImage()
-			chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSyncing)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	if chainNode.Status.Phase != appsv1.PhaseChainNodeRunning {
@@ -1263,21 +1261,31 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 			appsv1.ReasonNodeRunning,
 			"Node is synced and running",
 		)
-		chainNode.Status.AppImage = chainNode.GetRunningAppImage()
-		chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
+		setRecordedAppImage(chainNode)
 		return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRunning)
 	}
 
-	// Keep the recorded image in sync while the node stays Running. Without this, a node that is
-	// already Running when cosmopilot is upgraded would keep an empty .status.appImage until its
-	// next phase transition.
-	if chainNode.Status.AppImage != chainNode.GetRunningAppImage() {
-		chainNode.Status.AppImage = chainNode.GetRunningAppImage()
-		chainNode.Status.AppVersion = appsv1.ImageRefVersion(chainNode.GetRunningAppImage())
-		return r.Status().Update(ctx, chainNode)
-	}
+	return r.syncRecordedAppImage(ctx, chainNode)
+}
 
-	return nil
+// setRecordedAppImage stages the resolved running image on the status, for a caller that is about to
+// persist it as part of a phase transition.
+func setRecordedAppImage(chainNode *appsv1.ChainNode) {
+	image := chainNode.GetRunningAppImage()
+	chainNode.Status.AppImage = image
+	chainNode.Status.AppVersion = appsv1.ImageRefVersion(image)
+}
+
+// syncRecordedAppImage persists the resolved running image while the node stays in its current
+// phase. The assignments above only run on a phase transition, so without this a node that is
+// already Running, Syncing or StateSyncing when cosmopilot is upgraded would keep an empty
+// .status.appImage until it next changes phase — and syncing can last hours.
+func (r *Reconciler) syncRecordedAppImage(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if chainNode.Status.AppImage == chainNode.GetRunningAppImage() {
+		return nil
+	}
+	setRecordedAppImage(chainNode)
+	return r.Status().Update(ctx, chainNode)
 }
 
 func logFailedCosmosignerDiscoveryGate(logger logr.Logger, pod *corev1.Pod) {

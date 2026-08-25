@@ -230,11 +230,26 @@ func addUpgradeStatusCondition(chainNode *appsv1.ChainNode, upgrade *appsv1.Upgr
 // would leave node-utils halting each recreated pod, producing a stop/recreate loop for as long as
 // the override remains.
 func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	upgrade := r.getUpgrade(chainNode, chainNode.Status.LatestHeight)
-	if upgrade == nil {
+	logger := log.FromContext(ctx)
+
+	// Mirror node-utils' own trigger condition — it halts for any scheduled upgrade with
+	// `height >= upgrade.Height` (pkg/nodeutils/upgrades.go), not just one at the exact current
+	// height. An exact-height lookup would miss an upgrade the node has already advanced past (the
+	// chain can move on between ensureUpgrades and ensurePod) and leave node-utils halting the pinned
+	// pod on every recreation.
+	skipped := make([]int64, 0)
+	for i, u := range chainNode.Status.Upgrades {
+		if u.Status == appsv1.UpgradeScheduled && u.Height <= chainNode.Status.LatestHeight {
+			chainNode.Status.Upgrades[i].Status = appsv1.UpgradeSkipped
+			skipped = append(skipped, u.Height)
+		}
+	}
+	if len(skipped) == 0 {
 		return nil
 	}
-	if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeSkipped); err != nil {
+
+	logger.Info("skipping upgrades on pinned node", "heights", skipped)
+	if err := r.Status().Update(ctx, chainNode); err != nil {
 		return err
 	}
 	return r.ensureUpgradesConfig(ctx, chainNode)
