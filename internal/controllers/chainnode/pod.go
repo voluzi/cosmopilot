@@ -1203,18 +1203,24 @@ func orderVolumes(podSpec *corev1.PodSpec) {
 func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
+	// Stopped and Snapshotting are steady phases a node can sit in indefinitely — halted at
+	// .spec.config.haltHeight, or for the duration of a snapshot. They must record the image too,
+	// or a node already in one of them when cosmopilot is upgraded would keep an empty
+	// .status.appImage forever, never reaching the syncing/running branches that backfill it.
 	if mustStop, _ := chainNode.MustStop(); mustStop {
 		if chainNode.Status.Phase != appsv1.PhaseChainNodeStopped {
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeStopped)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	if volumeSnapshotInProgress(chainNode) {
 		if chainNode.Status.Phase != appsv1.PhaseChainNodeSnapshotting {
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSnapshotting)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	c, err := r.getChainNodeClient(chainNode)

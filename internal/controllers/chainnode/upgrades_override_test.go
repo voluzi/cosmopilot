@@ -208,3 +208,36 @@ func TestSkipUpgradeForOverrideNeverSkipsFutureUpgrades(t *testing.T) {
 	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[1].Status,
 		"a future upgrade must never be skipped from a latched halt flag")
 }
+
+// Stopped and Snapshotting are steady phases a node can sit in indefinitely, so they must record
+// the image too — otherwise a node already halted at .spec.config.haltHeight when cosmopilot is
+// upgraded keeps an empty .status.appImage forever, never reaching a branch that backfills it.
+func TestSyncRecordedAppImageBackfillsInSteadyPhases(t *testing.T) {
+	for _, phase := range []appsv1.ChainNodePhase{
+		appsv1.PhaseChainNodeStopped,
+		appsv1.PhaseChainNodeSnapshotting,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			stored := pinnedNodeAtUpgradeHeight()
+			stored.Spec.OverrideImage = nil
+			stored.Status.Phase = phase
+			stored.Status.AppImage = ""
+			stored.Status.AppVersion = ""
+			scheme := gcpImportTestScheme(t)
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(stored).
+				Build()
+			r := &Reconciler{Client: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+
+			chainNode := &appsv1.ChainNode{}
+			require.NoError(t, c.Get(context.Background(),
+				types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
+
+			require.NoError(t, r.syncRecordedAppImage(context.Background(), chainNode))
+			assert.Equal(t, "repo/app:v1", chainNode.Status.AppImage)
+			assert.Equal(t, phase, chainNode.Status.Phase, "backfill must not change phase")
+		})
+	}
+}
