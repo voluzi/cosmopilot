@@ -50,7 +50,7 @@ func TestSkipUpgradeForOverrideStopsNodeUtilsRetriggering(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, true))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
 
 	// The upgrade is no longer scheduled, so node-utils will not halt the app for it again.
 	require.Len(t, chainNode.Status.Upgrades, 1)
@@ -89,7 +89,7 @@ func TestSkipUpgradeForOverrideIsNoopWithoutScheduledUpgrade(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, true))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
 	assert.Equal(t, appsv1.UpgradeCompleted, chainNode.Status.Upgrades[0].Status)
 }
 
@@ -116,7 +116,7 @@ func TestSkipUpgradeForOverrideSkipsUpgradesBelowCurrentHeight(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, true))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
 
 	// Both upgrades at or below the current height are skipped; the future one is untouched so it
 	// still applies once the override is removed.
@@ -177,13 +177,17 @@ func TestSyncRecordedAppImageBackfillsWithoutPhaseChange(t *testing.T) {
 
 // .status.latestHeight and the /must_upgrade answer come from two separate calls, so the node can
 // cross an upgrade height between them. When node-utils has halted but the recorded height explains
-// none of it, the lowest scheduled upgrade is provably the one it halted for and must be skipped —
-// otherwise the pinned pod gets recreated with the upgrade still scheduled.
-func TestSkipUpgradeForOverrideHandlesHeightRace(t *testing.T) {
+
+// A latched node-utils halt flag survives a failed pod recreation or a controller restart, so it is
+// not evidence that an upgrade above the recorded height has been reached. Skipping one on that
+// basis would let a later override removal perform the binary change through image drift instead of
+// the halt-and-upgrade workflow. Only upgrades at or below the observed height may ever be skipped.
+func TestSkipUpgradeForOverrideNeverSkipsFutureUpgrades(t *testing.T) {
 	stored := pinnedNodeAtUpgradeHeight()
-	stored.Status.LatestHeight = 499 // recorded just before the node crossed 500
+	stored.Status.LatestHeight = 500
 	stored.Status.Upgrades = []appsv1.Upgrade{
-		{Height: 500, Image: "repo/app:v2", Status: appsv1.UpgradeScheduled},
+		// Already handled on a previous reconcile whose pod recreation then failed.
+		{Height: 500, Image: "repo/app:v2", Status: appsv1.UpgradeSkipped},
 		{Height: 1500, Image: "repo/app:v4", Status: appsv1.UpgradeScheduled},
 	}
 	scheme := gcpImportTestScheme(t)
@@ -198,33 +202,9 @@ func TestSkipUpgradeForOverrideHandlesHeightRace(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, true))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
 
-	// The upgrade node-utils halted for is skipped despite the stale height; the far-future one is not.
 	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[0].Status)
-	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[1].Status)
-}
-
-// Without node-utils having halted there is no evidence the node reached anything, so a stale height
-// must not cause a future upgrade to be skipped.
-func TestSkipUpgradeForOverrideDoesNotSkipFutureUpgradesWhenNotHalted(t *testing.T) {
-	stored := pinnedNodeAtUpgradeHeight()
-	stored.Status.LatestHeight = 499
-	stored.Status.Upgrades = []appsv1.Upgrade{
-		{Height: 500, Image: "repo/app:v2", Status: appsv1.UpgradeScheduled},
-	}
-	scheme := gcpImportTestScheme(t)
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&appsv1.ChainNode{}).
-		WithObjects(stored).
-		Build()
-	r := &Reconciler{Client: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
-
-	chainNode := &appsv1.ChainNode{}
-	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
-
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, false))
-	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[0].Status)
+	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[1].Status,
+		"a future upgrade must never be skipped from a latched halt flag")
 }

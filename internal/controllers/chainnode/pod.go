@@ -169,7 +169,14 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		// (pkg/nodeutils/upgrades.go), so leaving it scheduled would halt every recreated pod again
 		// and spin a stop/recreate loop for as long as the override is in place. Skipping also means
 		// that removing the override later moves the node onto this upgrade's image, as intended.
-		if err := r.skipUpgradeForOverride(ctx, chainNode, true); err != nil {
+		// Refresh the height before deciding what to skip. It was read before /must_upgrade, so the
+		// node may have crossed the upgrade height in between. node-utils only latches once the height
+		// has reached the upgrade and the application stops progressing at that point, so a reading
+		// taken now is at or above the upgrade height — making the filter exact rather than a guess.
+		if err := r.updateLatestHeight(ctx, chainNode); err != nil {
+			return fmt.Errorf("failed to refresh height for pinned node %s: %w", chainNode.GetName(), err)
+		}
+		if err := r.skipUpgradeForOverride(ctx, chainNode); err != nil {
 			return fmt.Errorf("failed to skip upgrade for pinned node %s: %w", chainNode.GetName(), err)
 		}
 		r.recorder.Eventf(chainNode,
