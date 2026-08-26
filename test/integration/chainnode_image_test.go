@@ -133,6 +133,9 @@ var _ = Describe("Image resolution", func() {
 					return Framework().Client().Update(Framework().Context(), node)
 				}).Should(Succeed())
 
+				// The controller filters ChainNodeSet updates on generation (see
+				// GenerationChangedPredicate), which annotations do not bump — so the re-render has to
+				// be provoked with a real spec change.
 				By("forcing the ChainNodeSet to re-render its children")
 				Eventually(func() error {
 					current := &appsv1.ChainNodeSet{}
@@ -140,14 +143,22 @@ var _ = Describe("Image resolution", func() {
 						client.ObjectKeyFromObject(nodeSet), current); err != nil {
 						return err
 					}
-					if current.Annotations == nil {
-						current.Annotations = map[string]string{}
-					}
-					current.Annotations["test.cosmopilot/rerender"] = "1"
+					current.Spec.App.Version = ptr.To("9.9.9-rerender")
 					return Framework().Client().Update(Framework().Context(), current)
 				}).Should(Succeed())
 
-				// The pin must survive repeated reconciles of the parent.
+				// Wait for evidence the re-render actually reached the child, so this cannot pass
+				// without the preservation path having run.
+				Eventually(func() *string {
+					node := &appsv1.ChainNode{}
+					if err := Framework().Client().Get(Framework().Context(),
+						client.ObjectKey{Name: name, Namespace: ns.Name}, node); err != nil {
+						return nil
+					}
+					return node.Spec.App.Version
+				}).Should(HaveValue(Equal("9.9.9-rerender")), "the ChainNodeSet should have re-rendered its child")
+
+				// The pin must survive that re-render, and stay put across subsequent reconciles.
 				Consistently(func() *string {
 					node := &appsv1.ChainNode{}
 					if err := Framework().Client().Get(Framework().Context(),
