@@ -47,8 +47,14 @@ help: ## Display this help.
 
 # Print the value of any variable, e.g. `make print-IMG`. CI resolves the image tags once this way
 # and passes them between jobs, so the job that builds and the jobs that consume agree on one name.
-.PHONY: print-%
-print-%:
+#
+# The FORCE prerequisite is load-bearing: .PHONY takes literal names, not patterns, so declaring
+# `print-%` phony does nothing. Without it a file that happened to be named after the target would
+# make it "up to date" and the echo would be skipped, printing nothing at all.
+.PHONY: FORCE
+FORCE:
+
+print-%: FORCE
 	@echo '$($*)'
 
 ##@ Development

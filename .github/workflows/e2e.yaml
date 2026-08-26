@@ -55,8 +55,21 @@ jobs:
       - name: Resolve image tags
         id: images
         run: |
-          echo "controller=$(make -s print-IMG)" >> "$GITHUB_OUTPUT"
-          echo "node-utils=$(make -s print-NODE_UTILS_IMG)" >> "$GITHUB_OUTPUT"
+          controller="$(make -s print-IMG)"
+          node_utils="$(make -s print-NODE_UTILS_IMG)"
+
+          # Both tags come out of `git describe`, so an unfetched tag or a shallow clone yields a
+          # reference with nothing after the colon. Caught here it costs twenty seconds; carried
+          # forward it surfaces as an opaque `docker load` failure in six parallel shards.
+          for image in "$controller" "$node_utils"; do
+            case "$image" in
+              *:?*) ;;
+              *) echo "::error::could not resolve an image tag: '$image'"; exit 1 ;;
+            esac
+          done
+
+          echo "controller=$controller" >> "$GITHUB_OUTPUT"
+          echo "node-utils=$node_utils" >> "$GITHUB_OUTPUT"
 
       # Written straight out as tarballs rather than loaded into this runner's daemon and saved back:
       # only the shards need them in a daemon.
