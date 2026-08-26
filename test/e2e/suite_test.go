@@ -187,6 +187,13 @@ func CreateTestNamespace() *corev1.Namespace {
 		err := Framework().DeleteNamespace(ns)
 		Expect(err).NotTo(HaveOccurred())
 	})
+	// Registered after the deletion above so that it runs before it: cleanup callbacks run in reverse
+	// order, and there is nothing left to read once the namespace is gone.
+	DeferCleanup(func() {
+		if CurrentSpecReport().Failed() {
+			DumpNamespaceDiagnostics(ns.Name)
+		}
+	})
 	return ns
 }
 

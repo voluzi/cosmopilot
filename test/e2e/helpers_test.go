@@ -2,9 +2,13 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
+	"sort"
+	"strings"
 	"time"
 
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -134,7 +138,9 @@ func WaitForChainNodesHeight(chainNodeSet *appsv1.ChainNodeSet, minHeight int64)
 		nodeNames = append(nodeNames, node.Name)
 	}
 
-	// Wait for each node to reach the minimum height
+	// Wait for each node to reach the minimum height. The description is a func so it is rendered
+	// from the node's final state rather than its state when the wait started; without it a stalled
+	// chain reports a bare height and not even which of the nodes stopped.
 	for _, name := range nodeNames {
 		Eventually(func() int64 {
 			current := appsv1.ChainNode{}
@@ -142,7 +148,10 @@ func WaitForChainNodesHeight(chainNodeSet *appsv1.ChainNodeSet, minHeight int64)
 				return 0
 			}
 			return current.Status.LatestHeight
-		}).Should(BeNumerically(">", minHeight))
+		}).Should(BeNumerically(">", minHeight), func() string {
+			return fmt.Sprintf("node %s never advanced past height %d\n%s",
+				name, minHeight, DescribeChainNode(chainNodeSet.Namespace, name))
+		})
 	}
 }
 
@@ -214,4 +223,89 @@ func WaitForTmkmsContainerRunning(chainNode *appsv1.ChainNode) {
 		}
 		return false
 	}).Should(BeTrue())
+}
+
+// DescribeChainNode renders the parts of a ChainNode's status that explain why it stopped making
+// progress: an upgrade that reports completed covers both a clean restart and one the controller gave
+// up on, so the upgrade entries and conditions are what separate the two.
+func DescribeChainNode(namespace, name string) string {
+	node := appsv1.ChainNode{}
+	if err := Framework().Client().Get(Framework().Context(),
+		client.ObjectKey{Namespace: namespace, Name: name}, &node); err != nil {
+		return fmt.Sprintf("  <could not read ChainNode %s: %v>\n", name, err)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "  ChainNode %s: phase=%s height=%d image=%s\n",
+		node.Name, node.Status.Phase, node.Status.LatestHeight, node.Status.AppImage)
+	for _, upgrade := range node.Status.Upgrades {
+		fmt.Fprintf(&b, "    upgrade height=%d status=%s source=%s image=%s\n",
+			upgrade.Height, upgrade.Status, upgrade.Source, upgrade.Image)
+	}
+	for _, condition := range node.Status.Conditions {
+		fmt.Fprintf(&b, "    condition %s=%s reason=%s: %s\n",
+			condition.Type, condition.Status, condition.Reason, condition.Message)
+	}
+	return b.String()
+}
+
+// DumpNamespaceDiagnostics writes the cluster-side state of a failing spec to the Ginkgo output.
+// Nothing else does: the controller runs inside the kind cluster and its logs are never collected,
+// and CI tears the cluster down on the way out, so a timeout that is not described here cannot be
+// investigated after the fact. Events carry the most — the controller records upgrade and restart
+// failures against the objects in this namespace.
+func DumpNamespaceDiagnostics(namespace string) {
+	ctx := Framework().Context()
+
+	GinkgoWriter.Printf("\n===== diagnostics for namespace %s =====\n", namespace)
+	defer GinkgoWriter.Printf("===== end diagnostics for namespace %s =====\n\n", namespace)
+
+	nodes := appsv1.ChainNodeList{}
+	if err := Framework().Client().List(ctx, &nodes, client.InNamespace(namespace)); err != nil {
+		GinkgoWriter.Printf("  <could not list ChainNodes: %v>\n", err)
+	}
+	for _, node := range nodes.Items {
+		GinkgoWriter.Print(DescribeChainNode(namespace, node.Name))
+	}
+
+	pods, err := Framework().KubeClient().CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		GinkgoWriter.Printf("  <could not list pods: %v>\n", err)
+	} else {
+		for _, pod := range pods.Items {
+			GinkgoWriter.Printf("  Pod %s: phase=%s\n", pod.Name, pod.Status.Phase)
+			for _, status := range pod.Status.ContainerStatuses {
+				GinkgoWriter.Printf("    container %s ready=%t restarts=%d state=%s\n",
+					status.Name, status.Ready, status.RestartCount, describeContainerState(status.State))
+			}
+		}
+	}
+
+	events, err := Framework().KubeClient().CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		GinkgoWriter.Printf("  <could not list events: %v>\n", err)
+		return
+	}
+	sort.Slice(events.Items, func(i, j int) bool {
+		return events.Items[i].LastTimestamp.Before(&events.Items[j].LastTimestamp)
+	})
+	for _, event := range events.Items {
+		GinkgoWriter.Printf("  Event %s %s/%s %s: %s\n",
+			event.Type, event.InvolvedObject.Kind, event.InvolvedObject.Name, event.Reason, event.Message)
+	}
+}
+
+// describeContainerState renders whichever of the three container states is set. A restart that never
+// came back shows up here as a waiting reason, which is the detail worth having.
+func describeContainerState(state corev1.ContainerState) string {
+	switch {
+	case state.Waiting != nil:
+		return fmt.Sprintf("waiting(%s: %s)", state.Waiting.Reason, state.Waiting.Message)
+	case state.Terminated != nil:
+		return fmt.Sprintf("terminated(%s: exit %d)", state.Terminated.Reason, state.Terminated.ExitCode)
+	case state.Running != nil:
+		return "running"
+	default:
+		return "unknown"
+	}
 }
