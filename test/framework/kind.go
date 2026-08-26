@@ -259,6 +259,29 @@ func (f *KindFramework) LoadImage(image string) error {
 	return nil
 }
 
+// MirrorImage makes src available inside the cluster under the dst reference without publishing
+// anything: it pulls src on the host, retags it as dst and loads it into the Kind nodes. The dst
+// registry never has to exist — the kubelet finds the image already present on the node and, with a
+// pull policy of IfNotPresent, never tries to fetch it.
+//
+// This is what makes an upgrade that moves a node to a *different* repository testable end to end.
+// That path is the one the tag-only image resolution bug lived on, and it is otherwise untestable
+// without publishing a second copy of an app image somewhere CI can reach.
+func (f *KindFramework) MirrorImage(src, dst string) error {
+	for _, args := range [][]string{
+		{"pull", src},
+		{"tag", src, dst},
+	} {
+		cmd := exec.CommandContext(f.ctx, "docker", args...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			// Report the whole command: a `tag` failure is about the destination reference, which
+			// naming only the source would hide.
+			return fmt.Errorf("docker %s: %s: %w", strings.Join(args, " "), string(output), err)
+		}
+	}
+	return f.LoadImage(dst)
+}
+
 // DeployController deploys the controller to the cluster using Helm.
 // If ChartVersion is set, deploys from OCI registry (release mode).
 // Otherwise, deploys from local chart with ControllerImage (dev mode).

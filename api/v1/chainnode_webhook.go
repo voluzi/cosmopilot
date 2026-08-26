@@ -79,6 +79,10 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		return nil, err
 	}
 
+	if err := ValidateImageOverrides(".spec", chainNode.Spec.OverrideVersion, chainNode.Spec.OverrideImage); err != nil {
+		return nil, err
+	}
+
 	// Validate persistence size
 	_, err := resource.ParseQuantity(chainNode.GetPersistenceSize())
 	if err != nil {
@@ -400,7 +404,9 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		}
 	}
 
-	return chainNode.tmKMSDeprecationWarnings(), nil
+	warnings := chainNode.tmKMSDeprecationWarnings()
+	warnings = append(warnings, chainNode.Spec.App.UpgradeImageWarnings(".spec.app")...)
+	return warnings, nil
 }
 
 // GenesisSigningDigestAllowsRefresh reports whether a recorded raw genesis fingerprint

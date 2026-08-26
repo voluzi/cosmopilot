@@ -459,6 +459,7 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 			StateSyncResources: cfg.StateSyncResources,
 			VPA:                cfg.VPA,
 			OverrideVersion:    cfg.OverrideVersion,
+			OverrideImage:      cfg.OverrideImage,
 		},
 	}
 

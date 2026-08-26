@@ -4323,9 +4323,20 @@ spec:
                         Selector which must match a node's labels for the pod to be scheduled on that node.
                         Ignored when this group has a `validator` block; use `.validator.nodeSelector` instead.
                       type: object
+                    overrideImage:
+                      description: |-
+                        OverrideImage will force this group to use the specified image, replacing both repository and
+                        tag. Takes precedence over `overrideVersion`, which may not be set at the same time.
+                        NOTE: when this is set, cosmopilot will not upgrade the nodes, nor will set the image
+                        based on upgrade history. For unsetting this, you will have to do it here and individually
+                        per ChainNode
+                        Ignored when this group has a `validator` block; use `.validator.overrideImage` instead.
+                      type: string
                     overrideVersion:
                       description: |-
-                        OverrideVersion will force this group to use the specified version.
+                        OverrideVersion will force this group to use the specified version. It is a tag-only shorthand:
+                        the repository still comes from `.spec.app.image`. Use `overrideImage` to also replace the
+                        repository.
                         NOTE: when this is set, cosmopilot will not upgrade the nodes, nor will set the version
                         based on upgrade history. For unsetting this, you will have to do it here and individually
                         per ChainNode
@@ -9332,9 +9343,19 @@ spec:
                             Selector which must be true for the pod to fit on a node.
                             Selector which must match a node's labels for the pod to be scheduled on that node.
                           type: object
+                        overrideImage:
+                          description: |-
+                            OverrideImage will force validator to use the specified image, replacing both repository and
+                            tag. Takes precedence over `overrideVersion`, which may not be set at the same time.
+                            NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the image
+                            based on upgrade history. For unsetting this, you will have to do it here and on
+                            the ChainNode itself.
+                          type: string
                         overrideVersion:
                           description: |-
-                            OverrideVersion will force validator to use the specified version.
+                            OverrideVersion will force validator to use the specified version. It is a tag-only shorthand:
+                            the repository still comes from `.spec.app.image`. Use `overrideImage` to also replace the
+                            repository.
                             NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version
                             based on upgrade history. For unsetting this, you will have to do it here and on
                             the ChainNode itself.
@@ -15070,9 +15091,19 @@ spec:
                       Selector which must be true for the pod to fit on a node.
                       Selector which must match a node's labels for the pod to be scheduled on that node.
                     type: object
+                  overrideImage:
+                    description: |-
+                      OverrideImage will force validator to use the specified image, replacing both repository and
+                      tag. Takes precedence over `overrideVersion`, which may not be set at the same time.
+                      NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the image
+                      based on upgrade history. For unsetting this, you will have to do it here and on
+                      the ChainNode itself.
+                    type: string
                   overrideVersion:
                     description: |-
-                      OverrideVersion will force validator to use the specified version.
+                      OverrideVersion will force validator to use the specified version. It is a tag-only shorthand:
+                      the repository still comes from `.spec.app.image`. Use `overrideImage` to also replace the
+                      repository.
                       NOTE: when this is set, cosmopilot will not upgrade the node, nor will set the version
                       based on upgrade history. For unsetting this, you will have to do it here and on
                       the ChainNode itself.
@@ -17280,8 +17311,18 @@ spec:
           status:
             description: ChainNodeSetStatus defines the observed state of ChainNodeSet.
             properties:
+              appImage:
+                description: |-
+                  Full application image currently deployed, including its repository. Upgrades may move nodes
+                  to a different repository, so this records the image this nodeset resolves to.
+                  NOTE: this is the nodeset-wide image and does not account for a per-group or validator
+                  `overrideImage`/`overrideVersion`. Read the `.status.appImage` of an individual ChainNode for
+                  the image that node is actually running.
+                type: string
               appVersion:
-                description: The application version currently deployed.
+                description: |-
+                  The application version currently deployed. This is the tag or digest of `.status.appImage`,
+                  kept for display purposes.
                 type: string
               chainID:
                 description: Indicates the chain ID.

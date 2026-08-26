@@ -635,3 +635,39 @@ func TestGetNodeSpecStripsDashboardExposureFromChildren(t *testing.T) {
 	assert.NotNil(t, nodeSet.Spec.Nodes[0].Config.GetCosmoGuardDashboard().Gateway,
 		"stripping the child copy must not mutate the group config")
 }
+
+func TestPreserveImageOverrides(t *testing.T) {
+	node := func(version, image *string) *appsv1.ChainNode {
+		return &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{OverrideVersion: version, OverrideImage: image}}
+	}
+
+	t.Run("preserves an existing override when the set asks for none", func(t *testing.T) {
+		desired, current := node(nil, nil), node(nil, ptr.To("repo/app:pinned"))
+		preserveImageOverrides(desired, current)
+		assert.Nil(t, desired.Spec.OverrideVersion)
+		assert.Equal(t, ptr.To("repo/app:pinned"), desired.Spec.OverrideImage)
+	})
+
+	t.Run("switching image override to version override drops the image", func(t *testing.T) {
+		// Preserving the two independently would leave both set, and the ChainNode webhook rejects
+		// that pair as mutually exclusive — deadlocking the ChainNodeSet.
+		desired, current := node(ptr.To("v9"), nil), node(nil, ptr.To("repo/app:pinned"))
+		preserveImageOverrides(desired, current)
+		assert.Equal(t, ptr.To("v9"), desired.Spec.OverrideVersion)
+		assert.Nil(t, desired.Spec.OverrideImage)
+	})
+
+	t.Run("switching version override to image override drops the version", func(t *testing.T) {
+		desired, current := node(nil, ptr.To("other/app:v2")), node(ptr.To("v9"), nil)
+		preserveImageOverrides(desired, current)
+		assert.Nil(t, desired.Spec.OverrideVersion)
+		assert.Equal(t, ptr.To("other/app:v2"), desired.Spec.OverrideImage)
+	})
+
+	t.Run("no overrides anywhere is a no-op", func(t *testing.T) {
+		desired, current := node(nil, nil), node(nil, nil)
+		preserveImageOverrides(desired, current)
+		assert.Nil(t, desired.Spec.OverrideVersion)
+		assert.Nil(t, desired.Spec.OverrideImage)
+	})
+}

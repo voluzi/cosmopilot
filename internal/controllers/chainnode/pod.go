@@ -159,6 +159,44 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return fmt.Errorf("failed to check if upgrade is required for %s: %w", chainNode.GetName(), err)
 	}
 
+	// A node pinned through .spec.overrideImage or .spec.overrideVersion must not be upgraded. The
+	// overrides win over upgrade history when the pod spec is built, so swapping the binary here
+	// would be reverted on the next reconcile — downgrading a node that has already written data
+	// with the upgraded version.
+	if requiresUpgrade && chainNode.HasImageOverride() {
+		// Mark the upgrade skipped instead of only suppressing this reconcile. node-utils halts the
+		// application for any upgrade still `scheduled` at or below the current height
+		// (pkg/nodeutils/upgrades.go), so leaving it scheduled would halt every recreated pod again
+		// and spin a stop/recreate loop for as long as the override is in place. Skipping also means
+		// that removing the override later moves the node onto this upgrade's image, as intended.
+		// Refresh the height before deciding what to skip. It was read before /must_upgrade, so the
+		// node may have crossed the upgrade height in between. node-utils only latches once the height
+		// has reached the upgrade and the application stops progressing at that point, so a reading
+		// taken now is at or above the upgrade height — making the filter exact rather than a guess.
+		if err := r.updateLatestHeight(ctx, chainNode); err != nil {
+			return fmt.Errorf("failed to refresh height for pinned node %s: %w", chainNode.GetName(), err)
+		}
+		if err := r.skipUpgradeForOverride(ctx, chainNode); err != nil {
+			return fmt.Errorf("failed to skip upgrade for pinned node %s: %w", chainNode.GetName(), err)
+		}
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonUpgradeSkippedByOverride,
+			"Not upgrading at height %d: node is pinned to %s by an image override",
+			chainNode.Status.LatestHeight, chainNode.GetAppImage(),
+		)
+
+		// node-utils latches requiresUpgrade in memory and never clears it (pkg/nodeutils/node.go),
+		// and serves /must_upgrade as its own readiness probe. On the on-chain path it does not stop
+		// the application either, so nothing restarts the process on its own: reloading the
+		// now-clean upgrades ConfigMap cannot reset the flag, and the container would stay unready —
+		// dropping the pod from the Service endpoints indefinitely. Recreate the pod so a fresh
+		// node-utils starts with a clear flag and reads the upgrade as already skipped.
+		logger.Info("recreating pod to clear the latched node-utils upgrade flag",
+			"image", chainNode.GetAppImage())
+		return r.recreatePod(ctx, chainNode, pod, false)
+	}
+
 	if requiresUpgrade {
 		// Get upgrade from scheduled upgrades list
 		upgrade := r.getUpgrade(chainNode, chainNode.Status.LatestHeight)
@@ -218,6 +256,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			if upgraded {
 				// If there was an error on pod creation or watching but the image was already swapped, we mark the upgrade
 				// completed anyway to avoid downgrading and corrupt data.
+				chainNode.Status.AppImage = upgrade.Image
 				chainNode.Status.AppVersion = upgrade.GetVersion()
 				upgradeStatus = appsv1.UpgradeCompleted
 				if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
@@ -234,6 +273,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			"Upgraded node to %s on height %d",
 			upgrade.Image, upgrade.Height,
 		)
+		chainNode.Status.AppImage = upgrade.Image
 		chainNode.Status.AppVersion = upgrade.GetVersion()
 		if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
 			return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
@@ -535,9 +575,11 @@ func cosmosignerDiscoveryResources(config *appsv1.Config) corev1.ResourceRequire
 // buildAppContainer creates the main application container with its configuration.
 func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesMounts []corev1.VolumeMount, readinessPath string, appResources corev1.ResourceRequirements, securityContext *corev1.SecurityContext) corev1.Container {
 	return corev1.Container{
-		Name:            chainNode.Spec.App.App,
-		Image:           chainNode.GetAppImage(),
-		ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
+		Name: chainNode.Spec.App.App,
+		// GetRunningAppImage, not GetAppImage: a state-sync restore from scratch runs the latest
+		// known image. Resolving it here keeps the pod and `.status.appImage` from diverging.
+		Image:           chainNode.GetRunningAppImage(),
+		ImagePullPolicy: chainNode.GetAppImagePullPolicy(),
 		SecurityContext: securityContext,
 		Command:         []string{chainNode.Spec.App.App},
 		Args: append([]string{"start",
@@ -776,11 +818,6 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			ContainerPort: controllers.EvmRpcWsPort,
 			Protocol:      corev1.ProtocolTCP,
 		})
-	}
-
-	// Always use latest version we know if we are doing state-sync restore
-	if chainNode.StateSyncRestoreEnabled() && chainNode.Status.LatestHeight == 0 {
-		pod.Spec.Containers[0].Image = chainNode.GetLatestAppImage()
 	}
 
 	if !chainNode.Spec.Genesis.ShouldUseDataVolume() {
@@ -1166,18 +1203,24 @@ func orderVolumes(podSpec *corev1.PodSpec) {
 func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	logger := log.FromContext(ctx)
 
+	// Stopped and Snapshotting are steady phases a node can sit in indefinitely — halted at
+	// .spec.config.haltHeight, or for the duration of a snapshot. They must record the image too,
+	// or a node already in one of them when cosmopilot is upgraded would keep an empty
+	// .status.appImage forever, never reaching the syncing/running branches that backfill it.
 	if mustStop, _ := chainNode.MustStop(); mustStop {
 		if chainNode.Status.Phase != appsv1.PhaseChainNodeStopped {
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeStopped)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	if volumeSnapshotInProgress(chainNode) {
 		if chainNode.Status.Phase != appsv1.PhaseChainNodeSnapshotting {
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSnapshotting)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	c, err := r.getChainNodeClient(chainNode)
@@ -1205,10 +1248,10 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeStateSyncing,
 				"Node is state-syncing",
 			)
-			chainNode.Status.AppVersion = chainNode.GetAppVersion()
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeStateSyncing)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	logger.V(1).Info("check if node is syncing")
@@ -1227,10 +1270,10 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 				appsv1.ReasonNodeSyncing,
 				"Node is syncing",
 			)
-			chainNode.Status.AppVersion = chainNode.GetAppVersion()
+			setRecordedAppImage(chainNode)
 			return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSyncing)
 		}
-		return nil
+		return r.syncRecordedAppImage(ctx, chainNode)
 	}
 
 	if chainNode.Status.Phase != appsv1.PhaseChainNodeRunning {
@@ -1239,11 +1282,31 @@ func (r *Reconciler) setNodePhase(ctx context.Context, chainNode *appsv1.ChainNo
 			appsv1.ReasonNodeRunning,
 			"Node is synced and running",
 		)
-		chainNode.Status.AppVersion = chainNode.GetAppVersion()
+		setRecordedAppImage(chainNode)
 		return r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRunning)
 	}
 
-	return nil
+	return r.syncRecordedAppImage(ctx, chainNode)
+}
+
+// setRecordedAppImage stages the resolved running image on the status, for a caller that is about to
+// persist it as part of a phase transition.
+func setRecordedAppImage(chainNode *appsv1.ChainNode) {
+	image := chainNode.GetRunningAppImage()
+	chainNode.Status.AppImage = image
+	chainNode.Status.AppVersion = appsv1.ImageRefVersion(image)
+}
+
+// syncRecordedAppImage persists the resolved running image while the node stays in its current
+// phase. The assignments above only run on a phase transition, so without this a node that is
+// already Running, Syncing or StateSyncing when cosmopilot is upgraded would keep an empty
+// .status.appImage until it next changes phase — and syncing can last hours.
+func (r *Reconciler) syncRecordedAppImage(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if chainNode.Status.AppImage == chainNode.GetRunningAppImage() {
+		return nil
+	}
+	setRecordedAppImage(chainNode)
+	return r.Status().Update(ctx, chainNode)
 }
 
 func logFailedCosmosignerDiscoveryGate(logger logr.Logger, pod *corev1.Pod) {

@@ -25,6 +25,11 @@ func Nibiru() TestApp {
 				UpgradeName: "v2.9.0",
 				FromVersion: "2.8.0",
 				ToVersion:   "2.9.0",
+				// Deliberately a different repository from AppSpec.Image below. Cosmopilot must use
+				// this reference verbatim rather than borrowing only its tag — the failure mode that
+				// took a mainnet node down. The suite mirrors the real image under this name into the
+				// Kind nodes, so nothing has to be published for it to resolve.
+				ToImage: "e2e.cosmopilot.local/mirror/nibiru:2.9.0",
 			},
 		},
 		AppSpec: appsv1.AppSpec{

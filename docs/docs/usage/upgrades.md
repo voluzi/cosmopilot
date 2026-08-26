@@ -4,9 +4,35 @@ This page explains how `Cosmopilot` handles upgrades for `ChainNode` and `ChainN
 
 ## Initial Version
 
-The `.spec.app.version` field specifies the initial version of the application for a `ChainNode` or all nodes in a `ChainNodeSet`. If no upgrades are configured, changing this field will cause the node(s) to restart with the new version.
+The `.spec.app.image` and `.spec.app.version` fields specify the initial image and tag of the application for a `ChainNode` or all nodes in a `ChainNodeSet`. If no upgrades are configured, changing these fields will cause the node(s) to restart with the new image.
 
-However, once upgrades are configured, this field is ignored for the remainder of the node(s)' lifetime. At this point, all version changes are managed through the upgrade process.
+However, once upgrades are configured, these fields are ignored for the remainder of the node(s)' lifetime. At this point, all image changes are managed through the upgrade process.
+
+## How the Running Image Is Resolved
+
+The image a node runs is resolved with the following precedence:
+
+1. `.spec.overrideImage`, if set — used verbatim.
+2. `.spec.overrideVersion`, if set — a tag-only shorthand, applied to the repository in `.spec.app.image`.
+3. The image of the highest upgrade the node has already reached — **used verbatim**.
+4. `.spec.app.image` joined with `.spec.app.version`.
+
+An upgrade image replaces the **whole** reference, not just the tag. This means an upgrade may move a node to a different registry or repository, which is exactly what a governance proposal does when a chain publishes a release somewhere new:
+
+```yaml
+app:
+  image: alloranetwork/allora-chain   # initial repository
+  version: v0.8.2
+  upgrades:
+  - height: 10511421
+    image: registry.example.com/team/allorad:v0.17.1   # node moves to this repository
+```
+
+`.status.appImage` records the full image currently deployed, and `.status.appVersion` its tag or digest.
+
+:::warning
+Because the upgrade image is used verbatim, it should always carry an explicit tag or digest. An image without one resolves to `latest`, and `Cosmopilot` emits an admission warning for it.
+:::
 
 ## Governance Upgrades
 
@@ -48,9 +74,24 @@ app:
     forceOnChain: true # Optional. Use only for governance upgrades.
 ```
 
+## Pinning a Node to a Specific Image
+
+To hold a node on a given image regardless of upgrade history — to test a build, for example — set `.spec.overrideImage`:
+
+```yaml
+spec:
+  overrideImage: registry.example.com/team/allorad:986-test
+```
+
+While this is set, `Cosmopilot` will not upgrade the node nor derive its image from upgrade history. `.spec.overrideVersion` does the same but only replaces the tag, keeping the repository from `.spec.app.image`; the two are mutually exclusive.
+
+On a `ChainNodeSet`, both fields are available per node group (`.spec.nodes[].overrideImage`) and for the validator (`.spec.validator.overrideImage`). To unset either, remove it from the `ChainNodeSet` **and** from each `ChainNode` individually.
+
 :::tip[Summary of Key Points]
-- `.spec.app.version` controls the initial version, but it is ignored once upgrades are configured.
+- `.spec.app.image` and `.spec.app.version` control the initial image, but are ignored once upgrades are configured.
+- An upgrade image is used verbatim, so an upgrade can move a node to a different registry or repository.
 - Governance upgrades are automatic if the proposal includes the necessary container image under the `docker` key.
 - Manual upgrades provide a flexible way to apply updates directly through `.spec.app.upgrades`.
 - Use the `forceOnChain` field to handle governance upgrades that lack required images.
+- Use `.spec.overrideImage` to pin a node to an exact image, or `.spec.overrideVersion` to pin only the tag.
 :::

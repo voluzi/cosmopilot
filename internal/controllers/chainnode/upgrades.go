@@ -221,3 +221,44 @@ func addUpgradeStatusCondition(chainNode *appsv1.ChainNode, upgrade *appsv1.Upgr
 		Message:            fmt.Sprintf("Successfully upgraded node to image %s", upgrade.Image),
 	})
 }
+
+// skipUpgradeForOverride marks the upgrade scheduled at the node's current height as skipped and
+// republishes the upgrades config consumed by node-utils.
+//
+// It is used when an image override pins the node. node-utils halts the application for any upgrade
+// still `scheduled` at or below the current height, so suppressing the upgrade only in the operator
+// would leave node-utils halting each recreated pod, producing a stop/recreate loop for as long as
+// the override remains.
+// The caller must refresh .status.latestHeight immediately beforehand: the height is otherwise read
+// before /must_upgrade and the node may have crossed the upgrade height in between.
+func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	logger := log.FromContext(ctx)
+
+	// Mirror node-utils' own trigger condition — it halts for any scheduled upgrade with
+	// `height >= upgrade.Height` (pkg/nodeutils/upgrades.go), not just one at the exact current
+	// height. An exact-height lookup would miss an upgrade the node has already advanced past and
+	// leave node-utils halting the pinned pod on every recreation.
+	//
+	// Only upgrades at or below the observed height are skipped. A latched halt flag is deliberately
+	// NOT treated as evidence that some higher upgrade was reached: the flag survives a failed pod
+	// recreation or a controller restart, so inferring from it could mark a genuinely future upgrade
+	// as skipped — and once skipped, removing the override would let image drift perform that binary
+	// change instead of the halt-and-upgrade workflow.
+	skipped := make([]int64, 0)
+	for i, u := range chainNode.Status.Upgrades {
+		if u.Status == appsv1.UpgradeScheduled && u.Height <= chainNode.Status.LatestHeight {
+			chainNode.Status.Upgrades[i].Status = appsv1.UpgradeSkipped
+			skipped = append(skipped, u.Height)
+		}
+	}
+
+	if len(skipped) == 0 {
+		return nil
+	}
+
+	logger.Info("skipping upgrades on pinned node", "heights", skipped)
+	if err := r.Status().Update(ctx, chainNode); err != nil {
+		return err
+	}
+	return r.ensureUpgradesConfig(ctx, chainNode)
+}

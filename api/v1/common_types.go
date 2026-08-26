@@ -59,6 +59,7 @@ const (
 	ReasonUpgradeCompleted                 = "UpgradeCompleted"
 	ReasonUpgradeFailed                    = "UpgradeFailed"
 	ReasonUpgradeMissingData               = "UpgradeMissingData"
+	ReasonUpgradeSkippedByOverride         = "UpgradeSkippedByOverride"
 	ReasonCreateValidatorFailure           = "FailedCreateValidator"
 	ReasonCreateValidatorSuccess           = "CreateValidatorSuccess"
 	ReasonInvalid                          = "Invalid"
