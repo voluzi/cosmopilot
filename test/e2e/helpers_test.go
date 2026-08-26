@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"math/rand"
@@ -254,6 +255,87 @@ func DescribeChainNode(namespace, name string) string {
 // and CI tears the cluster down on the way out, so a timeout that is not described here cannot be
 // investigated after the fact. Events carry the most — the controller records upgrade and restart
 // failures against the objects in this namespace.
+const (
+	// Where the framework's Helm release puts the controller, and how to pick it out.
+	controllerNamespace = "cosmopilot-system"
+	controllerSelector  = "app.kubernetes.io/name=cosmopilot"
+	controllerContainer = "manager"
+
+	// The controller serves every Ginkgo process at once, so its stream is mostly other specs'
+	// work. Read a generous tail, print only the lines naming the namespace that failed.
+	controllerLogTailLines = 4000
+	controllerLogMaxLines  = 150
+)
+
+// DumpControllerDiagnostics prints the controller's own account of a failing namespace.
+//
+// The namespace dump says what cosmopilot did. When it did nothing at all — no pods, no events, a
+// ChainNode whose status was never written — that dump goes quiet exactly when the answer matters
+// most, and cannot distinguish a controller that was down from one that saw the object and refused
+// it. Restart counts settle the first question and the log lines settle the second.
+func DumpControllerDiagnostics(namespace string) {
+	ctx := Framework().Context()
+
+	pods, err := Framework().KubeClient().CoreV1().Pods(controllerNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: controllerSelector,
+	})
+	if err != nil {
+		GinkgoWriter.Printf("  <could not list controller pods: %v>\n", err)
+		return
+	}
+	if len(pods.Items) == 0 {
+		GinkgoWriter.Printf("  <no controller pod matched %s in %s>\n", controllerSelector, controllerNamespace)
+		return
+	}
+
+	for _, pod := range pods.Items {
+		GinkgoWriter.Printf("  Controller %s: phase=%s\n", pod.Name, pod.Status.Phase)
+		for _, status := range pod.Status.ContainerStatuses {
+			GinkgoWriter.Printf("    container %s ready=%t restarts=%d state=%s\n",
+				status.Name, status.Ready, status.RestartCount, describeContainerState(status.State))
+		}
+		dumpControllerLog(ctx, pod.Name, namespace)
+	}
+}
+
+// dumpControllerLog prints the controller log lines that mention the namespace.
+func dumpControllerLog(ctx context.Context, podName, namespace string) {
+	tail := int64(controllerLogTailLines)
+	stream, err := Framework().KubeClient().CoreV1().Pods(controllerNamespace).
+		GetLogs(podName, &corev1.PodLogOptions{Container: controllerContainer, TailLines: &tail}).
+		Stream(ctx)
+	if err != nil {
+		GinkgoWriter.Printf("    <could not read controller log: %v>\n", err)
+		return
+	}
+	defer stream.Close()
+
+	// Structured log lines carry whole resource dumps, so the default 64KiB scanner limit is not
+	// enough: without a bigger buffer the scan stops at the first long line and the rest is lost.
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	printed := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, namespace) {
+			continue
+		}
+		if printed == controllerLogMaxLines {
+			GinkgoWriter.Printf("    <further controller log lines omitted>\n")
+			return
+		}
+		GinkgoWriter.Printf("    %s\n", line)
+		printed++
+	}
+	if err := scanner.Err(); err != nil {
+		GinkgoWriter.Printf("    <controller log truncated: %v>\n", err)
+	}
+	if printed == 0 {
+		GinkgoWriter.Printf("    <no controller log line mentions %s>\n", namespace)
+	}
+}
+
 func DumpNamespaceDiagnostics(namespace string) {
 	ctx := Framework().Context()
 
@@ -284,15 +366,17 @@ func DumpNamespaceDiagnostics(namespace string) {
 	events, err := Framework().KubeClient().CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		GinkgoWriter.Printf("  <could not list events: %v>\n", err)
-		return
+	} else {
+		sort.Slice(events.Items, func(i, j int) bool {
+			return events.Items[i].LastTimestamp.Before(&events.Items[j].LastTimestamp)
+		})
+		for _, event := range events.Items {
+			GinkgoWriter.Printf("  Event %s %s/%s %s: %s\n",
+				event.Type, event.InvolvedObject.Kind, event.InvolvedObject.Name, event.Reason, event.Message)
+		}
 	}
-	sort.Slice(events.Items, func(i, j int) bool {
-		return events.Items[i].LastTimestamp.Before(&events.Items[j].LastTimestamp)
-	})
-	for _, event := range events.Items {
-		GinkgoWriter.Printf("  Event %s %s/%s %s: %s\n",
-			event.Type, event.InvolvedObject.Kind, event.InvolvedObject.Name, event.Reason, event.Message)
-	}
+
+	DumpControllerDiagnostics(namespace)
 }
 
 // describeContainerState renders whichever of the three container states is set. A restart that never
