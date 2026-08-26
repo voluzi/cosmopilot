@@ -1,0 +1,95 @@
+# Genesis Download
+
+This section explains the methods available for downloading or specifying the genesis file when deploying a node or initializing a network using `Cosmopilot`. The genesis file defines the blockchain's initial state and parameters, making it a critical component for connecting to the correct network.
+
+## Download from a URL
+
+You can specify a URL to fetch the genesis file directly. This is the simplest and most common method for established networks.
+
+### Example Configuration
+
+```yaml
+genesis:
+  url: https://raw.githubusercontent.com/NibiruChain/Networks/main/Mainnet/cataclysm-1/genesis.json
+```
+
+**Notes**
+- The `URL` must point to a publicly accessible genesis file.
+- Ensure the `URL` is updated to match the desired network or version.
+
+### Compressed Genesis Files
+
+Cosmopilot automatically detects and extracts compressed genesis files. You can provide URLs to compressed genesis files, and Cosmopilot will handle the decompression automatically:
+
+```yaml
+genesis:
+  url: https://example.com/genesis.json.gz
+  useDataVolume: true
+```
+
+Supported compression formats:
+- **gzip** (`.gz`) - Most common format
+- **zstd** (`.zst`) - Faster decompression, better compression ratio
+
+This is particularly useful for large genesis files, as compression can significantly reduce download times.
+
+:::info
+Compressed genesis extraction requires `useDataVolume: true` since the file is decompressed directly into the data volume using an init container.
+:::
+
+## Fetch from an RPC Endpoint
+
+It's also possible to configure your [ChainNode](../reference/crds#chainnode) or [ChainNodeSet](../reference/crds#chainnodeset) to fetch the genesis directly from another node’s `RPC` endpoint.
+
+### Example Configuration
+
+```yaml
+genesis:
+  fromNodeRPC:
+    hostname: rpc.nibiru.fi
+    port: 443 # Optional. Defaults to 26657
+    secure: true # Optional. Defaults to false
+```
+
+**Notes**
+- Ensure the `RPC` endpoint is accessible from the cluster.
+- This method is useful for networks that regularly update their genesis file or for quickly bootstrapping nodes in test environments.
+
+## Load from a ConfigMap
+
+For private networks or custom configurations, you can use a Kubernetes `ConfigMap` to provide the genesis file. This is useful for managing genesis files directly within your cluster.
+
+### Steps
+
+1. Create a `ConfigMap` with the genesis file:
+
+```bash
+$ kubectl create configmap custom-genesis --from-file=genesis.json
+```
+Make sure the `ConfigMap` is created in the same namespace as your [ChainNode](../reference/crds#chainnode) or [ChainNodeSet](../reference/crds#chainnodeset).
+
+2. Reference the `ConfigMap` in your [ChainNode](../reference/crds#chainnode) or [ChainNodeSet](../reference/crds#chainnodeset) manifest:
+
+```yaml
+genesis:
+  configMap: custom-genesis
+```
+
+:::warning[Important]
+`Cosmopilot` expects the genesis file name to be `genesis.json`.
+:::
+
+## Large Genesis
+
+For genesis files larger than the 1MiB limit of Kubernetes `ConfigMaps`, `Cosmopilot` provides the `useDataVolume` option. This allows the genesis file to be stored directly in the same volume as the node’s data.
+
+### Example Configuration
+
+```yaml
+genesis:
+  url: https://raw.githubusercontent.com/NibiruChain/Networks/main/Mainnet/cataclysm-1/genesis.json
+  useDataVolume: true
+```
+
+**Downside**
+When using `useDataVolume`, `Cosmopilot` will download the genesis file once for each node. This may lead to redundant downloads in scenarios with multiple nodes.
