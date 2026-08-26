@@ -112,6 +112,53 @@ var _ = Describe("Image resolution", func() {
 			}),
 		)
 
+		// Setting an override directly on one ChainNode is a supported workflow: it pins a single node
+		// for testing without pinning its whole group, and must be removed from that node
+		// individually. The ChainNodeSet must not wipe it while it specifies no override itself.
+		It("does not wipe an override set directly on a ChainNode",
+			WithNamespace(func(ns *corev1.Namespace) {
+				nodeSet := newNodeSet(ns, func(s *appsv1.ChainNodeSet) {})
+				Expect(Framework().Client().Create(Framework().Context(), nodeSet)).To(Succeed())
+				WaitForChainNodeCount(ns.Name, 1)
+
+				By("pinning the individual ChainNode")
+				name := GetChainNodes(ns.Name)[0].Name
+				Eventually(func() error {
+					node := &appsv1.ChainNode{}
+					if err := Framework().Client().Get(Framework().Context(),
+						client.ObjectKey{Name: name, Namespace: ns.Name}, node); err != nil {
+						return err
+					}
+					node.Spec.OverrideImage = ptr.To("registry.example.com/team/nibiru:node-pinned")
+					return Framework().Client().Update(Framework().Context(), node)
+				}).Should(Succeed())
+
+				By("forcing the ChainNodeSet to re-render its children")
+				Eventually(func() error {
+					current := &appsv1.ChainNodeSet{}
+					if err := Framework().Client().Get(Framework().Context(),
+						client.ObjectKeyFromObject(nodeSet), current); err != nil {
+						return err
+					}
+					if current.Annotations == nil {
+						current.Annotations = map[string]string{}
+					}
+					current.Annotations["test.cosmopilot/rerender"] = "1"
+					return Framework().Client().Update(Framework().Context(), current)
+				}).Should(Succeed())
+
+				// The pin must survive repeated reconciles of the parent.
+				Consistently(func() *string {
+					node := &appsv1.ChainNode{}
+					if err := Framework().Client().Get(Framework().Context(),
+						client.ObjectKey{Name: name, Namespace: ns.Name}, node); err != nil {
+						return nil
+					}
+					return node.Spec.OverrideImage
+				}, "10s", "1s").Should(HaveValue(Equal("registry.example.com/team/nibiru:node-pinned")))
+			}),
+		)
+
 		// Preserving the two override fields independently used to leave a switched group carrying
 		// both, which the ChainNode webhook then rejects as mutually exclusive — deadlocking the
 		// ChainNodeSet, since it could never write its child again.

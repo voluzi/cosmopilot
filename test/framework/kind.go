@@ -274,7 +274,9 @@ func (f *KindFramework) MirrorImage(src, dst string) error {
 	} {
 		cmd := exec.CommandContext(f.ctx, "docker", args...)
 		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("docker %s %q: %s: %w", args[0], src, string(output), err)
+			// Report the whole command: a `tag` failure is about the destination reference, which
+			// naming only the source would hide.
+			return fmt.Errorf("docker %s: %s: %w", strings.Join(args, " "), string(output), err)
 		}
 	}
 	return f.LoadImage(dst)
