@@ -40,6 +40,22 @@ var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 						targetImage = fmt.Sprintf("%s:%s", app.AppSpec.Image, targetVersion)
 					}
 
+					// A fixture may point the upgrade at a different repository on purpose, to cover
+					// cosmopilot honouring the full reference rather than only its tag. Mirror the real
+					// image under that name into the Kind nodes so it resolves without anything being
+					// published; the pods still have to be verified against the mirrored reference.
+					if upgradeTest.ToImage != "" {
+						sourceVersion := upgradeTest.ToVersion
+						if sourceVersion == "" {
+							sourceVersion = *app.AppSpec.Version
+						}
+						source := fmt.Sprintf("%s:%s", app.AppSpec.Image, sourceVersion)
+						if source != targetImage {
+							By(fmt.Sprintf("Mirroring %s into the cluster as %s", source, targetImage))
+							Expect(Framework().MirrorImage(source, targetImage)).To(Succeed())
+						}
+					}
+
 					// Create a ChainNodeSet with the older version: 1 validator + 1 fullnode
 					chainNodeSet := app.BuildChainNodeSet(ns.Name, 1)
 					chainNodeSet.Spec.App.Version = ptr.To(upgradeTest.FromVersion)
