@@ -15,6 +15,10 @@ import (
 	"github.com/voluzi/cosmopilot/v3/test/e2e/apps"
 )
 
+// These specs loop over apps.All() by hand rather than going through apps.ForEachApp, so they carry
+// the per-app label explicitly: with TEST_APPS set, All() yields just that app and its spec runs in
+// that app's shard. Without the label all four would pile into the remainder shard, which they used
+// to do at two minutes apiece.
 var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 	Context("Software Upgrade via Governance", func() {
 		for _, app := range apps.All() {
@@ -29,7 +33,7 @@ var _ = Describe("ChainNodeSet Governance Upgrade", func() {
 				upgradeTest := upgradeTest // capture range variable
 				testName := fmt.Sprintf("should perform gov upgrade from %s to %s", upgradeTest.FromVersion, upgradeTest.ToVersion)
 
-				It(testName+" ["+app.Name+"]", WithNs(func(ns *corev1.Namespace) {
+				It(testName+" ["+app.Name+"]", Label(apps.LabelPerApp), WithNs(func(ns *corev1.Namespace) {
 					// Determine the target image
 					targetImage := upgradeTest.ToImage
 					if targetImage == "" {

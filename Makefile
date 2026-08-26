@@ -45,6 +45,12 @@ help: ## Display this help.
 /^[a-zA-Z0-9_.-]+:.*?##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 } \
 /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 
+# Print the value of any variable, e.g. `make print-IMG`. CI resolves the image tags once this way
+# and passes them between jobs, so the job that builds and the jobs that consume agree on one name.
+.PHONY: print-%
+print-%:
+	@echo '$($*)'
+
 ##@ Development
 
 .PHONY: manifests
@@ -103,14 +109,20 @@ test.integration: manifests generate fmt vet envtest ## Run integration tests (e
 .PHONY: test.e2e
 test.e2e: CLUSTER_NAME?=cosmopilot-e2e
 test.e2e: REUSE_CLUSTER?=true
+test.e2e: BUILD_IMAGES?=true
 test.e2e: BUILD_NODE_UTILS?=true
 test.e2e: COSMOSIGNER_IMAGE?=
 test.e2e: FOCUS?=
 test.e2e: SKIP?=
+test.e2e: LABEL_FILTER?=
+test.e2e: TEST_APPS?=
 test.e2e: TEST_TIMEOUT?=30m
 test.e2e: PROCS?=4
-test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Run e2e tests with locally built image.
-	@if [ "$(BUILD_NODE_UTILS)" = "true" ]; then \
+test.e2e: manifests generate fmt vet kind kubectl helm ginkgo ## Run e2e tests with locally built image.
+	@if [ "$(BUILD_IMAGES)" = "true" ]; then \
+		$(MAKE) docker-build; \
+	fi
+	@if [ "$(BUILD_IMAGES)" = "true" ] && [ "$(BUILD_NODE_UTILS)" = "true" ]; then \
 		$(MAKE) docker-build-nodeutils; \
 	fi
 	E2E_TEST=true \
@@ -120,9 +132,11 @@ test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Ru
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
 	BUILD_NODE_UTILS=$(BUILD_NODE_UTILS) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \
+	TEST_APPS=$(TEST_APPS) \
 	$(GINKGO) -v -procs=$(PROCS) --timeout=$(TEST_TIMEOUT) \
 		--focus="$(FOCUS)" \
 		--skip="$(SKIP)" \
+		--label-filter="$(LABEL_FILTER)" \
 		./test/e2e/...
 
 .PHONY: test.e2e.release
@@ -131,6 +145,8 @@ test.e2e.release: CHART_VERSION?=$(HELM_CHART_VERSION)
 test.e2e.release: REUSE_CLUSTER?=true
 test.e2e.release: FOCUS?=
 test.e2e.release: SKIP?=
+test.e2e.release: LABEL_FILTER?=
+test.e2e.release: TEST_APPS?=
 test.e2e.release: TEST_TIMEOUT?=30m
 test.e2e.release: PROCS?=4
 test.e2e.release: kind kubectl helm ginkgo ## Run e2e tests with released chart version.
@@ -139,9 +155,11 @@ test.e2e.release: kind kubectl helm ginkgo ## Run e2e tests with released chart 
 	CHART_VERSION=$(CHART_VERSION) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \
+	TEST_APPS=$(TEST_APPS) \
 	$(GINKGO) -v -procs=$(PROCS) --timeout=$(TEST_TIMEOUT) \
 		--focus="$(FOCUS)" \
 		--skip="$(SKIP)" \
+		--label-filter="$(LABEL_FILTER)" \
 		./test/e2e/...
 
 
@@ -154,13 +172,17 @@ $(BUILDDIR)/:
 build: manifests generate fmt vet $(BUILDDIR)/ ## Build manager binary.
 	go build -o $(BUILDDIR)/cosmopilot ./cmd/manager
 
+# Overridable so CI can substitute `docker buildx build` with a cache exporter. Defaults to a
+# plain build so a local `make docker-build` needs no buildx setup.
+DOCKER_BUILD ?= docker build
+
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	docker build -t $(IMG) .
+	$(DOCKER_BUILD) -t $(IMG) .
 
 .PHONY: docker-build-nodeutils
 docker-build-nodeutils: ## Build node-utils docker image.
-	docker build -t $(NODE_UTILS_IMG) -f Dockerfile.utils .
+	$(DOCKER_BUILD) -t $(NODE_UTILS_IMG) -f Dockerfile.utils .
 
 .PHONY: helm.package
 helm.package: manifests helm $(BUILDDIR)/ ## Package helm chart. Final package name is cosmopilot-<<VERSION>>.tgz
@@ -246,7 +268,8 @@ HELM_VERSION ?= v3.17.3
 CRD_TO_MARKDOWN_VERSION ?= 0.0.3
 KIND_VERSION ?= 0.32.0
 ENVTEST_K8S_VERSION ?= 1.32.0
-GINKGO_VERSION ?= v2.32.0
+# Derived from go.mod: a CLI that disagrees with the imported library warns on every run.
+GINKGO_VERSION ?= $(shell go list -m -f '{{.Version}}' github.com/onsi/ginkgo/v2)
 
 .PHONY: kubectl
 kubectl: $(KUBECTL) ## Download kubectl locally if necessary. If wrong version is installed, it will be removed before downloading.
@@ -310,7 +333,6 @@ $(ENVTEST): $(LOCALBIN)
 
 # find or download ginkgo
 .PHONY: ginkgo
-ginkgo: $(GINKGO) ## Download ginkgo locally if necessary.
-$(GINKGO): $(LOCALBIN)
-	@test -s $(GINKGO) && $(GINKGO) version | grep -q $(GINKGO_VERSION) || \
+ginkgo: $(LOCALBIN) ## Download ginkgo locally if necessary. Reinstalls if it drifts from go.mod.
+	@test -s $(GINKGO) && $(GINKGO) version | grep -q "$(GINKGO_VERSION:v%=%)" || \
 	GOBIN=$(LOCALBIN) go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)

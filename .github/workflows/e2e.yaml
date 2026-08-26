@@ -30,9 +30,90 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e:
+  # Every shard needs the same two images, so they are built once here and handed over as a tarball.
+  # Layers are cached in the Actions cache on top of that, which is what keeps this job short on the
+  # common run where only test code moved.
+  build-images:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
+    outputs:
+      controller-image: ${{ steps.images.outputs.controller }}
+      node-utils-image: ${{ steps.images.outputs.node-utils }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Both image tags come from `git describe`, so the tags have to be fetched.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Resolved once and passed down, so the job that builds and the jobs that load cannot end up
+      # disagreeing about the name.
+      - name: Resolve image tags
+        id: images
+        run: |
+          echo "controller=$(make -s print-IMG)" >> "$GITHUB_OUTPUT"
+          echo "node-utils=$(make -s print-NODE_UTILS_IMG)" >> "$GITHUB_OUTPUT"
+
+      # Written straight out as tarballs rather than loaded into this runner's daemon and saved back:
+      # only the shards need them in a daemon.
+      - name: Build images
+        run: |
+          mkdir -p /tmp/images
+          make docker-build DOCKER_BUILD="docker buildx build \
+            --cache-from=type=gha,scope=cosmopilot \
+            --cache-to=type=gha,scope=cosmopilot,mode=max \
+            --output=type=docker,dest=/tmp/images/cosmopilot.tar"
+          make docker-build-nodeutils DOCKER_BUILD="docker buildx build \
+            --cache-from=type=gha,scope=node-utils \
+            --cache-to=type=gha,scope=node-utils,mode=max \
+            --output=type=docker,dest=/tmp/images/node-utils.tar"
+
+      - name: Upload images
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-images
+          path: /tmp/images
+          retention-days: 1
+
+  e2e:
+    needs: build-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      # A failure in one app says nothing about the others, and knowing whether it is one app or all
+      # of them is most of the diagnosis.
+      fail-fast: false
+      matrix:
+        # The shards below partition the suite exactly: every spec runs in one of them, none runs
+        # twice. `per-app` is attached by apps.ForEachApp, so setting TEST_APPS to a single app makes
+        # that shard the whole fan-out for that app; the negated filters pick up the remainder.
+        include:
+          - shard: nibiru
+            apps: nibiru
+            labels: 'per-app'
+          - shard: osmosis
+            apps: osmosis
+            labels: 'per-app'
+          - shard: cosmoshub
+            apps: cosmoshub
+            labels: 'per-app'
+          - shard: allora
+            apps: allora
+            labels: 'per-app'
+          # Own shard because it is the heaviest group that does not fan out per app, and left in
+          # with the rest it decided the whole suite's wall-clock on its own.
+          - shard: cosmosigner
+            apps: ''
+            labels: '!per-app && cosmosigner'
+          # Everything else. TEST_APPS is deliberately left empty: a spec that enumerates apps.All()
+          # itself would silently lose entries if this shard were narrowed to one app.
+          - shard: shared
+            apps: ''
+            labels: '!per-app && !cosmosigner'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -54,11 +135,27 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run E2E Tests
+      - name: Download images
+        uses: actions/download-artifact@v7
+        with:
+          name: e2e-images
+          path: /tmp/images
+
+      - name: Load images
+        run: |
+          docker load -i /tmp/images/cosmopilot.tar
+          docker load -i /tmp/images/node-utils.tar
+
+      - name: Run E2E Tests (${{ matrix.shard }})
         run: |
           make test.e2e \
-            TEST_TIMEOUT=1h \
+            BUILD_IMAGES=false \
+            IMG='${{ needs.build-images.outputs.controller-image }}' \
+            NODE_UTILS_IMG='${{ needs.build-images.outputs.node-utils-image }}' \
+            TEST_TIMEOUT=25m \
             PROCS=4 \
             REUSE_CLUSTER=false \
+            TEST_APPS='${{ matrix.apps }}' \
+            LABEL_FILTER='${{ matrix.labels }}' \
             FOCUS="${{ github.event.inputs.focus || '' }}" \
             SKIP="${{ github.event.inputs.skip || '' }}"

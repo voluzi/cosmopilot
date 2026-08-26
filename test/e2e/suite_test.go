@@ -166,6 +166,16 @@ func WithNamespace(fn func(app apps.TestApp, ns *corev1.Namespace)) func(apps.Te
 	}
 }
 
+// WithApp is the single-app counterpart of WithNamespace, for specs that exercise controller
+// behaviour the chain has no part in. It runs the body once against apps.Default() in a fresh
+// namespace, so the spec carries no per-app label and lands in the shard that runs the remainder.
+func WithApp(fn func(app apps.TestApp, ns *corev1.Namespace)) func() {
+	return func() {
+		ns := CreateTestNamespace()
+		fn(apps.Default(), ns)
+	}
+}
+
 // CreateTestNamespace creates a random namespace and registers cleanup via DeferCleanup.
 // Use this in tests that need direct namespace control.
 func CreateTestNamespace() *corev1.Namespace {
