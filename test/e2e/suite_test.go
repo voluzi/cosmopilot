@@ -104,9 +104,11 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	cosmosignerImage := environ.GetString("COSMOSIGNER_IMAGE", "")
 	chartVersion := environ.GetString("CHART_VERSION", "")
 	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
-	installVault := environ.GetBool("INSTALL_VAULT", true)
 
-	// Always reuse the cluster that Process 1 set up
+	// Process 1 installed cert-manager, the CSI driver, ingress-nginx and Vault in the phase above;
+	// this one only needs a client onto the cluster they are already in. Re-running the installers on
+	// every process was not merely two minutes of wasted startup each: they all reached the same Vault
+	// pod at once, and the racing policy writes intermittently failed the suite before any spec ran.
 	tf = framework.NewKindFramework(
 		framework.WithClusterName(clusterName),
 		framework.WithControllerImage(controllerImage),
@@ -114,10 +116,10 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		framework.WithChartVersion(chartVersion),
 		framework.WithNodeUtilsImage(nodeUtilsImage),
 		framework.WithReuseCluster(true), // Always reuse - cluster is already set up
-		framework.WithCertManager(true),
-		framework.WithCSIDriver(true),
-		framework.WithIngressNginx(true),
-		framework.WithVault(installVault),
+		framework.WithCertManager(false),
+		framework.WithCSIDriver(false),
+		framework.WithIngressNginx(false),
+		framework.WithVault(false),
 	)
 
 	err := tf.Setup(ctx)
