@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	cosmopilotv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
 
 const (
@@ -105,6 +107,17 @@ func (h *MockNodeUtilsHelper) nodeUtilsIncarnation() string {
 	return ""
 }
 
+// The two ways a node-utils restart can make a read-back fail. Only these are ever excused, and only
+// alongside evidence that the container did restart.
+var (
+	errMockUnreachable = errors.New("mock server could not be reached")
+	errMockReset       = errors.New("mock server is serving its startup values")
+)
+
+// mockStartupValues is what a freshly started node-utils serves before anything writes to it. It is
+// built from the same constructor the container runs, so the two cannot drift apart.
+var mockStartupValues = nodeutils.NewMockStats()
+
 // verifySet runs a read-back check, tolerating the pod restart that the write itself may have
 // provoked.
 //
@@ -112,16 +125,21 @@ func (h *MockNodeUtilsHelper) nodeUtilsIncarnation() string {
 // cosmopilot acts on one by replacing the pod — taking node-utils, and with it the mock server the
 // read-back talks to, down. A write that causes exactly the behaviour the spec is testing therefore
 // races its own verification, in two ways: the read finds nothing listening on port 8000, or it
-// reaches a fresh process whose in-memory mock has reset to the default and so disagrees. Both show
-// up as the container changing incarnation, and neither means the write failed.
+// reaches a fresh process whose in-memory mock is back to its startup values and so disagrees.
 //
-// Only the read-back is forgiving. A failed write is still an error, because a spec that carries on
-// believing it set a value it did not would fail later and less legibly. And when the incarnation
-// cannot be read at all, before and after are both empty and the check stays strict.
+// Forgiveness is confined to those two, and still requires the container to have changed
+// incarnation. A read that returns some third value is a genuine disagreement whatever the container
+// was doing at the time, so a write that quietly failed to apply cannot shelter behind a restart
+// that happened to coincide with it. A failed write is likewise still an error, because a spec that
+// carries on believing it set a value it did not would fail later and less legibly. And when the
+// incarnation cannot be read at all, before and after are both empty and the check stays strict.
 func (h *MockNodeUtilsHelper) verifySet(before string, check func() error) error {
 	err := check()
 	if err == nil {
 		return nil
+	}
+	if !errors.Is(err, errMockUnreachable) && !errors.Is(err, errMockReset) {
+		return err
 	}
 	if after := h.nodeUtilsIncarnation(); after != before {
 		fmt.Printf("[MockNodeUtilsHelper] node-utils restarted under the read-back (%q -> %q), treating the write as applied: %v\n", before, after, err)
@@ -153,11 +171,15 @@ func (h *MockNodeUtilsHelper) SetCPUMillicores(millicores int64) error {
 	return h.verifySet(incarnation, func() error {
 		actualCores, _, err := h.GetStats()
 		if err != nil {
-			return fmt.Errorf("SetCPUMillicores verification failed: could not read stats: %w", err)
+			return fmt.Errorf("SetCPUMillicores verification failed: could not read stats: %w: %w", errMockUnreachable, err)
 		}
 
 		expectedCores := float64(millicores) / 1000.0
 		if actualCores != expectedCores {
+			if actualCores == mockStartupValues.GetCPU() {
+				return fmt.Errorf("SetCPUMillicores verification failed: expected %.3f cores but got the startup %.3f: %w",
+					expectedCores, actualCores, errMockReset)
+			}
 			return fmt.Errorf("SetCPUMillicores verification failed: expected %.3f cores but got %.3f cores", expectedCores, actualCores)
 		}
 		return nil
@@ -187,11 +209,15 @@ func (h *MockNodeUtilsHelper) SetMemoryMiB(mib int64) error {
 	return h.verifySet(incarnation, func() error {
 		_, actualBytes, err := h.GetStats()
 		if err != nil {
-			return fmt.Errorf("SetMemoryMiB verification failed: could not read stats: %w", err)
+			return fmt.Errorf("SetMemoryMiB verification failed: could not read stats: %w: %w", errMockUnreachable, err)
 		}
 
 		expectedBytes := uint64(mib * 1024 * 1024)
 		if actualBytes != expectedBytes {
+			if actualBytes == mockStartupValues.GetMemory() {
+				return fmt.Errorf("SetMemoryMiB verification failed: expected %d bytes but got the startup %d: %w",
+					expectedBytes, actualBytes, errMockReset)
+			}
 			return fmt.Errorf("SetMemoryMiB verification failed: expected %d bytes but got %d bytes", expectedBytes, actualBytes)
 		}
 		return nil
