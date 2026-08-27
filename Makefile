@@ -289,6 +289,20 @@ $(KUBECTL): $(LOCALBIN)
         chmod a+x $(KUBECTL); \
   	}
 
+# proxy.golang.org and sum.golang.org intermittently drop an HTTP/2 stream part-way through a
+# transfer, which `go install` reports as "stream error: ... INTERNAL_ERROR; received from peer" and
+# treats as fatal. Nothing is wrong with the module and the next attempt succeeds, so without a retry
+# a moment of trouble at Google costs a whole CI run before a single test has been compiled.
+define go-install-retry
+	n=1; \
+	until GOBIN=$(LOCALBIN) go install $(1); do \
+		if [ $$n -ge 3 ]; then echo "go install $(1): giving up after $$n attempts" >&2; exit 1; fi; \
+		echo "go install $(1): attempt $$n failed, retrying" >&2; \
+		sleep $$((n * 5)); \
+		n=$$((n + 1)); \
+	done
+endef
+
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary. If wrong version is installed, it will be overwritten.
 $(CONTROLLER_GEN): $(LOCALBIN)
@@ -326,7 +340,7 @@ $(KIND): $(LOCALBIN)
 		rm -rf $(KIND); \
 	fi
 	@test -s $(KIND) || { \
-		GOBIN=$(LOCALBIN) go install sigs.k8s.io/kind@v$(KIND_VERSION) ;\
+		$(call go-install-retry,sigs.k8s.io/kind@v$(KIND_VERSION)) ;\
 	}
 
 # find or download setup-envtest
@@ -340,5 +354,6 @@ $(ENVTEST): $(LOCALBIN)
 # find or download ginkgo
 .PHONY: ginkgo
 ginkgo: $(LOCALBIN) ## Download ginkgo locally if necessary. Reinstalls if it drifts from go.mod.
-	@test -s $(GINKGO) && $(GINKGO) version | grep -q "$(GINKGO_VERSION:v%=%)" || \
-	GOBIN=$(LOCALBIN) go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)
+	@test -s $(GINKGO) && $(GINKGO) version | grep -q "$(GINKGO_VERSION:v%=%)" || { \
+		$(call go-install-retry,github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)) ;\
+	}

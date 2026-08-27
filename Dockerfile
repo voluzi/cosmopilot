@@ -4,8 +4,17 @@ ENV GOMODCACHE=/go/pkg/mod
 
 WORKDIR /workspace
 COPY go.mod go.sum* ./
+# proxy.golang.org intermittently drops an HTTP/2 stream part-way through a transfer, reported as
+# "stream error: ... INTERNAL_ERROR; received from peer". The module is fine and the next attempt
+# succeeds, so a retry keeps a moment of trouble upstream from failing the whole image build.
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    n=1; \
+    until go mod download; do \
+        if [ $n -ge 3 ]; then echo "go mod download: giving up after $n attempts" >&2; exit 1; fi; \
+        echo "go mod download: attempt $n failed, retrying" >&2; \
+        sleep $((n * 5)); \
+        n=$((n + 1)); \
+    done
 
 # Copy the go source
 COPY cmd/ cmd/
