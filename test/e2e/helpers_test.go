@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -265,6 +266,14 @@ const (
 	// work. Read a generous tail, print only the lines naming the namespace that failed.
 	controllerLogTailLines = 4000
 	controllerLogMaxLines  = 150
+
+	// Capping the number of lines does not cap the bytes: a structured line can carry a whole
+	// resource dump, and the scanner is deliberately sized to survive one. Printing them whole
+	// would let a single failed spec emit tens of megabytes, and several failures in a shard would
+	// then push the earliest — usually the most interesting — diagnostics out of the CI log this
+	// exists to be read in. The message and its first fields lead the line, so cutting the tail
+	// costs little.
+	controllerLogMaxLineBytes = 2000
 )
 
 // DumpControllerDiagnostics prints the controller's own account of a failing namespace.
@@ -325,7 +334,7 @@ func dumpControllerLog(ctx context.Context, podName, namespace string) {
 			GinkgoWriter.Printf("    <further controller log lines omitted>\n")
 			return
 		}
-		GinkgoWriter.Printf("    %s\n", line)
+		GinkgoWriter.Printf("    %s\n", truncateLogLine(line))
 		printed++
 	}
 	if err := scanner.Err(); err != nil {
@@ -334,6 +343,20 @@ func dumpControllerLog(ctx context.Context, podName, namespace string) {
 	if printed == 0 {
 		GinkgoWriter.Printf("    <no controller log line mentions %s>\n", namespace)
 	}
+}
+
+// truncateLogLine shortens an over-long log line for printing, saying how much it dropped so the
+// reader can tell a cut line from a short one. The cut is walked back to a rune boundary, since
+// splitting a multi-byte character mid-way would render as a replacement character.
+func truncateLogLine(line string) string {
+	if len(line) <= controllerLogMaxLineBytes {
+		return line
+	}
+	cut := controllerLogMaxLineBytes
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s… <%d more bytes>", line[:cut], len(line)-cut)
 }
 
 func DumpNamespaceDiagnostics(namespace string) {
