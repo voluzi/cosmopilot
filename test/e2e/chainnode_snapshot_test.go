@@ -115,31 +115,52 @@ var _ = Describe("Snapshot E2E", func() {
 				WaitForChainNodeHeight(chainNode, 5)
 				RefreshChainNode(chainNode)
 
-				// Wait for at least 3 snapshot cycles to pass (3+ minutes)
-				// This ensures retention has a chance to kick in
-				By("Waiting for snapshots to be created and retention to be enforced")
-				time.Sleep(4 * time.Minute)
+				// Retention only does anything once a third snapshot forces a deletion, and the live
+				// count alone cannot tell "retention pruned back to 2" apart from "only 2 exist so
+				// far" — so asserting on it directly would pass vacuously after two cycles. Watch the
+				// names instead: once three distinct snapshots have been observed, a deletion must
+				// have happened for the count to be 2. This replaces a flat sleep long enough to
+				// cover three cycles, which cost four minutes on every app whatever the cluster did.
+				By("Waiting until enough snapshots have been created for retention to apply")
+				created := make(map[string]struct{})
+				Eventually(func() int {
+					for _, name := range snapshotNamesForPVC(ns.Name, chainNode.Name) {
+						created[name] = struct{}{}
+					}
+					return len(created)
+				}, 6*time.Minute, 5*time.Second).Should(BeNumerically(">=", 3),
+					"Expected at least 3 snapshots to have been created before checking retention")
 
 				// Verify retention policy is enforced (should have exactly 2 snapshots)
 				Eventually(func() int {
 					return countSnapshotsForPVC(ns.Name, chainNode.Name)
 				}, 2*time.Minute, 10*time.Second).Should(Equal(2), "Expected exactly 2 snapshots due to retain policy")
 
-				// Verify the snapshots are ready
-				snapshotList := &snapshotv1.VolumeSnapshotList{}
-				err = Framework().Client().List(Framework().Context(), snapshotList, &client.ListOptions{
-					Namespace: ns.Name,
-				})
-				Expect(err).NotTo(HaveOccurred())
-
-				for _, snap := range snapshotList.Items {
-					if snap.Spec.Source.PersistentVolumeClaimName != nil &&
-						*snap.Spec.Source.PersistentVolumeClaimName == chainNode.Name {
-						Expect(snap.Status).NotTo(BeNil())
-						Expect(snap.Status.ReadyToUse).NotTo(BeNil())
-						Expect(*snap.Status.ReadyToUse).To(BeTrue(), fmt.Sprintf("Snapshot %s should be ready", snap.Name))
+				// Snapshots keep being taken on the configured frequency, so this set is never at
+				// rest. The wait above returns the moment a third snapshot appears, and that moment
+				// is exactly when the third one is seconds old and still provisioning — so reading
+				// the list once here asks for readiness at the least likely instant of the cycle.
+				// Poll for a moment when every surviving snapshot is ready instead.
+				By("Waiting until every surviving snapshot is ready")
+				Eventually(func() error {
+					snapshotList := &snapshotv1.VolumeSnapshotList{}
+					if err := Framework().Client().List(Framework().Context(), snapshotList, &client.ListOptions{
+						Namespace: ns.Name,
+					}); err != nil {
+						return err
 					}
-				}
+
+					for _, snap := range snapshotList.Items {
+						if snap.Spec.Source.PersistentVolumeClaimName == nil ||
+							*snap.Spec.Source.PersistentVolumeClaimName != chainNode.Name {
+							continue
+						}
+						if snap.Status == nil || snap.Status.ReadyToUse == nil || !*snap.Status.ReadyToUse {
+							return fmt.Errorf("snapshot %s is not ready yet", snap.Name)
+						}
+					}
+					return nil
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
 			}),
 		)
 	})
@@ -159,21 +180,28 @@ func configureSnapshotPersistence(chainNode *appsv1.ChainNode) {
 
 // countSnapshotsForPVC counts the number of snapshots for a given PVC
 func countSnapshotsForPVC(namespace, pvcName string) int {
+	return len(snapshotNamesForPVC(namespace, pvcName))
+}
+
+// snapshotNamesForPVC returns the names of the snapshots currently existing for a given PVC.
+// Callers that need to know a snapshot was taken at all — rather than how many survive right now —
+// accumulate these across polls, since retention deletes them as it goes.
+func snapshotNamesForPVC(namespace, pvcName string) []string {
 	snapshotList := &snapshotv1.VolumeSnapshotList{}
 	if err := Framework().Client().List(Framework().Context(), snapshotList, &client.ListOptions{
 		Namespace: namespace,
 	}); err != nil {
-		return 0
+		return nil
 	}
 
-	count := 0
+	names := make([]string, 0, len(snapshotList.Items))
 	for _, snap := range snapshotList.Items {
 		if snap.Spec.Source.PersistentVolumeClaimName != nil &&
 			*snap.Spec.Source.PersistentVolumeClaimName == pvcName {
-			count++
+			names = append(names, snap.Name)
 		}
 	}
-	return count
+	return names
 }
 
 // findReadySnapshotForPVC finds a ready snapshot for a given PVC and returns its name

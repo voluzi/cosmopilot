@@ -101,6 +101,11 @@ type Config struct {
 
 	// InstallVault indicates whether to install HashiCorp Vault (for e2e only)
 	InstallVault bool
+
+	// ConnectOnly indicates that the dependencies above are already installed and this framework
+	// should only connect to the cluster. The Install* flags keep their meaning as "this dependency
+	// is available", which specs read to decide whether to run, so the two cannot be conflated.
+	ConnectOnly bool
 }
 
 // DefaultConfig returns a Config with default values
@@ -210,5 +215,12 @@ func WithIngressNginx(install bool) Option {
 func WithVault(install bool) Option {
 	return func(c *Config) {
 		c.InstallVault = install
+	}
+}
+
+// WithConnectOnly sets whether to skip installing dependencies and only connect to the cluster.
+func WithConnectOnly(connectOnly bool) Option {
+	return func(c *Config) {
+		c.ConnectOnly = connectOnly
 	}
 }

@@ -33,7 +33,10 @@ import (
 	"github.com/voluzi/cosmopilot/v3/test/e2e/apps"
 )
 
-var _ = Describe("ChainNodeSet Cosmosigner", func() {
+// Labelled so CI can give the cosmosigner specs a shard of their own. They are by some distance the
+// heaviest group that does not fan out per app — the migration and key-preservation specs alone run
+// close to six minutes each — and left in with the rest they set the whole suite's critical path.
+var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 	Context("Validator signing through a managed cosmosigner deployment", func() {
 		apps.ForEachApp("should validate using cosmosigner (software backend) and produce blocks",
 			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {

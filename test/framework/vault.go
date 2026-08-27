@@ -392,13 +392,17 @@ func (f *KindFramework) createTmkmsToken(rootToken string) error {
 		return err
 	}
 
-	// Always update the policy (in case it changed)
-	// Write policy to a temp file in the container, then apply it using VAULT_TOKEN env var
+	// Always update the policy (in case it changed).
+	//
+	// Fed on stdin rather than staged in a file: several Ginkgo processes reach this against the same
+	// Vault pod, and a fixed path under /tmp let one of them truncate the file with `cat >` while
+	// another's `vault policy write` was still reading it. Vault rejected the empty body with
+	// `'policy' parameter not supplied or empty`, taking the suite down before a single spec ran.
+	// A heredoc on stdin shares nothing, so concurrent callers cannot interfere.
 	policyCmd := fmt.Sprintf(`export VAULT_TOKEN=%s
-cat > /tmp/tmkms-policy.hcl << 'EOF'
+vault policy write -tls-skip-verify tmkms - << 'EOF'
 %s
-EOF
-vault policy write -tls-skip-verify tmkms /tmp/tmkms-policy.hcl`, rootToken, strings.TrimSpace(tmkmsPolicy))
+EOF`, rootToken, strings.TrimSpace(tmkmsPolicy))
 
 	_, err = f.PodExec(VaultNamespace, podName, "vault",
 		"sh", "-c", policyCmd)

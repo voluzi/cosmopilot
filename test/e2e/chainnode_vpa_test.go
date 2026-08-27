@@ -92,13 +92,18 @@ func getVPACPULimitMillicores(annotations map[string]string) int64 {
 	return cpu.MilliValue()
 }
 
+// VPA specs drive the autoscaling controller from node-utils' MOCK_MODE: the resource figures are
+// injected through MockNodeUtilsHelper and the assertions read the controller's own annotation, so
+// the chain binary is only there to give the pod something to run. Running them against every app
+// re-tested identical controller logic four times over — a third of the whole suite's runtime — so
+// they run once against apps.Default() instead.
 var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	// ==========================================================================
 	// Memory Scaling Tests
 	// ==========================================================================
 	Context("Memory Scale Up", func() {
-		apps.ForEachApp("should scale up memory when usage exceeds threshold",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should scale up memory when usage exceeds threshold",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				// Configure VPA with scale-up rule at 80% memory usage
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
@@ -149,8 +154,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("Memory Scale Down", func() {
-		apps.ForEachApp("should scale down memory when usage is below threshold",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should scale down memory when usage is below threshold",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
 					Memory: &appsv1.VerticalAutoscalingMetricConfig{
@@ -207,8 +212,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	// CPU Scaling Tests
 	// ==========================================================================
 	Context("CPU Scale Up", func() {
-		apps.ForEachApp("should scale up CPU when usage exceeds threshold",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should scale up CPU when usage exceeds threshold",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
 					CPU: &appsv1.VerticalAutoscalingMetricConfig{
@@ -259,8 +264,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("CPU Scale Down", func() {
-		apps.ForEachApp("should scale down CPU when usage is below threshold",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should scale down CPU when usage is below threshold",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				// Default mock CPU is 100m. Use request=200m so default=50% (safe zone).
 				// Then set mock to 60m (30%) to trigger scale-down.
 				vpa := &appsv1.VerticalAutoscalingConfig{
@@ -320,8 +325,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	// Safety Margin Tests
 	// ==========================================================================
 	Context("Memory Safety Margin", func() {
-		apps.ForEachApp("should not scale down memory below safety margin",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should not scale down memory below safety margin",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				// For safety margin to kick in, we need:
 				// - newVal = request - (request * step%) < usage * 1.2
 				// - With request=600Mi, step=80%: newVal = 120Mi
@@ -384,8 +389,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("CPU Safety Margin", func() {
-		apps.ForEachApp("should not scale down CPU below safety margin",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should not scale down CPU below safety margin",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				// Default mock CPU is 100m (0.1 cores). To avoid immediate scale-down before
 				// we can set the mock value, use a request where 100m is in the safe zone (40-80%).
 				// Request=200m means default 100m = 50% (safe zone).
@@ -456,8 +461,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	// Min/Max Bounds Tests
 	// ==========================================================================
 	Context("Min Bound", func() {
-		apps.ForEachApp("should not scale down memory below min bound",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should not scale down memory below min bound",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
 					Memory: &appsv1.VerticalAutoscalingMetricConfig{
@@ -511,8 +516,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("Max Bound", func() {
-		apps.ForEachApp("should not scale up memory above max bound",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should not scale up memory above max bound",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
 					Memory: &appsv1.VerticalAutoscalingMetricConfig{
@@ -565,8 +570,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	// Cooldown Tests
 	// ==========================================================================
 	Context("Cooldown", func() {
-		apps.ForEachApp("should respect cooldown period between scaling actions",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should respect cooldown period between scaling actions",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
 					Memory: &appsv1.VerticalAutoscalingMetricConfig{
@@ -666,8 +671,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	// Hysteresis Tests
 	// ==========================================================================
 	Context("Hysteresis", func() {
-		apps.ForEachApp("should apply hysteresis to scale-down threshold",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should apply hysteresis to scale-down threshold",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				// Scale-down threshold is 40%, hysteresis is 10%
 				// Effective threshold becomes 30% (40 - 10)
 				vpa := &appsv1.VerticalAutoscalingConfig{
@@ -750,8 +755,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	// Limit Update Strategy Tests
 	// ==========================================================================
 	Context("Limit Strategy Equal", func() {
-		apps.ForEachApp("should set limits equal to requests after scaling",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should set limits equal to requests after scaling",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				equalStrategy := appsv1.LimitEqual
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
@@ -807,8 +812,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("Limit Strategy Max", func() {
-		apps.ForEachApp("should set limits to VPA max after scaling",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should set limits to VPA max after scaling",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				maxStrategy := appsv1.LimitVpaMax
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
@@ -861,8 +866,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("Limit Strategy Percentage", func() {
-		apps.ForEachApp("should set limits to percentage of request after scaling",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should set limits to percentage of request after scaling",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				percentageStrategy := appsv1.LimitPercentage
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
@@ -921,8 +926,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("Limit Strategy Unset", func() {
-		apps.ForEachApp("should remove limits after scaling",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should remove limits after scaling",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				unsetStrategy := appsv1.LimitUnset
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,
@@ -978,8 +983,8 @@ var _ = Describe("ChainNode VPA", Label("vpa"), func() {
 	})
 
 	Context("Limit Strategy Retain", func() {
-		apps.ForEachApp("should retain original limits after scaling",
-			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+		It("should retain original limits after scaling",
+			WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 				retainStrategy := appsv1.LimitRetain
 				vpa := &appsv1.VerticalAutoscalingConfig{
 					Enabled: true,

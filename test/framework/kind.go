@@ -188,6 +188,12 @@ func (f *KindFramework) Setup(ctx context.Context) error {
 	f.SetKubeClient(clientSet)
 
 	// Install dependencies
+	// Everything above builds the clients; everything below installs into the cluster. A process
+	// attaching to a cluster another one prepared wants the first half only.
+	if f.cfg.ConnectOnly {
+		return nil
+	}
+
 	if f.cfg.InstallCertManager {
 		log.Info("Installing cert-manager")
 		if err := f.installCertManager(); err != nil {

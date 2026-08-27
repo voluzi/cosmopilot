@@ -1,14 +1,18 @@
 package framework
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	cosmopilotv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
 
 const (
@@ -72,9 +76,83 @@ func NewMockNodeUtilsHelperFromPod(execer PodExecer, pod *corev1.Pod) *MockNodeU
 	}
 }
 
+// containerStater is the half of a framework needed to tell a mock server that went away from one
+// that answered wrongly. Every framework that can exec also carries a clientset, but PodExecer does
+// not require one, so this is asserted rather than demanded.
+type containerStater interface {
+	KubeClient() *kubernetes.Clientset
+}
+
+// nodeUtilsIncarnation identifies the running instance of the node-utils container. It changes when
+// the pod is replaced or the container restarts, and is empty when it cannot be determined at all.
+func (h *MockNodeUtilsHelper) nodeUtilsIncarnation() string {
+	stater, ok := h.execer.(containerStater)
+	if !ok {
+		return ""
+	}
+	pod, err := stater.KubeClient().CoreV1().Pods(h.namespace).Get(context.Background(), h.podName, metav1.GetOptions{})
+	if err != nil {
+		return ""
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != NodeUtilsContainer {
+			continue
+		}
+		started := ""
+		if status.State.Running != nil {
+			started = status.State.Running.StartedAt.String()
+		}
+		return fmt.Sprintf("%s/%d/%s", pod.UID, status.RestartCount, started)
+	}
+	return ""
+}
+
+// The two ways a node-utils restart can make a read-back fail. Only these are ever excused, and only
+// alongside evidence that the container did restart.
+var (
+	errMockUnreachable = errors.New("mock server could not be reached")
+	errMockReset       = errors.New("mock server is serving its startup values")
+)
+
+// mockStartupValues is what a freshly started node-utils serves before anything writes to it. It is
+// built from the same constructor the container runs, so the two cannot drift apart.
+var mockStartupValues = nodeutils.NewMockStats()
+
+// verifySet runs a read-back check, tolerating the pod restart that the write itself may have
+// provoked.
+//
+// The values these specs write are picked to push vertical autoscaling over a threshold, and
+// cosmopilot acts on one by replacing the pod — taking node-utils, and with it the mock server the
+// read-back talks to, down. A write that causes exactly the behaviour the spec is testing therefore
+// races its own verification, in two ways: the read finds nothing listening on port 8000, or it
+// reaches a fresh process whose in-memory mock is back to its startup values and so disagrees.
+//
+// Forgiveness is confined to those two, and still requires the container to have changed
+// incarnation. A read that returns some third value is a genuine disagreement whatever the container
+// was doing at the time, so a write that quietly failed to apply cannot shelter behind a restart
+// that happened to coincide with it. A failed write is likewise still an error, because a spec that
+// carries on believing it set a value it did not would fail later and less legibly. And when the
+// incarnation cannot be read at all, before and after are both empty and the check stays strict.
+func (h *MockNodeUtilsHelper) verifySet(before string, check func() error) error {
+	err := check()
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errMockUnreachable) && !errors.Is(err, errMockReset) {
+		return err
+	}
+	if after := h.nodeUtilsIncarnation(); after != before {
+		fmt.Printf("[MockNodeUtilsHelper] node-utils restarted under the read-back (%q -> %q), treating the write as applied: %v\n", before, after, err)
+		return nil
+	}
+	return err
+}
+
 // SetCPUMillicores sets the mock CPU usage in millicores.
 // Example: SetCPUMillicores(500) sets CPU to 500m (0.5 cores).
 func (h *MockNodeUtilsHelper) SetCPUMillicores(millicores int64) error {
+	incarnation := h.nodeUtilsIncarnation()
+
 	output, err := h.execer.PodExec(
 		h.namespace,
 		h.podName,
@@ -90,22 +168,29 @@ func (h *MockNodeUtilsHelper) SetCPUMillicores(millicores int64) error {
 	}
 
 	// Verify the value was actually set
-	actualCores, _, err := h.GetStats()
-	if err != nil {
-		return fmt.Errorf("SetCPUMillicores verification failed: could not read stats: %w", err)
-	}
+	return h.verifySet(incarnation, func() error {
+		actualCores, _, err := h.GetStats()
+		if err != nil {
+			return fmt.Errorf("SetCPUMillicores verification failed: could not read stats: %w: %w", errMockUnreachable, err)
+		}
 
-	expectedCores := float64(millicores) / 1000.0
-	if actualCores != expectedCores {
-		return fmt.Errorf("SetCPUMillicores verification failed: expected %.3f cores but got %.3f cores", expectedCores, actualCores)
-	}
-
-	return nil
+		expectedCores := float64(millicores) / 1000.0
+		if actualCores != expectedCores {
+			if actualCores == mockStartupValues.GetCPU() {
+				return fmt.Errorf("SetCPUMillicores verification failed: expected %.3f cores but got the startup %.3f: %w",
+					expectedCores, actualCores, errMockReset)
+			}
+			return fmt.Errorf("SetCPUMillicores verification failed: expected %.3f cores but got %.3f cores", expectedCores, actualCores)
+		}
+		return nil
+	})
 }
 
 // SetMemoryMiB sets the mock memory usage in MiB.
 // Example: SetMemoryMiB(512) sets memory to 512MiB.
 func (h *MockNodeUtilsHelper) SetMemoryMiB(mib int64) error {
+	incarnation := h.nodeUtilsIncarnation()
+
 	output, err := h.execer.PodExec(
 		h.namespace,
 		h.podName,
@@ -121,17 +206,22 @@ func (h *MockNodeUtilsHelper) SetMemoryMiB(mib int64) error {
 	}
 
 	// Verify the value was actually set
-	_, actualBytes, err := h.GetStats()
-	if err != nil {
-		return fmt.Errorf("SetMemoryMiB verification failed: could not read stats: %w", err)
-	}
+	return h.verifySet(incarnation, func() error {
+		_, actualBytes, err := h.GetStats()
+		if err != nil {
+			return fmt.Errorf("SetMemoryMiB verification failed: could not read stats: %w: %w", errMockUnreachable, err)
+		}
 
-	expectedBytes := uint64(mib * 1024 * 1024)
-	if actualBytes != expectedBytes {
-		return fmt.Errorf("SetMemoryMiB verification failed: expected %d bytes but got %d bytes", expectedBytes, actualBytes)
-	}
-
-	return nil
+		expectedBytes := uint64(mib * 1024 * 1024)
+		if actualBytes != expectedBytes {
+			if actualBytes == mockStartupValues.GetMemory() {
+				return fmt.Errorf("SetMemoryMiB verification failed: expected %d bytes but got the startup %d: %w",
+					expectedBytes, actualBytes, errMockReset)
+			}
+			return fmt.Errorf("SetMemoryMiB verification failed: expected %d bytes but got %d bytes", expectedBytes, actualBytes)
+		}
+		return nil
+	})
 }
 
 // GetStats returns the current mock stats as a map.

@@ -45,6 +45,18 @@ help: ## Display this help.
 /^[a-zA-Z0-9_.-]+:.*?##/ { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 } \
 /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 
+# Print the value of any variable, e.g. `make print-IMG`. CI resolves the image tags once this way
+# and passes them between jobs, so the job that builds and the jobs that consume agree on one name.
+#
+# The FORCE prerequisite is load-bearing: .PHONY takes literal names, not patterns, so declaring
+# `print-%` phony does nothing. Without it a file that happened to be named after the target would
+# make it "up to date" and the echo would be skipped, printing nothing at all.
+.PHONY: FORCE
+FORCE:
+
+print-%: FORCE
+	@echo '$($*)'
+
 ##@ Development
 
 .PHONY: manifests
@@ -103,14 +115,20 @@ test.integration: manifests generate fmt vet envtest ## Run integration tests (e
 .PHONY: test.e2e
 test.e2e: CLUSTER_NAME?=cosmopilot-e2e
 test.e2e: REUSE_CLUSTER?=true
+test.e2e: BUILD_IMAGES?=true
 test.e2e: BUILD_NODE_UTILS?=true
 test.e2e: COSMOSIGNER_IMAGE?=
 test.e2e: FOCUS?=
 test.e2e: SKIP?=
+test.e2e: LABEL_FILTER?=
+test.e2e: TEST_APPS?=
 test.e2e: TEST_TIMEOUT?=30m
 test.e2e: PROCS?=4
-test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Run e2e tests with locally built image.
-	@if [ "$(BUILD_NODE_UTILS)" = "true" ]; then \
+test.e2e: manifests generate fmt vet kind kubectl helm ginkgo ## Run e2e tests with locally built image.
+	@if [ "$(BUILD_IMAGES)" = "true" ]; then \
+		$(MAKE) docker-build; \
+	fi
+	@if [ "$(BUILD_IMAGES)" = "true" ] && [ "$(BUILD_NODE_UTILS)" = "true" ]; then \
 		$(MAKE) docker-build-nodeutils; \
 	fi
 	E2E_TEST=true \
@@ -120,9 +138,11 @@ test.e2e: manifests generate fmt vet docker-build kind kubectl helm ginkgo ## Ru
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
 	BUILD_NODE_UTILS=$(BUILD_NODE_UTILS) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \
+	TEST_APPS=$(TEST_APPS) \
 	$(GINKGO) -v -procs=$(PROCS) --timeout=$(TEST_TIMEOUT) \
 		--focus="$(FOCUS)" \
 		--skip="$(SKIP)" \
+		--label-filter="$(LABEL_FILTER)" \
 		./test/e2e/...
 
 .PHONY: test.e2e.release
@@ -131,6 +151,8 @@ test.e2e.release: CHART_VERSION?=$(HELM_CHART_VERSION)
 test.e2e.release: REUSE_CLUSTER?=true
 test.e2e.release: FOCUS?=
 test.e2e.release: SKIP?=
+test.e2e.release: LABEL_FILTER?=
+test.e2e.release: TEST_APPS?=
 test.e2e.release: TEST_TIMEOUT?=30m
 test.e2e.release: PROCS?=4
 test.e2e.release: kind kubectl helm ginkgo ## Run e2e tests with released chart version.
@@ -139,9 +161,11 @@ test.e2e.release: kind kubectl helm ginkgo ## Run e2e tests with released chart 
 	CHART_VERSION=$(CHART_VERSION) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \
+	TEST_APPS=$(TEST_APPS) \
 	$(GINKGO) -v -procs=$(PROCS) --timeout=$(TEST_TIMEOUT) \
 		--focus="$(FOCUS)" \
 		--skip="$(SKIP)" \
+		--label-filter="$(LABEL_FILTER)" \
 		./test/e2e/...
 
 
@@ -154,13 +178,17 @@ $(BUILDDIR)/:
 build: manifests generate fmt vet $(BUILDDIR)/ ## Build manager binary.
 	go build -o $(BUILDDIR)/cosmopilot ./cmd/manager
 
+# Overridable so CI can substitute `docker buildx build` with a cache exporter. Defaults to a
+# plain build so a local `make docker-build` needs no buildx setup.
+DOCKER_BUILD ?= docker build
+
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	docker build -t $(IMG) .
+	$(DOCKER_BUILD) -t $(IMG) .
 
 .PHONY: docker-build-nodeutils
 docker-build-nodeutils: ## Build node-utils docker image.
-	docker build -t $(NODE_UTILS_IMG) -f Dockerfile.utils .
+	$(DOCKER_BUILD) -t $(NODE_UTILS_IMG) -f Dockerfile.utils .
 
 .PHONY: helm.package
 helm.package: manifests helm $(BUILDDIR)/ ## Package helm chart. Final package name is cosmopilot-<<VERSION>>.tgz
@@ -246,7 +274,8 @@ HELM_VERSION ?= v3.17.3
 CRD_TO_MARKDOWN_VERSION ?= 0.0.3
 KIND_VERSION ?= 0.32.0
 ENVTEST_K8S_VERSION ?= 1.32.0
-GINKGO_VERSION ?= v2.32.0
+# Derived from go.mod: a CLI that disagrees with the imported library warns on every run.
+GINKGO_VERSION ?= $(shell go list -m -f '{{.Version}}' github.com/onsi/ginkgo/v2)
 
 .PHONY: kubectl
 kubectl: $(KUBECTL) ## Download kubectl locally if necessary. If wrong version is installed, it will be removed before downloading.
@@ -260,11 +289,26 @@ $(KUBECTL): $(LOCALBIN)
         chmod a+x $(KUBECTL); \
   	}
 
+# proxy.golang.org and sum.golang.org intermittently drop an HTTP/2 stream part-way through a
+# transfer, which `go install` reports as "stream error: ... INTERNAL_ERROR; received from peer" and
+# treats as fatal. Nothing is wrong with the module and the next attempt succeeds, so without a retry
+# a moment of trouble at Google costs a whole CI run before a single test has been compiled.
+define go-install-retry
+	n=1; \
+	until GOBIN=$(LOCALBIN) go install $(1); do \
+		if [ $$n -ge 3 ]; then echo "go install $(1): giving up after $$n attempts" >&2; exit 1; fi; \
+		echo "go install $(1): attempt $$n failed, retrying" >&2; \
+		sleep $$((n * 5)); \
+		n=$$((n + 1)); \
+	done
+endef
+
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary. If wrong version is installed, it will be overwritten.
 $(CONTROLLER_GEN): $(LOCALBIN)
-	@test -s $(CONTROLLER_GEN) && $(CONTROLLER_GEN) --version | grep -q $(CONTROLLER_TOOLS_VERSION) || \
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+	@test -s $(CONTROLLER_GEN) && $(CONTROLLER_GEN) --version | grep -q $(CONTROLLER_TOOLS_VERSION) || { \
+		$(call go-install-retry,sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)) ;\
+	}
 
 .PHONY: helm
 helm: $(HELM) ## Download helm locally if necessary. If wrong version is installed, it will be removed before downloading.
@@ -285,8 +329,8 @@ $(HELM): $(LOCALBIN)
 crd-to-markdown: $(CRD_TO_MARKDOWN) ## Download crd-to-markdown locally if necessary.
 $(CRD_TO_MARKDOWN): $(LOCALBIN)
 	@test -s $(CRD_TO_MARKDOWN) || { \
-  		GOBIN=$(LOCALBIN) go install github.com/clamoriniere/crd-to-markdown@v$(CRD_TO_MARKDOWN_VERSION); \
-    }
+		$(call go-install-retry,github.com/clamoriniere/crd-to-markdown@v$(CRD_TO_MARKDOWN_VERSION)) ;\
+	}
 
 # find or download kind
 .PHONY: kind
@@ -297,7 +341,7 @@ $(KIND): $(LOCALBIN)
 		rm -rf $(KIND); \
 	fi
 	@test -s $(KIND) || { \
-		GOBIN=$(LOCALBIN) go install sigs.k8s.io/kind@v$(KIND_VERSION) ;\
+		$(call go-install-retry,sigs.k8s.io/kind@v$(KIND_VERSION)) ;\
 	}
 
 # find or download setup-envtest
@@ -305,12 +349,12 @@ $(KIND): $(LOCALBIN)
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	@test -s $(ENVTEST) || { \
-		GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250517180713-32e5e9e948a5 ;\
+		$(call go-install-retry,sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250517180713-32e5e9e948a5) ;\
 	}
 
 # find or download ginkgo
 .PHONY: ginkgo
-ginkgo: $(GINKGO) ## Download ginkgo locally if necessary.
-$(GINKGO): $(LOCALBIN)
-	@test -s $(GINKGO) && $(GINKGO) version | grep -q $(GINKGO_VERSION) || \
-	GOBIN=$(LOCALBIN) go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)
+ginkgo: $(LOCALBIN) ## Download ginkgo locally if necessary. Reinstalls if it drifts from go.mod.
+	@test -s $(GINKGO) && $(GINKGO) version | grep -q "$(GINKGO_VERSION:v%=%)" || { \
+		$(call go-install-retry,github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)) ;\
+	}

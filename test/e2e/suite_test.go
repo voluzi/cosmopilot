@@ -106,7 +106,12 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
 	installVault := environ.GetBool("INSTALL_VAULT", true)
 
-	// Always reuse the cluster that Process 1 set up
+	// Process 1 installed cert-manager, the CSI driver, ingress-nginx and Vault in the phase above.
+	// The flags are still passed through, because specs read them to decide whether a dependency is
+	// there at all — the TMKMS and cosmosigner specs skip themselves when Vault is not. ConnectOnly is
+	// what stops this process installing any of it a second time: redundant work that also had every
+	// process racing to write the same policy into the one Vault pod, which intermittently failed the
+	// suite before a single spec had run.
 	tf = framework.NewKindFramework(
 		framework.WithClusterName(clusterName),
 		framework.WithControllerImage(controllerImage),
@@ -118,6 +123,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		framework.WithCSIDriver(true),
 		framework.WithIngressNginx(true),
 		framework.WithVault(installVault),
+		framework.WithConnectOnly(true),
 	)
 
 	err := tf.Setup(ctx)
@@ -166,6 +172,16 @@ func WithNamespace(fn func(app apps.TestApp, ns *corev1.Namespace)) func(apps.Te
 	}
 }
 
+// WithApp is the single-app counterpart of WithNamespace, for specs that exercise controller
+// behaviour the chain has no part in. It runs the body once against apps.Default() in a fresh
+// namespace, so the spec carries no per-app label and lands in the shard that runs the remainder.
+func WithApp(fn func(app apps.TestApp, ns *corev1.Namespace)) func() {
+	return func() {
+		ns := CreateTestNamespace()
+		fn(apps.Default(), ns)
+	}
+}
+
 // CreateTestNamespace creates a random namespace and registers cleanup via DeferCleanup.
 // Use this in tests that need direct namespace control.
 func CreateTestNamespace() *corev1.Namespace {
@@ -174,6 +190,13 @@ func CreateTestNamespace() *corev1.Namespace {
 	DeferCleanup(func() {
 		err := Framework().DeleteNamespace(ns)
 		Expect(err).NotTo(HaveOccurred())
+	})
+	// Registered after the deletion above so that it runs before it: cleanup callbacks run in reverse
+	// order, and there is nothing left to read once the namespace is gone.
+	DeferCleanup(func() {
+		if CurrentSpecReport().Failed() {
+			DumpNamespaceDiagnostics(ns.Name)
+		}
 	})
 	return ns
 }
