@@ -136,21 +136,31 @@ var _ = Describe("Snapshot E2E", func() {
 					return countSnapshotsForPVC(ns.Name, chainNode.Name)
 				}, 2*time.Minute, 10*time.Second).Should(Equal(2), "Expected exactly 2 snapshots due to retain policy")
 
-				// Verify the snapshots are ready
-				snapshotList := &snapshotv1.VolumeSnapshotList{}
-				err = Framework().Client().List(Framework().Context(), snapshotList, &client.ListOptions{
-					Namespace: ns.Name,
-				})
-				Expect(err).NotTo(HaveOccurred())
-
-				for _, snap := range snapshotList.Items {
-					if snap.Spec.Source.PersistentVolumeClaimName != nil &&
-						*snap.Spec.Source.PersistentVolumeClaimName == chainNode.Name {
-						Expect(snap.Status).NotTo(BeNil())
-						Expect(snap.Status.ReadyToUse).NotTo(BeNil())
-						Expect(*snap.Status.ReadyToUse).To(BeTrue(), fmt.Sprintf("Snapshot %s should be ready", snap.Name))
+				// Snapshots keep being taken on the configured frequency, so this set is never at
+				// rest. The wait above returns the moment a third snapshot appears, and that moment
+				// is exactly when the third one is seconds old and still provisioning — so reading
+				// the list once here asks for readiness at the least likely instant of the cycle.
+				// Poll for a moment when every surviving snapshot is ready instead.
+				By("Waiting until every surviving snapshot is ready")
+				Eventually(func() error {
+					snapshotList := &snapshotv1.VolumeSnapshotList{}
+					if err := Framework().Client().List(Framework().Context(), snapshotList, &client.ListOptions{
+						Namespace: ns.Name,
+					}); err != nil {
+						return err
 					}
-				}
+
+					for _, snap := range snapshotList.Items {
+						if snap.Spec.Source.PersistentVolumeClaimName == nil ||
+							*snap.Spec.Source.PersistentVolumeClaimName != chainNode.Name {
+							continue
+						}
+						if snap.Status == nil || snap.Status.ReadyToUse == nil || !*snap.Status.ReadyToUse {
+							return fmt.Errorf("snapshot %s is not ready yet", snap.Name)
+						}
+					}
+					return nil
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
 			}),
 		)
 	})
