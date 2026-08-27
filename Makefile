@@ -306,8 +306,9 @@ endef
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary. If wrong version is installed, it will be overwritten.
 $(CONTROLLER_GEN): $(LOCALBIN)
-	@test -s $(CONTROLLER_GEN) && $(CONTROLLER_GEN) --version | grep -q $(CONTROLLER_TOOLS_VERSION) || \
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+	@test -s $(CONTROLLER_GEN) && $(CONTROLLER_GEN) --version | grep -q $(CONTROLLER_TOOLS_VERSION) || { \
+		$(call go-install-retry,sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)) ;\
+	}
 
 .PHONY: helm
 helm: $(HELM) ## Download helm locally if necessary. If wrong version is installed, it will be removed before downloading.
@@ -328,8 +329,8 @@ $(HELM): $(LOCALBIN)
 crd-to-markdown: $(CRD_TO_MARKDOWN) ## Download crd-to-markdown locally if necessary.
 $(CRD_TO_MARKDOWN): $(LOCALBIN)
 	@test -s $(CRD_TO_MARKDOWN) || { \
-  		GOBIN=$(LOCALBIN) go install github.com/clamoriniere/crd-to-markdown@v$(CRD_TO_MARKDOWN_VERSION); \
-    }
+		$(call go-install-retry,github.com/clamoriniere/crd-to-markdown@v$(CRD_TO_MARKDOWN_VERSION)) ;\
+	}
 
 # find or download kind
 .PHONY: kind
@@ -348,7 +349,7 @@ $(KIND): $(LOCALBIN)
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	@test -s $(ENVTEST) || { \
-		GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250517180713-32e5e9e948a5 ;\
+		$(call go-install-retry,sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250517180713-32e5e9e948a5) ;\
 	}
 
 # find or download ginkgo
