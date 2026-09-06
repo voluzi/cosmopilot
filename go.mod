@@ -2,6 +2,8 @@ module github.com/voluzi/cosmopilot/v3
 
 go 1.26.0
 
+toolchain go1.27.1
+
 require (
 	cloud.google.com/go/storage v1.65.0
 	emperror.dev/errors v0.8.1
