@@ -20,19 +20,20 @@ import (
 )
 
 var (
-	host             string
-	port             int
-	dataPath         string
-	upgradesConfig   string
-	blockThreshold   time.Duration
-	traceStore       string
-	logLevel         string
-	createFifo       bool
-	enableTmkmsProxy bool
-	signerPeerDNS    string
-	nodeBinaryName   string
-	haltHeight       int64
-	shutdownToken    string
+	host                      string
+	port                      int
+	dataPath                  string
+	upgradesConfig            string
+	blockThreshold            time.Duration
+	traceStore                string
+	logLevel                  string
+	createFifo                bool
+	enableTmkmsProxy          bool
+	signerPeerDNS             string
+	nodeBinaryName            string
+	haltHeight                int64
+	shutdownToken             string
+	expectedShutdownTokenHash string
 )
 
 // subcommands are the standalone entry points this binary implements. They run in containers that
@@ -155,6 +156,7 @@ func startServer() error {
 		nodeutils.WithHaltHeight(haltHeight),
 		nodeutils.WithMockMode(mockMode),
 		nodeutils.WithShutdownToken(shutdownToken),
+		nodeutils.WithExpectedShutdownTokenHash(expectedShutdownTokenHash),
 	)
 	if err != nil {
 		return err

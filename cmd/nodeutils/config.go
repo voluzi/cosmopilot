@@ -11,6 +11,7 @@ var mockMode bool
 
 func init() {
 	shutdownToken = environ.GetString(nodeutils.ShutdownTokenEnvironmentVariable, "")
+	expectedShutdownTokenHash = environ.GetString(nodeutils.ExpectedShutdownTokenHashEnvironmentVariable, "")
 
 	flag.StringVar(&host, "host",
 		environ.GetString("HOST", "0.0.0.0"),

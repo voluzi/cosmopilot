@@ -35,18 +35,19 @@ func defaultOptions() *Options {
 }
 
 type Options struct {
-	Host           string
-	Port           int
-	DataPath       string
-	BlockThreshold time.Duration
-	UpgradesConfig string
-	TraceStore     string
-	CreateFifo     bool
-	TmkmsProxy     bool
-	SignerPeerDNS  string
-	HaltHeight     int64
-	MockMode       bool
-	ShutdownToken  string
+	Host                      string
+	Port                      int
+	DataPath                  string
+	BlockThreshold            time.Duration
+	UpgradesConfig            string
+	TraceStore                string
+	CreateFifo                bool
+	TmkmsProxy                bool
+	SignerPeerDNS             string
+	HaltHeight                int64
+	MockMode                  bool
+	ShutdownToken             string
+	ExpectedShutdownTokenHash string
 }
 
 type Option func(*Options)
@@ -121,5 +122,12 @@ func WithMockMode(enable bool) Option {
 func WithShutdownToken(token string) Option {
 	return func(opts *Options) {
 		opts.ShutdownToken = token
+	}
+}
+
+// WithExpectedShutdownTokenHash configures the trusted identity of the injected credential.
+func WithExpectedShutdownTokenHash(hash string) Option {
+	return func(opts *Options) {
+		opts.ExpectedShutdownTokenHash = hash
 	}
 }

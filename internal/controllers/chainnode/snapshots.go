@@ -702,9 +702,11 @@ func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.Chain
 	logger := log.FromContext(ctx)
 
 	if chainNode.Spec.Persistence.Snapshots.ShouldStopNode() {
-		pod, err := r.getPodSpec(ctx, chainNode, "")
-		if err != nil {
-			return nil, err
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      chainNode.GetName(),
+				Namespace: chainNode.GetNamespace(),
+			},
 		}
 
 		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)

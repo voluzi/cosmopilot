@@ -66,18 +66,19 @@ type Reconciler struct {
 	snapshotClientSet kubernetes.Interface
 	// cosmosignerClientSet overrides ClientSet for the one-shot cosmosigner pods, so the
 	// import/pubkey pod protocol can be exercised without a cluster. Nil in production.
-	cosmosignerClientSet  kubernetes.Interface
-	RestConfig            *rest.Config
-	Scheme                *runtime.Scheme
-	configCache           *ttlcache.Cache[string, map[string]interface{}]
-	nodeClients           *ttlcache.Cache[string, *chainutils.Client]
-	recorder              record.EventRecorder
-	opts                  *controllers.ControllerRunOptions
-	disruptionLocks       *lockManager
-	configLocks           *configLockManager
-	statsClientFactory    StatsClientFactory
-	shutdownClientFactory nodeUtilsShutdownClientFactory
-	snapshotDeleteNow     func() time.Time
+	cosmosignerClientSet   kubernetes.Interface
+	RestConfig             *rest.Config
+	Scheme                 *runtime.Scheme
+	configCache            *ttlcache.Cache[string, map[string]interface{}]
+	nodeClients            *ttlcache.Cache[string, *chainutils.Client]
+	recorder               record.EventRecorder
+	opts                   *controllers.ControllerRunOptions
+	disruptionLocks        *lockManager
+	configLocks            *configLockManager
+	statsClientFactory     StatsClientFactory
+	shutdownClientFactory  nodeUtilsShutdownClientFactory
+	shutdownTokenGenerator func() (string, error)
+	snapshotDeleteNow      func() time.Time
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {

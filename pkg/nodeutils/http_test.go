@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,17 +135,11 @@ func TestShutdownServerAcknowledgesBeforeStopCompletes(t *testing.T) {
 }
 
 func TestShutdownServerFlushesAcknowledgementBeforeProcessExit(t *testing.T) {
-	reservation, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	address := reservation.Addr().String()
-	require.NoError(t, reservation.Close())
-
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestShutdownServerProcessHelper$", "-test.count=1")
 	cmd.Env = append(os.Environ(),
 		"NODEUTILS_SHUTDOWN_HELPER=1",
-		"NODEUTILS_SHUTDOWN_HELPER_ADDR="+address,
 	)
 	stdout, err := cmd.StdoutPipe()
 	require.NoError(t, err)
@@ -158,13 +153,19 @@ func TestShutdownServerFlushesAcknowledgementBeforeProcessExit(t *testing.T) {
 		}
 	})
 
-	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	addressLine, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil {
 		_ = cmd.Process.Kill()
 		waitErr := cmd.Wait()
-		t.Fatalf("wait for helper readiness: %v; process wait: %v; stderr: %s", err, waitErr, stderr.String())
+		t.Fatalf("wait for helper address: %v; process wait: %v; stderr: %s", err, waitErr, stderr.String())
 	}
-	require.Equal(t, "ready\n", ready)
+	address := strings.TrimSpace(addressLine)
+	host, portText, err := net.SplitHostPort(address)
+	require.NoError(t, err, "helper address %q", address)
+	require.True(t, net.ParseIP(host).IsLoopback(), "helper address %q is not loopback", address)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+	require.Positive(t, port)
 
 	conn, err := net.Dial("tcp", address)
 	require.NoError(t, err)
@@ -192,7 +193,7 @@ func TestShutdownServerProcessHelper(t *testing.T) {
 	if os.Getenv("NODEUTILS_SHUTDOWN_HELPER") != "1" {
 		return
 	}
-	listener, err := net.Listen("tcp", os.Getenv("NODEUTILS_SHUTDOWN_HELPER_ADDR"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -204,7 +205,7 @@ func TestShutdownServerProcessHelper(t *testing.T) {
 	}
 	s.registerRoutes()
 	s.server = &http.Server{Handler: s.router}
-	fmt.Fprintln(os.Stdout, "ready")
+	fmt.Fprintln(os.Stdout, listener.Addr().String())
 	if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(3)

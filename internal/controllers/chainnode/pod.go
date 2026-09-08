@@ -78,17 +78,17 @@ func (r *Reconciler) getChainNodePod(ctx context.Context, chainNode *appsv1.Chai
 
 func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode *appsv1.ChainNode, configHash string) error {
 	logger := log.FromContext(ctx)
-	shutdownToken, err := r.ensureNodeUtilsShutdownSecret(ctx, chainNode)
+	shutdownCredential, err := r.ensureNodeUtilsShutdownCredential(ctx, chainNode)
 	if err != nil {
 		return err
 	}
 
 	// Prepare pod spec
-	pod, err := r.getPodSpec(ctx, chainNode, configHash)
+	pod, err := r.getPodSpec(ctx, chainNode, configHash, shutdownCredential.name)
 	if err != nil {
 		return fmt.Errorf("failed to get pod spec for %s: %w", chainNode.GetName(), err)
 	}
-	setNodeUtilsShutdownTokenHash(pod, shutdownToken)
+	stampNodeUtilsShutdownCredential(pod, shutdownCredential)
 
 	// Get current pod. If it does not exist create it and exit.
 	currentPod := &corev1.Pod{}
@@ -151,6 +151,11 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		logFailedCosmosignerDiscoveryGate(logger, currentPod)
 		r.logFailedContainer(ctx, logger, currentPod, chainNode.Spec.App.App)
 		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
+	}
+
+	if !nodeUtilsTokenCurrent && !nodeUtilsIsRunning(currentPod) {
+		logger.Info("node-utils shutdown credential changed before node-utils started", "pod", pod.GetName())
+		return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
 	}
 
 	logger.V(1).Info("updating latest height")
@@ -246,11 +251,11 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		}
 
 		// Get new pod spec with updated configs
-		pod, err = r.getPodSpec(ctx, chainNode, configHash)
+		pod, err = r.getPodSpec(ctx, chainNode, configHash, shutdownCredential.name)
 		if err != nil {
 			return fmt.Errorf("failed to get pod spec after config update for %s: %w", chainNode.GetName(), err)
 		}
-		setNodeUtilsShutdownTokenHash(pod, shutdownToken)
+		stampNodeUtilsShutdownCredential(pod, shutdownCredential)
 
 		if upgraded, err := r.upgradePod(ctx, chainNode, pod, upgrade.Image); err != nil {
 			r.recorder.Eventf(chainNode,
@@ -451,7 +456,7 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 }
 
 // buildNodeUtilsInitContainer creates the node-utils sidecar init container.
-func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) corev1.Container {
+func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, shutdownSecretName string) corev1.Container {
 	var sidecarRestartAlways = corev1.ContainerRestartPolicyAlways
 	env := []corev1.EnvVar{
 		{
@@ -489,15 +494,21 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 		},
 	)
 	for _, userEnv := range chainNode.Spec.Config.GetNodeUtilsEnv() {
-		if userEnv.Name != nodeutils.ShutdownTokenEnvironmentVariable {
+		if userEnv.Name != nodeutils.ShutdownTokenEnvironmentVariable && userEnv.Name != nodeutils.ExpectedShutdownTokenHashEnvironmentVariable {
 			env = append(env, userEnv)
 		}
 	}
 	env = append(env, corev1.EnvVar{
 		Name: nodeutils.ShutdownTokenEnvironmentVariable,
 		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: nodeUtilsShutdownSecretName(chainNode)},
+			LocalObjectReference: corev1.LocalObjectReference{Name: shutdownSecretName},
 			Key:                  nodeutils.ShutdownTokenSecretKey,
+		}},
+	})
+	env = append(env, corev1.EnvVar{
+		Name: nodeutils.ExpectedShutdownTokenHashEnvironmentVariable,
+		ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+			FieldPath: "metadata.annotations['" + controllers.AnnotationNodeUtilsShutdownTokenHash + "']",
 		}},
 	})
 
@@ -714,7 +725,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 	}
 }
 
-func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode, configHash string) (*corev1.Pod, error) {
+func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode, configHash, shutdownSecretName string) (*corev1.Pod, error) {
 	logger := log.FromContext(ctx)
 
 	configFilesMounts, err := r.getConfigFilesMounts(ctx, chainNode)
@@ -804,7 +815,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			SecurityContext:               podSecurityContext,
 			TerminationGracePeriodSeconds: chainNode.Spec.Config.GetTerminationGracePeriodSeconds(),
 			Volumes:                       r.buildBaseVolumes(chainNode),
-			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode)},
+			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode, shutdownSecretName)},
 			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
 	}
@@ -1208,8 +1219,16 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 }
 
 func nodeUtilsShutdownTokenChanged(existing, desired *corev1.Pod) bool {
-	return existing.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash] !=
-		desired.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash]
+	for _, annotation := range []string{
+		controllers.AnnotationNodeUtilsShutdownSecretName,
+		controllers.AnnotationNodeUtilsShutdownSecretUID,
+		controllers.AnnotationNodeUtilsShutdownTokenHash,
+	} {
+		if existing.Annotations[annotation] != desired.Annotations[annotation] {
+			return true
+		}
+	}
+	return false
 }
 
 func orderVolumes(podSpec *corev1.PodSpec) {
@@ -1455,7 +1474,7 @@ func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
 }
 
 func (r *Reconciler) stopNodeUtilsContainer(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	token, err := r.loadNodeUtilsShutdownToken(ctx, chainNode)
+	credential, err := r.loadLivePodNodeUtilsShutdownCredential(ctx, chainNode)
 	if err != nil {
 		return err
 	}
@@ -1463,7 +1482,7 @@ func (r *Reconciler) stopNodeUtilsContainer(ctx context.Context, chainNode *apps
 	if factory == nil {
 		factory = defaultNodeUtilsShutdownClientFactory
 	}
-	return factory(chainNode.GetNodeFQDN(), token).ShutdownNodeUtilsServer(ctx)
+	return factory(chainNode.GetNodeFQDN(), credential.token).ShutdownNodeUtilsServer(ctx)
 }
 
 func isPodTerminating(pod *corev1.Pod) bool {

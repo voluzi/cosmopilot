@@ -38,6 +38,9 @@ func TestDefaultOptions(t *testing.T) {
 	if opts.ShutdownToken != "" {
 		t.Errorf("expected ShutdownToken to be empty, got a configured value")
 	}
+	if opts.ExpectedShutdownTokenHash != "" {
+		t.Errorf("expected ExpectedShutdownTokenHash to be empty, got a configured value")
+	}
 }
 
 func TestWithHost(t *testing.T) {
@@ -127,6 +130,16 @@ func TestWithShutdownToken(t *testing.T) {
 
 	if opts.ShutdownToken != testShutdownToken {
 		t.Error("expected shutdown token option to be set")
+	}
+}
+
+func TestWithExpectedShutdownTokenHash(t *testing.T) {
+	opts := defaultOptions()
+	hash := ShutdownTokenHash(testShutdownToken)
+	WithExpectedShutdownTokenHash(hash)(opts)
+
+	if opts.ExpectedShutdownTokenHash != hash {
+		t.Error("expected shutdown token hash option to be set")
 	}
 }
 

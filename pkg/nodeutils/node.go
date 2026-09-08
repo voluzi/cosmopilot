@@ -63,6 +63,9 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	for _, opt := range opts {
 		opt(options)
 	}
+	if err := validateShutdownCredential(options.ShutdownToken, options.ExpectedShutdownTokenHash); err != nil {
+		return nil, err
+	}
 
 	nodeUtils := &NodeUtils{
 		cfg:                options,
@@ -118,6 +121,22 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	}
 
 	return nodeUtils, nil
+}
+
+func validateShutdownCredential(token, expectedHash string) error {
+	if token == "" && expectedHash == "" {
+		return nil
+	}
+	if !ValidShutdownToken(token) {
+		return fmt.Errorf("shutdown credential token is missing or malformed")
+	}
+	if !ValidShutdownTokenHash(expectedHash) {
+		return fmt.Errorf("shutdown credential expected hash is missing or malformed")
+	}
+	if ShutdownTokenHash(token) != expectedHash {
+		return fmt.Errorf("shutdown credential does not match its expected hash")
+	}
+	return nil
 }
 
 func trustedSignerPeer(peer net.IP, addresses []net.IPAddr) bool {
