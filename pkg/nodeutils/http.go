@@ -181,7 +181,19 @@ func (s *NodeUtils) shutdownServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	responseController := http.NewResponseController(w)
+	if r.ContentLength != 0 {
+		if err := responseController.EnableFullDuplex(); err != nil {
+			log.WithError(err).Error("failed to enable full-duplex shutdown acknowledgement")
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusAccepted)
+	if err := responseController.Flush(); err != nil {
+		log.WithError(err).Error("failed to flush shutdown acknowledgement")
+		return
+	}
 	if !s.shutdownStarted.CompareAndSwap(false, true) {
 		return
 	}

@@ -78,7 +78,8 @@ func (r *Reconciler) getChainNodePod(ctx context.Context, chainNode *appsv1.Chai
 
 func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode *appsv1.ChainNode, configHash string) error {
 	logger := log.FromContext(ctx)
-	if err := r.ensureNodeUtilsShutdownSecret(ctx, chainNode); err != nil {
+	shutdownToken, err := r.ensureNodeUtilsShutdownSecret(ctx, chainNode)
+	if err != nil {
 		return err
 	}
 
@@ -87,9 +88,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	if err != nil {
 		return fmt.Errorf("failed to get pod spec for %s: %w", chainNode.GetName(), err)
 	}
-	if err := r.setNodeUtilsShutdownTokenHash(ctx, chainNode, pod); err != nil {
-		return err
-	}
+	setNodeUtilsShutdownTokenHash(pod, shutdownToken)
 
 	// Get current pod. If it does not exist create it and exit.
 	currentPod := &corev1.Pod{}
@@ -251,9 +250,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		if err != nil {
 			return fmt.Errorf("failed to get pod spec after config update for %s: %w", chainNode.GetName(), err)
 		}
-		if err := r.setNodeUtilsShutdownTokenHash(ctx, chainNode, pod); err != nil {
-			return err
-		}
+		setNodeUtilsShutdownTokenHash(pod, shutdownToken)
 
 		if upgraded, err := r.upgradePod(ctx, chainNode, pod, upgrade.Image); err != nil {
 			r.recorder.Eventf(chainNode,
@@ -499,7 +496,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 	env = append(env, corev1.EnvVar{
 		Name: nodeutils.ShutdownTokenEnvironmentVariable,
 		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: chainNode.GetName() + nodeUtilsSecretSuffix},
+			LocalObjectReference: corev1.LocalObjectReference{Name: nodeUtilsShutdownSecretName(chainNode)},
 			Key:                  nodeutils.ShutdownTokenSecretKey,
 		}},
 	})

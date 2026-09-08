@@ -1,10 +1,17 @@
 package nodeutils
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -126,73 +133,83 @@ func TestShutdownServerAcknowledgesBeforeStopCompletes(t *testing.T) {
 	close(release)
 }
 
-func TestShutdownServerAcknowledgesBeforeServerStops(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+func TestShutdownServerFlushesAcknowledgementBeforeProcessExit(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := reservation.Addr().String()
+	require.NoError(t, reservation.Close())
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestShutdownServerProcessHelper$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		"NODEUTILS_SHUTDOWN_HELPER=1",
+		"NODEUTILS_SHUTDOWN_HELPER_ADDR="+address,
+	)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		_ = cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		t.Fatalf("wait for helper readiness: %v; process wait: %v; stderr: %s", err, waitErr, stderr.String())
+	}
+	require.Equal(t, "ready\n", ready)
+
+	conn, err := net.Dial("tcp", address)
+	require.NoError(t, err)
+	defer conn.Close()
+	_, err = fmt.Fprintf(conn,
+		"POST /shutdown HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Length: 10\r\n\r\n",
+		address, testShutdownToken,
+	)
 	require.NoError(t, err)
 
-	stopStarted := make(chan struct{})
-	releaseStop := make(chan struct{})
-	var releaseOnce sync.Once
-	defer releaseOnce.Do(func() { close(releaseStop) })
+	waitErr := cmd.Wait()
+	require.NoError(t, waitErr, stderr.String())
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+	rawResponse, err := io.ReadAll(conn)
+	require.NoError(t, err)
+	request, err := http.NewRequest(http.MethodPost, "http://"+address+"/shutdown", nil)
+	require.NoError(t, err)
+	response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(rawResponse)), request)
+	require.NoError(t, err, "raw response was %q", rawResponse)
+	defer response.Body.Close()
+	assert.Equal(t, http.StatusAccepted, response.StatusCode)
+}
 
+func TestShutdownServerProcessHelper(t *testing.T) {
+	if os.Getenv("NODEUTILS_SHUTDOWN_HELPER") != "1" {
+		return
+	}
+	listener, err := net.Listen("tcp", os.Getenv("NODEUTILS_SHUTDOWN_HELPER_ADDR"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	s := &NodeUtils{
-		cfg:    &Options{ShutdownToken: testShutdownToken},
-		router: mux.NewRouter(),
-		stopNode: func() error {
-			close(stopStarted)
-			<-releaseStop
-			return nil
-		},
+		cfg:      &Options{ShutdownToken: testShutdownToken},
+		router:   mux.NewRouter(),
+		stopNode: func() error { return nil },
 	}
 	s.registerRoutes()
 	s.server = &http.Server{Handler: s.router}
-	defer s.server.Close()
-
-	serveErr := make(chan error, 1)
-	go func() {
-		serveErr <- s.server.Serve(listener)
-	}()
-
-	response := make(chan *http.Response, 1)
-	requestErr := make(chan error, 1)
-	go func() {
-		req, reqErr := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/shutdown", nil)
-		if reqErr != nil {
-			requestErr <- reqErr
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+testShutdownToken)
-		resp, doErr := http.DefaultClient.Do(req)
-		if doErr != nil {
-			requestErr <- doErr
-			return
-		}
-		response <- resp
-	}()
-
-	select {
-	case resp := <-response:
-		require.Equal(t, http.StatusAccepted, resp.StatusCode)
-		require.NoError(t, resp.Body.Close())
-	case err := <-requestErr:
-		t.Fatalf("shutdown request failed: %v", err)
-	case <-time.After(time.Second):
-		t.Fatal("shutdown response waited for process stop completion")
+	fmt.Fprintln(os.Stdout, "ready")
+	if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(3)
 	}
-
-	select {
-	case <-stopStarted:
-	case <-time.After(time.Second):
-		t.Fatal("process stop did not start")
-	}
-
-	releaseOnce.Do(func() { close(releaseStop) })
-	select {
-	case err := <-serveErr:
-		require.True(t, errors.Is(err, http.ErrServerClosed), "Serve returned %v", err)
-	case <-time.After(time.Second):
-		t.Fatal("HTTP server did not complete shutdown")
-	}
+	os.Exit(0)
 }
 
 func TestShutdownServerStartsStopOnce(t *testing.T) {

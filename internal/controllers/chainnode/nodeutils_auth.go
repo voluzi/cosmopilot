@@ -26,21 +26,28 @@ func defaultNodeUtilsShutdownClientFactory(host, token string) nodeUtilsShutdown
 	return nodeutils.NewClientWithShutdownToken(host, token)
 }
 
-func (r *Reconciler) ensureNodeUtilsShutdownSecret(ctx context.Context, chainNode *appsv1.ChainNode) error {
+// nodeUtilsShutdownSecretName binds a credential to one ChainNode object identity and uses a DNS
+// subdomain form that cannot be a ChainNode or Service DNS-label name.
+func nodeUtilsShutdownSecretName(chainNode *appsv1.ChainNode) string {
+	sum := sha256.Sum256([]byte(chainNode.GetNamespace() + "\x00" + chainNode.GetName() + "\x00" + string(chainNode.GetUID())))
+	digest := fmt.Sprintf("%x", sum)
+	return "node-utils." + digest[:32] + "." + digest[32:]
+}
+
+func (r *Reconciler) ensureNodeUtilsShutdownSecret(ctx context.Context, chainNode *appsv1.ChainNode) (string, error) {
 	secret := &corev1.Secret{}
-	key := client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: chainNode.GetName() + nodeUtilsSecretSuffix}
-	err := r.Get(ctx, key, secret)
+	key := client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: nodeUtilsShutdownSecretName(chainNode)}
+	err := r.reservationReader().Get(ctx, key, secret)
 	if err == nil {
-		_, err := nodeUtilsShutdownToken(secret, chainNode)
-		return err
+		return nodeUtilsShutdownToken(secret, chainNode)
 	}
 	if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get node-utils shutdown Secret %s/%s: %w", key.Namespace, key.Name, err)
+		return "", fmt.Errorf("get node-utils shutdown Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
 
 	token, err := nodeutils.GenerateShutdownToken()
 	if err != nil {
-		return fmt.Errorf("generate node-utils shutdown token: %w", err)
+		return "", fmt.Errorf("generate node-utils shutdown token: %w", err)
 	}
 	secret = &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -52,18 +59,18 @@ func (r *Reconciler) ensureNodeUtilsShutdownSecret(ctx context.Context, chainNod
 		Data: map[string][]byte{nodeutils.ShutdownTokenSecretKey: []byte(token)},
 	}
 	if err := controllerutil.SetControllerReference(chainNode, secret, r.Scheme); err != nil {
-		return fmt.Errorf("own node-utils shutdown Secret %s/%s: %w", key.Namespace, key.Name, err)
+		return "", fmt.Errorf("own node-utils shutdown Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
 	if err := r.Create(ctx, secret); err != nil {
-		return fmt.Errorf("create node-utils shutdown Secret %s/%s: %w", key.Namespace, key.Name, err)
+		return "", fmt.Errorf("create node-utils shutdown Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
-	return nil
+	return token, nil
 }
 
 func (r *Reconciler) loadNodeUtilsShutdownToken(ctx context.Context, chainNode *appsv1.ChainNode) (string, error) {
 	secret := &corev1.Secret{}
-	key := client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: chainNode.GetName() + nodeUtilsSecretSuffix}
-	if err := r.Get(ctx, key, secret); err != nil {
+	key := client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: nodeUtilsShutdownSecretName(chainNode)}
+	if err := r.reservationReader().Get(ctx, key, secret); err != nil {
 		return "", fmt.Errorf("get node-utils shutdown Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
 	return nodeUtilsShutdownToken(secret, chainNode)
@@ -83,14 +90,9 @@ func nodeUtilsShutdownToken(secret *corev1.Secret, chainNode *appsv1.ChainNode) 
 	return token, nil
 }
 
-func (r *Reconciler) setNodeUtilsShutdownTokenHash(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {
-	token, err := r.loadNodeUtilsShutdownToken(ctx, chainNode)
-	if err != nil {
-		return err
-	}
+func setNodeUtilsShutdownTokenHash(pod *corev1.Pod, token string) {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
 	pod.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash] = fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
-	return nil
 }

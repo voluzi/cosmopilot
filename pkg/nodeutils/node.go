@@ -258,7 +258,7 @@ func (s *NodeUtils) Start() error {
 					} else if heightUpdated {
 						log.WithField("height", height).Warn("stopping node for upgrade")
 						s.requiresUpgrade.Store(true)
-						if err := s.StopNode(); err != nil {
+						if err := s.stopNode(); err != nil {
 							log.Errorf("failed to stop node: %v", err)
 						} else {
 							return

@@ -10,9 +10,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
@@ -54,7 +57,7 @@ func nodeUtilsAuthTestNode() *appsv1.ChainNode {
 func ownedNodeUtilsSecret(t *testing.T, scheme *runtime.Scheme, owner *appsv1.ChainNode, token string) *corev1.Secret {
 	t.Helper()
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: owner.Name + nodeUtilsSecretSuffix, Namespace: owner.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: nodeUtilsShutdownSecretName(owner), Namespace: owner.Namespace},
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{nodeutils.ShutdownTokenSecretKey: []byte(token)},
 	}
@@ -62,24 +65,116 @@ func ownedNodeUtilsSecret(t *testing.T, scheme *runtime.Scheme, owner *appsv1.Ch
 	return secret
 }
 
+func TestNodeUtilsShutdownSecretNameIsDeterministic(t *testing.T) {
+	owner := nodeUtilsAuthTestNode()
+	owner.Name = "foo"
+	owner.UID = "foo-uid"
+
+	const want = "node-utils.8399536f466ee5cb981fde0facdef088.b40492549584989451ca2c574f8cd118"
+	assert.Equal(t, want, nodeUtilsShutdownSecretName(owner))
+	assert.Equal(t, want, nodeUtilsShutdownSecretName(owner.DeepCopy()))
+}
+
+func TestNodeUtilsShutdownSecretNameChangesWithUID(t *testing.T) {
+	owner := nodeUtilsAuthTestNode()
+	recreated := owner.DeepCopy()
+	recreated.UID = "replacement-uid"
+
+	assert.NotEqual(t, nodeUtilsShutdownSecretName(owner), nodeUtilsShutdownSecretName(recreated))
+}
+
+func TestNodeUtilsShutdownSecretNameIsValidAndBounded(t *testing.T) {
+	owner := nodeUtilsAuthTestNode()
+	owner.Name = strings.Repeat("a", 63)
+	owner.Namespace = strings.Repeat("b", 63)
+	owner.UID = types.UID(strings.Repeat("c", 128))
+
+	name := nodeUtilsShutdownSecretName(owner)
+	assert.Len(t, name, 76)
+	assert.Empty(t, validation.IsDNS1123Subdomain(name))
+	assert.NotEmpty(t, validation.IsDNS1123Label(name))
+}
+
+func TestEnsureNodeUtilsShutdownSecretDoesNotCollideWithLegalChainNodeName(t *testing.T) {
+	scheme := nodeUtilsAuthTestScheme(t)
+	owner := nodeUtilsAuthTestNode()
+	owner.Name = "foo"
+	owner.UID = "foo-uid"
+	collidingOwner := nodeUtilsAuthTestNode()
+	collidingOwner.Name = "foo-node-utils"
+	collidingOwner.UID = "foo-node-utils-uid"
+	existingNodeKey := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: collidingOwner.Name, Namespace: owner.Namespace},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{nodeKeyFilename: []byte("existing-node-key")},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(collidingOwner, existingNodeKey).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+
+	token, err := r.ensureNodeUtilsShutdownSecret(context.Background(), owner)
+	require.NoError(t, err)
+	assert.True(t, nodeutils.ValidShutdownToken(token))
+
+	authSecret := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKey{Namespace: owner.Namespace, Name: nodeUtilsShutdownSecretName(owner)}, authSecret))
+	assert.True(t, metav1.IsControlledBy(authSecret, owner))
+	assert.NotEqual(t, collidingOwner.Name, authSecret.Name)
+	preservedNodeKey := &corev1.Secret{}
+	require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(existingNodeKey), preservedNodeKey))
+	assert.Equal(t, existingNodeKey.Data, preservedNodeKey.Data)
+}
+
+type staleSecretCacheClient struct {
+	client.Client
+}
+
+func (c *staleSecretCacheClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Secret); ok {
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func TestEnsureNodeUtilsShutdownSecretReturnsCreatedTokenWhenCacheIsStale(t *testing.T) {
+	scheme := nodeUtilsAuthTestScheme(t)
+	owner := nodeUtilsAuthTestNode()
+	backing := fake.NewClientBuilder().WithScheme(scheme).Build()
+	staleCache := &staleSecretCacheClient{Client: backing}
+	r := &Reconciler{Client: staleCache, APIReader: backing, Scheme: scheme}
+
+	createdToken, err := r.ensureNodeUtilsShutdownSecret(context.Background(), owner)
+	require.NoError(t, err)
+	assert.True(t, nodeutils.ValidShutdownToken(createdToken))
+
+	cached := &corev1.Secret{}
+	err = staleCache.Get(context.Background(), client.ObjectKey{Namespace: owner.Namespace, Name: nodeUtilsShutdownSecretName(owner)}, cached)
+	require.True(t, apierrors.IsNotFound(err), "cached Get returned %v", err)
+	preservedToken, err := r.ensureNodeUtilsShutdownSecret(context.Background(), owner)
+	require.NoError(t, err)
+	assert.Equal(t, createdToken, preservedToken)
+}
+
 func TestEnsureNodeUtilsShutdownSecretCreatesStableOwnedToken(t *testing.T) {
 	scheme := nodeUtilsAuthTestScheme(t)
 	owner := nodeUtilsAuthTestNode()
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
 
-	require.NoError(t, r.ensureNodeUtilsShutdownSecret(context.Background(), owner))
-	key := client.ObjectKey{Namespace: owner.Namespace, Name: owner.Name + nodeUtilsSecretSuffix}
+	first, err := r.ensureNodeUtilsShutdownSecret(context.Background(), owner)
+	require.NoError(t, err)
+	key := client.ObjectKey{Namespace: owner.Namespace, Name: nodeUtilsShutdownSecretName(owner)}
 	created := &corev1.Secret{}
 	require.NoError(t, r.Get(context.Background(), key, created))
 	require.Equal(t, corev1.SecretTypeOpaque, created.Type)
 	assert.True(t, metav1.IsControlledBy(created, owner))
 	assert.Equal(t, WithChainNodeLabels(owner), created.Labels)
-	first := string(created.Data[nodeutils.ShutdownTokenSecretKey])
+	assert.Equal(t, first, string(created.Data[nodeutils.ShutdownTokenSecretKey]))
 	assert.True(t, nodeutils.ValidShutdownToken(first))
 
-	require.NoError(t, r.ensureNodeUtilsShutdownSecret(context.Background(), owner))
+	preservedToken, err := r.ensureNodeUtilsShutdownSecret(context.Background(), owner)
+	require.NoError(t, err)
 	preserved := &corev1.Secret{}
 	require.NoError(t, r.Get(context.Background(), key, preserved))
+	assert.Equal(t, first, preservedToken)
 	assert.Equal(t, first, string(preserved.Data[nodeutils.ShutdownTokenSecretKey]))
 }
 
@@ -91,7 +186,7 @@ func TestEnsureNodeUtilsShutdownSecretRefusesUnsafeExistingSecret(t *testing.T) 
 		{
 			name: "unowned",
 			secret: func(_ *testing.T, _ *runtime.Scheme, owner *appsv1.ChainNode) *corev1.Secret {
-				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: owner.Name + nodeUtilsSecretSuffix, Namespace: owner.Namespace}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{nodeutils.ShutdownTokenSecretKey: []byte(testShutdownToken)}}
+				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: nodeUtilsShutdownSecretName(owner), Namespace: owner.Namespace}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{nodeutils.ShutdownTokenSecretKey: []byte(testShutdownToken)}}
 			},
 		},
 		{
@@ -132,11 +227,11 @@ func TestEnsureNodeUtilsShutdownSecretRefusesUnsafeExistingSecret(t *testing.T) 
 			scheme := nodeUtilsAuthTestScheme(t)
 			owner := nodeUtilsAuthTestNode()
 			secret := tt.secret(t, scheme, owner)
-			secret.Name = owner.Name + nodeUtilsSecretSuffix
+			secret.Name = nodeUtilsShutdownSecretName(owner)
 			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 			r := &Reconciler{Client: base, Scheme: scheme}
 
-			err := r.ensureNodeUtilsShutdownSecret(context.Background(), owner)
+			_, err := r.ensureNodeUtilsShutdownSecret(context.Background(), owner)
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "node-utils shutdown Secret")
@@ -168,7 +263,7 @@ func TestBuildNodeUtilsInitContainerUsesReservedSecretEnvironment(t *testing.T) 
 	assert.Empty(t, tokenEnv.Value)
 	require.NotNil(t, tokenEnv.ValueFrom)
 	require.NotNil(t, tokenEnv.ValueFrom.SecretKeyRef)
-	assert.Equal(t, owner.Name+nodeUtilsSecretSuffix, tokenEnv.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, nodeUtilsShutdownSecretName(owner), tokenEnv.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, nodeutils.ShutdownTokenSecretKey, tokenEnv.ValueFrom.SecretKeyRef.Key)
 	assert.NotContains(t, container.Args, testShutdownToken)
 	assert.Contains(t, container.Env, corev1.EnvVar{Name: "CUSTOM", Value: "kept"})
@@ -193,7 +288,7 @@ func TestGetPodSpecTracksShutdownTokenWithoutExposingIt(t *testing.T) {
 
 	first, err := r.getPodSpec(context.Background(), owner, "config-hash")
 	require.NoError(t, err)
-	require.NoError(t, r.setNodeUtilsShutdownTokenHash(context.Background(), owner, first))
+	setNodeUtilsShutdownTokenHash(first, testShutdownToken)
 	firstHash := first.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash]
 	assert.Len(t, firstHash, 64)
 	assert.NotEqual(t, testShutdownToken, firstHash)
@@ -205,7 +300,7 @@ func TestGetPodSpecTracksShutdownTokenWithoutExposingIt(t *testing.T) {
 	require.NoError(t, base.Update(context.Background(), secret))
 	second, err := r.getPodSpec(context.Background(), owner, "config-hash")
 	require.NoError(t, err)
-	require.NoError(t, r.setNodeUtilsShutdownTokenHash(context.Background(), owner, second))
+	setNodeUtilsShutdownTokenHash(second, replacement)
 	assert.NotEqual(t, firstHash, second.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash])
 	assert.True(t, nodeUtilsShutdownTokenChanged(first, second))
 	assert.False(t, nodeUtilsShutdownTokenChanged(second, second.DeepCopy()))
@@ -228,9 +323,11 @@ func TestStopNodeUtilsContainerLoadsOwnedToken(t *testing.T) {
 	secret := ownedNodeUtilsSecret(t, scheme, owner, token)
 	shutdown := &fakeNodeUtilsShutdownClient{}
 	var gotHost, gotToken string
+	backing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 	r := &Reconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
-		Scheme: scheme,
+		Client:    &staleSecretCacheClient{Client: backing},
+		APIReader: backing,
+		Scheme:    scheme,
 		shutdownClientFactory: func(host, credential string) nodeUtilsShutdownClient {
 			gotHost, gotToken = host, credential
 			return shutdown
@@ -252,7 +349,7 @@ func TestStopNodeUtilsContainerNeverFallsBackWithoutOwnedToken(t *testing.T) {
 		{
 			name: "unowned secret",
 			secret: func(_ *testing.T, _ *runtime.Scheme, owner *appsv1.ChainNode) client.Object {
-				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: owner.Name + nodeUtilsSecretSuffix, Namespace: owner.Namespace}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{nodeutils.ShutdownTokenSecretKey: []byte(testShutdownToken)}}
+				return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: nodeUtilsShutdownSecretName(owner), Namespace: owner.Namespace}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{nodeutils.ShutdownTokenSecretKey: []byte(testShutdownToken)}}
 			},
 		},
 		{
@@ -293,7 +390,7 @@ func TestEnsurePodReconcilesShutdownSecretBeforeBuildingPod(t *testing.T) {
 	scheme := nodeUtilsAuthTestScheme(t)
 	owner := nodeUtilsAuthTestNode()
 	foreign := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: owner.Name + nodeUtilsSecretSuffix, Namespace: owner.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: nodeUtilsShutdownSecretName(owner), Namespace: owner.Namespace},
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{nodeutils.ShutdownTokenSecretKey: []byte(testShutdownToken)},
 	}
@@ -324,7 +421,7 @@ func TestTokenDriftHonorsDisruptionAllowanceForHealthyCurrentPod(t *testing.T) {
 	}
 	desired, err := specReconciler.getPodSpec(ctx, owner, "config-hash")
 	require.NoError(t, err)
-	require.NoError(t, specReconciler.setNodeUtilsShutdownTokenHash(ctx, owner, desired))
+	setNodeUtilsShutdownTokenHash(desired, testShutdownToken)
 	current := desired.DeepCopy()
 	current.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash] = "old-token-hash"
 	current.Status = corev1.PodStatus{
