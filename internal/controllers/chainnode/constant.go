@@ -40,6 +40,7 @@ const (
 	nodeUtilsContainerName = "node-utils"
 	nodeUtilsPortName      = "node-utils"
 	nodeUtilsPort          = 8000
+	nodeUtilsSecretSuffix  = "-node-utils"
 
 	// CosmosignerDiscoveryWaitContainerName identifies the DNS publication gate on signer targets.
 	CosmosignerDiscoveryWaitContainerName = "wait-cosmosigner-discovery"

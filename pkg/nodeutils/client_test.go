@@ -3,6 +3,7 @@ package nodeutils
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -455,14 +456,19 @@ func TestClient_ShutdownNodeUtilsServer(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name:       "successful shutdown",
-			statusCode: http.StatusOK,
+			name:       "accepted shutdown",
+			statusCode: http.StatusAccepted,
 			wantErr:    false,
 		},
 		{
 			name:       "server error",
 			statusCode: http.StatusInternalServerError,
-			wantErr:    false, // ShutdownNodeUtilsServer only checks if request was sent
+			wantErr:    true,
+		},
+		{
+			name:       "unauthorized",
+			statusCode: http.StatusUnauthorized,
+			wantErr:    true,
 		},
 	}
 
@@ -475,17 +481,92 @@ func TestClient_ShutdownNodeUtilsServer(t *testing.T) {
 				if r.Method != http.MethodPost {
 					t.Errorf("expected method POST, got %s", r.Method)
 				}
+				if got := r.Header.Get("Authorization"); got != "Bearer "+testShutdownToken {
+					t.Errorf("Authorization = %q, want bearer token", got)
+				}
 				w.WriteHeader(tt.statusCode)
 			}))
 			defer server.Close()
 
-			client := &Client{url: server.URL}
+			client := &Client{url: server.URL, shutdownToken: testShutdownToken}
 			err := client.ShutdownNodeUtilsServer(context.Background())
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ShutdownNodeUtilsServer() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestClient_ShutdownNodeUtilsServerRefusesMissingToken(t *testing.T) {
+	requested := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requested = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	err := (&Client{url: server.URL}).ShutdownNodeUtilsServer(context.Background())
+
+	if err == nil {
+		t.Fatal("ShutdownNodeUtilsServer() accepted a missing token")
+	}
+	if requested {
+		t.Fatal("ShutdownNodeUtilsServer() sent an unauthenticated request")
+	}
+}
+
+func TestClient_ShutdownNodeUtilsServerRejectsRedirect(t *testing.T) {
+	redirected := false
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer destination.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL+"/shutdown", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	err := (&Client{url: origin.URL, shutdownToken: testShutdownToken}).ShutdownNodeUtilsServer(context.Background())
+
+	if err == nil {
+		t.Fatal("ShutdownNodeUtilsServer() accepted a redirect")
+	}
+	if redirected {
+		t.Fatal("ShutdownNodeUtilsServer() followed a redirect with the shutdown credential")
+	}
+}
+
+type closeTrackingBody struct {
+	closed bool
+}
+
+func (b *closeTrackingBody) Read([]byte) (int, error) { return 0, io.EOF }
+func (b *closeTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type clientRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f clientRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestClient_ShutdownNodeUtilsServerClosesResponseBody(t *testing.T) {
+	body := &closeTrackingBody{}
+	previous := shutdownHTTPClient
+	shutdownHTTPClient = &http.Client{Transport: clientRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusAccepted, Body: body, Header: make(http.Header)}, nil
+	})}
+	t.Cleanup(func() { shutdownHTTPClient = previous })
+
+	err := (&Client{url: "http://node.invalid", shutdownToken: testShutdownToken}).ShutdownNodeUtilsServer(context.Background())
+
+	if err != nil {
+		t.Fatalf("ShutdownNodeUtilsServer() error = %v", err)
+	}
+	if !body.closed {
+		t.Fatal("ShutdownNodeUtilsServer() did not close the response body")
 	}
 }
 

@@ -4,11 +4,14 @@ import (
 	"flag"
 
 	"github.com/voluzi/cosmopilot/v3/pkg/environ"
+	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
 
 var mockMode bool
 
 func init() {
+	shutdownToken = environ.GetString(nodeutils.ShutdownTokenEnvironmentVariable, "")
+
 	flag.StringVar(&host, "host",
 		environ.GetString("HOST", "0.0.0.0"),
 		"the host at which this server will be listening to",

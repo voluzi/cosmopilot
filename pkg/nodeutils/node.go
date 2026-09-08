@@ -54,6 +54,8 @@ type NodeUtils struct {
 	fineStats              *statscollector.Collector
 	coarseStats            *statscollector.Collector
 	mockStats              *MockStats
+	shutdownStarted        atomic.Bool
+	stopNode               func() error
 }
 
 func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
@@ -70,6 +72,7 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 		fineStats:          statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
 		coarseStats:        statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
 	}
+	nodeUtils.stopNode = nodeUtils.StopNode
 
 	// Initialize tracer - needed in both normal and mock mode to track block heights
 	t, err := tracer.NewStoreTracer(options.TraceStore, options.CreateFifo)
@@ -305,7 +308,7 @@ func (s *NodeUtils) Stop(force bool) error {
 
 	// Ensure node is stopped too
 	log.Debug("stopping node")
-	if err := s.StopNode(); err != nil {
+	if err := s.stopNode(); err != nil {
 		log.Errorf("failed to stop node: %v", err)
 	}
 

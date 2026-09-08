@@ -46,7 +46,7 @@ func validateDerivedNameLengths(base, subject string, f nameFeatures) error {
 // derives (e.g. a CR named `foo-cg` collides with the CosmoGuard Service that `foo` derives), so the
 // two owners fight over the shared name. Every entry maps to a real derived resource:
 //   - node/group Services: -internal, -p2p, -grpc
-//   - secrets: -tls, -priv-key, -account, -cg-cluster
+//   - secrets: -tls, -priv-key, -account, -node-utils, -cg-cluster
 //   - configmaps / one-shot pods: -upgrades, -init-data, -config-generator, -genesis-init, -create-validator
 //   - tmkms: -tmkms, -tmkms-generate-identity, -tmkms-vault-upload
 //   - CosmoGuard: -cg, -cg-peer, -cg-cluster, -cg-dashboard, -cg-upstream
@@ -55,7 +55,7 @@ func validateDerivedNameLengths(base, subject string, f nameFeatures) error {
 //   - legacy .spec.validator: -validator (its child ChainNode "<set>-validator" and Services)
 var reservedNameSuffixes = []string{
 	"-internal", "-p2p", "-grpc",
-	"-tls", "-priv-key", "-account",
+	"-tls", "-priv-key", "-account", "-node-utils",
 	"-upgrades", "-init-data", "-config-generator", "-genesis-init", "-create-validator",
 	"-tmkms", "-tmkms-generate-identity", "-tmkms-vault-upload",
 	"-cg", "-cg-peer", "-cg-cluster", "-cg-dashboard", "-cg-upstream",

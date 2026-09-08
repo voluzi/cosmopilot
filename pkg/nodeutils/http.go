@@ -2,6 +2,8 @@ package nodeutils
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -27,7 +30,7 @@ func (s *NodeUtils) registerRoutes() {
 	s.router.HandleFunc("/tmkms_active", s.tmkmsConnectionActive).Methods(http.MethodGet)
 	s.router.HandleFunc("/signer_discovered", s.signerDiscoveredStatus).Methods(http.MethodGet)
 	s.router.HandleFunc("/snapshots", s.listSnapshots).Methods(http.MethodGet)
-	s.router.HandleFunc("/shutdown", s.shutdownServer).Methods(http.MethodGet, http.MethodPost)
+	s.router.HandleFunc("/shutdown", s.shutdownServer).Methods(http.MethodPost)
 	s.router.HandleFunc("/stats", s.stats).Methods(http.MethodGet)
 	s.router.HandleFunc("/stats/cpu", s.statsCPU).Methods(http.MethodGet)
 	s.router.HandleFunc("/stats/memory", s.statsMemory).Methods(http.MethodGet)
@@ -173,12 +176,38 @@ func (s *NodeUtils) signerDiscoveredStatus(w http.ResponseWriter, _ *http.Reques
 }
 
 func (s *NodeUtils) shutdownServer(w http.ResponseWriter, r *http.Request) {
-	log.Info("shutting down server")
-	if err := s.Stop(true); err != nil {
-		writeError(w, "error shutting down server: %v", err)
+	if !s.shutdownAuthorized(r) {
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+
+	w.WriteHeader(http.StatusAccepted)
+	if !s.shutdownStarted.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		log.Info("shutting down server")
+		if err := s.Stop(true); err != nil {
+			log.Errorf("error shutting down server: %v", err)
+		}
+	}()
+}
+
+func (s *NodeUtils) shutdownAuthorized(r *http.Request) bool {
+	if s.cfg == nil || !ValidShutdownToken(s.cfg.ShutdownToken) {
+		return false
+	}
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		return false
+	}
+	token, ok := strings.CutPrefix(values[0], "Bearer ")
+	if !ok || !ValidShutdownToken(token) {
+		return false
+	}
+	want := sha256.Sum256([]byte(s.cfg.ShutdownToken))
+	got := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
 
 func (s *NodeUtils) listSnapshots(w http.ResponseWriter, r *http.Request) {

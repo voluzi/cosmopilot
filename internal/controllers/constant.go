@@ -35,6 +35,7 @@ const (
 	AnnotationSnapshotExportCleanupAcknowledgement = "cosmopilot.voluzi.com/acknowledge-snapshot-export-cleanup"
 	AnnotationSnapshotIntegrityStatus              = "cosmopilot.voluzi.com/snapshot-integrity-status"
 	AnnotationPodSpecHash                          = "cosmopilot.voluzi.com/pod-spec-hash"
+	AnnotationNodeUtilsShutdownTokenHash           = "cosmopilot.voluzi.com/node-utils-shutdown-token-hash"
 	AnnotationChainNodeGeneration                  = "cosmopilot.voluzi.com/chainnode-generation"
 	AnnotationCosmosignerRollout                   = "cosmopilot.voluzi.com/cosmosigner-rollout"
 	AnnotationVPAResources                         = "cosmopilot.voluzi.com/vpa-resources"

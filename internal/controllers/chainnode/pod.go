@@ -78,11 +78,17 @@ func (r *Reconciler) getChainNodePod(ctx context.Context, chainNode *appsv1.Chai
 
 func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode *appsv1.ChainNode, configHash string) error {
 	logger := log.FromContext(ctx)
+	if err := r.ensureNodeUtilsShutdownSecret(ctx, chainNode); err != nil {
+		return err
+	}
 
 	// Prepare pod spec
 	pod, err := r.getPodSpec(ctx, chainNode, configHash)
 	if err != nil {
 		return fmt.Errorf("failed to get pod spec for %s: %w", chainNode.GetName(), err)
+	}
+	if err := r.setNodeUtilsShutdownTokenHash(ctx, chainNode, pod); err != nil {
+		return err
 	}
 
 	// Get current pod. If it does not exist create it and exit.
@@ -109,11 +115,12 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	// that this pod represents the current ChainNode generation.
 	logger.V(1).Info("checking for labels changes", "current", currentPod.Labels, "new", pod.Labels)
 	podSpecCurrent := !podSpecChanged(ctx, currentPod, pod)
+	nodeUtilsTokenCurrent := !nodeUtilsShutdownTokenChanged(currentPod, pod)
 	labelsChanged := !reflect.DeepEqual(currentPod.Labels, pod.Labels)
 	configCurrent := currentPod.Annotations[controllers.AnnotationConfigHash] == configHash
 	generation := pod.Annotations[controllers.AnnotationChainNodeGeneration]
 	generationChanged := currentPod.Annotations[controllers.AnnotationChainNodeGeneration] != generation
-	if podSpecCurrent && configCurrent && (labelsChanged || generationChanged) {
+	if podSpecCurrent && nodeUtilsTokenCurrent && configCurrent && (labelsChanged || generationChanged) {
 		logger.Info("updating pod metadata", "pod", pod.GetName())
 		modifiedPod := currentPod.DeepCopy()
 		if labelsChanged {
@@ -134,7 +141,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	if nodeUtilsIsInFailedState(currentPod) {
 		logger.Info("node-utils is in failed state", "pod", pod.GetName())
 		r.logFailedContainer(ctx, logger, currentPod, nodeUtilsContainerName)
-		return r.recreatePod(ctx, chainNode, pod, false)
+		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	}
 
 	// Handle terminal Pod failures before probing node-utils only when node-utils is unavailable.
@@ -144,7 +151,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		logger.Info("pod is in failed state", "pod", pod.GetName())
 		logFailedCosmosignerDiscoveryGate(logger, currentPod)
 		r.logFailedContainer(ctx, logger, currentPod, chainNode.Spec.App.App)
-		return r.recreatePod(ctx, chainNode, pod, false)
+		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	}
 
 	logger.V(1).Info("updating latest height")
@@ -194,7 +201,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		// node-utils starts with a clear flag and reads the upgrade as already skipped.
 		logger.Info("recreating pod to clear the latched node-utils upgrade flag",
 			"image", chainNode.GetAppImage())
-		return r.recreatePod(ctx, chainNode, pod, false)
+		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	}
 
 	if requiresUpgrade {
@@ -244,6 +251,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		if err != nil {
 			return fmt.Errorf("failed to get pod spec after config update for %s: %w", chainNode.GetName(), err)
 		}
+		if err := r.setNodeUtilsShutdownTokenHash(ctx, chainNode, pod); err != nil {
+			return err
+		}
 
 		if upgraded, err := r.upgradePod(ctx, chainNode, pod, upgrade.Image); err != nil {
 			r.recorder.Eventf(chainNode,
@@ -286,19 +296,24 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	if podInFailedState(chainNode, currentPod) {
 		logger.Info("pod is in failed state", "pod", pod.GetName())
 		r.logFailedContainer(ctx, logger, currentPod, chainNode.Spec.App.App)
-		return r.recreatePod(ctx, chainNode, pod, false)
+		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	}
 
 	// Re-create pod if spec changes
 	if !podSpecCurrent {
 		logger.Info("pod spec changed", "pod", pod.GetName())
-		return r.recreatePod(ctx, chainNode, pod, r.opts.DisruptionCheckEnabled)
+		return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
+	}
+
+	if !nodeUtilsTokenCurrent {
+		logger.Info("node-utils shutdown token changed", "pod", pod.GetName())
+		return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
 	}
 
 	// Re-create pod if config changed
 	if currentPod.Annotations[controllers.AnnotationConfigHash] != configHash {
 		logger.Info("config changed", "pod", pod.GetName())
-		return r.recreatePod(ctx, chainNode, pod, r.opts.DisruptionCheckEnabled)
+		return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
 	}
 
 	if err := r.setNodePhase(ctx, chainNode); err != nil {
@@ -476,7 +491,18 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode) co
 			Value: strconv.FormatInt(chainNode.Spec.Config.GetHaltHeight(), 10),
 		},
 	)
-	env = append(env, chainNode.Spec.Config.GetNodeUtilsEnv()...)
+	for _, userEnv := range chainNode.Spec.Config.GetNodeUtilsEnv() {
+		if userEnv.Name != nodeutils.ShutdownTokenEnvironmentVariable {
+			env = append(env, userEnv)
+		}
+	}
+	env = append(env, corev1.EnvVar{
+		Name: nodeutils.ShutdownTokenEnvironmentVariable,
+		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: chainNode.GetName() + nodeUtilsSecretSuffix},
+			Key:                  nodeutils.ShutdownTokenSecretKey,
+		}},
+	})
 
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
@@ -982,7 +1008,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	return pod, controllerutil.SetControllerReference(chainNode, pod, r.Scheme)
 }
 
-func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod, preventDisruption bool) error {
+func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNode, currentPod, desiredPod *corev1.Pod, preventDisruption bool) error {
 	logger := log.FromContext(ctx)
 
 	if preventDisruption {
@@ -1003,57 +1029,57 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 			}
 		}
 
-		logger.Info("attempting to acquire lock for recreating pod", "pod", pod.GetName(), "labels", disruptionLabels)
+		logger.Info("attempting to acquire lock for recreating pod", "pod", currentPod.GetName(), "labels", disruptionLabels)
 		lock := r.disruptionLocks.getLockForLabels(disruptionLabels)
 		lock.Lock()
 		defer lock.Unlock()
-		logger.Info("acquired lock for recreating pod", "pod", pod.GetName(), "labels", disruptionLabels)
+		logger.Info("acquired lock for recreating pod", "pod", currentPod.GetName(), "labels", disruptionLabels)
 
 		// If the pod is already unavailable, recreating it won't increase disruption
-		if isPodRunningAndReady(pod) {
-			logger.Info("checking pod disruption", "pod", pod.GetName(), "labels", disruptionLabels)
+		if isPodRunningAndReady(currentPod) {
+			logger.Info("checking pod disruption", "pod", currentPod.GetName(), "labels", disruptionLabels)
 			err := r.checkDisruptionAllowance(ctx, disruptionLabels)
 			if err != nil {
-				logger.Info("delaying pod recreation due to disruption limits", "pod", pod.GetName(), "reason", err.Error())
+				logger.Info("delaying pod recreation due to disruption limits", "pod", currentPod.GetName(), "reason", err.Error())
 				return nil
 			}
 		} else {
-			logger.Info("pod is already unavailable, skipping disruption check", "pod", pod.GetName())
+			logger.Info("pod is already unavailable, skipping disruption check", "pod", currentPod.GetName())
 		}
 	}
 
-	logger.Info("recreating pod", "pod", pod.GetName())
+	logger.Info("recreating pod", "pod", currentPod.GetName())
 	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRestarting); err != nil {
 		return fmt.Errorf("failed to update phase to Restarting for %s: %w", chainNode.GetName(), err)
 	}
 
-	logger.V(1).Info("deleting pod", "pod", pod.GetName())
-	deletePod := pod.DeepCopy()
+	logger.V(1).Info("deleting pod", "pod", currentPod.GetName())
+	deletePod := currentPod.DeepCopy()
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, deletePod)
 	if err := ph.Delete(ctx); err != nil {
-		return fmt.Errorf("failed to delete pod %s for recreation: %w", pod.GetName(), err)
+		return fmt.Errorf("failed to delete pod %s for recreation: %w", currentPod.GetName(), err)
 	}
 
 	// There is no need to wait for pod to be deleted if we are keeping it stopped
 	if mustStop, stopReason := chainNode.MustStop(); mustStop {
-		logger.Info("node must be stopped. not recreating pod", "pod", pod.GetName(), "reason", stopReason)
+		logger.Info("node must be stopped. not recreating pod", "pod", currentPod.GetName(), "reason", stopReason)
 
 		// Attempt to terminate node-utils container without waiting for grace-period. If there is an error
 		// we will just wait for the grace-period
 		if err := r.stopNodeUtilsContainer(ctx, chainNode); err != nil {
-			logger.Info("failed to stop node utils container", "pod", pod.GetName(), "error", err.Error())
+			logger.Info("failed to stop node utils container", "pod", currentPod.GetName(), "error", err.Error())
 		}
 		return r.setNodePhase(ctx, chainNode)
 	}
 
 	if err := ph.WaitForPodDeleted(ctx, timeoutPodDeleted); err != nil {
-		return fmt.Errorf("timeout waiting for pod %s to be deleted: %w", pod.GetName(), err)
+		return fmt.Errorf("timeout waiting for pod %s to be deleted: %w", currentPod.GetName(), err)
 	}
-	logger.V(1).Info("pod deleted", "pod", pod.GetName())
+	logger.V(1).Info("pod deleted", "pod", currentPod.GetName())
 
-	ph = k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
+	ph = k8s.NewPodHelper(r.ClientSet, r.RestConfig, desiredPod)
 	if err := ph.Create(ctx); err != nil {
-		return fmt.Errorf("failed to recreate pod %s: %w", pod.GetName(), err)
+		return fmt.Errorf("failed to recreate pod %s: %w", desiredPod.GetName(), err)
 	}
 
 	if err := ph.WaitForContainerStarted(ctx, timeoutPodRunning, chainNode.Spec.App.App); err != nil {
@@ -1063,7 +1089,7 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 			controllers.FormatErrorEvent("Pod failed to start", err),
 		)
 		_ = r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeError)
-		return fmt.Errorf("timeout waiting for recreated container %s to start in pod %s: %w", chainNode.Spec.App.App, pod.GetName(), err)
+		return fmt.Errorf("timeout waiting for recreated container %s to start in pod %s: %w", chainNode.Spec.App.App, desiredPod.GetName(), err)
 	}
 	r.recorder.Eventf(chainNode,
 		corev1.EventTypeNormal,
@@ -1182,6 +1208,11 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 		"new-spec", newSpecHash,
 	)
 	return newSpecHash != oldSpecHash
+}
+
+func nodeUtilsShutdownTokenChanged(existing, desired *corev1.Pod) bool {
+	return existing.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash] !=
+		desired.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash]
 }
 
 func orderVolumes(podSpec *corev1.PodSpec) {
@@ -1427,7 +1458,15 @@ func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
 }
 
 func (r *Reconciler) stopNodeUtilsContainer(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	return nodeutils.NewClient(chainNode.GetNodeFQDN()).ShutdownNodeUtilsServer(ctx)
+	token, err := r.loadNodeUtilsShutdownToken(ctx, chainNode)
+	if err != nil {
+		return err
+	}
+	factory := r.shutdownClientFactory
+	if factory == nil {
+		factory = defaultNodeUtilsShutdownClientFactory
+	}
+	return factory(chainNode.GetNodeFQDN(), token).ShutdownNodeUtilsServer(ctx)
 }
 
 func isPodTerminating(pod *corev1.Pod) bool {

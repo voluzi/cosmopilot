@@ -46,6 +46,7 @@ type Options struct {
 	SignerPeerDNS  string
 	HaltHeight     int64
 	MockMode       bool
+	ShutdownToken  string
 }
 
 type Option func(*Options)
@@ -113,5 +114,12 @@ func WithHaltHeight(height int64) Option {
 func WithMockMode(enable bool) Option {
 	return func(opts *Options) {
 		opts.MockMode = enable
+	}
+}
+
+// WithShutdownToken configures the credential required by the shutdown endpoint.
+func WithShutdownToken(token string) Option {
+	return func(opts *Options) {
+		opts.ShutdownToken = token
 	}
 }

@@ -35,6 +35,9 @@ func TestDefaultOptions(t *testing.T) {
 	if opts.HaltHeight != 0 {
 		t.Errorf("expected HaltHeight 0, got %v", opts.HaltHeight)
 	}
+	if opts.ShutdownToken != "" {
+		t.Errorf("expected ShutdownToken to be empty, got a configured value")
+	}
 }
 
 func TestWithHost(t *testing.T) {
@@ -115,6 +118,15 @@ func TestWithHaltHeight(t *testing.T) {
 
 	if opts.HaltHeight != 100000 {
 		t.Errorf("expected HaltHeight 100000, got %d", opts.HaltHeight)
+	}
+}
+
+func TestWithShutdownToken(t *testing.T) {
+	opts := defaultOptions()
+	WithShutdownToken(testShutdownToken)(opts)
+
+	if opts.ShutdownToken != testShutdownToken {
+		t.Error("expected shutdown token option to be set")
 	}
 }
 
