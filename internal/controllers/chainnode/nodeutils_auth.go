@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 
@@ -118,11 +119,50 @@ func (r *Reconciler) createAndBindNodeUtilsShutdownCredential(ctx context.Contex
 	annotations[controllers.AnnotationNodeUtilsShutdownSecretUID] = string(secret.GetUID())
 	fresh.SetAnnotations(annotations)
 	if err := r.Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return nodeUtilsShutdownCredential{}, fmt.Errorf("bind node-utils shutdown Secret %s/%s to ChainNode: %w", secret.Namespace, secret.Name, err)
+		return nodeUtilsShutdownCredential{}, r.handleNodeUtilsShutdownBindingError(ctx, chainNode, secret, err)
 	}
 	chainNode.SetAnnotations(fresh.GetAnnotations())
 	chainNode.SetResourceVersion(fresh.GetResourceVersion())
 	return nodeUtilsShutdownCredential{name: secret.GetName(), uid: secret.GetUID(), token: token}, nil
+}
+
+func (r *Reconciler) handleNodeUtilsShutdownBindingError(ctx context.Context, chainNode *appsv1.ChainNode, secret *corev1.Secret, patchErr error) error {
+	bindingErr := fmt.Errorf("bind node-utils shutdown Secret %s/%s to ChainNode: %w", secret.Namespace, secret.Name, patchErr)
+	key := client.ObjectKeyFromObject(chainNode)
+	live := &appsv1.ChainNode{}
+	if err := r.reservationReader().Get(ctx, key, live); err != nil {
+		return errors.Join(bindingErr, fmt.Errorf("verify ChainNode %s/%s after node-utils shutdown Secret binding error: %w", key.Namespace, key.Name, err))
+	}
+	if live.GetUID() != chainNode.GetUID() {
+		return errors.Join(bindingErr, fmt.Errorf("verify ChainNode %s/%s after node-utils shutdown Secret binding error: UID changed", key.Namespace, key.Name))
+	}
+	name, uid, bound, err := nodeUtilsShutdownBinding(live)
+	if err != nil {
+		return errors.Join(bindingErr, fmt.Errorf("verify ChainNode %s/%s after node-utils shutdown Secret binding error: %w", key.Namespace, key.Name, err))
+	}
+	if bound && (name == secret.GetName() || uid == secret.GetUID()) {
+		return bindingErr
+	}
+	if !nodeUtilsShutdownBindingDefinitelyRejected(patchErr) {
+		return bindingErr
+	}
+	secretUID := secret.GetUID()
+	if secretUID == "" {
+		return errors.Join(bindingErr, fmt.Errorf("delete unbound node-utils shutdown Secret %s/%s after binding rejection: Secret has no UID", secret.Namespace, secret.Name))
+	}
+	if err := r.Delete(ctx, secret, client.Preconditions{UID: &secretUID}); err != nil && !apierrors.IsNotFound(err) {
+		return errors.Join(bindingErr, fmt.Errorf("delete unbound node-utils shutdown Secret %s/%s after binding rejection: %w", secret.Namespace, secret.Name, err))
+	}
+	return bindingErr
+}
+
+func nodeUtilsShutdownBindingDefinitelyRejected(err error) bool {
+	return apierrors.IsConflict(err) ||
+		apierrors.IsForbidden(err) ||
+		apierrors.IsUnauthorized(err) ||
+		apierrors.IsInvalid(err) ||
+		apierrors.IsBadRequest(err) ||
+		apierrors.IsNotFound(err)
 }
 
 func nodeUtilsShutdownBinding(object metav1.Object) (string, types.UID, bool, error) {

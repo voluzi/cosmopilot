@@ -73,8 +73,9 @@ func ownedNodeUtilsSecret(t *testing.T, scheme *runtime.Scheme, owner *appsv1.Ch
 
 type secretUIDClient struct {
 	client.Client
-	nextUID, secretCreates int
-	chainNodePatchErr      error
+	nextUID, secretCreates      int
+	chainNodePatchErr           error
+	commitChainNodePatchOnError bool
 }
 
 func (c *secretUIDClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -88,9 +89,66 @@ func (c *secretUIDClient) Create(ctx context.Context, obj client.Object, opts ..
 
 func (c *secretUIDClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 	if _, ok := obj.(*appsv1.ChainNode); ok && c.chainNodePatchErr != nil {
+		if c.commitChainNodePatchOnError {
+			if err := c.Client.Patch(ctx, obj, patch, opts...); err != nil {
+				return err
+			}
+		}
 		return c.chainNodePatchErr
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+type afterInitialChainNodeReadReader struct {
+	client.Reader
+	chainNodeReads int
+	afterInitial   func(*appsv1.ChainNode) error
+}
+
+func (r *afterInitialChainNodeReadReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := r.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	chainNode, ok := obj.(*appsv1.ChainNode)
+	if !ok {
+		return nil
+	}
+	r.chainNodeReads++
+	if r.chainNodeReads > 1 && r.afterInitial != nil {
+		return r.afterInitial(chainNode)
+	}
+	return nil
+}
+
+type replaceSecretBeforeDeleteClient struct {
+	client.Client
+	replacement *corev1.Secret
+	deleteUID   types.UID
+}
+
+func (c *replaceSecretBeforeDeleteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return c.Client.Delete(ctx, obj, opts...)
+	}
+	deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+	if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+		c.deleteUID = *deleteOptions.Preconditions.UID
+	}
+	current := &corev1.Secret{}
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(secret), current); err != nil {
+		return err
+	}
+	if err := c.Client.Delete(ctx, current); err != nil {
+		return err
+	}
+	if err := c.Client.Create(ctx, c.replacement.DeepCopy()); err != nil {
+		return err
+	}
+	if c.deleteUID != c.replacement.GetUID() {
+		return apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, secret.Name, errors.New("UID precondition did not match"))
+	}
+	return c.Client.Delete(ctx, secret, opts...)
 }
 
 type staleSecretCacheClient struct{ client.Client }
@@ -282,6 +340,160 @@ func TestEnsureNodeUtilsShutdownCredentialRejectsStaleCallerBeforeCreate(t *test
 	}
 }
 
+func TestEnsureNodeUtilsShutdownCredentialCleansUpAfterDefinitePatchRejection(t *testing.T) {
+	owner := nodeUtilsAuthTestNode()
+	r, writer, backing := newNodeUtilsAuthReconciler(t, owner)
+	writer.chainNodePatchErr = apierrors.NewConflict(schema.GroupResource{Group: appsv1.GroupVersion.Group, Resource: "chainnodes"}, owner.Name, errors.New("test conflict"))
+	r.shutdownTokenGenerator = func() (string, error) { return testShutdownToken, nil }
+
+	for range 2 {
+		_, err := r.ensureNodeUtilsShutdownCredential(t.Context(), owner)
+		require.Error(t, err)
+		assert.True(t, apierrors.IsConflict(err))
+		secrets := &corev1.SecretList{}
+		require.NoError(t, backing.List(t.Context(), secrets))
+		assert.Empty(t, secrets.Items)
+	}
+	assert.Equal(t, 2, writer.secretCreates)
+	assert.Empty(t, owner.Annotations)
+}
+
+func TestEnsureNodeUtilsShutdownCredentialPreservesSecretAfterAmbiguousPatchError(t *testing.T) {
+	tests := []struct {
+		name     string
+		patchErr error
+	}{
+		{name: "transport", patchErr: errors.New("connection reset")},
+		{name: "cancellation", patchErr: context.Canceled},
+		{name: "timeout", patchErr: context.DeadlineExceeded},
+		{name: "server timeout", patchErr: apierrors.NewServerTimeout(schema.GroupResource{Resource: "chainnodes"}, "patch", 1)},
+		{name: "internal error", patchErr: apierrors.NewInternalError(errors.New("test internal error"))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := nodeUtilsAuthTestNode()
+			r, writer, backing := newNodeUtilsAuthReconciler(t, owner)
+			writer.chainNodePatchErr = tt.patchErr
+			r.shutdownTokenGenerator = func() (string, error) { return testShutdownToken, nil }
+
+			_, err := r.ensureNodeUtilsShutdownCredential(t.Context(), owner)
+
+			require.Error(t, err)
+			secrets := &corev1.SecretList{}
+			require.NoError(t, backing.List(t.Context(), secrets))
+			assert.Len(t, secrets.Items, 1)
+			assert.Empty(t, owner.Annotations)
+		})
+	}
+}
+
+func TestEnsureNodeUtilsShutdownCredentialPreservesCommittedBindingAfterPatchError(t *testing.T) {
+	owner := nodeUtilsAuthTestNode()
+	r, writer, backing := newNodeUtilsAuthReconciler(t, owner)
+	writer.chainNodePatchErr = errors.New("connection reset after commit")
+	writer.commitChainNodePatchOnError = true
+	r.shutdownTokenGenerator = func() (string, error) { return testShutdownToken, nil }
+
+	_, err := r.ensureNodeUtilsShutdownCredential(t.Context(), owner)
+	require.Error(t, err)
+	assert.Empty(t, owner.Annotations)
+	live := &appsv1.ChainNode{}
+	require.NoError(t, backing.Get(t.Context(), client.ObjectKeyFromObject(owner), live))
+	name, uid, bound, err := nodeUtilsShutdownBinding(live)
+	require.NoError(t, err)
+	require.True(t, bound)
+	assert.Equal(t, nodeUtilsShutdownSecretNameForToken(testShutdownToken), name)
+	assert.Equal(t, types.UID("secret-uid-1"), uid)
+
+	reused, err := r.ensureNodeUtilsShutdownCredential(t.Context(), live)
+	require.NoError(t, err)
+	assert.Equal(t, name, reused.name)
+	assert.Equal(t, uid, reused.uid)
+	assert.Equal(t, testShutdownToken, reused.token)
+	assert.Equal(t, 1, writer.secretCreates)
+}
+
+func TestEnsureNodeUtilsShutdownCredentialPreservesSecretWhenPatchVerificationFails(t *testing.T) {
+	verificationErr := errors.New("verification read failed")
+	tests := []struct {
+		name         string
+		afterInitial func(*appsv1.ChainNode) error
+		wantErr      error
+		wantContains string
+	}{
+		{
+			name: "read error",
+			afterInitial: func(*appsv1.ChainNode) error {
+				return verificationErr
+			},
+			wantErr: verificationErr,
+		},
+		{
+			name: "chainnode uid changed",
+			afterInitial: func(chainNode *appsv1.ChainNode) error {
+				chainNode.UID = "replacement-node-uid"
+				return nil
+			},
+			wantContains: "UID changed",
+		},
+		{
+			name: "partial binding",
+			afterInitial: func(chainNode *appsv1.ChainNode) error {
+				chainNode.Annotations = map[string]string{
+					controllers.AnnotationNodeUtilsShutdownSecretName: nodeUtilsShutdownSecretNameForToken(testShutdownToken),
+				}
+				return nil
+			},
+			wantContains: "partial or malformed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := nodeUtilsAuthTestNode()
+			r, writer, backing := newNodeUtilsAuthReconciler(t, owner)
+			reader := &afterInitialChainNodeReadReader{Reader: backing, afterInitial: tt.afterInitial}
+			r.APIReader = reader
+			writer.chainNodePatchErr = apierrors.NewConflict(schema.GroupResource{Group: appsv1.GroupVersion.Group, Resource: "chainnodes"}, owner.Name, errors.New("test conflict"))
+			r.shutdownTokenGenerator = func() (string, error) { return testShutdownToken, nil }
+
+			_, err := r.ensureNodeUtilsShutdownCredential(t.Context(), owner)
+
+			require.Error(t, err)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+			}
+			if tt.wantContains != "" {
+				assert.ErrorContains(t, err, tt.wantContains)
+			}
+			secrets := &corev1.SecretList{}
+			require.NoError(t, backing.List(t.Context(), secrets))
+			assert.Len(t, secrets.Items, 1)
+		})
+	}
+}
+
+func TestEnsureNodeUtilsShutdownCredentialDeleteUsesUIDPrecondition(t *testing.T) {
+	owner := nodeUtilsAuthTestNode()
+	scheme := nodeUtilsAuthTestScheme(t)
+	backing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner).Build()
+	replacement := ownedNodeUtilsSecret(t, scheme, owner, testShutdownToken, "replacement-secret-uid")
+	replacer := &replaceSecretBeforeDeleteClient{Client: backing, replacement: replacement}
+	writer := &secretUIDClient{
+		Client:            replacer,
+		chainNodePatchErr: apierrors.NewConflict(schema.GroupResource{Group: appsv1.GroupVersion.Group, Resource: "chainnodes"}, owner.Name, errors.New("test conflict")),
+	}
+	r := &Reconciler{Client: writer, APIReader: backing, Scheme: scheme, shutdownTokenGenerator: func() (string, error) { return testShutdownToken, nil }}
+
+	_, err := r.ensureNodeUtilsShutdownCredential(t.Context(), owner)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "delete unbound node-utils shutdown Secret")
+	assert.Equal(t, types.UID("secret-uid-1"), replacer.deleteUID)
+	stored := &corev1.Secret{}
+	require.NoError(t, backing.Get(t.Context(), client.ObjectKeyFromObject(replacement), stored))
+	assert.Equal(t, replacement.UID, stored.UID)
+}
+
 func TestEnsurePodDoesNotCreatePodWhenCredentialBindingPatchFails(t *testing.T) {
 	owner := nodeUtilsAuthTestNode()
 	r, writer, backing := newNodeUtilsAuthReconciler(t, owner)
@@ -291,6 +503,9 @@ func TestEnsurePodDoesNotCreatePodWhenCredentialBindingPatchFails(t *testing.T) 
 	pods := &corev1.PodList{}
 	require.NoError(t, backing.List(context.Background(), pods))
 	assert.Empty(t, pods.Items)
+	secrets := &corev1.SecretList{}
+	require.NoError(t, backing.List(context.Background(), secrets))
+	assert.Empty(t, secrets.Items)
 }
 
 func TestBuildNodeUtilsInitContainerUsesBoundCredentialEnvironment(t *testing.T) {

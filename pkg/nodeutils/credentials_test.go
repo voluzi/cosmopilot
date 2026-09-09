@@ -1,7 +1,6 @@
 package nodeutils
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,13 +35,6 @@ func TestMissingShutdownCredentialRemainsValidStandaloneConfiguration(t *testing
 	require.NoError(t, validateShutdownCredential("", ""))
 }
 
-func TestNewAcceptsMatchingShutdownCredential(t *testing.T) {
-	_, err := New("chaind",
-		WithShutdownToken(testShutdownToken),
-		WithExpectedShutdownTokenHash(ShutdownTokenHash(testShutdownToken)),
-		WithTraceStore("/path/that/must/not/exist/trace.fifo"),
-	)
-
-	require.Error(t, err)
-	assert.NotContains(t, strings.ToLower(err.Error()), "shutdown credential")
+func TestValidateShutdownCredentialAcceptsMatchingToken(t *testing.T) {
+	require.NoError(t, validateShutdownCredential(testShutdownToken, ShutdownTokenHash(testShutdownToken)))
 }
