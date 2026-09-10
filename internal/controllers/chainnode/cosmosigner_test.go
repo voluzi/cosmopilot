@@ -1535,7 +1535,7 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 				opts:   &controllers.ControllerRunOptions{NodeUtilsImage: nodeUtilsImage},
 			}
 
-			pod, err := r.getPodSpec(context.Background(), tc.chainNode, "config-hash")
+			pod, err := r.getPodSpec(context.Background(), tc.chainNode, "config-hash", "test-shutdown-secret")
 			require.NoError(t, err)
 
 			var gate *corev1.Container
@@ -1563,7 +1563,7 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 				corev1.ResourceCPU: resource.MustParse("25m"), corev1.ResourceMemory: resource.MustParse("64Mi"),
 			}}
 			tc.chainNode.Spec.Config = &appsv1.Config{CosmosignerDiscoveryResources: &custom}
-			configuredPod, err := r.getPodSpec(context.Background(), tc.chainNode, "config-hash")
+			configuredPod, err := r.getPodSpec(context.Background(), tc.chainNode, "config-hash", "test-shutdown-secret")
 			require.NoError(t, err)
 			var configuredGate *corev1.Container
 			for i := range configuredPod.Spec.InitContainers {
@@ -1660,7 +1660,7 @@ func TestNodeUtilsSignerPeerDNSRendering(t *testing.T) {
 				opts:   &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
 			}
 
-			pod, err := r.getPodSpec(context.Background(), tt.node, "config-hash")
+			pod, err := r.getPodSpec(context.Background(), tt.node, "config-hash", "test-shutdown-secret")
 			require.NoError(t, err)
 			var nodeUtils *corev1.Container
 			for i := range pod.Spec.InitContainers {

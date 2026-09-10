@@ -54,12 +54,17 @@ type NodeUtils struct {
 	fineStats              *statscollector.Collector
 	coarseStats            *statscollector.Collector
 	mockStats              *MockStats
+	shutdownStarted        atomic.Bool
+	stopNode               func() error
 }
 
 func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	options := defaultOptions()
 	for _, opt := range opts {
 		opt(options)
+	}
+	if err := validateShutdownCredential(options.ShutdownToken, options.ExpectedShutdownTokenHash); err != nil {
+		return nil, err
 	}
 
 	nodeUtils := &NodeUtils{
@@ -70,6 +75,7 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 		fineStats:          statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
 		coarseStats:        statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
 	}
+	nodeUtils.stopNode = nodeUtils.StopNode
 
 	// Initialize tracer - needed in both normal and mock mode to track block heights
 	t, err := tracer.NewStoreTracer(options.TraceStore, options.CreateFifo)
@@ -115,6 +121,22 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	}
 
 	return nodeUtils, nil
+}
+
+func validateShutdownCredential(token, expectedHash string) error {
+	if token == "" && expectedHash == "" {
+		return nil
+	}
+	if !ValidShutdownToken(token) {
+		return fmt.Errorf("shutdown credential token is missing or malformed")
+	}
+	if !ValidShutdownTokenHash(expectedHash) {
+		return fmt.Errorf("shutdown credential expected hash is missing or malformed")
+	}
+	if ShutdownTokenHash(token) != expectedHash {
+		return fmt.Errorf("shutdown credential does not match its expected hash")
+	}
+	return nil
 }
 
 func trustedSignerPeer(peer net.IP, addresses []net.IPAddr) bool {
@@ -255,7 +277,7 @@ func (s *NodeUtils) Start() error {
 					} else if heightUpdated {
 						log.WithField("height", height).Warn("stopping node for upgrade")
 						s.requiresUpgrade.Store(true)
-						if err := s.StopNode(); err != nil {
+						if err := s.stopNode(); err != nil {
 							log.Errorf("failed to stop node: %v", err)
 						} else {
 							return
@@ -305,7 +327,7 @@ func (s *NodeUtils) Stop(force bool) error {
 
 	// Ensure node is stopped too
 	log.Debug("stopping node")
-	if err := s.StopNode(); err != nil {
+	if err := s.stopNode(); err != nil {
 		log.Errorf("failed to stop node: %v", err)
 	}
 

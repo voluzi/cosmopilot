@@ -66,17 +66,19 @@ type Reconciler struct {
 	snapshotClientSet kubernetes.Interface
 	// cosmosignerClientSet overrides ClientSet for the one-shot cosmosigner pods, so the
 	// import/pubkey pod protocol can be exercised without a cluster. Nil in production.
-	cosmosignerClientSet kubernetes.Interface
-	RestConfig           *rest.Config
-	Scheme               *runtime.Scheme
-	configCache          *ttlcache.Cache[string, map[string]interface{}]
-	nodeClients          *ttlcache.Cache[string, *chainutils.Client]
-	recorder             record.EventRecorder
-	opts                 *controllers.ControllerRunOptions
-	disruptionLocks      *lockManager
-	configLocks          *configLockManager
-	statsClientFactory   StatsClientFactory
-	snapshotDeleteNow    func() time.Time
+	cosmosignerClientSet   kubernetes.Interface
+	RestConfig             *rest.Config
+	Scheme                 *runtime.Scheme
+	configCache            *ttlcache.Cache[string, map[string]interface{}]
+	nodeClients            *ttlcache.Cache[string, *chainutils.Client]
+	recorder               record.EventRecorder
+	opts                   *controllers.ControllerRunOptions
+	disruptionLocks        *lockManager
+	configLocks            *configLockManager
+	statsClientFactory     StatsClientFactory
+	shutdownClientFactory  nodeUtilsShutdownClientFactory
+	shutdownTokenGenerator func() (string, error)
+	snapshotDeleteNow      func() time.Time
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {
@@ -106,18 +108,19 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 	})
 
 	r := &Reconciler{
-		Client:             mgr.GetClient(),
-		APIReader:          mgr.GetAPIReader(),
-		ClientSet:          clientSet,
-		RestConfig:         mgr.GetConfig(),
-		Scheme:             mgr.GetScheme(),
-		configCache:        cfgCache,
-		nodeClients:        clientsCache,
-		recorder:           mgr.GetEventRecorderFor("chainnode-controller"),
-		opts:               opts,
-		disruptionLocks:    newLockManager(),
-		configLocks:        newConfigLockManager(),
-		statsClientFactory: DefaultStatsClientFactory,
+		Client:                mgr.GetClient(),
+		APIReader:             mgr.GetAPIReader(),
+		ClientSet:             clientSet,
+		RestConfig:            mgr.GetConfig(),
+		Scheme:                mgr.GetScheme(),
+		configCache:           cfgCache,
+		nodeClients:           clientsCache,
+		recorder:              mgr.GetEventRecorderFor("chainnode-controller"),
+		opts:                  opts,
+		disruptionLocks:       newLockManager(),
+		configLocks:           newConfigLockManager(),
+		statsClientFactory:    DefaultStatsClientFactory,
+		shutdownClientFactory: defaultNodeUtilsShutdownClientFactory,
 	}
 	if err := r.setupWithManager(mgr); err != nil {
 		return nil, err
@@ -529,6 +532,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		For(&appsv1.ChainNode{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
 		Owns(&corev1.Service{}).
 		Owns(&k8sappsv1.StatefulSet{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).

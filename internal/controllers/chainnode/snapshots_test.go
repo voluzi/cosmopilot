@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -87,6 +90,52 @@ func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testin
 	job.Spec.Template.Spec.InitContainers[1].Env[1].ValueFrom.SecretKeyRef.Name = "mutated"
 	assert.Equal(t, "app-secret", chainNode.Spec.Config.Env[1].ValueFrom.SecretKeyRef.Name)
 	assert.Empty(t, job.Spec.Template.Spec.Containers[0].Env)
+}
+
+func TestCreateSnapshotStopsUnboundExistingNodeBeforeCredentialRollout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			StopNode: ptr.To(true),
+		}}},
+		Status: appsv1.ChainNodeStatus{LatestHeight: 123},
+	}
+	podDeleted := false
+	kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodDelete {
+			podDeleted = true
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Success"}`))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`))}, nil
+	})}
+	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient)
+	require.NoError(t, err)
+	reconciler := &Reconciler{
+		Client:    fakeclient.NewClientBuilder().WithScheme(scheme).Build(),
+		ClientSet: clientSet,
+		Scheme:    scheme,
+	}
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader("123")),
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	snapshot, err := reconciler.createSnapshot(context.Background(), chainNode)
+
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.True(t, podDeleted)
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
 }
 
 func TestGetTarballExportProvider(t *testing.T) {

@@ -94,6 +94,10 @@ These ports are exposed on the node Pod and its Service.
 | `privvalidator` | `26659` | Private validator listen address. |
 | `node-utils` | `8000` | Internal `node-utils` sidecar API (operator use only). |
 
+`POST /shutdown` requires a per-`ChainNode` credential managed by the operator; read-only
+probe endpoints remain unauthenticated. All containers in the shared-process Pod are one trust
+boundary: peer containers can already inspect or signal the node process and must be trusted.
+
 For EVM-enabled chains, the following are added:
 
 | Port name | Port | Description |

@@ -54,6 +54,10 @@ func TestValidateDerivedNameLengthsBoundary(t *testing.T) {
 }
 
 func TestValidateReservedResourceName(t *testing.T) {
+	if err := ValidateReservedResourceName("foo-node-utils", true); err != nil {
+		t.Fatalf("historically valid metadata.name ending in -node-utils must remain available: %v", err)
+	}
+
 	// Every reserved suffix is rejected on create.
 	for _, suffix := range reservedNameSuffixes {
 		name := "foo" + suffix

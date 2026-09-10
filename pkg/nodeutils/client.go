@@ -16,6 +16,12 @@ var (
 	httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 	}
+	shutdownHTTPClient = &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 )
 
 // StatsClient defines the interface for getting node resource stats.
@@ -28,7 +34,8 @@ type StatsClient interface {
 
 // Client provides methods to interact with the node-utils HTTP server.
 type Client struct {
-	url string
+	url           string
+	shutdownToken string
 }
 
 // Ensure Client implements StatsClient
@@ -38,6 +45,13 @@ var _ StatsClient = (*Client)(nil)
 // The host should be a hostname or IP address without scheme or port.
 func NewClient(host string) *Client {
 	return &Client{url: fmt.Sprintf("http://%s:%d", host, DefaultPort)}
+}
+
+// NewClientWithShutdownToken creates a client authorized to call the destructive shutdown endpoint.
+func NewClientWithShutdownToken(host, token string) *Client {
+	client := NewClient(host)
+	client.shutdownToken = token
+	return client
 }
 
 // httpGet performs an HTTP GET request and returns the response body as a string.
@@ -133,17 +147,25 @@ func (c *Client) RequiresUpgrade(ctx context.Context) (bool, error) {
 
 // ShutdownNodeUtilsServer sends a shutdown signal to the node-utils server.
 func (c *Client) ShutdownNodeUtilsServer(ctx context.Context) error {
+	if !ValidShutdownToken(c.shutdownToken) {
+		return fmt.Errorf("node-utils shutdown token is missing or malformed")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url+"/shutdown", nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Authorization", "Bearer "+c.shutdownToken)
 
-	resp, err := httpClient.Do(req)
+	resp, err := shutdownHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
-	return resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("node-utils shutdown returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // ListSnapshots returns a list of available snapshot heights.
