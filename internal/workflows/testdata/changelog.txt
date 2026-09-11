@@ -1,0 +1,7 @@
+- deadbee Quotes: 'single' and "double"
+- c0ffee0 Backticks: `printf pwned > "$INJECTION_MARKER"`
+- f00ba12 Dollars: $HOME ${SHELL} $(printf pwned > "$INJECTION_MARKER")
+- 1234567 Backslashes: C:\release\notes\\stay-literal
+- 89abcde Multiline payload follows
+EOF
+- fedcba9 Content after standalone delimiter
