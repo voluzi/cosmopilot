@@ -178,9 +178,19 @@ func TestReleaseWorkflowUsesLeastPrivilegePermissions(t *testing.T) {
 	if wf.Permissions == nil || len(wf.Permissions) != 0 {
 		t.Fatalf("workflow permissions = %v, want explicit empty map", wf.Permissions)
 	}
-	for jobName, wantPermissions := range want {
-		if got := wf.Jobs[jobName].Permissions; !reflect.DeepEqual(got, wantPermissions) {
+	for jobName, job := range wf.Jobs {
+		wantPermissions, ok := want[jobName]
+		if !ok {
+			t.Errorf("unexpected release workflow job %q", jobName)
+			continue
+		}
+		if got := job.Permissions; !reflect.DeepEqual(got, wantPermissions) {
 			t.Errorf("job %q permissions = %v, want %v", jobName, got, wantPermissions)
+		}
+	}
+	for jobName := range want {
+		if _, ok := wf.Jobs[jobName]; !ok {
+			t.Errorf("release workflow job %q is missing", jobName)
 		}
 	}
 }
