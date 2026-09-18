@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,6 +120,18 @@ func snapshotExportUploading(chainNode *appsv1.ChainNode, snapshot *snapshotv1.V
 	export := snapshotExportFor(chainNode, snapshot)
 	return export != nil && export.Phase == appsv1.SnapshotExportPhaseUploading &&
 		export.Destination.Provider != appsv1.SnapshotExportProviderUnknown
+}
+
+// snapshotExportInFlight reports whether a tarball upload for this snapshot may still be running.
+// Retention must not delete the VolumeSnapshot while it is the source of the upload PVC. The phase
+// check is deliberately broader than snapshotExportUploading: a record whose destination could not
+// be resolved still marks an upload we must not cut short.
+func snapshotExportInFlight(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {
+	if snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true) {
+		return true
+	}
+	export := snapshotExportFor(chainNode, snapshot)
+	return export != nil && export.Phase == appsv1.SnapshotExportPhaseUploading
 }
 
 func snapshotExportCleanupAcknowledged(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {

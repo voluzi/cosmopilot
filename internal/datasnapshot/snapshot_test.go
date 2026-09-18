@@ -490,6 +490,170 @@ func TestDeleteSnapshotForPreviousExporterUploadUsesListedSourceAfterJobVanishes
 	assert.Equal(t, string(pvc.UID), job.Labels[labelCleanupPVCUID])
 }
 
+func TestRetainSnapshotForUploadLeavesRunningUploadUntouched(t *testing.T) {
+	owner := testJobOwner()
+	upload, pvc := testOrphanUploadResources(owner, s3Exporter)
+	client := fake.NewSimpleClientset(upload, pvc)
+
+	status, err := RetainSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: upload.UID, Purpose: SnapshotJobUpload, Exporter: s3Exporter,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotActive, status)
+
+	// An upload that outlived its volumesnapshot must still be allowed to finish.
+	_, err = client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), upload.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	_, err = client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "create", action.GetVerb())
+		assert.NotEqual(t, "delete", action.GetVerb())
+	}
+}
+
+func TestRetainSnapshotForUploadCleansOnlyLocalResources(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		conditions []batchv1.JobCondition
+		want       SnapshotStatus
+	}{
+		{
+			name:       "completed upload",
+			conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+			want:       SnapshotSucceeded,
+		},
+		{
+			name:       "failed upload",
+			conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+			want:       SnapshotFailed,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			owner := testJobOwner()
+			upload, pvc := testOrphanUploadResources(owner, s3Exporter)
+			upload.Status.Conditions = test.conditions
+			client := fake.NewSimpleClientset(upload, pvc)
+
+			status, err := RetainSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
+				Name: "snapshot", UID: upload.UID, Purpose: SnapshotJobUpload, Exporter: s3Exporter,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, status)
+
+			// Local resources go; nothing is ever created, so the remote object is never touched.
+			_, err = client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), upload.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err))
+			deletes := 0
+			for _, action := range client.Actions() {
+				assert.NotEqual(t, "create", action.GetVerb(), "retention must never schedule a deletion Job")
+				if action.GetVerb() == "delete" {
+					deletes++
+				}
+			}
+			assert.Equal(t, 2, deletes)
+		})
+	}
+}
+
+func TestRetainSnapshotForUploadRejectsMismatchedIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mutate  func(*batchv1.Job)
+		listed  func(*SnapshotJob)
+		wantErr string
+	}{
+		{
+			name:    "replaced upload job",
+			listed:  func(job *SnapshotJob) { job.UID = "stale-upload-uid" },
+			wantErr: "expected listed UID",
+		},
+		{
+			name:    "foreign owner",
+			mutate:  func(job *batchv1.Job) { job.OwnerReferences = nil },
+			wantErr: "not controlled by snapshot owner",
+		},
+		{
+			name:    "deletion job",
+			mutate:  func(job *batchv1.Job) { job.Labels[labelType] = typeDelete },
+			wantErr: "expected \"upload\"",
+		},
+		{
+			name:    "different exporter",
+			mutate:  func(job *batchv1.Job) { job.Labels[labelExporter] = gcsExporter },
+			wantErr: "expected \"s3-exporter\"",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			owner := testJobOwner()
+			upload, pvc := testOrphanUploadResources(owner, s3Exporter)
+			upload.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}
+			if test.mutate != nil {
+				test.mutate(upload)
+			}
+			listed := SnapshotJob{
+				Name: "snapshot", UID: upload.UID, Purpose: SnapshotJobUpload, Exporter: s3Exporter,
+			}
+			if test.listed != nil {
+				test.listed(&listed)
+			}
+			client := fake.NewSimpleClientset(upload, pvc)
+
+			_, err := RetainSnapshotForUpload(context.Background(), client, owner, listed)
+			require.ErrorContains(t, err, test.wantErr)
+
+			// Nothing is removed when identity cannot be proven.
+			_, err = client.BatchV1().Jobs(owner.Namespace).Get(context.Background(), upload.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			_, err = client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestRetainSnapshotForUploadRejectsNonUploadPurpose(t *testing.T) {
+	owner := testJobOwner()
+	client := fake.NewSimpleClientset()
+
+	_, err := RetainSnapshotForUpload(context.Background(), client, owner, testDeletionSnapshotJob("snapshot"))
+	require.ErrorContains(t, err, "expected \"upload\"")
+}
+
+func TestRetainSnapshotForUploadRemovesPVCLeftBehindByVanishedJob(t *testing.T) {
+	owner := testJobOwner()
+	upload, pvc := testOrphanUploadResources(owner, s3Exporter)
+	client := fake.NewSimpleClientset(pvc)
+
+	status, err := RetainSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: upload.UID, Purpose: SnapshotJobUpload, Exporter: s3Exporter,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, SnapshotNotFound, status)
+	_, err = client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestRetainSnapshotForUploadLeavesForeignPVCAlone(t *testing.T) {
+	owner := testJobOwner()
+	upload, pvc := testOrphanUploadResources(owner, s3Exporter)
+	upload.Status.Conditions = []batchv1.JobCondition{{
+		Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+	}}
+	pvc.OwnerReferences[0].UID = "someone-elses-job-uid"
+	client := fake.NewSimpleClientset(upload, pvc)
+
+	_, err := RetainSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: upload.UID, Purpose: SnapshotJobUpload, Exporter: s3Exporter,
+	})
+	require.ErrorContains(t, err, "not controlled by upload job UID")
+	_, err = client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
 func TestReconcileLegacyDeletionPairsActiveUnpairedUploadWorkflowBeforeCleanup(t *testing.T) {
 	owner := testJobOwner()
 	deleteJob := desiredDeleteJob(owner, gcsExporter)

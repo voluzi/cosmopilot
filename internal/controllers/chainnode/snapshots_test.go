@@ -1318,6 +1318,170 @@ func TestEnsureVolumeSnapshotsHonorsTarballDeletionMarkerForRetention(t *testing
 	}
 }
 
+func TestEnsureVolumeSnapshotsCountRetentionSkipsSnapshotWithUploadInFlight(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	// Both policies must hold the snapshot. deleteOnExpire=false is the destructive one: with no
+	// tarball deletion to wait for, retention would otherwise delete the volumesnapshot outright
+	// while it is still the source of the upload PVC.
+	for _, deleteOnExpire := range []bool{false, true} {
+		for _, provider := range orphanSnapshotProviderCases() {
+			t.Run(fmt.Sprintf("%s/deleteOnExpire=%t", provider.name, deleteOnExpire), func(t *testing.T) {
+				runCountRetentionInFlightCase(t, now, provider.export, deleteOnExpire)
+			})
+		}
+	}
+}
+
+func runCountRetentionInFlightCase(
+	t *testing.T,
+	now time.Time,
+	providerExport *appsv1.ExportTarballConfig,
+	deleteOnExpire bool,
+) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	export := providerExport.DeepCopy()
+	export.DeleteOnExpire = ptr.To(deleteOnExpire)
+	chainNode := orphanSnapshotTestChainNode(now, export)
+	chainNode.Spec.Persistence.Snapshots.Retain = ptr.To(int32(1))
+	chainNode.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+
+	// The oldest snapshot is over the retain count but is still feeding a tarball upload.
+	uploading := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "snapshot-uploading",
+			Namespace:         chainNode.Namespace,
+			UID:               "snapshot-uploading-uid",
+			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+			Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "true",
+				controllers.AnnotationExportingTarball: strconv.FormatBool(true),
+			},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	newest := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "snapshot-newest",
+			Namespace:         chainNode.Namespace,
+			UID:               "snapshot-newest-uid",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+			Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "true",
+				controllers.AnnotationExportingTarball: tarballFinished,
+			},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, uploading, newest).
+		Build()
+	clientSet := fake.NewSimpleClientset()
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(
+		context.Background(), client.ObjectKeyFromObject(uploading), stored,
+	), "retain count must not delete the volumesnapshot backing a running upload")
+	assert.Nil(t, stored.DeletionTimestamp)
+	for _, action := range clientSet.Actions() {
+		assert.NotEqual(t, "create", action.GetVerb(),
+			"no tarball deletion may be scheduled while the upload is in flight")
+	}
+}
+
+func TestEnsureVolumeSnapshotsRetainsOrphanUploadWhenDeleteOnExpireIsFalse(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(false)
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+			// The upload Job finished after its volumesnapshot was already gone.
+			uploadJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}
+			require.NoError(t, clientSet.Tracker().Update(
+				batchv1.SchemeGroupVersion.WithResource("jobs"), uploadJob, chainNode.Namespace,
+			))
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			// Local resources go, the remote object is left alone: no deletion Job is ever created.
+			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(
+				context.Background(), uploadJob.Name, metav1.GetOptions{},
+			)
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(
+				context.Background(), uploadPVC.Name, metav1.GetOptions{},
+			)
+			assert.True(t, apierrors.IsNotFound(err))
+			jobs, err := clientSet.BatchV1().Jobs(chainNode.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, jobs.Items, "a retained orphan upload must not schedule a tarball deletion")
+			for _, action := range clientSet.Actions() {
+				if action.GetVerb() != "create" {
+					continue
+				}
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				assert.NotEqual(t, "delete", job.Labels["type"],
+					"deleteOnExpire=false must never reach the destination bucket")
+			}
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsLetsRetainedOrphanUploadFinish(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(false)
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+
+			// The Job carries no terminal condition, so the upload is still running.
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(
+				context.Background(), uploadJob.Name, metav1.GetOptions{},
+			)
+			require.NoError(t, err, "a running upload must be allowed to finish")
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(
+				context.Background(), uploadPVC.Name, metav1.GetOptions{},
+			)
+			require.NoError(t, err, "the clone PVC feeding a running upload must survive")
+			for _, action := range clientSet.Actions() {
+				assert.NotEqual(t, "delete", action.GetVerb())
+				assert.NotEqual(t, "create", action.GetVerb())
+			}
+		})
+	}
+}
+
 func TestEnsureVolumeSnapshotsReconcilesOrphanJobs(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	providers := []struct {
@@ -1546,12 +1710,12 @@ func TestEnsureVolumeSnapshotsResumesOrphanDeletionAfterCrashFollowingDeleteJobC
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
 		},
 	}
 
@@ -1682,12 +1846,12 @@ func TestEnsureVolumeSnapshotsDoesNotRestartDeletionForTerminatingOrphanUpload(t
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
 		},
 	}
 
@@ -1771,12 +1935,12 @@ func TestEnsureVolumeSnapshotsDoesNotActOnSameNameOrphanUploadReplacement(t *tes
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
 		},
 	}
 
@@ -2010,12 +2174,12 @@ func orphanSnapshotProviderCases() []orphanSnapshotProviderCase {
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+			export: &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{
 				Bucket: "snapshots", Region: "eu-west-1",
 			}},
 		},

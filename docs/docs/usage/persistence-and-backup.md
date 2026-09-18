@@ -321,7 +321,13 @@ persistence:
     - Specify the database backend (for example, `goleveldb` or `pebbledb`).
 - **`deleteOnExpire`**:
   - Optional. Defaults to `false`.
-  - Indicates whether the tarball should also be deleted when the associated volume snapshot is removed due to expiration (`.persistence.snapshots.retention`).
+  - Indicates whether the tarball should also be deleted when the associated volume
+    snapshot is removed, whether by age (`.persistence.snapshots.retention`) or by count
+    (`.persistence.snapshots.retain`).
+  - A volume snapshot is never removed while its tarball is still uploading, so an export
+    is always allowed to finish. If a snapshot does disappear mid-upload — deleted by hand,
+    for example — the upload still runs to completion, and the resulting object is kept
+    unless `deleteOnExpire` is `true`.
 - **`compression`**:
   - Optional. One of `none`, `gzip`, `zstd`, or `lz4`. Defaults to `gzip` for
     compatibility with existing exports.
