@@ -300,10 +300,11 @@ func (s *NodeUtils) Stop(force bool) error {
 		}
 	}
 
-	// Ensure node is stopped too
-	log.Debug("stopping node")
-	if err := s.stopNode(); err != nil {
-		log.Errorf("failed to stop node: %v", err)
+	if force {
+		log.Debug("stopping node")
+		if err := s.stopNode(); err != nil {
+			log.Errorf("failed to stop node: %v", err)
+		}
 	}
 
 	// Shutdown main server

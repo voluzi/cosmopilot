@@ -282,6 +282,85 @@ func TestApplyUpgradeStatusRejectsMarkerBelowPersistedHeight(t *testing.T) {
 	assert.JSONEq(t, `{"upgrades":[]}`, published.Data[upgradesConfigFile])
 }
 
+func TestLateManualAndLegacyRequiredUpgradesRemainSelectable(t *testing.T) {
+	tests := []struct {
+		name         string
+		upgrade      appsv1.Upgrade
+		status       nodeutils.UpgradeStatus
+		wantLatest   int64
+		wantRequired nodeutils.RequiredUpgrade
+		wantImage    string
+	}{
+		{
+			name: "structured manual requirement after target height",
+			upgrade: appsv1.Upgrade{
+				Height: 100,
+				Name:   "manual-v2",
+				Image:  "repo/app:manual-v2",
+				Source: appsv1.ManualUpgrade,
+				Status: appsv1.UpgradeScheduled,
+			},
+			status: nodeutils.UpgradeStatus{
+				LatestHeight: ptr.To(int64(120)),
+				RequiredUpgrade: &nodeutils.RequiredUpgrade{
+					Height: 100,
+					Source: nodeutils.ManualUpgrade,
+					Name:   "manual-v2",
+				},
+			},
+			wantLatest:   120,
+			wantRequired: nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.ManualUpgrade, Name: "manual-v2"},
+			wantImage:    "repo/app:manual-v2",
+		},
+		{
+			name: "legacy requirement at target height",
+			upgrade: appsv1.Upgrade{
+				Height: 100,
+				Name:   "v2",
+				Image:  "repo/app:v2",
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeScheduled,
+			},
+			status: nodeutils.UpgradeStatus{
+				LatestHeight:          ptr.To(int64(100)),
+				LegacyUpgradeRequired: true,
+			},
+			wantLatest:   100,
+			wantRequired: nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.OnChainUpgrade, Name: "v2"},
+			wantImage:    "repo/app:v2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+				Status: appsv1.ChainNodeStatus{
+					LatestHeight: 99,
+					Upgrades:     []appsv1.Upgrade{tt.upgrade},
+				},
+			}
+			scheme := gcpImportTestScheme(t)
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(node).
+				Build()
+			r := &Reconciler{Client: c, Scheme: scheme}
+
+			require.NoError(t, r.applyUpgradeStatus(t.Context(), node, tt.status))
+			assert.Equal(t, tt.wantLatest, node.Status.LatestHeight)
+			required, err := resolveRequiredUpgrade(node, tt.status)
+			require.NoError(t, err)
+			require.NotNil(t, required)
+			require.Equal(t, tt.wantRequired, *required)
+			selected := r.getUpgrade(node, *required)
+			require.NotNil(t, selected)
+			assert.Equal(t, tt.wantImage, selected.Image)
+		})
+	}
+}
+
 func TestApplyUpgradeStatusRecordsAuthoritativeMarkerPlanBeforeImageSelection(t *testing.T) {
 	node := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},

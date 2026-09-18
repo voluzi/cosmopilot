@@ -160,8 +160,8 @@ func (r *Reconciler) applyUpgradeStatus(ctx context.Context, chainNode *appsv1.C
 		chainNode.Status.LatestHeight = *status.LatestHeight
 		statusChanged = true
 	}
-	if required := status.RequiredUpgrade; required != nil && !requiredUpgradeIsStale(chainNode, *required) &&
-		required.Source == nodeutils.OnChainUpgrade &&
+	if required := status.RequiredUpgrade; required != nil && required.Source == nodeutils.OnChainUpgrade &&
+		!structuredOnChainUpgradeIsStale(chainNode, *required) &&
 		required.Height > 0 && required.Name != "" {
 		chainNode.Status.Upgrades, upgradesChanged = recordRequiredGovernanceUpgrade(chainNode.Status.Upgrades, *required)
 		statusChanged = statusChanged || upgradesChanged
@@ -227,7 +227,8 @@ func recordRequiredGovernanceUpgrade(
 
 func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.UpgradeStatus) (*nodeutils.RequiredUpgrade, error) {
 	if status.RequiredUpgrade != nil {
-		if requiredUpgradeIsStale(chainNode, *status.RequiredUpgrade) {
+		if status.RequiredUpgrade.Source == nodeutils.OnChainUpgrade &&
+			structuredOnChainUpgradeIsStale(chainNode, *status.RequiredUpgrade) {
 			return nil, nil
 		}
 		required := *status.RequiredUpgrade
@@ -266,9 +267,6 @@ func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.Upgrad
 }
 
 func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) *appsv1.Upgrade {
-	if requiredUpgradeIsStale(chainNode, required) {
-		return nil
-	}
 	for _, upgrade := range chainNode.Status.Upgrades {
 		if upgrade.Height != required.Height ||
 			(upgrade.Status != appsv1.UpgradeScheduled &&
@@ -287,7 +285,7 @@ func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, required nodeutils.
 	return nil
 }
 
-func requiredUpgradeIsStale(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) bool {
+func structuredOnChainUpgradeIsStale(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) bool {
 	return required.Height > 0 && chainNode.Status.LatestHeight >= required.Height
 }
 
