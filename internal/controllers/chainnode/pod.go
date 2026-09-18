@@ -357,7 +357,7 @@ func (r *Reconciler) reconcileHaltHeightHold(ctx context.Context, chainNode *app
 		configured := strconv.FormatInt(haltHeight, 10)
 		if existing == configured {
 			desired = configured
-		} else if pod != nil && containerHasTerminated(pod, chainNode.Spec.App.App) {
+		} else if podHaltHeight, ok := nodeUtilsHaltHeight(pod); ok && podHaltHeight == haltHeight && containerHasTerminated(pod, chainNode.Spec.App.App) {
 			observed := status.LatestHeight
 			if observed == nil {
 				if finalStatus, ok := nodeUtilsTerminationStatus(pod); ok {
@@ -384,6 +384,26 @@ func (r *Reconciler) reconcileHaltHeightHold(ctx context.Context, chainNode *app
 	}
 	chainNode.SetAnnotations(annotations)
 	return r.Update(ctx, chainNode)
+}
+
+func nodeUtilsHaltHeight(pod *corev1.Pod) (int64, bool) {
+	if pod == nil {
+		return 0, false
+	}
+	for _, container := range pod.Spec.InitContainers {
+		if container.Name != nodeUtilsContainerName {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name != "HALT_HEIGHT" {
+				continue
+			}
+			height, err := strconv.ParseInt(env.Value, 10, 64)
+			return height, err == nil
+		}
+		return 0, false
+	}
+	return 0, false
 }
 
 type manualUpgradeIdentity struct {
@@ -448,8 +468,26 @@ func (r *Reconciler) recoverOngoingManualUpgrade(ctx context.Context, chainNode 
 	if upgrade == nil {
 		return false, nil
 	}
+	if chainNode.HasImageOverride() {
+		required := nodeutils.RequiredUpgrade{
+			Height: upgrade.Height,
+			Source: nodeutils.UpgradeSource(upgrade.Source),
+			Name:   upgrade.Name,
+			Image:  upgrade.Image,
+		}
+		if err := r.skipUpgradeForOverride(ctx, chainNode, required); err != nil {
+			return true, fmt.Errorf("skip recovered manual upgrade at height %d for pinned node: %w", upgrade.Height, err)
+		}
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonUpgradeSkippedByOverride,
+			"Not upgrading at height %d: node is pinned to %s by an image override",
+			upgrade.Height, chainNode.GetAppImage(),
+		)
+		return true, nil
+	}
 	if podMatchesManualUpgrade(currentPod, upgrade) {
-		if !appContainerStarted(currentPod, chainNode.Spec.App.App) {
+		if !appContainerStarted(currentPod, chainNode.Spec.App.App) && !containerHasTerminated(currentPod, chainNode.Spec.App.App) {
 			return true, nil
 		}
 		return true, r.completeRecoveredManualUpgrade(ctx, chainNode, upgrade)

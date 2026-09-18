@@ -189,10 +189,12 @@ Some chains use dashes instead of underscores in configuration keys (e.g., `addr
 ## Upgrade Module
 
 For automatic upgrade handling, your chain should implement the standard Cosmos SDK upgrade module
-(`x/upgrade`). Cosmopilot queries the `CurrentPlan` endpoint to detect pending upgrades and validates
-the SDK's `data/upgrade-info.json` marker against that plan before reporting a governance upgrade.
-The standard marker makes governance detection restart-safe even while the local RPC endpoint is
-temporarily unavailable.
+(`x/upgrade`). Cosmopilot queries the `CurrentPlan` endpoint to detect pending upgrades and also treats
+a valid, eligible `data/upgrade-info.json` marker as durable authority for the governance plan identity.
+This recovers absent or replaced local plan configuration across restarts while RPC is unavailable;
+persisted node progress rejects stale markers, terminal halt evidence is tied to the Pod's configured
+halt target, and `checkGovUpgrades`/`forceOnChain` still controls whether a previously unknown plan
+may be discovered.
 
 ## Compatible Chains
 

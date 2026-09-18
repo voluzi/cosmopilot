@@ -47,13 +47,17 @@ For full automation, ensure that the governance proposal includes the **containe
 ### Governance Upgrade Workflow
 1. When an upgrade proposal passes, `Cosmopilot` adds the upgrade to `.status.upgrades` as `scheduled`.
 2. If the container image is not included in the proposal, the upgrade is marked as `missing image`. In this case, you must manually add the upgrade to `.spec.app.upgrades` (see [Manual Upgrades](#manual-upgrades)).
-3. At the upgrade boundary, the node's SDK writes `data/upgrade-info.json`. The node sidecar validates
-   its height and plan name against the scheduled on-chain upgrade before reporting that the image
-   must change. Completed, skipped, stale, malformed, and mismatched markers are ignored.
+3. At the upgrade boundary, the node's SDK writes `data/upgrade-info.json`. A valid, eligible marker
+   is the durable authority for the governance plan identity, including when local configuration is
+   missing the plan or still names the plan it replaced. A marker behind the node's persisted progress
+   and malformed markers are ignored; terminal halt recovery also requires evidence from a Pod that
+   was configured for that same halt target.
 
 Because the SDK marker is stored on the data volume, governance upgrade detection survives sidecar
-and Pod restarts. If RPC is temporarily unavailable, a matching marker and scheduled plan are enough
-to recover the required target without inventing a committed height.
+and Pod restarts. If RPC is temporarily unavailable, the marker can recover the target and its
+`binaries.docker` image without inventing a committed height; without an image, the upgrade remains
+`missing image`. With `checkGovUpgrades: false`, marker recovery is limited to an already-known
+on-chain upgrade or an explicit `forceOnChain` entry.
 
 ## Manual Upgrades
 

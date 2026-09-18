@@ -49,15 +49,16 @@ func TestStopOnlyStopsApplicationWhenForced(t *testing.T) {
 
 func TestGracefulStopPreservesFinalHaltBoundaryObservation(t *testing.T) {
 	for _, tt := range []struct {
-		name        string
-		height      int64
-		force       bool
-		wantRunning bool
-		wantStops   int32
+		name         string
+		height       int64
+		force        bool
+		wantRunning  bool
+		wantStops    int32
+		wantSnapshot bool
 	}{
-		{name: "at previous committed height", height: 99, wantRunning: true},
-		{name: "at configured height", height: 100, wantRunning: true},
-		{name: "well before configured height", height: 98},
+		{name: "at previous committed height", height: 99, wantRunning: true, wantSnapshot: true},
+		{name: "at configured height", height: 100, wantRunning: true, wantSnapshot: true},
+		{name: "well before configured height", height: 98, wantSnapshot: true},
 		{name: "forced stop at boundary", height: 99, force: true, wantStops: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -89,6 +90,10 @@ func TestGracefulStopPreservesFinalHaltBoundaryObservation(t *testing.T) {
 			assert.Equal(t, tt.wantStops, stops.Load())
 
 			body, err := os.ReadFile(terminationPath)
+			if !tt.wantSnapshot {
+				assert.ErrorIs(t, err, os.ErrNotExist)
+				return
+			}
 			require.NoError(t, err)
 			var status UpgradeStatus
 			require.NoError(t, json.Unmarshal(body, &status))
@@ -96,6 +101,38 @@ func TestGracefulStopPreservesFinalHaltBoundaryObservation(t *testing.T) {
 			assert.Equal(t, tt.height, *status.LatestHeight)
 		})
 	}
+}
+
+func TestForcedStopClearsGracefulTerminationSnapshot(t *testing.T) {
+	height := int64(99)
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[]}`)
+	monitor := newUpgradeMonitor(&fakeABCIClient{err: errors.New("offline")}, checker, infoPath, func() error { return nil })
+	monitor.status.LatestHeight = &height
+	terminationPath := filepath.Join(t.TempDir(), "termination.log")
+	var stops atomic.Int32
+	server := &NodeUtils{
+		cfg: &Options{
+			HaltHeight:             100,
+			TerminationMessagePath: terminationPath,
+		},
+		server:         &http.Server{},
+		upgradeMonitor: monitor,
+		stopNode: func() error {
+			stops.Add(1)
+			return nil
+		},
+	}
+
+	require.NoError(t, server.Stop(false))
+	body, err := os.ReadFile(terminationPath)
+	require.NoError(t, err)
+	assert.NotEmpty(t, body)
+
+	require.NoError(t, server.Stop(true))
+	body, err = os.ReadFile(terminationPath)
+	require.NoError(t, err)
+	assert.Empty(t, body)
+	assert.Equal(t, int32(1), stops.Load())
 }
 
 func TestGracefulStopDoesNotStopApplicationForNewManualRequirement(t *testing.T) {

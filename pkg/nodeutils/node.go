@@ -279,10 +279,16 @@ func (s *NodeUtils) Stop(force bool) error {
 	// halt-height=0 would match latestBlockHeight=0 and prevent shutdown.
 	status := s.upgradeMonitor.Status()
 	if s.cfg.TerminationMessagePath != "" {
-		if body, err := json.Marshal(status); err != nil {
-			log.WithError(err).Warn("failed to marshal final node-utils status")
-		} else if err := os.WriteFile(s.cfg.TerminationMessagePath, body, 0o600); err != nil {
-			log.WithError(err).Warn("failed to persist final node-utils status")
+		if force {
+			if err := os.Truncate(s.cfg.TerminationMessagePath, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.WithError(err).Warn("failed to clear final node-utils status")
+			}
+		} else {
+			if body, err := json.Marshal(status); err != nil {
+				log.WithError(err).Warn("failed to marshal final node-utils status")
+			} else if err := os.WriteFile(s.cfg.TerminationMessagePath, body, 0o600); err != nil {
+				log.WithError(err).Warn("failed to persist final node-utils status")
+			}
 		}
 	}
 	var latestHeight int64
