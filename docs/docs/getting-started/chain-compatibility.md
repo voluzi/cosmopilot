@@ -167,11 +167,11 @@ Cosmopilot interacts with your chain through standard gRPC and RPC endpoints. Th
 |----------|---------|
 | `/status` | Node status and sync info |
 | `/abci_info` | ABCI application info |
-| `/websocket` | `NewBlockHeader` notifications used to accelerate upgrade checks |
 
 The sidecar treats `/abci_info` as the authoritative committed height and polls it periodically.
-Websocket notifications only wake that reconciliation sooner, so a disconnect or missed event does
-not prevent a manual upgrade from being detected.
+The `/websocket` endpoint is optional. When available, `NewBlockHeader` notifications wake upgrade
+reconciliation sooner; when unavailable or disconnected, polling continues to detect manual
+upgrades.
 
 ## Configuration Files
 

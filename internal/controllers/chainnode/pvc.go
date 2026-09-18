@@ -326,16 +326,24 @@ func rebaseDataProgress(chainNode *appsv1.ChainNode, height int64) bool {
 	chainNode.Status.LatestHeight = height
 	chainNode.Status.AppImage = ""
 	chainNode.Status.AppVersion = ""
+	preserveTerminal := height == 0 && chainNode.StateSyncRestoreEnabled() && !chainNode.ShouldRestoreFromSnapshot()
 	for i := range chainNode.Status.Upgrades {
-		if chainNode.Status.Upgrades[i].Status != appsv1.UpgradeOnGoing {
-			continue
+		upgrade := &chainNode.Status.Upgrades[i]
+		switch upgrade.Status {
+		case appsv1.UpgradeOnGoing:
+			status := appsv1.UpgradeScheduled
+			if upgrade.Height <= height {
+				status = appsv1.UpgradeSkipped
+			}
+			upgrade.Status = status
+			changed = true
+		case appsv1.UpgradeCompleted, appsv1.UpgradeSkipped:
+			if preserveTerminal || upgrade.Height <= height {
+				continue
+			}
+			upgrade.Status = appsv1.UpgradeScheduled
+			changed = true
 		}
-		status := appsv1.UpgradeScheduled
-		if chainNode.Status.Upgrades[i].Height <= height {
-			status = appsv1.UpgradeSkipped
-		}
-		chainNode.Status.Upgrades[i].Status = status
-		changed = true
 	}
 	return changed
 }

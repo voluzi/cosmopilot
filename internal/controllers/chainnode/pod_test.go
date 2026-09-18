@@ -46,8 +46,10 @@ func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
 		}
 	}
 	app := r.buildAppContainer(chainNode, nil, "/ready", corev1.ResourceRequirements{}, nil)
-	for i, arg := range app.Args {
-		if arg == "--trace-store" || arg == "/trace/trace.fifo" {
+	for i, arg := range append(nodeUtils.Args, app.Args...) {
+		if arg == "--trace-store" || strings.HasPrefix(arg, "--trace-store=") ||
+			arg == "--create-fifo" || strings.HasPrefix(arg, "--create-fifo=") ||
+			arg == "/trace/trace.fifo" {
 			t.Fatalf("app arg %d still contains trace artifact %q", i, arg)
 		}
 	}

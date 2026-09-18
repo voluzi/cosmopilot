@@ -175,19 +175,15 @@ func (c *Client) GetUpgradeStatus(ctx context.Context) (UpgradeStatus, error) {
 }
 
 func (c *Client) getLegacyUpgradeStatus(ctx context.Context) (UpgradeStatus, error) {
-	height, err := c.GetLatestHeight(ctx)
-	if err != nil {
-		return UpgradeStatus{}, err
-	}
 	requiresUpgrade, err := c.RequiresUpgrade(ctx)
 	if err != nil {
 		return UpgradeStatus{}, err
 	}
-	status := UpgradeStatus{LatestHeight: &height}
-	if requiresUpgrade {
-		status.RequiredUpgrade = &RequiredUpgrade{Height: height}
+	height, err := c.GetLatestHeight(ctx)
+	if err != nil {
+		return UpgradeStatus{}, err
 	}
-	return status, nil
+	return UpgradeStatus{LatestHeight: &height, LegacyUpgradeRequired: requiresUpgrade}, nil
 }
 
 // ShutdownNodeUtilsServer sends a shutdown signal to the node-utils server.

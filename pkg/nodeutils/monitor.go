@@ -24,9 +24,10 @@ type RequiredUpgrade struct {
 }
 
 type UpgradeStatus struct {
-	LatestHeight     *int64           `json:"latestHeight,omitempty"`
-	HeightObservedAt *time.Time       `json:"heightObservedAt,omitempty"`
-	RequiredUpgrade  *RequiredUpgrade `json:"requiredUpgrade"`
+	LatestHeight          *int64           `json:"latestHeight,omitempty"`
+	HeightObservedAt      *time.Time       `json:"heightObservedAt,omitempty"`
+	RequiredUpgrade       *RequiredUpgrade `json:"requiredUpgrade"`
+	LegacyUpgradeRequired bool             `json:"-"`
 }
 
 type abciInfoClient interface {

@@ -166,7 +166,10 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	if err := r.applyUpgradeStatus(ctx, chainNode, upgradeStatus); err != nil {
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
 	}
-	requiredUpgrade := upgradeStatus.RequiredUpgrade
+	requiredUpgrade, err := resolveRequiredUpgrade(chainNode, upgradeStatus)
+	if err != nil {
+		return fmt.Errorf("failed to resolve required upgrade for %s: %w", chainNode.GetName(), err)
+	}
 
 	// A node pinned through .spec.overrideImage or .spec.overrideVersion must not be upgraded. The
 	// overrides win over upgrade history when the pod spec is built, so swapping the binary here

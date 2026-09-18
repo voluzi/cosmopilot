@@ -1169,6 +1169,7 @@ UpgradeSpec represents a manual upgrade.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | height | Height at which the upgrade should occur. | int64 | true |
+| name | Governance plan name this image belongs to. The controller sets this when propagating an on-chain upgrade from a ChainNodeSet to its child nodes. | string | false |
 | image | Container image replacement to be used in the upgrade. | string | true |
 | forceOnChain | Whether to force this upgrade to be processed as a gov planned upgrade. Defaults to `false`. | *bool | false |
 

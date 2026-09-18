@@ -34,11 +34,23 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, node := range chainNodeList.Items {
-		for _, upgrade := range node.Status.Upgrades {
-			nodeSet.Status.Upgrades = AddOrUpdateUpgrade(nodeSet.Status.Upgrades, upgrade)
-		}
 		if node.Status.LatestHeight > nodeSet.Status.LatestHeight {
 			nodeSet.Status.LatestHeight = node.Status.LatestHeight
+		}
+	}
+	observedUpgrades := aggregateChildUpgrades(chainNodeList.Items)
+	for _, observed := range observedUpgrades {
+		replaced := false
+		for i := range nodeSet.Status.Upgrades {
+			if nodeSet.Status.Upgrades[i].Height != observed.Height {
+				continue
+			}
+			nodeSet.Status.Upgrades[i] = observed
+			replaced = true
+			break
+		}
+		if !replaced {
+			nodeSet.Status.Upgrades = append(nodeSet.Status.Upgrades, observed)
 		}
 	}
 
@@ -52,6 +64,35 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, nodeSet *appsv1.ChainNo
 		return r.Status().Update(ctx, nodeSet)
 	}
 	return nil
+}
+
+func aggregateChildUpgrades(nodes []appsv1.ChainNode) []appsv1.Upgrade {
+	upgrades := make([]appsv1.Upgrade, 0)
+	pendingPlanNames := make(map[int64]map[string]struct{})
+	for _, node := range nodes {
+		for _, upgrade := range node.Status.Upgrades {
+			upgrades = AddOrUpdateUpgrade(upgrades, upgrade)
+			if upgrade.Source != appsv1.OnChainUpgrade || upgrade.Name == "" ||
+				(upgrade.Status != appsv1.UpgradeScheduled && upgrade.Status != appsv1.UpgradeImageMissing) {
+				continue
+			}
+			if pendingPlanNames[upgrade.Height] == nil {
+				pendingPlanNames[upgrade.Height] = make(map[string]struct{})
+			}
+			pendingPlanNames[upgrade.Height][upgrade.Name] = struct{}{}
+		}
+	}
+	for i := range upgrades {
+		if len(pendingPlanNames[upgrades[i].Height]) <= 1 {
+			continue
+		}
+		upgrades[i] = appsv1.Upgrade{
+			Height: upgrades[i].Height,
+			Source: appsv1.OnChainUpgrade,
+			Status: appsv1.UpgradeImageMissing,
+		}
+	}
+	return upgrades
 }
 
 func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []appsv1.Upgrade {

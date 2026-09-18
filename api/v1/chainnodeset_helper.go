@@ -168,8 +168,14 @@ func (nodeSet *ChainNodeSet) GetAppSpecWithUpgrades() AppSpec {
 	spec := nodeSet.Spec.App.DeepCopy()
 
 	for _, u := range nodeSet.Status.Upgrades {
+		// Conflicting child plan identities are represented without a name or image. Do not turn that
+		// uncertainty into a forced child upgrade until the children converge on one plan.
+		if u.Source == OnChainUpgrade && u.Name == "" && u.Image == "" && u.Status == UpgradeImageMissing {
+			continue
+		}
 		upgradeSpec := UpgradeSpec{
 			Height: u.Height,
+			Name:   u.Name,
 			Image:  u.Image,
 		}
 		if u.Source == OnChainUpgrade {

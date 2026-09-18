@@ -129,6 +129,11 @@ spec:
                           description: Container image replacement to be used in the
                             upgrade.
                           type: string
+                        name:
+                          description: |-
+                            Governance plan name this image belongs to. The controller sets this when propagating an
+                            on-chain upgrade from a ChainNodeSet to its child nodes.
+                          type: string
                       required:
                       - height
                       - image

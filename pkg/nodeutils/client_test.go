@@ -232,14 +232,17 @@ func TestClientGetUpgradeStatusFallsBackOnlyOnNotFound(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var fallbacks atomic.Int32
+			var requestOrder atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/upgrade_status":
 					http.Error(w, http.StatusText(tt.statusCode), tt.statusCode)
 				case "/latest_height":
+					assert.Equal(t, int32(2), requestOrder.Add(1))
 					fallbacks.Add(1)
-					_, _ = io.WriteString(w, "99")
+					_, _ = io.WriteString(w, "101")
 				case "/must_upgrade":
+					assert.Equal(t, int32(1), requestOrder.Add(1))
 					fallbacks.Add(1)
 					w.WriteHeader(http.StatusUpgradeRequired)
 					_, _ = io.WriteString(w, "true")
@@ -255,8 +258,9 @@ func TestClientGetUpgradeStatusFallsBackOnlyOnNotFound(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, status.LatestHeight)
-				assert.Equal(t, int64(99), *status.LatestHeight)
-				assert.NotNil(t, status.RequiredUpgrade)
+				assert.Equal(t, int64(101), *status.LatestHeight)
+				assert.True(t, status.LegacyUpgradeRequired)
+				assert.Nil(t, status.RequiredUpgrade)
 			}
 			assert.Equal(t, tt.wantFallbacks, fallbacks.Load())
 		})

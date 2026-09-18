@@ -61,7 +61,8 @@ Manual upgrades allow you to define upgrades directly in `.spec.app.upgrades`. T
 
 The sidecar stops the application once the locally committed ABCI height reaches one block before
 the configured target. Committed height is reconciled periodically and after CometBFT
-`NewBlockHeader` notifications. A disconnected websocket may delay the stop until the next poll; if
+`NewBlockHeader` notifications when the optional websocket endpoint is available. Websocket access
+is not required: a disconnected or unavailable endpoint may delay the stop until the next poll. If
 the node has already advanced beyond the target, Cosmopilot still applies the explicitly configured
 upgrade instead of silently skipping it.
 
