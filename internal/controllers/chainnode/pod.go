@@ -1157,18 +1157,21 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		})
 	}
 
-	deferredSidecars := map[string]struct{}{}
+	managedInitContainers := pod.Spec.InitContainers
+	configuredSidecars := []corev1.Container{}
+	nonDeferredSidecars := []corev1.Container{}
+	materializedSidecars := []corev1.Container{}
 	deferredSidecarNames := []string{}
-	omittedSidecars := map[string]struct{}{}
+	materializedDeferredSidecarNames := []string{}
+	deferredSidecarFingerprints := map[string]string{}
 	_, belongsToGroup := chainNode.Labels[controllers.LabelChainNodeSetGroup]
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Sidecars != nil {
 		for _, c := range chainNode.Spec.Config.Sidecars {
-			if belongsToGroup && c.DeferUntilHealthyEnabled() {
-				deferredSidecars[c.Name] = struct{}{}
+			isDeferred := belongsToGroup && c.DeferUntilHealthyEnabled()
+			omit := false
+			if isDeferred {
 				deferredSidecarNames = append(deferredSidecarNames, c.Name)
-				if r.shouldSkipSidecar(ctx, chainNode, c, pod.Labels) {
-					omittedSidecars[c.Name] = struct{}{}
-				}
+				omit = r.shouldSkipSidecar(ctx, chainNode, c, pod.Labels)
 			}
 			// Use custom security context if provided, otherwise use restricted
 			sidecarSecurityContext := c.SecurityContext
@@ -1222,11 +1225,35 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 				sidecar.VolumeMounts = append(sidecar.VolumeMounts, configMounts...)
 			}
 
-			pod.Spec.InitContainers = append([]corev1.Container{sidecar}, pod.Spec.InitContainers...)
+			configuredSidecars = append([]corev1.Container{sidecar}, configuredSidecars...)
+			if !isDeferred {
+				nonDeferredSidecars = append([]corev1.Container{sidecar}, nonDeferredSidecars...)
+			}
+			if !omit {
+				materializedSidecars = append([]corev1.Container{sidecar}, materializedSidecars...)
+				if isDeferred {
+					materializedDeferredSidecarNames = append(materializedDeferredSidecarNames, c.Name)
+				}
+			}
+			if isDeferred {
+				fingerprint, err := containerFingerprint(sidecar)
+				if err != nil {
+					return nil, fmt.Errorf("fingerprint deferred sidecar %s: %w", c.Name, err)
+				}
+				deferredSidecarFingerprints[c.Name] = fingerprint
+			}
 		}
 	}
 	sort.Strings(deferredSidecarNames)
+	sort.Strings(materializedDeferredSidecarNames)
 	pod.Annotations[controllers.AnnotationDeferredSidecars] = strings.Join(deferredSidecarNames, ",")
+	pod.Annotations[controllers.AnnotationMaterializedDeferredSidecars] = strings.Join(materializedDeferredSidecarNames, ",")
+	deferredSidecarFingerprintBytes, err := json.Marshal(deferredSidecarFingerprints)
+	if err != nil {
+		return nil, fmt.Errorf("marshal deferred sidecar fingerprints: %w", err)
+	}
+	pod.Annotations[controllers.AnnotationDeferredSidecarFingerprints] = string(deferredSidecarFingerprintBytes)
+	pod.Spec.InitContainers = joinContainers(configuredSidecars, managedInitContainers)
 
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.SafeToEvict != nil {
 		pod.Annotations[controllers.AnnotationSafeEvict] = strconv.FormatBool(*chainNode.Spec.Config.SafeToEvict)
@@ -1239,13 +1266,13 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	pod.Annotations[controllers.AnnotationPodSpecHash] = specHash
 
 	podWithoutDeferredSidecars := pod.DeepCopy()
-	podWithoutDeferredSidecars.Spec.InitContainers = removeNamedContainers(podWithoutDeferredSidecars.Spec.InitContainers, deferredSidecars)
+	podWithoutDeferredSidecars.Spec.InitContainers = joinContainers(nonDeferredSidecars, managedInitContainers)
 	compatibilityHash, err := podSpecHash(podWithoutDeferredSidecars)
 	if err != nil {
 		return nil, err
 	}
 	pod.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars] = compatibilityHash
-	pod.Spec.InitContainers = removeNamedContainers(pod.Spec.InitContainers, omittedSidecars)
+	pod.Spec.InitContainers = joinContainers(materializedSidecars, managedInitContainers)
 	return pod, controllerutil.SetControllerReference(chainNode, pod, r.Scheme)
 }
 
@@ -1434,6 +1461,14 @@ func podSpecHash(pod *corev1.Pod) (string, error) {
 	return fmt.Sprintf("%x", sha256.Sum256(specBytes)), nil
 }
 
+func containerFingerprint(container corev1.Container) (string, error) {
+	containerBytes, err := container.Marshal()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(containerBytes)), nil
+}
+
 func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 	logger := log.FromContext(ctx)
 
@@ -1459,10 +1494,10 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 	if existingHasCompatibilityHash {
 		missingRequired := missingRequiredInitContainer(existing, new)
 		if newSpecHash == oldSpecHash {
-			return missingRequired
+			return missingRequired || unmaterializedDeferredSidecarBecameRequired(existing, new)
 		}
 		existingCompatibilityHash := existing.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars]
-		if existingCompatibilityHash == compatibleSpecHash && hasOmittedDeferredSidecar(new) && !hasMaterializedDeferredSidecar(existing) {
+		if existingCompatibilityHash == compatibleSpecHash && deferredSidecarChangesCanWait(existing, new) {
 			return missingRequired
 		}
 		return true
@@ -1470,38 +1505,97 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 	return newSpecHash != oldSpecHash && (existingGeneration != newGeneration || compatibleSpecHash != oldSpecHash)
 }
 
-func hasOmittedDeferredSidecar(pod *corev1.Pod) bool {
-	for _, name := range strings.Split(pod.Annotations[controllers.AnnotationDeferredSidecars], ",") {
-		if name == "" {
+func unmaterializedDeferredSidecarBecameRequired(existing, desired *corev1.Pod) bool {
+	existingFingerprints, ok := deferredSidecarFingerprints(existing)
+	if !ok {
+		return false
+	}
+	desiredFingerprints, ok := deferredSidecarFingerprints(desired)
+	if !ok {
+		return false
+	}
+	materialized, _ := annotationNameSet(existing, controllers.AnnotationMaterializedDeferredSidecars)
+	for name := range existingFingerprints {
+		if _, stillDeferred := desiredFingerprints[name]; stillDeferred {
 			continue
 		}
-		found := false
-		for _, container := range pod.Spec.InitContainers {
-			if container.Name == name {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, exists := materialized[name]; !exists {
 			return true
 		}
 	}
 	return false
 }
 
-func hasMaterializedDeferredSidecar(pod *corev1.Pod) bool {
-	deferredNames := map[string]struct{}{}
-	for _, name := range strings.Split(pod.Annotations[controllers.AnnotationDeferredSidecars], ",") {
+func deferredSidecarChangesCanWait(existing, desired *corev1.Pod) bool {
+	existingFingerprints, ok := deferredSidecarFingerprints(existing)
+	if !ok {
+		return false
+	}
+	desiredFingerprints, ok := deferredSidecarFingerprints(desired)
+	if !ok {
+		return false
+	}
+	existingMaterialized, ok := annotationNameSet(existing, controllers.AnnotationMaterializedDeferredSidecars)
+	if !ok {
+		return false
+	}
+	desiredMaterialized, ok := annotationNameSet(desired, controllers.AnnotationMaterializedDeferredSidecars)
+	if !ok {
+		return false
+	}
+
+	changed := false
+	for name, existingFingerprint := range existingFingerprints {
+		desiredFingerprint, stillConfigured := desiredFingerprints[name]
+		if stillConfigured && existingFingerprint == desiredFingerprint {
+			continue
+		}
+		changed = true
+		if _, materialized := existingMaterialized[name]; materialized {
+			return false
+		}
+		if stillConfigured {
+			if _, materialized := desiredMaterialized[name]; materialized {
+				return false
+			}
+		}
+	}
+	for name := range desiredFingerprints {
+		if _, alreadyCompared := existingFingerprints[name]; alreadyCompared {
+			continue
+		}
+		changed = true
+		if _, materialized := desiredMaterialized[name]; materialized {
+			return false
+		}
+	}
+	return changed
+}
+
+func deferredSidecarFingerprints(pod *corev1.Pod) (map[string]string, bool) {
+	value, exists := pod.Annotations[controllers.AnnotationDeferredSidecarFingerprints]
+	if !exists {
+		return nil, false
+	}
+	fingerprints := map[string]string{}
+	if err := json.Unmarshal([]byte(value), &fingerprints); err != nil || fingerprints == nil {
+		return nil, false
+	}
+	return fingerprints, true
+}
+
+func annotationNameSet(pod *corev1.Pod, annotation string) (map[string]struct{}, bool) {
+	value, exists := pod.Annotations[annotation]
+	if !exists {
+		return nil, false
+	}
+	names := map[string]struct{}{}
+	for _, name := range strings.Split(value, ",") {
 		if name != "" {
-			deferredNames[name] = struct{}{}
+			names[name] = struct{}{}
 		}
 	}
-	for _, container := range pod.Spec.InitContainers {
-		if _, deferred := deferredNames[container.Name]; deferred {
-			return true
-		}
-	}
-	return false
+	return names, true
 }
 
 func missingRequiredInitContainer(existing, desired *corev1.Pod) bool {
@@ -1509,15 +1603,10 @@ func missingRequiredInitContainer(existing, desired *corev1.Pod) bool {
 	for _, container := range existing.Spec.InitContainers {
 		existingNames[container.Name] = struct{}{}
 	}
-	deferredNames := map[string]struct{}{}
-	for _, name := range strings.Split(desired.Annotations[controllers.AnnotationDeferredSidecars], ",") {
-		if name != "" {
-			deferredNames[name] = struct{}{}
-		}
-	}
+	materializedDeferredSidecars, _ := annotationNameSet(desired, controllers.AnnotationMaterializedDeferredSidecars)
 	for _, container := range desired.Spec.InitContainers {
 		_, exists := existingNames[container.Name]
-		_, deferred := deferredNames[container.Name]
+		_, deferred := materializedDeferredSidecars[container.Name]
 		if !exists && !deferred {
 			return true
 		}
@@ -1529,11 +1618,12 @@ func syncPodSpecAnnotations(existing, desired *corev1.Pod) bool {
 	if existing.Annotations == nil {
 		existing.Annotations = map[string]string{}
 	}
-	changed := false
+	changed := syncMaterializedDeferredSidecars(existing, desired)
 	for _, annotation := range []string{
 		controllers.AnnotationPodSpecHash,
 		controllers.AnnotationPodSpecHashWithoutDeferredSidecars,
 		controllers.AnnotationDeferredSidecars,
+		controllers.AnnotationDeferredSidecarFingerprints,
 	} {
 		existingValue, exists := existing.Annotations[annotation]
 		if !exists || existingValue != desired.Annotations[annotation] {
@@ -1544,14 +1634,48 @@ func syncPodSpecAnnotations(existing, desired *corev1.Pod) bool {
 	return changed
 }
 
-func removeNamedContainers(containers []corev1.Container, names map[string]struct{}) []corev1.Container {
-	filtered := make([]corev1.Container, 0, len(containers))
-	for _, container := range containers {
-		if _, remove := names[container.Name]; !remove {
-			filtered = append(filtered, container)
-		}
+func syncMaterializedDeferredSidecars(existing, desired *corev1.Pod) bool {
+	if existing.Annotations[controllers.AnnotationPodSpecHash] != desired.Annotations[controllers.AnnotationPodSpecHash] {
+		return false
 	}
-	return filtered
+	existingFingerprints, ok := deferredSidecarFingerprints(existing)
+	if !ok {
+		return false
+	}
+	desiredFingerprints, ok := deferredSidecarFingerprints(desired)
+	if !ok {
+		return false
+	}
+	materialized, ok := annotationNameSet(existing, controllers.AnnotationMaterializedDeferredSidecars)
+	if !ok {
+		return false
+	}
+
+	changed := false
+	for name := range desiredFingerprints {
+		if _, wasDeferred := existingFingerprints[name]; wasDeferred {
+			continue
+		}
+		materialized[name] = struct{}{}
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+
+	names := make([]string, 0, len(materialized))
+	for name := range materialized {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	existing.Annotations[controllers.AnnotationMaterializedDeferredSidecars] = strings.Join(names, ",")
+	return true
+}
+
+func joinContainers(first, second []corev1.Container) []corev1.Container {
+	joined := make([]corev1.Container, 0, len(first)+len(second))
+	joined = append(joined, first...)
+	return append(joined, second...)
 }
 
 func nodeUtilsShutdownTokenChanged(existing, desired *corev1.Pod) bool {
