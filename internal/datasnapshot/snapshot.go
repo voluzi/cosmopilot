@@ -814,12 +814,16 @@ func retainedUploadPVC(
 	}
 	// The live Job settles the identity when it exists. When it is already gone the listed UID is the
 	// only witness left, and without it a same-named PVC recreated by a later upload would be deleted
-	// as if it belonged to this one.
+	// as if it belonged to this one, so an absent witness fails closed rather than open.
 	expectedUID := listedUID
 	if job != nil {
 		expectedUID = job.UID
 	}
-	if expectedUID != "" && controller.UID != expectedUID {
+	if expectedUID == "" {
+		return nil, fmt.Errorf("retained upload PVC %s/%s has no upload job UID to verify against",
+			pvc.Namespace, pvc.Name)
+	}
+	if controller.UID != expectedUID {
 		return nil, fmt.Errorf("retained upload PVC %s/%s is not controlled by upload job UID %s",
 			pvc.Namespace, pvc.Name, expectedUID)
 	}

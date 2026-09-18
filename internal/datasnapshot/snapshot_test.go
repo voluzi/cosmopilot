@@ -546,11 +546,29 @@ func TestRetainSnapshotForUploadCleansOnlyLocalResources(t *testing.T) {
 			assert.True(t, apierrors.IsNotFound(err))
 			_, err = client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
 			assert.True(t, apierrors.IsNotFound(err))
+			// Counting deletes is not enough: the UID preconditions are what stop a same-named
+			// replacement created by a later upload from being deleted in this one's name.
 			deletes := 0
 			for _, action := range client.Actions() {
 				assert.NotEqual(t, "create", action.GetVerb(), "retention must never schedule a deletion Job")
-				if action.GetVerb() == "delete" {
-					deletes++
+				if action.GetVerb() != "delete" {
+					continue
+				}
+				deletes++
+				deleteAction, ok := action.(k8stesting.DeleteActionImpl)
+				require.True(t, ok)
+				options := deleteAction.DeleteOptions
+				require.NotNil(t, options.Preconditions)
+				require.NotNil(t, options.Preconditions.UID)
+				switch action.GetResource().Resource {
+				case "jobs":
+					assert.Equal(t, upload.UID, *options.Preconditions.UID)
+					require.NotNil(t, options.PropagationPolicy)
+					assert.Equal(t, metav1.DeletePropagationForeground, *options.PropagationPolicy)
+				case "persistentvolumeclaims":
+					assert.Equal(t, pvc.UID, *options.Preconditions.UID)
+				default:
+					t.Errorf("unexpected deleted resource %q", action.GetResource().Resource)
 				}
 			}
 			assert.Equal(t, 2, deletes)

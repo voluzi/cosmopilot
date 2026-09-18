@@ -1655,6 +1655,64 @@ func TestEnsureVolumeSnapshotsKeepsUploadPolicyWhileUploadResourcesTerminate(t *
 	}
 }
 
+func TestEnsureVolumeSnapshotsKeepsUploadedPolicyWhileUploadResourcesTerminate(t *testing.T) {
+	// finishTarballExport records the Uploaded phase before cleaning up, and that cleanup deletes the
+	// Job with foreground propagation. The record therefore reaches Uploaded while its Job is still
+	// observable, so Uploaded must hold the captured deleteOnExpire=false promise exactly as Uploading
+	// does — otherwise pruning drops it and the flipped spec deletes the remote object for good.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(true)
+			reconciler, chainNode, clientSet, uploadJob, _ := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+			uploadJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}
+			resource := batchv1.SchemeGroupVersion.WithResource("jobs")
+			require.NoError(t, clientSet.Tracker().Update(resource, uploadJob, chainNode.Namespace))
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-orphan",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "orphan-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploaded,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			// Foreground deletion leaves the Job in place until its dependents are gone.
+			clientSet.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				stored, err := clientSet.Tracker().Get(resource, chainNode.Namespace, uploadJob.Name)
+				if err != nil {
+					return true, nil, err
+				}
+				terminating := stored.(*batchv1.Job).DeepCopy()
+				terminating.DeletionTimestamp = ptr.To(metav1.Now())
+				return true, nil, clientSet.Tracker().Update(resource, terminating, chainNode.Namespace)
+			})
+
+			for pass := 1; pass <= 2; pass++ {
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+				for _, action := range clientSet.Actions() {
+					assert.NotEqualf(t, "create", action.GetVerb(),
+						"pass %d: an uploaded record must keep its policy while its job terminates", pass)
+				}
+			}
+
+			fresh := &appsv1.ChainNode{}
+			require.NoError(t, reconciler.Get(
+				context.Background(), client.ObjectKeyFromObject(chainNode), fresh,
+			))
+			require.Len(t, fresh.Status.SnapshotExports, 1,
+				"the record must survive while its upload job is still terminating")
+			assert.False(t, fresh.Status.SnapshotExports[0].DeleteOnExpire)
+		})
+	}
+}
+
 func TestEnsureVolumeSnapshotsPrunesUploadingRecordWithoutUploadResources(t *testing.T) {
 	// An Uploading record is written before the upload Job is created, so creation can fail or the Job
 	// can be removed by hand. The orphan loop only walks existing Jobs, so the record must be reclaimed

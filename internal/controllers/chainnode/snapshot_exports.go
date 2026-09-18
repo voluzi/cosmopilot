@@ -427,6 +427,8 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 	// The check runs against live resources rather than the orphan loop's Job list: foreground deletion
 	// keeps a Job observable while its dependents are collected, and a Job that failed to be created or
 	// was removed by hand never appears in that list at all, which would strand its record forever.
+	// Uploaded counts as an upload too: finishTarballExport records that phase before cleaning up, so
+	// the Job outlives the phase change and the orphan loop can still meet it.
 	resolvedUploads, err := r.resolvedUploadExports(ctx, chainNode)
 	if err != nil {
 		return err
@@ -440,7 +442,7 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 			terminalDeletion := export.Phase == appsv1.SnapshotExportPhaseDeleted ||
 				export.Phase == appsv1.SnapshotExportPhaseAcknowledged
 			_, uploadResolved := resolvedUploads[export.ID]
-			unresolvedUpload := export.Phase == appsv1.SnapshotExportPhaseUploading && !uploadResolved
+			unresolvedUpload := snapshotExportPhaseHoldsUpload(export.Phase) && !uploadResolved
 			if snapshotPresent || unresolvedUpload || (export.DeleteOnExpire && !terminalDeletion) {
 				kept = append(kept, export)
 			}
@@ -454,9 +456,16 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 	return err
 }
 
-// resolvedUploadExports returns the IDs of Uploading records whose snapshot is gone and whose upload
+// snapshotExportPhaseHoldsUpload reports whether a phase can still have upload resources behind it.
+// Uploading is written before the Job is created and Uploaded before it is deleted, and the deletion
+// is a foreground one, so both phases can be observed while a Job and its clone PVC are still live.
+func snapshotExportPhaseHoldsUpload(phase appsv1.SnapshotExportPhase) bool {
+	return phase == appsv1.SnapshotExportPhaseUploading || phase == appsv1.SnapshotExportPhaseUploaded
+}
+
+// resolvedUploadExports returns the IDs of upload records whose snapshot is gone and whose upload
 // resources have been fully collected. Those records have nothing left to protect and may be pruned;
-// every other Uploading record is kept so its retention policy outlives any spec change.
+// every other upload record is kept so its retention policy outlives any spec change.
 func (r *Reconciler) resolvedUploadExports(
 	ctx context.Context,
 	chainNode *appsv1.ChainNode,
@@ -468,7 +477,7 @@ func (r *Reconciler) resolvedUploadExports(
 	}
 	for i := range chainNode.Status.SnapshotExports {
 		export := &chainNode.Status.SnapshotExports[i]
-		if export.Phase != appsv1.SnapshotExportPhaseUploading || export.ObjectName == "" {
+		if !snapshotExportPhaseHoldsUpload(export.Phase) || export.ObjectName == "" {
 			continue
 		}
 		gone, err := datasnapshot.SnapshotUploadResourcesGone(ctx, clientSet, chainNode, export.ObjectName)
