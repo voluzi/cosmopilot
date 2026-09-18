@@ -303,12 +303,15 @@ type Config struct {
 	// SecurityContext allows overriding the default restricted security context for the main app container.
 	// When not specified, a restricted security context is applied (runAsNonRoot, runAsUser=1000, drop all capabilities).
 	// Use this only if your app image requires running as root or with different security settings.
+	// If both this and podSecurityContext omit runAsUser or runAsGroup, pod generation fails because
+	// node-utils must use the app's numeric UID and primary GID to read the Cosmos SDK upgrade marker.
 	// +optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 
 	// PodSecurityContext allows overriding the default restricted pod security context.
 	// When not specified, a restricted pod security context is applied (runAsNonRoot, runAsUser=1000, fsGroup=1000).
 	// Use this only if your app or sidecars require running as root or with different security settings.
+	// Its runAsUser and runAsGroup are inherited by node-utils when the app container securityContext does not set them.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 
@@ -1331,6 +1334,10 @@ const (
 	// UpgradeImageMissing indicates that a scheduled upgrade is missing the image.
 	UpgradeImageMissing UpgradePhase = "image-missing"
 
+	// UpgradeConflict indicates that child nodes report different pending governance plans at the
+	// same height. It is an aggregate ChainNodeSet status and is not propagated to child specs.
+	UpgradeConflict UpgradePhase = "conflict"
+
 	// UpgradeScheduled indicates that the upgrade is scheduled and will be
 	// performed by cosmopilot.
 	UpgradeScheduled UpgradePhase = "scheduled"
@@ -1365,6 +1372,11 @@ type UpgradeSpec struct {
 	// Height at which the upgrade should occur.
 	Height int64 `json:"height"`
 
+	// Governance plan name this image belongs to. The controller sets this when propagating an
+	// on-chain upgrade from a ChainNodeSet to its child nodes.
+	// +optional
+	Name string `json:"name,omitempty"`
+
 	// Container image replacement to be used in the upgrade.
 	Image string `json:"image"`
 
@@ -1378,6 +1390,10 @@ type UpgradeSpec struct {
 type Upgrade struct {
 	// Height at which the upgrade should occur.
 	Height int64 `json:"height"`
+
+	// Governance plan name, when supplied by the chain.
+	// +optional
+	Name string `json:"name,omitempty"`
 
 	// Container image replacement to be used in the upgrade.
 	Image string `json:"image"`

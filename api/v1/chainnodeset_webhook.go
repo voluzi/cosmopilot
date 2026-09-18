@@ -119,6 +119,23 @@ func (nodeSet *ChainNodeSet) genesisSignerCollapseWarnings(genesisAlreadyCreated
 }
 
 func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, error) {
+	if nodeSet.Spec.Validator != nil {
+		if err := nodeSet.Spec.Validator.Config.ValidateNodeUtilsRunIdentity(".spec.validator.config"); err != nil {
+			return nil, err
+		}
+	}
+	for i := range nodeSet.Spec.Nodes {
+		group := &nodeSet.Spec.Nodes[i]
+		path := fmt.Sprintf(".spec.nodes[%d].config", i)
+		config := group.Config
+		if group.Validator != nil {
+			path = fmt.Sprintf(".spec.nodes[%d].validator.config", i)
+			config = group.Validator.Config
+		}
+		if err := config.ValidateNodeUtilsRunIdentity(path); err != nil {
+			return nil, err
+		}
+	}
 	if err := nodeSet.Spec.DeletionPolicy.Validate(".spec.deletionPolicy"); err != nil {
 		return nil, err
 	}

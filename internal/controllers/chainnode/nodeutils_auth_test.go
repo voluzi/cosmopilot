@@ -32,6 +32,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
@@ -514,7 +515,7 @@ func TestBuildNodeUtilsInitContainerUsesBoundCredentialEnvironment(t *testing.T)
 	owner.Spec.Config.NodeUtilsEnv = []corev1.EnvVar{{Name: "CUSTOM", Value: "kept"}, {Name: nodeutils.ShutdownTokenEnvironmentVariable, Value: "user-token"}, {Name: nodeutils.ExpectedShutdownTokenHashEnvironmentVariable, Value: "user-hash"}}
 	r := &Reconciler{opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 	secretName := nodeUtilsShutdownSecretNameForToken(testShutdownToken)
-	container := r.buildNodeUtilsInitContainer(owner, secretName)
+	container := r.buildNodeUtilsInitContainer(owner, secretName, k8s.NonRootUID, k8s.NonRootUID)
 	assert.Contains(t, container.Env, corev1.EnvVar{Name: "CUSTOM", Value: "kept"})
 	tokenEnv := requireSingleEnv(t, container.Env, nodeutils.ShutdownTokenEnvironmentVariable)
 	require.NotNil(t, tokenEnv.ValueFrom.SecretKeyRef)
@@ -527,7 +528,7 @@ func TestBuildNodeUtilsInitContainerUsesBoundCredentialEnvironment(t *testing.T)
 func TestNodeUtilsContainersUsePinnedDefaultImage(t *testing.T) {
 	owner := nodeUtilsAuthTestNode()
 	r := &Reconciler{}
-	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildNodeUtilsInitContainer(owner, "shutdown-secret").Image)
+	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildNodeUtilsInitContainer(owner, "shutdown-secret", k8s.NonRootUID, k8s.NonRootUID).Image)
 	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildCosmosignerDiscoveryInitContainer(owner, "signer").Image)
 }
 
@@ -558,6 +559,18 @@ func TestPodCredentialStampContainsOnlyTrustedIdentityAndHash(t *testing.T) {
 type fakeNodeUtilsShutdownClient struct {
 	called bool
 	err    error
+}
+
+type failingUpgradeStatusClient struct{ err error }
+
+func (c failingUpgradeStatusClient) GetUpgradeStatus(context.Context) (nodeutils.UpgradeStatus, error) {
+	return nodeutils.UpgradeStatus{}, c.err
+}
+
+type staticUpgradeStatusClient struct{ status nodeutils.UpgradeStatus }
+
+func (c staticUpgradeStatusClient) GetUpgradeStatus(context.Context) (nodeutils.UpgradeStatus, error) {
+	return c.status, nil
 }
 
 func (c *fakeNodeUtilsShutdownClient) ShutdownNodeUtilsServer(context.Context) error {
@@ -660,8 +673,8 @@ func TestTokenDriftHonorsDisruptionAllowanceForHealthyCurrentPod(t *testing.T) {
 	originalTransport := http.DefaultTransport
 	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		body := "false"
-		if req.URL.Path == "/latest_height" {
-			body = "1"
+		if req.URL.Path == "/upgrade_status" {
+			body = `{"latestHeight":1,"requiredUpgrade":null}`
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
@@ -681,6 +694,271 @@ func TestTokenDriftHonorsDisruptionAllowanceForHealthyCurrentPod(t *testing.T) {
 	require.NoError(t, base.Delete(ctx, unavailablePeer))
 	require.NoError(t, r.ensurePod(ctx, nil, owner, "config-hash"))
 	assert.Equal(t, 1, deletes)
+}
+
+func TestEnsurePodDoesNotRecreateRunningAppWhenNodeUtilsCrashes(t *testing.T) {
+	ctx := t.Context()
+	scheme := nodeUtilsAuthTestScheme(t)
+	owner := nodeUtilsAuthTestNode()
+	owner.Spec.App.Image = "repo/app:v1"
+	credential := nodeUtilsShutdownCredential{
+		name:  nodeUtilsShutdownSecretNameForToken(testShutdownToken),
+		uid:   "secret-uid",
+		token: testShutdownToken,
+	}
+	bindNodeUtilsCredential(owner, credential.name, credential.uid)
+	secret := ownedNodeUtilsSecret(t, scheme, owner, credential.token, credential.uid)
+	config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: owner.Name, Namespace: owner.Namespace}}
+	specClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build()
+	specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
+	current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", credential.name)
+	require.NoError(t, err)
+	stampNodeUtilsShutdownCredential(current, credential)
+	current.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  owner.Spec.App.App,
+			Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}},
+		InitContainerStatuses: []corev1.ContainerStatus{{
+			Name: nodeUtilsContainerName,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 1,
+			}},
+		}},
+	}
+	backing := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, current, secret, config).
+		Build()
+
+	var deletes atomic.Int32
+	kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodDelete {
+			deletes.Add(1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Failure","message":"test failure","code":500}`)),
+		}, nil
+	})}
+	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient)
+	require.NoError(t, err)
+	r := &Reconciler{
+		Client:    backing,
+		APIReader: backing,
+		ClientSet: clientSet,
+		Scheme:    scheme,
+		recorder:  record.NewFakeRecorder(10),
+		opts:      &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+		upgradeClientFactory: func(string) upgradeStatusClient {
+			return failingUpgradeStatusClient{err: errors.New("node-utils restarting")}
+		},
+	}
+
+	err = r.ensurePod(ctx, nil, owner, "config-hash")
+	require.ErrorContains(t, err, "node-utils restarting")
+	assert.Zero(t, deletes.Load())
+}
+
+func TestEnsurePodRecreatesDriftWhenNodeUtilsIsUnavailable(t *testing.T) {
+	tests := []struct {
+		name       string
+		configHash string
+		mutate     func(*corev1.Pod)
+	}{
+		{
+			name:       "pod spec drift",
+			configHash: "config-hash",
+			mutate: func(pod *corev1.Pod) {
+				pod.Annotations[controllers.AnnotationPodSpecHash] = "stale-spec-hash"
+			},
+		},
+		{
+			name:       "config drift",
+			configHash: "new-config-hash",
+			mutate:     func(*corev1.Pod) {},
+		},
+		{
+			name:       "shutdown credential drift",
+			configHash: "config-hash",
+			mutate: func(pod *corev1.Pod) {
+				pod.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash] = "stale-token-hash"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			scheme := nodeUtilsAuthTestScheme(t)
+			owner := nodeUtilsAuthTestNode()
+			owner.Spec.App.Image = "repo/app:v1"
+			credential := nodeUtilsShutdownCredential{
+				name:  nodeUtilsShutdownSecretNameForToken(testShutdownToken),
+				uid:   "secret-uid",
+				token: testShutdownToken,
+			}
+			bindNodeUtilsCredential(owner, credential.name, credential.uid)
+			secret := ownedNodeUtilsSecret(t, scheme, owner, credential.token, credential.uid)
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: owner.Name, Namespace: owner.Namespace}}
+			specClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build()
+			specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
+			current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", credential.name)
+			require.NoError(t, err)
+			stampNodeUtilsShutdownCredential(current, credential)
+			tt.mutate(current)
+			current.Status = corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  owner.Spec.App.App,
+					Ready: true,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}},
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					Name:  nodeUtilsContainerName,
+					Ready: true,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}},
+			}
+			backing := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(owner).
+				WithObjects(owner, current, secret, config).
+				Build()
+
+			var deletes atomic.Int32
+			kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodDelete {
+					deletes.Add(1)
+				}
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Failure","message":"test failure","code":500}`)),
+				}, nil
+			})}
+			clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient)
+			require.NoError(t, err)
+			r := &Reconciler{
+				Client:          backing,
+				APIReader:       backing,
+				ClientSet:       clientSet,
+				Scheme:          scheme,
+				recorder:        record.NewFakeRecorder(10),
+				disruptionLocks: newLockManager(),
+				opts: &controllers.ControllerRunOptions{
+					NodeUtilsImage:           "node-utils:test",
+					DisruptionCheckEnabled:   true,
+					DisruptionMaxUnavailable: 1,
+				},
+				upgradeClientFactory: func(string) upgradeStatusClient {
+					return failingUpgradeStatusClient{err: errors.New("node-utils unavailable")}
+				},
+			}
+
+			err = r.ensurePod(ctx, nil, owner, tt.configHash)
+			require.ErrorContains(t, err, "failed to delete pod")
+			assert.Equal(t, int32(1), deletes.Load())
+		})
+	}
+}
+
+func TestEnsurePodLeavesHaltedAppUntouchedForUnknownMarkerWhenGovernanceDiscoveryDisabled(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		override *string
+	}{
+		{name: "without image override"},
+		{name: "with image override", override: ptr.To("repo/app:pinned")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			scheme := nodeUtilsAuthTestScheme(t)
+			owner := nodeUtilsAuthTestNode()
+			owner.Spec.App.Image = "repo/app:v1"
+			owner.Spec.App.CheckGovUpgrades = ptr.To(false)
+			owner.Spec.OverrideImage = tt.override
+			owner.Status.LatestHeight = 99
+			credential := nodeUtilsShutdownCredential{
+				name:  nodeUtilsShutdownSecretNameForToken(testShutdownToken),
+				uid:   "secret-uid",
+				token: testShutdownToken,
+			}
+			bindNodeUtilsCredential(owner, credential.name, credential.uid)
+			secret := ownedNodeUtilsSecret(t, scheme, owner, credential.token, credential.uid)
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: owner.Name, Namespace: owner.Namespace}}
+			specClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build()
+			specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
+			current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", credential.name)
+			require.NoError(t, err)
+			stampNodeUtilsShutdownCredential(current, credential)
+			current.Status = corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  owner.Spec.App.App,
+					Ready: false,
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: 0,
+					}},
+				}},
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					Name:  nodeUtilsContainerName,
+					Ready: false,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}},
+			}
+			backing := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(owner).
+				WithObjects(owner, current, secret, config).
+				Build()
+
+			var deletes, creates atomic.Int32
+			kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.Method {
+				case http.MethodDelete:
+					deletes.Add(1)
+				case http.MethodPost:
+					creates.Add(1)
+				}
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Failure","message":"test failure","code":500}`)),
+				}, nil
+			})}
+			clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient)
+			require.NoError(t, err)
+			r := &Reconciler{
+				Client:    backing,
+				APIReader: backing,
+				ClientSet: clientSet,
+				Scheme:    scheme,
+				recorder:  record.NewFakeRecorder(10),
+				opts:      &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+				upgradeClientFactory: func(string) upgradeStatusClient {
+					return staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{RequiredUpgrade: &nodeutils.RequiredUpgrade{
+						Height: 100,
+						Source: nodeutils.OnChainUpgrade,
+						Name:   "v2",
+						Image:  "repo/app:v2",
+					}}}
+				},
+			}
+
+			err = r.ensurePod(ctx, nil, owner, "config-hash")
+			require.ErrorContains(t, err, "checkGovUpgrades is false")
+			require.ErrorContains(t, err, "height 100")
+			assert.Zero(t, deletes.Load())
+			assert.Zero(t, creates.Load())
+			assert.Empty(t, owner.Status.Upgrades)
+		})
+	}
 }
 
 func TestTokenDriftRecreatesWaitingPodBeforeNodeUtilsProbe(t *testing.T) {

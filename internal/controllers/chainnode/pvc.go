@@ -3,6 +3,7 @@ package chainnode
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
@@ -223,7 +224,7 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 				if err != nil {
 					return nil, ctrl.Result{}, err
 				}
-				chainNode.Status.LatestHeight = height
+				rebaseDataProgress(chainNode, height)
 				if err = r.Status().Update(ctx, chainNode); err != nil {
 					return nil, ctrl.Result{}, err
 				}
@@ -231,12 +232,15 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		} else {
 			// In case the PVC was deleted on an existing node, lets set latest height to 0 to make sure state-sync
 			// configuration can be applied if necessary.
-			if chainNode.Status.LatestHeight != 0 {
-				chainNode.Status.LatestHeight = 0
+			if rebaseDataProgress(chainNode, 0) {
 				if err = r.Status().Update(ctx, chainNode); err != nil {
 					return nil, ctrl.Result{}, err
 				}
 			}
+		}
+
+		if err := r.clearHaltHeightHold(ctx, chainNode); err != nil {
+			return nil, ctrl.Result{}, fmt.Errorf("failed to clear halt-height hold for replacement data: %w", err)
 		}
 
 		logger.Info("creating pvc", "pvc", chainNode.GetName(), "size", storageSize)
@@ -319,6 +323,43 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		return pvc, result, err
 	}
 	return pvc, ctrl.Result{}, nil
+}
+
+func (r *Reconciler) clearHaltHeightHold(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if _, ok := chainNode.Annotations[appsv1.AnnotationHaltHeightHold]; !ok {
+		return nil
+	}
+	chainNode.Annotations = maps.Clone(chainNode.Annotations)
+	delete(chainNode.Annotations, appsv1.AnnotationHaltHeightHold)
+	return r.Update(ctx, chainNode)
+}
+
+func rebaseDataProgress(chainNode *appsv1.ChainNode, height int64) bool {
+	changed := chainNode.Status.LatestHeight != height ||
+		chainNode.Status.AppImage != "" || chainNode.Status.AppVersion != ""
+	chainNode.Status.LatestHeight = height
+	chainNode.Status.AppImage = ""
+	chainNode.Status.AppVersion = ""
+	preserveTerminal := height == 0 && chainNode.StateSyncRestoreEnabled() && !chainNode.ShouldRestoreFromSnapshot()
+	for i := range chainNode.Status.Upgrades {
+		upgrade := &chainNode.Status.Upgrades[i]
+		switch upgrade.Status {
+		case appsv1.UpgradeOnGoing:
+			status := appsv1.UpgradeScheduled
+			if upgrade.Height <= height {
+				status = appsv1.UpgradeSkipped
+			}
+			upgrade.Status = status
+			changed = true
+		case appsv1.UpgradeCompleted, appsv1.UpgradeSkipped:
+			if preserveTerminal || upgrade.Height <= height {
+				continue
+			}
+			upgrade.Status = appsv1.UpgradeScheduled
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {

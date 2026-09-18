@@ -173,7 +173,7 @@ func TestCreateSnapshotStopsUnboundExistingNodeBeforeCredentialRollout(t *testin
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{},
-			Body:       io.NopCloser(strings.NewReader("123")),
+			Body:       io.NopCloser(strings.NewReader(`{"latestHeight":123,"requiredUpgrade":null}`)),
 		}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })

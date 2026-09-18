@@ -3,6 +3,7 @@ package v1
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 )
 
 const (
+	// AnnotationHaltHeightHold records an ambiguous H-1 halt that must survive Pod loss.
+	AnnotationHaltHeightHold = "cosmopilot.voluzi.com/halt-height-hold"
+
 	// DefaultPersistenceSize is the default size of the data PVC.
 	DefaultPersistenceSize = "50Gi"
 
@@ -266,9 +270,9 @@ func (chainNode *ChainNode) GetMoniker() string {
 	return chainNode.GetName()
 }
 
-// appliedUpgradeImage returns the image of the highest upgrade whose height the node has already
-// reached. Upgrades without an image (an on-chain plan that did not carry one) are ignored, so the
-// last known good image is kept instead of falling back to the initial one.
+// appliedUpgradeImage returns the highest reached or recorded deployed upgrade image. An ongoing
+// upgrade is an explicit selected target even when committed-height observation is stale. Upgrades
+// without an image are ignored so the last known good image is retained.
 func (chainNode *ChainNode) appliedUpgradeImage() string {
 	var h int64
 	var image string
@@ -276,11 +280,26 @@ func (chainNode *ChainNode) appliedUpgradeImage() string {
 		if u.Image == "" {
 			continue
 		}
-		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped || u.Status == UpgradeOnGoing) &&
-			u.Height > h && u.Height <= chainNode.Status.LatestHeight {
+		reached := (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height <= chainNode.Status.LatestHeight
+		recorded := u.Status == UpgradeCompleted && u.Image == chainNode.Status.AppImage
+		if (reached || recorded) && u.Height > h {
 			h = u.Height
 			image = u.Image
 		}
+	}
+	var ongoingHeight int64
+	var ongoingImage string
+	for _, u := range chainNode.Status.Upgrades {
+		if u.Status != UpgradeOnGoing || u.Image == "" || u.Height <= h {
+			continue
+		}
+		if ongoingHeight == 0 || u.Height < ongoingHeight {
+			ongoingHeight = u.Height
+			ongoingImage = u.Image
+		}
+	}
+	if ongoingImage != "" {
+		return ongoingImage
 	}
 	return image
 }
@@ -294,7 +313,7 @@ func (chainNode *ChainNode) latestUpgradeImage() string {
 		if u.Image == "" {
 			continue
 		}
-		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height > h {
+		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped || u.Status == UpgradeOnGoing) && u.Height > h {
 			h = u.Height
 			image = u.Image
 		}
@@ -398,7 +417,10 @@ func (chainNode *ChainNode) ShouldIgnoreGroupOnDisruption() bool {
 
 func (chainNode *ChainNode) MustStop() (bool, string) {
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.HaltHeight != nil {
-		return *chainNode.Spec.Config.HaltHeight == chainNode.Status.LatestHeight, fmt.Sprintf("halt height %d", *chainNode.Spec.Config.HaltHeight)
+		haltHeight := *chainNode.Spec.Config.HaltHeight
+		mustStop := haltHeight == chainNode.Status.LatestHeight ||
+			chainNode.GetAnnotations()[AnnotationHaltHeightHold] == strconv.FormatInt(haltHeight, 10)
+		return mustStop, fmt.Sprintf("halt height %d", haltHeight)
 	}
 	return false, ""
 }

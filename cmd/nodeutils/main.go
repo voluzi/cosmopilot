@@ -25,9 +25,7 @@ var (
 	dataPath                  string
 	upgradesConfig            string
 	blockThreshold            time.Duration
-	traceStore                string
 	logLevel                  string
-	createFifo                bool
 	enableTmkmsProxy          bool
 	signerPeerDNS             string
 	nodeBinaryName            string
@@ -149,8 +147,6 @@ func startServer() error {
 		nodeutils.WithBlockThreshold(blockThreshold),
 		nodeutils.WithDataPath(dataPath),
 		nodeutils.WithUpgradesConfig(upgradesConfig),
-		nodeutils.WithTraceStore(traceStore),
-		nodeutils.CreateFifo(createFifo),
 		nodeutils.WithTmkmsProxy(enableTmkmsProxy),
 		nodeutils.WithSignerPeerDNS(signerPeerDNS),
 		nodeutils.WithHaltHeight(haltHeight),

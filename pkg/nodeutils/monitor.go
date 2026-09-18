@@ -1,0 +1,273 @@
+package nodeutils
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
+	abci "github.com/cometbft/cometbft/abci/types"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	abciPollInterval   = time.Second
+	abciRequestTimeout = time.Second
+)
+
+type RequiredUpgrade struct {
+	Height int64         `json:"height"`
+	Source UpgradeSource `json:"source"`
+	Name   string        `json:"name,omitempty"`
+	Image  string        `json:"image,omitempty"`
+}
+
+type UpgradeStatus struct {
+	LatestHeight          *int64           `json:"latestHeight,omitempty"`
+	HeightObservedAt      *time.Time       `json:"heightObservedAt,omitempty"`
+	RequiredUpgrade       *RequiredUpgrade `json:"requiredUpgrade"`
+	LegacyUpgradeRequired bool             `json:"-"`
+}
+
+type abciInfoClient interface {
+	GetAbciInfo(context.Context) (abci.ResponseInfo, error)
+}
+
+type upgradeMonitor struct {
+	reconcileMu sync.Mutex
+	mu          sync.RWMutex
+
+	client          abciInfoClient
+	checker         *UpgradeChecker
+	upgradeInfoPath string
+	stopNode        func() error
+	status          UpgradeStatus
+	stopSucceeded   bool
+}
+
+func newUpgradeMonitor(client abciInfoClient, checker *UpgradeChecker, upgradeInfoPath string, stopNode func() error) *upgradeMonitor {
+	return &upgradeMonitor{
+		client:          client,
+		checker:         checker,
+		upgradeInfoPath: upgradeInfoPath,
+		stopNode:        stopNode,
+	}
+}
+
+func (m *upgradeMonitor) Status() UpgradeStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	status := m.status
+	if status.LatestHeight != nil {
+		height := *status.LatestHeight
+		status.LatestHeight = &height
+	}
+	if status.HeightObservedAt != nil {
+		observed := *status.HeightObservedAt
+		status.HeightObservedAt = &observed
+	}
+	if status.RequiredUpgrade != nil {
+		required := *status.RequiredUpgrade
+		status.RequiredUpgrade = &required
+	}
+	return status
+}
+
+func (m *upgradeMonitor) RequiresUpgrade() bool {
+	return m.Status().RequiredUpgrade != nil
+}
+
+func (m *upgradeMonitor) Run(ctx context.Context, wake <-chan struct{}) {
+	ticker := time.NewTicker(abciPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-wake:
+		case <-m.checker.Changed():
+		}
+		if err := m.Reconcile(ctx); err != nil {
+			log.WithError(err).Warn("upgrade reconciliation did not complete")
+		}
+	}
+}
+
+func (m *upgradeMonitor) Reconcile(ctx context.Context) error {
+	return m.reconcile(ctx, true)
+}
+
+func (m *upgradeMonitor) reconcile(ctx context.Context, stopManualUpgrade bool) error {
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+
+	freshHeight := m.observeHeight(ctx)
+	m.mu.Lock()
+	if required := m.status.RequiredUpgrade; required != nil && required.Source == ManualUpgrade {
+		current, shouldStop := m.manualRequiredUpgradeLocked()
+		changed := current == nil || *current != *required
+		m.status.RequiredUpgrade = current
+		if changed || !shouldStop {
+			m.stopSucceeded = false
+		}
+	}
+	if required := m.status.RequiredUpgrade; required != nil && required.Source == OnChainUpgrade {
+		valid, err := m.governanceRequirementValidLocked(*required, freshHeight)
+		if err != nil {
+			m.mu.Unlock()
+			return err
+		}
+		if !valid {
+			m.status.RequiredUpgrade = nil
+		}
+	}
+	if m.status.RequiredUpgrade == nil {
+		required, err := m.requiredUpgradeLocked(freshHeight)
+		if err != nil {
+			m.mu.Unlock()
+			return err
+		}
+		m.status.RequiredUpgrade = required
+	}
+	required := m.status.RequiredUpgrade
+	stopSucceeded := m.stopSucceeded
+	manualRequired, shouldStopManual := m.manualRequiredUpgradeLocked()
+	m.mu.Unlock()
+
+	if !stopManualUpgrade || required == nil || required.Source != ManualUpgrade || manualRequired == nil ||
+		*manualRequired != *required || !shouldStopManual || stopSucceeded {
+		return nil
+	}
+	if err := m.stopNode(); err != nil {
+		return fmt.Errorf("stop node for upgrade at height %d: %w", required.Height, err)
+	}
+	m.mu.Lock()
+	m.stopSucceeded = true
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *upgradeMonitor) observeHeight(ctx context.Context) bool {
+	requestCtx, cancel := context.WithTimeout(ctx, abciRequestTimeout)
+	defer cancel()
+	info, err := m.client.GetAbciInfo(requestCtx)
+	if err != nil {
+		return false
+	}
+	height := info.LastBlockHeight
+	observed := time.Now()
+	m.mu.Lock()
+	m.status.LatestHeight = &height
+	m.status.HeightObservedAt = &observed
+	m.mu.Unlock()
+	return true
+}
+
+func (m *upgradeMonitor) requiredUpgradeLocked(freshHeight bool) (*RequiredUpgrade, error) {
+	if required, _ := m.manualRequiredUpgradeLocked(); required != nil {
+		return required, nil
+	}
+
+	config := m.checker.Snapshot()
+	info, err := readSDKUpgradeInfo(m.upgradeInfoPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read SDK upgrade info %q: %w", m.upgradeInfoPath, err)
+	}
+	if !matchesGovernanceUpgrade(config, info) || !m.governanceHeightEligibleLocked(info.Height, freshHeight) {
+		return nil, nil
+	}
+	return &RequiredUpgrade{Height: info.Height, Source: OnChainUpgrade, Name: info.Name, Image: info.Image}, nil
+}
+
+func (m *upgradeMonitor) manualRequiredUpgradeLocked() (*RequiredUpgrade, bool) {
+	config := m.checker.Snapshot()
+	for _, upgrade := range config.Upgrades {
+		if upgrade.Source == ManualUpgrade && upgrade.Status == UpgradeOnGoing && upgrade.Height > 0 {
+			return &RequiredUpgrade{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}, false
+		}
+	}
+	for _, upgrade := range config.Upgrades {
+		if upgrade.Source != ManualUpgrade || upgrade.Status != UpgradeScheduled || upgrade.Height <= 0 {
+			continue
+		}
+		if m.status.LatestHeight != nil && *m.status.LatestHeight >= upgrade.Height-1 {
+			return &RequiredUpgrade{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}, true
+		}
+	}
+	return nil, false
+}
+
+func (m *upgradeMonitor) governanceRequirementValidLocked(required RequiredUpgrade, freshHeight bool) (bool, error) {
+	info, err := readSDKUpgradeInfo(m.upgradeInfoPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read SDK upgrade info %q: %w", m.upgradeInfoPath, err)
+	}
+	if info.Height != required.Height || info.Name != required.Name {
+		return false, nil
+	}
+	return matchesGovernanceUpgrade(m.checker.Snapshot(), info) &&
+		m.governanceHeightEligibleLocked(info.Height, freshHeight), nil
+}
+
+func (m *upgradeMonitor) governanceHeightEligibleLocked(target int64, freshHeight bool) bool {
+	if m.status.LatestHeight == nil {
+		return true
+	}
+	height := *m.status.LatestHeight
+	if height >= target {
+		return false
+	}
+	return !freshHeight || height >= target-1
+}
+
+func matchesGovernanceUpgrade(config UpgradesConfig, info sdkUpgradeInfo) bool {
+	for _, upgrade := range config.Upgrades {
+		if upgrade.Source != OnChainUpgrade || upgrade.Height != info.Height {
+			continue
+		}
+		if upgrade.Status == UpgradeCompleted || upgrade.Status == UpgradeSkipped {
+			return false
+		}
+	}
+	return true
+}
+
+type sdkUpgradeInfo struct {
+	Name   string `json:"name"`
+	Height int64  `json:"height"`
+	Info   string `json:"info,omitempty"`
+	Image  string `json:"-"`
+}
+
+func readSDKUpgradeInfo(path string) (sdkUpgradeInfo, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return sdkUpgradeInfo{}, err
+	}
+	var info sdkUpgradeInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return sdkUpgradeInfo{}, err
+	}
+	if info.Height <= 0 || info.Name == "" {
+		return sdkUpgradeInfo{}, fmt.Errorf("invalid SDK upgrade info")
+	}
+	metadata := struct {
+		Binaries struct {
+			Docker string `json:"docker"`
+		} `json:"binaries"`
+	}{}
+	if json.Unmarshal([]byte(info.Info), &metadata) == nil {
+		info.Image = metadata.Binaries.Docker
+	}
+	return info, nil
+}

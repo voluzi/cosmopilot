@@ -2,9 +2,13 @@ package nodeutils
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,7 +20,6 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/pkg/proxy"
 	"github.com/voluzi/cosmopilot/v3/pkg/statscollector"
-	"github.com/voluzi/cosmopilot/v3/pkg/tracer"
 )
 
 const (
@@ -39,10 +42,8 @@ type NodeUtils struct {
 	router                 *mux.Router
 	cfg                    *Options
 	client                 *chainutils.Client
-	tracer                 *tracer.StoreTracer
-	latestBlockHeight      atomic.Int64
 	upgradeChecker         *UpgradeChecker
-	requiresUpgrade        atomic.Bool
+	upgradeMonitor         *upgradeMonitor
 	tmkmsActive            atomic.Bool
 	signerDiscovered       atomic.Bool
 	signerPeerResolver     signerPeerResolver
@@ -50,12 +51,16 @@ type NodeUtils struct {
 	signerPeerLookupActive atomic.Bool
 	tmkmsProxy             tmkmsProxy
 	nodeBinaryName         string
+	processMu              sync.Mutex
 	appProcess             *process.Process
 	fineStats              *statscollector.Collector
 	coarseStats            *statscollector.Collector
 	mockStats              *MockStats
 	shutdownStarted        atomic.Bool
+	forcedShutdown         atomic.Bool
+	terminationEvidenceMu  sync.Mutex
 	stopNode               func() error
+	cancel                 context.CancelFunc
 }
 
 func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
@@ -77,33 +82,28 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	}
 	nodeUtils.stopNode = nodeUtils.StopNode
 
-	// Initialize tracer - needed in both normal and mock mode to track block heights
-	t, err := tracer.NewStoreTracer(options.TraceStore, options.CreateFifo)
-	if err != nil {
-		return nil, err
-	}
-	nodeUtils.tracer = t
-
-	// Initialize upgrade checker - needed in both normal and mock mode
 	uc, err := NewUpgradeChecker(options.UpgradesConfig)
 	if err != nil {
 		return nil, err
 	}
 	nodeUtils.upgradeChecker = uc
-
-	// In mock mode, we only mock CPU/memory stats - the blockchain still runs
-	if options.MockMode {
-		nodeUtils.mockStats = NewMockStats()
-		log.Info("node-utils starting in mock mode")
-		return nodeUtils, nil
-	}
-
-	// Initialize components only needed in normal mode
 	client, err := chainutils.NewClient("127.0.0.1")
 	if err != nil {
 		return nil, err
 	}
 	nodeUtils.client = client
+	nodeUtils.upgradeMonitor = newUpgradeMonitor(
+		client,
+		uc,
+		filepath.Join(options.DataPath, "upgrade-info.json"),
+		nodeUtils.stopNode,
+	)
+
+	if options.MockMode {
+		nodeUtils.mockStats = NewMockStats()
+		log.Info("node-utils starting in mock mode")
+		return nodeUtils, nil
+	}
 
 	if options.TmkmsProxy {
 		acceptSigner := func(*net.TCPConn) bool {
@@ -116,6 +116,7 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 		}
 		nodeUtils.tmkmsProxy, err = proxy.NewTCPProxy(":26659", "127.0.0.1:5555", true, acceptSigner)
 		if err != nil {
+			_ = client.Close()
 			return nil, err
 		}
 	}
@@ -199,7 +200,7 @@ func (s *NodeUtils) runTmkmsProxy() {
 		log.Errorf("tmkms connection finished with error: %v", err)
 
 		// If an upgrade is required lets not restart proxy
-		if s.requiresUpgrade.Load() {
+		if s.upgradeMonitor.RequiresUpgrade() {
 			return
 		}
 
@@ -210,13 +211,22 @@ func (s *NodeUtils) runTmkmsProxy() {
 
 func (s *NodeUtils) Start() error {
 	s.registerRoutes()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	defer cancel()
+	defer s.client.Close()
 
-	go s.tracer.Start()
 	go func() {
-		if err := s.upgradeChecker.WatchConfigFile(); err != nil {
+		if err := s.upgradeChecker.WatchConfigFile(ctx); err != nil {
 			log.Errorf("error watching config file: %v", err)
 		}
 	}()
+	if err := s.upgradeMonitor.Reconcile(ctx); err != nil {
+		log.WithError(err).Warn("initial upgrade reconciliation did not complete")
+	}
+	blockWake := make(chan struct{}, 1)
+	go runNewBlockWatcher(ctx, fmt.Sprintf("ws://127.0.0.1:%d/websocket", chainutils.RpcPort), blockWake)
+	go s.upgradeMonitor.Run(ctx, blockWake)
 
 	if s.tmkmsProxy != nil {
 		go s.runTmkmsProxy()
@@ -244,50 +254,6 @@ func (s *NodeUtils) Start() error {
 		}
 	}()
 
-	// Goroutine to update latest height and check for upgrades
-	go func() {
-		for trace := range s.tracer.Traces {
-			log.Trace(trace)
-			log.Trace(trace.Metadata)
-
-			if trace.Err != nil {
-				log.Errorf("error on trace: %v", trace.Err)
-				continue
-			}
-
-			if trace.Metadata != nil {
-				heightUpdated := s.latestBlockHeight.CompareAndSwap(s.latestBlockHeight.Load(), trace.Metadata.BlockHeight)
-				height := s.latestBlockHeight.Load()
-
-				if s.upgradeChecker.ShouldUpgrade(height) {
-					upgrade, err := s.upgradeChecker.GetUpgrade(height)
-					if err != nil {
-						log.Errorf("failed to get upgrade info for height %d: %v", height, err)
-						continue
-					}
-
-					// If it's an on-chain upgrade, the application is supposed to panic and require the upgrade.
-					// In manual upgrades case, we don't assume the application will panic but still want to stop the node at the
-					// right height. However, application can send several traces with the same height, so if we want
-					// stop the node after the whole block is processed, let's do it on the first trace of the next height
-					if upgrade.Source == OnChainUpgrade {
-						log.WithField("height", height).Info("on-chain upgrade: application should panic now")
-						s.requiresUpgrade.Store(true)
-
-					} else if heightUpdated {
-						log.WithField("height", height).Warn("stopping node for upgrade")
-						s.requiresUpgrade.Store(true)
-						if err := s.stopNode(); err != nil {
-							log.Errorf("failed to stop node: %v", err)
-						} else {
-							return
-						}
-					}
-				}
-			}
-		}
-	}()
-
 	s.server = &http.Server{Addr: fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port), Handler: s.router}
 	log.Infof("server started listening on %s:%d ...\n\n", s.cfg.Host, s.cfg.Port)
 	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -298,6 +264,32 @@ func (s *NodeUtils) Start() error {
 
 func (s *NodeUtils) Stop(force bool) error {
 	log.WithField("force", force).Info("stopping server")
+	var status UpgradeStatus
+	if force {
+		s.prepareForcedShutdown()
+		status = s.upgradeMonitor.Status()
+	} else {
+		s.terminationEvidenceMu.Lock()
+		if s.forcedShutdown.Load() {
+			s.terminationEvidenceMu.Unlock()
+			return nil
+		}
+		if err := s.upgradeMonitor.reconcile(context.Background(), false); err != nil {
+			log.WithError(err).Warn("final upgrade reconciliation did not complete")
+		}
+		status = s.upgradeMonitor.Status()
+		if !s.forcedShutdown.Load() && s.cfg.TerminationMessagePath != "" {
+			if body, err := json.Marshal(status); err != nil {
+				log.WithError(err).Warn("failed to marshal final node-utils status")
+			} else if err := os.WriteFile(s.cfg.TerminationMessagePath, body, 0o600); err != nil {
+				log.WithError(err).Warn("failed to persist final node-utils status")
+			}
+		}
+		s.terminationEvidenceMu.Unlock()
+		if s.forcedShutdown.Load() {
+			return nil
+		}
+	}
 
 	// When Stop is not forced, in the case of an upgrade being required we ignore
 	// the Stop call. This is most likely coming from SIGINT or SIGTERM signals and
@@ -308,13 +300,22 @@ func (s *NodeUtils) Stop(force bool) error {
 	// more so that cosmopilot can retrieve latest height before total shutdown.
 	// Note: Only check halt-height if it's actually configured (> 0), otherwise
 	// halt-height=0 would match latestBlockHeight=0 and prevent shutdown.
-	if !force && (s.requiresUpgrade.Load() || (s.cfg.HaltHeight > 0 && s.cfg.HaltHeight == s.latestBlockHeight.Load())) {
+	var latestHeight int64
+	if status.LatestHeight != nil {
+		latestHeight = *status.LatestHeight
+	}
+	atHaltBoundary := s.cfg.HaltHeight > 0 &&
+		(latestHeight == s.cfg.HaltHeight || latestHeight == s.cfg.HaltHeight-1)
+	if !force && (status.RequiredUpgrade != nil || atHaltBoundary) {
 		log.Warn("node requires upgrade or is set to halt on specific height. ignoring stop call")
 		return nil
 	}
 
 	if s.server == nil {
 		return fmt.Errorf("server was not started")
+	}
+	if s.cancel != nil {
+		s.cancel()
 	}
 
 	// Stop tmkms proxy if it is still alive
@@ -325,10 +326,11 @@ func (s *NodeUtils) Stop(force bool) error {
 		}
 	}
 
-	// Ensure node is stopped too
-	log.Debug("stopping node")
-	if err := s.stopNode(); err != nil {
-		log.Errorf("failed to stop node: %v", err)
+	if force {
+		log.Debug("stopping node")
+		if err := s.stopNode(); err != nil {
+			log.Errorf("failed to stop node: %v", err)
+		}
 	}
 
 	// Shutdown main server
@@ -338,7 +340,21 @@ func (s *NodeUtils) Stop(force bool) error {
 	return s.server.Shutdown(ctx)
 }
 
+func (s *NodeUtils) prepareForcedShutdown() {
+	s.forcedShutdown.Store(true)
+	s.terminationEvidenceMu.Lock()
+	defer s.terminationEvidenceMu.Unlock()
+	if s.cfg.TerminationMessagePath == "" {
+		return
+	}
+	if err := os.Truncate(s.cfg.TerminationMessagePath, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.WithError(err).Warn("failed to clear final node-utils status")
+	}
+}
+
 func (s *NodeUtils) getNodeProcess() (*process.Process, error) {
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
 	if s.appProcess != nil {
 		return s.appProcess, nil
 	}

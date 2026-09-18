@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path"
 	"reflect"
 	"sort"
@@ -45,7 +46,7 @@ func (r *Reconciler) isChainNodePodRunning(ctx context.Context, chainNode *appsv
 	}
 
 	// Check if the pod is terminating or in a failed state
-	if isPodTerminating(pod) || nodeUtilsIsInFailedState(pod) || podInFailedState(chainNode, pod) {
+	if isPodTerminating(pod) || podInFailedState(chainNode, pod) {
 		return false, false, nil
 	}
 
@@ -89,6 +90,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return fmt.Errorf("failed to get pod spec for %s: %w", chainNode.GetName(), err)
 	}
 	stampNodeUtilsShutdownCredential(pod, shutdownCredential)
+	if err := r.reconcileHaltHeightHold(ctx, chainNode, nil, nodeutils.UpgradeStatus{}); err != nil {
+		return fmt.Errorf("failed to reconcile halt-height hold for %s: %w", chainNode.GetName(), err)
+	}
 
 	// Get current pod. If it does not exist create it and exit.
 	currentPod := &corev1.Pod{}
@@ -99,6 +103,11 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		}
 		return fmt.Errorf("failed to get pod for %s: %w", chainNode.GetName(), err)
 	}
+	if finalStatus, ok := nodeUtilsTerminationStatus(currentPod); ok {
+		if err := r.reconcileHaltHeightHold(ctx, chainNode, currentPod, finalStatus); err != nil {
+			return fmt.Errorf("failed to preserve halt-height hold for %s: %w", chainNode.GetName(), err)
+		}
+	}
 
 	if isPodTerminating(currentPod) {
 		logger.Info("wait for pod to finish terminating")
@@ -106,6 +115,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			return fmt.Errorf("failed waiting for pod %s termination: %w", currentPod.GetName(), err)
 		}
 		return r.createPod(ctx, chainNode, pod)
+	}
+	if handled, err := r.recoverOngoingUpgrade(ctx, chainNode, currentPod, pod); handled {
+		return err
 	}
 
 	// Patch mutable pod metadata without restart only when the desired pod spec is already live.
@@ -137,12 +149,6 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		}
 	}
 
-	if nodeUtilsIsInFailedState(currentPod) {
-		logger.Info("node-utils is in failed state", "pod", pod.GetName())
-		r.logFailedContainer(ctx, logger, currentPod, nodeUtilsContainerName)
-		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
-	}
-
 	// Handle terminal Pod failures before probing node-utils only when node-utils is unavailable.
 	// A scheduled upgrade deliberately terminates the application while keeping node-utils alive so
 	// /must_upgrade can select the replacement image; preserve that probe path.
@@ -158,43 +164,49 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
 	}
 
-	logger.V(1).Info("updating latest height")
-	if err = r.updateLatestHeight(ctx, chainNode); err != nil {
+	logger.V(1).Info("retrieving upgrade status")
+	upgradeStatus, err := r.getUpgradeStatus(ctx, chainNode)
+	if err != nil {
+		switch {
+		case !podSpecCurrent:
+			logger.Info("pod spec changed while node-utils is unavailable", "pod", pod.GetName())
+			return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
+		case !nodeUtilsTokenCurrent:
+			logger.Info("node-utils shutdown token changed while node-utils is unavailable", "pod", pod.GetName())
+			return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
+		case !configCurrent:
+			logger.Info("config changed while node-utils is unavailable", "pod", pod.GetName())
+			return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
+		}
+		return fmt.Errorf("failed to retrieve upgrade status for %s: %w", chainNode.GetName(), err)
+	}
+	upgradeStatus = sanitizeUnknownGovernanceRequirement(chainNode, currentPod, upgradeStatus)
+	if err := r.applyUpgradeStatus(ctx, chainNode, upgradeStatus); err != nil {
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
 	}
-
-	// Check if the node is waiting for an upgrade
-	logger.V(1).Info("checking if an upgrade is required")
-	requiresUpgrade, err := r.requiresUpgrade(ctx, chainNode)
+	if err := r.reconcileHaltHeightHold(ctx, chainNode, currentPod, upgradeStatus); err != nil {
+		return fmt.Errorf("failed to preserve halt-height hold for %s: %w", chainNode.GetName(), err)
+	}
+	requiredUpgrade, err := resolveRequiredUpgrade(chainNode, upgradeStatus)
 	if err != nil {
-		return fmt.Errorf("failed to check if upgrade is required for %s: %w", chainNode.GetName(), err)
+		return fmt.Errorf("failed to resolve required upgrade for %s: %w", chainNode.GetName(), err)
 	}
 
 	// A node pinned through .spec.overrideImage or .spec.overrideVersion must not be upgraded. The
 	// overrides win over upgrade history when the pod spec is built, so swapping the binary here
 	// would be reverted on the next reconcile — downgrading a node that has already written data
 	// with the upgraded version.
-	if requiresUpgrade && chainNode.HasImageOverride() {
-		// Mark the upgrade skipped instead of only suppressing this reconcile. node-utils halts the
-		// application for any upgrade still `scheduled` at or below the current height
-		// (pkg/nodeutils/upgrades.go), so leaving it scheduled would halt every recreated pod again
-		// and spin a stop/recreate loop for as long as the override is in place. Skipping also means
-		// that removing the override later moves the node onto this upgrade's image, as intended.
-		// Refresh the height before deciding what to skip. It was read before /must_upgrade, so the
-		// node may have crossed the upgrade height in between. node-utils only latches once the height
-		// has reached the upgrade and the application stops progressing at that point, so a reading
-		// taken now is at or above the upgrade height — making the filter exact rather than a guess.
-		if err := r.updateLatestHeight(ctx, chainNode); err != nil {
-			return fmt.Errorf("failed to refresh height for pinned node %s: %w", chainNode.GetName(), err)
-		}
-		if err := r.skipUpgradeForOverride(ctx, chainNode); err != nil {
+	if requiredUpgrade != nil && chainNode.HasImageOverride() {
+		// Persist the explicit target as skipped so a recreated sidecar does not require it again while
+		// leaving every unrelated upgrade untouched.
+		if err := r.skipUpgradeForOverride(ctx, chainNode, *requiredUpgrade); err != nil {
 			return fmt.Errorf("failed to skip upgrade for pinned node %s: %w", chainNode.GetName(), err)
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonUpgradeSkippedByOverride,
 			"Not upgrading at height %d: node is pinned to %s by an image override",
-			chainNode.Status.LatestHeight, chainNode.GetAppImage(),
+			requiredUpgrade.Height, chainNode.GetAppImage(),
 		)
 
 		// node-utils latches requiresUpgrade in memory and never clears it (pkg/nodeutils/node.go),
@@ -208,9 +220,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	}
 
-	if requiresUpgrade {
+	if requiredUpgrade != nil {
 		// Get upgrade from scheduled upgrades list
-		upgrade := r.getUpgrade(chainNode, chainNode.Status.LatestHeight)
+		upgrade := r.getUpgrade(chainNode, *requiredUpgrade)
 
 		logger.V(1).Info("upgrade is required", "upgrade", upgrade)
 
@@ -220,9 +232,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 				corev1.EventTypeWarning,
 				appsv1.ReasonUpgradeMissingData,
 				"Missing upgrade or image for upgrade at height %d",
-				chainNode.Status.LatestHeight,
+				requiredUpgrade.Height,
 			)
-			return fmt.Errorf("missing upgrade or image for height %d", chainNode.Status.LatestHeight)
+			return fmt.Errorf("missing upgrade or image for height %d", requiredUpgrade.Height)
 		}
 
 		logger.Info("upgrading node", "pod", pod.GetName())
@@ -264,20 +276,12 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 				"Failed to restart for upgrade: %v",
 				err,
 			)
-			var upgradeStatus appsv1.UpgradePhase
 			if upgraded {
 				// If there was an error on pod creation or watching but the image was already swapped, we mark the upgrade
 				// completed anyway to avoid downgrading and corrupt data.
-				chainNode.Status.AppImage = upgrade.Image
-				chainNode.Status.AppVersion = upgrade.GetVersion()
-				upgradeStatus = appsv1.UpgradeCompleted
-				if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
-					return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
-				}
-			} else {
-				upgradeStatus = appsv1.UpgradeScheduled
+				return r.completeUpgrade(ctx, chainNode, upgrade, "failed to reset VPA after upgrade")
 			}
-			return r.setUpgradeStatus(ctx, chainNode, upgrade, upgradeStatus)
+			return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeScheduled)
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeNormal,
@@ -285,12 +289,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			"Upgraded node to %s on height %d",
 			upgrade.Image, upgrade.Height,
 		)
-		chainNode.Status.AppImage = upgrade.Image
-		chainNode.Status.AppVersion = upgrade.GetVersion()
-		if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
-			return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
-		}
-		return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
+		return r.completeUpgrade(ctx, chainNode, upgrade, "failed to reset VPA after upgrade")
 	}
 
 	// A terminated application with a live node-utils sidecar gets one chance to report a
@@ -322,6 +321,208 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return err
 	}
 	return r.attestPodHealth(ctx, chainNode, currentPod)
+}
+
+func nodeUtilsTerminationStatus(pod *corev1.Pod) (nodeutils.UpgradeStatus, bool) {
+	if pod == nil {
+		return nodeutils.UpgradeStatus{}, false
+	}
+	for _, container := range pod.Status.InitContainerStatuses {
+		if container.Name != nodeUtilsContainerName {
+			continue
+		}
+		terminated := container.State.Terminated
+		if terminated == nil {
+			terminated = container.LastTerminationState.Terminated
+		}
+		if terminated == nil || terminated.Message == "" {
+			return nodeutils.UpgradeStatus{}, false
+		}
+		var status nodeutils.UpgradeStatus
+		if err := json.Unmarshal([]byte(terminated.Message), &status); err != nil {
+			return nodeutils.UpgradeStatus{}, false
+		}
+		return status, true
+	}
+	return nodeutils.UpgradeStatus{}, false
+}
+
+func (r *Reconciler) reconcileHaltHeightHold(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod, status nodeutils.UpgradeStatus) error {
+	annotations := chainNode.GetAnnotations()
+	existing := annotations[appsv1.AnnotationHaltHeightHold]
+	desired := ""
+	if chainNode.Spec.Config != nil && chainNode.Spec.Config.HaltHeight != nil {
+		haltHeight := *chainNode.Spec.Config.HaltHeight
+		configured := strconv.FormatInt(haltHeight, 10)
+		if existing == configured {
+			desired = configured
+		} else if podHaltHeight, ok := nodeUtilsHaltHeight(pod); ok && podHaltHeight == haltHeight && containerHasTerminated(pod, chainNode.Spec.App.App) {
+			observed := status.LatestHeight
+			if observed == nil {
+				if finalStatus, ok := nodeUtilsTerminationStatus(pod); ok {
+					observed = finalStatus.LatestHeight
+				}
+			}
+			if haltHeight > 0 && observed != nil && (*observed == haltHeight || *observed == haltHeight-1) {
+				desired = configured
+			}
+		}
+	}
+	if desired == existing {
+		return nil
+	}
+	if annotations == nil {
+		annotations = map[string]string{}
+	} else {
+		annotations = maps.Clone(annotations)
+	}
+	if desired == "" {
+		delete(annotations, appsv1.AnnotationHaltHeightHold)
+	} else {
+		annotations[appsv1.AnnotationHaltHeightHold] = desired
+	}
+	chainNode.SetAnnotations(annotations)
+	return r.Update(ctx, chainNode)
+}
+
+func nodeUtilsHaltHeight(pod *corev1.Pod) (int64, bool) {
+	if pod == nil {
+		return 0, false
+	}
+	for _, container := range pod.Spec.InitContainers {
+		if container.Name != nodeUtilsContainerName {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name != "HALT_HEIGHT" {
+				continue
+			}
+			height, err := strconv.ParseInt(env.Value, 10, 64)
+			return height, err == nil
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+type upgradeIdentity struct {
+	Height int64                `json:"height"`
+	Source appsv1.UpgradeSource `json:"source"`
+	Name   string               `json:"name,omitempty"`
+	Image  string               `json:"image"`
+}
+
+func upgradeIdentityFrom(upgrade *appsv1.Upgrade) upgradeIdentity {
+	return upgradeIdentity{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}
+}
+
+func ongoingUpgrade(chainNode *appsv1.ChainNode) *appsv1.Upgrade {
+	var selected *appsv1.Upgrade
+	for i := range chainNode.Status.Upgrades {
+		upgrade := &chainNode.Status.Upgrades[i]
+		if (upgrade.Source != appsv1.ManualUpgrade && upgrade.Source != appsv1.OnChainUpgrade) ||
+			upgrade.Status != appsv1.UpgradeOnGoing || upgrade.Height <= 0 {
+			continue
+		}
+		if selected == nil || upgrade.Height < selected.Height {
+			selected = upgrade
+		}
+	}
+	return selected
+}
+
+func stampUpgradeIdentity(pod *corev1.Pod, upgrade *appsv1.Upgrade) error {
+	body, err := json.Marshal(upgradeIdentityFrom(upgrade))
+	if err != nil {
+		return err
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[controllers.AnnotationUpgradeIdentity] = string(body)
+	return nil
+}
+
+func podMatchesUpgrade(pod *corev1.Pod, upgrade *appsv1.Upgrade) bool {
+	if pod == nil {
+		return false
+	}
+	body := pod.Annotations[controllers.AnnotationUpgradeIdentity]
+	if body == "" {
+		body = pod.Annotations[controllers.AnnotationManualUpgradeIdentity]
+	}
+	var identity upgradeIdentity
+	if err := json.Unmarshal([]byte(body), &identity); err != nil {
+		return false
+	}
+	return identity == upgradeIdentityFrom(upgrade)
+}
+
+func appContainerStarted(pod *corev1.Pod, name string) bool {
+	for _, container := range pod.Status.ContainerStatuses {
+		if container.Name == name {
+			return container.State.Running != nil || container.Started != nil && *container.Started
+		}
+	}
+	return false
+}
+
+func (r *Reconciler) recoverOngoingUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, currentPod, desiredPod *corev1.Pod) (bool, error) {
+	upgrade := ongoingUpgrade(chainNode)
+	if upgrade == nil {
+		return false, nil
+	}
+	if chainNode.HasImageOverride() {
+		required := nodeutils.RequiredUpgrade{
+			Height: upgrade.Height,
+			Source: nodeutils.UpgradeSource(upgrade.Source),
+			Name:   upgrade.Name,
+			Image:  upgrade.Image,
+		}
+		if err := r.skipUpgradeForOverride(ctx, chainNode, required); err != nil {
+			return true, fmt.Errorf("skip recovered upgrade at height %d for pinned node: %w", upgrade.Height, err)
+		}
+		r.recorder.Eventf(chainNode,
+			corev1.EventTypeWarning,
+			appsv1.ReasonUpgradeSkippedByOverride,
+			"Not upgrading at height %d: node is pinned to %s by an image override",
+			upgrade.Height, chainNode.GetAppImage(),
+		)
+		return true, nil
+	}
+	if podMatchesUpgrade(currentPod, upgrade) {
+		if !appContainerStarted(currentPod, chainNode.Spec.App.App) &&
+			!containerHasTerminated(currentPod, chainNode.Spec.App.App) &&
+			!podInFailedState(chainNode, currentPod) {
+			return true, nil
+		}
+		return true, r.completeRecoveredUpgrade(ctx, chainNode, upgrade)
+	}
+	if upgrade.Image == "" {
+		return true, fmt.Errorf("ongoing upgrade at height %d has no image", upgrade.Height)
+	}
+	upgraded, err := r.upgradePod(ctx, chainNode, desiredPod, upgrade.Image)
+	if err != nil && !upgraded {
+		return true, fmt.Errorf("resume upgrade at height %d: %w", upgrade.Height, err)
+	}
+	if completeErr := r.completeRecoveredUpgrade(ctx, chainNode, upgrade); completeErr != nil {
+		return true, completeErr
+	}
+	return true, nil
+}
+
+func (r *Reconciler) completeRecoveredUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade) error {
+	return r.completeUpgrade(ctx, chainNode, upgrade, "reset VPA after recovered upgrade")
+}
+
+func (r *Reconciler) completeUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade, resetFailure string) error {
+	completed := *upgrade
+	if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
+		return fmt.Errorf("%s for %s: %w", resetFailure, chainNode.GetName(), err)
+	}
+	chainNode.Status.AppImage = completed.Image
+	chainNode.Status.AppVersion = completed.GetVersion()
+	return r.setUpgradeStatus(ctx, chainNode, &completed, appsv1.UpgradeCompleted)
 }
 
 // attestPodHealth records that the ChainNode controller successfully probed the node after the
@@ -437,12 +638,6 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 			},
 		},
 		{
-			Name: "trace",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		},
-		{
 			Name: "upgrades-config",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -456,7 +651,7 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 }
 
 // buildNodeUtilsInitContainer creates the node-utils sidecar init container.
-func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, shutdownSecretName string) corev1.Container {
+func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, shutdownSecretName string, runAsUser, runAsGroup int64) corev1.Container {
 	var sidecarRestartAlways = corev1.ContainerRestartPolicyAlways
 	env := []corev1.EnvVar{
 		{
@@ -476,14 +671,6 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 		env = append(env, corev1.EnvVar{Name: "SIGNER_PEER_DNS", Value: signerDNS})
 	}
 	env = append(env,
-		corev1.EnvVar{
-			Name:  "CREATE_FIFO",
-			Value: controllers.StringValueTrue,
-		},
-		corev1.EnvVar{
-			Name:  "TRACE_STORE",
-			Value: "/trace/trace.fifo",
-		},
 		corev1.EnvVar{
 			Name:  "NODE_BINARY_NAME",
 			Value: chainNode.Spec.App.App,
@@ -512,12 +699,17 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 		}},
 	})
 
+	securityContext := k8s.RestrictedSecurityContext()
+	securityContext.RunAsUser = ptr.To(runAsUser)
+	securityContext.RunAsGroup = ptr.To(runAsGroup)
+	securityContext.RunAsNonRoot = ptr.To(runAsUser != 0)
+
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
 		Image:           r.opts.GetNodeUtilsImage(),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &sidecarRestartAlways,
-		SecurityContext: k8s.RestrictedSecurityContext(),
+		SecurityContext: securityContext,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          nodeUtilsPortName,
@@ -530,10 +722,6 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 				Name:      "data",
 				MountPath: "/home/app/data",
 				ReadOnly:  true,
-			},
-			{
-				Name:      "trace",
-				MountPath: "/trace",
 			},
 			{
 				Name:      "upgrades-config",
@@ -557,6 +745,29 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 			PeriodSeconds:    2,
 		},
 	}
+}
+
+func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityContext) (int64, int64, error) {
+	var runAsUser *int64
+	if app != nil && app.RunAsUser != nil {
+		runAsUser = app.RunAsUser
+	} else if pod != nil && pod.RunAsUser != nil {
+		runAsUser = pod.RunAsUser
+	}
+	if runAsUser == nil {
+		return 0, 0, fmt.Errorf("node-utils requires an explicit numeric runAsUser on the app container or pod security context to read the SDK upgrade marker")
+	}
+
+	var runAsGroup *int64
+	if app != nil && app.RunAsGroup != nil {
+		runAsGroup = app.RunAsGroup
+	} else if pod != nil && pod.RunAsGroup != nil {
+		runAsGroup = pod.RunAsGroup
+	}
+	if runAsGroup == nil {
+		return 0, 0, fmt.Errorf("node-utils requires an explicit numeric runAsGroup on the app container or pod security context to traverse the app data directory")
+	}
+	return *runAsUser, *runAsGroup, nil
 }
 
 func signerPeerDNS(chainNode *appsv1.ChainNode) string {
@@ -616,11 +827,8 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 		ImagePullPolicy: chainNode.GetAppImagePullPolicy(),
 		SecurityContext: securityContext,
 		Command:         []string{chainNode.Spec.App.App},
-		Args: append([]string{"start",
-			"--home", "/home/app",
-			"--trace-store", "/trace/trace.fifo",
-		}, chainNode.GetAdditionalRunFlags()...),
-		Env: chainNode.Spec.Config.GetEnv(),
+		Args:            append([]string{"start", "--home", "/home/app"}, chainNode.GetAdditionalRunFlags()...),
+		Env:             chainNode.Spec.Config.GetEnv(),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          chainutils.P2pPortName,
@@ -671,10 +879,6 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 				MountPath: "/home/app/config/" + nodeKeyFilename,
 				SubPath:   nodeKeyFilename,
 			},
-			{
-				Name:      "trace",
-				MountPath: "/trace",
-			},
 		}, configFilesMounts...),
 		StartupProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -682,7 +886,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 					Path: "/health",
 					Port: intstr.IntOrString{
 						Type:   intstr.Int,
-						IntVal: nodeUtilsPort,
+						IntVal: chainutils.RpcPort,
 					},
 					Scheme: "HTTP",
 				},
@@ -697,7 +901,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 					Path: "/health",
 					Port: intstr.IntOrString{
 						Type:   intstr.Int,
-						IntVal: nodeUtilsPort,
+						IntVal: chainutils.RpcPort,
 					},
 					Scheme: "HTTP",
 				},
@@ -776,6 +980,10 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	if appSecurityContext == nil {
 		appSecurityContext = k8s.RestrictedSecurityContext()
 	}
+	nodeUtilsRunAsUser, nodeUtilsRunAsGroup, err := effectiveRunIdentity(appSecurityContext, podSecurityContext)
+	if err != nil {
+		return nil, fmt.Errorf("build node-utils for %s: %w", chainNode.GetName(), err)
+	}
 
 	podLabels := map[string]string{
 		controllers.LabelNodeID:    chainNode.Status.NodeID,
@@ -815,9 +1023,14 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			SecurityContext:               podSecurityContext,
 			TerminationGracePeriodSeconds: chainNode.Spec.Config.GetTerminationGracePeriodSeconds(),
 			Volumes:                       r.buildBaseVolumes(chainNode),
-			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode, shutdownSecretName)},
+			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode, shutdownSecretName, nodeUtilsRunAsUser, nodeUtilsRunAsGroup)},
 			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
+	}
+	if upgrade := ongoingUpgrade(chainNode); upgrade != nil {
+		if err := stampUpgradeIdentity(pod, upgrade); err != nil {
+			return nil, fmt.Errorf("encode ongoing upgrade identity for %s: %w", chainNode.GetName(), err)
+		}
 	}
 	if hasCosmosignerTarget {
 		// The headless Service publishes not-ready addresses, so this waits only for endpoint
@@ -1451,25 +1664,6 @@ func nodeUtilsIsRunning(pod *corev1.Pod) bool {
 			return c.State.Running != nil
 		}
 	}
-	return false
-}
-
-func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
-	// A failed regular init container terminates restartable init sidecars as the Pod shuts down.
-	// Preserve the discovery gate's diagnostic path instead of misclassifying that expected
-	// node-utils termination as the root failure.
-	for _, c := range pod.Status.InitContainerStatuses {
-		if c.Name == CosmosignerDiscoveryWaitContainerName && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
-			return false
-		}
-	}
-
-	for _, c := range pod.Status.InitContainerStatuses {
-		if c.Name == nodeUtilsContainerName && !c.Ready && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
-			return true
-		}
-	}
-
 	return false
 }
 

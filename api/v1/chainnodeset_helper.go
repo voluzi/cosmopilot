@@ -12,8 +12,6 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
 const (
@@ -168,19 +166,33 @@ func (nodeSet *ChainNodeSet) GetAppSpecWithUpgrades() AppSpec {
 	spec := nodeSet.Spec.App.DeepCopy()
 
 	for _, u := range nodeSet.Status.Upgrades {
+		if u.Status == UpgradeConflict {
+			continue
+		}
 		upgradeSpec := UpgradeSpec{
 			Height: u.Height,
+			Name:   u.Name,
 			Image:  u.Image,
 		}
 		if u.Source == OnChainUpgrade {
 			upgradeSpec.ForceOnChain = ptr.To(true)
 		}
 
-		if !utils.SliceContainsObj(spec.Upgrades, upgradeSpec, func(a UpgradeSpec, b UpgradeSpec) bool {
-			return a.Height == b.Height
-		}) {
-			spec.Upgrades = append(spec.Upgrades, upgradeSpec)
+		existing := -1
+		for i := range spec.Upgrades {
+			if spec.Upgrades[i].Height == upgradeSpec.Height {
+				existing = i
+				break
+			}
 		}
+		if existing >= 0 {
+			if u.Source == OnChainUpgrade && u.Name != "" &&
+				spec.Upgrades[existing].ForceGovUpgrade() && spec.Upgrades[existing].Name == "" {
+				spec.Upgrades[existing].Name = u.Name
+			}
+			continue
+		}
+		spec.Upgrades = append(spec.Upgrades, upgradeSpec)
 	}
 
 	// Sort upgrades by height

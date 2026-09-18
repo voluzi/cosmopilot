@@ -34,11 +34,23 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, node := range chainNodeList.Items {
-		for _, upgrade := range node.Status.Upgrades {
-			nodeSet.Status.Upgrades = AddOrUpdateUpgrade(nodeSet.Status.Upgrades, upgrade)
-		}
 		if node.Status.LatestHeight > nodeSet.Status.LatestHeight {
 			nodeSet.Status.LatestHeight = node.Status.LatestHeight
+		}
+	}
+	observedUpgrades := aggregateChildUpgrades(chainNodeList.Items)
+	for _, observed := range observedUpgrades {
+		replaced := false
+		for i := range nodeSet.Status.Upgrades {
+			if nodeSet.Status.Upgrades[i].Height != observed.Height {
+				continue
+			}
+			nodeSet.Status.Upgrades[i] = observed
+			replaced = true
+			break
+		}
+		if !replaced {
+			nodeSet.Status.Upgrades = append(nodeSet.Status.Upgrades, observed)
 		}
 	}
 
@@ -54,9 +66,67 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, nodeSet *appsv1.ChainNo
 	return nil
 }
 
+func aggregateChildUpgrades(nodes []appsv1.ChainNode) []appsv1.Upgrade {
+	planNames := make(map[int64]map[string]struct{})
+	for _, node := range nodes {
+		for _, upgrade := range node.Status.Upgrades {
+			if upgrade.Source != appsv1.OnChainUpgrade || upgrade.Status == appsv1.UpgradeConflict {
+				continue
+			}
+			if upgrade.Name == "" {
+				continue
+			}
+			if planNames[upgrade.Height] == nil {
+				planNames[upgrade.Height] = make(map[string]struct{})
+			}
+			planNames[upgrade.Height][upgrade.Name] = struct{}{}
+		}
+	}
+
+	upgrades := make([]appsv1.Upgrade, 0)
+	for _, node := range nodes {
+		for _, upgrade := range node.Status.Upgrades {
+			names := planNames[upgrade.Height]
+			if len(names) > 1 {
+				continue
+			}
+			if len(names) == 1 {
+				if upgrade.Source != appsv1.OnChainUpgrade {
+					continue
+				}
+				if _, matches := names[upgrade.Name]; !matches {
+					continue
+				}
+			}
+			upgrades = AddOrUpdateUpgrade(upgrades, upgrade)
+		}
+	}
+	for height, names := range planNames {
+		if len(names) <= 1 {
+			continue
+		}
+		upgrades = append(upgrades, appsv1.Upgrade{
+			Height: height,
+			Source: appsv1.OnChainUpgrade,
+			Status: appsv1.UpgradeConflict,
+		})
+	}
+	return upgrades
+}
+
 func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []appsv1.Upgrade {
 	for i, u := range upgrades {
 		if u.Height == upgrade.Height {
+			if u.Source == appsv1.OnChainUpgrade && upgrade.Source == appsv1.OnChainUpgrade &&
+				u.Name != "" && upgrade.Name != "" && u.Name != upgrade.Name &&
+				(u.Status == appsv1.UpgradeScheduled || u.Status == appsv1.UpgradeImageMissing) &&
+				(upgrade.Status == appsv1.UpgradeScheduled || upgrade.Status == appsv1.UpgradeImageMissing) {
+				upgrades[i] = upgrade
+				return upgrades
+			}
+			if upgrades[i].Name == "" && upgrade.Name != "" {
+				upgrades[i].Name = upgrade.Name
+			}
 			// Backfill an image that was initially missing from an on-chain proposal once a child
 			// ChainNode receives it from a matching manual upgrade.
 			if upgrades[i].Image == "" && upgrade.Image != "" {

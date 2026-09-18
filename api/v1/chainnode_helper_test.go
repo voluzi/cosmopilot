@@ -99,6 +99,36 @@ func TestChainNodeIsReady(t *testing.T) {
 	}
 }
 
+func TestChainNodeMustStopHonorsOnlyCurrentHaltBoundaryEvidence(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		haltHeight *int64
+		latest     int64
+		hold       string
+		want       bool
+	}{
+		{name: "exact committed height", haltHeight: ptr.To[int64](100), latest: 100, want: true},
+		{name: "running at previous height has no hold", haltHeight: ptr.To[int64](100), latest: 99},
+		{name: "terminal previous height has matching hold", haltHeight: ptr.To[int64](100), latest: 99, hold: "100", want: true},
+		{name: "changed halt height releases old hold", haltHeight: ptr.To[int64](101), latest: 99, hold: "100"},
+		{name: "removed halt height releases old hold", latest: 99, hold: "100"},
+		{name: "terminal well before height has no hold", haltHeight: ptr.To[int64](100), latest: 98},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &ChainNode{
+				Spec:   ChainNodeSpec{Config: &Config{HaltHeight: tt.haltHeight}},
+				Status: ChainNodeStatus{LatestHeight: tt.latest},
+			}
+			if tt.hold != "" {
+				node.Annotations = map[string]string{AnnotationHaltHeightHold: tt.hold}
+			}
+
+			got, _ := node.MustStop()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func chainNodeWithUpgrades(image string, version *string, latestHeight int64, upgrades ...Upgrade) *ChainNode {
 	return &ChainNode{
 		Spec: ChainNodeSpec{
@@ -140,6 +170,40 @@ func TestGetAppImageIgnoresUpgradesAboveLatestHeight(t *testing.T) {
 
 	// GetLatestAppImage has no height bound, so it does select the newer upgrade.
 	assert.Equal(t, "repo/app:v3", chainNode.GetLatestAppImage())
+}
+
+func TestGetAppImageUsesImmediateOngoingUpgradeAtPreviousCommittedHeight(t *testing.T) {
+	chainNode := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 99,
+		Upgrade{Height: 100, Name: "v2", Image: "repo/app:v2", Status: UpgradeOnGoing},
+		Upgrade{Height: 500, Name: "v5", Image: "repo/app:v5", Status: UpgradeOnGoing},
+	)
+
+	assert.Equal(t, "repo/app:v2", chainNode.GetAppImage())
+}
+
+func TestGetAppImageRetainsSelectedUpgradeWhenCommittedHeightIsStale(t *testing.T) {
+	tests := []struct {
+		name          string
+		latestHeight  int64
+		status        UpgradePhase
+		recordedImage string
+	}{
+		{name: "completed at previous height", latestHeight: 99, status: UpgradeCompleted, recordedImage: "repo/app:v2"},
+		{name: "ongoing below previous height", latestHeight: 98, status: UpgradeOnGoing},
+		{name: "ongoing with unknown height", status: UpgradeOnGoing},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := chainNodeWithUpgrades("repo/app", ptr.To("v1"), tt.latestHeight,
+				Upgrade{Height: 100, Name: "v2", Image: "repo/app:v2", Status: tt.status},
+			)
+			node.Status.AppImage = tt.recordedImage
+
+			assert.Equal(t, "repo/app:v2", node.GetAppImage())
+			assert.Equal(t, "repo/app:v2", node.GetRunningAppImage())
+		})
+	}
 }
 
 func TestImageRefVersion(t *testing.T) {
@@ -263,4 +327,13 @@ func TestGetRunningAppImageUsesLatestForStateSyncRestore(t *testing.T) {
 		Upgrade{Height: 500, Image: "repo/app:v5", Status: UpgradeCompleted},
 	)
 	assert.Equal(t, plain.GetAppImage(), plain.GetRunningAppImage())
+}
+
+func TestGetRunningAppImageRetainsOngoingUpgradeForStateSyncRestore(t *testing.T) {
+	node := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 0,
+		Upgrade{Height: 100, Image: "repo/app:v2", Status: UpgradeOnGoing},
+	)
+	node.Spec.StateSyncRestore = ptr.To(true)
+
+	assert.Equal(t, "repo/app:v2", node.GetRunningAppImage())
 }

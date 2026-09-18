@@ -6,8 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewClient(t *testing.T) {
@@ -196,6 +200,69 @@ func TestClient_RequiresUpgrade(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("RequiresUpgrade() = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+func TestClientGetUpgradeStatusUsesStructuredEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/upgrade_status" {
+			t.Fatalf("unexpected fallback request %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"latestHeight":99,"heightObservedAt":"2026-09-18T12:00:00Z","requiredUpgrade":{"height":100,"source":"on-chain","name":"v2"}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	status, err := (&Client{url: server.URL}).GetUpgradeStatus(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, status.LatestHeight)
+	assert.Equal(t, int64(99), *status.LatestHeight)
+	assert.Equal(t, &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"}, status.RequiredUpgrade)
+}
+
+func TestClientGetUpgradeStatusFallsBackOnlyOnNotFound(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		statusCode    int
+		wantErr       bool
+		wantFallbacks int32
+	}{
+		{name: "not found", statusCode: http.StatusNotFound, wantFallbacks: 2},
+		{name: "server error", statusCode: http.StatusInternalServerError, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var fallbacks atomic.Int32
+			var requestOrder atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/upgrade_status":
+					http.Error(w, http.StatusText(tt.statusCode), tt.statusCode)
+				case "/latest_height":
+					assert.Equal(t, int32(2), requestOrder.Add(1))
+					fallbacks.Add(1)
+					_, _ = io.WriteString(w, "101")
+				case "/must_upgrade":
+					assert.Equal(t, int32(1), requestOrder.Add(1))
+					fallbacks.Add(1)
+					w.WriteHeader(http.StatusUpgradeRequired)
+					_, _ = io.WriteString(w, "true")
+				default:
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			status, err := (&Client{url: server.URL}).GetUpgradeStatus(t.Context())
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, status.LatestHeight)
+				assert.Equal(t, int64(101), *status.LatestHeight)
+				assert.True(t, status.LegacyUpgradeRequired)
+				assert.Nil(t, status.RequiredUpgrade)
+			}
+			assert.Equal(t, tt.wantFallbacks, fallbacks.Load())
 		})
 	}
 }

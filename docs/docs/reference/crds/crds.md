@@ -655,8 +655,8 @@ Config allows setting specific configurations for a node, including overriding c
 | runFlags | List of flags to be appended to app container when starting the node. | []string | false |
 | dashedConfigToml | Whether field naming in config.toml should use dashes instead of underscores. Defaults to `false`. | *bool | false |
 | haltHeight | The block height at which the node should stop. Cosmopilot will not attempt to restart the node beyond this height. | *int64 | false |
-| securityContext | SecurityContext allows overriding the default restricted security context for the main app container. When not specified, a restricted security context is applied (runAsNonRoot, runAsUser=1000, drop all capabilities). Use this only if your app image requires running as root or with different security settings. | *corev1.SecurityContext | false |
-| podSecurityContext | PodSecurityContext allows overriding the default restricted pod security context. When not specified, a restricted pod security context is applied (runAsNonRoot, runAsUser=1000, fsGroup=1000). Use this only if your app or sidecars require running as root or with different security settings. | *corev1.PodSecurityContext | false |
+| securityContext | SecurityContext allows overriding the default restricted security context for the main app container. When not specified, a restricted security context is applied (runAsNonRoot, runAsUser=1000, drop all capabilities). Use this only if your app image requires running as root or with different security settings. If both this and podSecurityContext omit runAsUser or runAsGroup, pod generation fails because node-utils must use the app's numeric UID and primary GID to read the Cosmos SDK upgrade marker. | *corev1.SecurityContext | false |
+| podSecurityContext | PodSecurityContext allows overriding the default restricted pod security context. When not specified, a restricted pod security context is applied (runAsNonRoot, runAsUser=1000, fsGroup=1000). Use this only if your app or sidecars require running as root or with different security settings. Its runAsUser and runAsGroup are inherited by node-utils when the app container securityContext does not set them. | *corev1.PodSecurityContext | false |
 | serviceAccountName | ServiceAccountName is the name of the ServiceAccount to use for the node's pod. If not specified, the default service account in the namespace is used. This is useful when sidecars need specific permissions (e.g., for leader election using leases). | *string | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -1155,6 +1155,7 @@ Upgrade represents an upgrade processed by cosmopilot and added to status.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | height | Height at which the upgrade should occur. | int64 | true |
+| name | Governance plan name, when supplied by the chain. | string | false |
 | image | Container image replacement to be used in the upgrade. | string | true |
 | status | Upgrade status. | UpgradePhase | true |
 | source | Where cosmopilot got this upgrade from. | UpgradeSource | true |
@@ -1168,6 +1169,7 @@ UpgradeSpec represents a manual upgrade.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | height | Height at which the upgrade should occur. | int64 | true |
+| name | Governance plan name this image belongs to. The controller sets this when propagating an on-chain upgrade from a ChainNodeSet to its child nodes. | string | false |
 | image | Container image replacement to be used in the upgrade. | string | true |
 | forceOnChain | Whether to force this upgrade to be processed as a gov planned upgrade. Defaults to `false`. | *bool | false |
 

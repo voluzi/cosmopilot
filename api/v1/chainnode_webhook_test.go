@@ -26,6 +26,89 @@ func TestChainNodeValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
 	}, []string(warnings))
 }
 
+func TestConfigValidateNodeUtilsRunIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		config  *Config
+		wantErr string
+	}{
+		{name: "restricted defaults"},
+		{
+			name:   "custom app inherits default pod identity",
+			config: &Config{SecurityContext: &corev1.SecurityContext{}},
+		},
+		{
+			name:   "default app identity overrides empty custom pod context",
+			config: &Config{PodSecurityContext: &corev1.PodSecurityContext{}},
+		},
+		{
+			name: "app identity",
+			config: &Config{
+				SecurityContext:    &corev1.SecurityContext{RunAsUser: ptr.To[int64](2000), RunAsGroup: ptr.To[int64](2001)},
+				PodSecurityContext: &corev1.PodSecurityContext{},
+			},
+		},
+		{
+			name: "pod inheritance",
+			config: &Config{
+				SecurityContext:    &corev1.SecurityContext{},
+				PodSecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](2000), RunAsGroup: ptr.To[int64](2001)},
+			},
+		},
+		{
+			name: "explicit root",
+			config: &Config{
+				SecurityContext:    &corev1.SecurityContext{RunAsUser: ptr.To[int64](0), RunAsGroup: ptr.To[int64](0)},
+				PodSecurityContext: &corev1.PodSecurityContext{},
+			},
+		},
+		{
+			name: "image-defined user",
+			config: &Config{
+				SecurityContext:    &corev1.SecurityContext{},
+				PodSecurityContext: &corev1.PodSecurityContext{},
+			},
+			wantErr: "runAsUser",
+		},
+		{
+			name: "image-defined group",
+			config: &Config{
+				SecurityContext:    &corev1.SecurityContext{RunAsUser: ptr.To[int64](2000)},
+				PodSecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](2000)},
+			},
+			wantErr: "runAsGroup",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.ValidateNodeUtilsRunIdentity(".spec.config")
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+			require.ErrorContains(t, err, ".spec.config")
+		})
+	}
+}
+
+func TestChainNodeAdmissionRejectsImageDefinedRunIdentity(t *testing.T) {
+	node := &ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node"},
+		Spec: ChainNodeSpec{
+			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+			Config: &Config{
+				SecurityContext:    &corev1.SecurityContext{},
+				PodSecurityContext: &corev1.PodSecurityContext{},
+			},
+		},
+	}
+
+	_, err := node.Validate(nil)
+	require.ErrorContains(t, err, "runAsUser")
+	_, err = node.ValidateCreate(t.Context(), node)
+	require.ErrorContains(t, err, "runAsUser")
+}
+
 func TestChainNodeValidateWarnsWhenDeprecatedVaultTokenRenewerIsConfigured(t *testing.T) {
 	chainNode := &ChainNode{Spec: ChainNodeSpec{
 		Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},

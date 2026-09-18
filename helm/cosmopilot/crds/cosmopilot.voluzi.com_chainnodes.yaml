@@ -1050,6 +1050,11 @@ spec:
                           description: Container image replacement to be used in the
                             upgrade.
                           type: string
+                        name:
+                          description: |-
+                            Governance plan name this image belongs to. The controller sets this when propagating an
+                            on-chain upgrade from a ChainNodeSet to its child nodes.
+                          type: string
                       required:
                       - height
                       - image
@@ -1130,7 +1135,9 @@ spec:
                           upstream, listener, metrics and dashboard settings are managed by Cosmopilot.
                         properties:
                           key:
-                            description: The key to select.
+                            description: |-
+                              The key to select from the ConfigMap's Data field.
+                              Keys in the BinaryData field are not currently propagated to container env vars.
                             type: string
                           name:
                             default: ""
@@ -1465,7 +1472,9 @@ spec:
                               description: Selects a key of a ConfigMap.
                               properties:
                                 key:
-                                  description: The key to select.
+                                  description: |-
+                                    The key to select from the ConfigMap's Data field.
+                                    Keys in the BinaryData field are not currently propagated to container env vars.
                                   type: string
                                 name:
                                   default: ""
@@ -1661,7 +1670,9 @@ spec:
                               description: Selects a key of a ConfigMap.
                               properties:
                                 key:
-                                  description: The key to select.
+                                  description: |-
+                                    The key to select from the ConfigMap's Data field.
+                                    Keys in the BinaryData field are not currently propagated to container env vars.
                                   type: string
                                 name:
                                   default: ""
@@ -1869,6 +1880,7 @@ spec:
                       PodSecurityContext allows overriding the default restricted pod security context.
                       When not specified, a restricted pod security context is applied (runAsNonRoot, runAsUser=1000, fsGroup=1000).
                       Use this only if your app or sidecars require running as root or with different security settings.
+                      Its runAsUser and runAsGroup are inherited by node-utils when the app container securityContext does not set them.
                     properties:
                       appArmorProfile:
                         description: |-
@@ -1961,11 +1973,8 @@ spec:
                           Eligible volumes are in-tree FibreChannel and iSCSI volumes, and all CSI volumes
                           whose CSI driver announces SELinux support by setting spec.seLinuxMount: true in their
                           CSIDriver instance. Other volumes are always re-labelled recursively.
-                          "MountOption" value is allowed only when SELinuxMount feature gate is enabled.
 
-                          If not specified and SELinuxMount feature gate is enabled, "MountOption" is used.
-                          If not specified and SELinuxMount feature gate is disabled, "MountOption" is used for ReadWriteOncePod volumes
-                          and "Recursive" for all other volumes.
+                          If not specified, "MountOption" is used.
 
                           This field affects only Pods that have SELinux label set, either in PodSecurityContext or in SecurityContext of all containers.
 
@@ -2122,6 +2131,8 @@ spec:
                       SecurityContext allows overriding the default restricted security context for the main app container.
                       When not specified, a restricted security context is applied (runAsNonRoot, runAsUser=1000, drop all capabilities).
                       Use this only if your app image requires running as root or with different security settings.
+                      If both this and podSecurityContext omit runAsUser or runAsGroup, pod generation fails because
+                      node-utils must use the app's numeric UID and primary GID to read the Cosmos SDK upgrade marker.
                     properties:
                       allowPrivilegeEscalation:
                         description: |-
@@ -2382,7 +2393,9 @@ spec:
                                     description: Selects a key of a ConfigMap.
                                     properties:
                                       key:
-                                        description: The key to select.
+                                        description: |-
+                                          The key to select from the ConfigMap's Data field.
+                                          Keys in the BinaryData field are not currently propagated to container env vars.
                                         type: string
                                       name:
                                         default: ""
@@ -3575,7 +3588,9 @@ spec:
                                     description: Selects a key of a ConfigMap.
                                     properties:
                                       key:
-                                        description: The key to select.
+                                        description: |-
+                                          The key to select from the ConfigMap's Data field.
+                                          Keys in the BinaryData field are not currently propagated to container env vars.
                                         type: string
                                       name:
                                         default: ""
@@ -5384,7 +5399,9 @@ spec:
                                         description: Selects a key of a ConfigMap.
                                         properties:
                                           key:
-                                            description: The key to select.
+                                            description: |-
+                                              The key to select from the ConfigMap's Data field.
+                                              Keys in the BinaryData field are not currently propagated to container env vars.
                                             type: string
                                           name:
                                             default: ""
@@ -6575,6 +6592,9 @@ spec:
                       type: integer
                     image:
                       description: Container image replacement to be used in the upgrade.
+                      type: string
+                    name:
+                      description: Governance plan name, when supplied by the chain.
                       type: string
                     source:
                       description: Where cosmopilot got this upgrade from.
