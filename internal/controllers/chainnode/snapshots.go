@@ -454,6 +454,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		}
 	}
 
+	// Capture the per-object deleteOnExpire promises before the prune below discards the records of
+	// snapshots that are already gone. Orphan resolution must honour the policy an upload started
+	// under, not whatever the spec says by the time its Job is discovered.
+	uploadRetention := snapshotUploadRetentionPolicies(chainNode)
+
 	// A successful VolumeSnapshot deletion may be followed by a transient status-update failure.
 	// Prune retained-object records before orphan discovery so retries cannot mistake their historical
 	// upload Jobs for objects that should be deleted from the current destination.
@@ -481,7 +486,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshotJob.Name)
 					status, deleteErr = exporter.GetSnapshotDeletionStatus(ctx, snapshotJob)
 				case datasnapshot.SnapshotJobUpload:
-					if snapshotUploadRetained(chainNode, snapshotJob) {
+					if snapshotUploadRetained(chainNode, uploadRetention, snapshotJob) {
 						logger.Info("retaining orphaned tarball upload as its remote object must be kept", "snapshot", snapshotJob.Name)
 						status, deleteErr = datasnapshot.RetainSnapshotForUpload(
 							ctx, r.snapshotKubernetesClient(), chainNode, snapshotJob,
@@ -1391,14 +1396,22 @@ func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, e
 	)
 }
 
-// snapshotUploadRetained reports whether the remote object of an orphaned upload must be kept. A
-// durable export record wins, so the policy captured when the export started survives a later spec
-// change. pruneRetainedSnapshotExports only keeps records with deleteOnExpire set for snapshots that
-// are already gone, so in practice an orphan is usually recordless — a VolumeSnapshot deleted by hand
-// mid-upload, or a crash between its deletion and the status write — and the configured policy, which
-// defaults to keeping the tarball, decides. Deleting a remote object is unrecoverable, so the absent
-// signal must fail towards retention.
-func snapshotUploadRetained(chainNode *appsv1.ChainNode, upload datasnapshot.SnapshotJob) bool {
+// snapshotUploadRetained reports whether the remote object of an orphaned upload must be kept. The
+// policy captured when the export started wins, so a later spec change cannot retroactively authorise
+// deleting an object uploaded under deleteOnExpire=false. captured holds the records as they stood
+// before pruneRetainedSnapshotExports ran; the live records are consulted too, for exports written
+// after that snapshot was taken. Only a genuinely recordless orphan — a VolumeSnapshot deleted by hand
+// mid-upload, or a crash between its deletion and the status write — falls through to the configured
+// policy, which defaults to keeping the tarball. Deleting a remote object is unrecoverable, so the
+// absent signal must fail towards retention.
+func snapshotUploadRetained(
+	chainNode *appsv1.ChainNode,
+	captured map[string]bool,
+	upload datasnapshot.SnapshotJob,
+) bool {
+	if deleteOnExpire, ok := captured[upload.Name]; ok {
+		return !deleteOnExpire
+	}
 	if export := snapshotExportByObjectName(chainNode, upload.Name); export != nil {
 		return !export.DeleteOnExpire
 	}

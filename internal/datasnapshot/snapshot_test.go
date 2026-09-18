@@ -654,6 +654,22 @@ func TestRetainSnapshotForUploadLeavesForeignPVCAlone(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRetainSnapshotForUploadLeavesRecreatedPVCOfVanishedJobAlone(t *testing.T) {
+	// The listed upload Job is gone and a later upload recreated a same-named PVC under a new Job that
+	// has since vanished too. Only the listed UID can tell the two apart, so retention must refuse.
+	owner := testJobOwner()
+	_, pvc := testOrphanUploadResources(owner, s3Exporter)
+	pvc.OwnerReferences[0].UID = "a-later-upload-job-uid"
+	client := fake.NewSimpleClientset(pvc)
+
+	_, err := RetainSnapshotForUpload(context.Background(), client, owner, SnapshotJob{
+		Name: "snapshot", UID: "upload-uid", Purpose: SnapshotJobUpload, Exporter: s3Exporter,
+	})
+	require.ErrorContains(t, err, "not controlled by upload job UID upload-uid")
+	_, err = client.CoreV1().PersistentVolumeClaims(owner.Namespace).Get(context.Background(), pvc.Name, metav1.GetOptions{})
+	require.NoError(t, err, "a PVC belonging to a different upload must survive")
+}
+
 func TestReconcileLegacyDeletionPairsActiveUnpairedUploadWorkflowBeforeCleanup(t *testing.T) {
 	owner := testJobOwner()
 	deleteJob := desiredDeleteJob(owner, gcsExporter)

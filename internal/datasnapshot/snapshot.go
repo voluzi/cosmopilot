@@ -745,7 +745,7 @@ func RetainSnapshotForUpload(
 		}
 	}
 
-	pvc, err := retainedUploadPVC(ctx, client, namespace, jobName, job)
+	pvc, err := retainedUploadPVC(ctx, client, namespace, jobName, job, upload.UID)
 	if err != nil {
 		return "", err
 	}
@@ -769,6 +769,7 @@ func retainedUploadPVC(
 	client kubernetes.Interface,
 	namespace, jobName string,
 	job *batchv1.Job,
+	listedUID types.UID,
 ) (*corev1.PersistentVolumeClaim, error) {
 	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if err != nil {
@@ -783,9 +784,16 @@ func retainedUploadPVC(
 		return nil, fmt.Errorf("retained upload PVC %s/%s is not controlled by upload job %s",
 			pvc.Namespace, pvc.Name, jobName)
 	}
-	if job != nil && controller.UID != job.UID {
+	// The live Job settles the identity when it exists. When it is already gone the listed UID is the
+	// only witness left, and without it a same-named PVC recreated by a later upload would be deleted
+	// as if it belonged to this one.
+	expectedUID := listedUID
+	if job != nil {
+		expectedUID = job.UID
+	}
+	if expectedUID != "" && controller.UID != expectedUID {
 		return nil, fmt.Errorf("retained upload PVC %s/%s is not controlled by upload job UID %s",
-			pvc.Namespace, pvc.Name, job.UID)
+			pvc.Namespace, pvc.Name, expectedUID)
 	}
 	return pvc, nil
 }

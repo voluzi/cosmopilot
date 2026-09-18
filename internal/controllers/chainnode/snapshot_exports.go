@@ -127,8 +127,14 @@ func snapshotExportUploading(chainNode *appsv1.ChainNode, snapshot *snapshotv1.V
 // check is deliberately broader than snapshotExportUploading: a record whose destination could not
 // be resolved still marks an upload we must not cut short.
 func snapshotExportInFlight(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {
-	if snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true) {
+	switch snapshot.Annotations[controllers.AnnotationExportingTarball] {
+	case strconv.FormatBool(true):
 		return true
+	case tarballFailed:
+		// Retries are exhausted, so recordTarballExportFailure has already torn down the upload Job and
+		// its clone PVC and no further upload will start. The export record keeps its Uploading phase
+		// for good, so honouring it below would exempt this snapshot from count retention forever.
+		return false
 	}
 	export := snapshotExportFor(chainNode, snapshot)
 	return export != nil && export.Phase == appsv1.SnapshotExportPhaseUploading
@@ -137,6 +143,19 @@ func snapshotExportInFlight(chainNode *appsv1.ChainNode, snapshot *snapshotv1.Vo
 func snapshotExportCleanupAcknowledged(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {
 	export := snapshotExportFor(chainNode, snapshot)
 	return export != nil && export.Phase == appsv1.SnapshotExportPhaseAcknowledged
+}
+
+// snapshotUploadRetentionPolicies captures deleteOnExpire per remote object name. pruneRetainedSnapshotExports
+// drops records whose VolumeSnapshot is already gone, so the policy an export started under has to be read
+// before that prune runs; otherwise orphan resolution falls back to the current spec and a later flip to
+// deleteOnExpire=true would irreversibly delete an object that was uploaded under the opposite promise.
+func snapshotUploadRetentionPolicies(chainNode *appsv1.ChainNode) map[string]bool {
+	policies := make(map[string]bool, len(chainNode.Status.SnapshotExports))
+	for i := range chainNode.Status.SnapshotExports {
+		export := &chainNode.Status.SnapshotExports[i]
+		policies[export.ObjectName] = export.DeleteOnExpire
+	}
+	return policies
 }
 
 func snapshotExportByObjectName(chainNode *appsv1.ChainNode, objectName string) *appsv1.SnapshotExportStatus {
