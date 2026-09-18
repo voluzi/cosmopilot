@@ -75,6 +75,58 @@ func TestUpgradeMonitorStopsLateManualUpgradeOnce(t *testing.T) {
 	assert.Equal(t, int32(1), stops.Load())
 }
 
+func TestUpgradeMonitorRecoversOngoingManualUpgradeWithoutStoppingNode(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		client *fakeABCIClient
+	}{
+		{name: "height unavailable", client: &fakeABCIClient{err: errors.New("offline")}},
+		{name: "height below upgrade", client: &fakeABCIClient{heights: []int64{10}}},
+		{name: "height above upgrade", client: &fakeABCIClient{heights: []int64{110}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"v2","image":"repo/app:v2","status":"ongoing","source":"manual"}]}`)
+			var stops atomic.Int32
+			monitor := newUpgradeMonitor(tt.client, checker, infoPath, func() error {
+				stops.Add(1)
+				return nil
+			})
+
+			require.NoError(t, monitor.Reconcile(t.Context()))
+
+			assert.Equal(t, &RequiredUpgrade{Height: 100, Source: ManualUpgrade, Name: "v2", Image: "repo/app:v2"}, monitor.Status().RequiredUpgrade)
+			assert.Zero(t, stops.Load())
+		})
+	}
+}
+
+func TestUpgradeMonitorRevalidatesManualRequirementAcrossConfigPhases(t *testing.T) {
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"v2","image":"repo/app:v2","status":"scheduled","source":"manual"}]}`)
+	client := &fakeABCIClient{heights: []int64{99}}
+	var stops atomic.Int32
+	monitor := newUpgradeMonitor(client, checker, infoPath, func() error {
+		stops.Add(1)
+		return nil
+	})
+
+	require.NoError(t, monitor.Reconcile(t.Context()))
+	require.NotNil(t, monitor.Status().RequiredUpgrade)
+	assert.Equal(t, int32(1), stops.Load())
+
+	for _, phase := range []string{UpgradeCompleted, UpgradeSkipped} {
+		require.NoError(t, os.WriteFile(checker.configFile, []byte(`{"upgrades":[{"height":100,"name":"v2","image":"repo/app:v2","status":"`+phase+`","source":"manual"}]}`), 0o600))
+		require.NoError(t, checker.reload())
+		require.NoError(t, monitor.Reconcile(t.Context()))
+		assert.Nil(t, monitor.Status().RequiredUpgrade)
+
+		require.NoError(t, os.WriteFile(checker.configFile, []byte(`{"upgrades":[{"height":100,"name":"v2","image":"repo/app:v2","status":"scheduled","source":"manual"}]}`), 0o600))
+		require.NoError(t, checker.reload())
+		require.NoError(t, monitor.Reconcile(t.Context()))
+		require.NotNil(t, monitor.Status().RequiredUpgrade)
+	}
+	assert.Equal(t, int32(3), stops.Load())
+}
+
 func TestUpgradeMonitorRetriesFailedManualStop(t *testing.T) {
 	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"status":"scheduled","source":"manual"}]}`)
 	client := &fakeABCIClient{heights: []int64{99, 99}}

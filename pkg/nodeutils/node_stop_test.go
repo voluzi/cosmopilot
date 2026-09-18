@@ -1,8 +1,11 @@
 package nodeutils
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -42,4 +45,77 @@ func TestStopOnlyStopsApplicationWhenForced(t *testing.T) {
 			assert.Equal(t, tt.wantStops, stops.Load())
 		})
 	}
+}
+
+func TestGracefulStopPreservesFinalHaltBoundaryObservation(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		height      int64
+		force       bool
+		wantRunning bool
+		wantStops   int32
+	}{
+		{name: "at previous committed height", height: 99, wantRunning: true},
+		{name: "at configured height", height: 100, wantRunning: true},
+		{name: "well before configured height", height: 98},
+		{name: "forced stop at boundary", height: 99, force: true, wantStops: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[]}`)
+			monitor := newUpgradeMonitor(&fakeABCIClient{err: errors.New("offline")}, checker, infoPath, func() error { return nil })
+			monitor.status.LatestHeight = &tt.height
+			terminationPath := filepath.Join(t.TempDir(), "termination.log")
+			var cancels, stops atomic.Int32
+			server := &NodeUtils{
+				cfg: &Options{
+					HaltHeight:             100,
+					TerminationMessagePath: terminationPath,
+				},
+				server:         &http.Server{},
+				upgradeMonitor: monitor,
+				cancel:         func() { cancels.Add(1) },
+				stopNode: func() error {
+					stops.Add(1)
+					return nil
+				},
+			}
+
+			require.NoError(t, server.Stop(tt.force))
+			if tt.wantRunning {
+				assert.Zero(t, cancels.Load())
+			} else {
+				assert.Equal(t, int32(1), cancels.Load())
+			}
+			assert.Equal(t, tt.wantStops, stops.Load())
+
+			body, err := os.ReadFile(terminationPath)
+			require.NoError(t, err)
+			var status UpgradeStatus
+			require.NoError(t, json.Unmarshal(body, &status))
+			require.NotNil(t, status.LatestHeight)
+			assert.Equal(t, tt.height, *status.LatestHeight)
+		})
+	}
+}
+
+func TestGracefulStopDoesNotStopApplicationForNewManualRequirement(t *testing.T) {
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"manual"}]}`)
+	var stops atomic.Int32
+	monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99}}, checker, infoPath, func() error {
+		stops.Add(1)
+		return nil
+	})
+	server := &NodeUtils{
+		cfg:            &Options{},
+		server:         &http.Server{},
+		upgradeMonitor: monitor,
+		stopNode: func() error {
+			stops.Add(1)
+			return nil
+		},
+	}
+
+	require.NoError(t, server.Stop(false))
+	assert.Zero(t, stops.Load())
+	assert.Equal(t, &RequiredUpgrade{Height: 100, Source: ManualUpgrade, Name: "v2"}, monitor.Status().RequiredUpgrade)
 }

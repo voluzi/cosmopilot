@@ -2,9 +2,11 @@ package nodeutils
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -261,7 +263,7 @@ func (s *NodeUtils) Start() error {
 func (s *NodeUtils) Stop(force bool) error {
 	log.WithField("force", force).Info("stopping server")
 	if !force {
-		if err := s.upgradeMonitor.Reconcile(context.Background()); err != nil {
+		if err := s.upgradeMonitor.reconcile(context.Background(), false); err != nil {
 			log.WithError(err).Warn("final upgrade reconciliation did not complete")
 		}
 	}
@@ -276,11 +278,20 @@ func (s *NodeUtils) Stop(force bool) error {
 	// Note: Only check halt-height if it's actually configured (> 0), otherwise
 	// halt-height=0 would match latestBlockHeight=0 and prevent shutdown.
 	status := s.upgradeMonitor.Status()
+	if s.cfg.TerminationMessagePath != "" {
+		if body, err := json.Marshal(status); err != nil {
+			log.WithError(err).Warn("failed to marshal final node-utils status")
+		} else if err := os.WriteFile(s.cfg.TerminationMessagePath, body, 0o600); err != nil {
+			log.WithError(err).Warn("failed to persist final node-utils status")
+		}
+	}
 	var latestHeight int64
 	if status.LatestHeight != nil {
 		latestHeight = *status.LatestHeight
 	}
-	if !force && (status.RequiredUpgrade != nil || (s.cfg.HaltHeight > 0 && s.cfg.HaltHeight == latestHeight)) {
+	atHaltBoundary := s.cfg.HaltHeight > 0 &&
+		(latestHeight == s.cfg.HaltHeight || latestHeight == s.cfg.HaltHeight-1)
+	if !force && (status.RequiredUpgrade != nil || atHaltBoundary) {
 		log.Warn("node requires upgrade or is set to halt on specific height. ignoring stop call")
 		return nil
 	}

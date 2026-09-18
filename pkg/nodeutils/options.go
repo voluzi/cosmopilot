@@ -14,18 +14,22 @@ const (
 
 	// DefaultUpgradesConfig is the default path to the upgrades configuration file.
 	DefaultUpgradesConfig = "/config/upgrades.json"
+
+	// DefaultTerminationMessagePath is captured by kubelet after the sidecar exits.
+	DefaultTerminationMessagePath = "/dev/termination-log"
 )
 
 func defaultOptions() *Options {
 	return &Options{
-		DataPath:       DefaultDataPath,
-		Host:           DefaultHost,
-		Port:           DefaultPort,
-		BlockThreshold: 0,
-		UpgradesConfig: DefaultUpgradesConfig,
-		TmkmsProxy:     false,
-		SignerPeerDNS:  "",
-		HaltHeight:     0,
+		DataPath:               DefaultDataPath,
+		Host:                   DefaultHost,
+		Port:                   DefaultPort,
+		BlockThreshold:         0,
+		UpgradesConfig:         DefaultUpgradesConfig,
+		TmkmsProxy:             false,
+		SignerPeerDNS:          "",
+		HaltHeight:             0,
+		TerminationMessagePath: DefaultTerminationMessagePath,
 	}
 }
 
@@ -38,6 +42,7 @@ type Options struct {
 	TmkmsProxy                bool
 	SignerPeerDNS             string
 	HaltHeight                int64
+	TerminationMessagePath    string
 	MockMode                  bool
 	ShutdownToken             string
 	ExpectedShutdownTokenHash string

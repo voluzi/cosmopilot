@@ -3,6 +3,7 @@ package v1
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 )
 
 const (
+	// AnnotationHaltHeightHold records an ambiguous H-1 halt that must survive Pod loss.
+	AnnotationHaltHeightHold = "cosmopilot.voluzi.com/halt-height-hold"
+
 	// DefaultPersistenceSize is the default size of the data PVC.
 	DefaultPersistenceSize = "50Gi"
 
@@ -413,7 +417,10 @@ func (chainNode *ChainNode) ShouldIgnoreGroupOnDisruption() bool {
 
 func (chainNode *ChainNode) MustStop() (bool, string) {
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.HaltHeight != nil {
-		return *chainNode.Spec.Config.HaltHeight == chainNode.Status.LatestHeight, fmt.Sprintf("halt height %d", *chainNode.Spec.Config.HaltHeight)
+		haltHeight := *chainNode.Spec.Config.HaltHeight
+		mustStop := haltHeight == chainNode.Status.LatestHeight ||
+			chainNode.GetAnnotations()[AnnotationHaltHeightHold] == strconv.FormatInt(haltHeight, 10)
+		return mustStop, fmt.Sprintf("halt height %d", haltHeight)
 	}
 	return false, ""
 }

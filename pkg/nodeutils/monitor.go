@@ -98,11 +98,23 @@ func (m *upgradeMonitor) Run(ctx context.Context, wake <-chan struct{}) {
 }
 
 func (m *upgradeMonitor) Reconcile(ctx context.Context) error {
+	return m.reconcile(ctx, true)
+}
+
+func (m *upgradeMonitor) reconcile(ctx context.Context, stopManualUpgrade bool) error {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
 
 	freshHeight := m.observeHeight(ctx)
 	m.mu.Lock()
+	if required := m.status.RequiredUpgrade; required != nil && required.Source == ManualUpgrade {
+		current, shouldStop := m.manualRequiredUpgradeLocked()
+		changed := current == nil || *current != *required
+		m.status.RequiredUpgrade = current
+		if changed || !shouldStop {
+			m.stopSucceeded = false
+		}
+	}
 	if required := m.status.RequiredUpgrade; required != nil && required.Source == OnChainUpgrade {
 		valid, err := m.governanceRequirementValidLocked(*required, freshHeight)
 		if err != nil {
@@ -123,9 +135,11 @@ func (m *upgradeMonitor) Reconcile(ctx context.Context) error {
 	}
 	required := m.status.RequiredUpgrade
 	stopSucceeded := m.stopSucceeded
+	manualRequired, shouldStopManual := m.manualRequiredUpgradeLocked()
 	m.mu.Unlock()
 
-	if required == nil || required.Source != ManualUpgrade || stopSucceeded {
+	if !stopManualUpgrade || required == nil || required.Source != ManualUpgrade || manualRequired == nil ||
+		*manualRequired != *required || !shouldStopManual || stopSucceeded {
 		return nil
 	}
 	if err := m.stopNode(); err != nil {
@@ -154,16 +168,11 @@ func (m *upgradeMonitor) observeHeight(ctx context.Context) bool {
 }
 
 func (m *upgradeMonitor) requiredUpgradeLocked(freshHeight bool) (*RequiredUpgrade, error) {
-	config := m.checker.Snapshot()
-	for _, upgrade := range config.Upgrades {
-		if upgrade.Source != ManualUpgrade || upgrade.Status != UpgradeScheduled || upgrade.Height <= 0 {
-			continue
-		}
-		if m.status.LatestHeight != nil && *m.status.LatestHeight >= upgrade.Height-1 {
-			return &RequiredUpgrade{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name}, nil
-		}
+	if required, _ := m.manualRequiredUpgradeLocked(); required != nil {
+		return required, nil
 	}
 
+	config := m.checker.Snapshot()
 	info, err := readSDKUpgradeInfo(m.upgradeInfoPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -175,6 +184,24 @@ func (m *upgradeMonitor) requiredUpgradeLocked(freshHeight bool) (*RequiredUpgra
 		return nil, nil
 	}
 	return &RequiredUpgrade{Height: info.Height, Source: OnChainUpgrade, Name: info.Name, Image: info.Image}, nil
+}
+
+func (m *upgradeMonitor) manualRequiredUpgradeLocked() (*RequiredUpgrade, bool) {
+	config := m.checker.Snapshot()
+	for _, upgrade := range config.Upgrades {
+		if upgrade.Source == ManualUpgrade && upgrade.Status == UpgradeOnGoing && upgrade.Height > 0 {
+			return &RequiredUpgrade{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}, false
+		}
+	}
+	for _, upgrade := range config.Upgrades {
+		if upgrade.Source != ManualUpgrade || upgrade.Status != UpgradeScheduled || upgrade.Height <= 0 {
+			continue
+		}
+		if m.status.LatestHeight != nil && *m.status.LatestHeight >= upgrade.Height-1 {
+			return &RequiredUpgrade{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}, true
+		}
+	}
+	return nil, false
 }
 
 func (m *upgradeMonitor) governanceRequirementValidLocked(required RequiredUpgrade, freshHeight bool) (bool, error) {

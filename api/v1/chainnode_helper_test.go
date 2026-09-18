@@ -99,6 +99,36 @@ func TestChainNodeIsReady(t *testing.T) {
 	}
 }
 
+func TestChainNodeMustStopHonorsOnlyCurrentHaltBoundaryEvidence(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		haltHeight *int64
+		latest     int64
+		hold       string
+		want       bool
+	}{
+		{name: "exact committed height", haltHeight: ptr.To[int64](100), latest: 100, want: true},
+		{name: "running at previous height has no hold", haltHeight: ptr.To[int64](100), latest: 99},
+		{name: "terminal previous height has matching hold", haltHeight: ptr.To[int64](100), latest: 99, hold: "100", want: true},
+		{name: "changed halt height releases old hold", haltHeight: ptr.To[int64](101), latest: 99, hold: "100"},
+		{name: "removed halt height releases old hold", latest: 99, hold: "100"},
+		{name: "terminal well before height has no hold", haltHeight: ptr.To[int64](100), latest: 98},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &ChainNode{
+				Spec:   ChainNodeSpec{Config: &Config{HaltHeight: tt.haltHeight}},
+				Status: ChainNodeStatus{LatestHeight: tt.latest},
+			}
+			if tt.hold != "" {
+				node.Annotations = map[string]string{AnnotationHaltHeightHold: tt.hold}
+			}
+
+			got, _ := node.MustStop()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func chainNodeWithUpgrades(image string, version *string, latestHeight int64, upgrades ...Upgrade) *ChainNode {
 	return &ChainNode{
 		Spec: ChainNodeSpec{

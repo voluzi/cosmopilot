@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path"
 	"reflect"
 	"sort"
@@ -89,6 +90,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return fmt.Errorf("failed to get pod spec for %s: %w", chainNode.GetName(), err)
 	}
 	stampNodeUtilsShutdownCredential(pod, shutdownCredential)
+	if err := r.reconcileHaltHeightHold(ctx, chainNode, nil, nodeutils.UpgradeStatus{}); err != nil {
+		return fmt.Errorf("failed to reconcile halt-height hold for %s: %w", chainNode.GetName(), err)
+	}
 
 	// Get current pod. If it does not exist create it and exit.
 	currentPod := &corev1.Pod{}
@@ -99,6 +103,11 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		}
 		return fmt.Errorf("failed to get pod for %s: %w", chainNode.GetName(), err)
 	}
+	if finalStatus, ok := nodeUtilsTerminationStatus(currentPod); ok {
+		if err := r.reconcileHaltHeightHold(ctx, chainNode, currentPod, finalStatus); err != nil {
+			return fmt.Errorf("failed to preserve halt-height hold for %s: %w", chainNode.GetName(), err)
+		}
+	}
 
 	if isPodTerminating(currentPod) {
 		logger.Info("wait for pod to finish terminating")
@@ -106,6 +115,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			return fmt.Errorf("failed waiting for pod %s termination: %w", currentPod.GetName(), err)
 		}
 		return r.createPod(ctx, chainNode, pod)
+	}
+	if handled, err := r.recoverOngoingManualUpgrade(ctx, chainNode, currentPod, pod); handled {
+		return err
 	}
 
 	// Patch mutable pod metadata without restart only when the desired pod spec is already live.
@@ -159,6 +171,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	}
 	if err := r.applyUpgradeStatus(ctx, chainNode, upgradeStatus); err != nil {
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
+	}
+	if err := r.reconcileHaltHeightHold(ctx, chainNode, currentPod, upgradeStatus); err != nil {
+		return fmt.Errorf("failed to preserve halt-height hold for %s: %w", chainNode.GetName(), err)
 	}
 	requiredUpgrade, err := resolveRequiredUpgrade(chainNode, upgradeStatus)
 	if err != nil {
@@ -307,6 +322,158 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return err
 	}
 	return r.attestPodHealth(ctx, chainNode, currentPod)
+}
+
+func nodeUtilsTerminationStatus(pod *corev1.Pod) (nodeutils.UpgradeStatus, bool) {
+	if pod == nil {
+		return nodeutils.UpgradeStatus{}, false
+	}
+	for _, container := range pod.Status.InitContainerStatuses {
+		if container.Name != nodeUtilsContainerName {
+			continue
+		}
+		terminated := container.State.Terminated
+		if terminated == nil {
+			terminated = container.LastTerminationState.Terminated
+		}
+		if terminated == nil || terminated.Message == "" {
+			return nodeutils.UpgradeStatus{}, false
+		}
+		var status nodeutils.UpgradeStatus
+		if err := json.Unmarshal([]byte(terminated.Message), &status); err != nil {
+			return nodeutils.UpgradeStatus{}, false
+		}
+		return status, true
+	}
+	return nodeutils.UpgradeStatus{}, false
+}
+
+func (r *Reconciler) reconcileHaltHeightHold(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod, status nodeutils.UpgradeStatus) error {
+	annotations := chainNode.GetAnnotations()
+	existing := annotations[appsv1.AnnotationHaltHeightHold]
+	desired := ""
+	if chainNode.Spec.Config != nil && chainNode.Spec.Config.HaltHeight != nil {
+		haltHeight := *chainNode.Spec.Config.HaltHeight
+		configured := strconv.FormatInt(haltHeight, 10)
+		if existing == configured {
+			desired = configured
+		} else if pod != nil && containerHasTerminated(pod, chainNode.Spec.App.App) {
+			observed := status.LatestHeight
+			if observed == nil {
+				if finalStatus, ok := nodeUtilsTerminationStatus(pod); ok {
+					observed = finalStatus.LatestHeight
+				}
+			}
+			if haltHeight > 0 && observed != nil && (*observed == haltHeight || *observed == haltHeight-1) {
+				desired = configured
+			}
+		}
+	}
+	if desired == existing {
+		return nil
+	}
+	if annotations == nil {
+		annotations = map[string]string{}
+	} else {
+		annotations = maps.Clone(annotations)
+	}
+	if desired == "" {
+		delete(annotations, appsv1.AnnotationHaltHeightHold)
+	} else {
+		annotations[appsv1.AnnotationHaltHeightHold] = desired
+	}
+	chainNode.SetAnnotations(annotations)
+	return r.Update(ctx, chainNode)
+}
+
+type manualUpgradeIdentity struct {
+	Height int64                `json:"height"`
+	Source appsv1.UpgradeSource `json:"source"`
+	Name   string               `json:"name,omitempty"`
+	Image  string               `json:"image"`
+}
+
+func manualUpgradeIdentityFrom(upgrade *appsv1.Upgrade) manualUpgradeIdentity {
+	return manualUpgradeIdentity{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}
+}
+
+func ongoingManualUpgrade(chainNode *appsv1.ChainNode) *appsv1.Upgrade {
+	var selected *appsv1.Upgrade
+	for i := range chainNode.Status.Upgrades {
+		upgrade := &chainNode.Status.Upgrades[i]
+		if upgrade.Source != appsv1.ManualUpgrade || upgrade.Status != appsv1.UpgradeOnGoing || upgrade.Height <= 0 {
+			continue
+		}
+		if selected == nil || upgrade.Height < selected.Height {
+			selected = upgrade
+		}
+	}
+	return selected
+}
+
+func stampManualUpgradeIdentity(pod *corev1.Pod, upgrade *appsv1.Upgrade) error {
+	body, err := json.Marshal(manualUpgradeIdentityFrom(upgrade))
+	if err != nil {
+		return err
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[controllers.AnnotationManualUpgradeIdentity] = string(body)
+	return nil
+}
+
+func podMatchesManualUpgrade(pod *corev1.Pod, upgrade *appsv1.Upgrade) bool {
+	if pod == nil {
+		return false
+	}
+	var identity manualUpgradeIdentity
+	if err := json.Unmarshal([]byte(pod.Annotations[controllers.AnnotationManualUpgradeIdentity]), &identity); err != nil {
+		return false
+	}
+	return identity == manualUpgradeIdentityFrom(upgrade)
+}
+
+func appContainerStarted(pod *corev1.Pod, name string) bool {
+	for _, container := range pod.Status.ContainerStatuses {
+		if container.Name == name {
+			return container.State.Running != nil || container.Started != nil && *container.Started
+		}
+	}
+	return false
+}
+
+func (r *Reconciler) recoverOngoingManualUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, currentPod, desiredPod *corev1.Pod) (bool, error) {
+	upgrade := ongoingManualUpgrade(chainNode)
+	if upgrade == nil {
+		return false, nil
+	}
+	if podMatchesManualUpgrade(currentPod, upgrade) {
+		if !appContainerStarted(currentPod, chainNode.Spec.App.App) {
+			return true, nil
+		}
+		return true, r.completeRecoveredManualUpgrade(ctx, chainNode, upgrade)
+	}
+	if upgrade.Image == "" {
+		return true, fmt.Errorf("ongoing manual upgrade at height %d has no image", upgrade.Height)
+	}
+	upgraded, err := r.upgradePod(ctx, chainNode, desiredPod, upgrade.Image)
+	if err != nil && !upgraded {
+		return true, fmt.Errorf("resume manual upgrade at height %d: %w", upgrade.Height, err)
+	}
+	if completeErr := r.completeRecoveredManualUpgrade(ctx, chainNode, upgrade); completeErr != nil {
+		return true, completeErr
+	}
+	return true, nil
+}
+
+func (r *Reconciler) completeRecoveredManualUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade) error {
+	if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
+		return fmt.Errorf("reset VPA after recovered manual upgrade for %s: %w", chainNode.GetName(), err)
+	}
+	chainNode.Status.AppImage = upgrade.Image
+	chainNode.Status.AppVersion = upgrade.GetVersion()
+	return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
 }
 
 // attestPodHealth records that the ChainNode controller successfully probed the node after the
@@ -810,6 +977,11 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode, shutdownSecretName, nodeUtilsRunAsUser, nodeUtilsRunAsGroup)},
 			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
+	}
+	if upgrade := ongoingManualUpgrade(chainNode); upgrade != nil {
+		if err := stampManualUpgradeIdentity(pod, upgrade); err != nil {
+			return nil, fmt.Errorf("encode ongoing manual upgrade identity for %s: %w", chainNode.GetName(), err)
+		}
 	}
 	if hasCosmosignerTarget {
 		// The headless Service publishes not-ready addresses, so this waits only for endpoint
