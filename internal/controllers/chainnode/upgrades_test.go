@@ -282,6 +282,93 @@ func TestApplyUpgradeStatusRejectsMarkerBelowPersistedHeight(t *testing.T) {
 	assert.JSONEq(t, `{"upgrades":[]}`, published.Data[upgradesConfigFile])
 }
 
+func TestApplyUpgradeStatusHonorsGovernanceDiscoveryPolicy(t *testing.T) {
+	marker := nodeutils.UpgradeStatus{RequiredUpgrade: &nodeutils.RequiredUpgrade{
+		Height: 100,
+		Source: nodeutils.OnChainUpgrade,
+		Name:   "v2",
+		Image:  "repo/app:v2",
+	}}
+	for _, tt := range []struct {
+		name         string
+		app          appsv1.AppSpec
+		known        []appsv1.Upgrade
+		wantRecorded bool
+	}{
+		{
+			name: "disabled discovery rejects unknown marker plan",
+			app:  appsv1.AppSpec{CheckGovUpgrades: ptr.To(false)},
+		},
+		{
+			name: "disabled discovery permits explicit forced plan",
+			app: appsv1.AppSpec{
+				CheckGovUpgrades: ptr.To(false),
+				Upgrades: []appsv1.UpgradeSpec{{
+					Height:       100,
+					ForceOnChain: ptr.To(true),
+				}},
+			},
+			wantRecorded: true,
+		},
+		{
+			name: "disabled discovery permits known pending plan",
+			app:  appsv1.AppSpec{CheckGovUpgrades: ptr.To(false)},
+			known: []appsv1.Upgrade{{
+				Height: 100,
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeImageMissing,
+			}},
+			wantRecorded: true,
+		},
+		{
+			name:         "default discovery recovers unknown marker plan",
+			app:          appsv1.AppSpec{},
+			wantRecorded: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+				Spec:       appsv1.ChainNodeSpec{App: tt.app},
+				Status: appsv1.ChainNodeStatus{
+					LatestHeight: 99,
+					Upgrades:     tt.known,
+				},
+			}
+			scheme := gcpImportTestScheme(t)
+			config := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-upgrades", Namespace: "default"},
+				Data:       map[string]string{upgradesConfigFile: `{"upgrades":[]}`},
+			}
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(node, config).
+				Build()
+			r := &Reconciler{Client: c, Scheme: scheme}
+
+			require.NoError(t, r.applyUpgradeStatus(t.Context(), node, marker))
+			selected := r.getUpgrade(node, *marker.RequiredUpgrade)
+			published := &corev1.ConfigMap{}
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node-upgrades", Namespace: "default"}, published))
+			if !tt.wantRecorded {
+				assert.Empty(t, node.Status.Upgrades)
+				assert.Nil(t, selected)
+				assert.JSONEq(t, `{"upgrades":[]}`, published.Data[upgradesConfigFile])
+				return
+			}
+
+			require.Len(t, node.Status.Upgrades, 1)
+			assert.Equal(t, "v2", node.Status.Upgrades[0].Name)
+			assert.Equal(t, "repo/app:v2", node.Status.Upgrades[0].Image)
+			require.NotNil(t, selected)
+			assert.Equal(t, "repo/app:v2", selected.Image)
+			assert.Contains(t, published.Data[upgradesConfigFile], `"name":"v2"`)
+			assert.Contains(t, published.Data[upgradesConfigFile], `"image":"repo/app:v2"`)
+		})
+	}
+}
+
 func TestLateManualAndLegacyRequiredUpgradesRemainSelectable(t *testing.T) {
 	tests := []struct {
 		name         string
