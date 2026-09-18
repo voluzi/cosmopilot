@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 const (
 	LabelWorkerName          = "worker-name"
-	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.0.1"
+	DefaultDataExporterImage = images.DefaultDataExporterImage
 )
 
 type ControllerRunOptions struct {
@@ -22,6 +22,8 @@ type ControllerRunOptions struct {
 	CosmosignerImage         string
 	DataExporterImage        string
 	UtilityImage             string
+	TmKmsImage               string
+	VaultTokenRenewerImage   string
 	ReleaseName              string
 	DisruptionCheckEnabled   bool
 	DisruptionMaxUnavailable int
@@ -61,9 +63,51 @@ func (opts *ControllerRunOptions) GetDataExporterImage() string {
 
 func (opts *ControllerRunOptions) GetUtilityImage() string {
 	if opts == nil || opts.UtilityImage == "" {
-		return k8s.DefaultUtilityImage
+		return images.DefaultUtilityImage
 	}
 	return opts.UtilityImage
+}
+
+func (opts *ControllerRunOptions) GetNodeUtilsImage() string {
+	if opts == nil || opts.NodeUtilsImage == "" {
+		return images.DefaultNodeUtilsImage
+	}
+	return opts.NodeUtilsImage
+}
+
+func (opts *ControllerRunOptions) GetCosmoseedImage() string {
+	if opts == nil || opts.CosmoseedImage == "" {
+		return images.DefaultCosmoseedImage
+	}
+	return opts.CosmoseedImage
+}
+
+func (opts *ControllerRunOptions) GetCosmoGuardImage() string {
+	if opts == nil || opts.CosmoGuardImage == "" {
+		return images.DefaultCosmoGuardImage
+	}
+	return opts.CosmoGuardImage
+}
+
+func (opts *ControllerRunOptions) GetCosmosignerImage() string {
+	if opts == nil || opts.CosmosignerImage == "" {
+		return images.DefaultCosmosignerImage
+	}
+	return opts.CosmosignerImage
+}
+
+func (opts *ControllerRunOptions) GetTmKmsImage() string {
+	if opts == nil || opts.TmKmsImage == "" {
+		return images.DefaultTmKmsImage
+	}
+	return opts.TmKmsImage
+}
+
+func (opts *ControllerRunOptions) GetVaultTokenRenewerImage() string {
+	if opts == nil || opts.VaultTokenRenewerImage == "" {
+		return images.DefaultVaultTokenRenewerImage
+	}
+	return opts.VaultTokenRenewerImage
 }
 
 func (opts *ControllerRunOptions) GetDefaultPriorityClassName() string {

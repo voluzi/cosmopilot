@@ -11,6 +11,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -100,8 +101,8 @@ func TestUtilityImageOptionSupportsDefaultTagAndDigestOverrides(t *testing.T) {
 		image string
 		want  string
 	}{
-		{name: "default", want: "ghcr.io/voluzi/node-tools:1.4.3"},
-		{name: "empty uses default", image: "", want: "ghcr.io/voluzi/node-tools:1.4.3"},
+		{name: "default", want: images.DefaultUtilityImage},
+		{name: "empty uses default", image: "", want: images.DefaultUtilityImage},
 		{name: "registry port and tag", image: "registry.example.com:5000/tools:custom", want: "registry.example.com:5000/tools:custom"},
 		{name: "digest", image: "registry.example.com/tools@sha256:abcdef", want: "registry.example.com/tools@sha256:abcdef"},
 	}

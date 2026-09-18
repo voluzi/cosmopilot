@@ -94,6 +94,10 @@ config:
 
 :::note
 `restartPodOnFailure` is deprecated and has no effect: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes.
+
+The image resolves from the per-resource `config.cosmoGuard.image` first, then a nonempty
+operator-wide `cosmoGuardImage` Helm value, and finally the pinned default supplied by the selected
+manager release. Leave both overrides empty to follow the manager release on upgrades.
 :::
 
 ## Autoscaling

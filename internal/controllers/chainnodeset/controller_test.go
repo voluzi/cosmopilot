@@ -26,6 +26,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 type chainNodeSetRoundTripperFunc func(*http.Request) (*http.Response, error)
@@ -54,6 +55,7 @@ func TestReconcileRejectsRecoveredSignerLockMismatchWithWebhooksEnabled(t *testi
 	require.NoError(t, err)
 	params, err := r.cosmosignerParams(context.Background(), nodeSet, signer)
 	require.NoError(t, err)
+	require.Equal(t, images.DefaultCosmosignerImage, params.Image)
 	params.Replicas = 3
 	params.ExpectedPublicKey = parsed.PubKey.Value
 	liveConfig, err := params.ConfigYAML()

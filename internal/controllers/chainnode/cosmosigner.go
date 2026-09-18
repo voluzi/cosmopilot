@@ -272,10 +272,7 @@ func (r *Reconciler) fallbackTmKMSPublicKey(ctx context.Context, chainNode *apps
 	if clientSet == nil {
 		return "", fmt.Errorf("cosmosigner fallback public-key preflight requires a Kubernetes clientset")
 	}
-	image := appsv1.DefaultCosmosignerImage
-	if r.opts != nil && r.opts.CosmosignerImage != "" {
-		image = r.opts.CosmosignerImage
-	}
+	image := r.opts.GetCosmosignerImage()
 	runner := cosmosigner.JobRunner{
 		Client: clientSet,
 		Scheme: r.Scheme,
@@ -793,7 +790,7 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, chainNode *appsv1.Ch
 		OwnerUID:           chainNode.GetUID(),
 		RootOwner:          resourcecleanup.RootOwnerFor(chainNode),
 		ChainID:            chainNode.Status.ChainID,
-		Image:              c.GetImage(r.opts.CosmosignerImage),
+		Image:              c.GetImage(r.opts.GetCosmosignerImage()),
 		Replicas:           c.GetReplicas(),
 		LogLevel:           c.GetLogLevel(),
 		StateStorageSize:   c.GetStateStorageSize(),

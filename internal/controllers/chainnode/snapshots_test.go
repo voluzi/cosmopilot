@@ -34,6 +34,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testing.T) {
@@ -135,8 +136,8 @@ func TestStartSnapshotIntegrityCheckAllowsNilConfig(t *testing.T) {
 	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-nil-config-ichk", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, job.Spec.Template.Spec.ImagePullSecrets)
-	assert.Equal(t, "ghcr.io/voluzi/node-tools:1.4.3", job.Spec.Template.Spec.InitContainers[0].Image)
-	assert.Equal(t, "ghcr.io/voluzi/node-tools:1.4.3", job.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, images.DefaultUtilityImage, job.Spec.Template.Spec.InitContainers[0].Image)
+	assert.Equal(t, images.DefaultUtilityImage, job.Spec.Template.Spec.Containers[0].Image)
 }
 
 func TestCreateSnapshotStopsUnboundExistingNodeBeforeCredentialRollout(t *testing.T) {

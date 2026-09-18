@@ -7,6 +7,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 // Framework defines the interface for test frameworks.
@@ -114,7 +116,7 @@ func DefaultConfig() *Config {
 		CertsDir:            "/tmp/k8s-webhook-server/serving-certs",
 		IssuerName:          "cosmopilot-test",
 		WorkerCount:         10,
-		NodeUtilsImage:      "ghcr.io/voluzi/node-utils",
+		NodeUtilsImage:      images.DefaultNodeUtilsImage,
 		ClusterName:         "cosmopilot-test",
 		ReuseCluster:        true,
 		InstallCertManager:  true,

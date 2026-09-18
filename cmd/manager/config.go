@@ -7,9 +7,8 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 	"github.com/voluzi/cosmopilot/v3/pkg/environ"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 func init() {
@@ -32,33 +31,43 @@ func init() {
 	)
 
 	flag.StringVar(&runOpts.NodeUtilsImage, "nodeutils-image",
-		environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils:2.10.0"),
+		environ.GetString("NODE_UTILS_IMAGE", images.DefaultNodeUtilsImage),
 		"nodeutils image to be deployed with nodes.",
 	)
 
 	flag.StringVar(&runOpts.CosmoGuardImage, "cosmoguard-image",
-		environ.GetString("COSMOGUARD_IMAGE", "ghcr.io/voluzi/cosmoguard:4.0.3"),
+		environ.GetString("COSMOGUARD_IMAGE", images.DefaultCosmoGuardImage),
 		"cosmoguard image for the standalone deployments created when CosmoGuard is enabled.",
 	)
 
 	flag.StringVar(&runOpts.CosmoseedImage, "cosmoseed-image",
-		environ.GetString("COSMOSEED_IMAGE", "ghcr.io/voluzi/cosmoseed:0.11.0"),
+		environ.GetString("COSMOSEED_IMAGE", images.DefaultCosmoseedImage),
 		"image to be used in cosmoseed deployments when enabled.",
 	)
 
 	flag.StringVar(&runOpts.CosmosignerImage, "cosmosigner-image",
-		environ.GetString("COSMOSIGNER_IMAGE", ""),
+		environ.GetString("COSMOSIGNER_IMAGE", images.DefaultCosmosignerImage),
 		"default image to be used in cosmosigner deployments when enabled; overridden per-resource by .spec.cosmosigner.image.",
 	)
 
 	flag.StringVar(&runOpts.DataExporterImage, "dataexporter-image",
-		environ.GetString("DATA_EXPORTER_IMAGE", controllers.DefaultDataExporterImage),
+		environ.GetString("DATA_EXPORTER_IMAGE", images.DefaultDataExporterImage),
 		"dataexporter image to be used by snapshot tarball upload and deletion jobs.",
 	)
 
 	flag.StringVar(&runOpts.UtilityImage, "utility-image",
-		environ.GetString("UTILITY_IMAGE", k8s.DefaultUtilityImage),
+		environ.GetString("UTILITY_IMAGE", images.DefaultUtilityImage),
 		"utility image to be used by operator-owned helper containers.",
+	)
+
+	flag.StringVar(&runOpts.TmKmsImage, "tmkms-image",
+		environ.GetString("TMKMS_IMAGE", images.DefaultTmKmsImage),
+		"tmkms image to be used by validators configured with TmKMS.",
+	)
+
+	flag.StringVar(&runOpts.VaultTokenRenewerImage, "vault-token-renewer-image",
+		environ.GetString("VAULT_TOKEN_RENEWER_IMAGE", images.DefaultVaultTokenRenewerImage),
+		"vault token renewer image to be used with TmKMS automatic token renewal.",
 	)
 
 	flag.StringVar(&runOpts.WorkerName, "worker-name",

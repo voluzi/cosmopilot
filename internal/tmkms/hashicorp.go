@@ -13,15 +13,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 const (
 	hashicorpProviderName = "hashicorp"
 	hashicorpMountDir     = "/vault/"
 
-	tokenRenewerCpu        = "100m"
-	tokenRenewerMemory     = "64Mi"
-	vaultTokenRenewerImage = "ghcr.io/voluzi/vault-renewer:1.0.1"
+	tokenRenewerCpu    = "100m"
+	tokenRenewerMemory = "64Mi"
 )
 
 var (
@@ -36,6 +36,17 @@ type HashicorpProvider struct {
 	CertificateSecret *corev1.SecretKeySelector `toml:"-"`
 	TokenSecret       *corev1.SecretKeySelector `toml:"-"`
 	AutoRenewToken    bool                      `toml:"-"`
+	TokenRenewerImage string                    `toml:"-"`
+}
+
+type HashicorpOption func(*HashicorpProvider)
+
+func WithTokenRenewerImage(image string) HashicorpOption {
+	return func(provider *HashicorpProvider) {
+		if image != "" {
+			provider.TokenRenewerImage = image
+		}
+	}
 }
 
 type HashicorpKey struct {
@@ -65,7 +76,7 @@ type HashicorpEndpointsConfig struct {
 	Sign        string `toml:"sign"`
 }
 
-func NewHashicorpProvider(chainID, address, key string, token, ca *corev1.SecretKeySelector, autoRenewToken, skipVerify bool) Provider {
+func NewHashicorpProvider(chainID, address, key string, token, ca *corev1.SecretKeySelector, autoRenewToken, skipVerify bool, opts ...HashicorpOption) Provider {
 	hashicorp := &HashicorpProvider{
 		Keys: []*HashicorpKey{
 			{
@@ -84,6 +95,10 @@ func NewHashicorpProvider(chainID, address, key string, token, ca *corev1.Secret
 		CertificateSecret: ca,
 		TokenSecret:       token,
 		AutoRenewToken:    autoRenewToken,
+		TokenRenewerImage: images.DefaultVaultTokenRenewerImage,
+	}
+	for _, opt := range opts {
+		opt(hashicorp)
 	}
 
 	if ca != nil {
@@ -144,9 +159,13 @@ func (v HashicorpProvider) getContainers() []corev1.Container {
 	var containers []corev1.Container
 
 	if v.AutoRenewToken {
+		image := v.TokenRenewerImage
+		if image == "" {
+			image = images.DefaultVaultTokenRenewerImage
+		}
 		spec := corev1.Container{
 			Name:            "vault-token-renewer",
-			Image:           vaultTokenRenewerImage,
+			Image:           image,
 			SecurityContext: k8s.RestrictedSecurityContext(),
 			Env: []corev1.EnvVar{
 				{
@@ -201,8 +220,33 @@ func (v HashicorpProvider) getContainers() []corev1.Container {
 }
 
 func (v HashicorpProvider) UploadKey(ctx context.Context, kms *KMS, key string) error {
+	pod, err := v.uploadKeyPod(kms, key)
+	if err != nil {
+		return err
+	}
+
+	ph := k8s.NewPodHelper(kms.Client, nil, pod)
+
+	// Delete the pod if it already exists
+	_ = ph.Delete(ctx)
+
+	// Delete the pod independently of the result
+	defer func() { _ = ph.Delete(ctx) }()
+
+	if err := ph.Create(ctx); err != nil {
+		return err
+	}
+
+	// TODO: handle key already existing error
+	if err := ph.WaitForPodSucceeded(ctx, time.Minute); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (v HashicorpProvider) uploadKeyPod(kms *KMS, key string) (*corev1.Pod, error) {
 	if len(v.Keys) != 1 {
-		return fmt.Errorf("config has no keys configured. this is not supposed to happen")
+		return nil, fmt.Errorf("config has no keys configured. this is not supposed to happen")
 	}
 	hashicorpKey := v.Keys[0]
 
@@ -213,6 +257,8 @@ func (v HashicorpProvider) UploadKey(ctx context.Context, kms *KMS, key string) 
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			ImagePullSecrets: append([]corev1.LocalObjectReference(nil),
+				kms.Config.ImagePullSecrets...),
 			// Kubelet reaps the pod after 5 min even if cosmopilot dies mid-call
 			// (SIGKILL prevents `defer ph.Delete` from running).
 			ActiveDeadlineSeconds: ptr.To[int64](300),
@@ -283,24 +329,7 @@ func (v HashicorpProvider) UploadKey(ctx context.Context, kms *KMS, key string) 
 	}
 
 	if err := controllerutil.SetControllerReference(kms.Owner, pod, kms.Scheme); err != nil {
-		return err
+		return nil, err
 	}
-
-	ph := k8s.NewPodHelper(kms.Client, nil, pod)
-
-	// Delete the pod if it already exists
-	_ = ph.Delete(ctx)
-
-	// Delete the pod independently of the result
-	defer func() { _ = ph.Delete(ctx) }()
-
-	if err := ph.Create(ctx); err != nil {
-		return err
-	}
-
-	// TODO: handle key already existing error
-	if err := ph.WaitForPodSucceeded(ctx, time.Minute); err != nil {
-		return err
-	}
-	return nil
+	return pod, nil
 }

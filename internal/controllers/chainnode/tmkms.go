@@ -94,6 +94,8 @@ func (r *Reconciler) getTmkms(chainNode *appsv1.ChainNode) (tmkms.Provider, *tmk
 
 	var tmkmsOptions []tmkms.Option
 	tmkmsOptions = append(tmkmsOptions, tmkms.WithResources(chainNode.Spec.Validator.TmKMS.GetResources()))
+	tmkmsOptions = append(tmkmsOptions, tmkms.WithImage(r.opts.GetTmKmsImage()))
+	tmkmsOptions = append(tmkmsOptions, tmkms.WithImagePullSecrets(chainNodeImagePullSecrets(chainNode)))
 
 	var provider tmkms.Provider
 	switch providerCfg := chainNode.Spec.Validator.TmKMS.Provider; {
@@ -107,11 +109,9 @@ func (r *Reconciler) getTmkms(chainNode *appsv1.ChainNode) (tmkms.Provider, *tmk
 			providerCfg.Hashicorp.CertificateSecret,
 			providerCfg.Hashicorp.AutoRenewToken,
 			providerCfg.Hashicorp.SkipCertificateVerify,
+			tmkms.WithTokenRenewerImage(r.opts.GetVaultTokenRenewerImage()),
 		)
 		tmkmsOptions = append(tmkmsOptions, tmkms.WithProvider(provider))
-
-		// TODO: remove this when we have official release of tmkms (see https://github.com/iqlusioninc/tmkms/pull/843)
-		tmkmsOptions = append(tmkmsOptions, tmkms.WithImage("ghcr.io/voluzi/tmkms:0.14.0-vault"))
 
 	default:
 		return nil, nil, fmt.Errorf("no supported provider configured")

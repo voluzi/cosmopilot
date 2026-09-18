@@ -26,11 +26,16 @@ $ helm show values oci://ghcr.io/voluzi/helm/cosmopilot
 
 ### `imageTag`
 - **Description**: The tag with the version to be used.
-- **Default**: Defaults to specified app version in helm.
+- **Default**: The chart's application version.
+
+The companion-image values below are optional overrides. Their Helm defaults are empty, so the
+selected manager release supplies its pinned, compatible image defaults. Upgrading the manager can
+therefore upgrade its companions as one release. Explicit values remain pinned across upgrades,
+including upgrades that use `--reuse-values`; clear or delete an old value to resume release defaults.
 
 ### `nodeUtilsImage`
 - **Description**: The container image of `node-utils` (with version tag included). This is a container deployed by `cosmopilot` as a sidecar with helper methods for calculating data size, handling upgrades, and a few more utilities.
-- **Default**: `ghcr.io/voluzi/node-utils:2.10.0`
+- **Default**: `""` (inherits the pinned default from the selected manager release)
 
 :::warning[Cosmosigner discovery gating]
 If you override or pin `nodeUtilsImage`, use node-utils 2.10.0 or newer. Cosmosigner target Pods
@@ -39,23 +44,31 @@ require the discovery-gate command introduced in 2.10.0 and cannot start with an
 
 ### `cosmoGuardImage`
 - **Description**: The container image of [CosmoGuard](https://github.com/voluzi/cosmoguard) (with version tag included) used for the standalone CosmoGuard deployments.
-- **Default**: `ghcr.io/voluzi/cosmoguard:4.0.3`
+- **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `cosmoseedImage`
 - **Description**: The container image of [Cosmoseed](https://github.com/voluzi/cosmoseed) (with version tag included). Used when deploying seed nodes.
-- **Default**: `ghcr.io/voluzi/cosmoseed:0.11.0`
+- **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `cosmosignerImage`
 - **Description**: The default container image of [Cosmosigner](https://github.com/voluzi/cosmosigner) (with version tag included), used when deploying managed remote signers. Can be overridden per-signer with `.spec.cosmosigner.image`.
-- **Default**: `ghcr.io/voluzi/cosmosigner:0.2.1`
+- **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `dataExporterImage`
 - **Description**: The container image of Data Exporter (with version tag included) used by snapshot tarball upload and deletion Jobs.
-- **Default**: `ghcr.io/voluzi/dataexporter:2.0.1`
+- **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `utilityImage`
 - **Description**: Versioned utility image used by operator-owned helper containers for genesis, configuration, PVC, and snapshot integrity operations. Overrides may use a tag or digest and must provide the commands used by these helpers, including standard file utilities, `jq`, `wget`, `gunzip`, `zstd`, `pidof`, and `nc`.
-- **Default**: `ghcr.io/voluzi/node-tools:1.4.3`
+- **Default**: `""` (inherits the pinned default from the selected manager release)
+
+### `tmkmsImage`
+- **Description**: TmKMS image used by the deprecated TmKMS validator sidecar and its identity/upload helper Pods.
+- **Default**: `""` (inherits the pinned default from the selected manager release)
+
+### `vaultTokenRenewerImage`
+- **Description**: Image for the deprecated Vault token-renewer sidecar used only when a legacy TmKMS configuration enables `autoRenewToken`.
+- **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `imagePullSecrets`
 - **Description**: Secrets for pulling the Cosmopilot manager image. Helper Pods run in the `ChainNode` namespace and use namespace-local secrets from `.spec.config.imagePullSecrets` instead.

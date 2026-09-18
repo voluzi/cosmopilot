@@ -25,7 +25,14 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
+
+func TestCosmoGuardParamsUsePinnedDefaultImage(t *testing.T) {
+	chainNode := guardedChainNode("node", false)
+	r := &Reconciler{opts: &controllers.ControllerRunOptions{}}
+	assert.Equal(t, images.DefaultCosmoGuardImage, r.cosmoGuardParams(chainNode).Image)
+}
 
 // ensureGuard drops ensureCosmoGuard's route-pending flag for the tests that only assert on the
 // error. Tests that care about the flag call ensureCosmoGuard directly.

@@ -53,18 +53,38 @@ spec:
               readOnly: true
           {{- end }}
           env:
+            {{- if .Values.nodeUtilsImage }}
             - name: NODE_UTILS_IMAGE
-              value: {{ .Values.nodeUtilsImage }}
+              value: {{ .Values.nodeUtilsImage | quote }}
+            {{- end }}
+            {{- if .Values.cosmoGuardImage }}
             - name: COSMOGUARD_IMAGE
-              value: {{ .Values.cosmoGuardImage }}
+              value: {{ .Values.cosmoGuardImage | quote }}
+            {{- end }}
+            {{- if .Values.cosmoseedImage }}
             - name: COSMOSEED_IMAGE
-              value: {{ .Values.cosmoseedImage }}
+              value: {{ .Values.cosmoseedImage | quote }}
+            {{- end }}
+            {{- if .Values.cosmosignerImage }}
             - name: COSMOSIGNER_IMAGE
-              value: {{ .Values.cosmosignerImage }}
+              value: {{ .Values.cosmosignerImage | quote }}
+            {{- end }}
+            {{- if .Values.dataExporterImage }}
             - name: DATA_EXPORTER_IMAGE
               value: {{ .Values.dataExporterImage | quote }}
+            {{- end }}
+            {{- if .Values.utilityImage }}
             - name: UTILITY_IMAGE
               value: {{ .Values.utilityImage | quote }}
+            {{- end }}
+            {{- if .Values.tmkmsImage }}
+            - name: TMKMS_IMAGE
+              value: {{ .Values.tmkmsImage | quote }}
+            {{- end }}
+            {{- if .Values.vaultTokenRenewerImage }}
+            - name: VAULT_TOKEN_RENEWER_IMAGE
+              value: {{ .Values.vaultTokenRenewerImage | quote }}
+            {{- end }}
             - name: WORKER_NAME
               value: {{ .Values.workerName }}
             - name: WORKER_COUNT

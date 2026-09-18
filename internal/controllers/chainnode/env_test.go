@@ -12,6 +12,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 func TestNewAppPropagatesStandaloneChainNodeEnvWithoutAliasing(t *testing.T) {
@@ -104,5 +105,5 @@ func TestNewAppAllowsNilConfig(t *testing.T) {
 	pod, err := app.BuildInitPod(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node"}}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, pod.Spec.ImagePullSecrets)
-	assert.Equal(t, "ghcr.io/voluzi/node-tools:1.4.3", pod.Spec.Containers[0].Image)
+	assert.Equal(t, images.DefaultUtilityImage, pod.Spec.Containers[0].Image)
 }

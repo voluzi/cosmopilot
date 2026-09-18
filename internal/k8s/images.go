@@ -1,3 +1,5 @@
 package k8s
 
-const DefaultUtilityImage = "ghcr.io/voluzi/node-tools:1.4.3"
+import "github.com/voluzi/cosmopilot/v3/pkg/images"
+
+const DefaultUtilityImage = images.DefaultUtilityImage
