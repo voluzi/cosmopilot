@@ -53,7 +53,7 @@ func (h *PvcHelper) WriteToFile(ctx context.Context, content, path, pc string, a
 	}
 
 	// Wait for container to be running
-	if err := ph.WaitForContainerStarted(ctx, time.Minute, "busybox"); err != nil {
+	if err := ph.WaitForContainerStarted(ctx, 4*time.Minute, "busybox"); err != nil {
 		return err
 	}
 

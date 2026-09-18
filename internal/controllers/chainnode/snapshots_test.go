@@ -93,6 +93,7 @@ func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testin
 	require.Len(t, job.Spec.Template.Spec.InitContainers, 2)
 	assert.Equal(t, "registry.example.com:5000/tools:custom", job.Spec.Template.Spec.InitContainers[0].Image)
 	assert.Equal(t, "registry.example.com:5000/tools:custom", job.Spec.Template.Spec.Containers[0].Image)
+	assert.Empty(t, job.Spec.Template.Spec.Containers[0].ImagePullPolicy)
 	assert.Equal(t, chainNode.Spec.Config.ImagePullSecrets, job.Spec.Template.Spec.ImagePullSecrets)
 	assert.Empty(t, job.Spec.Template.Spec.InitContainers[0].Env)
 	require.Equal(t, env, job.Spec.Template.Spec.InitContainers[1].Env)

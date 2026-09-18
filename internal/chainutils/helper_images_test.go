@@ -87,10 +87,20 @@ func TestGeneratedHelperPodsUseVersionedImages(t *testing.T) {
 			"pubkey", &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657",
 		),
 	}
+	utilityContainers := map[string][]string{
+		"config":  {"busybox"},
+		"data":    {"busybox"},
+		"genesis": {"load-priv-key", "busybox", "set-unbonding-time", "set-voting-period", "set-expedited-voting-period", "load-priv-key-1"},
+	}
 
 	for name, pod := range pods {
 		t.Run(name, func(t *testing.T) {
 			assertPodImagesVersioned(t, pod)
+			containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
+			containers = append(containers, pod.Spec.Containers...)
+			for _, containerName := range utilityContainers[name] {
+				assert.Equal(t, images.DefaultUtilityImage, requireContainer(t, containers, containerName).Image)
+			}
 		})
 	}
 }

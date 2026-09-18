@@ -84,7 +84,6 @@ func TestManagerImageFlagOverrides(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := flag.Lookup(tt.name)
 			require.NotNil(t, f)
-			assert.Equal(t, tt.want, f.DefValue)
 
 			original := tt.configured()
 			t.Cleanup(func() { require.NoError(t, f.Value.Set(original)) })

@@ -1715,7 +1715,6 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 						{
 							Name:            "start-checker",
 							Image:           r.opts.GetUtilityImage(),
-							ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Command:         []string{"sh"},
 							Args: []string{
