@@ -525,7 +525,51 @@ func (r *Reconciler) removeRetainedSnapshotExportIfGone(
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
+	// This removal runs before pruneRetainedSnapshotExports, so it must apply the same guard itself:
+	// a record still holding upload resources is the only durable witness of the deleteOnExpire promise
+	// that upload began under. Dropping it here would let the orphan loop meet the surviving Job with no
+	// record to read, fall back to the live spec, and irreversibly delete an archive uploaded under
+	// deleteOnExpire=false. The prune reclaims the record once those resources are gone.
+	held, err := r.snapshotExportHoldsUploadResources(ctx, chainNode, id)
+	if err != nil {
+		return err
+	}
+	if held {
+		return nil
+	}
 	return r.removeSnapshotExport(ctx, chainNode, id)
+}
+
+// snapshotExportHoldsUploadResources reports whether the record still has an upload Job or clone PVC
+// behind it. An absent snapshot client cannot answer, so it reports held and fails towards retention,
+// matching resolvedUploadExports.
+func (r *Reconciler) snapshotExportHoldsUploadResources(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	id string,
+) (bool, error) {
+	export := snapshotExportByID(chainNode, id)
+	if export == nil || !snapshotExportPhaseHoldsUpload(export.Phase) || export.ObjectName == "" {
+		return false, nil
+	}
+	clientSet := r.snapshotKubernetesClient()
+	if clientSet == nil {
+		return true, nil
+	}
+	gone, err := datasnapshot.SnapshotUploadResourcesGone(ctx, clientSet, chainNode, export.ObjectName)
+	if err != nil {
+		return false, err
+	}
+	return !gone, nil
+}
+
+func snapshotExportByID(chainNode *appsv1.ChainNode, id string) *appsv1.SnapshotExportStatus {
+	for i := range chainNode.Status.SnapshotExports {
+		if chainNode.Status.SnapshotExports[i].ID == id {
+			return &chainNode.Status.SnapshotExports[i]
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) removeSnapshotExport(ctx context.Context, chainNode *appsv1.ChainNode, id string) error {

@@ -1713,6 +1713,83 @@ func TestEnsureVolumeSnapshotsKeepsUploadedPolicyWhileUploadResourcesTerminate(t
 	}
 }
 
+func TestRemoveRetainedSnapshotExportIfGoneKeepsRecordWhileUploadResourcesRemain(t *testing.T) {
+	// Retention deletes the VolumeSnapshot and then removes its record directly, before the prune runs.
+	// finishTarballExport reaches Uploaded while the foreground Job deletion is still collecting
+	// dependents, so this direct removal can meet a record whose upload resources are alive. Dropping it
+	// leaves the orphan loop with no record to read: it falls back to the live spec, and a spec flipped
+	// to deleteOnExpire=true then destroys an archive uploaded under the opposite promise.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(true)
+			reconciler, chainNode, _, _, _ := newOrphanUploadTestReconciler(t, now, provider.exporter, export)
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-retained",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "orphan-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploaded,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			// The VolumeSnapshot is already gone; only the upload Job and its clone PVC remain.
+			deleted := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+				Name:      "snapshot-gone",
+				Namespace: chainNode.Namespace,
+				UID:       "snapshot-gone-uid",
+			}}
+			require.NoError(t, reconciler.removeRetainedSnapshotExportIfGone(
+				context.Background(), chainNode, deleted, "export-retained",
+			))
+
+			fresh := &appsv1.ChainNode{}
+			require.NoError(t, reconciler.Get(
+				context.Background(), client.ObjectKeyFromObject(chainNode), fresh,
+			))
+			require.Len(t, fresh.Status.SnapshotExports, 1,
+				"the record must outlive the snapshot while its upload resources are still live")
+			assert.False(t, fresh.Status.SnapshotExports[0].DeleteOnExpire,
+				"the captured deleteOnExpire=false promise must survive the direct removal")
+		})
+	}
+}
+
+func TestRemoveRetainedSnapshotExportIfGoneRemovesRecordWithoutUploadResources(t *testing.T) {
+	// The mirror case: with no Job and no PVC left there is nothing to protect, so the record must be
+	// reclaimed here rather than pinned forever by the guard above.
+	now := time.Now().UTC().Truncate(time.Second)
+	reconciler, chainNode, _, _, _ := newOrphanUploadTestReconciler(
+		t, now, "gcs-exporter",
+		&appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+	)
+	chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID:             "export-vanished",
+		SnapshotName:   "snapshot-gone",
+		SnapshotUID:    "snapshot-gone-uid",
+		ObjectName:     "vanished-tarball",
+		Phase:          appsv1.SnapshotExportPhaseUploaded,
+		DeleteOnExpire: false,
+	}}
+	require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+	deleted := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:      "snapshot-gone",
+		Namespace: chainNode.Namespace,
+		UID:       "snapshot-gone-uid",
+	}}
+	require.NoError(t, reconciler.removeRetainedSnapshotExportIfGone(
+		context.Background(), chainNode, deleted, "export-vanished",
+	))
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(chainNode), fresh))
+	assert.Empty(t, fresh.Status.SnapshotExports,
+		"a record with no upload resources left has nothing to protect")
+}
+
 func TestPruneRetainedSnapshotExportsDoesNotProbePresentSnapshots(t *testing.T) {
 	// A successful export sits in Uploaded for as long as its VolumeSnapshot is retained, and such a
 	// record is kept unconditionally. Probing the API server for its upload resources would therefore
