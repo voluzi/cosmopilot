@@ -245,6 +245,43 @@ func TestApplyUpgradeStatusPreservesHeightWhenObservationIsStale(t *testing.T) {
 	assert.Equal(t, int64(99), chainNode.Status.LatestHeight)
 }
 
+func TestApplyUpgradeStatusRejectsMarkerBelowPersistedHeight(t *testing.T) {
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Status: appsv1.ChainNodeStatus{
+			LatestHeight: 200,
+		},
+	}
+	scheme := gcpImportTestScheme(t)
+	config := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-upgrades", Namespace: "default"},
+		Data:       map[string]string{upgradesConfigFile: `{"upgrades":[]}`},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node, config).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+	markerStatus := nodeutils.UpgradeStatus{RequiredUpgrade: &nodeutils.RequiredUpgrade{
+		Height: 100,
+		Source: nodeutils.OnChainUpgrade,
+		Name:   "v2",
+		Image:  "repo/app:v2",
+	}}
+
+	require.NoError(t, r.applyUpgradeStatus(t.Context(), node, markerStatus))
+	assert.Empty(t, node.Status.Upgrades)
+	required, err := resolveRequiredUpgrade(node, markerStatus)
+	require.NoError(t, err)
+	assert.Nil(t, required)
+	assert.Nil(t, r.getUpgrade(node, *markerStatus.RequiredUpgrade))
+
+	published := &corev1.ConfigMap{}
+	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node-upgrades", Namespace: "default"}, published))
+	assert.JSONEq(t, `{"upgrades":[]}`, published.Data[upgradesConfigFile])
+}
+
 func TestApplyUpgradeStatusRecordsAuthoritativeMarkerPlanBeforeImageSelection(t *testing.T) {
 	node := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},

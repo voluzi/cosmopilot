@@ -45,7 +45,7 @@ func (r *Reconciler) isChainNodePodRunning(ctx context.Context, chainNode *appsv
 	}
 
 	// Check if the pod is terminating or in a failed state
-	if isPodTerminating(pod) || nodeUtilsIsInFailedState(pod) || podInFailedState(chainNode, pod) {
+	if isPodTerminating(pod) || podInFailedState(chainNode, pod) {
 		return false, false, nil
 	}
 
@@ -135,12 +135,6 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		if err != nil {
 			return fmt.Errorf("failed to patch pod metadata for %s: %w", pod.GetName(), err)
 		}
-	}
-
-	if nodeUtilsIsInFailedState(currentPod) {
-		logger.Info("node-utils is in failed state", "pod", pod.GetName())
-		r.logFailedContainer(ctx, logger, currentPod, nodeUtilsContainerName)
-		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	}
 
 	// Handle terminal Pod failures before probing node-utils only when node-utils is unavailable.
@@ -676,7 +670,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 					Path: "/health",
 					Port: intstr.IntOrString{
 						Type:   intstr.Int,
-						IntVal: nodeUtilsPort,
+						IntVal: chainutils.RpcPort,
 					},
 					Scheme: "HTTP",
 				},
@@ -691,7 +685,7 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 					Path: "/health",
 					Port: intstr.IntOrString{
 						Type:   intstr.Int,
-						IntVal: nodeUtilsPort,
+						IntVal: chainutils.RpcPort,
 					},
 					Scheme: "HTTP",
 				},
@@ -1449,25 +1443,6 @@ func nodeUtilsIsRunning(pod *corev1.Pod) bool {
 			return c.State.Running != nil
 		}
 	}
-	return false
-}
-
-func nodeUtilsIsInFailedState(pod *corev1.Pod) bool {
-	// A failed regular init container terminates restartable init sidecars as the Pod shuts down.
-	// Preserve the discovery gate's diagnostic path instead of misclassifying that expected
-	// node-utils termination as the root failure.
-	for _, c := range pod.Status.InitContainerStatuses {
-		if c.Name == CosmosignerDiscoveryWaitContainerName && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
-			return false
-		}
-	}
-
-	for _, c := range pod.Status.InitContainerStatuses {
-		if c.Name == nodeUtilsContainerName && !c.Ready && c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
-			return true
-		}
-	}
-
 	return false
 }
 

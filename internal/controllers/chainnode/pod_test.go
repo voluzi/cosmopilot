@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -20,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 )
@@ -63,6 +63,57 @@ func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
 			t.Fatalf("app still contains trace mount %#v", mount)
 		}
 	}
+}
+
+func TestAppHealthProbesUseCometBFTWhileReadinessUsesNodeUtils(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		Spec: appsv1.ChainNodeSpec{
+			App:    appsv1.AppSpec{App: "appd"},
+			Config: &appsv1.Config{},
+		},
+	}
+	r := &Reconciler{}
+
+	app := r.buildAppContainer(chainNode, nil, "/ready", corev1.ResourceRequirements{}, nil)
+	require.NotNil(t, app.StartupProbe)
+	require.NotNil(t, app.StartupProbe.HTTPGet)
+	assert.Equal(t, "/health", app.StartupProbe.HTTPGet.Path)
+	assert.Equal(t, int32(chainutils.RpcPort), app.StartupProbe.HTTPGet.Port.IntVal)
+	require.NotNil(t, app.LivenessProbe)
+	require.NotNil(t, app.LivenessProbe.HTTPGet)
+	assert.Equal(t, "/health", app.LivenessProbe.HTTPGet.Path)
+	assert.Equal(t, int32(chainutils.RpcPort), app.LivenessProbe.HTTPGet.Port.IntVal)
+	require.NotNil(t, app.ReadinessProbe)
+	require.NotNil(t, app.ReadinessProbe.HTTPGet)
+	assert.Equal(t, "/ready", app.ReadinessProbe.HTTPGet.Path)
+	assert.Equal(t, int32(nodeUtilsPort), app.ReadinessProbe.HTTPGet.Port.IntVal)
+}
+
+func TestIsChainNodePodRunningIgnoresCrashedNodeUtils(t *testing.T) {
+	chainNode := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name, Namespace: chainNode.Namespace},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "appd",
+				Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: nodeUtilsContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 1,
+				}},
+			}},
+		},
+	}
+	scheme := gcpImportTestScheme(t)
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()}
+
+	running, _, err := r.isChainNodePodRunning(t.Context(), chainNode)
+	require.NoError(t, err)
+	assert.True(t, running)
 }
 
 func TestNodeUtilsUsesEffectiveAppRunAsUserForSDKUpgradeInfo(t *testing.T) {
@@ -662,110 +713,6 @@ func TestNodeUtilsIsRunning(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := nodeUtilsIsRunning(tt.pod); got != tt.want {
 				t.Errorf("nodeUtilsIsRunning() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNodeUtilsIsInFailedState(t *testing.T) {
-	tests := []struct {
-		name string
-		pod  *corev1.Pod
-		want bool
-	}{
-		{
-			name: "node-utils running",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: "node-utils",
-							State: corev1.ContainerState{
-								Running: &corev1.ContainerStateRunning{
-									StartedAt: metav1.Time{Time: time.Now()},
-								},
-							},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "no node-utils container",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: "app",
-							State: corev1.ContainerState{
-								Running: &corev1.ContainerStateRunning{},
-							},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "failed pod with discovery gate failure",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					Phase: corev1.PodFailed,
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: CosmosignerDiscoveryWaitContainerName,
-							State: corev1.ContainerState{
-								Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
-							},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "discovery failure with node-utils sidecar shutdown",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					Phase: corev1.PodFailed,
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name:  nodeUtilsContainerName,
-							State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
-						},
-						{
-							Name:  CosmosignerDiscoveryWaitContainerName,
-							State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "terminated node-utils init container",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					Phase: corev1.PodFailed,
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: nodeUtilsContainerName,
-							State: corev1.ContainerState{
-								Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
-							},
-						},
-					},
-				},
-			},
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := nodeUtilsIsInFailedState(tt.pod); got != tt.want {
-				t.Errorf("nodeUtilsIsInFailedState() = %v, want %v", got, tt.want)
 			}
 		})
 	}

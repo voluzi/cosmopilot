@@ -110,6 +110,45 @@ func TestSkipUpgradeForOverrideSkipsExplicitOngoingTarget(t *testing.T) {
 	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[0].Status)
 }
 
+func TestSkipUpgradeForOverridePersistsImageMissingGovernanceTarget(t *testing.T) {
+	stored := pinnedNodeAtUpgradeHeight()
+	stored.Status.LatestHeight = 499
+	stored.Status.Upgrades[0] = appsv1.Upgrade{
+		Height: 500,
+		Name:   "v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}
+	scheme := gcpImportTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(stored).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+	chainNode := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
+	required := nodeutils.RequiredUpgrade{Height: 500, Source: nodeutils.OnChainUpgrade, Name: "v2"}
+
+	require.NoError(t, r.skipUpgradeForOverride(t.Context(), chainNode, required))
+	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[0].Status)
+
+	published := &corev1.ConfigMap{}
+	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "pinned-upgrades", Namespace: "default"}, published))
+	var config struct {
+		Upgrades []appsv1.Upgrade `json:"upgrades"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(published.Data[upgradesConfigFile]), &config))
+	require.Len(t, config.Upgrades, 1)
+	assert.Equal(t, appsv1.UpgradeSkipped, config.Upgrades[0].Status)
+
+	require.NoError(t, r.skipUpgradeForOverride(t.Context(), chainNode, required))
+	freshStatus := nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(499))}
+	afterRestart, err := resolveRequiredUpgrade(chainNode, freshStatus)
+	require.NoError(t, err)
+	assert.Nil(t, afterRestart)
+}
+
 // Committed progress can be beyond several scheduled entries. The explicit requirement identifies
 // which one the override suppresses without discarding unrelated history or future work.
 func TestSkipUpgradeForOverrideSkipsOnlyExplicitTarget(t *testing.T) {

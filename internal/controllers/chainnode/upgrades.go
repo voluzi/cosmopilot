@@ -160,7 +160,8 @@ func (r *Reconciler) applyUpgradeStatus(ctx context.Context, chainNode *appsv1.C
 		chainNode.Status.LatestHeight = *status.LatestHeight
 		statusChanged = true
 	}
-	if required := status.RequiredUpgrade; required != nil && required.Source == nodeutils.OnChainUpgrade &&
+	if required := status.RequiredUpgrade; required != nil && !requiredUpgradeIsStale(chainNode, *required) &&
+		required.Source == nodeutils.OnChainUpgrade &&
 		required.Height > 0 && required.Name != "" {
 		chainNode.Status.Upgrades, upgradesChanged = recordRequiredGovernanceUpgrade(chainNode.Status.Upgrades, *required)
 		statusChanged = statusChanged || upgradesChanged
@@ -226,6 +227,9 @@ func recordRequiredGovernanceUpgrade(
 
 func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.UpgradeStatus) (*nodeutils.RequiredUpgrade, error) {
 	if status.RequiredUpgrade != nil {
+		if requiredUpgradeIsStale(chainNode, *status.RequiredUpgrade) {
+			return nil, nil
+		}
 		required := *status.RequiredUpgrade
 		return &required, nil
 	}
@@ -262,6 +266,9 @@ func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.Upgrad
 }
 
 func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) *appsv1.Upgrade {
+	if requiredUpgradeIsStale(chainNode, required) {
+		return nil
+	}
 	for _, upgrade := range chainNode.Status.Upgrades {
 		if upgrade.Height != required.Height ||
 			(upgrade.Status != appsv1.UpgradeScheduled &&
@@ -278,6 +285,10 @@ func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, required nodeutils.
 		return &upgrade
 	}
 	return nil
+}
+
+func requiredUpgradeIsStale(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) bool {
+	return required.Height > 0 && chainNode.Status.LatestHeight >= required.Height
 }
 
 func (r *Reconciler) setUpgradeStatus(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade, status appsv1.UpgradePhase) error {
@@ -430,7 +441,8 @@ func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *apps
 	logger := log.FromContext(ctx)
 	skipped := make([]int64, 0, 1)
 	for i, u := range chainNode.Status.Upgrades {
-		if (u.Status == appsv1.UpgradeScheduled || u.Status == appsv1.UpgradeOnGoing) && u.Height == required.Height &&
+		if (u.Status == appsv1.UpgradeScheduled || u.Status == appsv1.UpgradeOnGoing || u.Status == appsv1.UpgradeImageMissing) &&
+			u.Height == required.Height &&
 			(required.Source == "" || string(u.Source) == string(required.Source)) &&
 			(required.Name == "" || u.Name == "" || u.Name == required.Name) {
 			chainNode.Status.Upgrades[i].Status = appsv1.UpgradeSkipped
