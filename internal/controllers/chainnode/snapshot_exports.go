@@ -422,6 +422,17 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 		}
 		present[snapshot.Name][snapshot.UID] = struct{}{}
 	}
+	snapshotPresent := func(export *appsv1.SnapshotExportStatus) bool {
+		uids, namePresent := present[export.SnapshotName]
+		if !namePresent {
+			return false
+		}
+		if export.SnapshotUID == "" {
+			return true
+		}
+		_, uidPresent := uids[export.SnapshotUID]
+		return uidPresent
+	}
 	// An upload record whose VolumeSnapshot is gone is the only durable witness of the deleteOnExpire
 	// promise that upload began under, so it survives the prune until the upload leaves nothing behind.
 	// The check runs against live resources rather than the orphan loop's Job list: foreground deletion
@@ -429,21 +440,19 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 	// was removed by hand never appears in that list at all, which would strand its record forever.
 	// Uploaded counts as an upload too: finishTarballExport records that phase before cleaning up, so
 	// the Job outlives the phase change and the orphan loop can still meet it.
-	resolvedUploads, err := r.resolvedUploadExports(ctx, chainNode)
+	resolvedUploads, err := r.resolvedUploadExports(ctx, chainNode, snapshotPresent)
 	if err != nil {
 		return err
 	}
 	_, err = r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
 		kept := make([]appsv1.SnapshotExportStatus, 0, len(fresh.Status.SnapshotExports))
-		for _, export := range fresh.Status.SnapshotExports {
-			uids, namePresent := present[export.SnapshotName]
-			_, uidPresent := uids[export.SnapshotUID]
-			snapshotPresent := namePresent && (export.SnapshotUID == "" || uidPresent)
+		for i := range fresh.Status.SnapshotExports {
+			export := fresh.Status.SnapshotExports[i]
 			terminalDeletion := export.Phase == appsv1.SnapshotExportPhaseDeleted ||
 				export.Phase == appsv1.SnapshotExportPhaseAcknowledged
 			_, uploadResolved := resolvedUploads[export.ID]
 			unresolvedUpload := snapshotExportPhaseHoldsUpload(export.Phase) && !uploadResolved
-			if snapshotPresent || unresolvedUpload || (export.DeleteOnExpire && !terminalDeletion) {
+			if snapshotPresent(&export) || unresolvedUpload || (export.DeleteOnExpire && !terminalDeletion) {
 				kept = append(kept, export)
 			}
 		}
@@ -466,9 +475,15 @@ func snapshotExportPhaseHoldsUpload(phase appsv1.SnapshotExportPhase) bool {
 // resolvedUploadExports returns the IDs of upload records whose snapshot is gone and whose upload
 // resources have been fully collected. Those records have nothing left to protect and may be pruned;
 // every other upload record is kept so its retention policy outlives any spec change.
+//
+// A record whose VolumeSnapshot is still present is kept regardless, so it is skipped without probing:
+// a successful export sits in Uploaded until retention removes its snapshot, and probing those would
+// add two API reads per retained snapshot to every reconcile and let one transient failure on an
+// irrelevant record abort the whole prune.
 func (r *Reconciler) resolvedUploadExports(
 	ctx context.Context,
 	chainNode *appsv1.ChainNode,
+	snapshotPresent func(*appsv1.SnapshotExportStatus) bool,
 ) (map[string]struct{}, error) {
 	resolved := make(map[string]struct{})
 	clientSet := r.snapshotKubernetesClient()
@@ -478,6 +493,9 @@ func (r *Reconciler) resolvedUploadExports(
 	for i := range chainNode.Status.SnapshotExports {
 		export := &chainNode.Status.SnapshotExports[i]
 		if !snapshotExportPhaseHoldsUpload(export.Phase) || export.ObjectName == "" {
+			continue
+		}
+		if snapshotPresent(export) {
 			continue
 		}
 		gone, err := datasnapshot.SnapshotUploadResourcesGone(ctx, clientSet, chainNode, export.ObjectName)

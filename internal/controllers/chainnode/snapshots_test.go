@@ -1713,6 +1713,45 @@ func TestEnsureVolumeSnapshotsKeepsUploadedPolicyWhileUploadResourcesTerminate(t
 	}
 }
 
+func TestPruneRetainedSnapshotExportsDoesNotProbePresentSnapshots(t *testing.T) {
+	// A successful export sits in Uploaded for as long as its VolumeSnapshot is retained, and such a
+	// record is kept unconditionally. Probing the API server for its upload resources would therefore
+	// buy nothing while adding two uncached reads per retained snapshot to every reconcile, and would
+	// let one transient read failure on an irrelevant record abort the whole prune.
+	now := time.Now().UTC().Truncate(time.Second)
+	reconciler, chainNode, clientSet, _, _ := newOrphanUploadTestReconciler(
+		t, now, "gcs-exporter",
+		&appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+	)
+	chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID:             "export-live",
+		SnapshotName:   "snapshot-live",
+		SnapshotUID:    "snapshot-live-uid",
+		ObjectName:     "live-tarball",
+		Phase:          appsv1.SnapshotExportPhaseUploaded,
+		DeleteOnExpire: false,
+	}}
+	require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+	snapshots := []snapshotv1.VolumeSnapshot{{ObjectMeta: metav1.ObjectMeta{
+		Name:      "snapshot-live",
+		Namespace: chainNode.Namespace,
+		UID:       "snapshot-live-uid",
+	}}}
+
+	require.NoError(t, reconciler.pruneRetainedSnapshotExports(context.Background(), chainNode, snapshots))
+
+	for _, action := range clientSet.Actions() {
+		assert.NotEqualf(t, "get", action.GetVerb(),
+			"a record whose snapshot is present is kept regardless, so %q must not be read",
+			action.GetResource().Resource)
+	}
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(chainNode), fresh))
+	require.Len(t, fresh.Status.SnapshotExports, 1, "a record whose snapshot is present must be kept")
+	assert.Equal(t, "export-live", fresh.Status.SnapshotExports[0].ID)
+}
+
 func TestEnsureVolumeSnapshotsPrunesUploadingRecordWithoutUploadResources(t *testing.T) {
 	// An Uploading record is written before the upload Job is created, so creation can fail or the Job
 	// can be removed by hand. The orphan loop only walks existing Jobs, so the record must be reclaimed
