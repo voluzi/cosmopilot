@@ -98,7 +98,7 @@ func TestImageOptionsPreserveDefaultsAndApplyOverrides(t *testing.T) {
 			&corev1.SecretKeySelector{Key: "token"}, nil, true, false,
 			WithTokenRenewerImage(""),
 		).(*HashicorpProvider)
-		if got := defaultProvider.getContainers()[0].Image; got != images.DefaultVaultTokenRenewerImage {
+		if got := defaultProvider.TokenRenewerImage; got != images.DefaultVaultTokenRenewerImage {
 			t.Fatalf("empty override renewer image = %q, want %q", got, images.DefaultVaultTokenRenewerImage)
 		}
 

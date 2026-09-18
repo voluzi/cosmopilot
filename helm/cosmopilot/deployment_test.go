@@ -24,7 +24,7 @@ var imageOverrideEnvNames = map[string]string{
 	"vaultTokenRenewerImage": "VAULT_TOKEN_RENEWER_IMAGE",
 }
 
-func TestCompanionImageValuesDefaultToManagerDefaults(t *testing.T) {
+func TestCompanionImageValuesAreOptionalOverrides(t *testing.T) {
 	valuesSource, err := os.ReadFile("values.yaml")
 	require.NoError(t, err)
 
@@ -166,6 +166,7 @@ func renderDeployment(t *testing.T, values map[string]any, appVersion string) re
 
 	env := make(map[string]yaml.Node)
 	for _, variable := range deployment.Spec.Template.Spec.Containers[0].Env {
+		require.NotContains(t, env, variable.Name, "environment variable must be emitted at most once")
 		env[variable.Name] = variable.Value
 	}
 	return renderedDeployment{image: deployment.Spec.Template.Spec.Containers[0].Image, env: env}
