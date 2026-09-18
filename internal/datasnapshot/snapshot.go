@@ -696,6 +696,34 @@ func CleanupSnapshotDeletionResources(
 	return cleanupSnapshotDeletionResources(ctx, client, owner, job, job.Exporter)
 }
 
+// SnapshotUploadResourcesGone reports whether an upload left nothing behind: neither its Job nor the
+// clone PVC feeding it. A Job deleted with foreground propagation stays observable until its dependents
+// are collected, so "gone" is deliberately stricter than "deletion was requested".
+func SnapshotUploadResourcesGone(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	name string,
+) (bool, error) {
+	namespace := owner.GetNamespace()
+	jobName := fmt.Sprintf("%s-upload", name)
+	_, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return false, nil
+	case !apierrors.IsNotFound(err):
+		return false, fmt.Errorf("get upload job %s/%s: %w", namespace, jobName, err)
+	}
+	_, err = client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return false, nil
+	case !apierrors.IsNotFound(err):
+		return false, fmt.Errorf("get upload PVC %s/%s: %w", namespace, jobName, err)
+	}
+	return true, nil
+}
+
 // RetainSnapshotForUpload reconciles an orphaned upload Job whose remote object must be kept.
 // While the Job is still running it touches nothing and reports SnapshotActive, so an upload that
 // outlived its VolumeSnapshot is allowed to finish. Once the Job is terminal it removes only the

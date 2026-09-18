@@ -1606,6 +1606,89 @@ func TestEnsureVolumeSnapshotsHonoursUploadPolicyCapturedBeforePruning(t *testin
 	}
 }
 
+func TestEnsureVolumeSnapshotsKeepsUploadPolicyWhileUploadResourcesTerminate(t *testing.T) {
+	// Retention deletes the upload Job with foreground propagation, so it stays observable while its
+	// dependents are collected. The captured deleteOnExpire=false promise must outlive that window, or
+	// the next reconcile falls back to the flipped spec and deletes the remote object for good.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(true)
+			reconciler, chainNode, clientSet, uploadJob, _ := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+			uploadJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}
+			resource := batchv1.SchemeGroupVersion.WithResource("jobs")
+			require.NoError(t, clientSet.Tracker().Update(resource, uploadJob, chainNode.Namespace))
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-orphan",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "orphan-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploading,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			// Foreground deletion leaves the Job in place until its dependents are gone.
+			clientSet.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				stored, err := clientSet.Tracker().Get(resource, chainNode.Namespace, uploadJob.Name)
+				if err != nil {
+					return true, nil, err
+				}
+				terminating := stored.(*batchv1.Job).DeepCopy()
+				terminating.DeletionTimestamp = ptr.To(metav1.Now())
+				return true, nil, clientSet.Tracker().Update(resource, terminating, chainNode.Namespace)
+			})
+
+			for pass := 1; pass <= 2; pass++ {
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+				for _, action := range clientSet.Actions() {
+					assert.NotEqualf(t, "create", action.GetVerb(),
+						"pass %d: a terminating upload must not have its remote object deleted", pass)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsPrunesUploadingRecordWithoutUploadResources(t *testing.T) {
+	// An Uploading record is written before the upload Job is created, so creation can fail or the Job
+	// can be removed by hand. The orphan loop only walks existing Jobs, so the record must be reclaimed
+	// here instead of being retained forever.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(false)
+			reconciler, chainNode, _, _, _ := newOrphanUploadTestReconciler(t, now, provider.exporter, export)
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-vanished",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "vanished-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploading,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			fresh := &appsv1.ChainNode{}
+			require.NoError(t, reconciler.Get(
+				context.Background(), client.ObjectKeyFromObject(chainNode), fresh,
+			))
+			for _, record := range fresh.Status.SnapshotExports {
+				assert.NotEqual(t, "export-vanished", record.ID,
+					"an upload record with no Job and no PVC left has nothing to protect")
+			}
+		})
+	}
+}
+
 func TestEnsureVolumeSnapshotsReconcilesOrphanJobs(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	providers := []struct {
