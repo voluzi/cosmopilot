@@ -141,12 +141,28 @@ func (s *NodeUtils) dataSize(w http.ResponseWriter, r *http.Request) {
 
 func (s *NodeUtils) latestHeight(w http.ResponseWriter, r *http.Request) {
 	height := int64(0)
-	if observed := s.upgradeMonitor.Status().LatestHeight; observed != nil {
+	status := s.upgradeMonitor.Status()
+	if observed := status.LatestHeight; observed != nil {
 		height = *observed
+	}
+	if required := status.RequiredUpgrade; required != nil && s.legacyScheduledUpgradeMatches(*required) {
+		height = required.Height
 	}
 	log.WithField("height", height).Info("retrieved latest height")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(strconv.FormatInt(height, 10)))
+}
+
+func (s *NodeUtils) legacyScheduledUpgradeMatches(required RequiredUpgrade) bool {
+	if s.upgradeMonitor == nil || s.upgradeMonitor.checker == nil {
+		return false
+	}
+	for _, upgrade := range s.upgradeMonitor.checker.Snapshot().Upgrades {
+		if upgrade.Height == required.Height && upgrade.Source == required.Source && upgrade.Status == UpgradeScheduled {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *NodeUtils) mustUpgrade(w http.ResponseWriter, r *http.Request) {

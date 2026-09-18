@@ -244,6 +244,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.V(1).Info("namespace is being terminated, skipping reconcile")
 		return ctrl.Result{}, nil
 	}
+	if err := r.validateNodeUtilsRunIdentity(chainNode); err != nil {
+		logger.Error(err, "spec is invalid")
+		return ctrl.Result{}, err
+	}
 
 	if !controllerutil.ContainsFinalizer(chainNode, resourcecleanup.Finalizer) {
 		controllerutil.AddFinalizer(chainNode, resourcecleanup.Finalizer)
@@ -260,7 +264,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	} else if changed {
 		return ctrl.Result{Requeue: true}, nil
 	}
-
 	if r.opts.DisableWebhooks {
 		// The reserved-name rule normally runs on the admission create path; here it applies only
 		// while the object has never been reconciled (empty status), so legacy names keep working.
@@ -536,6 +539,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
 	}
 	return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
+}
+
+func (r *Reconciler) validateNodeUtilsRunIdentity(chainNode *appsv1.ChainNode) error {
+	err := chainNode.Spec.Config.ValidateNodeUtilsRunIdentity(".spec.config")
+	if err == nil {
+		return nil
+	}
+	r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid, "spec is invalid: %v", err)
+	return err
 }
 
 func (r *Reconciler) updatePhase(ctx context.Context, chainNode *appsv1.ChainNode, phase appsv1.ChainNodePhase) error {

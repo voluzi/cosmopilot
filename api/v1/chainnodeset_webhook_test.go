@@ -2123,3 +2123,51 @@ func TestMisplacedValidatorScopedFieldsIncludesOverrideImage(t *testing.T) {
 	}
 	assert.Contains(t, group.MisplacedValidatorScopedFields(), "overrideImage")
 }
+
+func TestChainNodeSetValidateRejectsImageDefinedRunIdentityInEffectiveConfigs(t *testing.T) {
+	invalid := &Config{
+		SecurityContext:    &corev1.SecurityContext{},
+		PodSecurityContext: &corev1.PodSecurityContext{},
+	}
+	for _, tt := range []struct {
+		name     string
+		mutate   func(*ChainNodeSet)
+		wantPath string
+	}{
+		{
+			name: "top-level validator",
+			mutate: func(nodeSet *ChainNodeSet) {
+				nodeSet.Spec.Validator = &NodeSetValidatorConfig{Config: invalid.DeepCopy()}
+			},
+			wantPath: ".spec.validator.config",
+		},
+		{
+			name: "regular group",
+			mutate: func(nodeSet *ChainNodeSet) {
+				nodeSet.Spec.Nodes = []NodeGroupSpec{{Name: "fullnode", Config: invalid.DeepCopy()}}
+			},
+			wantPath: ".spec.nodes[0].config",
+		},
+		{
+			name: "validator group uses validator config",
+			mutate: func(nodeSet *ChainNodeSet) {
+				nodeSet.Spec.Nodes = []NodeGroupSpec{{
+					Name:      "validators",
+					Config:    &Config{},
+					Validator: &NodeSetValidatorConfig{Config: invalid.DeepCopy()},
+				}}
+			},
+			wantPath: ".spec.nodes[0].validator.config",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeSet := &ChainNodeSet{}
+			tt.mutate(nodeSet)
+
+			_, err := nodeSet.Validate(nil)
+
+			require.ErrorContains(t, err, tt.wantPath)
+			require.ErrorContains(t, err, "runAsUser")
+		})
+	}
+}

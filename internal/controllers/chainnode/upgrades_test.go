@@ -231,6 +231,7 @@ func TestResolveRequiredUpgradeAllowsKnownGovernanceMarkerWhenDiscoveryDisabled(
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
 				Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{
 					CheckGovUpgrades: ptr.To(false),
 					Upgrades:         tt.upgrades,
@@ -585,12 +586,294 @@ func TestApplyUpgradeStatusUsesMarkerImageWithoutOverwritingExplicitSamePlanImag
 				Source: nodeutils.OnChainUpgrade,
 				Name:   "plan-b",
 				Image:  tt.markerImage,
-			})
+			}, false)
 			assert.True(t, changed)
 			assert.Equal(t, tt.wantImage, got[0].Image)
 			assert.Equal(t, appsv1.UpgradeScheduled, got[0].Status)
 		})
 	}
+}
+
+func TestApplyUpgradeStatusUsesExplicitForceOnChainImageForNamedMarker(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		markerImage string
+		wantImage   string
+		managed     bool
+	}{
+		{name: "fills marker without image", wantImage: "repo/custom:v2"},
+		{name: "explicit image overrides marker metadata on managed child", markerImage: "repo/upstream:v2", wantImage: "repo/custom:v2", managed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+				Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{
+					CheckGovUpgrades: ptr.To(false),
+					Upgrades: []appsv1.UpgradeSpec{{
+						Height:       100,
+						Image:        "repo/custom:v2",
+						ForceOnChain: ptr.To(true),
+					}},
+				}},
+				Status: appsv1.ChainNodeStatus{
+					LatestHeight: 99,
+					Upgrades: []appsv1.Upgrade{{
+						Height: 100,
+						Image:  "repo/legacy:v1",
+						Source: appsv1.OnChainUpgrade,
+						Status: appsv1.UpgradeScheduled,
+					}},
+				},
+			}
+			if tt.managed {
+				node.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: appsv1.GroupVersion.String(),
+					Kind:       "ChainNodeSet",
+					Name:       "set",
+					UID:        "set-uid",
+					Controller: ptr.To(true),
+				}}
+				assert.True(t, node.IsControlledByChainNodeSet())
+			}
+			scheme := gcpImportTestScheme(t)
+			config := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-upgrades", Namespace: "default"},
+				Data:       map[string]string{upgradesConfigFile: `{"upgrades":[]}`},
+			}
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(node, config).
+				Build()
+			r := &Reconciler{Client: c, Scheme: scheme}
+			status := nodeutils.UpgradeStatus{RequiredUpgrade: &nodeutils.RequiredUpgrade{
+				Height: 100,
+				Source: nodeutils.OnChainUpgrade,
+				Name:   "plan-v2",
+				Image:  tt.markerImage,
+			}}
+
+			require.NoError(t, r.applyUpgradeStatus(t.Context(), node, status))
+			require.Len(t, node.Status.Upgrades, 1)
+			assert.Equal(t, "plan-v2", node.Status.Upgrades[0].Name)
+			assert.Equal(t, tt.wantImage, node.Status.Upgrades[0].Image)
+			assert.Equal(t, appsv1.UpgradeScheduled, node.Status.Upgrades[0].Status)
+		})
+	}
+}
+
+func TestApplyUpgradeStatusOverwritesDiscoveredImageWithExplicitForceOnChainImage(t *testing.T) {
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{
+			Upgrades: []appsv1.UpgradeSpec{{
+				Height:       100,
+				Image:        "repo/custom:v2",
+				ForceOnChain: ptr.To(true),
+			}},
+		}},
+		Status: appsv1.ChainNodeStatus{
+			LatestHeight: 99,
+			Upgrades: []appsv1.Upgrade{{
+				Height: 100,
+				Name:   "plan-v2",
+				Image:  "repo/upstream:v2",
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeScheduled,
+			}},
+		},
+	}
+	scheme := gcpImportTestScheme(t)
+	config := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-upgrades", Namespace: "default"},
+		Data:       map[string]string{upgradesConfigFile: `{"upgrades":[]}`},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node, config).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.applyUpgradeStatus(t.Context(), node, nodeutils.UpgradeStatus{RequiredUpgrade: &nodeutils.RequiredUpgrade{
+		Height: 100,
+		Source: nodeutils.OnChainUpgrade,
+		Name:   "plan-v2",
+	}}))
+
+	require.Len(t, node.Status.Upgrades, 1)
+	assert.Equal(t, "repo/custom:v2", node.Status.Upgrades[0].Image)
+	assert.Equal(t, appsv1.UpgradeScheduled, node.Status.Upgrades[0].Status)
+}
+
+func TestApplyUpgradeStatusDoesNotPreserveUnconfiguredNamelessImageOnReplacement(t *testing.T) {
+	upgrades := []appsv1.Upgrade{{
+		Height: 100,
+		Image:  "repo/legacy:v1",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}}
+
+	got, changed := recordRequiredGovernanceUpgrade(upgrades, nodeutils.RequiredUpgrade{
+		Height: 100,
+		Source: nodeutils.OnChainUpgrade,
+		Name:   "plan-v2",
+	}, false)
+
+	assert.True(t, changed)
+	require.Len(t, got, 1)
+	assert.Equal(t, "plan-v2", got[0].Name)
+	assert.Empty(t, got[0].Image)
+	assert.Equal(t, appsv1.UpgradeImageMissing, got[0].Status)
+}
+
+func TestResolveRequiredUpgradeIgnoresFinishedExactStructuredRequirement(t *testing.T) {
+	for _, phase := range []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeSkipped} {
+		t.Run(string(phase), func(t *testing.T) {
+			node := &appsv1.ChainNode{
+				Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{CheckGovUpgrades: ptr.To(false)}},
+				Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
+					Height: 100,
+					Source: appsv1.OnChainUpgrade,
+					Name:   "plan-v2",
+					Status: phase,
+				}}},
+			}
+
+			required, err := resolveRequiredUpgrade(node, nodeutils.UpgradeStatus{RequiredUpgrade: &nodeutils.RequiredUpgrade{
+				Height: 100,
+				Source: nodeutils.OnChainUpgrade,
+				Name:   "plan-v2",
+			}})
+
+			require.NoError(t, err)
+			assert.Nil(t, required)
+		})
+	}
+}
+
+func TestResolveRequiredUpgradeDoesNotIgnoreDifferentFinishedRequirement(t *testing.T) {
+	for _, finished := range []appsv1.Upgrade{
+		{Height: 100, Source: appsv1.ManualUpgrade, Name: "plan-v2", Status: appsv1.UpgradeCompleted},
+		{Height: 100, Source: appsv1.OnChainUpgrade, Name: "plan-v1", Status: appsv1.UpgradeCompleted},
+	} {
+		node := &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{LatestHeight: 99, Upgrades: []appsv1.Upgrade{finished}}}
+		want := &nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.OnChainUpgrade, Name: "plan-v2"}
+
+		required, err := resolveRequiredUpgrade(node, nodeutils.UpgradeStatus{RequiredUpgrade: want})
+
+		require.NoError(t, err)
+		assert.Equal(t, want, required)
+	}
+}
+
+func TestSanitizeUnknownGovernanceRequirement(t *testing.T) {
+	marker := &nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.OnChainUpgrade, Name: "plan-v2"}
+	zero := int64(0)
+	for _, tt := range []struct {
+		name       string
+		node       *appsv1.ChainNode
+		pod        *corev1.Pod
+		status     nodeutils.UpgradeStatus
+		wantMarker bool
+	}{
+		{
+			name:   "adopted pvc marker while app runs is ignored",
+			node:   &appsv1.ChainNode{},
+			pod:    runningAppPod("appd"),
+			status: nodeutils.UpgradeStatus{RequiredUpgrade: marker},
+		},
+		{
+			name:   "zero observation is still unknown",
+			node:   &appsv1.ChainNode{},
+			pod:    runningAppPod("appd"),
+			status: nodeutils.UpgradeStatus{LatestHeight: &zero, RequiredUpgrade: marker},
+		},
+		{
+			name:       "terminal app accepts durable marker",
+			node:       &appsv1.ChainNode{},
+			pod:        terminatedAppPod("appd"),
+			status:     nodeutils.UpgradeStatus{RequiredUpgrade: marker},
+			wantMarker: true,
+		},
+		{
+			name:       "terminal pod accepts durable marker",
+			node:       &appsv1.ChainNode{},
+			pod:        &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+			status:     nodeutils.UpgradeStatus{RequiredUpgrade: marker},
+			wantMarker: true,
+		},
+		{
+			name: "known scheduled identity accepts marker",
+			node: &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{
+				Upgrades: []appsv1.Upgrade{{
+					Height: 100, Source: appsv1.OnChainUpgrade, Name: "plan-v2", Status: appsv1.UpgradeScheduled,
+				}},
+			}},
+			pod:        runningAppPod("appd"),
+			status:     nodeutils.UpgradeStatus{RequiredUpgrade: marker},
+			wantMarker: true,
+		},
+		{
+			name: "known ongoing identity accepts marker",
+			node: &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{
+				Upgrades: []appsv1.Upgrade{{
+					Height: 100, Source: appsv1.OnChainUpgrade, Name: "plan-v2", Status: appsv1.UpgradeOnGoing,
+				}},
+			}},
+			pod:        runningAppPod("appd"),
+			status:     nodeutils.UpgradeStatus{RequiredUpgrade: marker},
+			wantMarker: true,
+		},
+		{
+			name: "nameless forced spec accepts named marker",
+			node: &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{
+				Upgrades: []appsv1.UpgradeSpec{{
+					Height: 100, ForceOnChain: ptr.To(true),
+				}},
+			}}},
+			pod:        runningAppPod("appd"),
+			status:     nodeutils.UpgradeStatus{RequiredUpgrade: marker},
+			wantMarker: true,
+		},
+		{
+			name:       "observed height accepts marker",
+			node:       &appsv1.ChainNode{},
+			pod:        runningAppPod("appd"),
+			status:     nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(99)), RequiredUpgrade: marker},
+			wantMarker: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.node.Spec.App.App = "appd"
+			got := sanitizeUnknownGovernanceRequirement(tt.node, tt.pod, tt.status)
+			if tt.wantMarker {
+				assert.Equal(t, marker, got.RequiredUpgrade)
+			} else {
+				assert.Nil(t, got.RequiredUpgrade)
+			}
+		})
+	}
+}
+
+func runningAppPod(name string) *corev1.Pod {
+	return &corev1.Pod{Status: corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  name,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}},
+	}}
+}
+
+func terminatedAppPod(name string) *corev1.Pod {
+	return &corev1.Pod{Status: corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  name,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}},
+		}},
+	}}
 }
 
 func TestApplyUpgradeStatusPreservesCompletedSkippedAndOngoingHistory(t *testing.T) {

@@ -701,6 +701,21 @@ func (cfg *Config) GetPodSecurityContext() *corev1.PodSecurityContext {
 	return nil
 }
 
+// ValidateNodeUtilsRunIdentity ensures custom app and pod contexts expose the numeric ownership
+// node-utils must use for the SDK upgrade marker and its parent data directory.
+func (cfg *Config) ValidateNodeUtilsRunIdentity(path string) error {
+	if cfg == nil || cfg.SecurityContext == nil || cfg.PodSecurityContext == nil {
+		return nil
+	}
+	if cfg.SecurityContext.RunAsUser == nil && cfg.PodSecurityContext.RunAsUser == nil {
+		return fmt.Errorf("%s.securityContext.runAsUser or %s.podSecurityContext.runAsUser is required when both security contexts are customized", path, path)
+	}
+	if cfg.SecurityContext.RunAsGroup == nil && cfg.PodSecurityContext.RunAsGroup == nil {
+		return fmt.Errorf("%s.securityContext.runAsGroup or %s.podSecurityContext.runAsGroup is required when both security contexts are customized", path, path)
+	}
+	return nil
+}
+
 // GetServiceAccountName returns the service account name if specified, or empty string otherwise.
 func (cfg *Config) GetServiceAccountName() string {
 	if cfg != nil && cfg.ServiceAccountName != nil {

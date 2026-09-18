@@ -85,6 +85,66 @@ func TestUpgradeStatusEndpointPreservesLegacyWireFormats(t *testing.T) {
 	assert.Equal(t, "true", required.Body.String())
 }
 
+func TestLatestHeightSynthesizesOnlyScheduledMatchingUpgradeForLegacyManager(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		required   *RequiredUpgrade
+		upgrades   []Upgrade
+		wantHeight string
+	}{
+		{
+			name:       "scheduled matching upgrade",
+			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+			upgrades:   []Upgrade{{Height: 100, Source: OnChainUpgrade, Status: UpgradeScheduled}},
+			wantHeight: "100",
+		},
+		{
+			name:       "unknown marker",
+			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+			wantHeight: "99",
+		},
+		{
+			name:       "ongoing is not replayed",
+			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+			upgrades:   []Upgrade{{Height: 100, Source: OnChainUpgrade, Status: UpgradeOnGoing}},
+			wantHeight: "99",
+		},
+		{
+			name:       "completed is not replayed",
+			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+			upgrades:   []Upgrade{{Height: 100, Source: OnChainUpgrade, Status: UpgradeCompleted}},
+			wantHeight: "99",
+		},
+		{
+			name:       "skipped is not replayed",
+			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+			upgrades:   []Upgrade{{Height: 100, Source: OnChainUpgrade, Status: UpgradeSkipped}},
+			wantHeight: "99",
+		},
+		{
+			name:       "different source",
+			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+			upgrades:   []Upgrade{{Height: 100, Source: ManualUpgrade, Status: UpgradeScheduled}},
+			wantHeight: "99",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			height := int64(99)
+			s := newShutdownTestServer(testShutdownToken, func() error { return nil })
+			s.upgradeMonitor.status = UpgradeStatus{LatestHeight: &height, RequiredUpgrade: tt.required}
+			s.upgradeMonitor.checker = &UpgradeChecker{config: UpgradesConfig{Upgrades: tt.upgrades}}
+
+			legacy := httptest.NewRecorder()
+			s.router.ServeHTTP(legacy, httptest.NewRequest(http.MethodGet, "/latest_height", nil))
+			assert.Equal(t, tt.wantHeight, legacy.Body.String())
+
+			structured := httptest.NewRecorder()
+			s.router.ServeHTTP(structured, httptest.NewRequest(http.MethodGet, "/upgrade_status", nil))
+			assert.Contains(t, structured.Body.String(), `"latestHeight":99`)
+		})
+	}
+}
+
 func TestShutdownServerRequiresBearerToken(t *testing.T) {
 	tests := []struct {
 		name          string

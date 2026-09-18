@@ -41,6 +41,7 @@ const (
 	AnnotationChainNodeGeneration                  = "cosmopilot.voluzi.com/chainnode-generation"
 	AnnotationCosmosignerRollout                   = "cosmopilot.voluzi.com/cosmosigner-rollout"
 	AnnotationManualUpgradeIdentity                = "cosmopilot.voluzi.com/manual-upgrade-identity"
+	AnnotationUpgradeIdentity                      = "cosmopilot.voluzi.com/upgrade-identity"
 	AnnotationVPAResources                         = "cosmopilot.voluzi.com/vpa-resources"
 	AnnotationVPALastCPUScale                      = "cosmopilot.voluzi.com/last-cpu-scale"
 	AnnotationVPALastMemoryScale                   = "cosmopilot.voluzi.com/last-memory-scale"

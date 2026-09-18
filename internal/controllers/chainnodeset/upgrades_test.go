@@ -35,7 +35,7 @@ func TestAggregateChildUpgradesConflictingPlansIsOrderIndependent(t *testing.T) 
 	}
 }
 
-func TestAggregateChildUpgradesTreatsMixedNamelessAndNamedPlansAsConflict(t *testing.T) {
+func TestAggregateChildUpgradesConvergesMixedNamelessAndNamedPlans(t *testing.T) {
 	namelessPlanA := appsv1.Upgrade{
 		Height: 100,
 		Image:  "repo/app:a",
@@ -50,8 +50,9 @@ func TestAggregateChildUpgradesTreatsMixedNamelessAndNamedPlansAsConflict(t *tes
 	}
 	want := appsv1.Upgrade{
 		Height: 100,
+		Name:   "plan-b",
 		Source: appsv1.OnChainUpgrade,
-		Status: appsv1.UpgradeConflict,
+		Status: appsv1.UpgradeImageMissing,
 	}
 
 	for _, children := range [][]appsv1.Upgrade{{namelessPlanA, planB}, {planB, namelessPlanA}} {
@@ -67,7 +68,7 @@ func TestAggregateChildUpgradesTreatsMixedNamelessAndNamedPlansAsConflict(t *tes
 
 func TestAggregateChildUpgradesConflictsAcrossReplacementPlanPhases(t *testing.T) {
 	planA := appsv1.Upgrade{Height: 100, Name: "plan-a", Image: "repo/app:a", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeScheduled}
-	for _, phase := range []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeOnGoing} {
+	for _, phase := range []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeOnGoing, appsv1.UpgradeSkipped} {
 		planB := appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/app:b", Source: appsv1.OnChainUpgrade, Status: phase}
 		for _, children := range [][]appsv1.Upgrade{{planA, planB}, {planB, planA}} {
 			nodes := make([]appsv1.ChainNode, 0, len(children))

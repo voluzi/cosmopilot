@@ -220,6 +220,12 @@ By default, Cosmopilot applies a restricted security context to all containers f
 
 If your application requires different security settings (e.g., running as root or with specific capabilities), you can override these defaults.
 
+node-utils reads the Cosmos SDK `data/upgrade-info.json` marker as the same numeric user and primary
+group as the application. If both `securityContext` and `podSecurityContext` are customized, their
+effective combination must explicitly provide both `runAsUser` and `runAsGroup`; image-defined
+UIDs and GIDs cannot be inferred by the operator. This configuration is rejected during admission
+and reconciliation so governance upgrade recovery cannot silently lose access to the marker.
+
 ### Container Security Context
 
 Override security settings for the main application container:

@@ -40,6 +40,9 @@ including upgrades that use `--reuse-values`; clear or delete an old value to re
 :::warning[node-utils compatibility]
 If you override or pin `nodeUtilsImage`, use node-utils 3.0.0 or newer. This version provides the
 polling and SDK marker-based upgrade coordination required by Pods that do not use a trace FIFO.
+The same release also validates custom app and Pod security contexts: when both are supplied, their
+effective combination must set numeric `runAsUser` and `runAsGroup` values so node-utils can read
+the SDK marker with the application's filesystem identity.
 :::
 
 ### `cosmoGuardImage`

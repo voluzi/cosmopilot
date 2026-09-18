@@ -164,7 +164,16 @@ func (r *Reconciler) applyUpgradeStatus(ctx context.Context, chainNode *appsv1.C
 		governanceMarkerRecoveryAllowed(chainNode, *required) &&
 		!structuredOnChainUpgradeIsStale(chainNode, *required) &&
 		required.Height > 0 && required.Name != "" {
-		chainNode.Status.Upgrades, upgradesChanged = recordRequiredGovernanceUpgrade(chainNode.Status.Upgrades, *required)
+		authoritative := *required
+		configuredImage := configuredGovernanceImage(chainNode, authoritative)
+		if configuredImage != "" {
+			authoritative.Image = configuredImage
+		}
+		chainNode.Status.Upgrades, upgradesChanged = recordRequiredGovernanceUpgrade(
+			chainNode.Status.Upgrades,
+			authoritative,
+			configuredImage != "",
+		)
 		statusChanged = statusChanged || upgradesChanged
 	}
 	if !statusChanged {
@@ -182,6 +191,7 @@ func (r *Reconciler) applyUpgradeStatus(ctx context.Context, chainNode *appsv1.C
 func recordRequiredGovernanceUpgrade(
 	upgrades []appsv1.Upgrade,
 	required nodeutils.RequiredUpgrade,
+	configuredImage bool,
 ) ([]appsv1.Upgrade, bool) {
 	status := appsv1.UpgradeImageMissing
 	if required.Image != "" {
@@ -209,7 +219,7 @@ func recordRequiredGovernanceUpgrade(
 
 		updated := existing
 		updated.Source = appsv1.OnChainUpgrade
-		if updated.Image == "" && required.Image != "" {
+		if required.Image != "" && (updated.Image == "" || configuredImage) {
 			updated.Image = required.Image
 		}
 		if updated.Image == "" {
@@ -229,6 +239,9 @@ func recordRequiredGovernanceUpgrade(
 func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.UpgradeStatus) (*nodeutils.RequiredUpgrade, error) {
 	if status.RequiredUpgrade != nil {
 		required := *status.RequiredUpgrade
+		if finishedUpgradeMatches(chainNode, required) {
+			return nil, nil
+		}
 		if required.Source == nodeutils.OnChainUpgrade {
 			if structuredOnChainUpgradeIsStale(chainNode, required) {
 				return nil, nil
@@ -269,6 +282,30 @@ func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.Upgrad
 		Source: nodeutils.UpgradeSource(selected.Source),
 		Name:   selected.Name,
 	}, nil
+}
+
+func configuredGovernanceImage(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) string {
+	for i := range chainNode.Spec.App.Upgrades {
+		upgrade := &chainNode.Spec.App.Upgrades[i]
+		if upgrade.Height != required.Height || !upgrade.ForceGovUpgrade() || upgrade.Image == "" {
+			continue
+		}
+		if upgrade.Name == "" || upgrade.Name == required.Name {
+			return upgrade.Image
+		}
+	}
+	return ""
+}
+
+func finishedUpgradeMatches(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) bool {
+	for _, upgrade := range chainNode.Status.Upgrades {
+		if upgrade.Height == required.Height && string(upgrade.Source) == string(required.Source) &&
+			upgrade.Name == required.Name &&
+			(upgrade.Status == appsv1.UpgradeCompleted || upgrade.Status == appsv1.UpgradeSkipped) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) *appsv1.Upgrade {
@@ -314,6 +351,50 @@ func governanceMarkerRecoveryAllowed(chainNode *appsv1.ChainNode, required nodeu
 
 func structuredOnChainUpgradeIsStale(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) bool {
 	return required.Height > 0 && chainNode.Status.LatestHeight >= required.Height
+}
+
+func sanitizeUnknownGovernanceRequirement(
+	chainNode *appsv1.ChainNode,
+	pod *corev1.Pod,
+	status nodeutils.UpgradeStatus,
+) nodeutils.UpgradeStatus {
+	required := status.RequiredUpgrade
+	if required == nil || required.Source != nodeutils.OnChainUpgrade || chainNode.Status.LatestHeight > 0 ||
+		status.LatestHeight != nil && *status.LatestHeight > 0 {
+		return status
+	}
+	if knownPendingUpgradeMatches(chainNode, *required) || forcedUpgradeMatches(chainNode, *required) ||
+		containerHasTerminated(pod, chainNode.Spec.App.App) || pod != nil &&
+		(pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded) {
+		return status
+	}
+	status.RequiredUpgrade = nil
+	return status
+}
+
+func knownPendingUpgradeMatches(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) bool {
+	for _, upgrade := range chainNode.Status.Upgrades {
+		if upgrade.Height != required.Height || string(upgrade.Source) != string(required.Source) ||
+			upgrade.Name != required.Name {
+			continue
+		}
+		if upgrade.Status == appsv1.UpgradeScheduled || upgrade.Status == appsv1.UpgradeImageMissing ||
+			upgrade.Status == appsv1.UpgradeOnGoing {
+			return true
+		}
+	}
+	return false
+}
+
+func forcedUpgradeMatches(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) bool {
+	for i := range chainNode.Spec.App.Upgrades {
+		upgrade := &chainNode.Spec.App.Upgrades[i]
+		if upgrade.Height == required.Height && upgrade.ForceGovUpgrade() &&
+			(upgrade.Name == "" || upgrade.Name == required.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) setUpgradeStatus(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade, status appsv1.UpgradePhase) error {

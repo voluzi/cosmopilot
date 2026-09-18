@@ -30,10 +30,69 @@ func TestManualUpgradePodIdentityDistinguishesSameImage(t *testing.T) {
 	pod := &corev1.Pod{}
 	oldPod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Image: upgradeA.Image}}}}
 
-	assert.False(t, podMatchesManualUpgrade(oldPod, upgradeA))
-	require.NoError(t, stampManualUpgradeIdentity(pod, upgradeA))
-	assert.True(t, podMatchesManualUpgrade(pod, upgradeA))
-	assert.False(t, podMatchesManualUpgrade(pod, upgradeB))
+	assert.False(t, podMatchesUpgrade(oldPod, upgradeA))
+	require.NoError(t, stampUpgradeIdentity(pod, upgradeA))
+	assert.True(t, podMatchesUpgrade(pod, upgradeA))
+	assert.False(t, podMatchesUpgrade(pod, upgradeB))
+	legacyPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		controllers.AnnotationManualUpgradeIdentity: `{"height":100,"source":"manual","name":"plan-a","image":"repo/app:v2"}`,
+	}}}
+	assert.True(t, podMatchesUpgrade(legacyPod, upgradeA))
+}
+
+func TestUpgradePodIdentitySupportsOnChainUpgrade(t *testing.T) {
+	upgrade := &appsv1.Upgrade{Height: 100, Source: appsv1.OnChainUpgrade, Name: "plan-v2", Image: "repo/app:v2", Status: appsv1.UpgradeOnGoing}
+	pod := &corev1.Pod{}
+
+	require.NoError(t, stampUpgradeIdentity(pod, upgrade))
+	assert.True(t, podMatchesUpgrade(pod, upgrade))
+	assert.NotEmpty(t, pod.Annotations[controllers.AnnotationUpgradeIdentity])
+}
+
+func TestOngoingUpgradeIncludesOnChainUpgrade(t *testing.T) {
+	node := &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{
+		{Height: 100, Source: appsv1.OnChainUpgrade, Name: "plan-v2", Image: "repo/app:v2", Status: appsv1.UpgradeOnGoing},
+	}}}
+
+	upgrade := ongoingUpgrade(node)
+
+	require.NotNil(t, upgrade)
+	assert.Equal(t, appsv1.OnChainUpgrade, upgrade.Source)
+}
+
+func TestRecoverOngoingOnChainUpgradeCompletesStampedStartedPod(t *testing.T) {
+	ctx := t.Context()
+	scheme := nodeUtilsAuthTestScheme(t)
+	node := nodeUtilsAuthTestNode()
+	node.Spec.App.Image = "repo/app:v1"
+	node.Status.Upgrades = []appsv1.Upgrade{{
+		Height: 100,
+		Source: appsv1.OnChainUpgrade,
+		Name:   "plan-v2",
+		Image:  "repo/app:v2",
+		Status: appsv1.UpgradeOnGoing,
+	}}
+	upgradesConfig := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-upgrades", Namespace: node.Namespace},
+		Data:       map[string]string{upgradesConfigFile: `{"upgrades":[]}`},
+	}
+	backing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node, upgradesConfig).Build()
+	r := &Reconciler{Client: backing, Scheme: scheme, recorder: record.NewFakeRecorder(10)}
+	current := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name:  node.Spec.App.App,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}},
+	}
+	require.NoError(t, stampUpgradeIdentity(current, &node.Status.Upgrades[0]))
+
+	handled, err := r.recoverOngoingUpgrade(ctx, node, current, current.DeepCopy())
+
+	require.NoError(t, err)
+	assert.True(t, handled)
+	assert.Equal(t, appsv1.UpgradeCompleted, node.Status.Upgrades[0].Status)
+	assert.Equal(t, "repo/app:v2", node.Status.AppImage)
 }
 
 func TestRecoverOngoingManualUpgradeReplacesUnstampedOldPod(t *testing.T) {
@@ -54,6 +113,7 @@ func TestRecoverOngoingManualUpgradeReplacesUnstampedOldPod(t *testing.T) {
 	stampNodeUtilsShutdownCredential(desired, credential)
 	current := desired.DeepCopy()
 	delete(current.Annotations, controllers.AnnotationManualUpgradeIdentity)
+	delete(current.Annotations, controllers.AnnotationUpgradeIdentity)
 	backing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node, current, secret, config, upgradesConfig).Build()
 
 	var deletes, creates atomic.Int32
@@ -90,7 +150,7 @@ func TestRecoverOngoingManualUpgradeReplacesUnstampedOldPod(t *testing.T) {
 		},
 	}
 
-	handled, err := r.recoverOngoingManualUpgrade(ctx, node, current, desired)
+	handled, err := r.recoverOngoingUpgrade(ctx, node, current, desired)
 	require.ErrorContains(t, err, "stop after create attempt")
 	assert.True(t, handled)
 	assert.Equal(t, int32(1), deletes.Load())
@@ -146,7 +206,7 @@ func TestRecoverOngoingManualUpgradeHonorsImageOverrides(t *testing.T) {
 			desired := current.DeepCopy()
 			desired.Spec.Containers = []corev1.Container{{Name: node.Spec.App.App, Image: node.GetAppImage()}}
 
-			handled, err := r.recoverOngoingManualUpgrade(ctx, node, current, desired)
+			handled, err := r.recoverOngoingUpgrade(ctx, node, current, desired)
 			require.NoError(t, err)
 			assert.True(t, handled)
 			assert.Zero(t, podRequests.Load())

@@ -116,7 +116,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		}
 		return r.createPod(ctx, chainNode, pod)
 	}
-	if handled, err := r.recoverOngoingManualUpgrade(ctx, chainNode, currentPod, pod); handled {
+	if handled, err := r.recoverOngoingUpgrade(ctx, chainNode, currentPod, pod); handled {
 		return err
 	}
 
@@ -169,6 +169,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	if err != nil {
 		return fmt.Errorf("failed to retrieve upgrade status for %s: %w", chainNode.GetName(), err)
 	}
+	upgradeStatus = sanitizeUnknownGovernanceRequirement(chainNode, currentPod, upgradeStatus)
 	if err := r.applyUpgradeStatus(ctx, chainNode, upgradeStatus); err != nil {
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
 	}
@@ -393,22 +394,23 @@ func nodeUtilsHaltHeight(pod *corev1.Pod) (int64, bool) {
 	return 0, false
 }
 
-type manualUpgradeIdentity struct {
+type upgradeIdentity struct {
 	Height int64                `json:"height"`
 	Source appsv1.UpgradeSource `json:"source"`
 	Name   string               `json:"name,omitempty"`
 	Image  string               `json:"image"`
 }
 
-func manualUpgradeIdentityFrom(upgrade *appsv1.Upgrade) manualUpgradeIdentity {
-	return manualUpgradeIdentity{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}
+func upgradeIdentityFrom(upgrade *appsv1.Upgrade) upgradeIdentity {
+	return upgradeIdentity{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name, Image: upgrade.Image}
 }
 
-func ongoingManualUpgrade(chainNode *appsv1.ChainNode) *appsv1.Upgrade {
+func ongoingUpgrade(chainNode *appsv1.ChainNode) *appsv1.Upgrade {
 	var selected *appsv1.Upgrade
 	for i := range chainNode.Status.Upgrades {
 		upgrade := &chainNode.Status.Upgrades[i]
-		if upgrade.Source != appsv1.ManualUpgrade || upgrade.Status != appsv1.UpgradeOnGoing || upgrade.Height <= 0 {
+		if (upgrade.Source != appsv1.ManualUpgrade && upgrade.Source != appsv1.OnChainUpgrade) ||
+			upgrade.Status != appsv1.UpgradeOnGoing || upgrade.Height <= 0 {
 			continue
 		}
 		if selected == nil || upgrade.Height < selected.Height {
@@ -418,27 +420,31 @@ func ongoingManualUpgrade(chainNode *appsv1.ChainNode) *appsv1.Upgrade {
 	return selected
 }
 
-func stampManualUpgradeIdentity(pod *corev1.Pod, upgrade *appsv1.Upgrade) error {
-	body, err := json.Marshal(manualUpgradeIdentityFrom(upgrade))
+func stampUpgradeIdentity(pod *corev1.Pod, upgrade *appsv1.Upgrade) error {
+	body, err := json.Marshal(upgradeIdentityFrom(upgrade))
 	if err != nil {
 		return err
 	}
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	pod.Annotations[controllers.AnnotationManualUpgradeIdentity] = string(body)
+	pod.Annotations[controllers.AnnotationUpgradeIdentity] = string(body)
 	return nil
 }
 
-func podMatchesManualUpgrade(pod *corev1.Pod, upgrade *appsv1.Upgrade) bool {
+func podMatchesUpgrade(pod *corev1.Pod, upgrade *appsv1.Upgrade) bool {
 	if pod == nil {
 		return false
 	}
-	var identity manualUpgradeIdentity
-	if err := json.Unmarshal([]byte(pod.Annotations[controllers.AnnotationManualUpgradeIdentity]), &identity); err != nil {
+	body := pod.Annotations[controllers.AnnotationUpgradeIdentity]
+	if body == "" {
+		body = pod.Annotations[controllers.AnnotationManualUpgradeIdentity]
+	}
+	var identity upgradeIdentity
+	if err := json.Unmarshal([]byte(body), &identity); err != nil {
 		return false
 	}
-	return identity == manualUpgradeIdentityFrom(upgrade)
+	return identity == upgradeIdentityFrom(upgrade)
 }
 
 func appContainerStarted(pod *corev1.Pod, name string) bool {
@@ -450,8 +456,8 @@ func appContainerStarted(pod *corev1.Pod, name string) bool {
 	return false
 }
 
-func (r *Reconciler) recoverOngoingManualUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, currentPod, desiredPod *corev1.Pod) (bool, error) {
-	upgrade := ongoingManualUpgrade(chainNode)
+func (r *Reconciler) recoverOngoingUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, currentPod, desiredPod *corev1.Pod) (bool, error) {
+	upgrade := ongoingUpgrade(chainNode)
 	if upgrade == nil {
 		return false, nil
 	}
@@ -463,7 +469,7 @@ func (r *Reconciler) recoverOngoingManualUpgrade(ctx context.Context, chainNode 
 			Image:  upgrade.Image,
 		}
 		if err := r.skipUpgradeForOverride(ctx, chainNode, required); err != nil {
-			return true, fmt.Errorf("skip recovered manual upgrade at height %d for pinned node: %w", upgrade.Height, err)
+			return true, fmt.Errorf("skip recovered upgrade at height %d for pinned node: %w", upgrade.Height, err)
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
@@ -473,29 +479,29 @@ func (r *Reconciler) recoverOngoingManualUpgrade(ctx context.Context, chainNode 
 		)
 		return true, nil
 	}
-	if podMatchesManualUpgrade(currentPod, upgrade) {
+	if podMatchesUpgrade(currentPod, upgrade) {
 		if !appContainerStarted(currentPod, chainNode.Spec.App.App) &&
 			!containerHasTerminated(currentPod, chainNode.Spec.App.App) &&
 			!podInFailedState(chainNode, currentPod) {
 			return true, nil
 		}
-		return true, r.completeRecoveredManualUpgrade(ctx, chainNode, upgrade)
+		return true, r.completeRecoveredUpgrade(ctx, chainNode, upgrade)
 	}
 	if upgrade.Image == "" {
-		return true, fmt.Errorf("ongoing manual upgrade at height %d has no image", upgrade.Height)
+		return true, fmt.Errorf("ongoing upgrade at height %d has no image", upgrade.Height)
 	}
 	upgraded, err := r.upgradePod(ctx, chainNode, desiredPod, upgrade.Image)
 	if err != nil && !upgraded {
-		return true, fmt.Errorf("resume manual upgrade at height %d: %w", upgrade.Height, err)
+		return true, fmt.Errorf("resume upgrade at height %d: %w", upgrade.Height, err)
 	}
-	if completeErr := r.completeRecoveredManualUpgrade(ctx, chainNode, upgrade); completeErr != nil {
+	if completeErr := r.completeRecoveredUpgrade(ctx, chainNode, upgrade); completeErr != nil {
 		return true, completeErr
 	}
 	return true, nil
 }
 
-func (r *Reconciler) completeRecoveredManualUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade) error {
-	return r.completeUpgrade(ctx, chainNode, upgrade, "reset VPA after recovered manual upgrade")
+func (r *Reconciler) completeRecoveredUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade) error {
+	return r.completeUpgrade(ctx, chainNode, upgrade, "reset VPA after recovered upgrade")
 }
 
 func (r *Reconciler) completeUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade, resetFailure string) error {
@@ -1010,9 +1016,9 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
 	}
-	if upgrade := ongoingManualUpgrade(chainNode); upgrade != nil {
-		if err := stampManualUpgradeIdentity(pod, upgrade); err != nil {
-			return nil, fmt.Errorf("encode ongoing manual upgrade identity for %s: %w", chainNode.GetName(), err)
+	if upgrade := ongoingUpgrade(chainNode); upgrade != nil {
+		if err := stampUpgradeIdentity(pod, upgrade); err != nil {
+			return nil, fmt.Errorf("encode ongoing upgrade identity for %s: %w", chainNode.GetName(), err)
 		}
 	}
 	if hasCosmosignerTarget {

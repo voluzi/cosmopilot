@@ -67,35 +67,49 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, nodeSet *appsv1.ChainNo
 }
 
 func aggregateChildUpgrades(nodes []appsv1.ChainNode) []appsv1.Upgrade {
-	upgrades := make([]appsv1.Upgrade, 0)
-	pendingPlanNames := make(map[int64]map[string]struct{})
-	pendingNamelessPlans := make(map[int64]bool)
+	planNames := make(map[int64]map[string]struct{})
 	for _, node := range nodes {
 		for _, upgrade := range node.Status.Upgrades {
-			upgrades = AddOrUpdateUpgrade(upgrades, upgrade)
 			if upgrade.Source != appsv1.OnChainUpgrade || upgrade.Status == appsv1.UpgradeConflict {
 				continue
 			}
 			if upgrade.Name == "" {
-				pendingNamelessPlans[upgrade.Height] = true
 				continue
 			}
-			if pendingPlanNames[upgrade.Height] == nil {
-				pendingPlanNames[upgrade.Height] = make(map[string]struct{})
+			if planNames[upgrade.Height] == nil {
+				planNames[upgrade.Height] = make(map[string]struct{})
 			}
-			pendingPlanNames[upgrade.Height][upgrade.Name] = struct{}{}
+			planNames[upgrade.Height][upgrade.Name] = struct{}{}
 		}
 	}
-	for i := range upgrades {
-		planNames := pendingPlanNames[upgrades[i].Height]
-		if len(planNames) <= 1 && !(pendingNamelessPlans[upgrades[i].Height] && len(planNames) > 0) {
+
+	upgrades := make([]appsv1.Upgrade, 0)
+	for _, node := range nodes {
+		for _, upgrade := range node.Status.Upgrades {
+			names := planNames[upgrade.Height]
+			if len(names) > 1 {
+				continue
+			}
+			if len(names) == 1 {
+				if upgrade.Source != appsv1.OnChainUpgrade {
+					continue
+				}
+				if _, matches := names[upgrade.Name]; !matches {
+					continue
+				}
+			}
+			upgrades = AddOrUpdateUpgrade(upgrades, upgrade)
+		}
+	}
+	for height, names := range planNames {
+		if len(names) <= 1 {
 			continue
 		}
-		upgrades[i] = appsv1.Upgrade{
-			Height: upgrades[i].Height,
+		upgrades = append(upgrades, appsv1.Upgrade{
+			Height: height,
 			Source: appsv1.OnChainUpgrade,
 			Status: appsv1.UpgradeConflict,
-		}
+		})
 	}
 	return upgrades
 }

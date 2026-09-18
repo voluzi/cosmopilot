@@ -63,6 +63,13 @@ on-chain upgrade or an explicit `forceOnChain` entry.
 
 Manual upgrades allow you to define upgrades directly in `.spec.app.upgrades`. These upgrades result in a straightforward binary swap, and `Cosmopilot` does not wait for the node to panic and halt, as is typical with governance upgrades.
 
+:::warning
+Manual upgrades are best-effort coordination. On fast catch-up or sub-second chains, polling may
+observe the node only after it has passed the configured boundary. Do not use a manual upgrade as
+the sole mechanism for a consensus-breaking release. Use the Cosmos SDK governance upgrade path,
+whose durable `upgrade-info.json` marker remains authoritative across missed events and restarts.
+:::
+
 The sidecar stops the application once the locally committed ABCI height reaches one block before
 the configured target. Committed height is reconciled periodically and after CometBFT
 `NewBlockHeader` notifications when the optional websocket endpoint is available. Websocket access
