@@ -1318,6 +1318,560 @@ func TestEnsureVolumeSnapshotsHonorsTarballDeletionMarkerForRetention(t *testing
 	}
 }
 
+func TestEnsureVolumeSnapshotsCountRetentionSkipsSnapshotWithUploadInFlight(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	// Both policies must hold the snapshot. deleteOnExpire=false is the destructive one: with no
+	// tarball deletion to wait for, retention would otherwise delete the volumesnapshot outright
+	// while it is still the source of the upload PVC.
+	for _, deleteOnExpire := range []bool{false, true} {
+		for _, provider := range orphanSnapshotProviderCases() {
+			t.Run(fmt.Sprintf("%s/deleteOnExpire=%t", provider.name, deleteOnExpire), func(t *testing.T) {
+				runCountRetentionInFlightCase(t, now, provider.export, deleteOnExpire)
+			})
+		}
+	}
+}
+
+func runCountRetentionInFlightCase(
+	t *testing.T,
+	now time.Time,
+	providerExport *appsv1.ExportTarballConfig,
+	deleteOnExpire bool,
+) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	export := providerExport.DeepCopy()
+	export.DeleteOnExpire = ptr.To(deleteOnExpire)
+	chainNode := orphanSnapshotTestChainNode(now, export)
+	chainNode.Spec.Persistence.Snapshots.Retain = ptr.To(int32(1))
+	chainNode.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+
+	// The oldest snapshot is over the retain count but is still feeding a tarball upload.
+	uploading := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "snapshot-uploading",
+			Namespace:         chainNode.Namespace,
+			UID:               "snapshot-uploading-uid",
+			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+			Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "true",
+				controllers.AnnotationExportingTarball: strconv.FormatBool(true),
+			},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	newest := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "snapshot-newest",
+			Namespace:         chainNode.Namespace,
+			UID:               "snapshot-newest-uid",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+			Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "true",
+				controllers.AnnotationExportingTarball: tarballFinished,
+			},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode, uploading, newest).
+		Build()
+	clientSet := fake.NewSimpleClientset()
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(
+		context.Background(), client.ObjectKeyFromObject(uploading), stored,
+	), "retain count must not delete the volumesnapshot backing a running upload")
+	assert.Nil(t, stored.DeletionTimestamp)
+	for _, action := range clientSet.Actions() {
+		assert.NotEqual(t, "create", action.GetVerb(),
+			"no tarball deletion may be scheduled while the upload is in flight")
+	}
+}
+
+func TestEnsureVolumeSnapshotsCountRetentionDeletesSnapshotWithExhaustedUpload(t *testing.T) {
+	// Retries are spent, so the upload Job and its clone PVC are already gone and no further upload can
+	// start. The snapshot must fall back under count retention instead of being held forever.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, batchv1.AddToScheme(scheme))
+
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(false)
+			chainNode := orphanSnapshotTestChainNode(now, export)
+			chainNode.Spec.Persistence.Snapshots.Retain = ptr.To(int32(1))
+			chainNode.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+
+			failed := &snapshotv1.VolumeSnapshot{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "snapshot-failed",
+					Namespace:         chainNode.Namespace,
+					UID:               "snapshot-failed-uid",
+					CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour)),
+					Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+					Annotations: map[string]string{
+						controllers.AnnotationPvcSnapshotReady:      "true",
+						controllers.AnnotationExportingTarball:      tarballFailed,
+						controllers.AnnotationTarballExportAttempts: strconv.Itoa(tarballExportMaxAttempts),
+					},
+				},
+				Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+			}
+			newest := &snapshotv1.VolumeSnapshot{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "snapshot-newest",
+					Namespace:         chainNode.Namespace,
+					UID:               "snapshot-newest-uid",
+					CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+					Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+					Annotations: map[string]string{
+						controllers.AnnotationPvcSnapshotReady: "true",
+						controllers.AnnotationExportingTarball: tarballFinished,
+					},
+				},
+				Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+			}
+			// The export record keeps its Uploading phase for good once retries are exhausted.
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:           "export-failed",
+				SnapshotName: failed.Name,
+				SnapshotUID:  failed.UID,
+				ObjectName:   getTarballName(chainNode, failed),
+				Phase:        appsv1.SnapshotExportPhaseUploading,
+			}}
+
+			controllerClient := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(chainNode, failed, newest).
+				Build()
+			reconciler := &Reconciler{
+				Client:            controllerClient,
+				snapshotClientSet: fake.NewSimpleClientset(),
+				Scheme:            scheme,
+				opts:              &controllers.ControllerRunOptions{},
+				recorder:          record.NewFakeRecorder(10),
+			}
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			stored := &snapshotv1.VolumeSnapshot{}
+			err := controllerClient.Get(context.Background(), client.ObjectKeyFromObject(failed), stored)
+			assert.True(t, apierrors.IsNotFound(err),
+				"a snapshot whose upload can never resume must not be exempt from count retention")
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsRetainsOrphanUploadWhenDeleteOnExpireIsFalse(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(false)
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+			// The upload Job finished after its volumesnapshot was already gone.
+			uploadJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}
+			require.NoError(t, clientSet.Tracker().Update(
+				batchv1.SchemeGroupVersion.WithResource("jobs"), uploadJob, chainNode.Namespace,
+			))
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			// Local resources go, the remote object is left alone: no deletion Job is ever created.
+			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(
+				context.Background(), uploadJob.Name, metav1.GetOptions{},
+			)
+			assert.True(t, apierrors.IsNotFound(err))
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(
+				context.Background(), uploadPVC.Name, metav1.GetOptions{},
+			)
+			assert.True(t, apierrors.IsNotFound(err))
+			jobs, err := clientSet.BatchV1().Jobs(chainNode.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, jobs.Items, "a retained orphan upload must not schedule a tarball deletion")
+			for _, action := range clientSet.Actions() {
+				if action.GetVerb() != "create" {
+					continue
+				}
+				createAction, ok := action.(k8stesting.CreateAction)
+				require.True(t, ok)
+				job, ok := createAction.GetObject().(*batchv1.Job)
+				require.True(t, ok)
+				assert.NotEqual(t, "delete", job.Labels["type"],
+					"deleteOnExpire=false must never reach the destination bucket")
+			}
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsLetsRetainedOrphanUploadFinish(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(false)
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+
+			// The Job carries no terminal condition, so the upload is still running.
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(
+				context.Background(), uploadJob.Name, metav1.GetOptions{},
+			)
+			require.NoError(t, err, "a running upload must be allowed to finish")
+			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(
+				context.Background(), uploadPVC.Name, metav1.GetOptions{},
+			)
+			require.NoError(t, err, "the clone PVC feeding a running upload must survive")
+			for _, action := range clientSet.Actions() {
+				assert.NotEqual(t, "delete", action.GetVerb())
+				assert.NotEqual(t, "create", action.GetVerb())
+			}
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsHonoursUploadPolicyCapturedBeforePruning(t *testing.T) {
+	// The upload started under deleteOnExpire=false and its VolumeSnapshot is already gone, so
+	// pruneRetainedSnapshotExports drops the record on this very reconcile. The spec has since flipped
+	// to true. Deleting the remote object is unrecoverable, so the promise the upload began under wins.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(true)
+			reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-orphan",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "orphan-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploading,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			// The record is pruned on the first pass unless it is deliberately retained, so the policy
+			// has to survive into the second reconcile as well.
+			for pass := 1; pass <= 2; pass++ {
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+				_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(
+					context.Background(), uploadJob.Name, metav1.GetOptions{},
+				)
+				require.NoErrorf(t, err,
+					"pass %d: an upload started under deleteOnExpire=false must be allowed to finish", pass)
+				_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(
+					context.Background(), uploadPVC.Name, metav1.GetOptions{},
+				)
+				require.NoErrorf(t, err, "pass %d: the clone PVC feeding the upload must survive", pass)
+				for _, action := range clientSet.Actions() {
+					assert.NotEqualf(t, "create", action.GetVerb(),
+						"pass %d: no deletion Job may be scheduled against an object promised retention", pass)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsKeepsUploadPolicyWhileUploadResourcesTerminate(t *testing.T) {
+	// Retention deletes the upload Job with foreground propagation, so it stays observable while its
+	// dependents are collected. The captured deleteOnExpire=false promise must outlive that window, or
+	// the next reconcile falls back to the flipped spec and deletes the remote object for good.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(true)
+			reconciler, chainNode, clientSet, uploadJob, _ := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+			uploadJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}
+			resource := batchv1.SchemeGroupVersion.WithResource("jobs")
+			require.NoError(t, clientSet.Tracker().Update(resource, uploadJob, chainNode.Namespace))
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-orphan",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "orphan-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploading,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			// Foreground deletion leaves the Job in place until its dependents are gone.
+			clientSet.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				stored, err := clientSet.Tracker().Get(resource, chainNode.Namespace, uploadJob.Name)
+				if err != nil {
+					return true, nil, err
+				}
+				terminating := stored.(*batchv1.Job).DeepCopy()
+				terminating.DeletionTimestamp = ptr.To(metav1.Now())
+				return true, nil, clientSet.Tracker().Update(resource, terminating, chainNode.Namespace)
+			})
+
+			for pass := 1; pass <= 2; pass++ {
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+				for _, action := range clientSet.Actions() {
+					assert.NotEqualf(t, "create", action.GetVerb(),
+						"pass %d: a terminating upload must not have its remote object deleted", pass)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsKeepsUploadedPolicyWhileUploadResourcesTerminate(t *testing.T) {
+	// finishTarballExport records the Uploaded phase before cleaning up, and that cleanup deletes the
+	// Job with foreground propagation. The record therefore reaches Uploaded while its Job is still
+	// observable, so Uploaded must hold the captured deleteOnExpire=false promise exactly as Uploading
+	// does — otherwise pruning drops it and the flipped spec deletes the remote object for good.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(true)
+			reconciler, chainNode, clientSet, uploadJob, _ := newOrphanUploadTestReconciler(
+				t, now, provider.exporter, export,
+			)
+			uploadJob.Status.Conditions = []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}}
+			resource := batchv1.SchemeGroupVersion.WithResource("jobs")
+			require.NoError(t, clientSet.Tracker().Update(resource, uploadJob, chainNode.Namespace))
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-orphan",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "orphan-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploaded,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			// Foreground deletion leaves the Job in place until its dependents are gone.
+			clientSet.PrependReactor("delete", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				stored, err := clientSet.Tracker().Get(resource, chainNode.Namespace, uploadJob.Name)
+				if err != nil {
+					return true, nil, err
+				}
+				terminating := stored.(*batchv1.Job).DeepCopy()
+				terminating.DeletionTimestamp = ptr.To(metav1.Now())
+				return true, nil, clientSet.Tracker().Update(resource, terminating, chainNode.Namespace)
+			})
+
+			for pass := 1; pass <= 2; pass++ {
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+				for _, action := range clientSet.Actions() {
+					assert.NotEqualf(t, "create", action.GetVerb(),
+						"pass %d: an uploaded record must keep its policy while its job terminates", pass)
+				}
+			}
+
+			fresh := &appsv1.ChainNode{}
+			require.NoError(t, reconciler.Get(
+				context.Background(), client.ObjectKeyFromObject(chainNode), fresh,
+			))
+			require.Len(t, fresh.Status.SnapshotExports, 1,
+				"the record must survive while its upload job is still terminating")
+			assert.False(t, fresh.Status.SnapshotExports[0].DeleteOnExpire)
+		})
+	}
+}
+
+func TestRemoveRetainedSnapshotExportIfGoneKeepsRecordWhileUploadResourcesRemain(t *testing.T) {
+	// Retention deletes the VolumeSnapshot and then removes its record directly, before the prune runs.
+	// finishTarballExport reaches Uploaded while the foreground Job deletion is still collecting
+	// dependents, so this direct removal can meet a record whose upload resources are alive. Dropping it
+	// leaves the orphan loop with no record to read: it falls back to the live spec, and a spec flipped
+	// to deleteOnExpire=true then destroys an archive uploaded under the opposite promise.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(true)
+			reconciler, chainNode, _, _, _ := newOrphanUploadTestReconciler(t, now, provider.exporter, export)
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-retained",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "orphan-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploaded,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			// The VolumeSnapshot is already gone; only the upload Job and its clone PVC remain.
+			deleted := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+				Name:      "snapshot-gone",
+				Namespace: chainNode.Namespace,
+				UID:       "snapshot-gone-uid",
+			}}
+			require.NoError(t, reconciler.removeRetainedSnapshotExportIfGone(
+				context.Background(), chainNode, deleted, "export-retained",
+			))
+
+			fresh := &appsv1.ChainNode{}
+			require.NoError(t, reconciler.Get(
+				context.Background(), client.ObjectKeyFromObject(chainNode), fresh,
+			))
+			require.Len(t, fresh.Status.SnapshotExports, 1,
+				"the record must outlive the snapshot while its upload resources are still live")
+			assert.False(t, fresh.Status.SnapshotExports[0].DeleteOnExpire,
+				"the captured deleteOnExpire=false promise must survive the direct removal")
+		})
+	}
+}
+
+func TestRemoveRetainedSnapshotExportIfGoneRemovesRecordWithoutUploadResources(t *testing.T) {
+	// The mirror case: with no Job and no PVC left there is nothing to protect, so the record must be
+	// reclaimed here rather than pinned forever by the guard above.
+	now := time.Now().UTC().Truncate(time.Second)
+	reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
+		t, now, "gcs-exporter",
+		&appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+	)
+	chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID:             "export-vanished",
+		SnapshotName:   "snapshot-gone",
+		SnapshotUID:    "snapshot-gone-uid",
+		ObjectName:     "orphan-tarball",
+		Phase:          appsv1.SnapshotExportPhaseUploaded,
+		DeleteOnExpire: false,
+	}}
+	require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+	// The record names the seeded upload, so the probe looks the resources up by the name they were
+	// created under; removing them is what makes this the no-resource case rather than a name mismatch.
+	require.NoError(t, clientSet.BatchV1().Jobs(chainNode.Namespace).Delete(
+		context.Background(), uploadJob.Name, metav1.DeleteOptions{},
+	))
+	require.NoError(t, clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Delete(
+		context.Background(), uploadPVC.Name, metav1.DeleteOptions{},
+	))
+
+	deleted := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:      "snapshot-gone",
+		Namespace: chainNode.Namespace,
+		UID:       "snapshot-gone-uid",
+	}}
+	require.NoError(t, reconciler.removeRetainedSnapshotExportIfGone(
+		context.Background(), chainNode, deleted, "export-vanished",
+	))
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(chainNode), fresh))
+	assert.Empty(t, fresh.Status.SnapshotExports,
+		"a record with no upload resources left has nothing to protect")
+}
+
+func TestPruneRetainedSnapshotExportsDoesNotProbePresentSnapshots(t *testing.T) {
+	// A successful export sits in Uploaded for as long as its VolumeSnapshot is retained, and such a
+	// record is kept unconditionally. Probing the API server for its upload resources would therefore
+	// buy nothing while adding two uncached reads per retained snapshot to every reconcile, and would
+	// let one transient read failure on an irrelevant record abort the whole prune.
+	now := time.Now().UTC().Truncate(time.Second)
+	reconciler, chainNode, clientSet, _, _ := newOrphanUploadTestReconciler(
+		t, now, "gcs-exporter",
+		&appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+	)
+	chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+		ID:             "export-live",
+		SnapshotName:   "snapshot-live",
+		SnapshotUID:    "snapshot-live-uid",
+		ObjectName:     "live-tarball",
+		Phase:          appsv1.SnapshotExportPhaseUploaded,
+		DeleteOnExpire: false,
+	}}
+	require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+	snapshots := []snapshotv1.VolumeSnapshot{{ObjectMeta: metav1.ObjectMeta{
+		Name:      "snapshot-live",
+		Namespace: chainNode.Namespace,
+		UID:       "snapshot-live-uid",
+	}}}
+
+	require.NoError(t, reconciler.pruneRetainedSnapshotExports(context.Background(), chainNode, snapshots))
+
+	for _, action := range clientSet.Actions() {
+		assert.NotEqualf(t, "get", action.GetVerb(),
+			"a record whose snapshot is present is kept regardless, so %q must not be read",
+			action.GetResource().Resource)
+	}
+
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(chainNode), fresh))
+	require.Len(t, fresh.Status.SnapshotExports, 1, "a record whose snapshot is present must be kept")
+	assert.Equal(t, "export-live", fresh.Status.SnapshotExports[0].ID)
+}
+
+func TestEnsureVolumeSnapshotsPrunesUploadingRecordWithoutUploadResources(t *testing.T) {
+	// An Uploading record is written before the upload Job is created, so creation can fail or the Job
+	// can be removed by hand. The orphan loop only walks existing Jobs, so the record must be reclaimed
+	// here instead of being retained forever.
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, provider := range orphanSnapshotProviderCases() {
+		t.Run(provider.name, func(t *testing.T) {
+			export := provider.export.DeepCopy()
+			export.DeleteOnExpire = ptr.To(false)
+			reconciler, chainNode, _, _, _ := newOrphanUploadTestReconciler(t, now, provider.exporter, export)
+			chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{
+				ID:             "export-vanished",
+				SnapshotName:   "snapshot-gone",
+				SnapshotUID:    "snapshot-gone-uid",
+				ObjectName:     "vanished-tarball",
+				Phase:          appsv1.SnapshotExportPhaseUploading,
+				DeleteOnExpire: false,
+			}}
+			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+
+			fresh := &appsv1.ChainNode{}
+			require.NoError(t, reconciler.Get(
+				context.Background(), client.ObjectKeyFromObject(chainNode), fresh,
+			))
+			for _, record := range fresh.Status.SnapshotExports {
+				assert.NotEqual(t, "export-vanished", record.ID,
+					"an upload record with no Job and no PVC left has nothing to protect")
+			}
+		})
+	}
+}
+
 func TestEnsureVolumeSnapshotsReconcilesOrphanJobs(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	providers := []struct {
@@ -1546,12 +2100,12 @@ func TestEnsureVolumeSnapshotsResumesOrphanDeletionAfterCrashFollowingDeleteJobC
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
 		},
 	}
 
@@ -1682,12 +2236,12 @@ func TestEnsureVolumeSnapshotsDoesNotRestartDeletionForTerminatingOrphanUpload(t
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
 		},
 	}
 
@@ -1771,12 +2325,12 @@ func TestEnsureVolumeSnapshotsDoesNotActOnSameNameOrphanUploadReplacement(t *tes
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export:   &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}},
 		},
 	}
 
@@ -2010,12 +2564,12 @@ func orphanSnapshotProviderCases() []orphanSnapshotProviderCase {
 		{
 			name:     "GCS",
 			exporter: "gcs-exporter",
-			export:   &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
+			export:   &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 		},
 		{
 			name:     "S3",
 			exporter: "s3-exporter",
-			export: &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+			export: &appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), S3: &appsv1.S3ExportConfig{
 				Bucket: "snapshots", Region: "eu-west-1",
 			}},
 		},

@@ -401,6 +401,14 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		// Delete oldest snapshots (from the beginning of sorted slice)
 		for i := 0; i < toDelete; i++ {
 			snapshot := snapshots[i]
+			// The time-based path above is protected by the switch ordering: an in-flight export is
+			// matched before the retention case ever runs. Count-based retention has no such ordering,
+			// so it must check explicitly, otherwise the VolumeSnapshot backing a running upload is
+			// deleted mid-flight and its Job is later mistaken for an orphan.
+			if snapshotExportInFlight(chainNode, &snapshot) {
+				logger.Info("skipping retain-count deletion while tarball export is in flight", "snapshot", snapshot.GetName())
+				continue
+			}
 			deleteTarball := shouldDeleteSnapshotTarballOnExpire(chainNode, &snapshot)
 			cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
 			tarballName := ""
@@ -465,14 +473,40 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		}
 		for _, snapshotJob := range tarballSnapshots {
 			if !utils.SliceContains[string](tarballNames, snapshotJob.Name) {
-				logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshotJob.Name)
 				cleanupJob := snapshotJob
 				var status datasnapshot.SnapshotStatus
 				var deleteErr error
 				switch snapshotJob.Purpose {
 				case datasnapshot.SnapshotJobDelete:
+					logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshotJob.Name)
 					status, deleteErr = exporter.GetSnapshotDeletionStatus(ctx, snapshotJob)
 				case datasnapshot.SnapshotJobUpload:
+					if snapshotUploadRetained(chainNode, snapshotJob) {
+						logger.Info("retaining orphaned tarball upload as its remote object must be kept", "snapshot", snapshotJob.Name)
+						status, deleteErr = datasnapshot.RetainSnapshotForUpload(
+							ctx, r.snapshotKubernetesClient(), chainNode, snapshotJob,
+						)
+						if deleteErr != nil {
+							return deleteErr
+						}
+						switch status {
+						case datasnapshot.SnapshotSucceeded:
+							r.recorder.Eventf(chainNode,
+								corev1.EventTypeNormal,
+								appsv1.ReasonTarballExportFinish,
+								"Finished exporting orphaned tarball %s; remote object retained", snapshotJob.Name,
+							)
+						case datasnapshot.SnapshotFailed:
+							r.recorder.Eventf(chainNode,
+								corev1.EventTypeWarning,
+								appsv1.ReasonTarballExportError,
+								"Orphaned tarball %s export failed; upload resources removed and remote object left untouched",
+								snapshotJob.Name,
+							)
+						}
+						continue
+					}
+					logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshotJob.Name)
 					if snapshotJob.Exporter != "" {
 						cleanupJob, status, deleteErr = datasnapshot.DeleteSnapshotForUpload(
 							ctx, r.snapshotKubernetesClient(), chainNode, snapshotJob,
@@ -1355,6 +1389,20 @@ func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, e
 		appsv1.ReasonSnapshotJobReplaced,
 		message,
 	)
+}
+
+// snapshotUploadRetained reports whether the remote object of an orphaned upload must be kept. The
+// durable export record decides, so the deleteOnExpire promise an upload began under survives any later
+// spec change: pruneRetainedSnapshotExports keeps records still in the Uploading phase until the upload
+// leaves neither Job nor clone PVC behind. Only a genuinely recordless
+// orphan — a VolumeSnapshot deleted by hand mid-upload, or a crash between its deletion and the status
+// write — falls through to the configured policy, which defaults to keeping the tarball. Deleting a
+// remote object is unrecoverable, so the absent signal must fail towards retention.
+func snapshotUploadRetained(chainNode *appsv1.ChainNode, upload datasnapshot.SnapshotJob) bool {
+	if export := snapshotExportByObjectName(chainNode, upload.Name); export != nil {
+		return !export.DeleteOnExpire
+	}
+	return !chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
 }
 
 func shouldDeleteSnapshotTarballOnExpire(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {

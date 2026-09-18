@@ -696,6 +696,140 @@ func CleanupSnapshotDeletionResources(
 	return cleanupSnapshotDeletionResources(ctx, client, owner, job, job.Exporter)
 }
 
+// SnapshotUploadResourcesGone reports whether an upload left nothing behind: neither its Job nor the
+// clone PVC feeding it. A Job deleted with foreground propagation stays observable until its dependents
+// are collected, so "gone" is deliberately stricter than "deletion was requested".
+func SnapshotUploadResourcesGone(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	name string,
+) (bool, error) {
+	namespace := owner.GetNamespace()
+	jobName := fmt.Sprintf("%s-upload", name)
+	_, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return false, nil
+	case !apierrors.IsNotFound(err):
+		return false, fmt.Errorf("get upload job %s/%s: %w", namespace, jobName, err)
+	}
+	_, err = client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return false, nil
+	case !apierrors.IsNotFound(err):
+		return false, fmt.Errorf("get upload PVC %s/%s: %w", namespace, jobName, err)
+	}
+	return true, nil
+}
+
+// RetainSnapshotForUpload reconciles an orphaned upload Job whose remote object must be kept.
+// While the Job is still running it touches nothing and reports SnapshotActive, so an upload that
+// outlived its VolumeSnapshot is allowed to finish. Once the Job is terminal it removes only the
+// upload Job and its PVC, both guarded by UID preconditions. It never creates a deletion Job and
+// never reaches the destination bucket.
+func RetainSnapshotForUpload(
+	ctx context.Context,
+	client kubernetes.Interface,
+	owner metav1.Object,
+	upload SnapshotJob,
+) (SnapshotStatus, error) {
+	if upload.Purpose != SnapshotJobUpload {
+		return "", fmt.Errorf("snapshot job %q has purpose %q, expected %q", upload.Name, upload.Purpose, SnapshotJobUpload)
+	}
+
+	namespace := owner.GetNamespace()
+	jobName := fmt.Sprintf("%s-upload", upload.Name)
+	job, err := client.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("get retained upload job %s/%s: %w", namespace, jobName, err)
+		}
+		job = nil
+	} else {
+		if upload.UID != "" && job.UID != upload.UID {
+			return "", fmt.Errorf("retained upload job %s/%s has UID %s, expected listed UID %s",
+				job.Namespace, job.Name, job.UID, upload.UID)
+		}
+		if !metav1.IsControlledBy(job, owner) {
+			return "", fmt.Errorf("retained upload job %s/%s is not controlled by snapshot owner %s",
+				job.Namespace, job.Name, owner.GetName())
+		}
+		if job.Labels[labelType] != typeUpload {
+			return "", fmt.Errorf("retained upload job %s/%s has %s label %q, expected %q",
+				job.Namespace, job.Name, labelType, job.Labels[labelType], typeUpload)
+		}
+		if upload.Exporter != "" && job.Labels[labelExporter] != upload.Exporter {
+			return "", fmt.Errorf("retained upload job %s/%s has %s label %q, expected %q",
+				job.Namespace, job.Name, labelExporter, job.Labels[labelExporter], upload.Exporter)
+		}
+		// A Job already being torn down cascades to its PVC; leave the deletion in progress alone.
+		if job.DeletionTimestamp != nil {
+			return SnapshotActive, nil
+		}
+		if status := snapshotJobStatus(job); status == SnapshotActive {
+			return status, nil
+		}
+	}
+
+	pvc, err := retainedUploadPVC(ctx, client, namespace, jobName, job, upload.UID)
+	if err != nil {
+		return "", err
+	}
+	if job == nil && pvc == nil {
+		return SnapshotNotFound, nil
+	}
+	if err = cleanupSnapshotUploadResources(ctx, client, job, pvc); err != nil {
+		return "", err
+	}
+	if job == nil {
+		return SnapshotNotFound, nil
+	}
+	return snapshotJobStatus(job), nil
+}
+
+// retainedUploadPVC returns the clone PVC of a retained upload Job. When the Job is already gone the
+// PVC is matched by the name and controller kind alone, since the Job UID it points at is no longer
+// observable, but it is still never returned when some other object owns it.
+func retainedUploadPVC(
+	ctx context.Context,
+	client kubernetes.Interface,
+	namespace, jobName string,
+	job *batchv1.Job,
+	listedUID types.UID,
+) (*corev1.PersistentVolumeClaim, error) {
+	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get retained upload PVC %s/%s: %w", namespace, jobName, err)
+	}
+	controller := metav1.GetControllerOfNoCopy(pvc)
+	if controller == nil || controller.APIVersion != batchv1.SchemeGroupVersion.String() ||
+		controller.Kind != "Job" || controller.Name != jobName {
+		return nil, fmt.Errorf("retained upload PVC %s/%s is not controlled by upload job %s",
+			pvc.Namespace, pvc.Name, jobName)
+	}
+	// The live Job settles the identity when it exists. When it is already gone the listed UID is the
+	// only witness left, and without it a same-named PVC recreated by a later upload would be deleted
+	// as if it belonged to this one, so an absent witness fails closed rather than open.
+	expectedUID := listedUID
+	if job != nil {
+		expectedUID = job.UID
+	}
+	if expectedUID == "" {
+		return nil, fmt.Errorf("retained upload PVC %s/%s has no upload job UID to verify against",
+			pvc.Namespace, pvc.Name)
+	}
+	if controller.UID != expectedUID {
+		return nil, fmt.Errorf("retained upload PVC %s/%s is not controlled by upload job UID %s",
+			pvc.Namespace, pvc.Name, expectedUID)
+	}
+	return pvc, nil
+}
+
 // DeleteSnapshotForUpload creates a deletion workflow from an upload Job that
 // belongs to a previously configured exporter.
 func DeleteSnapshotForUpload(
