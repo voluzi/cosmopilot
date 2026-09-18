@@ -1,0 +1,61 @@
+package k8s
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+)
+
+func TestPvcHelperBuildWriteFilePodUsesConfiguredImageAndSecrets(t *testing.T) {
+	pullSecrets := []corev1.LocalObjectReference{{Name: "registry-creds"}}
+	affinity := &corev1.Affinity{}
+	nodeSelector := map[string]string{"disk": "fast"}
+	helper := NewPvcHelper(nil, nil, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data", Namespace: "default",
+	}}, "registry.example.com:5000/tools:custom", pullSecrets)
+	pullSecrets[0].Name = "mutated-source"
+
+	pod := helper.buildWriteFilePod("config/genesis.json", "priority", affinity, nodeSelector)
+	require.Len(t, pod.Spec.Containers, 1)
+	container := pod.Spec.Containers[0]
+	assert.Equal(t, "registry.example.com:5000/tools:custom", container.Image)
+	assert.Equal(t, []corev1.LocalObjectReference{{Name: "registry-creds"}}, pod.Spec.ImagePullSecrets)
+	assert.Equal(t, []string{"/bin/sh"}, container.Command)
+	assert.Equal(t, []string{"-c", "cp /dev/stdin /pvc/config/genesis.json"}, container.Args)
+	assert.True(t, container.Stdin)
+	assert.True(t, container.StdinOnce)
+	assert.Equal(t, ptr.To[int64](0), pod.Spec.TerminationGracePeriodSeconds)
+	assert.Equal(t, ptr.To[int64](300), pod.Spec.ActiveDeadlineSeconds)
+	assert.Equal(t, "priority", pod.Spec.PriorityClassName)
+	assert.Same(t, affinity, pod.Spec.Affinity)
+	assert.Equal(t, nodeSelector, pod.Spec.NodeSelector)
+	assert.Equal(t, RestrictedPodSecurityContext(), pod.Spec.SecurityContext)
+	assert.Equal(t, RestrictedSecurityContext(), container.SecurityContext)
+
+	require.NotEmpty(t, pod.Spec.ImagePullSecrets)
+	pod.Spec.ImagePullSecrets[0].Name = "mutated-pod"
+	assert.Equal(t, []corev1.LocalObjectReference{{Name: "registry-creds"}}, helper.buildWriteFilePod("file", "", nil, nil).Spec.ImagePullSecrets)
+}
+
+func TestPvcHelperBuildDownloadGenesisPodUsesDefaultImageAndSecrets(t *testing.T) {
+	helper := NewPvcHelper(nil, nil, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data", Namespace: "default",
+	}}, "", []corev1.LocalObjectReference{{Name: "registry-creds"}})
+
+	pod := helper.buildDownloadGenesisPod("https://example.com/genesis.json.zst", "config/genesis.json", "priority", nil, nil)
+	require.Len(t, pod.Spec.Containers, 1)
+	container := pod.Spec.Containers[0]
+	assert.Equal(t, DefaultUtilityImage, container.Image)
+	assert.Equal(t, []corev1.LocalObjectReference{{Name: "registry-creds"}}, pod.Spec.ImagePullSecrets)
+	assert.Equal(t, []string{"/bin/sh"}, container.Command)
+	assert.Equal(t, []string{"-c", "wget -qO- 'https://example.com/genesis.json.zst' | zstd -d > /pvc/config/genesis.json"}, container.Args)
+	assert.False(t, container.Stdin)
+	assert.Equal(t, ptr.To[int64](0), pod.Spec.TerminationGracePeriodSeconds)
+	assert.Equal(t, ptr.To[int64](4500), pod.Spec.ActiveDeadlineSeconds)
+	assert.Equal(t, RestrictedPodSecurityContext(), pod.Spec.SecurityContext)
+	assert.Equal(t, RestrictedSecurityContext(), container.SecurityContext)
+}

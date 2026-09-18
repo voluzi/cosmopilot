@@ -31,6 +31,24 @@ func TestGetDataExporterImageWithNilOptions(t *testing.T) {
 	assert.Equal(t, DefaultDataExporterImage, opts.GetDataExporterImage())
 }
 
+func TestGetUtilityImage(t *testing.T) {
+	tests := []struct {
+		name string
+		opts *ControllerRunOptions
+		want string
+	}{
+		{name: "nil options", want: "ghcr.io/voluzi/node-tools:1.4.3"},
+		{name: "zero options", opts: &ControllerRunOptions{}, want: "ghcr.io/voluzi/node-tools:1.4.3"},
+		{name: "configured", opts: &ControllerRunOptions{UtilityImage: "registry.example.com/tools:custom"}, want: "registry.example.com/tools:custom"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.opts.GetUtilityImage())
+		})
+	}
+}
+
 func TestWaitForRootProtectionBlocksUntilMigrationCompletes(t *testing.T) {
 	ready := make(chan struct{})
 	opts := &ControllerRunOptions{RootProtectionReady: ready}

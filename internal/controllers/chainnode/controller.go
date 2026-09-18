@@ -44,12 +44,21 @@ func (r *Reconciler) newApp(chainNode *appsv1.ChainNode) (*chainutils.App, error
 		[]sdkcmd.Option{sdkcmd.WithGenesisSubcommand(chainNode.Spec.App.UseGenesisSubcommand())},
 		chainutils.WithImage(chainNode.GetAppImage()),
 		chainutils.WithImagePullPolicy(chainNode.Spec.App.ImagePullPolicy),
+		chainutils.WithUtilityImage(r.opts.GetUtilityImage()),
+		chainutils.WithImagePullSecrets(chainNodeImagePullSecrets(chainNode)),
 		chainutils.WithBinary(chainNode.Spec.App.App),
 		chainutils.WithEnv(chainNode.Spec.Config.GetEnv()),
 		chainutils.WithPriorityClass(r.opts.GetDefaultPriorityClassName()),
 		chainutils.WithAffinityConfig(chainNode.Spec.Affinity),
 		chainutils.WithNodeSelector(chainNode.Spec.NodeSelector),
 	)
+}
+
+func chainNodeImagePullSecrets(chainNode *appsv1.ChainNode) []corev1.LocalObjectReference {
+	if chainNode.Spec.Config == nil {
+		return nil
+	}
+	return append([]corev1.LocalObjectReference(nil), chainNode.Spec.Config.ImagePullSecrets...)
 }
 
 // SetStatsClientFactory sets the factory function for creating StatsClient instances.

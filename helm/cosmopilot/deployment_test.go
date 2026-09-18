@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestDataExporterImageDefault(t *testing.T) {
+func TestHelperImageDefaults(t *testing.T) {
 	valuesSource, err := os.ReadFile("values.yaml")
 	if err != nil {
 		t.Fatalf("read values: %v", err)
@@ -18,6 +18,7 @@ func TestDataExporterImageDefault(t *testing.T) {
 
 	var values struct {
 		DataExporterImage string `yaml:"dataExporterImage"`
+		UtilityImage      string `yaml:"utilityImage"`
 	}
 	if err := yaml.Unmarshal(valuesSource, &values); err != nil {
 		t.Fatalf("decode values: %v", err)
@@ -25,9 +26,12 @@ func TestDataExporterImageDefault(t *testing.T) {
 	if values.DataExporterImage != "ghcr.io/voluzi/dataexporter:2.0.1" {
 		t.Errorf("dataExporterImage = %q, want %q", values.DataExporterImage, "ghcr.io/voluzi/dataexporter:2.0.1")
 	}
+	if values.UtilityImage != "ghcr.io/voluzi/node-tools:1.4.3" {
+		t.Errorf("utilityImage = %q, want %q", values.UtilityImage, "ghcr.io/voluzi/node-tools:1.4.3")
+	}
 }
 
-func TestDeploymentConfiguresDataExporterImage(t *testing.T) {
+func TestDeploymentConfiguresHelperImagesAsStrings(t *testing.T) {
 	templateSource, err := os.ReadFile("templates/deployment.yaml")
 	if err != nil {
 		t.Fatalf("read deployment template: %v", err)
@@ -77,6 +81,7 @@ func TestDeploymentConfiguresDataExporterImage(t *testing.T) {
 			"cosmoseedImage":          "cosmoseed",
 			"cosmosignerImage":        "cosmosigner",
 			"dataExporterImage":       image,
+			"utilityImage":            image,
 			"workerName":              "",
 			"workerCount":             10,
 			"debugMode":               false,
@@ -108,13 +113,18 @@ func TestDeploymentConfiguresDataExporterImage(t *testing.T) {
 		t.Fatalf("decode rendered deployment: %v\n%s", err, rendered.String())
 	}
 
+	want := map[string]bool{"DATA_EXPORTER_IMAGE": false, "UTILITY_IMAGE": false}
 	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
-		if env.Name == "DATA_EXPORTER_IMAGE" {
+		if _, ok := want[env.Name]; ok {
 			if env.Value.Tag != "!!str" || env.Value.Value != image {
-				t.Errorf("DATA_EXPORTER_IMAGE = %s %q, want !!str %q", env.Value.Tag, env.Value.Value, image)
+				t.Errorf("%s = %s %q, want !!str %q", env.Name, env.Value.Tag, env.Value.Value, image)
 			}
-			return
+			want[env.Name] = true
 		}
 	}
-	t.Error("DATA_EXPORTER_IMAGE is not configured")
+	for name, configured := range want {
+		if !configured {
+			t.Errorf("%s is not configured", name)
+		}
+	}
 }

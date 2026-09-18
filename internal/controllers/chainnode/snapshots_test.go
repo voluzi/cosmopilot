@@ -66,8 +66,59 @@ func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testin
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
 		Spec: appsv1.ChainNodeSpec{
-			App:         appsv1.AppSpec{Image: "example/app", App: "appd"},
-			Config:      &appsv1.Config{Env: env},
+			App: appsv1.AppSpec{Image: "example/app:v1", App: "appd"},
+			Config: &appsv1.Config{
+				Env:              env,
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "registry-creds"}},
+			},
+			Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{}},
+		},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain"},
+	}
+	clientSet := fake.NewSimpleClientset()
+	reconciler := &Reconciler{
+		Client:            fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(snapshot).Build(),
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts: &controllers.ControllerRunOptions{
+			UtilityImage: "registry.example.com:5000/tools:custom",
+		},
+	}
+
+	require.NoError(t, reconciler.startSnapshotIntegrityCheck(context.Background(), chainNode, snapshot))
+	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-ichk", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	require.Len(t, job.Spec.Template.Spec.InitContainers, 2)
+	assert.Equal(t, "registry.example.com:5000/tools:custom", job.Spec.Template.Spec.InitContainers[0].Image)
+	assert.Equal(t, "registry.example.com:5000/tools:custom", job.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, chainNode.Spec.Config.ImagePullSecrets, job.Spec.Template.Spec.ImagePullSecrets)
+	assert.Empty(t, job.Spec.Template.Spec.InitContainers[0].Env)
+	require.Equal(t, env, job.Spec.Template.Spec.InitContainers[1].Env)
+	job.Spec.Template.Spec.InitContainers[1].Env[1].ValueFrom.SecretKeyRef.Name = "mutated"
+	assert.Equal(t, "app-secret", chainNode.Spec.Config.Env[1].ValueFrom.SecretKeyRef.Name)
+	assert.Empty(t, job.Spec.Template.Spec.Containers[0].Env)
+}
+
+func TestStartSnapshotIntegrityCheckAllowsNilConfig(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	restoreSize := resource.MustParse("1Gi")
+	snapshot := &snapshotv1.VolumeSnapshot{
+		TypeMeta: metav1.TypeMeta{APIVersion: snapshotv1.SchemeGroupVersion.String(), Kind: "VolumeSnapshot"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "snapshot-nil-config", Namespace: "default", Annotations: map[string]string{},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{RestoreSize: &restoreSize},
+	}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{
+			App:         appsv1.AppSpec{Image: "example/app:v1", App: "appd"},
 			Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{}},
 		},
 		Status: appsv1.ChainNodeStatus{ChainID: "chain"},
@@ -81,15 +132,11 @@ func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testin
 	}
 
 	require.NoError(t, reconciler.startSnapshotIntegrityCheck(context.Background(), chainNode, snapshot))
-	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-ichk", metav1.GetOptions{})
+	job, err := clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-nil-config-ichk", metav1.GetOptions{})
 	require.NoError(t, err)
-
-	require.Len(t, job.Spec.Template.Spec.InitContainers, 2)
-	assert.Empty(t, job.Spec.Template.Spec.InitContainers[0].Env)
-	require.Equal(t, env, job.Spec.Template.Spec.InitContainers[1].Env)
-	job.Spec.Template.Spec.InitContainers[1].Env[1].ValueFrom.SecretKeyRef.Name = "mutated"
-	assert.Equal(t, "app-secret", chainNode.Spec.Config.Env[1].ValueFrom.SecretKeyRef.Name)
-	assert.Empty(t, job.Spec.Template.Spec.Containers[0].Env)
+	assert.Empty(t, job.Spec.Template.Spec.ImagePullSecrets)
+	assert.Equal(t, "ghcr.io/voluzi/node-tools:1.4.3", job.Spec.Template.Spec.InitContainers[0].Image)
+	assert.Equal(t, "ghcr.io/voluzi/node-tools:1.4.3", job.Spec.Template.Spec.Containers[0].Image)
 }
 
 func TestCreateSnapshotStopsUnboundExistingNodeBeforeCredentialRollout(t *testing.T) {

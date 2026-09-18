@@ -146,7 +146,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 				"url", *chainNode.Spec.Genesis.Url,
 				"pvc", pvc.GetName(),
 			)
-			if err = k8s.NewPvcHelper(r.ClientSet, r.RestConfig, pvc).
+			if err = k8s.NewPvcHelper(r.ClientSet, r.RestConfig, pvc, r.opts.GetUtilityImage(), chainNodeImagePullSecrets(chainNode)).
 				DownloadGenesis(
 					ctx, *chainNode.Spec.Genesis.Url,
 					chainutils.GenesisFilename,
@@ -237,7 +237,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 			return fmt.Errorf("failed to get pvc for writing genesis: %w", err)
 		}
 		logger.Info("writing genesis to data volume", "pvc", pvc.GetName())
-		if err = k8s.NewPvcHelper(r.ClientSet, r.RestConfig, pvc).
+		if err = k8s.NewPvcHelper(r.ClientSet, r.RestConfig, pvc, r.opts.GetUtilityImage(), chainNodeImagePullSecrets(chainNode)).
 			WriteToFile(ctx, genesis, chainutils.GenesisFilename,
 				r.opts.GetDefaultPriorityClassName(),
 				chainNode.Spec.Affinity,

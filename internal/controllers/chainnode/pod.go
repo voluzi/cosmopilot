@@ -875,7 +875,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		pod.Spec.InitContainers = append([]corev1.Container{
 			{
 				Name:            "link-genesis",
-				Image:           "busybox",
+				Image:           r.opts.GetUtilityImage(),
 				Command:         []string{"/bin/sh"},
 				SecurityContext: k8s.RestrictedSecurityContext(),
 				Args: []string{

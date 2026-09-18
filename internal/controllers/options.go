@@ -3,6 +3,8 @@ package controllers
 import (
 	"context"
 	"fmt"
+
+	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 )
 
 const (
@@ -19,6 +21,7 @@ type ControllerRunOptions struct {
 	CosmoseedImage           string
 	CosmosignerImage         string
 	DataExporterImage        string
+	UtilityImage             string
 	ReleaseName              string
 	DisruptionCheckEnabled   bool
 	DisruptionMaxUnavailable int
@@ -54,6 +57,13 @@ func (opts *ControllerRunOptions) GetDataExporterImage() string {
 		return DefaultDataExporterImage
 	}
 	return opts.DataExporterImage
+}
+
+func (opts *ControllerRunOptions) GetUtilityImage() string {
+	if opts == nil || opts.UtilityImage == "" {
+		return k8s.DefaultUtilityImage
+	}
+	return opts.UtilityImage
 }
 
 func (opts *ControllerRunOptions) GetDefaultPriorityClassName() string {

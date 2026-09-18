@@ -9,6 +9,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 )
 
 type App struct {
@@ -24,6 +25,8 @@ type App struct {
 	env               []corev1.EnvVar
 	pullPolicy        corev1.PullPolicy
 	priorityClassName string
+	utilityImage      string
+	imagePullSecrets  []corev1.LocalObjectReference
 	NodeSelector      map[string]string
 	Affinity          *corev1.Affinity
 }
@@ -144,6 +147,18 @@ func WithPriorityClass(name string) Option {
 	}
 }
 
+func WithUtilityImage(image string) Option {
+	return func(c *App) {
+		c.utilityImage = image
+	}
+}
+
+func WithImagePullSecrets(imagePullSecrets []corev1.LocalObjectReference) Option {
+	return func(c *App) {
+		c.imagePullSecrets = cloneImagePullSecrets(imagePullSecrets)
+	}
+}
+
 func WithAffinityConfig(affinity *corev1.Affinity) Option {
 	return func(c *App) {
 		c.Affinity = affinity
@@ -158,6 +173,24 @@ func WithNodeSelector(selector map[string]string) Option {
 
 func (a *App) appEnv() []corev1.EnvVar {
 	return deepCopyEnv(a.env)
+}
+
+func (a *App) utilityImageRef() string {
+	if a.utilityImage == "" {
+		return k8s.DefaultUtilityImage
+	}
+	return a.utilityImage
+}
+
+func (a *App) appImagePullSecrets() []corev1.LocalObjectReference {
+	return cloneImagePullSecrets(a.imagePullSecrets)
+}
+
+func cloneImagePullSecrets(imagePullSecrets []corev1.LocalObjectReference) []corev1.LocalObjectReference {
+	if imagePullSecrets == nil {
+		return nil
+	}
+	return append([]corev1.LocalObjectReference(nil), imagePullSecrets...)
 }
 
 func deepCopyEnv(env []corev1.EnvVar) []corev1.EnvVar {

@@ -8,6 +8,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 	"github.com/voluzi/cosmopilot/v3/pkg/environ"
 )
 
@@ -31,7 +32,7 @@ func init() {
 	)
 
 	flag.StringVar(&runOpts.NodeUtilsImage, "nodeutils-image",
-		environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils"),
+		environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils:2.10.0"),
 		"nodeutils image to be deployed with nodes.",
 	)
 
@@ -41,7 +42,7 @@ func init() {
 	)
 
 	flag.StringVar(&runOpts.CosmoseedImage, "cosmoseed-image",
-		environ.GetString("COSMOSEED_IMAGE", "ghcr.io/voluzi/cosmoseed"),
+		environ.GetString("COSMOSEED_IMAGE", "ghcr.io/voluzi/cosmoseed:0.11.0"),
 		"image to be used in cosmoseed deployments when enabled.",
 	)
 
@@ -53,6 +54,11 @@ func init() {
 	flag.StringVar(&runOpts.DataExporterImage, "dataexporter-image",
 		environ.GetString("DATA_EXPORTER_IMAGE", controllers.DefaultDataExporterImage),
 		"dataexporter image to be used by snapshot tarball upload and deletion jobs.",
+	)
+
+	flag.StringVar(&runOpts.UtilityImage, "utility-image",
+		environ.GetString("UTILITY_IMAGE", k8s.DefaultUtilityImage),
+		"utility image to be used by operator-owned helper containers.",
 	)
 
 	flag.StringVar(&runOpts.WorkerName, "worker-name",

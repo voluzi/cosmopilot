@@ -22,9 +22,10 @@ admission webhook server.
 | `-metrics-bind-address` | `METRICS_BIND_ADDRESS` | `:8080` | Address the metrics endpoint binds to. |
 | `-health-probe-bind-address` | `HEALTH_PROBE_BIND_ADDRESS` | `:8081` | Address the health/readiness probe endpoint binds to. |
 | `-enable-leader-election` | `ENABLE_LEADER_ELECTION` | `false` | Enable leader election so only one manager is active at a time. |
-| `-nodeutils-image` | `NODE_UTILS_IMAGE` | `ghcr.io/voluzi/node-utils` | `node-utils` image deployed as a sidecar with each node. |
+| `-nodeutils-image` | `NODE_UTILS_IMAGE` | `ghcr.io/voluzi/node-utils:2.10.0` | `node-utils` image deployed as a sidecar with each node. |
 | `-cosmoguard-image` | `COSMOGUARD_IMAGE` | `ghcr.io/voluzi/cosmoguard:4.0.3` | CosmoGuard image for the standalone deployments created when CosmoGuard is enabled. |
-| `-cosmoseed-image` | `COSMOSEED_IMAGE` | `ghcr.io/voluzi/cosmoseed` | Image used for Cosmoseed deployments when enabled. |
+| `-cosmoseed-image` | `COSMOSEED_IMAGE` | `ghcr.io/voluzi/cosmoseed:0.11.0` | Image used for Cosmoseed deployments when enabled. |
+| `-utility-image` | `UTILITY_IMAGE` | `ghcr.io/voluzi/node-tools:1.4.3` | Utility image used by operator-owned helper containers. |
 | `-worker-name` | `WORKER_NAME` | `""` | Name of this worker (set as the `worker-name` label). Used to shard which resources this instance reconciles. |
 | `-worker-count` | `WORKER_COUNT` | `1` | Maximum number of concurrent reconciles. |
 | `-disable-webhooks` | `DISABLE_WEBHOOKS` | `false` | Disable admission webhooks. |

@@ -43,7 +43,7 @@ require the discovery-gate command introduced in 2.10.0 and cannot start with an
 
 ### `cosmoseedImage`
 - **Description**: The container image of [Cosmoseed](https://github.com/voluzi/cosmoseed) (with version tag included). Used when deploying seed nodes.
-- **Default**: `ghcr.io/voluzi/cosmoseed`
+- **Default**: `ghcr.io/voluzi/cosmoseed:0.11.0`
 
 ### `cosmosignerImage`
 - **Description**: The default container image of [Cosmosigner](https://github.com/voluzi/cosmosigner) (with version tag included), used when deploying managed remote signers. Can be overridden per-signer with `.spec.cosmosigner.image`.
@@ -53,8 +53,12 @@ require the discovery-gate command introduced in 2.10.0 and cannot start with an
 - **Description**: The container image of Data Exporter (with version tag included) used by snapshot tarball upload and deletion Jobs.
 - **Default**: `ghcr.io/voluzi/dataexporter:2.0.1`
 
+### `utilityImage`
+- **Description**: Versioned utility image used by operator-owned helper containers for genesis, configuration, PVC, and snapshot integrity operations. Overrides may use a tag or digest and must provide the commands used by these helpers, including standard file utilities, `jq`, `wget`, `gunzip`, `zstd`, `pidof`, and `nc`.
+- **Default**: `ghcr.io/voluzi/node-tools:1.4.3`
+
 ### `imagePullSecrets`
-- **Description**: Secrets for pulling images from private repositories.
+- **Description**: Secrets for pulling the Cosmopilot manager image. Helper Pods run in the `ChainNode` namespace and use namespace-local secrets from `.spec.config.imagePullSecrets` instead.
 - **Default**: `[]`
 
 ## **Worker Configuration**

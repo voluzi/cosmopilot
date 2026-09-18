@@ -37,6 +37,7 @@ func (a *App) buildConfigGeneratorPod() *corev1.Pod {
 			PriorityClassName: a.priorityClassName,
 			Affinity:          a.Affinity,
 			NodeSelector:      a.NodeSelector,
+			ImagePullSecrets:  a.appImagePullSecrets(),
 			SecurityContext:   k8s.RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
@@ -67,7 +68,7 @@ func (a *App) buildConfigGeneratorPod() *corev1.Pod {
 			Containers: []corev1.Container{
 				{
 					Name:            "busybox",
-					Image:           "busybox",
+					Image:           a.utilityImageRef(),
 					Command:         []string{"cat"},
 					Stdin:           true,
 					VolumeMounts:    []corev1.VolumeMount{configVolumeMount},
