@@ -145,19 +145,6 @@ func snapshotExportCleanupAcknowledged(chainNode *appsv1.ChainNode, snapshot *sn
 	return export != nil && export.Phase == appsv1.SnapshotExportPhaseAcknowledged
 }
 
-// snapshotUploadRetentionPolicies captures deleteOnExpire per remote object name. pruneRetainedSnapshotExports
-// drops records whose VolumeSnapshot is already gone, so the policy an export started under has to be read
-// before that prune runs; otherwise orphan resolution falls back to the current spec and a later flip to
-// deleteOnExpire=true would irreversibly delete an object that was uploaded under the opposite promise.
-func snapshotUploadRetentionPolicies(chainNode *appsv1.ChainNode) map[string]bool {
-	policies := make(map[string]bool, len(chainNode.Status.SnapshotExports))
-	for i := range chainNode.Status.SnapshotExports {
-		export := &chainNode.Status.SnapshotExports[i]
-		policies[export.ObjectName] = export.DeleteOnExpire
-	}
-	return policies
-}
-
 func snapshotExportByObjectName(chainNode *appsv1.ChainNode, objectName string) *appsv1.SnapshotExportStatus {
 	for i := range chainNode.Status.SnapshotExports {
 		if chainNode.Status.SnapshotExports[i].ObjectName == objectName {
@@ -443,7 +430,12 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 			snapshotPresent := namePresent && (export.SnapshotUID == "" || uidPresent)
 			terminalDeletion := export.Phase == appsv1.SnapshotExportPhaseDeleted ||
 				export.Phase == appsv1.SnapshotExportPhaseAcknowledged
-			if snapshotPresent || (export.DeleteOnExpire && !terminalDeletion) {
+			// An upload whose VolumeSnapshot is already gone still has a Job running against the remote
+			// object, and this record is the only durable witness of the deleteOnExpire promise it began
+			// under. Dropping it here would let a later spec flip decide the orphan's fate on the next
+			// reconcile. resolveOrphanUploadExport clears it once the upload is terminal.
+			unresolvedUpload := export.Phase == appsv1.SnapshotExportPhaseUploading
+			if snapshotPresent || unresolvedUpload || (export.DeleteOnExpire && !terminalDeletion) {
 				kept = append(kept, export)
 			}
 		}

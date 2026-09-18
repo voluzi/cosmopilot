@@ -454,11 +454,6 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		}
 	}
 
-	// Capture the per-object deleteOnExpire promises before the prune below discards the records of
-	// snapshots that are already gone. Orphan resolution must honour the policy an upload started
-	// under, not whatever the spec says by the time its Job is discovered.
-	uploadRetention := snapshotUploadRetentionPolicies(chainNode)
-
 	// A successful VolumeSnapshot deletion may be followed by a transient status-update failure.
 	// Prune retained-object records before orphan discovery so retries cannot mistake their historical
 	// upload Jobs for objects that should be deleted from the current destination.
@@ -486,7 +481,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					logger.Info("reconciling orphaned tarball deletion as volumesnapshot does not exist anymore", "snapshot", snapshotJob.Name)
 					status, deleteErr = exporter.GetSnapshotDeletionStatus(ctx, snapshotJob)
 				case datasnapshot.SnapshotJobUpload:
-					if snapshotUploadRetained(chainNode, uploadRetention, snapshotJob) {
+					if snapshotUploadRetained(chainNode, snapshotJob) {
 						logger.Info("retaining orphaned tarball upload as its remote object must be kept", "snapshot", snapshotJob.Name)
 						status, deleteErr = datasnapshot.RetainSnapshotForUpload(
 							ctx, r.snapshotKubernetesClient(), chainNode, snapshotJob,
@@ -508,6 +503,9 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 								"Orphaned tarball %s export failed; upload resources removed and remote object left untouched",
 								snapshotJob.Name,
 							)
+						}
+						if err = r.resolveOrphanUploadExport(ctx, chainNode, snapshotJob.Name, status); err != nil {
+							return err
 						}
 						continue
 					}
@@ -1397,25 +1395,37 @@ func (r *Reconciler) recordSnapshotJobReplacement(chainNode *appsv1.ChainNode, e
 }
 
 // snapshotUploadRetained reports whether the remote object of an orphaned upload must be kept. The
-// policy captured when the export started wins, so a later spec change cannot retroactively authorise
-// deleting an object uploaded under deleteOnExpire=false. captured holds the records as they stood
-// before pruneRetainedSnapshotExports ran; the live records are consulted too, for exports written
-// after that snapshot was taken. Only a genuinely recordless orphan — a VolumeSnapshot deleted by hand
-// mid-upload, or a crash between its deletion and the status write — falls through to the configured
-// policy, which defaults to keeping the tarball. Deleting a remote object is unrecoverable, so the
-// absent signal must fail towards retention.
-func snapshotUploadRetained(
-	chainNode *appsv1.ChainNode,
-	captured map[string]bool,
-	upload datasnapshot.SnapshotJob,
-) bool {
-	if deleteOnExpire, ok := captured[upload.Name]; ok {
-		return !deleteOnExpire
-	}
+// durable export record decides, so the deleteOnExpire promise an upload began under survives any later
+// spec change: pruneRetainedSnapshotExports deliberately keeps records still in the Uploading phase, and
+// resolveOrphanUploadExport clears them only once the upload is terminal. Only a genuinely recordless
+// orphan — a VolumeSnapshot deleted by hand mid-upload, or a crash between its deletion and the status
+// write — falls through to the configured policy, which defaults to keeping the tarball. Deleting a
+// remote object is unrecoverable, so the absent signal must fail towards retention.
+func snapshotUploadRetained(chainNode *appsv1.ChainNode, upload datasnapshot.SnapshotJob) bool {
 	if export := snapshotExportByObjectName(chainNode, upload.Name); export != nil {
 		return !export.DeleteOnExpire
 	}
 	return !chainNode.Spec.Persistence.Snapshots.ExportTarball.DeleteWhenExpired()
+}
+
+// resolveOrphanUploadExport drops the export record of an orphaned upload once its Job has settled.
+// Until then pruneRetainedSnapshotExports keeps the record alive as the sole durable witness of the
+// upload's retention policy. A still-running upload keeps its record; the next reconcile decides again.
+func (r *Reconciler) resolveOrphanUploadExport(
+	ctx context.Context,
+	chainNode *appsv1.ChainNode,
+	objectName string,
+	status datasnapshot.SnapshotStatus,
+) error {
+	if status != datasnapshot.SnapshotSucceeded && status != datasnapshot.SnapshotFailed &&
+		status != datasnapshot.SnapshotNotFound {
+		return nil
+	}
+	export := snapshotExportByObjectName(chainNode, objectName)
+	if export == nil {
+		return nil
+	}
+	return r.removeSnapshotExport(ctx, chainNode, export.ID)
 }
 
 func shouldDeleteSnapshotTarballOnExpire(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) bool {

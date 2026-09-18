@@ -1583,19 +1583,24 @@ func TestEnsureVolumeSnapshotsHonoursUploadPolicyCapturedBeforePruning(t *testin
 			}}
 			require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
 
-			require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
+			// The record is pruned on the first pass unless it is deliberately retained, so the policy
+			// has to survive into the second reconcile as well.
+			for pass := 1; pass <= 2; pass++ {
+				require.NoError(t, reconciler.ensureVolumeSnapshots(context.Background(), chainNode, true))
 
-			_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(
-				context.Background(), uploadJob.Name, metav1.GetOptions{},
-			)
-			require.NoError(t, err, "an upload started under deleteOnExpire=false must be allowed to finish")
-			_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(
-				context.Background(), uploadPVC.Name, metav1.GetOptions{},
-			)
-			require.NoError(t, err)
-			for _, action := range clientSet.Actions() {
-				assert.NotEqual(t, "create", action.GetVerb(),
-					"no deletion Job may be scheduled against an object promised retention")
+				_, err := clientSet.BatchV1().Jobs(chainNode.Namespace).Get(
+					context.Background(), uploadJob.Name, metav1.GetOptions{},
+				)
+				require.NoErrorf(t, err,
+					"pass %d: an upload started under deleteOnExpire=false must be allowed to finish", pass)
+				_, err = clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Get(
+					context.Background(), uploadPVC.Name, metav1.GetOptions{},
+				)
+				require.NoErrorf(t, err, "pass %d: the clone PVC feeding the upload must survive", pass)
+				for _, action := range clientSet.Actions() {
+					assert.NotEqualf(t, "create", action.GetVerb(),
+						"pass %d: no deletion Job may be scheduled against an object promised retention", pass)
+				}
 			}
 		})
 	}
