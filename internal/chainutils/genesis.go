@@ -157,6 +157,7 @@ func (a *App) buildGenesisPod(
 			PriorityClassName: a.priorityClassName,
 			Affinity:          a.Affinity,
 			NodeSelector:      a.NodeSelector,
+			ImagePullSecrets:  a.appImagePullSecrets(),
 			Volumes: []corev1.Volume{
 				{
 					Name: dataVolumeMount.Name,
@@ -192,7 +193,7 @@ func (a *App) buildGenesisPod(
 				},
 				{
 					Name:            "load-priv-key",
-					Image:           "busybox",
+					Image:           a.utilityImageRef(),
 					Command:         []string{"/bin/sh"},
 					Args:            []string{"-c", "cp /secrets/priv_validator_key.json /home/app/config/priv_validator_key.json"},
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount, privKeyVolumeMount},
@@ -224,7 +225,7 @@ func (a *App) buildGenesisPod(
 			Containers: []corev1.Container{
 				{
 					Name:            "busybox",
-					Image:           "busybox",
+					Image:           a.utilityImageRef(),
 					Command:         []string{"cat"},
 					Stdin:           true,
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -239,7 +240,7 @@ func (a *App) buildGenesisPod(
 	if params.UnbondingTime != "" {
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "set-unbonding-time",
-			Image:           "apteno/alpine-jq",
+			Image:           a.utilityImageRef(),
 			Command:         []string{"sh", "-c"},
 			Args:            []string{a.cmd.GenesisSetUnbondingTimeCmd(params.UnbondingTime, filepath.Join(defaultHome, defaultGenesisFile))},
 			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -249,7 +250,7 @@ func (a *App) buildGenesisPod(
 	if params.VotingPeriod != "" {
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "set-voting-period",
-			Image:           "apteno/alpine-jq",
+			Image:           a.utilityImageRef(),
 			Command:         []string{"sh", "-c"},
 			Args:            []string{a.cmd.GenesisSetVotingPeriodCmd(params.VotingPeriod, filepath.Join(defaultHome, defaultGenesisFile))},
 			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -259,7 +260,7 @@ func (a *App) buildGenesisPod(
 	if cmd := a.cmd.GenesisSetExpeditedVotingPeriodCmd(params.ExpeditedVotingPeriod, filepath.Join(defaultHome, defaultGenesisFile)); params.ExpeditedVotingPeriod != "" && cmd != "" {
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "set-expedited-voting-period",
-			Image:           "apteno/alpine-jq",
+			Image:           a.utilityImageRef(),
 			Command:         []string{"sh", "-c"},
 			Args:            []string{cmd},
 			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -342,7 +343,7 @@ func (a *App) buildGenesisPod(
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers,
 			corev1.Container{
 				Name:            fmt.Sprintf("load-priv-key-%d", idx),
-				Image:           "busybox",
+				Image:           a.utilityImageRef(),
 				Command:         []string{"/bin/sh"},
 				Args:            []string{"-c", fmt.Sprintf("cp %s/priv_validator_key.json /home/app/config/priv_validator_key.json", privKeyMount.MountPath)},
 				VolumeMounts:    []corev1.VolumeMount{dataVolumeMount, privKeyMount},

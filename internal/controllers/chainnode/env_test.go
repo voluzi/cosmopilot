@@ -12,6 +12,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 func TestNewAppPropagatesStandaloneChainNodeEnvWithoutAliasing(t *testing.T) {
@@ -54,4 +55,55 @@ func TestNewAppPropagatesStandaloneChainNodeEnvWithoutAliasing(t *testing.T) {
 
 	assert.Equal(t, "value", chainNode.Spec.Config.Env[0].Value)
 	assert.Equal(t, "app-secret", chainNode.Spec.Config.Env[1].ValueFrom.SecretKeyRef.Name)
+}
+
+func TestNewAppPropagatesUtilityImageAndImagePullSecrets(t *testing.T) {
+	pullSecrets := []corev1.LocalObjectReference{{Name: "registry-creds"}}
+	wantPullSecrets := []corev1.LocalObjectReference{{Name: "registry-creds"}}
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{Image: "example/app", Version: ptr.To("v1"), App: "appd"},
+			Config: &appsv1.Config{
+				ImagePullSecrets: pullSecrets,
+			},
+		},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	reconciler := &Reconciler{Scheme: scheme, opts: &controllers.ControllerRunOptions{
+		UtilityImage: "registry.example.com:5000/tools:custom",
+	}}
+
+	app, err := reconciler.newApp(chainNode)
+	require.NoError(t, err)
+	pod, err := app.BuildInitPod(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node"}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "registry.example.com:5000/tools:custom", pod.Spec.Containers[0].Image)
+	assert.Equal(t, wantPullSecrets, pod.Spec.ImagePullSecrets)
+
+	chainNode.Spec.Config.ImagePullSecrets[0].Name = "mutated-source"
+	pod.Spec.ImagePullSecrets[0].Name = "mutated-pod"
+	next, err := app.BuildInitPod(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node"}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, wantPullSecrets, next.Spec.ImagePullSecrets)
+}
+
+func TestNewAppAllowsNilConfig(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{Image: "example/app", Version: ptr.To("v1"), App: "appd"},
+		},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	reconciler := &Reconciler{Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+
+	app, err := reconciler.newApp(chainNode)
+	require.NoError(t, err)
+	pod, err := app.BuildInitPod(&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node"}}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, pod.Spec.ImagePullSecrets)
+	assert.Equal(t, images.DefaultUtilityImage, pod.Spec.Containers[0].Image)
 }

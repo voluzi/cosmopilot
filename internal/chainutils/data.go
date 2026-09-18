@@ -51,6 +51,7 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 			PriorityClassName: a.priorityClassName,
 			Affinity:          a.Affinity,
 			NodeSelector:      a.NodeSelector,
+			ImagePullSecrets:  a.appImagePullSecrets(),
 			SecurityContext:   k8s.RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
@@ -90,7 +91,7 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 				// no-op container
 				{
 					Name:            "busybox",
-					Image:           "busybox",
+					Image:           a.utilityImageRef(),
 					Command:         []string{"echo"},
 					SecurityContext: k8s.RestrictedSecurityContext(),
 				},

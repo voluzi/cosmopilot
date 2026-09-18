@@ -222,6 +222,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		[]sdkcmd.Option{sdkcmd.WithGenesisSubcommand(nodeSet.Spec.App.UseGenesisSubcommand())},
 		chainutils.WithImage(nodeSet.Spec.App.GetImage()),
 		chainutils.WithImagePullPolicy(nodeSet.Spec.App.ImagePullPolicy),
+		chainutils.WithUtilityImage(r.opts.GetUtilityImage()),
 		chainutils.WithBinary(nodeSet.Spec.App.App),
 		chainutils.WithPriorityClass(r.opts.GetDefaultPriorityClassName()),
 	)

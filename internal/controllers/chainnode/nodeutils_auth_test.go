@@ -32,6 +32,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
 
@@ -521,6 +522,13 @@ func TestBuildNodeUtilsInitContainerUsesBoundCredentialEnvironment(t *testing.T)
 	hashEnv := requireSingleEnv(t, container.Env, nodeutils.ExpectedShutdownTokenHashEnvironmentVariable)
 	require.NotNil(t, hashEnv.ValueFrom.FieldRef)
 	assert.Equal(t, "metadata.annotations['"+controllers.AnnotationNodeUtilsShutdownTokenHash+"']", hashEnv.ValueFrom.FieldRef.FieldPath)
+}
+
+func TestNodeUtilsContainersUsePinnedDefaultImage(t *testing.T) {
+	owner := nodeUtilsAuthTestNode()
+	r := &Reconciler{}
+	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildNodeUtilsInitContainer(owner, "shutdown-secret").Image)
+	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildCosmosignerDiscoveryInitContainer(owner, "signer").Image)
 }
 
 func requireSingleEnv(t *testing.T, env []corev1.EnvVar, name string) corev1.EnvVar {

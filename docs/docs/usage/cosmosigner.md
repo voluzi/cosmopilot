@@ -14,10 +14,10 @@ separate `StatefulSet` that **dials** the targeted nodes' privval address. `Cosm
 wires everything for you.
 
 :::tip[Image]
-The signer image defaults to the operator-wide `cosmosignerImage` Helm value
-(`ghcr.io/voluzi/cosmosigner:0.2.1`), configured via the `-cosmosigner-image` / `COSMOSIGNER_IMAGE`
-operator flag — see [Configuration](../getting-started/configuration.md#cosmosignerimage). Set
-`.spec.cosmosigner.image` to pin or override the image for one specific signer only. Cosmopilot's
+The signer image resolves in this order: `.spec.cosmosigner.image`, a nonempty operator-wide
+`cosmosignerImage` Helm value (the `-cosmosigner-image` / `COSMOSIGNER_IMAGE` operator setting),
+then the pinned default supplied by the selected manager release. See
+[Configuration](../getting-started/configuration.md#cosmosignerimage). Cosmopilot's
 managed signing path requires Cosmosigner 0.2.0 or newer for Vault key-version pinning and startup
 public-key verification. For production validators, use an immutable image digest rather than a
 mutable tag so a rescheduled replica cannot pick up different code without a managed migration.

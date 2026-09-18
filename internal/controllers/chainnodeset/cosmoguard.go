@@ -79,7 +79,7 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 	p := cosmoguard.Params{
 		Name:          name,
 		Namespace:     nodeSet.GetNamespace(),
-		Image:         cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
+		Image:         cfg.GetCosmoGuardImage(r.opts.GetCosmoGuardImage()),
 		Replicas:      cfg.GetCosmoGuardReplicas(),
 		DiscoveryHost: fmt.Sprintf("%s.%s.svc.cluster.local", groupCosmoGuardUpstreamName(nodeSet, group), nodeSet.GetNamespace()),
 		EvmEnabled:    cfg.IsEvmEnabled(),

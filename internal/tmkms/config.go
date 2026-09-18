@@ -3,10 +3,11 @@ package tmkms
 import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 const (
-	DefaultTmKmsImage  = "ghcr.io/iqlusioninc/tmkms"
 	configFileName     = "config.toml"
 	tmkmsAppName       = "tmkms"
 	identityKeyName    = "kms-identity.key"
@@ -17,7 +18,7 @@ const (
 
 func defaultConfig() *Config {
 	return &Config{
-		Image:        DefaultTmKmsImage,
+		Image:        images.DefaultTmKmsImage,
 		Chains:       make([]*ChainConfig, 0),
 		Validators:   make([]*ValidatorConfig, 0),
 		Providers:    make(map[string][]Provider),
@@ -36,12 +37,13 @@ func defaultConfig() *Config {
 }
 
 type Config struct {
-	Image        string                      `toml:"-"`
-	Chains       []*ChainConfig              `toml:"chain"`
-	Validators   []*ValidatorConfig          `toml:"validator"`
-	Providers    map[string][]Provider       `toml:"providers"`
-	PersistState bool                        `toml:"-"`
-	Resources    corev1.ResourceRequirements `toml:"-"`
+	Image            string                        `toml:"-"`
+	ImagePullSecrets []corev1.LocalObjectReference `toml:"-"`
+	Chains           []*ChainConfig                `toml:"chain"`
+	Validators       []*ValidatorConfig            `toml:"validator"`
+	Providers        map[string][]Provider         `toml:"providers"`
+	PersistState     bool                          `toml:"-"`
+	Resources        corev1.ResourceRequirements   `toml:"-"`
 }
 
 type Option func(*Config)
@@ -54,7 +56,15 @@ type Provider interface {
 
 func WithImage(s string) Option {
 	return func(cfg *Config) {
-		cfg.Image = s
+		if s != "" {
+			cfg.Image = s
+		}
+	}
+}
+
+func WithImagePullSecrets(imagePullSecrets []corev1.LocalObjectReference) Option {
+	return func(cfg *Config) {
+		cfg.ImagePullSecrets = append([]corev1.LocalObjectReference(nil), imagePullSecrets...)
 	}
 }
 

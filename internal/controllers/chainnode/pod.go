@@ -514,7 +514,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
-		Image:           r.opts.NodeUtilsImage,
+		Image:           r.opts.GetNodeUtilsImage(),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &sidecarRestartAlways,
 		SecurityContext: k8s.RestrictedSecurityContext(),
@@ -570,7 +570,7 @@ func signerPeerDNS(chainNode *appsv1.ChainNode) string {
 func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.ChainNode, signerName string) corev1.Container {
 	return corev1.Container{
 		Name:                     CosmosignerDiscoveryWaitContainerName,
-		Image:                    r.opts.NodeUtilsImage,
+		Image:                    r.opts.GetNodeUtilsImage(),
 		ImagePullPolicy:          corev1.PullIfNotPresent,
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext:          k8s.RestrictedSecurityContext(),
@@ -875,7 +875,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		pod.Spec.InitContainers = append([]corev1.Container{
 			{
 				Name:            "link-genesis",
-				Image:           "busybox",
+				Image:           r.opts.GetUtilityImage(),
 				Command:         []string{"/bin/sh"},
 				SecurityContext: k8s.RestrictedSecurityContext(),
 				Args: []string{

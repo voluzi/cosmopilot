@@ -18,6 +18,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 const gcpDestinationKey = "projects/example-project/locations/europe-west1/keyRings/validators/cryptoKeys/consensus"
@@ -235,6 +236,7 @@ func TestCosmosignerParamsThreadsImagePullSecrets(t *testing.T) {
 
 	params, err := r.cosmosignerParams(context.Background(), chainNode)
 	require.NoError(t, err)
+	require.Equal(t, images.DefaultCosmosignerImage, params.Image)
 	require.Equal(t, chainNode.Spec.Config.ImagePullSecrets, params.ImagePullSecrets)
 }
 

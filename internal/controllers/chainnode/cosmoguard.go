@@ -177,7 +177,7 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 	p := cosmoguard.Params{
 		Name:      name,
 		Namespace: chainNode.GetNamespace(),
-		Image:     cfg.GetCosmoGuardImage(r.opts.CosmoGuardImage),
+		Image:     cfg.GetCosmoGuardImage(r.opts.GetCosmoGuardImage()),
 		Replicas:  cfg.GetCosmoGuardReplicas(),
 		// The main node Service publishes only ready endpoints (unlike "-internal", which publishes
 		// not-ready addresses for peers/signer); client API traffic must go through the ready-gated one.

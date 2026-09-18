@@ -3,12 +3,11 @@ package controllers
 import (
 	"context"
 	"fmt"
+
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
-const (
-	LabelWorkerName          = "worker-name"
-	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.0.1"
-)
+const LabelWorkerName = "worker-name"
 
 type ControllerRunOptions struct {
 	WorkerCount              int
@@ -19,6 +18,9 @@ type ControllerRunOptions struct {
 	CosmoseedImage           string
 	CosmosignerImage         string
 	DataExporterImage        string
+	UtilityImage             string
+	TmKmsImage               string
+	VaultTokenRenewerImage   string
 	ReleaseName              string
 	DisruptionCheckEnabled   bool
 	DisruptionMaxUnavailable int
@@ -51,9 +53,58 @@ func MatchesWorker(labels map[string]string, workerName string) bool {
 
 func (opts *ControllerRunOptions) GetDataExporterImage() string {
 	if opts == nil || opts.DataExporterImage == "" {
-		return DefaultDataExporterImage
+		return images.DefaultDataExporterImage
 	}
 	return opts.DataExporterImage
+}
+
+func (opts *ControllerRunOptions) GetUtilityImage() string {
+	if opts == nil || opts.UtilityImage == "" {
+		return images.DefaultUtilityImage
+	}
+	return opts.UtilityImage
+}
+
+func (opts *ControllerRunOptions) GetNodeUtilsImage() string {
+	if opts == nil || opts.NodeUtilsImage == "" {
+		return images.DefaultNodeUtilsImage
+	}
+	return opts.NodeUtilsImage
+}
+
+func (opts *ControllerRunOptions) GetCosmoseedImage() string {
+	if opts == nil || opts.CosmoseedImage == "" {
+		return images.DefaultCosmoseedImage
+	}
+	return opts.CosmoseedImage
+}
+
+func (opts *ControllerRunOptions) GetCosmoGuardImage() string {
+	if opts == nil || opts.CosmoGuardImage == "" {
+		return images.DefaultCosmoGuardImage
+	}
+	return opts.CosmoGuardImage
+}
+
+func (opts *ControllerRunOptions) GetCosmosignerImage() string {
+	if opts == nil || opts.CosmosignerImage == "" {
+		return images.DefaultCosmosignerImage
+	}
+	return opts.CosmosignerImage
+}
+
+func (opts *ControllerRunOptions) GetTmKmsImage() string {
+	if opts == nil || opts.TmKmsImage == "" {
+		return images.DefaultTmKmsImage
+	}
+	return opts.TmKmsImage
+}
+
+func (opts *ControllerRunOptions) GetVaultTokenRenewerImage() string {
+	if opts == nil || opts.VaultTokenRenewerImage == "" {
+		return images.DefaultVaultTokenRenewerImage
+	}
+	return opts.VaultTokenRenewerImage
 }
 
 func (opts *ControllerRunOptions) GetDefaultPriorityClassName() string {

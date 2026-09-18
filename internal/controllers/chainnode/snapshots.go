@@ -1626,6 +1626,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 					RestartPolicy:         corev1.RestartPolicyNever,
 					PriorityClassName:     r.opts.GetDefaultPriorityClassName(),
 					ShareProcessNamespace: ptr.To(true),
+					ImagePullSecrets:      chainNodeImagePullSecrets(chainNode),
 					Volumes: []corev1.Volume{
 						{
 							Name: "data",
@@ -1655,7 +1656,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 					InitContainers: []corev1.Container{
 						{
 							Name:            "init-config",
-							Image:           "busybox",
+							Image:           r.opts.GetUtilityImage(),
 							Command:         []string{"sh"},
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args: []string{
@@ -1713,8 +1714,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 					Containers: []corev1.Container{
 						{
 							Name:            "start-checker",
-							Image:           "busybox",
-							ImagePullPolicy: chainNode.Spec.App.GetImagePullPolicy(),
+							Image:           r.opts.GetUtilityImage(),
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Command:         []string{"sh"},
 							Args: []string{

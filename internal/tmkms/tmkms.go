@@ -103,6 +103,34 @@ func (kms *KMS) ensureIdentityKey(ctx context.Context) error {
 }
 
 func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
+	pod, err := kms.identityGenerationPod()
+	if err != nil {
+		return "", err
+	}
+
+	ph := k8s.NewPodHelper(kms.Client, nil, pod)
+
+	// Delete the pod if it already exists
+	_ = ph.Delete(ctx)
+
+	// Delete the pod independently of the result
+	defer func() { _ = ph.Delete(ctx) }()
+
+	if err := ph.Create(ctx); err != nil {
+		return "", err
+	}
+
+	// Wait for the pod to finish
+	if err := ph.WaitForPodSucceeded(ctx, time.Minute); err != nil {
+		return "", err
+	}
+
+	// Grab identity key file content
+	out, err := ph.GetLogs(ctx, "busybox")
+	return strings.TrimSpace(out), err
+}
+
+func (kms *KMS) identityGenerationPod() (*corev1.Pod, error) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-generate-identity", kms.Name),
@@ -111,6 +139,8 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 		Spec: corev1.PodSpec{
 			RestartPolicy:   corev1.RestartPolicyNever,
 			SecurityContext: k8s.RestrictedPodSecurityContext(),
+			ImagePullSecrets: append([]corev1.LocalObjectReference(nil),
+				kms.Config.ImagePullSecrets...),
 			Volumes: []corev1.Volume{
 				{
 					Name: "data",
@@ -152,29 +182,9 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 		},
 	}
 	if err := controllerutil.SetControllerReference(kms.Owner, pod, kms.Scheme); err != nil {
-		return "", err
+		return nil, err
 	}
-
-	ph := k8s.NewPodHelper(kms.Client, nil, pod)
-
-	// Delete the pod if it already exists
-	_ = ph.Delete(ctx)
-
-	// Delete the pod independently of the result
-	defer func() { _ = ph.Delete(ctx) }()
-
-	if err := ph.Create(ctx); err != nil {
-		return "", err
-	}
-
-	// Wait for the pod to finish
-	if err := ph.WaitForPodSucceeded(ctx, time.Minute); err != nil {
-		return "", err
-	}
-
-	// Grab identity key file content
-	out, err := ph.GetLogs(ctx, "busybox")
-	return strings.TrimSpace(out), err
+	return pod, nil
 }
 
 func (kms *KMS) ensureConfigMap(ctx context.Context) error {

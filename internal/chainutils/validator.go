@@ -39,6 +39,7 @@ func (a *App) buildCreateValidatorPod(
 			PriorityClassName: a.priorityClassName,
 			Affinity:          a.Affinity,
 			NodeSelector:      a.NodeSelector,
+			ImagePullSecrets:  a.appImagePullSecrets(),
 			Volumes: []corev1.Volume{
 				{
 					Name: dataVolumeMount.Name,

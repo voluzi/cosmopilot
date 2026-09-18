@@ -8,7 +8,25 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
+
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
+
+func TestGetCosmoGuardImagePrecedence(t *testing.T) {
+	explicit := "registry.example.com/cosmoguard@sha256:abcdef"
+	cfg := &Config{CosmoGuard: &CosmoGuardConfig{Image: &explicit}}
+	assert.Equal(t, explicit, cfg.GetCosmoGuardImage("operator/default:v1"))
+
+	cfg.CosmoGuard.Image = nil
+	assert.Equal(t, "operator/default:v1", cfg.GetCosmoGuardImage("operator/default:v1"))
+	empty := ""
+	cfg.CosmoGuard.Image = &empty
+	assert.Equal(t, "operator/default:v1", cfg.GetCosmoGuardImage("operator/default:v1"))
+	assert.Equal(t, images.DefaultCosmoGuardImage, cfg.GetCosmoGuardImage(""))
+
+	var nilCfg *Config
+	assert.Equal(t, images.DefaultCosmoGuardImage, nilCfg.GetCosmoGuardImage(""))
+}
 
 // TestValidateCosmoGuardDashboard verifies the dashboard port is rejected when it collides with a
 // port the guard Service already exposes (which would render an invalid duplicate-port Service).

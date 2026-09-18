@@ -15,6 +15,7 @@ import (
 
 	"github.com/voluzi/cosmopilot/v3/internal/tmkms"
 	"github.com/voluzi/cosmopilot/v3/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -463,6 +464,9 @@ func (cfg *Config) GetCosmoGuardReplicas() int32 {
 func (cfg *Config) GetCosmoGuardImage(defaultImage string) string {
 	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Image != nil && *cfg.CosmoGuard.Image != "" {
 		return *cfg.CosmoGuard.Image
+	}
+	if defaultImage == "" {
+		return images.DefaultCosmoGuardImage
 	}
 	return defaultImage
 }

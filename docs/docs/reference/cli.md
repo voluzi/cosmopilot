@@ -22,9 +22,14 @@ admission webhook server.
 | `-metrics-bind-address` | `METRICS_BIND_ADDRESS` | `:8080` | Address the metrics endpoint binds to. |
 | `-health-probe-bind-address` | `HEALTH_PROBE_BIND_ADDRESS` | `:8081` | Address the health/readiness probe endpoint binds to. |
 | `-enable-leader-election` | `ENABLE_LEADER_ELECTION` | `false` | Enable leader election so only one manager is active at a time. |
-| `-nodeutils-image` | `NODE_UTILS_IMAGE` | `ghcr.io/voluzi/node-utils` | `node-utils` image deployed as a sidecar with each node. |
-| `-cosmoguard-image` | `COSMOGUARD_IMAGE` | `ghcr.io/voluzi/cosmoguard:4.0.3` | CosmoGuard image for the standalone deployments created when CosmoGuard is enabled. |
-| `-cosmoseed-image` | `COSMOSEED_IMAGE` | `ghcr.io/voluzi/cosmoseed` | Image used for Cosmoseed deployments when enabled. |
+| `-nodeutils-image` | `NODE_UTILS_IMAGE` | Pinned manager-release default | `node-utils` image deployed as a sidecar with each node. |
+| `-cosmoguard-image` | `COSMOGUARD_IMAGE` | Pinned manager-release default | CosmoGuard image for the standalone deployments created when CosmoGuard is enabled. |
+| `-cosmoseed-image` | `COSMOSEED_IMAGE` | Pinned manager-release default | Image used for Cosmoseed deployments when enabled. |
+| `-cosmosigner-image` | `COSMOSIGNER_IMAGE` | Pinned manager-release default | Default image for managed Cosmosigner deployments; a per-resource image overrides it. |
+| `-dataexporter-image` | `DATA_EXPORTER_IMAGE` | Pinned manager-release default | Data exporter image used by snapshot upload and deletion Jobs. |
+| `-utility-image` | `UTILITY_IMAGE` | Pinned manager-release default | Utility image used by operator-owned helper containers. |
+| `-tmkms-image` | `TMKMS_IMAGE` | Pinned manager-release default | TmKMS sidecar and helper image for legacy TmKMS configurations. |
+| `-vault-token-renewer-image` | `VAULT_TOKEN_RENEWER_IMAGE` | Pinned manager-release default | Vault token renewer sidecar image for legacy TmKMS automatic renewal. |
 | `-worker-name` | `WORKER_NAME` | `""` | Name of this worker (set as the `worker-name` label). Used to shard which resources this instance reconciles. |
 | `-worker-count` | `WORKER_COUNT` | `1` | Maximum number of concurrent reconciles. |
 | `-disable-webhooks` | `DISABLE_WEBHOOKS` | `false` | Disable admission webhooks. |
@@ -43,7 +48,9 @@ Fixed (not configurable) endpoints:
 :::note
 When installed via Helm, the chart sets `ENABLE_LEADER_ELECTION=true` and maps
 `workerCount` (default `10` in the chart), `workerName`, `webHooksEnabled`,
-`debugMode` and `disruptionChecksEnabled` to the corresponding variables.
+`debugMode` and `disruptionChecksEnabled` to the corresponding variables. Companion image
+variables are emitted only for nonempty Helm values; empty values inherit the pinned defaults from
+the selected manager release.
 :::
 
 ## node-utils

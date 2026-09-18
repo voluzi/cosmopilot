@@ -473,7 +473,7 @@ func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string,
 					Containers: []corev1.Container{
 						{
 							Name:            controllers.CosmoseedName,
-							Image:           r.opts.CosmoseedImage,
+							Image:           r.opts.GetCosmoseedImage(),
 							ImagePullPolicy: corev1.PullAlways,
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args: []string{
