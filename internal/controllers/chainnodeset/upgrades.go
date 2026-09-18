@@ -57,6 +57,16 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, nodeSet *appsv1.ChainNo
 func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []appsv1.Upgrade {
 	for i, u := range upgrades {
 		if u.Height == upgrade.Height {
+			if u.Source == appsv1.OnChainUpgrade && upgrade.Source == appsv1.OnChainUpgrade &&
+				u.Name != "" && upgrade.Name != "" && u.Name != upgrade.Name &&
+				(u.Status == appsv1.UpgradeScheduled || u.Status == appsv1.UpgradeImageMissing) &&
+				(upgrade.Status == appsv1.UpgradeScheduled || upgrade.Status == appsv1.UpgradeImageMissing) {
+				upgrades[i] = upgrade
+				return upgrades
+			}
+			if upgrades[i].Name == "" && upgrade.Name != "" {
+				upgrades[i].Name = upgrade.Name
+			}
 			// Backfill an image that was initially missing from an on-chain proposal once a child
 			// ChainNode receives it from a matching manual upgrade.
 			if upgrades[i].Image == "" && upgrade.Image != "" {

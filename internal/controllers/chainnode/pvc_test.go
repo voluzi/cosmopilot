@@ -2,22 +2,155 @@ package chainnode
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 )
+
+func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
+	tests := []struct {
+		name           string
+		restore        bool
+		upgradeStatus  appsv1.UpgradePhase
+		wantStatus     appsv1.UpgradePhase
+		expectedHeight int64
+	}{
+		{name: "older snapshot after completed upgrade", restore: true, upgradeStatus: appsv1.UpgradeCompleted, wantStatus: appsv1.UpgradeCompleted, expectedHeight: 50},
+		{name: "older snapshot during ongoing upgrade", restore: true, upgradeStatus: appsv1.UpgradeOnGoing, wantStatus: appsv1.UpgradeScheduled, expectedHeight: 50},
+		{name: "empty replacement after completed upgrade", upgradeStatus: appsv1.UpgradeCompleted, wantStatus: appsv1.UpgradeCompleted, expectedHeight: 0},
+		{name: "empty replacement during ongoing upgrade", upgradeStatus: appsv1.UpgradeOnGoing, wantStatus: appsv1.UpgradeScheduled, expectedHeight: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+				Spec: appsv1.ChainNodeSpec{
+					App:         appsv1.AppSpec{App: "appd", Image: "repo/app", Version: ptr.To("v1")},
+					Persistence: &appsv1.Persistence{},
+				},
+				Status: appsv1.ChainNodeStatus{
+					LatestHeight: 100,
+					AppImage:     "repo/app:v2",
+					AppVersion:   "v2",
+					Upgrades: []appsv1.Upgrade{{
+						Height: 100,
+						Image:  "repo/app:v2",
+						Status: tt.upgradeStatus,
+					}},
+				},
+			}
+			objects := []client.Object{node}
+			if tt.restore {
+				node.Spec.Persistence.RestoreFromSnapshot = &appsv1.PvcSnapshot{Name: "snapshot"}
+				objects = append(objects, &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+					Name: "snapshot", Namespace: "default",
+					Annotations: map[string]string{controllers.AnnotationDataHeight: "50"},
+				}, Status: &snapshotv1.VolumeSnapshotStatus{}})
+			} else {
+				objects = append(objects, &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: "node-init-data", Namespace: "default"},
+					Status:     corev1.PodStatus{Phase: corev1.PodPending},
+				})
+			}
+			c := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(objects...).
+				Build()
+			r := &Reconciler{Client: c, APIReader: c, Scheme: scheme}
+			stored := &appsv1.ChainNode{}
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+
+			_, _, err := r.ensureDataVolume(t.Context(), nil, stored)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedHeight, stored.Status.LatestHeight)
+			assert.Empty(t, stored.Status.AppImage)
+			assert.Empty(t, stored.Status.AppVersion)
+			assert.Equal(t, tt.wantStatus, stored.Status.Upgrades[0].Status)
+			assert.Equal(t, "repo/app:v1", stored.GetAppImage())
+			cacheKey, err := configGenerationCacheKey(stored)
+			require.NoError(t, err)
+			assert.True(t, strings.HasPrefix(cacheKey, "repo/app:v1:"))
+			container := r.buildAppContainer(stored, nil, "/ready", corev1.ResourceRequirements{}, nil)
+			assert.Equal(t, "repo/app:v1", container.Image)
+		})
+	}
+}
+
+func TestExistingPVCBootstrapAppliesHistoricalUpgradeBeforeStartingPod(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{
+				App:      "appd",
+				Image:    "repo/app",
+				Version:  ptr.To("v1"),
+				Upgrades: []appsv1.UpgradeSpec{{Height: 100, Image: "repo/app:v2"}},
+			},
+			Persistence: &appsv1.Persistence{},
+		},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationDataInitialized: controllers.StringValueTrue,
+				controllers.AnnotationDataHeight:      "200",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("50Gi")},
+		}},
+	}
+	c := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node, pvc).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme}
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+
+	_, result, err := r.ensureDataVolume(t.Context(), nil, stored)
+	require.NoError(t, err)
+	assert.Zero(t, result.RequeueAfter)
+	assert.Equal(t, int64(200), stored.Status.LatestHeight)
+	assert.Equal(t, "50Gi", stored.Status.PvcSize)
+	require.NoError(t, r.ensureUpgrades(t.Context(), stored, false))
+	require.Len(t, stored.Status.Upgrades, 1)
+	assert.Equal(t, appsv1.UpgradeSkipped, stored.Status.Upgrades[0].Status)
+	assert.Equal(t, "repo/app:v2", stored.GetAppImage())
+
+	config := &corev1.ConfigMap{}
+	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node-upgrades", Namespace: "default"}, config))
+	assert.Contains(t, config.Data[upgradesConfigFile], `"status":"skipped"`)
+	assert.Equal(t, "repo/app:v2", r.buildAppContainer(stored, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
+}
 
 func TestUpdatePvcDataHeightRetriesOnConflict(t *testing.T) {
 	scheme := runtime.NewScheme()

@@ -3,6 +3,8 @@ package chainnodeset
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
@@ -33,6 +35,42 @@ func TestAddOrUpdateUpgradeBackfillsMissingImage(t *testing.T) {
 	if got[0].Status != appsv1.UpgradeCompleted {
 		t.Errorf("AddOrUpdateUpgrade() status = %q, want %q", got[0].Status, appsv1.UpgradeCompleted)
 	}
+}
+
+func TestAddOrUpdateUpgradePreservesName(t *testing.T) {
+	got := AddOrUpdateUpgrade([]appsv1.Upgrade{{
+		Height: 100,
+		Image:  "repo/app:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}}, appsv1.Upgrade{
+		Height: 100,
+		Name:   "v2",
+		Image:  "repo/app:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	})
+
+	assert.Equal(t, "v2", got[0].Name)
+}
+
+func TestAddOrUpdateUpgradeRefreshesScheduledPlanAtSameHeight(t *testing.T) {
+	got := AddOrUpdateUpgrade([]appsv1.Upgrade{{
+		Height: 100,
+		Name:   "plan-a",
+		Image:  "repo/app:a",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}}, appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Image:  "repo/app:b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	})
+
+	assert.Equal(t, "plan-b", got[0].Name)
+	assert.Equal(t, "repo/app:b", got[0].Image)
 }
 
 func TestAddOrUpdateUpgradeSchedulesBackfilledMissingImage(t *testing.T) {

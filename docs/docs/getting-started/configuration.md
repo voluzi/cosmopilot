@@ -37,9 +37,9 @@ including upgrades that use `--reuse-values`; clear or delete an old value to re
 - **Description**: The container image of `node-utils` (with version tag included). This is a container deployed by `cosmopilot` as a sidecar with helper methods for calculating data size, handling upgrades, and a few more utilities.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
-:::warning[Cosmosigner discovery gating]
-If you override or pin `nodeUtilsImage`, use node-utils 2.10.0 or newer. Cosmosigner target Pods
-require the discovery-gate command introduced in 2.10.0 and cannot start with an older image.
+:::warning[node-utils compatibility]
+If you override or pin `nodeUtilsImage`, use node-utils 3.0.0 or newer. This version provides the
+polling and SDK marker-based upgrade coordination required by Pods that do not use a trace FIFO.
 :::
 
 ### `cosmoGuardImage`

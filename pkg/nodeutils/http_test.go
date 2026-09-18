@@ -29,13 +29,39 @@ const wrongTestShutdownToken = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"
 
 func newShutdownTestServer(token string, stop func() error) *NodeUtils {
 	s := &NodeUtils{
-		cfg:      &Options{ShutdownToken: token},
-		router:   mux.NewRouter(),
-		server:   &http.Server{},
-		stopNode: stop,
+		cfg:            &Options{ShutdownToken: token},
+		router:         mux.NewRouter(),
+		server:         &http.Server{},
+		stopNode:       stop,
+		upgradeMonitor: &upgradeMonitor{},
 	}
 	s.registerRoutes()
 	return s
+}
+
+func TestUpgradeStatusEndpointPreservesLegacyWireFormats(t *testing.T) {
+	height := int64(99)
+	observed := time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC)
+	s := newShutdownTestServer(testShutdownToken, func() error { return nil })
+	s.upgradeMonitor.status = UpgradeStatus{
+		LatestHeight:     &height,
+		HeightObservedAt: &observed,
+		RequiredUpgrade:  &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+	}
+
+	structured := httptest.NewRecorder()
+	s.router.ServeHTTP(structured, httptest.NewRequest(http.MethodGet, "/upgrade_status", nil))
+	assert.Equal(t, http.StatusOK, structured.Code)
+	assert.JSONEq(t, `{"latestHeight":99,"heightObservedAt":"2026-09-18T12:00:00Z","requiredUpgrade":{"height":100,"source":"on-chain","name":"v2"}}`, structured.Body.String())
+
+	latest := httptest.NewRecorder()
+	s.router.ServeHTTP(latest, httptest.NewRequest(http.MethodGet, "/latest_height", nil))
+	assert.Equal(t, "99", latest.Body.String())
+
+	required := httptest.NewRecorder()
+	s.router.ServeHTTP(required, httptest.NewRequest(http.MethodGet, "/must_upgrade", nil))
+	assert.Equal(t, http.StatusUpgradeRequired, required.Code)
+	assert.Equal(t, "true", required.Body.String())
 }
 
 func TestShutdownServerRequiresBearerToken(t *testing.T) {
@@ -199,9 +225,10 @@ func TestShutdownServerProcessHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	s := &NodeUtils{
-		cfg:      &Options{ShutdownToken: testShutdownToken},
-		router:   mux.NewRouter(),
-		stopNode: func() error { return nil },
+		cfg:            &Options{ShutdownToken: testShutdownToken},
+		router:         mux.NewRouter(),
+		stopNode:       func() error { return nil },
+		upgradeMonitor: &upgradeMonitor{},
 	}
 	s.registerRoutes()
 	s.server = &http.Server{Handler: s.router}

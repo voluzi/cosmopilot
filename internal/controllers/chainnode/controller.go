@@ -34,8 +34,18 @@ import (
 // This can be overridden in tests to inject mock clients.
 type StatsClientFactory func(host string) nodeutils.StatsClient
 
+type upgradeStatusClient interface {
+	GetUpgradeStatus(context.Context) (nodeutils.UpgradeStatus, error)
+}
+
+type upgradeStatusClientFactory func(host string) upgradeStatusClient
+
 // DefaultStatsClientFactory creates a real nodeutils client.
 func DefaultStatsClientFactory(host string) nodeutils.StatsClient {
+	return nodeutils.NewClient(host)
+}
+
+func defaultUpgradeStatusClientFactory(host string) upgradeStatusClient {
 	return nodeutils.NewClient(host)
 }
 
@@ -85,6 +95,7 @@ type Reconciler struct {
 	disruptionLocks        *lockManager
 	configLocks            *configLockManager
 	statsClientFactory     StatsClientFactory
+	upgradeClientFactory   upgradeStatusClientFactory
 	shutdownClientFactory  nodeUtilsShutdownClientFactory
 	shutdownTokenGenerator func() (string, error)
 	snapshotDeleteNow      func() time.Time
@@ -129,6 +140,7 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 		disruptionLocks:       newLockManager(),
 		configLocks:           newConfigLockManager(),
 		statsClientFactory:    DefaultStatsClientFactory,
+		upgradeClientFactory:  defaultUpgradeStatusClientFactory,
 		shutdownClientFactory: defaultNodeUtilsShutdownClientFactory,
 	}
 	if err := r.setupWithManager(mgr); err != nil {
@@ -568,20 +580,9 @@ func (r *Reconciler) getChainNodeClientByHost(host string) (*chainutils.Client, 
 }
 
 func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	height, err := nodeutils.NewClient(chainNode.GetNodeFQDN()).GetLatestHeight(ctx)
+	status, err := r.getUpgradeStatus(ctx, chainNode)
 	if err != nil {
 		return err
 	}
-	// If height is 0 then node-utils didn't grab latest height yet, so lets not update it.
-	if height == 0 {
-		return nil
-	}
-
-	// Avoid API call if there is nothing to change
-	if height == chainNode.Status.LatestHeight {
-		return nil
-	}
-
-	chainNode.Status.LatestHeight = height
-	return r.Status().Update(ctx, chainNode)
+	return r.applyUpgradeStatus(ctx, chainNode, status)
 }

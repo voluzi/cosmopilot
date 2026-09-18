@@ -16,7 +16,47 @@ import (
 	"k8s.io/client-go/rest"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 )
+
+func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node"},
+		Spec: appsv1.ChainNodeSpec{
+			App:    appsv1.AppSpec{App: "appd"},
+			Config: &appsv1.Config{},
+		},
+	}
+	r := &Reconciler{opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
+
+	for _, volume := range r.buildBaseVolumes(chainNode) {
+		if volume.Name == "trace" {
+			t.Fatal("generated pod still contains trace volume")
+		}
+	}
+	nodeUtils := r.buildNodeUtilsInitContainer(chainNode, "shutdown-token")
+	for _, env := range nodeUtils.Env {
+		if env.Name == "TRACE_STORE" || env.Name == "CREATE_FIFO" {
+			t.Fatalf("node-utils still contains trace environment %s", env.Name)
+		}
+	}
+	for _, mount := range nodeUtils.VolumeMounts {
+		if mount.Name == "trace" || mount.MountPath == "/trace" {
+			t.Fatalf("node-utils still contains trace mount %#v", mount)
+		}
+	}
+	app := r.buildAppContainer(chainNode, nil, "/ready", corev1.ResourceRequirements{}, nil)
+	for i, arg := range app.Args {
+		if arg == "--trace-store" || arg == "/trace/trace.fifo" {
+			t.Fatalf("app arg %d still contains trace artifact %q", i, arg)
+		}
+	}
+	for _, mount := range app.VolumeMounts {
+		if mount.Name == "trace" || mount.MountPath == "/trace" {
+			t.Fatalf("app still contains trace mount %#v", mount)
+		}
+	}
+}
 
 func TestPodSpecHash(t *testing.T) {
 	tests := []struct {

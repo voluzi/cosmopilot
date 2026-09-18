@@ -223,7 +223,7 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 				if err != nil {
 					return nil, ctrl.Result{}, err
 				}
-				chainNode.Status.LatestHeight = height
+				rebaseDataProgress(chainNode, height)
 				if err = r.Status().Update(ctx, chainNode); err != nil {
 					return nil, ctrl.Result{}, err
 				}
@@ -231,8 +231,7 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		} else {
 			// In case the PVC was deleted on an existing node, lets set latest height to 0 to make sure state-sync
 			// configuration can be applied if necessary.
-			if chainNode.Status.LatestHeight != 0 {
-				chainNode.Status.LatestHeight = 0
+			if rebaseDataProgress(chainNode, 0) {
 				if err = r.Status().Update(ctx, chainNode); err != nil {
 					return nil, ctrl.Result{}, err
 				}
@@ -319,6 +318,26 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		return pvc, result, err
 	}
 	return pvc, ctrl.Result{}, nil
+}
+
+func rebaseDataProgress(chainNode *appsv1.ChainNode, height int64) bool {
+	changed := chainNode.Status.LatestHeight != height ||
+		chainNode.Status.AppImage != "" || chainNode.Status.AppVersion != ""
+	chainNode.Status.LatestHeight = height
+	chainNode.Status.AppImage = ""
+	chainNode.Status.AppVersion = ""
+	for i := range chainNode.Status.Upgrades {
+		if chainNode.Status.Upgrades[i].Status != appsv1.UpgradeOnGoing {
+			continue
+		}
+		status := appsv1.UpgradeScheduled
+		if chainNode.Status.Upgrades[i].Height <= height {
+			status = appsv1.UpgradeSkipped
+		}
+		chainNode.Status.Upgrades[i].Status = status
+		changed = true
+	}
+	return changed
 }
 
 func (r *Reconciler) ensurePvcUpdates(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {

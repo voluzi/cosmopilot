@@ -34,9 +34,8 @@ func pinnedNodeAtUpgradeHeight() *appsv1.ChainNode {
 	}
 }
 
-// A pinned node must not merely suppress the upgrade in the operator: node-utils halts the
-// application for any upgrade still `scheduled` at or below the current height, so an entry left
-// scheduled would halt every recreated pod and spin a stop/recreate loop.
+// A pinned node must persist the explicit target as skipped or a recreated sidecar will require the
+// same scheduled upgrade again.
 func TestSkipUpgradeForOverrideStopsNodeUtilsRetriggering(t *testing.T) {
 	scheme := gcpImportTestScheme(t)
 	c := fake.NewClientBuilder().
@@ -50,7 +49,7 @@ func TestSkipUpgradeForOverrideStopsNodeUtilsRetriggering(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, nodeutils.RequiredUpgrade{Height: 500}))
 
 	// The upgrade is no longer scheduled, so node-utils will not halt the app for it again.
 	require.Len(t, chainNode.Status.Upgrades, 1)
@@ -89,14 +88,31 @@ func TestSkipUpgradeForOverrideIsNoopWithoutScheduledUpgrade(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, nodeutils.RequiredUpgrade{Height: 500}))
 	assert.Equal(t, appsv1.UpgradeCompleted, chainNode.Status.Upgrades[0].Status)
 }
 
-// node-utils halts for any scheduled upgrade at or *below* the current height, so a pinned node that
-// has already advanced past the upgrade height must still have it skipped. An exact-height lookup
-// would miss this and leave node-utils halting every recreated pod.
-func TestSkipUpgradeForOverrideSkipsUpgradesBelowCurrentHeight(t *testing.T) {
+func TestSkipUpgradeForOverrideSkipsExplicitOngoingTarget(t *testing.T) {
+	stored := pinnedNodeAtUpgradeHeight()
+	stored.Status.Upgrades[0].Status = appsv1.UpgradeOnGoing
+	scheme := gcpImportTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(stored).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+	chainNode := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
+
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, nodeutils.RequiredUpgrade{Height: 500}))
+	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[0].Status)
+}
+
+// Committed progress can be beyond several scheduled entries. The explicit requirement identifies
+// which one the override suppresses without discarding unrelated history or future work.
+func TestSkipUpgradeForOverrideSkipsOnlyExplicitTarget(t *testing.T) {
 	stored := pinnedNodeAtUpgradeHeight()
 	stored.Status.LatestHeight = 900
 	stored.Status.Upgrades = []appsv1.Upgrade{
@@ -116,11 +132,9 @@ func TestSkipUpgradeForOverrideSkipsUpgradesBelowCurrentHeight(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, nodeutils.RequiredUpgrade{Height: 800}))
 
-	// Both upgrades at or below the current height are skipped; the future one is untouched so it
-	// still applies once the override is removed.
-	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[0].Status)
+	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[0].Status)
 	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[1].Status)
 	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[2].Status)
 
@@ -131,12 +145,9 @@ func TestSkipUpgradeForOverrideSkipsUpgradesBelowCurrentHeight(t *testing.T) {
 		Upgrades []appsv1.Upgrade `json:"upgrades"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(cm.Data[upgradesConfigFile]), &published))
-	for _, u := range published.Upgrades {
-		if u.Height <= 900 {
-			assert.NotEqual(t, nodeutils.UpgradeScheduled, string(u.Status),
-				"upgrade at height %d would still halt the pinned pod", u.Height)
-		}
-	}
+	assert.Equal(t, appsv1.UpgradeScheduled, published.Upgrades[0].Status)
+	assert.Equal(t, appsv1.UpgradeSkipped, published.Upgrades[1].Status)
+	assert.Equal(t, appsv1.UpgradeScheduled, published.Upgrades[2].Status)
 }
 
 // A node that is already Syncing/StateSyncing/Running when cosmopilot is upgraded never hits a phase
@@ -175,13 +186,8 @@ func TestSyncRecordedAppImageBackfillsWithoutPhaseChange(t *testing.T) {
 	assert.Equal(t, "repo/app:v1", chainNode.Status.AppImage)
 }
 
-// .status.latestHeight and the /must_upgrade answer come from two separate calls, so the node can
-// cross an upgrade height between them. When node-utils has halted but the recorded height explains
-
-// A latched node-utils halt flag survives a failed pod recreation or a controller restart, so it is
-// not evidence that an upgrade above the recorded height has been reached. Skipping one on that
-// basis would let a later override removal perform the binary change through image drift instead of
-// the halt-and-upgrade workflow. Only upgrades at or below the observed height may ever be skipped.
+// A latched requirement survives a failed pod recreation or controller restart. The explicit target
+// must not spill over onto a different future upgrade.
 func TestSkipUpgradeForOverrideNeverSkipsFutureUpgrades(t *testing.T) {
 	stored := pinnedNodeAtUpgradeHeight()
 	stored.Status.LatestHeight = 500
@@ -202,7 +208,7 @@ func TestSkipUpgradeForOverrideNeverSkipsFutureUpgrades(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: "pinned", Namespace: "default"}, chainNode))
 
-	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode))
+	require.NoError(t, r.skipUpgradeForOverride(context.Background(), chainNode, nodeutils.RequiredUpgrade{Height: 500}))
 
 	assert.Equal(t, appsv1.UpgradeSkipped, chainNode.Status.Upgrades[0].Status)
 	assert.Equal(t, appsv1.UpgradeScheduled, chainNode.Status.Upgrades[1].Status,

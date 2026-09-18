@@ -142,6 +142,40 @@ func TestGetAppImageIgnoresUpgradesAboveLatestHeight(t *testing.T) {
 	assert.Equal(t, "repo/app:v3", chainNode.GetLatestAppImage())
 }
 
+func TestGetAppImageUsesImmediateOngoingUpgradeAtPreviousCommittedHeight(t *testing.T) {
+	chainNode := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 99,
+		Upgrade{Height: 100, Name: "v2", Image: "repo/app:v2", Status: UpgradeOnGoing},
+		Upgrade{Height: 500, Name: "v5", Image: "repo/app:v5", Status: UpgradeOnGoing},
+	)
+
+	assert.Equal(t, "repo/app:v2", chainNode.GetAppImage())
+}
+
+func TestGetAppImageRetainsSelectedUpgradeWhenCommittedHeightIsStale(t *testing.T) {
+	tests := []struct {
+		name          string
+		latestHeight  int64
+		status        UpgradePhase
+		recordedImage string
+	}{
+		{name: "completed at previous height", latestHeight: 99, status: UpgradeCompleted, recordedImage: "repo/app:v2"},
+		{name: "ongoing below previous height", latestHeight: 98, status: UpgradeOnGoing},
+		{name: "ongoing with unknown height", status: UpgradeOnGoing},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := chainNodeWithUpgrades("repo/app", ptr.To("v1"), tt.latestHeight,
+				Upgrade{Height: 100, Name: "v2", Image: "repo/app:v2", Status: tt.status},
+			)
+			node.Status.AppImage = tt.recordedImage
+
+			assert.Equal(t, "repo/app:v2", node.GetAppImage())
+			assert.Equal(t, "repo/app:v2", node.GetRunningAppImage())
+		})
+	}
+}
+
 func TestImageRefVersion(t *testing.T) {
 	for _, tc := range []struct {
 		image string
@@ -263,4 +297,13 @@ func TestGetRunningAppImageUsesLatestForStateSyncRestore(t *testing.T) {
 		Upgrade{Height: 500, Image: "repo/app:v5", Status: UpgradeCompleted},
 	)
 	assert.Equal(t, plain.GetAppImage(), plain.GetRunningAppImage())
+}
+
+func TestGetRunningAppImageRetainsOngoingUpgradeForStateSyncRestore(t *testing.T) {
+	node := chainNodeWithUpgrades("repo/app", ptr.To("v1"), 0,
+		Upgrade{Height: 100, Image: "repo/app:v2", Status: UpgradeOnGoing},
+	)
+	node.Spec.StateSyncRestore = ptr.To(true)
+
+	assert.Equal(t, "repo/app:v2", node.GetRunningAppImage())
 }

@@ -266,9 +266,9 @@ func (chainNode *ChainNode) GetMoniker() string {
 	return chainNode.GetName()
 }
 
-// appliedUpgradeImage returns the image of the highest upgrade whose height the node has already
-// reached. Upgrades without an image (an on-chain plan that did not carry one) are ignored, so the
-// last known good image is kept instead of falling back to the initial one.
+// appliedUpgradeImage returns the highest reached or recorded deployed upgrade image. An ongoing
+// upgrade is an explicit selected target even when committed-height observation is stale. Upgrades
+// without an image are ignored so the last known good image is retained.
 func (chainNode *ChainNode) appliedUpgradeImage() string {
 	var h int64
 	var image string
@@ -276,11 +276,26 @@ func (chainNode *ChainNode) appliedUpgradeImage() string {
 		if u.Image == "" {
 			continue
 		}
-		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped || u.Status == UpgradeOnGoing) &&
-			u.Height > h && u.Height <= chainNode.Status.LatestHeight {
+		reached := (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height <= chainNode.Status.LatestHeight
+		recorded := u.Status == UpgradeCompleted && u.Image == chainNode.Status.AppImage
+		if (reached || recorded) && u.Height > h {
 			h = u.Height
 			image = u.Image
 		}
+	}
+	var ongoingHeight int64
+	var ongoingImage string
+	for _, u := range chainNode.Status.Upgrades {
+		if u.Status != UpgradeOnGoing || u.Image == "" || u.Height <= h {
+			continue
+		}
+		if ongoingHeight == 0 || u.Height < ongoingHeight {
+			ongoingHeight = u.Height
+			ongoingImage = u.Image
+		}
+	}
+	if ongoingImage != "" {
+		return ongoingImage
 	}
 	return image
 }
@@ -294,7 +309,7 @@ func (chainNode *ChainNode) latestUpgradeImage() string {
 		if u.Image == "" {
 			continue
 		}
-		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped) && u.Height > h {
+		if (u.Status == UpgradeCompleted || u.Status == UpgradeSkipped || u.Status == UpgradeOnGoing) && u.Height > h {
 			h = u.Height
 			image = u.Image
 		}

@@ -660,8 +660,8 @@ func TestTokenDriftHonorsDisruptionAllowanceForHealthyCurrentPod(t *testing.T) {
 	originalTransport := http.DefaultTransport
 	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		body := "false"
-		if req.URL.Path == "/latest_height" {
-			body = "1"
+		if req.URL.Path == "/upgrade_status" {
+			body = `{"latestHeight":1,"requiredUpgrade":null}`
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})

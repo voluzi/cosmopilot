@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 
+	upgradetypes "github.com/cosmos/cosmos-sdk/x/upgrade/types"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +35,7 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 			logger.Error(err, "could not retrieve upgrade plans")
 		} else {
 			for _, upgrade := range govUpgrades {
-				chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, upgrade, chainNode.Status.LatestHeight)
+				chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, upgrade)
 			}
 		}
 	}
@@ -46,17 +47,22 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 			Status: appsv1.UpgradeScheduled,
 			Source: appsv1.ManualUpgrade,
 		}
-		// If this upgrade is in the past, lets set it as skipped
-		if chainNode.Status.LatestHeight > u.Height {
-			u.Status = appsv1.UpgradeSkipped
-		}
-
 		// Maybe set this upgrade as gov planned upgraded
 		if upgrade.ForceGovUpgrade() {
 			u.Source = appsv1.OnChainUpgrade
 		}
+		if isHistoricalBootstrapUpgrade(chainNode, nodePodRunning, upgrade.Height) {
+			u.Status = appsv1.UpgradeSkipped
+		}
 
-		chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, u, chainNode.Status.LatestHeight)
+		chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, u)
+		if u.Status == appsv1.UpgradeSkipped {
+			for i := range chainNode.Status.Upgrades {
+				if chainNode.Status.Upgrades[i].Height == u.Height && chainNode.Status.Upgrades[i].Status == appsv1.UpgradeScheduled {
+					chainNode.Status.Upgrades[i].Status = appsv1.UpgradeSkipped
+				}
+			}
+		}
 	}
 
 	// Sort upgrades by height
@@ -73,6 +79,22 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 		return r.Status().Update(ctx, chainNode)
 	}
 	return nil
+}
+
+func isHistoricalBootstrapUpgrade(chainNode *appsv1.ChainNode, nodePodRunning bool, height int64) bool {
+	if nodePodRunning || height > chainNode.Status.LatestHeight {
+		return false
+	}
+	// PvcSize is persisted before an initialized PVC reaches upgrade reconciliation. A new empty
+	// volume enters InitData instead, so the empty phase identifies adopted or restored chain data.
+	if chainNode.Status.Phase == "" && chainNode.Status.PvcSize != "" {
+		return true
+	}
+	if chainNode.ShouldRestoreFromSnapshot() {
+		return chainNode.Status.Phase == ""
+	}
+	return chainNode.StateSyncRestoreEnabled() &&
+		(chainNode.Status.Phase == "" || chainNode.Status.Phase == appsv1.PhaseChainNodeInitData)
 }
 
 func (r *Reconciler) ensureUpgradesConfig(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -118,15 +140,34 @@ func (r *Reconciler) ensureUpgradesConfig(ctx context.Context, chainNode *appsv1
 	return nil
 }
 
-func (r *Reconciler) requiresUpgrade(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	return nodeutils.NewClient(chainNode.GetNodeFQDN()).RequiresUpgrade(ctx)
+func (r *Reconciler) getUpgradeStatus(ctx context.Context, chainNode *appsv1.ChainNode) (nodeutils.UpgradeStatus, error) {
+	factory := r.upgradeClientFactory
+	if factory == nil {
+		factory = defaultUpgradeStatusClientFactory
+	}
+	return factory(chainNode.GetNodeFQDN()).GetUpgradeStatus(ctx)
 }
 
-func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, height int64) *appsv1.Upgrade {
+func (r *Reconciler) applyUpgradeStatus(ctx context.Context, chainNode *appsv1.ChainNode, status nodeutils.UpgradeStatus) error {
+	if status.LatestHeight == nil || *status.LatestHeight <= chainNode.Status.LatestHeight {
+		return nil
+	}
+	chainNode.Status.LatestHeight = *status.LatestHeight
+	return r.Status().Update(ctx, chainNode)
+}
+
+func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) *appsv1.Upgrade {
 	for _, upgrade := range chainNode.Status.Upgrades {
-		if upgrade.Height == height && upgrade.Status == appsv1.UpgradeScheduled {
-			return &upgrade
+		if upgrade.Height != required.Height || (upgrade.Status != appsv1.UpgradeScheduled && upgrade.Status != appsv1.UpgradeOnGoing) {
+			continue
 		}
+		if required.Source != "" && string(upgrade.Source) != string(required.Source) {
+			continue
+		}
+		if required.Name != "" && upgrade.Name != "" && upgrade.Name != required.Name {
+			continue
+		}
+		return &upgrade
 	}
 	return nil
 }
@@ -164,44 +205,54 @@ func (r *Reconciler) getGovUpgrades(ctx context.Context, chainNode *appsv1.Chain
 
 	upgrades := make([]appsv1.Upgrade, 0)
 	if plannedUpgrade != nil {
-		upgrade := appsv1.Upgrade{
-			Height: plannedUpgrade.Height,
-			Status: appsv1.UpgradeScheduled,
-			Source: appsv1.OnChainUpgrade,
-		}
-
-		info := struct {
-			Binaries struct {
-				Docker string `json:"docker"`
-			} `json:"binaries"`
-		}{}
-		if err := json.Unmarshal([]byte(plannedUpgrade.Info), &info); err == nil && info.Binaries.Docker != "" {
-			upgrade.Image = info.Binaries.Docker
-		} else {
-			upgrade.Status = appsv1.UpgradeImageMissing
-		}
-		upgrades = append(upgrades, upgrade)
+		upgrades = append(upgrades, upgradeFromPlan(plannedUpgrade))
 	}
 	return upgrades, nil
 }
 
-func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade, currentHeight int64) []appsv1.Upgrade {
+func upgradeFromPlan(plan *upgradetypes.Plan) appsv1.Upgrade {
+	upgrade := appsv1.Upgrade{
+		Height: plan.Height,
+		Name:   plan.Name,
+		Status: appsv1.UpgradeScheduled,
+		Source: appsv1.OnChainUpgrade,
+	}
+	info := struct {
+		Binaries struct {
+			Docker string `json:"docker"`
+		} `json:"binaries"`
+	}{}
+	if err := json.Unmarshal([]byte(plan.Info), &info); err == nil && info.Binaries.Docker != "" {
+		upgrade.Image = info.Binaries.Docker
+	} else {
+		upgrade.Status = appsv1.UpgradeImageMissing
+	}
+	return upgrade
+}
+
+func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []appsv1.Upgrade {
 	for i, u := range upgrades {
 		if u.Height == upgrade.Height {
-			// Update if we are adding a missing image
-			if u.Status == appsv1.UpgradeImageMissing && upgrade.Image != "" {
-				upgrades[i].Image = upgrade.Image
-				upgrades[i].Source = upgrade.Source
-				upgrades[i].Status = appsv1.UpgradeScheduled
+			if u.Status == appsv1.UpgradeCompleted || u.Status == appsv1.UpgradeSkipped || u.Status == appsv1.UpgradeOnGoing {
+				return upgrades
 			}
 
-			// If we are updating an upgrade with a past height, and it was not completed, lets set it
-			// as skipped
-			if u.Status != appsv1.UpgradeCompleted && u.Height < currentHeight {
-				upgrades[i].Status = appsv1.UpgradeSkipped
+			switch {
+			case upgrade.Source == appsv1.OnChainUpgrade && upgrade.Name != "":
+				if u.Source == appsv1.ManualUpgrade {
+					return upgrades
+				}
+				if u.Source == appsv1.OnChainUpgrade && u.Name == "" && u.Image != "" {
+					upgrades[i].Name = upgrade.Name
+					return upgrades
+				}
+				upgrades[i] = upgrade
+			case upgrade.Source == appsv1.OnChainUpgrade && upgrade.Name == "":
+				upgrade.Name = u.Name
+				upgrades[i] = upgrade
+			default:
+				upgrades[i] = upgrade
 			}
-
-			upgrades[i].Source = upgrade.Source
 			return upgrades
 		}
 	}
@@ -222,31 +273,16 @@ func addUpgradeStatusCondition(chainNode *appsv1.ChainNode, upgrade *appsv1.Upgr
 	})
 }
 
-// skipUpgradeForOverride marks the upgrade scheduled at the node's current height as skipped and
-// republishes the upgrades config consumed by node-utils.
-//
-// It is used when an image override pins the node. node-utils halts the application for any upgrade
-// still `scheduled` at or below the current height, so suppressing the upgrade only in the operator
-// would leave node-utils halting each recreated pod, producing a stop/recreate loop for as long as
-// the override remains.
-// The caller must refresh .status.latestHeight immediately beforehand: the height is otherwise read
-// before /must_upgrade and the node may have crossed the upgrade height in between.
-func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *appsv1.ChainNode) error {
+// skipUpgradeForOverride marks only the explicitly required upgrade as skipped and republishes the
+// config consumed by node-utils. The target identity prevents an unrelated upgrade from being
+// discarded when committed progress and the required upgrade height differ.
+func (r *Reconciler) skipUpgradeForOverride(ctx context.Context, chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) error {
 	logger := log.FromContext(ctx)
-
-	// Mirror node-utils' own trigger condition — it halts for any scheduled upgrade with
-	// `height >= upgrade.Height` (pkg/nodeutils/upgrades.go), not just one at the exact current
-	// height. An exact-height lookup would miss an upgrade the node has already advanced past and
-	// leave node-utils halting the pinned pod on every recreation.
-	//
-	// Only upgrades at or below the observed height are skipped. A latched halt flag is deliberately
-	// NOT treated as evidence that some higher upgrade was reached: the flag survives a failed pod
-	// recreation or a controller restart, so inferring from it could mark a genuinely future upgrade
-	// as skipped — and once skipped, removing the override would let image drift perform that binary
-	// change instead of the halt-and-upgrade workflow.
-	skipped := make([]int64, 0)
+	skipped := make([]int64, 0, 1)
 	for i, u := range chainNode.Status.Upgrades {
-		if u.Status == appsv1.UpgradeScheduled && u.Height <= chainNode.Status.LatestHeight {
+		if (u.Status == appsv1.UpgradeScheduled || u.Status == appsv1.UpgradeOnGoing) && u.Height == required.Height &&
+			(required.Source == "" || string(u.Source) == string(required.Source)) &&
+			(required.Name == "" || u.Name == "" || u.Name == required.Name) {
 			chainNode.Status.Upgrades[i].Status = appsv1.UpgradeSkipped
 			skipped = append(skipped, u.Height)
 		}

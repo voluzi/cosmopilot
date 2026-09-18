@@ -1379,6 +1379,10 @@ type Upgrade struct {
 	// Height at which the upgrade should occur.
 	Height int64 `json:"height"`
 
+	// Governance plan name, when supplied by the chain.
+	// +optional
+	Name string `json:"name,omitempty"`
+
 	// Container image replacement to be used in the upgrade.
 	Image string `json:"image"`
 

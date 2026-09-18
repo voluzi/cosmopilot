@@ -14,9 +14,6 @@ const (
 
 	// DefaultUpgradesConfig is the default path to the upgrades configuration file.
 	DefaultUpgradesConfig = "/config/upgrades.json"
-
-	// DefaultTraceStore is the default path to the trace store FIFO.
-	DefaultTraceStore = "/trace/trace.fifo"
 )
 
 func defaultOptions() *Options {
@@ -26,8 +23,6 @@ func defaultOptions() *Options {
 		Port:           DefaultPort,
 		BlockThreshold: 0,
 		UpgradesConfig: DefaultUpgradesConfig,
-		TraceStore:     DefaultTraceStore,
-		CreateFifo:     false,
 		TmkmsProxy:     false,
 		SignerPeerDNS:  "",
 		HaltHeight:     0,
@@ -40,8 +35,6 @@ type Options struct {
 	DataPath                  string
 	BlockThreshold            time.Duration
 	UpgradesConfig            string
-	TraceStore                string
-	CreateFifo                bool
 	TmkmsProxy                bool
 	SignerPeerDNS             string
 	HaltHeight                int64
@@ -79,18 +72,6 @@ func WithUpgradesConfig(path string) Option {
 func WithBlockThreshold(n time.Duration) Option {
 	return func(opts *Options) {
 		opts.BlockThreshold = n
-	}
-}
-
-func WithTraceStore(path string) Option {
-	return func(opts *Options) {
-		opts.TraceStore = path
-	}
-}
-
-func CreateFifo(create bool) Option {
-	return func(opts *Options) {
-		opts.CreateFifo = create
 	}
 }
 

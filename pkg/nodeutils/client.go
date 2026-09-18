@@ -145,6 +145,51 @@ func (c *Client) RequiresUpgrade(ctx context.Context) (bool, error) {
 	return strconv.ParseBool(body)
 }
 
+// GetUpgradeStatus returns committed progress and the explicit upgrade requirement from node-utils.
+// Older sidecars are supported only when the structured endpoint is absent.
+func (c *Client) GetUpgradeStatus(ctx context.Context) (UpgradeStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url+"/upgrade_status", nil)
+	if err != nil {
+		return UpgradeStatus{}, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return UpgradeStatus{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return UpgradeStatus{}, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return c.getLegacyUpgradeStatus(ctx)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return UpgradeStatus{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var status UpgradeStatus
+	if err := json.Unmarshal(body, &status); err != nil {
+		return UpgradeStatus{}, err
+	}
+	return status, nil
+}
+
+func (c *Client) getLegacyUpgradeStatus(ctx context.Context) (UpgradeStatus, error) {
+	height, err := c.GetLatestHeight(ctx)
+	if err != nil {
+		return UpgradeStatus{}, err
+	}
+	requiresUpgrade, err := c.RequiresUpgrade(ctx)
+	if err != nil {
+		return UpgradeStatus{}, err
+	}
+	status := UpgradeStatus{LatestHeight: &height}
+	if requiresUpgrade {
+		status.RequiredUpgrade = &RequiredUpgrade{Height: height}
+	}
+	return status, nil
+}
+
 // ShutdownNodeUtilsServer sends a shutdown signal to the node-utils server.
 func (c *Client) ShutdownNodeUtilsServer(ctx context.Context) error {
 	if !ValidShutdownToken(c.shutdownToken) {

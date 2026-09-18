@@ -24,9 +24,8 @@ mutable tag so a rescheduled replica cannot pick up different code without a man
 :::
 
 :::warning[node-utils compatibility]
-Cosmosigner discovery gating requires node-utils 2.10.0 or newer. If you override or pin the Helm
-`nodeUtilsImage` value, keep it at 2.10.0 or later or targeted node Pods cannot pass their startup
-gate.
+Use node-utils 3.0.0 or newer with this Cosmopilot release. It includes both Cosmosigner discovery
+gating and the polling-based upgrade coordination used by node Pods without a trace FIFO.
 :::
 
 ## How it works

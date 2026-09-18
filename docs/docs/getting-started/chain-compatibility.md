@@ -45,7 +45,6 @@ This command initializes the chain home directory and generates default configur
 
 Starts the blockchain node. Must support the following flags:
 - `--home` - Specify the home directory path
-- `--trace-store` - Path for trace output (FIFO)
 
 For snapshot integrity verification, the following is also required:
 
@@ -168,6 +167,11 @@ Cosmopilot interacts with your chain through standard gRPC and RPC endpoints. Th
 |----------|---------|
 | `/status` | Node status and sync info |
 | `/abci_info` | ABCI application info |
+| `/websocket` | `NewBlockHeader` notifications used to accelerate upgrade checks |
+
+The sidecar treats `/abci_info` as the authoritative committed height and polls it periodically.
+Websocket notifications only wake that reconciliation sooner, so a disconnect or missed event does
+not prevent a manual upgrade from being detected.
 
 ## Configuration Files
 
@@ -184,7 +188,11 @@ Some chains use dashes instead of underscores in configuration keys (e.g., `addr
 
 ## Upgrade Module
 
-For automatic upgrade handling, your chain should implement the standard Cosmos SDK upgrade module (`x/upgrade`). Cosmopilot queries the `CurrentPlan` endpoint to detect pending upgrades and can automatically handle version changes.
+For automatic upgrade handling, your chain should implement the standard Cosmos SDK upgrade module
+(`x/upgrade`). Cosmopilot queries the `CurrentPlan` endpoint to detect pending upgrades and validates
+the SDK's `data/upgrade-info.json` marker against that plan before reporting a governance upgrade.
+The standard marker makes governance detection restart-safe even while the local RPC endpoint is
+temporarily unavailable.
 
 ## Compatible Chains
 

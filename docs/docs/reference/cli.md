@@ -65,9 +65,7 @@ The helper sidecar that runs in every node Pod and exposes an internal HTTP API
 | `-data-dir` | `DATA_DIR` | `/home/app/data` | Directory where the data volume is mounted. |
 | `-block-threshold` | `BLOCK_THRESHOLD` | `0` (disabled) | Time to wait for a new block before the node is considered unhealthy. |
 | `-upgrades-config` | `UPGRADES_CONFIG` | `/config/upgrades.json` | File containing the upgrades configuration. |
-| `-trace-store` | `TRACE_STORE` | `/trace/trace.fifo` | File or FIFO watched for traces. |
 | `-log-level` | `LOG_LEVEL` | `info` | Log level. |
-| `-create-fifo` | `CREATE_FIFO` | `false` | Create the FIFO for the trace store. |
 | `-tmkms-proxy` | `TMKMS_PROXY` | `false` | Enable the TMKMS proxy. |
 | `-node-binary-name` | `NODE_BINARY_NAME` | `""` | Name of the node application binary. |
 | `-halt-height` | `HALT_HEIGHT` | `0` (disabled) | Height at which the node will be halted. |

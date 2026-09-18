@@ -158,43 +158,31 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
 	}
 
-	logger.V(1).Info("updating latest height")
-	if err = r.updateLatestHeight(ctx, chainNode); err != nil {
+	logger.V(1).Info("retrieving upgrade status")
+	upgradeStatus, err := r.getUpgradeStatus(ctx, chainNode)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve upgrade status for %s: %w", chainNode.GetName(), err)
+	}
+	if err := r.applyUpgradeStatus(ctx, chainNode, upgradeStatus); err != nil {
 		return fmt.Errorf("failed to update latest height for %s: %w", chainNode.GetName(), err)
 	}
-
-	// Check if the node is waiting for an upgrade
-	logger.V(1).Info("checking if an upgrade is required")
-	requiresUpgrade, err := r.requiresUpgrade(ctx, chainNode)
-	if err != nil {
-		return fmt.Errorf("failed to check if upgrade is required for %s: %w", chainNode.GetName(), err)
-	}
+	requiredUpgrade := upgradeStatus.RequiredUpgrade
 
 	// A node pinned through .spec.overrideImage or .spec.overrideVersion must not be upgraded. The
 	// overrides win over upgrade history when the pod spec is built, so swapping the binary here
 	// would be reverted on the next reconcile — downgrading a node that has already written data
 	// with the upgraded version.
-	if requiresUpgrade && chainNode.HasImageOverride() {
-		// Mark the upgrade skipped instead of only suppressing this reconcile. node-utils halts the
-		// application for any upgrade still `scheduled` at or below the current height
-		// (pkg/nodeutils/upgrades.go), so leaving it scheduled would halt every recreated pod again
-		// and spin a stop/recreate loop for as long as the override is in place. Skipping also means
-		// that removing the override later moves the node onto this upgrade's image, as intended.
-		// Refresh the height before deciding what to skip. It was read before /must_upgrade, so the
-		// node may have crossed the upgrade height in between. node-utils only latches once the height
-		// has reached the upgrade and the application stops progressing at that point, so a reading
-		// taken now is at or above the upgrade height — making the filter exact rather than a guess.
-		if err := r.updateLatestHeight(ctx, chainNode); err != nil {
-			return fmt.Errorf("failed to refresh height for pinned node %s: %w", chainNode.GetName(), err)
-		}
-		if err := r.skipUpgradeForOverride(ctx, chainNode); err != nil {
+	if requiredUpgrade != nil && chainNode.HasImageOverride() {
+		// Persist the explicit target as skipped so a recreated sidecar does not require it again while
+		// leaving every unrelated upgrade untouched.
+		if err := r.skipUpgradeForOverride(ctx, chainNode, *requiredUpgrade); err != nil {
 			return fmt.Errorf("failed to skip upgrade for pinned node %s: %w", chainNode.GetName(), err)
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeWarning,
 			appsv1.ReasonUpgradeSkippedByOverride,
 			"Not upgrading at height %d: node is pinned to %s by an image override",
-			chainNode.Status.LatestHeight, chainNode.GetAppImage(),
+			requiredUpgrade.Height, chainNode.GetAppImage(),
 		)
 
 		// node-utils latches requiresUpgrade in memory and never clears it (pkg/nodeutils/node.go),
@@ -208,9 +196,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	}
 
-	if requiresUpgrade {
+	if requiredUpgrade != nil {
 		// Get upgrade from scheduled upgrades list
-		upgrade := r.getUpgrade(chainNode, chainNode.Status.LatestHeight)
+		upgrade := r.getUpgrade(chainNode, *requiredUpgrade)
 
 		logger.V(1).Info("upgrade is required", "upgrade", upgrade)
 
@@ -220,9 +208,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 				corev1.EventTypeWarning,
 				appsv1.ReasonUpgradeMissingData,
 				"Missing upgrade or image for upgrade at height %d",
-				chainNode.Status.LatestHeight,
+				requiredUpgrade.Height,
 			)
-			return fmt.Errorf("missing upgrade or image for height %d", chainNode.Status.LatestHeight)
+			return fmt.Errorf("missing upgrade or image for height %d", requiredUpgrade.Height)
 		}
 
 		logger.Info("upgrading node", "pod", pod.GetName())
@@ -437,12 +425,6 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 			},
 		},
 		{
-			Name: "trace",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		},
-		{
 			Name: "upgrades-config",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -476,14 +458,6 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 		env = append(env, corev1.EnvVar{Name: "SIGNER_PEER_DNS", Value: signerDNS})
 	}
 	env = append(env,
-		corev1.EnvVar{
-			Name:  "CREATE_FIFO",
-			Value: controllers.StringValueTrue,
-		},
-		corev1.EnvVar{
-			Name:  "TRACE_STORE",
-			Value: "/trace/trace.fifo",
-		},
 		corev1.EnvVar{
 			Name:  "NODE_BINARY_NAME",
 			Value: chainNode.Spec.App.App,
@@ -530,10 +504,6 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 				Name:      "data",
 				MountPath: "/home/app/data",
 				ReadOnly:  true,
-			},
-			{
-				Name:      "trace",
-				MountPath: "/trace",
 			},
 			{
 				Name:      "upgrades-config",
@@ -616,11 +586,8 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 		ImagePullPolicy: chainNode.GetAppImagePullPolicy(),
 		SecurityContext: securityContext,
 		Command:         []string{chainNode.Spec.App.App},
-		Args: append([]string{"start",
-			"--home", "/home/app",
-			"--trace-store", "/trace/trace.fifo",
-		}, chainNode.GetAdditionalRunFlags()...),
-		Env: chainNode.Spec.Config.GetEnv(),
+		Args:            append([]string{"start", "--home", "/home/app"}, chainNode.GetAdditionalRunFlags()...),
+		Env:             chainNode.Spec.Config.GetEnv(),
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          chainutils.P2pPortName,
@@ -670,10 +637,6 @@ func (r *Reconciler) buildAppContainer(chainNode *appsv1.ChainNode, configFilesM
 				Name:      "node-key",
 				MountPath: "/home/app/config/" + nodeKeyFilename,
 				SubPath:   nodeKeyFilename,
-			},
-			{
-				Name:      "trace",
-				MountPath: "/trace",
 			},
 		}, configFilesMounts...),
 		StartupProbe: &corev1.Probe{

@@ -1155,6 +1155,7 @@ Upgrade represents an upgrade processed by cosmopilot and added to status.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | height | Height at which the upgrade should occur. | int64 | true |
+| name | Governance plan name, when supplied by the chain. | string | false |
 | image | Container image replacement to be used in the upgrade. | string | true |
 | status | Upgrade status. | UpgradePhase | true |
 | source | Where cosmopilot got this upgrade from. | UpgradeSource | true |

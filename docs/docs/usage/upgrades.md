@@ -47,10 +47,23 @@ For full automation, ensure that the governance proposal includes the **containe
 ### Governance Upgrade Workflow
 1. When an upgrade proposal passes, `Cosmopilot` adds the upgrade to `.status.upgrades` as `scheduled`.
 2. If the container image is not included in the proposal, the upgrade is marked as `missing image`. In this case, you must manually add the upgrade to `.spec.app.upgrades` (see [Manual Upgrades](#manual-upgrades)).
+3. At the upgrade boundary, the node's SDK writes `data/upgrade-info.json`. The node sidecar validates
+   its height and plan name against the scheduled on-chain upgrade before reporting that the image
+   must change. Completed, skipped, stale, malformed, and mismatched markers are ignored.
+
+Because the SDK marker is stored on the data volume, governance upgrade detection survives sidecar
+and Pod restarts. If RPC is temporarily unavailable, a matching marker and scheduled plan are enough
+to recover the required target without inventing a committed height.
 
 ## Manual Upgrades
 
 Manual upgrades allow you to define upgrades directly in `.spec.app.upgrades`. These upgrades result in a straightforward binary swap, and `Cosmopilot` does not wait for the node to panic and halt, as is typical with governance upgrades.
+
+The sidecar stops the application once the locally committed ABCI height reaches one block before
+the configured target. Committed height is reconciled periodically and after CometBFT
+`NewBlockHeader` notifications. A disconnected websocket may delay the stop until the next poll; if
+the node has already advanced beyond the target, Cosmopilot still applies the explicitly configured
+upgrade instead of silently skipping it.
 
 ### Adding a Manual Upgrade
 Example configuration:
