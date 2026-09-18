@@ -530,6 +530,55 @@ func TestPodSpecChangedDetectsDeferredSidecarBecomingRequired(t *testing.T) {
 	assert.True(t, podSpecChanged(t.Context(), current, desired))
 }
 
+func TestPodSpecChangedDeferredConfigChanges(t *testing.T) {
+	tests := []struct {
+		name              string
+		currentHealthy    int32
+		desiredHealthy    int32
+		changeNonDeferred bool
+		removeDeferred    bool
+		wantChanged       bool
+	}{
+		{name: "omitted deferred-only change stays current", currentHealthy: 0, desiredHealthy: 0, wantChanged: false},
+		{name: "healthy deferred-only change requires rollout", currentHealthy: 1, desiredHealthy: 1, wantChanged: true},
+		{name: "materialized deferred-only change remains drift when group degrades", currentHealthy: 1, desiredHealthy: 0, wantChanged: true},
+		{name: "mixed change while unhealthy requires rollout", currentHealthy: 0, desiredHealthy: 0, changeNonDeferred: true, wantChanged: true},
+		{name: "removing a running deferred sidecar requires rollout", currentHealthy: 1, desiredHealthy: 0, removeDeferred: true, wantChanged: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldDeferred := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), Args: []string{"--old"}, DeferUntilHealthy: ptr.To(true)}
+			newDeferred := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v2"), Args: []string{"--new"}, DeferUntilHealthy: ptr.To(true)}
+			currentSidecars := []appsv1.SidecarSpec{oldDeferred}
+			desiredSidecars := []appsv1.SidecarSpec{newDeferred}
+			if tt.removeDeferred {
+				stillDeferred := appsv1.SidecarSpec{Name: "audit", Image: ptr.To("audit:v1"), DeferUntilHealthy: ptr.To(true)}
+				currentSidecars = []appsv1.SidecarSpec{oldDeferred, stillDeferred}
+				desiredSidecars = []appsv1.SidecarSpec{stillDeferred}
+			}
+			if tt.changeNonDeferred {
+				currentSidecars = append(currentSidecars, appsv1.SidecarSpec{Name: "metrics", Image: ptr.To("metrics:v1")})
+				desiredSidecars = append(desiredSidecars, appsv1.SidecarSpec{Name: "metrics", Image: ptr.To("metrics:v2")})
+			}
+
+			current := deferredSidecarPodSpecAtGeneration(t, tt.currentHealthy, 1, currentSidecars...)
+			desired := deferredSidecarPodSpecAtGeneration(t, tt.desiredHealthy, 2, desiredSidecars...)
+			require.NotEqual(t, current.Annotations[controllers.AnnotationPodSpecHash], desired.Annotations[controllers.AnnotationPodSpecHash])
+			if tt.changeNonDeferred {
+				require.NotEqual(t, current.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars], desired.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars])
+			} else {
+				require.Equal(t, current.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars], desired.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars])
+			}
+			assert.Equal(t, tt.wantChanged, podSpecChanged(t.Context(), current, desired))
+			if !tt.wantChanged {
+				require.True(t, syncPodSpecAnnotations(current, desired))
+				assert.Equal(t, desired.Annotations[controllers.AnnotationPodSpecHash], current.Annotations[controllers.AnnotationPodSpecHash])
+			}
+		})
+	}
+}
+
 func TestPodSpecChangedDetectsFirstDeferredSidecarOnLegacyNewGeneration(t *testing.T) {
 	legacy := deferredSidecarPodSpecAtGeneration(t, 1, 1)
 	delete(legacy.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)

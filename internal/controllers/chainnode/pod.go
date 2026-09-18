@@ -1457,9 +1457,51 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 		"new-generation", newGeneration,
 	)
 	if existingHasCompatibilityHash {
-		return newSpecHash != oldSpecHash || missingRequiredInitContainer(existing, new)
+		missingRequired := missingRequiredInitContainer(existing, new)
+		if newSpecHash == oldSpecHash {
+			return missingRequired
+		}
+		existingCompatibilityHash := existing.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars]
+		if existingCompatibilityHash == compatibleSpecHash && hasOmittedDeferredSidecar(new) && !hasMaterializedDeferredSidecar(existing) {
+			return missingRequired
+		}
+		return true
 	}
 	return newSpecHash != oldSpecHash && (existingGeneration != newGeneration || compatibleSpecHash != oldSpecHash)
+}
+
+func hasOmittedDeferredSidecar(pod *corev1.Pod) bool {
+	for _, name := range strings.Split(pod.Annotations[controllers.AnnotationDeferredSidecars], ",") {
+		if name == "" {
+			continue
+		}
+		found := false
+		for _, container := range pod.Spec.InitContainers {
+			if container.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMaterializedDeferredSidecar(pod *corev1.Pod) bool {
+	deferredNames := map[string]struct{}{}
+	for _, name := range strings.Split(pod.Annotations[controllers.AnnotationDeferredSidecars], ",") {
+		if name != "" {
+			deferredNames[name] = struct{}{}
+		}
+	}
+	for _, container := range pod.Spec.InitContainers {
+		if _, deferred := deferredNames[container.Name]; deferred {
+			return true
+		}
+	}
+	return false
 }
 
 func missingRequiredInitContainer(existing, desired *corev1.Pod) bool {
