@@ -32,6 +32,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
@@ -514,7 +515,7 @@ func TestBuildNodeUtilsInitContainerUsesBoundCredentialEnvironment(t *testing.T)
 	owner.Spec.Config.NodeUtilsEnv = []corev1.EnvVar{{Name: "CUSTOM", Value: "kept"}, {Name: nodeutils.ShutdownTokenEnvironmentVariable, Value: "user-token"}, {Name: nodeutils.ExpectedShutdownTokenHashEnvironmentVariable, Value: "user-hash"}}
 	r := &Reconciler{opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 	secretName := nodeUtilsShutdownSecretNameForToken(testShutdownToken)
-	container := r.buildNodeUtilsInitContainer(owner, secretName)
+	container := r.buildNodeUtilsInitContainer(owner, secretName, k8s.NonRootUID, k8s.NonRootUID)
 	assert.Contains(t, container.Env, corev1.EnvVar{Name: "CUSTOM", Value: "kept"})
 	tokenEnv := requireSingleEnv(t, container.Env, nodeutils.ShutdownTokenEnvironmentVariable)
 	require.NotNil(t, tokenEnv.ValueFrom.SecretKeyRef)
@@ -527,7 +528,7 @@ func TestBuildNodeUtilsInitContainerUsesBoundCredentialEnvironment(t *testing.T)
 func TestNodeUtilsContainersUsePinnedDefaultImage(t *testing.T) {
 	owner := nodeUtilsAuthTestNode()
 	r := &Reconciler{}
-	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildNodeUtilsInitContainer(owner, "shutdown-secret").Image)
+	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildNodeUtilsInitContainer(owner, "shutdown-secret", k8s.NonRootUID, k8s.NonRootUID).Image)
 	assert.Equal(t, images.DefaultNodeUtilsImage, r.buildCosmosignerDiscoveryInitContainer(owner, "signer").Image)
 }
 

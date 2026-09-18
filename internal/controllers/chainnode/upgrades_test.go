@@ -139,7 +139,7 @@ func TestGetUpgradeUsesExplicitTargetAtPreviousCommittedHeight(t *testing.T) {
 	assert.Equal(t, "repo/app:v2", got.Image)
 }
 
-func TestGetUpgradeAllowsNamelessForcedOnChainEntry(t *testing.T) {
+func TestGetUpgradeRefusesNamelessEntryForNamedAuthoritativeTarget(t *testing.T) {
 	r := &Reconciler{}
 	chainNode := &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
 		Height: 100,
@@ -149,8 +149,7 @@ func TestGetUpgradeAllowsNamelessForcedOnChainEntry(t *testing.T) {
 	}}}}
 
 	got := r.getUpgrade(chainNode, nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.OnChainUpgrade, Name: "v2"})
-	require.NotNil(t, got)
-	assert.Equal(t, "repo/app:v2", got.Image)
+	assert.Nil(t, got)
 }
 
 func TestResolveRequiredUpgradeMapsLegacySignalToLowestEligibleTarget(t *testing.T) {
@@ -159,6 +158,7 @@ func TestResolveRequiredUpgradeMapsLegacySignalToLowestEligibleTarget(t *testing
 		height int64
 		want   int64
 	}{
+		{name: "legacy stop boundary selects next-height target", height: 99, want: 100},
 		{name: "crosses target between legacy requests", height: 101, want: 100},
 		{name: "late observation selects earliest pending target", height: 110, want: 100},
 	} {
@@ -243,6 +243,136 @@ func TestApplyUpgradeStatusPreservesHeightWhenObservationIsStale(t *testing.T) {
 		LatestHeight: &latestHeight,
 	}))
 	assert.Equal(t, int64(99), chainNode.Status.LatestHeight)
+}
+
+func TestApplyUpgradeStatusRecordsAuthoritativeMarkerPlanBeforeImageSelection(t *testing.T) {
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec:       appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd", Image: "repo/app"}},
+		Status: appsv1.ChainNodeStatus{
+			LatestHeight: 99,
+			Upgrades: []appsv1.Upgrade{{
+				Height: 100,
+				Name:   "plan-a",
+				Image:  "repo/app:a",
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeScheduled,
+			}},
+		},
+	}
+	scheme := gcpImportTestScheme(t)
+	config := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-upgrades", Namespace: "default"},
+		Data:       map[string]string{upgradesConfigFile: `{"upgrades":[{"height":100,"name":"plan-a","image":"repo/app:a","status":"scheduled","source":"on-chain"}]}`},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node, config).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+	markerStatus := nodeutils.UpgradeStatus{
+		LatestHeight: ptr.To(int64(99)),
+		RequiredUpgrade: &nodeutils.RequiredUpgrade{
+			Height: 100,
+			Source: nodeutils.OnChainUpgrade,
+			Name:   "plan-b",
+		},
+	}
+
+	require.NoError(t, r.applyUpgradeStatus(t.Context(), node, markerStatus))
+	require.Len(t, node.Status.Upgrades, 1)
+	assert.Equal(t, appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}, node.Status.Upgrades[0])
+	assert.Nil(t, r.getUpgrade(node, nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.OnChainUpgrade, Name: "plan-a"}))
+	selected := r.getUpgrade(node, *markerStatus.RequiredUpgrade)
+	require.NotNil(t, selected)
+	assert.Equal(t, appsv1.UpgradeImageMissing, selected.Status)
+	assert.Empty(t, selected.Image)
+
+	published := &corev1.ConfigMap{}
+	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node-upgrades", Namespace: "default"}, published))
+	assert.Contains(t, published.Data[upgradesConfigFile], `"name":"plan-b"`)
+	assert.NotContains(t, published.Data[upgradesConfigFile], "repo/app:a")
+
+	restarted := &Reconciler{Client: c, Scheme: scheme}
+	require.NoError(t, restarted.applyUpgradeStatus(t.Context(), node, markerStatus))
+	assert.Equal(t, "plan-b", node.Status.Upgrades[0].Name)
+	assert.Empty(t, node.Status.Upgrades[0].Image)
+
+	node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{
+		Height:       100,
+		Name:         "plan-b",
+		Image:        "repo/app:b",
+		ForceOnChain: ptr.To(true),
+	}}
+	require.NoError(t, restarted.ensureUpgrades(t.Context(), node, false))
+	selected = restarted.getUpgrade(node, *markerStatus.RequiredUpgrade)
+	require.NotNil(t, selected)
+	assert.Equal(t, "repo/app:b", selected.Image)
+	assert.Equal(t, appsv1.UpgradeScheduled, selected.Status)
+}
+
+func TestApplyUpgradeStatusUsesMarkerImageWithoutOverwritingExplicitSamePlanImage(t *testing.T) {
+	tests := []struct {
+		name          string
+		existingImage string
+		markerImage   string
+		wantImage     string
+	}{
+		{name: "fills missing image", markerImage: "repo/app:b", wantImage: "repo/app:b"},
+		{name: "preserves explicit image", existingImage: "repo/custom:b", markerImage: "repo/app:b", wantImage: "repo/custom:b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upgrades := []appsv1.Upgrade{{
+				Height: 100,
+				Name:   "plan-b",
+				Image:  tt.existingImage,
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeImageMissing,
+			}}
+
+			got, changed := recordRequiredGovernanceUpgrade(upgrades, nodeutils.RequiredUpgrade{
+				Height: 100,
+				Source: nodeutils.OnChainUpgrade,
+				Name:   "plan-b",
+				Image:  tt.markerImage,
+			})
+			assert.True(t, changed)
+			assert.Equal(t, tt.wantImage, got[0].Image)
+			assert.Equal(t, appsv1.UpgradeScheduled, got[0].Status)
+		})
+	}
+}
+
+func TestApplyUpgradeStatusPreservesCompletedSkippedAndOngoingHistory(t *testing.T) {
+	for _, phase := range []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeSkipped, appsv1.UpgradeOnGoing} {
+		t.Run(string(phase), func(t *testing.T) {
+			node := &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
+				Height: 100,
+				Name:   "plan-a",
+				Image:  "repo/app:a",
+				Source: appsv1.OnChainUpgrade,
+				Status: phase,
+			}}}}
+			r := &Reconciler{}
+
+			require.NoError(t, r.applyUpgradeStatus(t.Context(), node, nodeutils.UpgradeStatus{RequiredUpgrade: &nodeutils.RequiredUpgrade{
+				Height: 100,
+				Source: nodeutils.OnChainUpgrade,
+				Name:   "plan-b",
+				Image:  "repo/app:b",
+			}}))
+			assert.Equal(t, "plan-a", node.Status.Upgrades[0].Name)
+			assert.Equal(t, "repo/app:a", node.Status.Upgrades[0].Image)
+			assert.Equal(t, phase, node.Status.Upgrades[0].Status)
+		})
+	}
 }
 
 func TestSelectedUpgradeImageFeedsPodAndConfigGenerationWithStaleHeight(t *testing.T) {
@@ -366,6 +496,91 @@ func TestEnsureUpgradesAppliesHistoricalImageDuringFreshBootstrap(t *testing.T) 
 	}
 }
 
+func TestEnsureUpgradesBackfillsNamedGovernancePlanFromDocumentedForceOnChainSpec(t *testing.T) {
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{
+			App:   "appd",
+			Image: "repo/app",
+			Upgrades: []appsv1.UpgradeSpec{{
+				Height:       3000,
+				Image:        "yourimage:yourtag",
+				ForceOnChain: ptr.To(true),
+			}},
+		}},
+		Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
+			Height: 3000,
+			Name:   "plan-b",
+			Source: appsv1.OnChainUpgrade,
+			Status: appsv1.UpgradeImageMissing,
+		}}},
+	}
+	scheme := gcpImportTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.ensureUpgrades(t.Context(), node, false))
+	require.Len(t, node.Status.Upgrades, 1)
+	assert.Equal(t, appsv1.Upgrade{
+		Height: 3000,
+		Name:   "plan-b",
+		Image:  "yourimage:yourtag",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}, node.Status.Upgrades[0])
+}
+
+func TestEnsureUpgradesRejectsStaleNamelessForcedEntryOnManagedChild(t *testing.T) {
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "set-fullnode-0",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.GroupVersion.String(),
+				Kind:       "ChainNodeSet",
+				Name:       "set",
+				UID:        types.UID("set-uid"),
+				Controller: ptr.To(true),
+			}},
+		},
+		Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{
+			App:   "appd",
+			Image: "repo/app",
+			Upgrades: []appsv1.UpgradeSpec{{
+				Height:       100,
+				Image:        "repo/app:plan-a",
+				ForceOnChain: ptr.To(true),
+			}},
+		}},
+		Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
+			Height: 100,
+			Name:   "plan-b",
+			Source: appsv1.OnChainUpgrade,
+			Status: appsv1.UpgradeImageMissing,
+		}}},
+	}
+	scheme := gcpImportTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.ensureUpgrades(t.Context(), node, false))
+	require.Len(t, node.Status.Upgrades, 1)
+	assert.Equal(t, appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}, node.Status.Upgrades[0])
+}
+
 func TestAddOrUpdateUpgradeRefreshesSameHeightGovernancePlan(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -380,16 +595,22 @@ func TestAddOrUpdateUpgradeRefreshesSameHeightGovernancePlan(t *testing.T) {
 			want:     appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/app:v2", Status: appsv1.UpgradeScheduled, Source: appsv1.OnChainUpgrade},
 		},
 		{
+			name:     "authoritative named plan replaces legacy nameless image",
+			existing: appsv1.Upgrade{Height: 100, Image: "repo/plan-a:v2", Status: appsv1.UpgradeScheduled, Source: appsv1.OnChainUpgrade},
+			incoming: appsv1.Upgrade{Height: 100, Name: "plan-b", Status: appsv1.UpgradeImageMissing, Source: appsv1.OnChainUpgrade},
+			want:     appsv1.Upgrade{Height: 100, Name: "plan-b", Status: appsv1.UpgradeImageMissing, Source: appsv1.OnChainUpgrade},
+		},
+		{
 			name:     "completed history",
 			existing: appsv1.Upgrade{Height: 100, Name: "plan-a", Image: "repo/app:v2", Status: appsv1.UpgradeCompleted, Source: appsv1.OnChainUpgrade},
 			incoming: appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/app:v2", Status: appsv1.UpgradeScheduled, Source: appsv1.OnChainUpgrade},
 			want:     appsv1.Upgrade{Height: 100, Name: "plan-a", Image: "repo/app:v2", Status: appsv1.UpgradeCompleted, Source: appsv1.OnChainUpgrade},
 		},
 		{
-			name:     "forced on-chain image",
+			name:     "authoritative plan image replaces nameless image",
 			existing: appsv1.Upgrade{Height: 100, Image: "repo/custom:v2", Status: appsv1.UpgradeScheduled, Source: appsv1.OnChainUpgrade},
 			incoming: appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/plan:v2", Status: appsv1.UpgradeScheduled, Source: appsv1.OnChainUpgrade},
-			want:     appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/custom:v2", Status: appsv1.UpgradeScheduled, Source: appsv1.OnChainUpgrade},
+			want:     appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/plan:v2", Status: appsv1.UpgradeScheduled, Source: appsv1.OnChainUpgrade},
 		},
 		{
 			name:     "manual override",
@@ -420,6 +641,105 @@ func TestAddOrUpdateUpgradeRefreshesSameHeightGovernancePlan(t *testing.T) {
 	}
 }
 
+func TestAuthoritativePlanThenDirectForceOnChainSpecUsesConfiguredImage(t *testing.T) {
+	legacy := appsv1.Upgrade{
+		Height: 100,
+		Image:  "repo/plan-a:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}
+	queried := appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}
+	configured := appsv1.Upgrade{
+		Height: 100,
+		Image:  "yourimage:yourtag",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}
+
+	upgrades := AddOrUpdateUpgrade([]appsv1.Upgrade{legacy}, queried)
+	upgrades = AddOrUpdateConfiguredUpgrade(upgrades, configured, false)
+	require.Len(t, upgrades, 1)
+	assert.Equal(t, appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Image:  "yourimage:yourtag",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}, upgrades[0])
+}
+
+func TestAddOrUpdateUpgradeRepeatedManualBackfillPreservesGovernanceIdentity(t *testing.T) {
+	upgrades := []appsv1.Upgrade{{
+		Height: 100,
+		Name:   "plan-b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}}
+	manual := appsv1.Upgrade{
+		Height: 100,
+		Image:  "repo/manual:v2",
+		Source: appsv1.ManualUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}
+
+	upgrades = AddOrUpdateUpgrade(upgrades, manual)
+	upgrades = AddOrUpdateUpgrade(upgrades, manual)
+	require.Len(t, upgrades, 1)
+	assert.Equal(t, appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Image:  "repo/manual:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}, upgrades[0])
+
+	replacement := appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-c",
+		Image:  "repo/plan-c:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}
+	upgrades = AddOrUpdateUpgrade(upgrades, replacement)
+	assert.Equal(t, replacement, upgrades[0])
+}
+
+func TestAddOrUpdateUpgradeChangedManualBackfillPreservesGovernanceIdentity(t *testing.T) {
+	upgrades := []appsv1.Upgrade{{
+		Height: 100,
+		Name:   "plan-b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}}
+	upgrades = AddOrUpdateUpgrade(upgrades, appsv1.Upgrade{
+		Height: 100,
+		Image:  "repo/manual:v2",
+		Source: appsv1.ManualUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	})
+	corrected := appsv1.Upgrade{
+		Height: 100,
+		Image:  "repo/manual:v3",
+		Source: appsv1.ManualUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}
+
+	upgrades = AddOrUpdateUpgrade(upgrades, corrected)
+	require.Len(t, upgrades, 1)
+	assert.Equal(t, appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Image:  "repo/manual:v3",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}, upgrades[0])
+}
+
 func TestAddOrUpdateConfiguredUpgradeBackfillsManualImageForNamedPlan(t *testing.T) {
 	existing := appsv1.Upgrade{
 		Height: 100,
@@ -434,7 +754,7 @@ func TestAddOrUpdateConfiguredUpgradeBackfillsManualImageForNamedPlan(t *testing
 		Status: appsv1.UpgradeScheduled,
 	}
 
-	got := AddOrUpdateConfiguredUpgrade([]appsv1.Upgrade{existing}, configured)
+	got := AddOrUpdateConfiguredUpgrade([]appsv1.Upgrade{existing}, configured, false)
 	require.Len(t, got, 1)
 	assert.Equal(t, appsv1.Upgrade{
 		Height: 100,
@@ -459,7 +779,56 @@ func TestAddOrUpdateConfiguredUpgradeRejectsNamelessOnChainImageForNamedPlan(t *
 		Status: appsv1.UpgradeScheduled,
 	}
 
-	got := AddOrUpdateConfiguredUpgrade([]appsv1.Upgrade{existing}, staleConfigured)
+	got := AddOrUpdateConfiguredUpgrade([]appsv1.Upgrade{existing}, staleConfigured, true)
+	require.Len(t, got, 1)
+	assert.Equal(t, existing, got[0])
+}
+
+func TestAddOrUpdateConfiguredUpgradePreservesTerminalAndOngoingGovernanceState(t *testing.T) {
+	for _, status := range []appsv1.UpgradePhase{
+		appsv1.UpgradeCompleted,
+		appsv1.UpgradeSkipped,
+		appsv1.UpgradeOnGoing,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			existing := appsv1.Upgrade{
+				Height: 100,
+				Name:   "plan-b",
+				Image:  "repo/app:v2",
+				Source: appsv1.OnChainUpgrade,
+				Status: status,
+			}
+			configured := appsv1.Upgrade{
+				Height: 100,
+				Name:   "plan-b",
+				Image:  "repo/configured:v2",
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeScheduled,
+			}
+
+			got := AddOrUpdateConfiguredUpgrade([]appsv1.Upgrade{existing}, configured, true)
+			require.Len(t, got, 1)
+			assert.Equal(t, existing, got[0])
+		})
+	}
+}
+
+func TestAddOrUpdateConfiguredUpgradePreservesCompletedPlanFromStandaloneNamelessSpec(t *testing.T) {
+	existing := appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Image:  "repo/app:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeCompleted,
+	}
+	configured := appsv1.Upgrade{
+		Height: 100,
+		Image:  "repo/configured:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}
+
+	got := AddOrUpdateConfiguredUpgrade([]appsv1.Upgrade{existing}, configured, false)
 	require.Len(t, got, 1)
 	assert.Equal(t, existing, got[0])
 }

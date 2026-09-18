@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
@@ -21,7 +22,7 @@ func TestAggregateChildUpgradesConflictingPlansIsOrderIndependent(t *testing.T) 
 	permutations := [][]int{
 		{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
 	}
-	want := appsv1.Upgrade{Height: 100, Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeImageMissing}
+	want := appsv1.Upgrade{Height: 100, Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeConflict}
 
 	for _, order := range permutations {
 		nodes := make([]appsv1.ChainNode, 0, len(order))
@@ -34,7 +35,82 @@ func TestAggregateChildUpgradesConflictingPlansIsOrderIndependent(t *testing.T) 
 	}
 }
 
+func TestAggregateChildUpgradesTreatsMixedNamelessAndNamedPlansAsConflict(t *testing.T) {
+	namelessPlanA := appsv1.Upgrade{
+		Height: 100,
+		Image:  "repo/app:a",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}
+	planB := appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}
+	want := appsv1.Upgrade{
+		Height: 100,
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeConflict,
+	}
+
+	for _, children := range [][]appsv1.Upgrade{{namelessPlanA, planB}, {planB, namelessPlanA}} {
+		nodes := make([]appsv1.ChainNode, 0, len(children))
+		for _, upgrade := range children {
+			nodes = append(nodes, appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{upgrade}}})
+		}
+		got := aggregateChildUpgrades(nodes)
+		require.Len(t, got, 1)
+		assert.Equal(t, want, got[0], "children %v", children)
+	}
+}
+
+func TestAggregateChildUpgradesConflictsAcrossReplacementPlanPhases(t *testing.T) {
+	planA := appsv1.Upgrade{Height: 100, Name: "plan-a", Image: "repo/app:a", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeScheduled}
+	for _, phase := range []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeOnGoing} {
+		planB := appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/app:b", Source: appsv1.OnChainUpgrade, Status: phase}
+		for _, children := range [][]appsv1.Upgrade{{planA, planB}, {planB, planA}} {
+			nodes := make([]appsv1.ChainNode, 0, len(children))
+			for _, upgrade := range children {
+				nodes = append(nodes, appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{upgrade}}})
+			}
+			got := aggregateChildUpgrades(nodes)
+			require.Len(t, got, 1)
+			assert.Equal(t, appsv1.Upgrade{
+				Height: 100,
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeConflict,
+			}, got[0], "phase %s children %v", phase, children)
+		}
+	}
+}
+
+func TestAggregateChildUpgradesConvergesAfterMarkerReplacement(t *testing.T) {
+	planBMissing := appsv1.Upgrade{Height: 100, Name: "plan-b", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeImageMissing}
+	planBReady := appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/app:b", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeScheduled}
+
+	got := aggregateChildUpgrades([]appsv1.ChainNode{
+		{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{planBMissing}}},
+		{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{planBReady}}},
+	})
+	require.Len(t, got, 1)
+	assert.Equal(t, planBReady, got[0])
+}
+
 func TestGetAppSpecWithUpgradesDoesNotPropagateConflictingPlan(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		Spec: appsv1.ChainNodeSetSpec{App: appsv1.AppSpec{Image: "repo/app", App: "appd"}},
+		Status: appsv1.ChainNodeSetStatus{Upgrades: []appsv1.Upgrade{{
+			Height: 100,
+			Source: appsv1.OnChainUpgrade,
+			Status: appsv1.UpgradeConflict,
+		}}},
+	}
+
+	assert.Empty(t, nodeSet.GetAppSpecWithUpgrades().Upgrades)
+}
+
+func TestGetAppSpecWithUpgradesPropagatesLegitimateNamelessMissingImage(t *testing.T) {
 	nodeSet := &appsv1.ChainNodeSet{
 		Spec: appsv1.ChainNodeSetSpec{App: appsv1.AppSpec{Image: "repo/app", App: "appd"}},
 		Status: appsv1.ChainNodeSetStatus{Upgrades: []appsv1.Upgrade{{
@@ -44,7 +120,89 @@ func TestGetAppSpecWithUpgradesDoesNotPropagateConflictingPlan(t *testing.T) {
 		}}},
 	}
 
-	assert.Empty(t, nodeSet.GetAppSpecWithUpgrades().Upgrades)
+	got := nodeSet.GetAppSpecWithUpgrades().Upgrades
+	require.Len(t, got, 1)
+	assert.Equal(t, int64(100), got[0].Height)
+	assert.True(t, got[0].ForceGovUpgrade())
+}
+
+func TestGetAppSpecWithUpgradesAddsPlanIdentityToUserForceOnChainImage(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		Spec: appsv1.ChainNodeSetSpec{App: appsv1.AppSpec{
+			Image: "repo/app",
+			App:   "appd",
+			Upgrades: []appsv1.UpgradeSpec{{
+				Height:       100,
+				Image:        "repo/manual:v2",
+				ForceOnChain: ptr.To(true),
+			}},
+		}},
+		Status: appsv1.ChainNodeSetStatus{Upgrades: []appsv1.Upgrade{{
+			Height: 100,
+			Name:   "plan-b",
+			Source: appsv1.OnChainUpgrade,
+			Status: appsv1.UpgradeImageMissing,
+		}}},
+	}
+
+	got := nodeSet.GetAppSpecWithUpgrades().Upgrades
+	require.Len(t, got, 1)
+	assert.Equal(t, "plan-b", got[0].Name)
+	assert.Equal(t, "repo/manual:v2", got[0].Image)
+	assert.True(t, got[0].ForceGovUpgrade())
+
+	child := childcontroller.AddOrUpdateConfiguredUpgrade([]appsv1.Upgrade{{
+		Height: 100,
+		Name:   "plan-b",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeImageMissing,
+	}}, appsv1.Upgrade{
+		Height: got[0].Height,
+		Name:   got[0].Name,
+		Image:  got[0].Image,
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}, true)
+	require.Len(t, child, 1)
+	assert.Equal(t, appsv1.Upgrade{
+		Height: 100,
+		Name:   "plan-b",
+		Image:  "repo/manual:v2",
+		Source: appsv1.OnChainUpgrade,
+		Status: appsv1.UpgradeScheduled,
+	}, child[0])
+}
+
+func TestEnsureUpgradesConvergesFromExplicitConflict(t *testing.T) {
+	planB := appsv1.Upgrade{Height: 100, Name: "plan-b", Image: "repo/app:b", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeScheduled}
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default"},
+		Status: appsv1.ChainNodeSetStatus{Upgrades: []appsv1.Upgrade{{
+			Height: 100,
+			Source: appsv1.OnChainUpgrade,
+			Status: appsv1.UpgradeConflict,
+		}}},
+	}
+	child := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "set-fullnode-0",
+			Namespace: "default",
+			Labels:    map[string]string{controllers.LabelChainNodeSet: "set"},
+		},
+		Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{planB}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNodeSet{}).
+		WithObjects(nodeSet, child).
+		Build()
+	r := &Reconciler{Client: c, Scheme: scheme}
+
+	require.NoError(t, r.ensureUpgrades(t.Context(), nodeSet))
+	require.Len(t, nodeSet.Status.Upgrades, 1)
+	assert.Equal(t, planB, nodeSet.Status.Upgrades[0])
 }
 
 func TestEnsureUpgradesConvergesFromPreviousPlanAfterChildrenReplaceIt(t *testing.T) {
@@ -92,7 +250,7 @@ func TestAggregateToChildRoundTripDoesNotRevertReplacementPlan(t *testing.T) {
 		Image:  staleSpec.Image,
 		Source: appsv1.OnChainUpgrade,
 		Status: appsv1.UpgradeScheduled,
-	})
+	}, true)
 	require.Len(t, child, 1)
 	assert.Equal(t, planB, child[0])
 
@@ -102,7 +260,7 @@ func TestAggregateToChildRoundTripDoesNotRevertReplacementPlan(t *testing.T) {
 		Image:  "repo/app:b",
 		Source: appsv1.OnChainUpgrade,
 		Status: appsv1.UpgradeScheduled,
-	})
+	}, true)
 	require.Len(t, child, 1)
 	assert.Equal(t, appsv1.Upgrade{
 		Height: 100,

@@ -103,6 +103,86 @@ func TestUpgradeMonitorGovernanceRequiresMatchingSDKFile(t *testing.T) {
 	assert.Equal(t, &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"}, monitor.Status().RequiredUpgrade)
 }
 
+func TestUpgradeMonitorMissingSDKUpgradeInfoIsNormal(t *testing.T) {
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`)
+	monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99}}, checker, infoPath, func() error { return nil })
+
+	require.NoError(t, monitor.Reconcile(t.Context()))
+	assert.Nil(t, monitor.Status().RequiredUpgrade)
+}
+
+func TestUpgradeMonitorReportsUnreadableOrInvalidSDKUpgradeInfo(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		mode    os.FileMode
+	}{
+		{name: "malformed", content: `{`, mode: 0o600},
+		{name: "invalid", content: `{"name":"","height":0}`, mode: 0o600},
+		{name: "permission", content: `{"name":"v2","height":100}`, mode: 0o000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`)
+			require.NoError(t, os.WriteFile(infoPath, []byte(tt.content), 0o600))
+			require.NoError(t, os.Chmod(infoPath, tt.mode))
+			t.Cleanup(func() { _ = os.Chmod(infoPath, 0o600) })
+			monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99}}, checker, infoPath, func() error { return nil })
+
+			err := monitor.Reconcile(t.Context())
+			require.ErrorContains(t, err, "SDK upgrade info")
+			assert.Nil(t, monitor.Status().RequiredUpgrade)
+		})
+	}
+}
+
+func TestUpgradeMonitorPreservesLatchedGovernanceRequirementOnMarkerReadError(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "partial write",
+			mutate: func(t *testing.T, path string) {
+				require.NoError(t, os.WriteFile(path, []byte(`{`), 0o600))
+			},
+		},
+		{
+			name: "permission denied",
+			mutate: func(t *testing.T, path string) {
+				require.NoError(t, os.Chmod(path, 0o000))
+				t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`)
+			require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"v2","height":100}`), 0o600))
+			monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99, 99}}, checker, infoPath, func() error { return nil })
+			require.NoError(t, monitor.Reconcile(t.Context()))
+			want := &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"}
+			assert.Equal(t, want, monitor.Status().RequiredUpgrade)
+
+			tt.mutate(t, infoPath)
+			require.ErrorContains(t, monitor.Reconcile(t.Context()), "SDK upgrade info")
+			assert.Equal(t, want, monitor.Status().RequiredUpgrade)
+		})
+	}
+}
+
+func TestUpgradeMonitorMissingMarkerClearsLatchedGovernanceRequirement(t *testing.T) {
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`)
+	require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"v2","height":100}`), 0o600))
+	monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99, 99}}, checker, infoPath, func() error { return nil })
+	require.NoError(t, monitor.Reconcile(t.Context()))
+	require.NotNil(t, monitor.Status().RequiredUpgrade)
+
+	require.NoError(t, os.Remove(infoPath))
+	require.NoError(t, monitor.Reconcile(t.Context()))
+	assert.Nil(t, monitor.Status().RequiredUpgrade)
+}
+
 func TestUpgradeMonitorUsesReplacementPlanIdentityAtSameHeight(t *testing.T) {
 	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"plan-b","image":"repo/app:v2","status":"scheduled","source":"on-chain"}]}`)
 	client := &fakeABCIClient{heights: []int64{99, 99}}
@@ -110,11 +190,40 @@ func TestUpgradeMonitorUsesReplacementPlanIdentityAtSameHeight(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"plan-a","height":100}`), 0o600))
 	require.NoError(t, monitor.Reconcile(t.Context()))
-	assert.Nil(t, monitor.Status().RequiredUpgrade)
+	assert.Equal(t, &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "plan-a"}, monitor.Status().RequiredUpgrade)
 
 	require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"plan-b","height":100}`), 0o600))
 	require.NoError(t, monitor.Reconcile(t.Context()))
 	assert.Equal(t, &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "plan-b"}, monitor.Status().RequiredUpgrade)
+}
+
+func TestUpgradeMonitorUsesAuthoritativeMarkerIdentityForSameHeightConfiguredPlan(t *testing.T) {
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"plan-a","image":"repo/app:a","status":"scheduled","source":"on-chain"}]}`)
+	require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"plan-b","height":100}`), 0o600))
+	want := &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "plan-b"}
+
+	monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99, 99}}, checker, infoPath, func() error { return nil })
+	require.NoError(t, monitor.Reconcile(t.Context()))
+	assert.Equal(t, want, monitor.Status().RequiredUpgrade)
+	require.NoError(t, monitor.Reconcile(t.Context()))
+	assert.Equal(t, want, monitor.Status().RequiredUpgrade)
+
+	restarted := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99}}, checker, infoPath, func() error { return nil })
+	require.NoError(t, restarted.Reconcile(t.Context()))
+	assert.Equal(t, want, restarted.Status().RequiredUpgrade)
+
+	stale := newUpgradeMonitor(&fakeABCIClient{heights: []int64{100}}, checker, infoPath, func() error { return nil })
+	require.NoError(t, stale.Reconcile(t.Context()))
+	assert.Nil(t, stale.Status().RequiredUpgrade)
+}
+
+func TestUpgradeMonitorReportsMarkerDockerImageForReplacementPlan(t *testing.T) {
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"name":"plan-a","image":"repo/app:a","status":"scheduled","source":"on-chain"}]}`)
+	require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"plan-b","height":100,"info":"{\"binaries\":{\"docker\":\"repo/app:b\"}}"}`), 0o600))
+	monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{99}}, checker, infoPath, func() error { return nil })
+
+	require.NoError(t, monitor.Reconcile(t.Context()))
+	assert.Equal(t, &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "plan-b", Image: "repo/app:b"}, monitor.Status().RequiredUpgrade)
 }
 
 func TestUpgradeMonitorRecoversGovernanceTargetWithoutRPC(t *testing.T) {
@@ -155,11 +264,20 @@ func TestUpgradeMonitorRevalidatesRecoveredGovernanceRequirement(t *testing.T) {
 	tests := []struct {
 		name   string
 		config string
+		want   *RequiredUpgrade
 	}{
 		{name: "completed", config: `{"upgrades":[{"height":100,"name":"v2","status":"completed","source":"on-chain"}]}`},
 		{name: "skipped", config: `{"upgrades":[{"height":100,"name":"v2","status":"skipped","source":"on-chain"}]}`},
-		{name: "mismatched name", config: `{"upgrades":[{"height":100,"name":"v3","status":"ongoing","source":"on-chain"}]}`},
-		{name: "mismatched height", config: `{"upgrades":[{"height":101,"name":"v2","status":"ongoing","source":"on-chain"}]}`},
+		{
+			name:   "mismatched name",
+			config: `{"upgrades":[{"height":100,"name":"v3","status":"ongoing","source":"on-chain"}]}`,
+			want:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+		},
+		{
+			name:   "config no longer contains marker height",
+			config: `{"upgrades":[{"height":101,"name":"v2","status":"ongoing","source":"on-chain"}]}`,
+			want:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -173,7 +291,7 @@ func TestUpgradeMonitorRevalidatesRecoveredGovernanceRequirement(t *testing.T) {
 			require.NoError(t, os.WriteFile(checker.configFile, []byte(tt.config), 0o600))
 			require.NoError(t, checker.reload())
 			require.NoError(t, monitor.Reconcile(t.Context()))
-			assert.Nil(t, monitor.Status().RequiredUpgrade)
+			assert.Equal(t, tt.want, monitor.Status().RequiredUpgrade)
 		})
 	}
 }
@@ -197,17 +315,34 @@ func TestUpgradeMonitorUsesMarkerWhenCurrentHeightObservationFails(t *testing.T)
 	assert.Equal(t, &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"}, status.RequiredUpgrade)
 }
 
-func TestUpgradeMonitorIgnoresInvalidSDKUpgradeInfo(t *testing.T) {
+func TestUpgradeMonitorRejectsInvalidOrIgnoresIneligibleSDKUpgradeInfo(t *testing.T) {
 	tests := []struct {
 		name      string
 		config    string
 		file      string
 		height    int64
 		writeFile bool
+		wantError bool
+		want      *RequiredUpgrade
 	}{
-		{name: "malformed", config: `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`, file: `{`, height: 99, writeFile: true},
-		{name: "zero height", config: `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`, file: `{"name":"v2","height":0}`, height: 99, writeFile: true},
-		{name: "wrong name", config: `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`, file: `{"name":"v3","height":100}`, height: 99, writeFile: true},
+		{name: "malformed", config: `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`, file: `{`, height: 99, writeFile: true, wantError: true},
+		{name: "zero height", config: `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`, file: `{"name":"v2","height":0}`, height: 99, writeFile: true, wantError: true},
+		{
+			name:      "replacement name",
+			config:    `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`,
+			file:      `{"name":"v3","height":100}`,
+			height:    99,
+			writeFile: true,
+			want:      &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v3"},
+		},
+		{
+			name:      "absent config entry",
+			config:    `{"upgrades":[]}`,
+			file:      `{"name":"v2","height":100}`,
+			height:    99,
+			writeFile: true,
+			want:      &RequiredUpgrade{Height: 100, Source: OnChainUpgrade, Name: "v2"},
+		},
 		{name: "wrong height", config: `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"on-chain"}]}`, file: `{"name":"v2","height":101}`, height: 99, writeFile: true},
 		{name: "manual config", config: `{"upgrades":[{"height":100,"name":"v2","status":"scheduled","source":"manual"}]}`, file: `{"name":"v2","height":100}`, height: 98, writeFile: true},
 		{name: "completed", config: `{"upgrades":[{"height":100,"name":"v2","status":"completed","source":"on-chain"}]}`, file: `{"name":"v2","height":100}`, height: 99, writeFile: true},
@@ -223,8 +358,13 @@ func TestUpgradeMonitorIgnoresInvalidSDKUpgradeInfo(t *testing.T) {
 				require.NoError(t, os.WriteFile(infoPath, []byte(tt.file), 0o600))
 			}
 			monitor := newUpgradeMonitor(&fakeABCIClient{heights: []int64{tt.height}}, checker, infoPath, func() error { return nil })
-			require.NoError(t, monitor.Reconcile(t.Context()))
-			assert.Nil(t, monitor.Status().RequiredUpgrade)
+			err := monitor.Reconcile(t.Context())
+			if tt.wantError {
+				require.ErrorContains(t, err, "SDK upgrade info")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.want, monitor.Status().RequiredUpgrade)
 		})
 	}
 }
@@ -234,7 +374,7 @@ func TestUpgradeMonitorPartialThenValidSDKFileRecovers(t *testing.T) {
 	client := &fakeABCIClient{heights: []int64{99, 99}}
 	monitor := newUpgradeMonitor(client, checker, infoPath, func() error { return nil })
 	require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":`), 0o600))
-	require.NoError(t, monitor.Reconcile(t.Context()))
+	require.ErrorContains(t, monitor.Reconcile(t.Context()), "SDK upgrade info")
 	assert.Nil(t, monitor.Status().RequiredUpgrade)
 
 	require.NoError(t, os.WriteFile(infoPath, []byte(`{"name":"v2","height":100}`), 0o600))

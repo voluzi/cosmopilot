@@ -441,7 +441,7 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 }
 
 // buildNodeUtilsInitContainer creates the node-utils sidecar init container.
-func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, shutdownSecretName string) corev1.Container {
+func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, shutdownSecretName string, runAsUser, runAsGroup int64) corev1.Container {
 	var sidecarRestartAlways = corev1.ContainerRestartPolicyAlways
 	env := []corev1.EnvVar{
 		{
@@ -489,12 +489,17 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 		}},
 	})
 
+	securityContext := k8s.RestrictedSecurityContext()
+	securityContext.RunAsUser = ptr.To(runAsUser)
+	securityContext.RunAsGroup = ptr.To(runAsGroup)
+	securityContext.RunAsNonRoot = ptr.To(runAsUser != 0)
+
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
 		Image:           r.opts.GetNodeUtilsImage(),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &sidecarRestartAlways,
-		SecurityContext: k8s.RestrictedSecurityContext(),
+		SecurityContext: securityContext,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          nodeUtilsPortName,
@@ -530,6 +535,29 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 			PeriodSeconds:    2,
 		},
 	}
+}
+
+func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityContext) (int64, int64, error) {
+	var runAsUser *int64
+	if app != nil && app.RunAsUser != nil {
+		runAsUser = app.RunAsUser
+	} else if pod != nil && pod.RunAsUser != nil {
+		runAsUser = pod.RunAsUser
+	}
+	if runAsUser == nil {
+		return 0, 0, fmt.Errorf("node-utils requires an explicit numeric runAsUser on the app container or pod security context to read the SDK upgrade marker")
+	}
+
+	var runAsGroup *int64
+	if app != nil && app.RunAsGroup != nil {
+		runAsGroup = app.RunAsGroup
+	} else if pod != nil && pod.RunAsGroup != nil {
+		runAsGroup = pod.RunAsGroup
+	}
+	if runAsGroup == nil {
+		return 0, 0, fmt.Errorf("node-utils requires an explicit numeric runAsGroup on the app container or pod security context to traverse the app data directory")
+	}
+	return *runAsUser, *runAsGroup, nil
 }
 
 func signerPeerDNS(chainNode *appsv1.ChainNode) string {
@@ -742,6 +770,10 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	if appSecurityContext == nil {
 		appSecurityContext = k8s.RestrictedSecurityContext()
 	}
+	nodeUtilsRunAsUser, nodeUtilsRunAsGroup, err := effectiveRunIdentity(appSecurityContext, podSecurityContext)
+	if err != nil {
+		return nil, fmt.Errorf("build node-utils for %s: %w", chainNode.GetName(), err)
+	}
 
 	podLabels := map[string]string{
 		controllers.LabelNodeID:    chainNode.Status.NodeID,
@@ -781,7 +813,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			SecurityContext:               podSecurityContext,
 			TerminationGracePeriodSeconds: chainNode.Spec.Config.GetTerminationGracePeriodSeconds(),
 			Volumes:                       r.buildBaseVolumes(chainNode),
-			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode, shutdownSecretName)},
+			InitContainers:                []corev1.Container{r.buildNodeUtilsInitContainer(chainNode, shutdownSecretName, nodeUtilsRunAsUser, nodeUtilsRunAsGroup)},
 			Containers:                    []corev1.Container{r.buildAppContainer(chainNode, configFilesMounts, readinessPath, appResources, appSecurityContext)},
 		},
 	}

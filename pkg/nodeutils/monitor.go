@@ -3,6 +3,7 @@ package nodeutils
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -21,6 +22,7 @@ type RequiredUpgrade struct {
 	Height int64         `json:"height"`
 	Source UpgradeSource `json:"source"`
 	Name   string        `json:"name,omitempty"`
+	Image  string        `json:"image,omitempty"`
 }
 
 type UpgradeStatus struct {
@@ -101,12 +103,23 @@ func (m *upgradeMonitor) Reconcile(ctx context.Context) error {
 
 	freshHeight := m.observeHeight(ctx)
 	m.mu.Lock()
-	if required := m.status.RequiredUpgrade; required != nil && required.Source == OnChainUpgrade &&
-		!m.governanceRequirementValidLocked(*required, freshHeight) {
-		m.status.RequiredUpgrade = nil
+	if required := m.status.RequiredUpgrade; required != nil && required.Source == OnChainUpgrade {
+		valid, err := m.governanceRequirementValidLocked(*required, freshHeight)
+		if err != nil {
+			m.mu.Unlock()
+			return err
+		}
+		if !valid {
+			m.status.RequiredUpgrade = nil
+		}
 	}
 	if m.status.RequiredUpgrade == nil {
-		m.status.RequiredUpgrade = m.requiredUpgradeLocked(freshHeight)
+		required, err := m.requiredUpgradeLocked(freshHeight)
+		if err != nil {
+			m.mu.Unlock()
+			return err
+		}
+		m.status.RequiredUpgrade = required
 	}
 	required := m.status.RequiredUpgrade
 	stopSucceeded := m.stopSucceeded
@@ -140,34 +153,43 @@ func (m *upgradeMonitor) observeHeight(ctx context.Context) bool {
 	return true
 }
 
-func (m *upgradeMonitor) requiredUpgradeLocked(freshHeight bool) *RequiredUpgrade {
+func (m *upgradeMonitor) requiredUpgradeLocked(freshHeight bool) (*RequiredUpgrade, error) {
 	config := m.checker.Snapshot()
 	for _, upgrade := range config.Upgrades {
 		if upgrade.Source != ManualUpgrade || upgrade.Status != UpgradeScheduled || upgrade.Height <= 0 {
 			continue
 		}
 		if m.status.LatestHeight != nil && *m.status.LatestHeight >= upgrade.Height-1 {
-			return &RequiredUpgrade{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name}
+			return &RequiredUpgrade{Height: upgrade.Height, Source: upgrade.Source, Name: upgrade.Name}, nil
 		}
 	}
 
 	info, err := readSDKUpgradeInfo(m.upgradeInfoPath)
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read SDK upgrade info %q: %w", m.upgradeInfoPath, err)
 	}
 	if !matchesGovernanceUpgrade(config, info) || !m.governanceHeightEligibleLocked(info.Height, freshHeight) {
-		return nil
+		return nil, nil
 	}
-	return &RequiredUpgrade{Height: info.Height, Source: OnChainUpgrade, Name: info.Name}
+	return &RequiredUpgrade{Height: info.Height, Source: OnChainUpgrade, Name: info.Name, Image: info.Image}, nil
 }
 
-func (m *upgradeMonitor) governanceRequirementValidLocked(required RequiredUpgrade, freshHeight bool) bool {
+func (m *upgradeMonitor) governanceRequirementValidLocked(required RequiredUpgrade, freshHeight bool) (bool, error) {
 	info, err := readSDKUpgradeInfo(m.upgradeInfoPath)
-	if err != nil || info.Height != required.Height || info.Name != required.Name {
-		return false
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read SDK upgrade info %q: %w", m.upgradeInfoPath, err)
+	}
+	if info.Height != required.Height || info.Name != required.Name {
+		return false, nil
 	}
 	return matchesGovernanceUpgrade(m.checker.Snapshot(), info) &&
-		m.governanceHeightEligibleLocked(info.Height, freshHeight)
+		m.governanceHeightEligibleLocked(info.Height, freshHeight), nil
 }
 
 func (m *upgradeMonitor) governanceHeightEligibleLocked(target int64, freshHeight bool) bool {
@@ -183,21 +205,21 @@ func (m *upgradeMonitor) governanceHeightEligibleLocked(target int64, freshHeigh
 
 func matchesGovernanceUpgrade(config UpgradesConfig, info sdkUpgradeInfo) bool {
 	for _, upgrade := range config.Upgrades {
-		if upgrade.Source != OnChainUpgrade ||
-			(upgrade.Status != UpgradeScheduled && upgrade.Status != UpgradeOnGoing) ||
-			upgrade.Height != info.Height {
+		if upgrade.Source != OnChainUpgrade || upgrade.Height != info.Height {
 			continue
 		}
-		if upgrade.Name == "" || upgrade.Name == info.Name {
-			return true
+		if upgrade.Status == UpgradeCompleted || upgrade.Status == UpgradeSkipped {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 type sdkUpgradeInfo struct {
 	Name   string `json:"name"`
 	Height int64  `json:"height"`
+	Info   string `json:"info,omitempty"`
+	Image  string `json:"-"`
 }
 
 func readSDKUpgradeInfo(path string) (sdkUpgradeInfo, error) {
@@ -211,6 +233,14 @@ func readSDKUpgradeInfo(path string) (sdkUpgradeInfo, error) {
 	}
 	if info.Height <= 0 || info.Name == "" {
 		return sdkUpgradeInfo{}, fmt.Errorf("invalid SDK upgrade info")
+	}
+	metadata := struct {
+		Binaries struct {
+			Docker string `json:"docker"`
+		} `json:"binaries"`
+	}{}
+	if json.Unmarshal([]byte(info.Info), &metadata) == nil {
+		info.Image = metadata.Binaries.Docker
 	}
 	return info, nil
 }

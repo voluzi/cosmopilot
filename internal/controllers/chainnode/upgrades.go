@@ -56,7 +56,11 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 			u.Status = appsv1.UpgradeSkipped
 		}
 
-		chainNode.Status.Upgrades = AddOrUpdateConfiguredUpgrade(chainNode.Status.Upgrades, u)
+		chainNode.Status.Upgrades = AddOrUpdateConfiguredUpgrade(
+			chainNode.Status.Upgrades,
+			u,
+			chainNode.IsControlledByChainNodeSet(),
+		)
 		if u.Status == appsv1.UpgradeSkipped {
 			for i := range chainNode.Status.Upgrades {
 				if chainNode.Status.Upgrades[i].Height == u.Height && chainNode.Status.Upgrades[i].Status == appsv1.UpgradeScheduled {
@@ -150,11 +154,74 @@ func (r *Reconciler) getUpgradeStatus(ctx context.Context, chainNode *appsv1.Cha
 }
 
 func (r *Reconciler) applyUpgradeStatus(ctx context.Context, chainNode *appsv1.ChainNode, status nodeutils.UpgradeStatus) error {
-	if status.LatestHeight == nil || *status.LatestHeight <= chainNode.Status.LatestHeight {
+	statusChanged := false
+	upgradesChanged := false
+	if status.LatestHeight != nil && *status.LatestHeight > chainNode.Status.LatestHeight {
+		chainNode.Status.LatestHeight = *status.LatestHeight
+		statusChanged = true
+	}
+	if required := status.RequiredUpgrade; required != nil && required.Source == nodeutils.OnChainUpgrade &&
+		required.Height > 0 && required.Name != "" {
+		chainNode.Status.Upgrades, upgradesChanged = recordRequiredGovernanceUpgrade(chainNode.Status.Upgrades, *required)
+		statusChanged = statusChanged || upgradesChanged
+	}
+	if !statusChanged {
 		return nil
 	}
-	chainNode.Status.LatestHeight = *status.LatestHeight
-	return r.Status().Update(ctx, chainNode)
+	if err := r.Status().Update(ctx, chainNode); err != nil {
+		return err
+	}
+	if upgradesChanged {
+		return r.ensureUpgradesConfig(ctx, chainNode)
+	}
+	return nil
+}
+
+func recordRequiredGovernanceUpgrade(
+	upgrades []appsv1.Upgrade,
+	required nodeutils.RequiredUpgrade,
+) ([]appsv1.Upgrade, bool) {
+	status := appsv1.UpgradeImageMissing
+	if required.Image != "" {
+		status = appsv1.UpgradeScheduled
+	}
+	incoming := appsv1.Upgrade{
+		Height: required.Height,
+		Name:   required.Name,
+		Image:  required.Image,
+		Source: appsv1.OnChainUpgrade,
+		Status: status,
+	}
+	for i, existing := range upgrades {
+		if existing.Height != required.Height {
+			continue
+		}
+		if existing.Status == appsv1.UpgradeCompleted || existing.Status == appsv1.UpgradeSkipped ||
+			existing.Status == appsv1.UpgradeOnGoing {
+			return upgrades, false
+		}
+		if existing.Name != required.Name || existing.Name == "" {
+			upgrades[i] = incoming
+			return upgrades, true
+		}
+
+		updated := existing
+		updated.Source = appsv1.OnChainUpgrade
+		if updated.Image == "" && required.Image != "" {
+			updated.Image = required.Image
+		}
+		if updated.Image == "" {
+			updated.Status = appsv1.UpgradeImageMissing
+		} else {
+			updated.Status = appsv1.UpgradeScheduled
+		}
+		if updated == existing {
+			return upgrades, false
+		}
+		upgrades[i] = updated
+		return upgrades, true
+	}
+	return append(upgrades, incoming), true
 }
 
 func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.UpgradeStatus) (*nodeutils.RequiredUpgrade, error) {
@@ -168,11 +235,15 @@ func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.Upgrad
 	if status.LatestHeight == nil {
 		return nil, fmt.Errorf("legacy node-utils requires an upgrade without reporting a height")
 	}
+	maxEligibleHeight := *status.LatestHeight
+	if maxEligibleHeight < 1<<63-1 {
+		maxEligibleHeight++
+	}
 
 	var selected *appsv1.Upgrade
 	for i := range chainNode.Status.Upgrades {
 		upgrade := &chainNode.Status.Upgrades[i]
-		if upgrade.Height > *status.LatestHeight ||
+		if upgrade.Height > maxEligibleHeight ||
 			(upgrade.Status != appsv1.UpgradeScheduled && upgrade.Status != appsv1.UpgradeOnGoing) {
 			continue
 		}
@@ -192,13 +263,16 @@ func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.Upgrad
 
 func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, required nodeutils.RequiredUpgrade) *appsv1.Upgrade {
 	for _, upgrade := range chainNode.Status.Upgrades {
-		if upgrade.Height != required.Height || (upgrade.Status != appsv1.UpgradeScheduled && upgrade.Status != appsv1.UpgradeOnGoing) {
+		if upgrade.Height != required.Height ||
+			(upgrade.Status != appsv1.UpgradeScheduled &&
+				upgrade.Status != appsv1.UpgradeOnGoing &&
+				upgrade.Status != appsv1.UpgradeImageMissing) {
 			continue
 		}
 		if required.Source != "" && string(upgrade.Source) != string(required.Source) {
 			continue
 		}
-		if required.Name != "" && upgrade.Name != "" && upgrade.Name != required.Name {
+		if required.Name != "" && upgrade.Name != required.Name {
 			continue
 		}
 		return &upgrade
@@ -276,10 +350,6 @@ func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []app
 				if u.Source == appsv1.ManualUpgrade {
 					return upgrades
 				}
-				if u.Source == appsv1.OnChainUpgrade && u.Name == "" && u.Image != "" {
-					upgrades[i].Name = upgrade.Name
-					return upgrades
-				}
 				upgrades[i] = upgrade
 			case upgrade.Source == appsv1.OnChainUpgrade && upgrade.Name == "":
 				if u.Source == appsv1.OnChainUpgrade && u.Name != "" {
@@ -291,9 +361,13 @@ func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []app
 				}
 				upgrade.Name = u.Name
 				upgrades[i] = upgrade
-			case u.Source == appsv1.OnChainUpgrade && upgrade.Source == appsv1.ManualUpgrade && u.Image == "":
-				upgrades[i].Image = upgrade.Image
-				upgrades[i].Status = upgrade.Status
+			case u.Source == appsv1.OnChainUpgrade && upgrade.Source == appsv1.ManualUpgrade:
+				if u.Name != "" {
+					upgrades[i].Image = upgrade.Image
+					upgrades[i].Status = upgrade.Status
+				} else {
+					upgrades[i] = upgrade
+				}
 			default:
 				upgrades[i] = upgrade
 			}
@@ -305,17 +379,29 @@ func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []app
 }
 
 // AddOrUpdateConfiguredUpgrade merges a spec-originated entry without allowing a stale propagated
-// plan identity to replace a named governance plan queried directly by the child.
-func AddOrUpdateConfiguredUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []appsv1.Upgrade {
+// plan identity to replace a named governance plan queried directly by a managed child.
+func AddOrUpdateConfiguredUpgrade(
+	upgrades []appsv1.Upgrade,
+	upgrade appsv1.Upgrade,
+	managedByChainNodeSet bool,
+) []appsv1.Upgrade {
 	for i, existing := range upgrades {
-		if existing.Height != upgrade.Height || existing.Source != appsv1.OnChainUpgrade ||
+		if existing.Height != upgrade.Height {
+			continue
+		}
+		if existing.Status == appsv1.UpgradeCompleted || existing.Status == appsv1.UpgradeSkipped ||
+			existing.Status == appsv1.UpgradeOnGoing {
+			return upgrades
+		}
+		if existing.Source != appsv1.OnChainUpgrade ||
 			upgrade.Source != appsv1.OnChainUpgrade || existing.Name == "" {
 			continue
 		}
-		if upgrade.Name == "" || upgrade.Name != existing.Name {
+		if (upgrade.Name == "" && managedByChainNodeSet) ||
+			(upgrade.Name != "" && upgrade.Name != existing.Name) {
 			return upgrades
 		}
-		if existing.Image == "" && upgrade.Image != "" {
+		if upgrade.Image != "" {
 			upgrades[i].Image = upgrade.Image
 			upgrades[i].Status = upgrade.Status
 		}

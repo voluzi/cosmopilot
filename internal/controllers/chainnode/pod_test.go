@@ -10,13 +10,18 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 )
 
 func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
@@ -34,7 +39,7 @@ func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
 			t.Fatal("generated pod still contains trace volume")
 		}
 	}
-	nodeUtils := r.buildNodeUtilsInitContainer(chainNode, "shutdown-token")
+	nodeUtils := r.buildNodeUtilsInitContainer(chainNode, "shutdown-token", k8s.NonRootUID, k8s.NonRootUID)
 	for _, env := range nodeUtils.Env {
 		if env.Name == "TRACE_STORE" || env.Name == "CREATE_FIFO" {
 			t.Fatalf("node-utils still contains trace environment %s", env.Name)
@@ -58,6 +63,160 @@ func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
 			t.Fatalf("app still contains trace mount %#v", mount)
 		}
 	}
+}
+
+func TestNodeUtilsUsesEffectiveAppRunAsUserForSDKUpgradeInfo(t *testing.T) {
+	tests := []struct {
+		name               string
+		config             *appsv1.Config
+		wantUID            int64
+		wantGID            int64
+		wantRunAsNonRoot   bool
+		checkIsolationFrom bool
+	}{
+		{
+			name:             "restricted defaults use uid 1000",
+			wantUID:          k8s.NonRootUID,
+			wantGID:          k8s.NonRootUID,
+			wantRunAsNonRoot: true,
+		},
+		{
+			name: "app uid zero overrides pod uid",
+			config: &appsv1.Config{
+				SecurityContext: &corev1.SecurityContext{
+					RunAsUser:                ptr.To[int64](0),
+					RunAsGroup:               ptr.To[int64](0),
+					RunAsNonRoot:             ptr.To(false),
+					Privileged:               ptr.To(true),
+					AllowPrivilegeEscalation: ptr.To(true),
+					Capabilities: &corev1.Capabilities{
+						Add: []corev1.Capability{"SYS_ADMIN"},
+					},
+				},
+				PodSecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](2000), RunAsGroup: ptr.To[int64](2000)},
+			},
+			wantUID:            0,
+			wantGID:            0,
+			wantRunAsNonRoot:   false,
+			checkIsolationFrom: true,
+		},
+		{
+			name: "app without uid inherits explicit pod uid",
+			config: &appsv1.Config{
+				SecurityContext:    &corev1.SecurityContext{AllowPrivilegeEscalation: ptr.To(false)},
+				PodSecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](2345), RunAsGroup: ptr.To[int64](2346)},
+			},
+			wantUID:          2345,
+			wantGID:          2346,
+			wantRunAsNonRoot: true,
+		},
+		{
+			name: "node-utils matches app owner for sdk 0600 marker",
+			config: &appsv1.Config{
+				SecurityContext:    &corev1.SecurityContext{RunAsUser: ptr.To[int64](3456), RunAsGroup: ptr.To[int64](3457)},
+				PodSecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](2000), RunAsGroup: ptr.To[int64](2000)},
+			},
+			wantUID:          3456,
+			wantGID:          3457,
+			wantRunAsNonRoot: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod, err := renderPodForSecurityContextTest(t, tt.config)
+			require.NoError(t, err)
+			appSecurityContext := pod.Spec.Containers[0].SecurityContext
+			require.NotNil(t, appSecurityContext)
+			nodeUtils := requireNodeUtilsContainer(t, pod)
+			require.NotNil(t, nodeUtils.SecurityContext)
+			require.NotNil(t, nodeUtils.SecurityContext.RunAsUser)
+			assert.Equal(t, tt.wantUID, *nodeUtils.SecurityContext.RunAsUser)
+			require.NotNil(t, nodeUtils.SecurityContext.RunAsGroup)
+			assert.Equal(t, tt.wantGID, *nodeUtils.SecurityContext.RunAsGroup)
+			require.NotNil(t, nodeUtils.SecurityContext.RunAsNonRoot)
+			assert.Equal(t, tt.wantRunAsNonRoot, *nodeUtils.SecurityContext.RunAsNonRoot)
+			if appSecurityContext.RunAsUser != nil {
+				assert.Equal(t, *appSecurityContext.RunAsUser, *nodeUtils.SecurityContext.RunAsUser)
+			}
+			if appSecurityContext.RunAsGroup != nil {
+				assert.Equal(t, *appSecurityContext.RunAsGroup, *nodeUtils.SecurityContext.RunAsGroup)
+			}
+			if tt.checkIsolationFrom {
+				assert.Nil(t, nodeUtils.SecurityContext.Privileged)
+				require.NotNil(t, nodeUtils.SecurityContext.AllowPrivilegeEscalation)
+				assert.False(t, *nodeUtils.SecurityContext.AllowPrivilegeEscalation)
+				require.NotNil(t, nodeUtils.SecurityContext.Capabilities)
+				assert.Empty(t, nodeUtils.SecurityContext.Capabilities.Add)
+				assert.Equal(t, []corev1.Capability{"ALL"}, nodeUtils.SecurityContext.Capabilities.Drop)
+				require.NotNil(t, nodeUtils.SecurityContext.SeccompProfile)
+				assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, nodeUtils.SecurityContext.SeccompProfile.Type)
+			}
+			for _, mount := range nodeUtils.VolumeMounts {
+				if mount.Name == "data" {
+					assert.True(t, mount.ReadOnly)
+					return
+				}
+			}
+			t.Fatal("node-utils data mount not found")
+		})
+	}
+}
+
+func TestGetPodSpecRejectsImageDefinedUserForNodeUtilsMarkerAccess(t *testing.T) {
+	config := &appsv1.Config{
+		SecurityContext:    &corev1.SecurityContext{},
+		PodSecurityContext: &corev1.PodSecurityContext{},
+	}
+
+	pod, err := renderPodForSecurityContextTest(t, config)
+	require.Nil(t, pod)
+	require.ErrorContains(t, err, "explicit numeric runAsUser")
+}
+
+func TestGetPodSpecRejectsImageDefinedGroupForNodeUtilsDataTraversal(t *testing.T) {
+	config := &appsv1.Config{
+		SecurityContext:    &corev1.SecurityContext{RunAsUser: ptr.To[int64](1001)},
+		PodSecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](1001)},
+	}
+
+	pod, err := renderPodForSecurityContextTest(t, config)
+	require.Nil(t, pod)
+	require.ErrorContains(t, err, "explicit numeric runAsGroup")
+}
+
+func renderPodForSecurityContextTest(t *testing.T, config *appsv1.Config) (*corev1.Pod, error) {
+	t.Helper()
+	genesisConfigMap := "genesis"
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec: appsv1.ChainNodeSpec{
+			App:     appsv1.AppSpec{Image: "repo/app", App: "appd"},
+			Config:  config,
+			Genesis: &appsv1.GenesisConfig{ConfigMap: &genesisConfigMap},
+		},
+	}
+	scheme := gcpImportTestScheme(t)
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace},
+	}).Build()
+	r := &Reconciler{
+		Client: client,
+		Scheme: scheme,
+		opts:   &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+	}
+	return r.getPodSpec(t.Context(), node, "config-hash", "shutdown-secret")
+}
+
+func requireNodeUtilsContainer(t *testing.T, pod *corev1.Pod) *corev1.Container {
+	t.Helper()
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == nodeUtilsContainerName {
+			return &pod.Spec.InitContainers[i]
+		}
+	}
+	t.Fatal("node-utils container not found")
+	return nil
 }
 
 func TestPodSpecHash(t *testing.T) {
