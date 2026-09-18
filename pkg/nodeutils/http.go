@@ -199,20 +199,23 @@ func (s *NodeUtils) shutdownServer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.prepareForcedShutdown()
+	startShutdown := s.shutdownStarted.CompareAndSwap(false, true)
+	if startShutdown {
+		defer func() {
+			go func() {
+				log.Info("shutting down server")
+				if err := s.Stop(true); err != nil {
+					log.Errorf("error shutting down server: %v", err)
+				}
+			}()
+		}()
+	}
 	w.WriteHeader(http.StatusAccepted)
 	if err := responseController.Flush(); err != nil {
 		log.WithError(err).Error("failed to flush shutdown acknowledgement")
 		return
 	}
-	if !s.shutdownStarted.CompareAndSwap(false, true) {
-		return
-	}
-	go func() {
-		log.Info("shutting down server")
-		if err := s.Stop(true); err != nil {
-			log.Errorf("error shutting down server: %v", err)
-		}
-	}()
 }
 
 func (s *NodeUtils) shutdownAuthorized(r *http.Request) bool {

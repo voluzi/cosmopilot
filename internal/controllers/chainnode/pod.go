@@ -487,7 +487,9 @@ func (r *Reconciler) recoverOngoingManualUpgrade(ctx context.Context, chainNode 
 		return true, nil
 	}
 	if podMatchesManualUpgrade(currentPod, upgrade) {
-		if !appContainerStarted(currentPod, chainNode.Spec.App.App) && !containerHasTerminated(currentPod, chainNode.Spec.App.App) {
+		if !appContainerStarted(currentPod, chainNode.Spec.App.App) &&
+			!containerHasTerminated(currentPod, chainNode.Spec.App.App) &&
+			!podInFailedState(chainNode, currentPod) {
 			return true, nil
 		}
 		return true, r.completeRecoveredManualUpgrade(ctx, chainNode, upgrade)

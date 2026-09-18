@@ -27,6 +27,27 @@ import (
 const testShutdownToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 const wrongTestShutdownToken = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"
 
+type flushErrorResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *flushErrorResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *flushErrorResponseWriter) Write(body []byte) (int, error) {
+	return len(body), nil
+}
+
+func (w *flushErrorResponseWriter) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *flushErrorResponseWriter) FlushError() error {
+	return errors.New("flush failed")
+}
+
 func newShutdownTestServer(token string, stop func() error) *NodeUtils {
 	s := &NodeUtils{
 		cfg:            &Options{ShutdownToken: token},
@@ -158,6 +179,26 @@ func TestShutdownServerAcknowledgesBeforeStopCompletes(t *testing.T) {
 		t.Fatal("shutdown did not start after acknowledgement")
 	}
 	close(release)
+}
+
+func TestShutdownServerStillStopsWhenAcknowledgementFlushFails(t *testing.T) {
+	stopped := make(chan struct{}, 1)
+	s := newShutdownTestServer(testShutdownToken, func() error {
+		stopped <- struct{}{}
+		return nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/shutdown", nil)
+	req.Header.Set("Authorization", "Bearer "+testShutdownToken)
+	resp := &flushErrorResponseWriter{header: make(http.Header)}
+
+	s.router.ServeHTTP(resp, req)
+
+	assert.Equal(t, http.StatusAccepted, resp.status)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("forced shutdown was abandoned after acknowledgement flush failed")
+	}
 }
 
 func TestShutdownServerFlushesAcknowledgementBeforeProcessExit(t *testing.T) {

@@ -297,3 +297,50 @@ func TestEnsurePodCompletesTerminatedStampedManualUpgradeBeforeCrashRecovery(t *
 	assert.Equal(t, "v2", node.Status.AppVersion)
 	assert.Equal(t, appsv1.UpgradeCompleted, node.Status.Upgrades[0].Status)
 }
+
+func TestEnsurePodCompletesFailedStampedManualUpgradeBeforeCrashRecovery(t *testing.T) {
+	ctx := t.Context()
+	scheme := nodeUtilsAuthTestScheme(t)
+	node := nodeUtilsAuthTestNode()
+	node.Spec.App.Image = "repo/app:v1"
+	node.Status.Upgrades = []appsv1.Upgrade{{
+		Height: 100,
+		Source: appsv1.ManualUpgrade,
+		Name:   "v2",
+		Image:  "repo/app:v2",
+		Status: appsv1.UpgradeOnGoing,
+	}}
+	credential := nodeUtilsShutdownCredential{name: nodeUtilsShutdownSecretNameForToken(testShutdownToken), uid: "secret-uid", token: testShutdownToken}
+	bindNodeUtilsCredential(node, credential.name, credential.uid)
+	secret := ownedNodeUtilsSecret(t, scheme, node, credential.token, credential.uid)
+	config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace}}
+	upgradesConfig := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-upgrades", Namespace: node.Namespace},
+		Data:       map[string]string{upgradesConfigFile: `{"upgrades":[]}`},
+	}
+	specClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build()
+	specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
+	current, err := specReconciler.getPodSpec(ctx, node, "config-hash", credential.name)
+	require.NoError(t, err)
+	stampNodeUtilsShutdownCredential(current, credential)
+	current.Status = corev1.PodStatus{Phase: corev1.PodFailed}
+	backing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node, current, secret, config, upgradesConfig).Build()
+	var nodeUtilsCalls int
+	r := &Reconciler{
+		Client:    backing,
+		APIReader: backing,
+		Scheme:    scheme,
+		recorder:  record.NewFakeRecorder(10),
+		opts:      &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+		upgradeClientFactory: func(string) upgradeStatusClient {
+			nodeUtilsCalls++
+			return failingUpgradeStatusClient{err: errors.New("node-utils unavailable")}
+		},
+	}
+
+	require.NoError(t, r.ensurePod(ctx, nil, node, "config-hash"))
+	assert.Zero(t, nodeUtilsCalls)
+	assert.Equal(t, "repo/app:v2", node.Status.AppImage)
+	assert.Equal(t, "v2", node.Status.AppVersion)
+	assert.Equal(t, appsv1.UpgradeCompleted, node.Status.Upgrades[0].Status)
+}

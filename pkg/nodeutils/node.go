@@ -57,6 +57,8 @@ type NodeUtils struct {
 	coarseStats            *statscollector.Collector
 	mockStats              *MockStats
 	shutdownStarted        atomic.Bool
+	forcedShutdown         atomic.Bool
+	terminationEvidenceMu  sync.Mutex
 	stopNode               func() error
 	cancel                 context.CancelFunc
 }
@@ -262,9 +264,30 @@ func (s *NodeUtils) Start() error {
 
 func (s *NodeUtils) Stop(force bool) error {
 	log.WithField("force", force).Info("stopping server")
-	if !force {
+	var status UpgradeStatus
+	if force {
+		s.prepareForcedShutdown()
+		status = s.upgradeMonitor.Status()
+	} else {
+		s.terminationEvidenceMu.Lock()
+		if s.forcedShutdown.Load() {
+			s.terminationEvidenceMu.Unlock()
+			return nil
+		}
 		if err := s.upgradeMonitor.reconcile(context.Background(), false); err != nil {
 			log.WithError(err).Warn("final upgrade reconciliation did not complete")
+		}
+		status = s.upgradeMonitor.Status()
+		if !s.forcedShutdown.Load() && s.cfg.TerminationMessagePath != "" {
+			if body, err := json.Marshal(status); err != nil {
+				log.WithError(err).Warn("failed to marshal final node-utils status")
+			} else if err := os.WriteFile(s.cfg.TerminationMessagePath, body, 0o600); err != nil {
+				log.WithError(err).Warn("failed to persist final node-utils status")
+			}
+		}
+		s.terminationEvidenceMu.Unlock()
+		if s.forcedShutdown.Load() {
+			return nil
 		}
 	}
 
@@ -277,20 +300,6 @@ func (s *NodeUtils) Stop(force bool) error {
 	// more so that cosmopilot can retrieve latest height before total shutdown.
 	// Note: Only check halt-height if it's actually configured (> 0), otherwise
 	// halt-height=0 would match latestBlockHeight=0 and prevent shutdown.
-	status := s.upgradeMonitor.Status()
-	if s.cfg.TerminationMessagePath != "" {
-		if force {
-			if err := os.Truncate(s.cfg.TerminationMessagePath, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
-				log.WithError(err).Warn("failed to clear final node-utils status")
-			}
-		} else {
-			if body, err := json.Marshal(status); err != nil {
-				log.WithError(err).Warn("failed to marshal final node-utils status")
-			} else if err := os.WriteFile(s.cfg.TerminationMessagePath, body, 0o600); err != nil {
-				log.WithError(err).Warn("failed to persist final node-utils status")
-			}
-		}
-	}
 	var latestHeight int64
 	if status.LatestHeight != nil {
 		latestHeight = *status.LatestHeight
@@ -329,6 +338,18 @@ func (s *NodeUtils) Stop(force bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return s.server.Shutdown(ctx)
+}
+
+func (s *NodeUtils) prepareForcedShutdown() {
+	s.forcedShutdown.Store(true)
+	s.terminationEvidenceMu.Lock()
+	defer s.terminationEvidenceMu.Unlock()
+	if s.cfg.TerminationMessagePath == "" {
+		return
+	}
+	if err := os.Truncate(s.cfg.TerminationMessagePath, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.WithError(err).Warn("failed to clear final node-utils status")
+	}
 }
 
 func (s *NodeUtils) getNodeProcess() (*process.Process, error) {

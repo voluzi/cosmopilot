@@ -1,17 +1,33 @@
 package nodeutils
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	abci "github.com/cometbft/cometbft/abci/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type blockingStopABCIClient struct {
+	started chan struct{}
+	release chan struct{}
+	height  int64
+}
+
+func (c *blockingStopABCIClient) GetAbciInfo(context.Context) (abci.ResponseInfo, error) {
+	close(c.started)
+	<-c.release
+	return abci.ResponseInfo{LastBlockHeight: c.height}, nil
+}
 
 func TestStopOnlyStopsApplicationWhenForced(t *testing.T) {
 	for _, tt := range []struct {
@@ -133,6 +149,62 @@ func TestForcedStopClearsGracefulTerminationSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, body)
 	assert.Equal(t, int32(1), stops.Load())
+}
+
+func TestForcedShutdownWinsConcurrentGracefulTerminationEvidence(t *testing.T) {
+	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[]}`)
+	client := &blockingStopABCIClient{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		height:  99,
+	}
+	monitor := newUpgradeMonitor(client, checker, infoPath, func() error { return nil })
+	terminationPath := filepath.Join(t.TempDir(), "termination.log")
+	stopped := make(chan struct{}, 1)
+	server := newShutdownTestServer(testShutdownToken, func() error {
+		stopped <- struct{}{}
+		return nil
+	})
+	server.cfg.HaltHeight = 100
+	server.cfg.TerminationMessagePath = terminationPath
+	server.upgradeMonitor = monitor
+
+	gracefulDone := make(chan error, 1)
+	go func() { gracefulDone <- server.Stop(false) }()
+	select {
+	case <-client.started:
+	case <-time.After(time.Second):
+		t.Fatal("graceful final reconciliation did not start")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/shutdown", nil)
+	req.Header.Set("Authorization", "Bearer "+testShutdownToken)
+	resp := httptest.NewRecorder()
+	requestDone := make(chan struct{})
+	go func() {
+		server.router.ServeHTTP(resp, req)
+		close(requestDone)
+	}()
+	require.Eventually(t, server.forcedShutdown.Load, time.Second, time.Millisecond)
+	close(client.release)
+	require.NoError(t, <-gracefulDone)
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("forced shutdown acknowledgement did not complete")
+	}
+	require.Equal(t, http.StatusAccepted, resp.Code)
+	body, err := os.ReadFile(terminationPath)
+	if err == nil {
+		assert.Empty(t, body)
+	} else {
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("forced application stop did not complete")
+	}
 }
 
 func TestGracefulStopDoesNotStopApplicationForNewManualRequirement(t *testing.T) {
