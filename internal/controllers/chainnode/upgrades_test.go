@@ -286,6 +286,51 @@ func TestApplyUpgradeStatusPreservesHeightWhenObservationIsStale(t *testing.T) {
 	assert.Equal(t, int64(99), chainNode.Status.LatestHeight)
 }
 
+func TestUpdateLatestHeightDoesNotPersistRequiredUpgrade(t *testing.T) {
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+		Spec:       appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd", Image: "repo/app"}},
+		Status: appsv1.ChainNodeStatus{
+			LatestHeight: 100,
+			Upgrades: []appsv1.Upgrade{{
+				Height: 50,
+				Name:   "completed",
+				Image:  "repo/app:v1",
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeCompleted,
+			}},
+		},
+	}
+	scheme := gcpImportTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node).
+		Build()
+	r := &Reconciler{
+		Client: c,
+		Scheme: scheme,
+		upgradeClientFactory: func(string) upgradeStatusClient {
+			return staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{
+				LatestHeight: ptr.To(int64(150)),
+				RequiredUpgrade: &nodeutils.RequiredUpgrade{
+					Height: 200,
+					Source: nodeutils.OnChainUpgrade,
+					Name:   "untrusted-marker",
+					Image:  "repo/app:v2",
+				},
+			}}
+		},
+	}
+	wantUpgrades := append([]appsv1.Upgrade(nil), node.Status.Upgrades...)
+
+	require.NoError(t, r.updateLatestHeight(t.Context(), node))
+	persisted := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: node.Name, Namespace: node.Namespace}, persisted))
+	assert.Equal(t, int64(150), persisted.Status.LatestHeight)
+	assert.Equal(t, wantUpgrades, persisted.Status.Upgrades)
+}
+
 func TestApplyUpgradeStatusRejectsMarkerBelowPersistedHeight(t *testing.T) {
 	node := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},

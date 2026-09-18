@@ -596,5 +596,5 @@ func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.C
 	if err != nil {
 		return err
 	}
-	return r.applyUpgradeStatus(ctx, chainNode, status)
+	return r.applyUpgradeStatus(ctx, chainNode, nodeutils.UpgradeStatus{LatestHeight: status.LatestHeight})
 }

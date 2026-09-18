@@ -167,6 +167,17 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	logger.V(1).Info("retrieving upgrade status")
 	upgradeStatus, err := r.getUpgradeStatus(ctx, chainNode)
 	if err != nil {
+		switch {
+		case !podSpecCurrent:
+			logger.Info("pod spec changed while node-utils is unavailable", "pod", pod.GetName())
+			return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
+		case !nodeUtilsTokenCurrent:
+			logger.Info("node-utils shutdown token changed while node-utils is unavailable", "pod", pod.GetName())
+			return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
+		case !configCurrent:
+			logger.Info("config changed while node-utils is unavailable", "pod", pod.GetName())
+			return r.recreatePod(ctx, chainNode, currentPod, pod, r.opts.DisruptionCheckEnabled)
+		}
 		return fmt.Errorf("failed to retrieve upgrade status for %s: %w", chainNode.GetName(), err)
 	}
 	upgradeStatus = sanitizeUnknownGovernanceRequirement(chainNode, currentPod, upgradeStatus)

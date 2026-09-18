@@ -3,6 +3,7 @@ package chainnode
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
@@ -238,6 +239,10 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 			}
 		}
 
+		if err := r.clearHaltHeightHold(ctx, chainNode); err != nil {
+			return nil, ctrl.Result{}, fmt.Errorf("failed to clear halt-height hold for replacement data: %w", err)
+		}
+
 		logger.Info("creating pvc", "pvc", chainNode.GetName(), "size", storageSize)
 
 		pvc = &corev1.PersistentVolumeClaim{
@@ -318,6 +323,15 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		return pvc, result, err
 	}
 	return pvc, ctrl.Result{}, nil
+}
+
+func (r *Reconciler) clearHaltHeightHold(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	if _, ok := chainNode.Annotations[appsv1.AnnotationHaltHeightHold]; !ok {
+		return nil
+	}
+	chainNode.Annotations = maps.Clone(chainNode.Annotations)
+	delete(chainNode.Annotations, appsv1.AnnotationHaltHeightHold)
+	return r.Update(ctx, chainNode)
 }
 
 func rebaseDataProgress(chainNode *appsv1.ChainNode, height int64) bool {

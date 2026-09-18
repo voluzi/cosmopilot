@@ -46,7 +46,15 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 			require.NoError(t, corev1.AddToScheme(scheme))
 			require.NoError(t, snapshotv1.AddToScheme(scheme))
 			node := &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "node",
+					Namespace: "default",
+					UID:       "node-uid",
+					Annotations: map[string]string{
+						appsv1.AnnotationHaltHeightHold: "100",
+						"example.com/unrelated":         "preserved",
+					},
+				},
 				Spec: appsv1.ChainNodeSpec{
 					App:         appsv1.AppSpec{App: "appd", Image: "repo/app", Version: ptr.To("v1")},
 					Persistence: &appsv1.Persistence{},
@@ -96,8 +104,70 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 			assert.True(t, strings.HasPrefix(cacheKey, "repo/app:v1:"))
 			container := r.buildAppContainer(stored, nil, "/ready", corev1.ResourceRequirements{}, nil)
 			assert.Equal(t, "repo/app:v1", container.Image)
+			persisted := &appsv1.ChainNode{}
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(stored), persisted))
+			assert.NotContains(t, persisted.Annotations, appsv1.AnnotationHaltHeightHold)
+			assert.Equal(t, "preserved", persisted.Annotations["example.com/unrelated"])
 		})
 	}
+}
+
+func TestEnsureDataVolumeClearsHaltHoldWhenSnapshotHeightIsUnknown(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			UID:       "node-uid",
+			Annotations: map[string]string{
+				appsv1.AnnotationHaltHeightHold: "100",
+				"example.com/unrelated":         "preserved",
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{App: "appd", Image: "repo/app", Version: ptr.To("v1")},
+			Persistence: &appsv1.Persistence{
+				RestoreFromSnapshot: &appsv1.PvcSnapshot{Name: "snapshot"},
+			},
+		},
+		Status: appsv1.ChainNodeStatus{
+			LatestHeight: 100,
+			AppImage:     "repo/app:v2",
+			AppVersion:   "v2",
+			Upgrades: []appsv1.Upgrade{{
+				Height: 100,
+				Image:  "repo/app:v2",
+				Status: appsv1.UpgradeCompleted,
+			}},
+		},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: "default"},
+		Status:     &snapshotv1.VolumeSnapshotStatus{},
+	}
+	c := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node, snapshot).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme}
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+	wantUpgrades := append([]appsv1.Upgrade(nil), stored.Status.Upgrades...)
+
+	_, _, err := r.ensureDataVolume(t.Context(), nil, stored)
+	require.NoError(t, err)
+	persisted := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(node), persisted))
+	assert.NotContains(t, persisted.Annotations, appsv1.AnnotationHaltHeightHold)
+	assert.Equal(t, "preserved", persisted.Annotations["example.com/unrelated"])
+	assert.Equal(t, int64(100), persisted.Status.LatestHeight)
+	assert.Equal(t, "repo/app:v2", persisted.Status.AppImage)
+	assert.Equal(t, "v2", persisted.Status.AppVersion)
+	assert.Equal(t, wantUpgrades, persisted.Status.Upgrades)
 }
 
 func TestEnsureDataVolumePreservesLatestCompletedImageForStateSyncFromScratch(t *testing.T) {

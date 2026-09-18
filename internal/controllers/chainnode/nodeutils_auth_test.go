@@ -764,6 +764,110 @@ func TestEnsurePodDoesNotRecreateRunningAppWhenNodeUtilsCrashes(t *testing.T) {
 	assert.Zero(t, deletes.Load())
 }
 
+func TestEnsurePodRecreatesDriftWhenNodeUtilsIsUnavailable(t *testing.T) {
+	tests := []struct {
+		name       string
+		configHash string
+		mutate     func(*corev1.Pod)
+	}{
+		{
+			name:       "pod spec drift",
+			configHash: "config-hash",
+			mutate: func(pod *corev1.Pod) {
+				pod.Annotations[controllers.AnnotationPodSpecHash] = "stale-spec-hash"
+			},
+		},
+		{
+			name:       "config drift",
+			configHash: "new-config-hash",
+			mutate:     func(*corev1.Pod) {},
+		},
+		{
+			name:       "shutdown credential drift",
+			configHash: "config-hash",
+			mutate: func(pod *corev1.Pod) {
+				pod.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash] = "stale-token-hash"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			scheme := nodeUtilsAuthTestScheme(t)
+			owner := nodeUtilsAuthTestNode()
+			owner.Spec.App.Image = "repo/app:v1"
+			credential := nodeUtilsShutdownCredential{
+				name:  nodeUtilsShutdownSecretNameForToken(testShutdownToken),
+				uid:   "secret-uid",
+				token: testShutdownToken,
+			}
+			bindNodeUtilsCredential(owner, credential.name, credential.uid)
+			secret := ownedNodeUtilsSecret(t, scheme, owner, credential.token, credential.uid)
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: owner.Name, Namespace: owner.Namespace}}
+			specClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build()
+			specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
+			current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", credential.name)
+			require.NoError(t, err)
+			stampNodeUtilsShutdownCredential(current, credential)
+			tt.mutate(current)
+			current.Status = corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  owner.Spec.App.App,
+					Ready: true,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}},
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					Name:  nodeUtilsContainerName,
+					Ready: true,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}},
+			}
+			backing := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(owner).
+				WithObjects(owner, current, secret, config).
+				Build()
+
+			var deletes atomic.Int32
+			kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodDelete {
+					deletes.Add(1)
+				}
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Failure","message":"test failure","code":500}`)),
+				}, nil
+			})}
+			clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient)
+			require.NoError(t, err)
+			r := &Reconciler{
+				Client:          backing,
+				APIReader:       backing,
+				ClientSet:       clientSet,
+				Scheme:          scheme,
+				recorder:        record.NewFakeRecorder(10),
+				disruptionLocks: newLockManager(),
+				opts: &controllers.ControllerRunOptions{
+					NodeUtilsImage:           "node-utils:test",
+					DisruptionCheckEnabled:   true,
+					DisruptionMaxUnavailable: 1,
+				},
+				upgradeClientFactory: func(string) upgradeStatusClient {
+					return failingUpgradeStatusClient{err: errors.New("node-utils unavailable")}
+				},
+			}
+
+			err = r.ensurePod(ctx, nil, owner, tt.configHash)
+			require.ErrorContains(t, err, "failed to delete pod")
+			assert.Equal(t, int32(1), deletes.Load())
+		})
+	}
+}
+
 func TestEnsurePodLeavesHaltedAppUntouchedForUnknownMarkerWhenGovernanceDiscoveryDisabled(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
