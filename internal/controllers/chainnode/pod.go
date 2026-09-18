@@ -264,20 +264,12 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 				"Failed to restart for upgrade: %v",
 				err,
 			)
-			var upgradeStatus appsv1.UpgradePhase
 			if upgraded {
 				// If there was an error on pod creation or watching but the image was already swapped, we mark the upgrade
 				// completed anyway to avoid downgrading and corrupt data.
-				chainNode.Status.AppImage = upgrade.Image
-				chainNode.Status.AppVersion = upgrade.GetVersion()
-				upgradeStatus = appsv1.UpgradeCompleted
-				if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
-					return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
-				}
-			} else {
-				upgradeStatus = appsv1.UpgradeScheduled
+				return r.completeUpgrade(ctx, chainNode, upgrade, "failed to reset VPA after upgrade")
 			}
-			return r.setUpgradeStatus(ctx, chainNode, upgrade, upgradeStatus)
+			return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeScheduled)
 		}
 		r.recorder.Eventf(chainNode,
 			corev1.EventTypeNormal,
@@ -285,12 +277,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			"Upgraded node to %s on height %d",
 			upgrade.Image, upgrade.Height,
 		)
-		chainNode.Status.AppImage = upgrade.Image
-		chainNode.Status.AppVersion = upgrade.GetVersion()
-		if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
-			return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
-		}
-		return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
+		return r.completeUpgrade(ctx, chainNode, upgrade, "failed to reset VPA after upgrade")
 	}
 
 	// A terminated application with a live node-utils sidecar gets one chance to report a
@@ -508,12 +495,17 @@ func (r *Reconciler) recoverOngoingManualUpgrade(ctx context.Context, chainNode 
 }
 
 func (r *Reconciler) completeRecoveredManualUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade) error {
+	return r.completeUpgrade(ctx, chainNode, upgrade, "reset VPA after recovered manual upgrade")
+}
+
+func (r *Reconciler) completeUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade, resetFailure string) error {
+	completed := *upgrade
 	if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
-		return fmt.Errorf("reset VPA after recovered manual upgrade for %s: %w", chainNode.GetName(), err)
+		return fmt.Errorf("%s for %s: %w", resetFailure, chainNode.GetName(), err)
 	}
-	chainNode.Status.AppImage = upgrade.Image
-	chainNode.Status.AppVersion = upgrade.GetVersion()
-	return r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted)
+	chainNode.Status.AppImage = completed.Image
+	chainNode.Status.AppVersion = completed.GetVersion()
+	return r.setUpgradeStatus(ctx, chainNode, &completed, appsv1.UpgradeCompleted)
 }
 
 // attestPodHealth records that the ChainNode controller successfully probed the node after the
