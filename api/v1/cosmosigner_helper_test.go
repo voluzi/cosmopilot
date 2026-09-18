@@ -11,11 +11,8 @@ import (
 // TestCosmosignerGetImagePrecedence verifies the image resolution order: an explicit per-CR
 // .spec.cosmosigner.image always wins; otherwise the operator-wide default (wired from the
 // -cosmosigner-image/COSMOSIGNER_IMAGE flag) is used; only when that is also empty does the
-// hardcoded DefaultCosmosignerImage constant apply.
+// built-in default apply.
 func TestCosmosignerGetImagePrecedence(t *testing.T) {
-	if DefaultCosmosignerImage != images.DefaultCosmosignerImage {
-		t.Fatalf("compatibility alias = %q, want %q", DefaultCosmosignerImage, images.DefaultCosmosignerImage)
-	}
 	explicit := "explicit/image:v1"
 	c := &Cosmosigner{Image: &explicit}
 	if got := c.GetImage("operator/default:v2"); got != explicit {
@@ -31,7 +28,7 @@ func TestCosmosignerGetImagePrecedence(t *testing.T) {
 		t.Fatalf("operator default must be used when the resource image is empty, got %q", got)
 	}
 
-	if got := unset.GetImage(""); got != DefaultCosmosignerImage {
+	if got := unset.GetImage(""); got != images.DefaultCosmosignerImage {
 		t.Fatalf("hardcoded default must be used when nothing else is configured, got %q", got)
 	}
 }

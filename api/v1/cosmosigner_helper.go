@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -23,7 +24,7 @@ func (c *Cosmosigner) GetReplicas() int32 {
 
 // GetImage returns the configured signer image: the explicit per-CR override when set, otherwise
 // operatorDefault (the operator-wide cosmosigner image, wired from the `-cosmosigner-image` /
-// `COSMOSIGNER_IMAGE` flag — see ControllerRunOptions.CosmosignerImage), and DefaultCosmosignerImage
+// `COSMOSIGNER_IMAGE` flag — see ControllerRunOptions.CosmosignerImage), and the built-in default
 // only when even that is empty (e.g. a manager run with no image configured at all).
 func (c *Cosmosigner) GetImage(operatorDefault string) string {
 	if c != nil && c.Image != nil && *c.Image != "" {
@@ -32,7 +33,7 @@ func (c *Cosmosigner) GetImage(operatorDefault string) string {
 	if operatorDefault != "" {
 		return operatorDefault
 	}
-	return DefaultCosmosignerImage
+	return images.DefaultCosmosignerImage
 }
 
 // GetStateStorageSize returns the configured per-replica state PVC size, defaulting to

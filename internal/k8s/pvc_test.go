@@ -8,6 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 func TestPvcHelperBuildWriteFilePodUsesConfiguredImageAndSecrets(t *testing.T) {
@@ -49,7 +51,7 @@ func TestPvcHelperBuildDownloadGenesisPodUsesDefaultImageAndSecrets(t *testing.T
 	pod := helper.buildDownloadGenesisPod("https://example.com/genesis.json.zst", "config/genesis.json", "priority", nil, nil)
 	require.Len(t, pod.Spec.Containers, 1)
 	container := pod.Spec.Containers[0]
-	assert.Equal(t, DefaultUtilityImage, container.Image)
+	assert.Equal(t, images.DefaultUtilityImage, container.Image)
 	assert.Equal(t, []corev1.LocalObjectReference{{Name: "registry-creds"}}, pod.Spec.ImagePullSecrets)
 	assert.Equal(t, []string{"/bin/sh"}, container.Command)
 	assert.Equal(t, []string{"-c", "wget -qO- 'https://example.com/genesis.json.zst' | zstd -d > /pvc/config/genesis.json"}, container.Args)

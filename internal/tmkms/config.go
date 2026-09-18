@@ -8,7 +8,6 @@ import (
 )
 
 const (
-	DefaultTmKmsImage  = images.DefaultTmKmsImage
 	configFileName     = "config.toml"
 	tmkmsAppName       = "tmkms"
 	identityKeyName    = "kms-identity.key"
@@ -19,7 +18,7 @@ const (
 
 func defaultConfig() *Config {
 	return &Config{
-		Image:        DefaultTmKmsImage,
+		Image:        images.DefaultTmKmsImage,
 		Chains:       make([]*ChainConfig, 0),
 		Validators:   make([]*ValidatorConfig, 0),
 		Providers:    make(map[string][]Provider),

@@ -9,7 +9,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 type App struct {
@@ -177,7 +177,7 @@ func (a *App) appEnv() []corev1.EnvVar {
 
 func (a *App) utilityImageRef() string {
 	if a.utilityImage == "" {
-		return k8s.DefaultUtilityImage
+		return images.DefaultUtilityImage
 	}
 	return a.utilityImage
 }

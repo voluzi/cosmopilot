@@ -7,10 +7,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
-const (
-	LabelWorkerName          = "worker-name"
-	DefaultDataExporterImage = images.DefaultDataExporterImage
-)
+const LabelWorkerName = "worker-name"
 
 type ControllerRunOptions struct {
 	WorkerCount              int
@@ -56,7 +53,7 @@ func MatchesWorker(labels map[string]string, workerName string) bool {
 
 func (opts *ControllerRunOptions) GetDataExporterImage() string {
 	if opts == nil || opts.DataExporterImage == "" {
-		return DefaultDataExporterImage
+		return images.DefaultDataExporterImage
 	}
 	return opts.DataExporterImage
 }

@@ -3,15 +3,9 @@ package v1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 const (
-	// DefaultCosmosignerImage is the cosmosigner image used when none is specified (either via
-	// .spec.cosmosigner.image or the operator-wide cosmosignerImage Helm value / COSMOSIGNER_IMAGE).
-	DefaultCosmosignerImage = images.DefaultCosmosignerImage
-
 	// DefaultCosmosignerReplicas is the default number of signer replicas (single instance).
 	DefaultCosmosignerReplicas int32 = 1
 

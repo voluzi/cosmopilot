@@ -13,6 +13,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
+
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 type PvcHelper struct {
@@ -25,7 +27,7 @@ type PvcHelper struct {
 
 func NewPvcHelper(client *kubernetes.Clientset, cfg *rest.Config, pvc *corev1.PersistentVolumeClaim, utilityImage string, imagePullSecrets []corev1.LocalObjectReference) *PvcHelper {
 	if utilityImage == "" {
-		utilityImage = DefaultUtilityImage
+		utilityImage = images.DefaultUtilityImage
 	}
 	return &PvcHelper{
 		client:           client,

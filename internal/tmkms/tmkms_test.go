@@ -82,8 +82,8 @@ func TestImageOptionsPreserveDefaultsAndApplyOverrides(t *testing.T) {
 	t.Run("tmkms", func(t *testing.T) {
 		cfg := defaultConfig()
 		WithImage("")(cfg)
-		if got := cfg.Image; got != DefaultTmKmsImage {
-			t.Fatalf("empty override image = %q, want %q", got, DefaultTmKmsImage)
+		if got := cfg.Image; got != images.DefaultTmKmsImage {
+			t.Fatalf("empty override image = %q, want %q", got, images.DefaultTmKmsImage)
 		}
 
 		WithImage("registry.example.com/tmkms@sha256:abcdef")(cfg)
