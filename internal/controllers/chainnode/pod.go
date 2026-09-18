@@ -131,9 +131,10 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	configCurrent := currentPod.Annotations[controllers.AnnotationConfigHash] == configHash
 	generation := pod.Annotations[controllers.AnnotationChainNodeGeneration]
 	generationChanged := currentPod.Annotations[controllers.AnnotationChainNodeGeneration] != generation
-	if podSpecCurrent && nodeUtilsTokenCurrent && configCurrent && (labelsChanged || generationChanged) {
+	modifiedPod := currentPod.DeepCopy()
+	podSpecAnnotationsChanged := syncPodSpecAnnotations(modifiedPod, pod)
+	if podSpecCurrent && nodeUtilsTokenCurrent && configCurrent && (labelsChanged || generationChanged || podSpecAnnotationsChanged) {
 		logger.Info("updating pod metadata", "pod", pod.GetName())
-		modifiedPod := currentPod.DeepCopy()
 		if labelsChanged {
 			modifiedPod.Labels = pod.Labels
 		}
@@ -1156,10 +1157,18 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		})
 	}
 
+	deferredSidecars := map[string]struct{}{}
+	deferredSidecarNames := []string{}
+	omittedSidecars := map[string]struct{}{}
+	_, belongsToGroup := chainNode.Labels[controllers.LabelChainNodeSetGroup]
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Sidecars != nil {
 		for _, c := range chainNode.Spec.Config.Sidecars {
-			if r.shouldSkipSidecar(ctx, chainNode, c, pod.Labels) {
-				continue
+			if belongsToGroup && c.DeferUntilHealthyEnabled() {
+				deferredSidecars[c.Name] = struct{}{}
+				deferredSidecarNames = append(deferredSidecarNames, c.Name)
+				if r.shouldSkipSidecar(ctx, chainNode, c, pod.Labels) {
+					omittedSidecars[c.Name] = struct{}{}
+				}
 			}
 			// Use custom security context if provided, otherwise use restricted
 			sidecarSecurityContext := c.SecurityContext
@@ -1216,6 +1225,8 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			pod.Spec.InitContainers = append([]corev1.Container{sidecar}, pod.Spec.InitContainers...)
 		}
 	}
+	sort.Strings(deferredSidecarNames)
+	pod.Annotations[controllers.AnnotationDeferredSidecars] = strings.Join(deferredSidecarNames, ",")
 
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.SafeToEvict != nil {
 		pod.Annotations[controllers.AnnotationSafeEvict] = strconv.FormatBool(*chainNode.Spec.Config.SafeToEvict)
@@ -1226,6 +1237,15 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		return nil, err
 	}
 	pod.Annotations[controllers.AnnotationPodSpecHash] = specHash
+
+	podWithoutDeferredSidecars := pod.DeepCopy()
+	podWithoutDeferredSidecars.Spec.InitContainers = removeNamedContainers(podWithoutDeferredSidecars.Spec.InitContainers, deferredSidecars)
+	compatibilityHash, err := podSpecHash(podWithoutDeferredSidecars)
+	if err != nil {
+		return nil, err
+	}
+	pod.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars] = compatibilityHash
+	pod.Spec.InitContainers = removeNamedContainers(pod.Spec.InitContainers, omittedSidecars)
 	return pod, controllerutil.SetControllerReference(chainNode, pod, r.Scheme)
 }
 
@@ -1423,12 +1443,73 @@ func podSpecChanged(ctx context.Context, existing, new *corev1.Pod) bool {
 		return true
 	}
 	newSpecHash := new.Annotations[controllers.AnnotationPodSpecHash]
+	compatibleSpecHash := new.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars]
+	_, existingHasCompatibilityHash := existing.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars]
+	existingGeneration := existing.Annotations[controllers.AnnotationChainNodeGeneration]
+	newGeneration := new.Annotations[controllers.AnnotationChainNodeGeneration]
 
 	logger.V(1).Info("checked pod spec hash",
 		"old-spec", oldSpecHash,
 		"new-spec", newSpecHash,
+		"compatible-spec", compatibleSpecHash,
+		"old-has-compatible-spec", existingHasCompatibilityHash,
+		"old-generation", existingGeneration,
+		"new-generation", newGeneration,
 	)
-	return newSpecHash != oldSpecHash
+	if existingHasCompatibilityHash {
+		return newSpecHash != oldSpecHash || missingRequiredInitContainer(existing, new)
+	}
+	return newSpecHash != oldSpecHash && (existingGeneration != newGeneration || compatibleSpecHash != oldSpecHash)
+}
+
+func missingRequiredInitContainer(existing, desired *corev1.Pod) bool {
+	existingNames := make(map[string]struct{}, len(existing.Spec.InitContainers))
+	for _, container := range existing.Spec.InitContainers {
+		existingNames[container.Name] = struct{}{}
+	}
+	deferredNames := map[string]struct{}{}
+	for _, name := range strings.Split(desired.Annotations[controllers.AnnotationDeferredSidecars], ",") {
+		if name != "" {
+			deferredNames[name] = struct{}{}
+		}
+	}
+	for _, container := range desired.Spec.InitContainers {
+		_, exists := existingNames[container.Name]
+		_, deferred := deferredNames[container.Name]
+		if !exists && !deferred {
+			return true
+		}
+	}
+	return false
+}
+
+func syncPodSpecAnnotations(existing, desired *corev1.Pod) bool {
+	if existing.Annotations == nil {
+		existing.Annotations = map[string]string{}
+	}
+	changed := false
+	for _, annotation := range []string{
+		controllers.AnnotationPodSpecHash,
+		controllers.AnnotationPodSpecHashWithoutDeferredSidecars,
+		controllers.AnnotationDeferredSidecars,
+	} {
+		existingValue, exists := existing.Annotations[annotation]
+		if !exists || existingValue != desired.Annotations[annotation] {
+			existing.Annotations[annotation] = desired.Annotations[annotation]
+			changed = true
+		}
+	}
+	return changed
+}
+
+func removeNamedContainers(containers []corev1.Container, names map[string]struct{}) []corev1.Container {
+	filtered := make([]corev1.Container, 0, len(containers))
+	for _, container := range containers {
+		if _, remove := names[container.Name]; !remove {
+			filtered = append(filtered, container)
+		}
+	}
+	return filtered
 }
 
 func nodeUtilsShutdownTokenChanged(existing, desired *corev1.Pod) bool {

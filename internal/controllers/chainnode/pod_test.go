@@ -12,11 +12,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
@@ -109,7 +111,7 @@ func TestIsChainNodePodRunningIgnoresCrashedNodeUtils(t *testing.T) {
 		},
 	}
 	scheme := gcpImportTestScheme(t)
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()}
+	r := &Reconciler{Client: fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()}
 
 	running, _, err := r.isChainNodePodRunning(t.Context(), chainNode)
 	require.NoError(t, err)
@@ -248,7 +250,7 @@ func renderPodForSecurityContextTest(t *testing.T, config *appsv1.Config) (*core
 		},
 	}
 	scheme := gcpImportTestScheme(t)
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.ConfigMap{
+	client := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace},
 	}).Build()
 	r := &Reconciler{
@@ -465,6 +467,168 @@ func TestPodSpecChanged(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetPodSpecDeferredSidecarHashIsIndependentOfGroupHealth(t *testing.T) {
+	deferredV1 := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), DeferUntilHealthy: ptr.To(true)}
+	nonDeferred := appsv1.SidecarSpec{Name: "metrics", Image: ptr.To("metrics:v1")}
+	healthy := deferredSidecarPodSpec(t, 1, deferredV1, nonDeferred)
+	unhealthy := deferredSidecarPodSpec(t, 0, deferredV1, nonDeferred)
+
+	assert.True(t, hasContainer(healthy.Spec.InitContainers, deferredV1.Name))
+	assert.False(t, hasContainer(unhealthy.Spec.InitContainers, deferredV1.Name))
+	assert.True(t, hasContainer(healthy.Spec.InitContainers, nonDeferred.Name))
+	assert.True(t, hasContainer(unhealthy.Spec.InitContainers, nonDeferred.Name))
+	assert.Equal(t, healthy.Annotations[controllers.AnnotationPodSpecHash], unhealthy.Annotations[controllers.AnnotationPodSpecHash])
+	assert.False(t, podSpecChanged(t.Context(), healthy, unhealthy))
+	assert.False(t, podSpecChanged(t.Context(), unhealthy, healthy))
+
+	deferredV2 := deferredV1
+	deferredV2.Image = ptr.To("indexer:v2")
+	unhealthyWithConfigChange := deferredSidecarPodSpec(t, 0, deferredV2, nonDeferred)
+	assert.NotEqual(t, unhealthy.Annotations[controllers.AnnotationPodSpecHash], unhealthyWithConfigChange.Annotations[controllers.AnnotationPodSpecHash])
+}
+
+func TestPodSpecChangedAcceptsLegacyDeferredSidecarHash(t *testing.T) {
+	deferred := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), DeferUntilHealthy: ptr.To(true)}
+	healthy := deferredSidecarPodSpec(t, 1, deferred)
+	legacyOmitted := deferredSidecarPodSpec(t, 0, deferred)
+
+	legacyHash, err := podSpecHash(legacyOmitted)
+	require.NoError(t, err)
+	legacyOmitted.Annotations[controllers.AnnotationPodSpecHash] = legacyHash
+	delete(legacyOmitted.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
+	require.NotEqual(t, healthy.Annotations[controllers.AnnotationPodSpecHash], legacyHash)
+	assert.False(t, podSpecChanged(t.Context(), legacyOmitted, healthy))
+}
+
+func TestPodSpecChangedDetectsFirstDeferredSidecarOnAnnotatedPod(t *testing.T) {
+	current := deferredSidecarPodSpec(t, 1)
+	deferred := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), DeferUntilHealthy: ptr.To(true)}
+	desired := deferredSidecarPodSpec(t, 1, deferred)
+
+	require.Contains(t, current.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
+	require.NotEqual(t, current.Annotations[controllers.AnnotationPodSpecHash], desired.Annotations[controllers.AnnotationPodSpecHash])
+	require.Equal(t, current.Annotations[controllers.AnnotationPodSpecHash], desired.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars])
+	assert.True(t, podSpecChanged(t.Context(), current, desired))
+}
+
+func TestPodSpecChangedDetectsDeferredSidecarBecomingRequired(t *testing.T) {
+	required := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), DeferUntilHealthy: ptr.To(true)}
+	stillDeferred := appsv1.SidecarSpec{Name: "audit", Image: ptr.To("audit:v1"), DeferUntilHealthy: ptr.To(true)}
+	current := deferredSidecarPodSpecAtGeneration(t, 0, 1, required, stillDeferred)
+	required.DeferUntilHealthy = ptr.To(false)
+	desired := deferredSidecarPodSpecAtGeneration(t, 0, 2, required, stillDeferred)
+
+	assert.False(t, hasContainer(current.Spec.InitContainers, required.Name))
+	assert.False(t, hasContainer(current.Spec.InitContainers, stillDeferred.Name))
+	assert.True(t, hasContainer(desired.Spec.InitContainers, required.Name))
+	assert.False(t, hasContainer(desired.Spec.InitContainers, stillDeferred.Name))
+	require.Equal(t, current.Annotations[controllers.AnnotationPodSpecHash], desired.Annotations[controllers.AnnotationPodSpecHash])
+	assert.Equal(t, "audit,indexer", current.Annotations[controllers.AnnotationDeferredSidecars])
+	assert.Equal(t, stillDeferred.Name, desired.Annotations[controllers.AnnotationDeferredSidecars])
+	assert.True(t, podSpecChanged(t.Context(), current, desired))
+}
+
+func TestPodSpecChangedDetectsFirstDeferredSidecarOnLegacyNewGeneration(t *testing.T) {
+	legacy := deferredSidecarPodSpecAtGeneration(t, 1, 1)
+	delete(legacy.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
+	deferred := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), DeferUntilHealthy: ptr.To(true)}
+	desired := deferredSidecarPodSpecAtGeneration(t, 1, 2, deferred)
+
+	require.Equal(t, legacy.Annotations[controllers.AnnotationPodSpecHash], desired.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars])
+	assert.True(t, podSpecChanged(t.Context(), legacy, desired))
+}
+
+func TestSyncPodSpecAnnotationsMigratesAcceptedLegacyDeferredSidecar(t *testing.T) {
+	deferred := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), DeferUntilHealthy: ptr.To(true)}
+	desired := deferredSidecarPodSpecAtGeneration(t, 0, 1, deferred)
+	legacy := desired.DeepCopy()
+	legacyHash, err := podSpecHash(legacy)
+	require.NoError(t, err)
+	legacy.Annotations[controllers.AnnotationPodSpecHash] = legacyHash
+	delete(legacy.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationDeferredSidecars)
+	require.False(t, podSpecChanged(t.Context(), legacy, desired))
+	require.True(t, syncPodSpecAnnotations(legacy, desired))
+
+	for _, annotation := range []string{
+		controllers.AnnotationPodSpecHash,
+		controllers.AnnotationPodSpecHashWithoutDeferredSidecars,
+		controllers.AnnotationDeferredSidecars,
+	} {
+		assert.Equal(t, desired.Annotations[annotation], legacy.Annotations[annotation])
+	}
+	later := desired.DeepCopy()
+	later.Annotations[controllers.AnnotationChainNodeGeneration] = "2"
+	assert.False(t, podSpecChanged(t.Context(), legacy, later))
+}
+
+func TestSyncPodSpecAnnotationsAddsEmptyDeferredSidecarsMarker(t *testing.T) {
+	existing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		controllers.AnnotationPodSpecHash:                        "canonical",
+		controllers.AnnotationPodSpecHashWithoutDeferredSidecars: "compatible",
+	}}}
+	desired := existing.DeepCopy()
+	desired.Annotations[controllers.AnnotationDeferredSidecars] = ""
+
+	assert.True(t, syncPodSpecAnnotations(existing, desired))
+	assert.Contains(t, existing.Annotations, controllers.AnnotationDeferredSidecars)
+}
+
+func deferredSidecarPodSpec(t *testing.T, currentHealthy int32, sidecars ...appsv1.SidecarSpec) *corev1.Pod {
+	t.Helper()
+	return deferredSidecarPodSpecAtGeneration(t, currentHealthy, 1, sidecars...)
+}
+
+func deferredSidecarPodSpecAtGeneration(t *testing.T, currentHealthy int32, generation int64, sidecars ...appsv1.SidecarSpec) *corev1.Pod {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
+
+	chainNode := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "archive-0",
+			Namespace:  "default",
+			UID:        "node-uid",
+			Generation: generation,
+			Labels:     map[string]string{controllers.LabelChainNodeSetGroup: "archive"},
+		},
+		Spec: appsv1.ChainNodeSpec{
+			App:    appsv1.AppSpec{Image: "app", Version: ptr.To("v1"), App: "appd"},
+			Config: &appsv1.Config{Sidecars: sidecars},
+		},
+		Status: appsv1.ChainNodeStatus{ChainID: "chain", NodeID: "node-id"},
+	}
+	config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name, Namespace: chainNode.Namespace}}
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "archive", Namespace: chainNode.Namespace},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{controllers.LabelChainNodeSetGroup: "archive"}},
+		},
+		Status: policyv1.PodDisruptionBudgetStatus{CurrentHealthy: currentHealthy, DesiredHealthy: 1},
+	}
+	reconciler := &Reconciler{
+		Client: fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(config, pdb).Build(),
+		Scheme: scheme,
+		opts:   &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+	}
+
+	pod, err := reconciler.getPodSpec(t.Context(), chainNode, "config-hash", "shutdown-secret")
+	require.NoError(t, err)
+	return pod
+}
+
+func hasContainer(containers []corev1.Container, name string) bool {
+	for _, container := range containers {
+		if container.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestOrderVolumes(t *testing.T) {

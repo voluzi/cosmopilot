@@ -35,6 +35,8 @@ const (
 	AnnotationSnapshotExportCleanupAcknowledgement = "cosmopilot.voluzi.com/acknowledge-snapshot-export-cleanup"
 	AnnotationSnapshotIntegrityStatus              = "cosmopilot.voluzi.com/snapshot-integrity-status"
 	AnnotationPodSpecHash                          = "cosmopilot.voluzi.com/pod-spec-hash"
+	AnnotationPodSpecHashWithoutDeferredSidecars   = "cosmopilot.voluzi.com/pod-spec-hash-without-deferred-sidecars"
+	AnnotationDeferredSidecars                     = "cosmopilot.voluzi.com/deferred-sidecars"
 	AnnotationNodeUtilsShutdownSecretName          = "cosmopilot.voluzi.com/node-utils-shutdown-secret-name"
 	AnnotationNodeUtilsShutdownSecretUID           = "cosmopilot.voluzi.com/node-utils-shutdown-secret-uid"
 	AnnotationNodeUtilsShutdownTokenHash           = "cosmopilot.voluzi.com/node-utils-shutdown-token-hash"
