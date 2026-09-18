@@ -1761,7 +1761,7 @@ func TestRemoveRetainedSnapshotExportIfGoneRemovesRecordWithoutUploadResources(t
 	// The mirror case: with no Job and no PVC left there is nothing to protect, so the record must be
 	// reclaimed here rather than pinned forever by the guard above.
 	now := time.Now().UTC().Truncate(time.Second)
-	reconciler, chainNode, _, _, _ := newOrphanUploadTestReconciler(
+	reconciler, chainNode, clientSet, uploadJob, uploadPVC := newOrphanUploadTestReconciler(
 		t, now, "gcs-exporter",
 		&appsv1.ExportTarballConfig{DeleteOnExpire: ptr.To(true), GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}},
 	)
@@ -1769,11 +1769,20 @@ func TestRemoveRetainedSnapshotExportIfGoneRemovesRecordWithoutUploadResources(t
 		ID:             "export-vanished",
 		SnapshotName:   "snapshot-gone",
 		SnapshotUID:    "snapshot-gone-uid",
-		ObjectName:     "vanished-tarball",
+		ObjectName:     "orphan-tarball",
 		Phase:          appsv1.SnapshotExportPhaseUploaded,
 		DeleteOnExpire: false,
 	}}
 	require.NoError(t, reconciler.Status().Update(context.Background(), chainNode))
+
+	// The record names the seeded upload, so the probe looks the resources up by the name they were
+	// created under; removing them is what makes this the no-resource case rather than a name mismatch.
+	require.NoError(t, clientSet.BatchV1().Jobs(chainNode.Namespace).Delete(
+		context.Background(), uploadJob.Name, metav1.DeleteOptions{},
+	))
+	require.NoError(t, clientSet.CoreV1().PersistentVolumeClaims(chainNode.Namespace).Delete(
+		context.Background(), uploadPVC.Name, metav1.DeleteOptions{},
+	))
 
 	deleted := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
 		Name:      "snapshot-gone",
