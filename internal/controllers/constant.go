@@ -37,6 +37,7 @@ const (
 	AnnotationPodSpecHash                          = "cosmopilot.voluzi.com/pod-spec-hash"
 	AnnotationPodSpecHashWithoutDeferredSidecars   = "cosmopilot.voluzi.com/pod-spec-hash-without-deferred-sidecars"
 	AnnotationDeferredSidecars                     = "cosmopilot.voluzi.com/deferred-sidecars"
+	AnnotationConfiguredSidecarOrder               = "cosmopilot.voluzi.com/configured-sidecar-order"
 	AnnotationDeferredSidecarFingerprints          = "cosmopilot.voluzi.com/deferred-sidecar-fingerprints"
 	AnnotationMaterializedDeferredSidecars         = "cosmopilot.voluzi.com/materialized-deferred-sidecars"
 	AnnotationNodeUtilsShutdownSecretName          = "cosmopilot.voluzi.com/node-utils-shutdown-secret-name"

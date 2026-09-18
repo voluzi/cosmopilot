@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -492,6 +491,30 @@ func TestGetPodSpecDeferredSidecarHashIsIndependentOfGroupHealth(t *testing.T) {
 	assert.NotEqual(t, unhealthy.Annotations[controllers.AnnotationPodSpecHash], unhealthyWithConfigChange.Annotations[controllers.AnnotationPodSpecHash])
 }
 
+func TestGetPodSpecDeferredSidecarFingerprintStableWithMultipleConfigKeys(t *testing.T) {
+	mountConfig := "/config"
+	deferred := appsv1.SidecarSpec{
+		Name:              "indexer",
+		Image:             ptr.To("indexer:v1"),
+		DeferUntilHealthy: ptr.To(true),
+		MountConfig:       &mountConfig,
+	}
+	configData := map[string]string{
+		"app.toml":       "app",
+		"client.toml":    "client",
+		"config.toml":    "config",
+		"consensus.toml": "consensus",
+		"genesis.json":   "genesis",
+		"mempool.toml":   "mempool",
+	}
+	fingerprints := map[string]struct{}{}
+	for range 30 {
+		pod := deferredSidecarPodSpecWithConfigData(t, 0, 1, configData, deferred)
+		fingerprints[pod.Annotations[controllers.AnnotationDeferredSidecarFingerprints]] = struct{}{}
+	}
+	assert.Len(t, fingerprints, 1)
+}
+
 func TestGetPodSpecOmittedDeferredSidecarPreservesManagedInitContainerWithSameName(t *testing.T) {
 	base := deferredSidecarPodSpec(t, 0)
 	deferred := appsv1.SidecarSpec{Name: nodeUtilsContainerName, Image: ptr.To("custom-node-utils:v1"), DeferUntilHealthy: ptr.To(true)}
@@ -680,15 +703,70 @@ func TestPodSpecChangedIgnoresChangesToDifferentOmittedDeferredSidecar(t *testin
 	}
 }
 
-func TestPodSpecChangedDetectsMaterializedDeferredSidecarChangesAfterAPIDefaulting(t *testing.T) {
+func TestPodSpecChangedHandlesDeferredSidecarReordering(t *testing.T) {
+	a := appsv1.SidecarSpec{Name: "a", Image: ptr.To("a:v1"), DeferUntilHealthy: ptr.To(true)}
+	b := appsv1.SidecarSpec{Name: "b", Image: ptr.To("b:v1"), DeferUntilHealthy: ptr.To(true)}
+	c := appsv1.SidecarSpec{Name: "c", Image: ptr.To("c:v1"), DeferUntilHealthy: ptr.To(true)}
+	metrics := appsv1.SidecarSpec{Name: "metrics", Image: ptr.To("metrics:v1")}
+
+	tests := []struct {
+		name    string
+		current *corev1.Pod
+		desired *corev1.Pod
+		want    bool
+	}{
+		{
+			name:    "all omitted",
+			current: deferredSidecarPodSpecAtGeneration(t, 0, 1, a, b, c),
+			desired: deferredSidecarPodSpecAtGeneration(t, 0, 2, a, c, b),
+		},
+		{
+			name: "unrelated running sidecar",
+			current: func() *corev1.Pod {
+				pod := deferredSidecarPodSpecAtGeneration(t, 1, 1, a, b, c)
+				pod.Spec.InitContainers = withoutContainerNamed(pod.Spec.InitContainers, b.Name)
+				pod.Spec.InitContainers = withoutContainerNamed(pod.Spec.InitContainers, c.Name)
+				pod.Annotations[controllers.AnnotationMaterializedDeferredSidecars] = a.Name
+				return pod
+			}(),
+			desired: deferredSidecarPodSpecAtGeneration(t, 0, 2, a, c, b),
+		},
+		{
+			name:    "materialized reordered sidecars",
+			current: deferredSidecarPodSpecAtGeneration(t, 1, 1, b, c),
+			desired: deferredSidecarPodSpecAtGeneration(t, 1, 2, c, b),
+			want:    true,
+		},
+		{
+			name:    "materialized deferred sidecar crosses non-deferred sidecar",
+			current: deferredSidecarPodSpecAtGeneration(t, 1, 1, a, metrics),
+			desired: deferredSidecarPodSpecAtGeneration(t, 1, 2, metrics, a),
+			want:    true,
+		},
+		{
+			name:    "omitted deferred sidecar crosses non-deferred sidecar",
+			current: deferredSidecarPodSpecAtGeneration(t, 0, 1, a, metrics),
+			desired: deferredSidecarPodSpecAtGeneration(t, 0, 2, metrics, a),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NotEqual(t, tt.current.Annotations[controllers.AnnotationPodSpecHash], tt.desired.Annotations[controllers.AnnotationPodSpecHash])
+			require.Equal(t,
+				tt.current.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars],
+				tt.desired.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars],
+			)
+			assert.Equal(t, tt.want, podSpecChanged(t.Context(), tt.current, tt.desired))
+		})
+	}
+}
+
+func TestPodSpecChangedDetectsMaterializedDeferredSidecarChanges(t *testing.T) {
 	oldMaterialized := appsv1.SidecarSpec{
 		Name:              "indexer",
 		Image:             ptr.To("indexer:v1"),
 		DeferUntilHealthy: ptr.To(true),
-		Env: []corev1.EnvVar{
-			{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-			{Name: "CPU_LIMIT", ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{Resource: "limits.cpu"}}},
-		},
 	}
 	changedMaterialized := oldMaterialized
 	changedMaterialized.Image = ptr.To("indexer:v2")
@@ -705,7 +783,6 @@ func TestPodSpecChangedDetectsMaterializedDeferredSidecarChangesAfterAPIDefaulti
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			current := deferredSidecarPodSpecAtGeneration(t, 1, 1, oldMaterialized, stillDeferred)
-			defaultSidecarEnvReferences(t, current, oldMaterialized.Name)
 			desired := deferredSidecarPodSpecAtGeneration(t, 0, 2, tt.desiredSidecars...)
 
 			require.Equal(t,
@@ -737,6 +814,7 @@ func TestSyncPodSpecAnnotationsMigratesAcceptedLegacyDeferredSidecar(t *testing.
 	legacy.Annotations[controllers.AnnotationPodSpecHash] = legacyHash
 	delete(legacy.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
 	delete(legacy.Annotations, controllers.AnnotationDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationConfiguredSidecarOrder)
 	delete(legacy.Annotations, controllers.AnnotationDeferredSidecarFingerprints)
 	delete(legacy.Annotations, controllers.AnnotationMaterializedDeferredSidecars)
 	require.False(t, podSpecChanged(t.Context(), legacy, desired))
@@ -746,18 +824,117 @@ func TestSyncPodSpecAnnotationsMigratesAcceptedLegacyDeferredSidecar(t *testing.
 		controllers.AnnotationPodSpecHash,
 		controllers.AnnotationPodSpecHashWithoutDeferredSidecars,
 		controllers.AnnotationDeferredSidecars,
+		controllers.AnnotationConfiguredSidecarOrder,
 		controllers.AnnotationDeferredSidecarFingerprints,
 	} {
 		assert.Equal(t, desired.Annotations[annotation], legacy.Annotations[annotation])
 	}
-	assert.NotContains(t, legacy.Annotations, controllers.AnnotationMaterializedDeferredSidecars)
+	assert.Equal(t, "", legacy.Annotations[controllers.AnnotationMaterializedDeferredSidecars])
 	later := desired.DeepCopy()
 	later.Annotations[controllers.AnnotationChainNodeGeneration] = "2"
 	assert.False(t, podSpecChanged(t.Context(), legacy, later))
 	changedDeferred := deferred
 	changedDeferred.Image = ptr.To("indexer:v2")
 	changed := deferredSidecarPodSpecAtGeneration(t, 0, 2, changedDeferred)
-	assert.True(t, podSpecChanged(t.Context(), legacy, changed))
+	assert.False(t, podSpecChanged(t.Context(), legacy, changed))
+}
+
+func TestSyncPodSpecAnnotationsBackfillsRunningLegacyDeferredSidecars(t *testing.T) {
+	running := appsv1.SidecarSpec{Name: "indexer", Image: ptr.To("indexer:v1"), DeferUntilHealthy: ptr.To(true)}
+	desired := deferredSidecarPodSpecAtGeneration(t, 1, 1, running)
+	legacy := desired.DeepCopy()
+	legacyHash, err := podSpecHash(legacy)
+	require.NoError(t, err)
+	legacy.Annotations[controllers.AnnotationPodSpecHash] = legacyHash
+	delete(legacy.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationConfiguredSidecarOrder)
+	delete(legacy.Annotations, controllers.AnnotationDeferredSidecarFingerprints)
+	delete(legacy.Annotations, controllers.AnnotationMaterializedDeferredSidecars)
+
+	require.False(t, podSpecChanged(t.Context(), legacy, desired))
+	require.True(t, syncPodSpecAnnotations(legacy, desired))
+	assert.Equal(t, running.Name, legacy.Annotations[controllers.AnnotationMaterializedDeferredSidecars])
+	required := running
+	required.DeferUntilHealthy = ptr.To(false)
+	withoutDeferral := deferredSidecarPodSpecAtGeneration(t, 0, 2, required)
+	assert.False(t, podSpecChanged(t.Context(), legacy, withoutDeferral))
+
+	newOmitted := appsv1.SidecarSpec{Name: "audit", Image: ptr.To("audit:v1"), DeferUntilHealthy: ptr.To(true)}
+	added := deferredSidecarPodSpecAtGeneration(t, 0, 2, running, newOmitted)
+	require.False(t, podSpecChanged(t.Context(), legacy, added))
+	require.True(t, syncPodSpecAnnotations(legacy, added))
+	newOmitted.Image = ptr.To("audit:v2")
+	changed := deferredSidecarPodSpecAtGeneration(t, 0, 3, running, newOmitted)
+	assert.False(t, podSpecChanged(t.Context(), legacy, changed))
+}
+
+func TestSyncPodSpecAnnotationsDoesNotBackfillAmbiguousLegacyDeferredSidecar(t *testing.T) {
+	deferred := appsv1.SidecarSpec{
+		Name:              nodeUtilsContainerName,
+		Image:             ptr.To("custom-node-utils:v1"),
+		DeferUntilHealthy: ptr.To(true),
+	}
+	desired := deferredSidecarPodSpecAtGeneration(t, 0, 1, deferred)
+	legacy := desired.DeepCopy()
+	legacyHash, err := podSpecHash(legacy)
+	require.NoError(t, err)
+	legacy.Annotations[controllers.AnnotationPodSpecHash] = legacyHash
+	delete(legacy.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationConfiguredSidecarOrder)
+	delete(legacy.Annotations, controllers.AnnotationDeferredSidecarFingerprints)
+	delete(legacy.Annotations, controllers.AnnotationMaterializedDeferredSidecars)
+
+	require.False(t, podSpecChanged(t.Context(), legacy, desired))
+	require.True(t, syncPodSpecAnnotations(legacy, desired))
+	assert.NotContains(t, legacy.Annotations, controllers.AnnotationMaterializedDeferredSidecars)
+
+	required := deferred
+	required.DeferUntilHealthy = ptr.To(false)
+	withoutDeferral := deferredSidecarPodSpecAtGeneration(t, 0, 2, required)
+	assert.True(t, podSpecChanged(t.Context(), legacy, withoutDeferral))
+}
+
+func TestSyncPodSpecAnnotationsLeavesHealthyLegacyCollisionMaterializationUnknown(t *testing.T) {
+	deferred := appsv1.SidecarSpec{
+		Name:              nodeUtilsContainerName,
+		Image:             ptr.To("custom-node-utils:v1"),
+		DeferUntilHealthy: ptr.To(true),
+	}
+	legacy := deferredSidecarPodSpecAtGeneration(t, 0, 1, deferred)
+	legacyHash, err := podSpecHash(legacy)
+	require.NoError(t, err)
+	legacy.Annotations[controllers.AnnotationPodSpecHash] = legacyHash
+	delete(legacy.Annotations, controllers.AnnotationPodSpecHashWithoutDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationDeferredSidecars)
+	delete(legacy.Annotations, controllers.AnnotationConfiguredSidecarOrder)
+	delete(legacy.Annotations, controllers.AnnotationDeferredSidecarFingerprints)
+	delete(legacy.Annotations, controllers.AnnotationMaterializedDeferredSidecars)
+	desired := deferredSidecarPodSpecAtGeneration(t, 1, 1, deferred)
+
+	require.Len(t, containersNamed(legacy.Spec.InitContainers, nodeUtilsContainerName), 1)
+	require.Len(t, containersNamed(desired.Spec.InitContainers, nodeUtilsContainerName), 2)
+	require.False(t, podSpecChanged(t.Context(), legacy, desired))
+	require.True(t, syncPodSpecAnnotations(legacy, desired))
+	assert.NotContains(t, legacy.Annotations, controllers.AnnotationMaterializedDeferredSidecars)
+
+	changed := deferred
+	changed.Image = ptr.To("custom-node-utils:v2")
+	required := deferred
+	required.DeferUntilHealthy = ptr.To(false)
+	for _, tt := range []struct {
+		name string
+		next *corev1.Pod
+	}{
+		{name: "changed", next: deferredSidecarPodSpecAtGeneration(t, 1, 2, changed)},
+		{name: "removed", next: deferredSidecarPodSpecAtGeneration(t, 1, 2)},
+		{name: "deferral removed", next: deferredSidecarPodSpecAtGeneration(t, 1, 2, required)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.True(t, podSpecChanged(t.Context(), legacy, tt.next))
+		})
+	}
 }
 
 func TestSyncPodSpecAnnotationsTracksSidecarMaterializedBeforeDeferral(t *testing.T) {
@@ -817,6 +994,11 @@ func deferredSidecarPodSpec(t *testing.T, currentHealthy int32, sidecars ...apps
 
 func deferredSidecarPodSpecAtGeneration(t *testing.T, currentHealthy int32, generation int64, sidecars ...appsv1.SidecarSpec) *corev1.Pod {
 	t.Helper()
+	return deferredSidecarPodSpecWithConfigData(t, currentHealthy, generation, nil, sidecars...)
+}
+
+func deferredSidecarPodSpecWithConfigData(t *testing.T, currentHealthy int32, generation int64, configData map[string]string, sidecars ...appsv1.SidecarSpec) *corev1.Pod {
+	t.Helper()
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
@@ -837,7 +1019,10 @@ func deferredSidecarPodSpecAtGeneration(t *testing.T, currentHealthy int32, gene
 		},
 		Status: appsv1.ChainNodeStatus{ChainID: "chain", NodeID: "node-id"},
 	}
-	config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name, Namespace: chainNode.Namespace}}
+	config := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name, Namespace: chainNode.Namespace},
+		Data:       configData,
+	}
 	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{Name: "archive", Namespace: chainNode.Namespace},
 		Spec: policyv1.PodDisruptionBudgetSpec{
@@ -865,6 +1050,16 @@ func hasContainer(containers []corev1.Container, name string) bool {
 	return false
 }
 
+func containersNamed(containers []corev1.Container, name string) []corev1.Container {
+	var matching []corev1.Container
+	for _, container := range containers {
+		if container.Name == name {
+			matching = append(matching, container)
+		}
+	}
+	return matching
+}
+
 func withoutContainerNamed(containers []corev1.Container, name string) []corev1.Container {
 	filtered := make([]corev1.Container, 0, len(containers))
 	for _, container := range containers {
@@ -873,21 +1068,6 @@ func withoutContainerNamed(containers []corev1.Container, name string) []corev1.
 		}
 	}
 	return filtered
-}
-
-func defaultSidecarEnvReferences(t *testing.T, pod *corev1.Pod, name string) {
-	t.Helper()
-	for i := range pod.Spec.InitContainers {
-		container := &pod.Spec.InitContainers[i]
-		if container.Name != name {
-			continue
-		}
-		require.Len(t, container.Env, 2)
-		container.Env[0].ValueFrom.FieldRef.APIVersion = "v1"
-		container.Env[1].ValueFrom.ResourceFieldRef.Divisor = resource.MustParse("1")
-		return
-	}
-	t.Fatalf("init container %q not found", name)
 }
 
 func TestOrderVolumes(t *testing.T) {

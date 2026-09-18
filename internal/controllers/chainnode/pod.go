@@ -1162,12 +1162,14 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	nonDeferredSidecars := []corev1.Container{}
 	materializedSidecars := []corev1.Container{}
 	deferredSidecarNames := []string{}
+	configuredSidecarOrder := []string{}
 	materializedDeferredSidecarNames := []string{}
 	deferredSidecarFingerprints := map[string]string{}
 	_, belongsToGroup := chainNode.Labels[controllers.LabelChainNodeSetGroup]
 	if chainNode.Spec.Config != nil && chainNode.Spec.Config.Sidecars != nil {
 		for _, c := range chainNode.Spec.Config.Sidecars {
 			isDeferred := belongsToGroup && c.DeferUntilHealthyEnabled()
+			configuredSidecarOrder = append([]string{c.Name}, configuredSidecarOrder...)
 			omit := false
 			if isDeferred {
 				deferredSidecarNames = append(deferredSidecarNames, c.Name)
@@ -1247,6 +1249,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	sort.Strings(deferredSidecarNames)
 	sort.Strings(materializedDeferredSidecarNames)
 	pod.Annotations[controllers.AnnotationDeferredSidecars] = strings.Join(deferredSidecarNames, ",")
+	pod.Annotations[controllers.AnnotationConfiguredSidecarOrder] = strings.Join(configuredSidecarOrder, ",")
 	pod.Annotations[controllers.AnnotationMaterializedDeferredSidecars] = strings.Join(materializedDeferredSidecarNames, ",")
 	deferredSidecarFingerprintBytes, err := json.Marshal(deferredSidecarFingerprints)
 	if err != nil {
@@ -1462,7 +1465,11 @@ func podSpecHash(pod *corev1.Pod) (string, error) {
 }
 
 func containerFingerprint(container corev1.Container) (string, error) {
-	containerBytes, err := container.Marshal()
+	containerCopy := container.DeepCopy()
+	sort.Slice(containerCopy.VolumeMounts, func(i, j int) bool {
+		return containerCopy.VolumeMounts[i].MountPath < containerCopy.VolumeMounts[j].MountPath
+	})
+	containerBytes, err := containerCopy.Marshal()
 	if err != nil {
 		return "", err
 	}
@@ -1543,6 +1550,14 @@ func deferredSidecarChangesCanWait(existing, desired *corev1.Pod) bool {
 	if !ok {
 		return false
 	}
+	existingOrder, ok := annotationNames(existing, controllers.AnnotationConfiguredSidecarOrder)
+	if !ok {
+		return false
+	}
+	desiredOrder, ok := annotationNames(desired, controllers.AnnotationConfiguredSidecarOrder)
+	if !ok {
+		return false
+	}
 
 	changed := false
 	for name, existingFingerprint := range existingFingerprints {
@@ -1569,7 +1584,29 @@ func deferredSidecarChangesCanWait(existing, desired *corev1.Pod) bool {
 			return false
 		}
 	}
+	if !reflect.DeepEqual(existingOrder, desiredOrder) {
+		existingMaterializedOrder := filterConfiguredSidecarOrder(existingOrder, existingFingerprints, existingMaterialized, desiredMaterialized)
+		desiredMaterializedOrder := filterConfiguredSidecarOrder(desiredOrder, desiredFingerprints, existingMaterialized, desiredMaterialized)
+		return reflect.DeepEqual(existingMaterializedOrder, desiredMaterializedOrder)
+	}
 	return changed
+}
+
+func filterConfiguredSidecarOrder(order []string, deferredFingerprints map[string]string, materializedSets ...map[string]struct{}) []string {
+	filtered := make([]string, 0, len(order))
+	for _, name := range order {
+		if _, deferred := deferredFingerprints[name]; !deferred {
+			filtered = append(filtered, name)
+			continue
+		}
+		for _, materialized := range materializedSets {
+			if _, exists := materialized[name]; exists {
+				filtered = append(filtered, name)
+				break
+			}
+		}
+	}
+	return filtered
 }
 
 func deferredSidecarFingerprints(pod *corev1.Pod) (map[string]string, bool) {
@@ -1585,17 +1622,28 @@ func deferredSidecarFingerprints(pod *corev1.Pod) (map[string]string, bool) {
 }
 
 func annotationNameSet(pod *corev1.Pod, annotation string) (map[string]struct{}, bool) {
-	value, exists := pod.Annotations[annotation]
+	orderedNames, exists := annotationNames(pod, annotation)
 	if !exists {
 		return nil, false
 	}
 	names := map[string]struct{}{}
-	for _, name := range strings.Split(value, ",") {
+	for _, name := range orderedNames {
 		if name != "" {
 			names[name] = struct{}{}
 		}
 	}
 	return names, true
+}
+
+func annotationNames(pod *corev1.Pod, annotation string) ([]string, bool) {
+	value, exists := pod.Annotations[annotation]
+	if !exists {
+		return nil, false
+	}
+	if value == "" {
+		return []string{}, true
+	}
+	return strings.Split(value, ","), true
 }
 
 func missingRequiredInitContainer(existing, desired *corev1.Pod) bool {
@@ -1618,11 +1666,15 @@ func syncPodSpecAnnotations(existing, desired *corev1.Pod) bool {
 	if existing.Annotations == nil {
 		existing.Annotations = map[string]string{}
 	}
-	changed := syncMaterializedDeferredSidecars(existing, desired)
+	changed := syncLegacyMaterializedDeferredSidecars(existing, desired)
+	if syncMaterializedDeferredSidecars(existing, desired) {
+		changed = true
+	}
 	for _, annotation := range []string{
 		controllers.AnnotationPodSpecHash,
 		controllers.AnnotationPodSpecHashWithoutDeferredSidecars,
 		controllers.AnnotationDeferredSidecars,
+		controllers.AnnotationConfiguredSidecarOrder,
 		controllers.AnnotationDeferredSidecarFingerprints,
 	} {
 		existingValue, exists := existing.Annotations[annotation]
@@ -1632,6 +1684,47 @@ func syncPodSpecAnnotations(existing, desired *corev1.Pod) bool {
 		}
 	}
 	return changed
+}
+
+func syncLegacyMaterializedDeferredSidecars(existing, desired *corev1.Pod) bool {
+	if _, migrated := existing.Annotations[controllers.AnnotationPodSpecHashWithoutDeferredSidecars]; migrated {
+		return false
+	}
+	desiredFingerprints, ok := deferredSidecarFingerprints(desired)
+	if !ok {
+		return false
+	}
+	desiredMaterialized, ok := annotationNameSet(desired, controllers.AnnotationMaterializedDeferredSidecars)
+	if !ok {
+		return false
+	}
+	liveNames := liveContainerNames(existing)
+	desiredLiveNameCounts := make(map[string]int, len(desired.Spec.InitContainers))
+	for _, container := range desired.Spec.InitContainers {
+		desiredLiveNameCounts[container.Name]++
+	}
+	materialized := make([]string, 0, len(desiredFingerprints))
+	for name := range desiredFingerprints {
+		_, desiredHasMaterialized := desiredMaterialized[name]
+		desiredLiveCount := desiredLiveNameCounts[name]
+		if desiredLiveCount > 1 || (!desiredHasMaterialized && desiredLiveCount > 0) {
+			return false
+		}
+		if _, live := liveNames[name]; live {
+			materialized = append(materialized, name)
+		}
+	}
+	sort.Strings(materialized)
+	existing.Annotations[controllers.AnnotationMaterializedDeferredSidecars] = strings.Join(materialized, ",")
+	return true
+}
+
+func liveContainerNames(pod *corev1.Pod) map[string]struct{} {
+	names := make(map[string]struct{}, len(pod.Spec.InitContainers))
+	for _, container := range pod.Spec.InitContainers {
+		names[container.Name] = struct{}{}
+	}
+	return names
 }
 
 func syncMaterializedDeferredSidecars(existing, desired *corev1.Pod) bool {
