@@ -206,6 +206,46 @@ func TestResolveRequiredUpgradePreservesStructuredTarget(t *testing.T) {
 	assert.Equal(t, want, required)
 }
 
+func TestResolveRequiredUpgradeAllowsKnownGovernanceMarkerWhenDiscoveryDisabled(t *testing.T) {
+	marker := &nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.OnChainUpgrade, Name: "v2"}
+	for _, tt := range []struct {
+		name     string
+		upgrades []appsv1.UpgradeSpec
+		status   []appsv1.Upgrade
+	}{
+		{
+			name: "explicit force-on-chain configuration",
+			upgrades: []appsv1.UpgradeSpec{{
+				Height:       100,
+				ForceOnChain: ptr.To(true),
+			}},
+		},
+		{
+			name: "known pending on-chain upgrade",
+			status: []appsv1.Upgrade{{
+				Height: 100,
+				Source: appsv1.OnChainUpgrade,
+				Status: appsv1.UpgradeImageMissing,
+			}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &appsv1.ChainNode{
+				Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{
+					CheckGovUpgrades: ptr.To(false),
+					Upgrades:         tt.upgrades,
+				}},
+				Status: appsv1.ChainNodeStatus{LatestHeight: 99, Upgrades: tt.status},
+			}
+
+			required, err := resolveRequiredUpgrade(node, nodeutils.UpgradeStatus{RequiredUpgrade: marker})
+
+			require.NoError(t, err)
+			assert.Equal(t, marker, required)
+		})
+	}
+}
+
 func TestAddOrUpdateUpgradeDoesNotSkipExistingLateUpgrade(t *testing.T) {
 	got := AddOrUpdateUpgrade([]appsv1.Upgrade{{
 		Height: 100,

@@ -228,11 +228,15 @@ func recordRequiredGovernanceUpgrade(
 
 func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.UpgradeStatus) (*nodeutils.RequiredUpgrade, error) {
 	if status.RequiredUpgrade != nil {
-		if status.RequiredUpgrade.Source == nodeutils.OnChainUpgrade &&
-			structuredOnChainUpgradeIsStale(chainNode, *status.RequiredUpgrade) {
-			return nil, nil
-		}
 		required := *status.RequiredUpgrade
+		if required.Source == nodeutils.OnChainUpgrade {
+			if structuredOnChainUpgradeIsStale(chainNode, required) {
+				return nil, nil
+			}
+			if !governanceMarkerRecoveryAllowed(chainNode, required) {
+				return nil, fmt.Errorf("governance upgrade marker at height %d cannot be recovered while .spec.app.checkGovUpgrades is false; configure a forceOnChain upgrade at this height or enable governance upgrade discovery", required.Height)
+			}
+		}
 		return &required, nil
 	}
 	if !status.LegacyUpgradeRequired {
