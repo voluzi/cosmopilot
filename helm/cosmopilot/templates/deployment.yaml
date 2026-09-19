@@ -85,6 +85,8 @@ spec:
             - name: VAULT_TOKEN_RENEWER_IMAGE
               value: {{ .Values.vaultTokenRenewerImage | quote }}
             {{- end }}
+            - name: RELEASE_NAME
+              value: {{ .Release.Name | quote }}
             - name: WORKER_NAME
               value: {{ .Values.workerName }}
             - name: WORKER_COUNT

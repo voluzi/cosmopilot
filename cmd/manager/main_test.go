@@ -22,6 +22,28 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
 )
 
+func TestLeaderElectionIDIncludesReleaseName(t *testing.T) {
+	tests := []struct {
+		name        string
+		releaseName string
+		workerName  string
+		want        string
+	}{
+		{name: "default release", releaseName: "cosmopilot", want: "cosmopilot.cosmopilot.voluzi.com"},
+		{name: "default release worker", releaseName: "cosmopilot", workerName: "worker-a", want: "worker-a.cosmopilot.cosmopilot.voluzi.com"},
+		{name: "custom release", releaseName: "audit-release", want: "audit-release.cosmopilot.voluzi.com"},
+		{name: "custom release worker", releaseName: "audit-release", workerName: "worker-a", want: "worker-a.audit-release.cosmopilot.voluzi.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := leaderElectionID(tt.releaseName, tt.workerName); got != tt.want {
+				t.Fatalf("leaderElectionID(%q, %q) = %q, want %q", tt.releaseName, tt.workerName, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRootProtectionReadinessAllowsStandbyBeforeLeadership(t *testing.T) {
 	elected := make(chan struct{})
 	ready := make(chan struct{})
