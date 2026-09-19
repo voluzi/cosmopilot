@@ -24,8 +24,11 @@ Cosmopilot automatically detects and extracts compressed genesis files. You can 
 ```yaml
 genesis:
   url: https://example.com/genesis.json.gz
+  genesisSHA: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   useDataVolume: true
 ```
+
+When `genesisSHA` is set, it must be the lowercase SHA-256 digest of the final uncompressed genesis file. Cosmopilot verifies this digest before installing container-downloaded genesis files on the data volume.
 
 Supported compression formats:
 - **gzip** (`.gz`) - Most common format

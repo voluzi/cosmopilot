@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -24,6 +25,8 @@ type PvcHelper struct {
 	utilityImage     string
 	imagePullSecrets []corev1.LocalObjectReference
 }
+
+const genesisDownloadTerminationGraceSeconds int64 = 10
 
 func NewPvcHelper(client *kubernetes.Clientset, cfg *rest.Config, pvc *corev1.PersistentVolumeClaim, utilityImage string, imagePullSecrets []corev1.LocalObjectReference) *PvcHelper {
 	if utilityImage == "" {
@@ -125,28 +128,31 @@ func (h *PvcHelper) buildWriteFilePod(path, pc string, af *corev1.Affinity, ns m
 	}
 }
 
-func (h *PvcHelper) DownloadGenesis(ctx context.Context, url, path, pc string, af *corev1.Affinity, ns map[string]string) error {
-	pod := h.buildDownloadGenesisPod(url, path, pc, af, ns)
+func (h *PvcHelper) DownloadGenesis(ctx context.Context, url, path string, sha *string, pc string, af *corev1.Affinity, ns map[string]string) error {
+	pod := h.buildDownloadGenesisPod(url, path, sha, pc, af, ns)
 
 	ph := NewPodHelper(h.client, h.restConfig, pod)
 
-	// Delete the pod if it already exists
-	_ = ph.Delete(ctx)
+	deleteOptions := metav1.DeleteOptions{GracePeriodSeconds: ptr.To(genesisDownloadTerminationGraceSeconds)}
+	if err := h.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOptions); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete previous genesis download pod: %w", err)
+	}
+	// Graceful deletion lets the previous shell clean its private stage before a retry reclaims leftovers.
+	if err := ph.WaitForPodDeleted(ctx, time.Minute); err != nil {
+		return fmt.Errorf("wait for previous genesis download pod deletion: %w", err)
+	}
 
-	// Delete the pod independently of the result
-	defer func() { _ = ph.Delete(ctx) }()
-
-	// Create the pod
 	if err := ph.Create(ctx); err != nil {
 		return err
 	}
+	defer func() { _ = ph.Delete(ctx) }()
 
 	return ph.WaitForPodSucceeded(ctx, time.Hour)
 }
 
-func (h *PvcHelper) buildDownloadGenesisPod(url, path, pc string, af *corev1.Affinity, ns map[string]string) *corev1.Pod {
+func (h *PvcHelper) buildDownloadGenesisPod(url, path string, sha *string, pc string, af *corev1.Affinity, ns map[string]string) *corev1.Pod {
 	destPath := filepath.Join("/pvc", path)
-	cmd := buildGenesisDownloadCommand(url, destPath)
+	args := buildGenesisDownloadCommand(url, destPath, sha)
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -155,7 +161,7 @@ func (h *PvcHelper) buildDownloadGenesisPod(url, path, pc string, af *corev1.Aff
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
-			TerminationGracePeriodSeconds: ptr.To[int64](0),
+			TerminationGracePeriodSeconds: ptr.To(genesisDownloadTerminationGraceSeconds),
 			// Kubelet reaps the pod after 75 min (download wait is 1h) even if
 			// cosmopilot dies mid-call (SIGKILL prevents `defer ph.Delete`).
 			ActiveDeadlineSeconds: ptr.To[int64](4500),
@@ -180,7 +186,7 @@ func (h *PvcHelper) buildDownloadGenesisPod(url, path, pc string, af *corev1.Aff
 					Image:           h.utilityImage,
 					Command:         []string{"/bin/sh"},
 					SecurityContext: RestrictedSecurityContext(),
-					Args:            []string{"-c", cmd},
+					Args:            args,
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "pvc",
@@ -200,17 +206,88 @@ func cloneLocalObjectReferences(refs []corev1.LocalObjectReference) []corev1.Loc
 	return append([]corev1.LocalObjectReference(nil), refs...)
 }
 
-// buildGenesisDownloadCommand returns the appropriate download command based on URL extension.
-// It auto-detects compression format (.gz, .zst) and decompresses accordingly.
-func buildGenesisDownloadCommand(url, destPath string) string {
-	lowerURL := strings.ToLower(url)
+const genesisDownloadScript = `set -eu
+url=$1
+destination=$2
+compression=$3
+verify_sha=$4
+expected_sha=$5
 
+destination_dir=${destination%/*}
+destination_name=${destination##*/}
+stage_prefix="${destination_dir}/.${destination_name}.download."
+for stale_stage in "${stage_prefix}"*; do
+	if [ -e "$stale_stage" ] || [ -L "$stale_stage" ]; then
+		rm -rf -- "$stale_stage"
+	fi
+done
+stage_dir=$(mktemp -d "${stage_prefix}XXXXXX")
+cleanup() {
+	status=$?
+	trap - EXIT
+	rm -rf "$stage_dir" || true
+	exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+download_path="$stage_dir/download"
+candidate_path="$stage_dir/genesis"
+if ! wget -q -O "$download_path" "$url"; then
+	echo "genesis download failed" >&2
+	exit 1
+fi
+
+case "$compression" in
+	gzip)
+		if ! gunzip -c "$download_path" > "$candidate_path"; then
+			echo "genesis gzip decompression failed" >&2
+			exit 1
+		fi
+		;;
+	zstd)
+		if ! zstd -d -c "$download_path" > "$candidate_path"; then
+			echo "genesis zstd decompression failed" >&2
+			exit 1
+		fi
+		;;
+	plain)
+		mv "$download_path" "$candidate_path"
+		;;
+esac
+
+if [ "$verify_sha" = "1" ]; then
+	checksum_output=$(sha256sum "$candidate_path")
+	actual_sha=${checksum_output%% *}
+	if [ "$actual_sha" != "$expected_sha" ]; then
+		printf 'genesis SHA256 mismatch: expected %s, got %s\n' "$expected_sha" "$actual_sha" >&2
+		exit 1
+	fi
+fi
+
+if [ -d "$destination" ] || [ -L "$destination" ]; then
+	printf 'genesis destination must not be a directory or symlink: %s\n' "$destination" >&2
+	exit 1
+fi
+mv -fT "$candidate_path" "$destination"
+`
+
+func buildGenesisDownloadCommand(url, destPath string, sha *string) []string {
+	lowerURL := strings.ToLower(url)
+	compression := "plain"
 	switch {
 	case strings.HasSuffix(lowerURL, ".gz"):
-		return fmt.Sprintf("wget -qO- '%s' | gunzip > %s", url, destPath)
+		compression = "gzip"
 	case strings.HasSuffix(lowerURL, ".zst"):
-		return fmt.Sprintf("wget -qO- '%s' | zstd -d > %s", url, destPath)
-	default:
-		return fmt.Sprintf("wget -O %s '%s'", destPath, url)
+		compression = "zstd"
 	}
+
+	verifySHA := "0"
+	expectedSHA := ""
+	if sha != nil {
+		verifySHA = "1"
+		expectedSHA = *sha
+	}
+
+	return []string{"-c", genesisDownloadScript, "genesis-download", url, destPath, compression, verifySHA, expectedSHA}
 }

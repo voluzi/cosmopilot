@@ -48,15 +48,24 @@ func TestPvcHelperBuildDownloadGenesisPodUsesDefaultImageAndSecrets(t *testing.T
 		Name: "data", Namespace: "default",
 	}}, "", []corev1.LocalObjectReference{{Name: "registry-creds"}})
 
-	pod := helper.buildDownloadGenesisPod("https://example.com/genesis.json.zst", "config/genesis.json", "priority", nil, nil)
+	sha := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	pod := helper.buildDownloadGenesisPod("https://example.com/genesis.json.zst", "config/genesis.json", &sha, "priority", nil, nil)
 	require.Len(t, pod.Spec.Containers, 1)
 	container := pod.Spec.Containers[0]
 	assert.Equal(t, images.DefaultUtilityImage, container.Image)
 	assert.Equal(t, []corev1.LocalObjectReference{{Name: "registry-creds"}}, pod.Spec.ImagePullSecrets)
 	assert.Equal(t, []string{"/bin/sh"}, container.Command)
-	assert.Equal(t, []string{"-c", "wget -qO- 'https://example.com/genesis.json.zst' | zstd -d > /pvc/config/genesis.json"}, container.Args)
+	require.GreaterOrEqual(t, len(container.Args), 8)
+	assert.Equal(t, "-c", container.Args[0])
+	assert.Equal(t, "genesis-download", container.Args[2])
+	assert.Equal(t, "https://example.com/genesis.json.zst", container.Args[3])
+	assert.Equal(t, "/pvc/config/genesis.json", container.Args[4])
+	assert.Equal(t, "zstd", container.Args[5])
+	assert.Equal(t, "1", container.Args[6])
+	assert.Equal(t, sha, container.Args[7])
 	assert.False(t, container.Stdin)
-	assert.Equal(t, ptr.To[int64](0), pod.Spec.TerminationGracePeriodSeconds)
+	require.NotNil(t, pod.Spec.TerminationGracePeriodSeconds)
+	assert.Positive(t, *pod.Spec.TerminationGracePeriodSeconds)
 	assert.Equal(t, ptr.To[int64](4500), pod.Spec.ActiveDeadlineSeconds)
 	assert.Equal(t, RestrictedPodSecurityContext(), pod.Spec.SecurityContext)
 	assert.Equal(t, RestrictedSecurityContext(), container.SecurityContext)
