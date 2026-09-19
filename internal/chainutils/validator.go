@@ -3,7 +3,9 @@ package chainutils
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -20,7 +22,28 @@ func (a *App) buildCreateValidatorPod(
 	nodeInfo *NodeInfo,
 	params *Params,
 	node string,
-) *corev1.Pod {
+) (*corev1.Pod, error) {
+	validatorFile := filepath.Join(defaultHome, "validator.json")
+	command, err := a.cmd.CreateValidatorCommand(
+		validatorFile,
+		defaultAccountName,
+		pubKey,
+		nodeInfo.Moniker,
+		params.StakeAmount,
+		params.ChainID,
+		params.GasPrices,
+		sdkcmd.WithArg(sdkcmd.CommissionMaxChangeRate, params.CommissionMaxChangeRate),
+		sdkcmd.WithArg(sdkcmd.CommissionMaxRate, params.CommissionMaxRate),
+		sdkcmd.WithArg(sdkcmd.CommissionRate, params.CommissionRate),
+		sdkcmd.WithOptionalArg(sdkcmd.MinSelfDelegation, params.MinSelfDelegation),
+		sdkcmd.WithOptionalArg(sdkcmd.Details, nodeInfo.Details),
+		sdkcmd.WithOptionalArg(sdkcmd.Website, nodeInfo.Website),
+		sdkcmd.WithOptionalArg(sdkcmd.Identity, nodeInfo.Identity),
+		sdkcmd.WithArg(sdkcmd.Node, node),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("building create-validator command: %w", err)
+	}
 
 	var (
 		dataVolumeMount = corev1.VolumeMount{
@@ -40,6 +63,7 @@ func (a *App) buildCreateValidatorPod(
 			Affinity:          a.Affinity,
 			NodeSelector:      a.NodeSelector,
 			ImagePullSecrets:  a.appImagePullSecrets(),
+			SecurityContext:   k8s.RestrictedPodSecurityContext(),
 			Volumes: []corev1.Volume{
 				{
 					Name: dataVolumeMount.Name,
@@ -68,22 +92,7 @@ func (a *App) buildCreateValidatorPod(
 					Image:           a.image,
 					ImagePullPolicy: a.pullPolicy,
 					Command:         []string{a.binary},
-					Args: a.cmd.CreateValidatorArgs(
-						defaultAccountName,
-						pubKey,
-						nodeInfo.Moniker,
-						params.StakeAmount,
-						params.ChainID,
-						params.GasPrices,
-						sdkcmd.WithArg(sdkcmd.CommissionMaxChangeRate, params.CommissionMaxChangeRate),
-						sdkcmd.WithArg(sdkcmd.CommissionMaxRate, params.CommissionMaxRate),
-						sdkcmd.WithArg(sdkcmd.CommissionRate, params.CommissionRate),
-						sdkcmd.WithOptionalArg(sdkcmd.MinSelfDelegation, params.MinSelfDelegation),
-						sdkcmd.WithOptionalArg(sdkcmd.Details, nodeInfo.Details),
-						sdkcmd.WithOptionalArg(sdkcmd.Website, nodeInfo.Website),
-						sdkcmd.WithOptionalArg(sdkcmd.Identity, nodeInfo.Identity),
-						sdkcmd.WithArg(sdkcmd.Node, node),
-					),
+					Args:            command.Args,
 					Env:             a.appEnv(),
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
 					SecurityContext: k8s.RestrictedSecurityContext(),
@@ -95,7 +104,17 @@ func (a *App) buildCreateValidatorPod(
 			ActiveDeadlineSeconds: ptr.To[int64](300),
 		},
 	}
-	return pod
+	if len(command.ValidatorJSON) > 0 {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:            "write-validator-json",
+			Image:           a.utilityImageRef(),
+			Command:         []string{"/bin/sh", "-c"},
+			Args:            []string{`printf '%s' "$1" | base64 -d > "$2"`, "write-validator-json", base64.StdEncoding.EncodeToString(command.ValidatorJSON), validatorFile},
+			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
+			SecurityContext: k8s.RestrictedSecurityContext(),
+		})
+	}
+	return pod, nil
 }
 
 func (a *App) CreateValidator(
@@ -106,7 +125,10 @@ func (a *App) CreateValidator(
 	params *Params,
 	node string,
 ) error {
-	pod := a.buildCreateValidatorPod(pubKey, nodeInfo, params, node)
+	pod, err := a.buildCreateValidatorPod(pubKey, nodeInfo, params, node)
+	if err != nil {
+		return err
+	}
 
 	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {
 		return err
