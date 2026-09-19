@@ -68,11 +68,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	leaderElectionID := fmt.Sprintf("%s.cosmopilot.voluzi.com", runOpts.ReleaseName)
-	if runOpts.WorkerName != "" {
-		leaderElectionID = fmt.Sprintf("%s.%s.cosmopilot.voluzi.com", runOpts.WorkerName, runOpts.ReleaseName)
-	}
-
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
@@ -84,7 +79,7 @@ func main() {
 		}),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       leaderElectionID,
+		LeaderElectionID:       leaderElectionID(runOpts.ReleaseName, runOpts.WorkerName),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -161,6 +156,13 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func leaderElectionID(releaseName, workerName string) string {
+	if workerName != "" {
+		return fmt.Sprintf("%s.%s.cosmopilot.voluzi.com", workerName, releaseName)
+	}
+	return fmt.Sprintf("%s.cosmopilot.voluzi.com", releaseName)
 }
 
 func rootProtectionReadiness(leaderElectionEnabled bool, elected, ready <-chan struct{}) healthz.Checker {

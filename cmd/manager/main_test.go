@@ -22,6 +22,23 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
 )
 
+func TestLeaderElectionIDIncludesReleaseName(t *testing.T) {
+	const workerName = "worker-a"
+
+	defaultReleaseID := leaderElectionID("cosmopilot", workerName)
+	customReleaseID := leaderElectionID("audit-release", workerName)
+
+	if defaultReleaseID != "worker-a.cosmopilot.cosmopilot.voluzi.com" {
+		t.Fatalf("default release leader-election ID = %q", defaultReleaseID)
+	}
+	if customReleaseID != "worker-a.audit-release.cosmopilot.voluzi.com" {
+		t.Fatalf("custom release leader-election ID = %q", customReleaseID)
+	}
+	if defaultReleaseID == customReleaseID {
+		t.Fatal("distinct releases with the same worker name must not share a leader-election ID")
+	}
+}
+
 func TestRootProtectionReadinessAllowsStandbyBeforeLeadership(t *testing.T) {
 	elected := make(chan struct{})
 	ready := make(chan struct{})

@@ -49,7 +49,7 @@ func TestDeploymentOmitsEmptyImageOverrides(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			deployment := renderDeployment(t, tt.values, "3.0.0-beta.7")
+			deployment := renderDeployment(t, "test", tt.values, "3.0.0-beta.7")
 			for _, envName := range imageOverrideEnvNames {
 				_, ok := deployment.env[envName]
 				assert.False(t, ok, "%s must be omitted", envName)
@@ -70,7 +70,7 @@ func TestDeploymentPassesThroughEachImageOverride(t *testing.T) {
 			t.Run(key+"/"+image, func(t *testing.T) {
 				values := defaultChartValues()
 				values[key] = image
-				deployment := renderDeployment(t, values, "3.0.0-beta.7")
+				deployment := renderDeployment(t, "test", values, "3.0.0-beta.7")
 				require.Equal(t, image, deployment.env[envName].Value)
 				require.Equal(t, "!!str", deployment.env[envName].Tag)
 				for otherKey, otherEnvName := range imageOverrideEnvNames {
@@ -90,7 +90,7 @@ func TestDeploymentPassesThroughAllImageOverrides(t *testing.T) {
 		values[key] = fmt.Sprintf("registry.example.com/%s:custom", key)
 	}
 
-	deployment := renderDeployment(t, values, "3.0.0-beta.7")
+	deployment := renderDeployment(t, "test", values, "3.0.0-beta.7")
 	for key, envName := range imageOverrideEnvNames {
 		assert.Equal(t, values[key], deployment.env[envName].Value)
 	}
@@ -98,10 +98,26 @@ func TestDeploymentPassesThroughAllImageOverrides(t *testing.T) {
 
 func TestManagerImageUsesAppVersionUnlessImageTagIsSet(t *testing.T) {
 	values := defaultChartValues()
-	assert.Equal(t, "ghcr.io/voluzi/cosmopilot:3.0.0-beta.7", renderDeployment(t, values, "3.0.0-beta.7").image)
+	assert.Equal(t, "ghcr.io/voluzi/cosmopilot:3.0.0-beta.7", renderDeployment(t, "test", values, "3.0.0-beta.7").image)
 
 	values["imageTag"] = "3.1.0-custom"
-	assert.Equal(t, "ghcr.io/voluzi/cosmopilot:3.1.0-custom", renderDeployment(t, values, "3.0.0-beta.7").image)
+	assert.Equal(t, "ghcr.io/voluzi/cosmopilot:3.1.0-custom", renderDeployment(t, "test", values, "3.0.0-beta.7").image)
+}
+
+func TestDeploymentPassesReleaseName(t *testing.T) {
+	for _, releaseName := range []string{"cosmopilot", "audit-release"} {
+		t.Run(releaseName, func(t *testing.T) {
+			values := defaultChartValues()
+			values["workerName"] = "worker-a"
+
+			deployment := renderDeployment(t, releaseName, values, "3.0.0-beta.7")
+
+			require.Contains(t, deployment.env, "RELEASE_NAME")
+			assert.Equal(t, releaseName, deployment.env["RELEASE_NAME"].Value)
+			assert.Equal(t, "!!str", deployment.env["RELEASE_NAME"].Tag)
+			assert.Equal(t, "worker-a", deployment.env["WORKER_NAME"].Value)
+		})
+	}
 }
 
 type renderedDeployment struct {
@@ -109,7 +125,7 @@ type renderedDeployment struct {
 	env   map[string]yaml.Node
 }
 
-func renderDeployment(t *testing.T, values map[string]any, appVersion string) renderedDeployment {
+func renderDeployment(t *testing.T, releaseName string, values map[string]any, appVersion string) renderedDeployment {
 	t.Helper()
 	templateSource, err := os.ReadFile("templates/deployment.yaml")
 	require.NoError(t, err)
@@ -139,7 +155,7 @@ func renderDeployment(t *testing.T, values map[string]any, appVersion string) re
 	require.NoError(t, err)
 
 	data := map[string]any{
-		"Release": map[string]any{"Name": "test", "Namespace": "default"},
+		"Release": map[string]any{"Name": releaseName, "Namespace": "default"},
 		"Chart":   map[string]any{"AppVersion": appVersion},
 		"Values":  values,
 	}
