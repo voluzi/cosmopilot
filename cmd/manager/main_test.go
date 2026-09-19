@@ -23,19 +23,24 @@ import (
 )
 
 func TestLeaderElectionIDIncludesReleaseName(t *testing.T) {
-	const workerName = "worker-a"
-
-	defaultReleaseID := leaderElectionID("cosmopilot", workerName)
-	customReleaseID := leaderElectionID("audit-release", workerName)
-
-	if defaultReleaseID != "worker-a.cosmopilot.cosmopilot.voluzi.com" {
-		t.Fatalf("default release leader-election ID = %q", defaultReleaseID)
+	tests := []struct {
+		name        string
+		releaseName string
+		workerName  string
+		want        string
+	}{
+		{name: "default release", releaseName: "cosmopilot", want: "cosmopilot.cosmopilot.voluzi.com"},
+		{name: "default release worker", releaseName: "cosmopilot", workerName: "worker-a", want: "worker-a.cosmopilot.cosmopilot.voluzi.com"},
+		{name: "custom release", releaseName: "audit-release", want: "audit-release.cosmopilot.voluzi.com"},
+		{name: "custom release worker", releaseName: "audit-release", workerName: "worker-a", want: "worker-a.audit-release.cosmopilot.voluzi.com"},
 	}
-	if customReleaseID != "worker-a.audit-release.cosmopilot.voluzi.com" {
-		t.Fatalf("custom release leader-election ID = %q", customReleaseID)
-	}
-	if defaultReleaseID == customReleaseID {
-		t.Fatal("distinct releases with the same worker name must not share a leader-election ID")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := leaderElectionID(tt.releaseName, tt.workerName); got != tt.want {
+				t.Fatalf("leaderElectionID(%q, %q) = %q, want %q", tt.releaseName, tt.workerName, got, tt.want)
+			}
+		})
 	}
 }
 
