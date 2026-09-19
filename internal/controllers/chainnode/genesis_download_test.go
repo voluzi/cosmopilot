@@ -1,12 +1,14 @@
 package chainnode
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,13 +29,18 @@ func TestGetGenesisContainerDownloadPropagatesDigestAndGatesSuccessState(t *test
 	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 	for _, tt := range []struct {
-		name        string
-		podPhase    corev1.PodPhase
-		wantErr     bool
-		wantSuccess bool
+		name          string
+		genesisSHA    *string
+		podPhase      corev1.PodPhase
+		existingPod   bool
+		wantVerifySHA string
+		wantDigest    string
+		wantErr       bool
+		wantSuccess   bool
 	}{
-		{name: "successful pod", podPhase: corev1.PodSucceeded, wantSuccess: true},
-		{name: "failed pod", podPhase: corev1.PodFailed, wantErr: true},
+		{name: "successful pod", genesisSHA: ptr.To(digest), podPhase: corev1.PodSucceeded, wantVerifySHA: "1", wantDigest: digest, wantSuccess: true},
+		{name: "failed pod", genesisSHA: ptr.To(digest), podPhase: corev1.PodFailed, wantVerifySHA: "1", wantDigest: digest, wantErr: true},
+		{name: "nil digest after deleting existing pod", podPhase: corev1.PodSucceeded, existingPod: true, wantVerifySHA: "0", wantSuccess: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
@@ -44,7 +51,7 @@ func TestGetGenesisContainerDownloadPropagatesDigestAndGatesSuccessState(t *test
 				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
 				Spec: appsv1.ChainNodeSpec{Genesis: &appsv1.GenesisConfig{
 					Url:           ptr.To("https://example.invalid/genesis.json.zst"),
-					GenesisSHA:    ptr.To(digest),
+					GenesisSHA:    tt.genesisSHA,
 					UseDataVolume: ptr.To(true),
 					ChainID:       ptr.To("chain-1"),
 				}},
@@ -54,7 +61,7 @@ func TestGetGenesisContainerDownloadPropagatesDigestAndGatesSuccessState(t *test
 
 			var capturedMu sync.Mutex
 			var captured *corev1.Pod
-			clientSet := newGenesisDownloadClientset(t, tt.podPhase, func(pod *corev1.Pod) {
+			clientSet := newGenesisDownloadClientset(t, tt.podPhase, tt.existingPod, func(pod *corev1.Pod) {
 				capturedMu.Lock()
 				defer capturedMu.Unlock()
 				captured = pod.DeepCopy()
@@ -67,7 +74,9 @@ func TestGetGenesisContainerDownloadPropagatesDigestAndGatesSuccessState(t *test
 				opts:       &controllers.ControllerRunOptions{},
 			}
 
-			err := r.getGenesis(t.Context(), nil, chainNode)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			err := r.getGenesis(ctx, nil, chainNode)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -79,8 +88,8 @@ func TestGetGenesisContainerDownloadPropagatesDigestAndGatesSuccessState(t *test
 			args := append([]string(nil), captured.Spec.Containers[0].Args...)
 			capturedMu.Unlock()
 			require.GreaterOrEqual(t, len(args), 8)
-			assert.Equal(t, "1", args[6])
-			assert.Equal(t, digest, args[7])
+			assert.Equal(t, tt.wantVerifySHA, args[6])
+			assert.Equal(t, tt.wantDigest, args[7])
 
 			persistedPVC := &corev1.PersistentVolumeClaim{}
 			require.NoError(t, backing.Get(t.Context(), client.ObjectKeyFromObject(pvc), persistedPVC))
@@ -97,7 +106,7 @@ func TestGetGenesisContainerDownloadPropagatesDigestAndGatesSuccessState(t *test
 	}
 }
 
-func newGenesisDownloadClientset(t *testing.T, phase corev1.PodPhase, capture func(*corev1.Pod)) *kubernetes.Clientset {
+func newGenesisDownloadClientset(t *testing.T, phase corev1.PodPhase, existingPod bool, capture func(*corev1.Pod)) *kubernetes.Clientset {
 	t.Helper()
 	pod := corev1.Pod{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
@@ -105,12 +114,26 @@ func newGenesisDownloadClientset(t *testing.T, phase corev1.PodPhase, capture fu
 		Status:     corev1.PodStatus{Phase: phase},
 	}
 	var stateMu sync.Mutex
+	previousPodExists := existingPod
+	deleteRequested := false
 	podCreated := false
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		status := http.StatusOK
 		body := `{"kind":"Status","apiVersion":"v1","status":"Success"}`
 		switch {
+		case req.Method == http.MethodDelete:
+			stateMu.Lock()
+			deleteRequested = previousPodExists
+			stateMu.Unlock()
 		case req.Method == http.MethodPost:
+			stateMu.Lock()
+			previousExists := previousPodExists
+			stateMu.Unlock()
+			if previousExists {
+				status = http.StatusConflict
+				body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"AlreadyExists","code":409}`
+				break
+			}
 			createdPod := &corev1.Pod{}
 			if err := json.NewDecoder(req.Body).Decode(createdPod); err != nil {
 				return nil, err
@@ -127,9 +150,10 @@ func newGenesisDownloadClientset(t *testing.T, phase corev1.PodPhase, capture fu
 			body = string(encoded)
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/"+pod.Name):
 			stateMu.Lock()
+			previousExists := previousPodExists
 			isCreated := podCreated
 			stateMu.Unlock()
-			if !isCreated {
+			if !previousExists && !isCreated {
 				status = http.StatusNotFound
 				body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
 				break
@@ -140,6 +164,43 @@ func newGenesisDownloadClientset(t *testing.T, phase corev1.PodPhase, capture fu
 			}
 			body = string(encoded)
 		case req.Method == http.MethodGet && req.URL.Query().Get("watch") == "true":
+			stateMu.Lock()
+			previousExists := previousPodExists
+			requested := deleteRequested
+			if previousExists && requested {
+				previousPodExists = false
+			}
+			stateMu.Unlock()
+			if previousExists {
+				if !requested {
+					status = http.StatusInternalServerError
+					body = `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"watched before delete","code":500}`
+					break
+				}
+				added, err := json.Marshal(map[string]any{"type": "ADDED", "object": pod})
+				if err != nil {
+					return nil, err
+				}
+				bookmarkPod := corev1.Pod{
+					TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+					ObjectMeta: metav1.ObjectMeta{
+						ResourceVersion: "2",
+						Annotations:     map[string]string{metav1.InitialEventsAnnotationKey: "true"},
+					},
+				}
+				bookmark, err := json.Marshal(map[string]any{"type": "BOOKMARK", "object": bookmarkPod})
+				if err != nil {
+					return nil, err
+				}
+				deletedPod := pod.DeepCopy()
+				deletedPod.ResourceVersion = "3"
+				deleted, err := json.Marshal(map[string]any{"type": "DELETED", "object": deletedPod})
+				if err != nil {
+					return nil, err
+				}
+				body = string(added) + "\n" + string(bookmark) + "\n" + string(deleted) + "\n"
+				break
+			}
 			added, err := json.Marshal(map[string]any{"type": "ADDED", "object": pod})
 			if err != nil {
 				return nil, err
@@ -157,16 +218,22 @@ func newGenesisDownloadClientset(t *testing.T, phase corev1.PodPhase, capture fu
 			}
 			body = string(added) + "\n" + string(bookmark) + "\n"
 		case req.Method == http.MethodGet:
+			stateMu.Lock()
+			previousExists := previousPodExists
+			isCreated := podCreated
+			stateMu.Unlock()
 			list := corev1.PodList{
 				TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"},
-				Items:    []corev1.Pod{pod},
+			}
+			if previousExists || isCreated {
+				list.Items = []corev1.Pod{pod}
 			}
 			encoded, err := json.Marshal(list)
 			if err != nil {
 				return nil, err
 			}
 			body = string(encoded)
-		case req.Method != http.MethodDelete:
+		default:
 			status = http.StatusInternalServerError
 			body = `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"unexpected request","code":500}`
 		}

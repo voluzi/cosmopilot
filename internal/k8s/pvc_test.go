@@ -55,14 +55,16 @@ func TestPvcHelperBuildDownloadGenesisPodUsesDefaultImageAndSecrets(t *testing.T
 	assert.Equal(t, images.DefaultUtilityImage, container.Image)
 	assert.Equal(t, []corev1.LocalObjectReference{{Name: "registry-creds"}}, pod.Spec.ImagePullSecrets)
 	assert.Equal(t, []string{"/bin/sh"}, container.Command)
-	require.GreaterOrEqual(t, len(container.Args), 8)
-	assert.Equal(t, "-c", container.Args[0])
-	assert.Equal(t, "genesis-download", container.Args[2])
-	assert.Equal(t, "https://example.com/genesis.json.zst", container.Args[3])
-	assert.Equal(t, "/pvc/config/genesis.json", container.Args[4])
-	assert.Equal(t, "zstd", container.Args[5])
-	assert.Equal(t, "1", container.Args[6])
-	assert.Equal(t, sha, container.Args[7])
+	assert.Equal(t, []string{
+		"-c",
+		genesisDownloadScript,
+		"genesis-download",
+		"https://example.com/genesis.json.zst",
+		"/pvc/config/genesis.json",
+		"zstd",
+		"1",
+		sha,
+	}, container.Args)
 	assert.False(t, container.Stdin)
 	require.NotNil(t, pod.Spec.TerminationGracePeriodSeconds)
 	assert.Positive(t, *pod.Spec.TerminationGracePeriodSeconds)

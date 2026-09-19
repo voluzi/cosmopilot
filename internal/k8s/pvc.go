@@ -137,7 +137,8 @@ func (h *PvcHelper) DownloadGenesis(ctx context.Context, url, path string, sha *
 	if err := h.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOptions); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete previous genesis download pod: %w", err)
 	}
-	// Graceful deletion lets the previous shell clean its private stage before a retry reclaims leftovers.
+	// The grace period and deletion wait ensure the prior writer has stopped before Create.
+	// The new download separately reclaims staging left by an earlier SIGKILL.
 	if err := ph.WaitForPodDeleted(ctx, time.Minute); err != nil {
 		return fmt.Errorf("wait for previous genesis download pod deletion: %w", err)
 	}
