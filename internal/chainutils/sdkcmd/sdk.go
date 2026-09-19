@@ -43,8 +43,8 @@ type SDK interface {
 	// CollectGenTxsArgs returns arguments for collecting genesis transactions.
 	CollectGenTxsArgs() []string
 
-	// CreateValidatorArgs returns arguments for creating a validator on an existing chain.
-	CreateValidatorArgs(account, pubKey, moniker, stakeAmount, chainID, gasPrices string, options ...*ArgOption) []string
+	// CreateValidatorCommand returns the arguments and optional validator file for an existing chain.
+	CreateValidatorCommand(validatorFile, account, pubKey, moniker, stakeAmount, chainID, gasPrices string, options ...*ArgOption) (CreateValidatorCommand, error)
 
 	// GenesisSetUnbondingTimeCmd returns a shell command to set the unbonding time in the genesis file.
 	GenesisSetUnbondingTimeCmd(unbondingTime, genesisFile string) string
@@ -55,6 +55,12 @@ type SDK interface {
 	// GenesisSetExpeditedVotingPeriodCmd returns a shell command to set the expedited voting period.
 	// Returns empty string for SDK versions that don't support it (< v0.50).
 	GenesisSetExpeditedVotingPeriodCmd(votingPeriod, genesisFile string) string
+}
+
+// CreateValidatorCommand contains the CLI arguments and any file content they reference.
+type CreateValidatorCommand struct {
+	Args          []string
+	ValidatorJSON []byte
 }
 
 type Options struct {

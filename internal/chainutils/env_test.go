@@ -104,12 +104,13 @@ func TestBuildConfigGeneratorPodPropagatesAppEnvOnlyToTheChainApp(t *testing.T) 
 func TestBuildCreateValidatorPodPropagatesAppEnvToBothChainCLIContainers(t *testing.T) {
 	app := newTestAppWithEnv(t, testAppEnv())
 
-	pod := app.buildCreateValidatorPod(
+	pod, err := app.buildCreateValidatorPod(
 		"pubkey",
 		&NodeInfo{Moniker: "validator"},
 		&Params{ChainID: "chain", StakeAmount: "1stake"},
 		"tcp://node:26657",
 	)
+	require.NoError(t, err)
 
 	assert.Equal(t, testAppEnv(), requireContainer(t, pod.Spec.InitContainers, "load-account").Env)
 	assert.Equal(t, testAppEnv(), requireContainer(t, pod.Spec.Containers, "create-validator").Env)
