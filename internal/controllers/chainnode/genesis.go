@@ -150,6 +150,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 				DownloadGenesis(
 					ctx, *chainNode.Spec.Genesis.Url,
 					chainutils.GenesisFilename,
+					chainNode.Spec.Genesis.GenesisSHA,
 					r.opts.GetDefaultPriorityClassName(),
 					chainNode.Spec.Affinity,
 					chainNode.Spec.NodeSelector); err != nil {
