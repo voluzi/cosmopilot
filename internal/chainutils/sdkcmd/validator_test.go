@@ -96,7 +96,9 @@ func TestCreateValidatorCommandSDKVersions(t *testing.T) {
 func TestModernCreateValidatorCommandPayload(t *testing.T) {
 	t.Parallel()
 
-	metadata := "quotes: \"hello\"\nbacktick: ` dollar: $ expansion: $(NAME) unicode: Olá"
+	identity := "validator-identity"
+	website := "https://validator.example.com"
+	details := "quotes: \"hello\"\nbacktick: ` dollar: $ expansion: $(NAME) unicode: Olá"
 	sdk, err := GetSDK(appsv1.V0_53)
 	require.NoError(t, err)
 	command, err := sdk.CreateValidatorCommand(
@@ -105,9 +107,9 @@ func TestModernCreateValidatorCommandPayload(t *testing.T) {
 		WithArg(CommissionMaxRate, "0.22"),
 		WithArg(CommissionMaxChangeRate, "0.03"),
 		WithArg(MinSelfDelegation, "9"),
-		WithArg(Identity, metadata),
-		WithArg(Website, metadata),
-		WithArg(Details, metadata),
+		WithArg(Identity, identity),
+		WithArg(Website, website),
+		WithArg(Details, details),
 	)
 	require.NoError(t, err)
 
@@ -133,9 +135,9 @@ func TestModernCreateValidatorCommandPayload(t *testing.T) {
 	require.NotNil(t, payload.Identity)
 	require.NotNil(t, payload.Website)
 	require.NotNil(t, payload.Details)
-	assert.Equal(t, metadata, *payload.Identity)
-	assert.Equal(t, metadata, *payload.Website)
-	assert.Equal(t, metadata, *payload.Details)
+	assert.Equal(t, identity, *payload.Identity)
+	assert.Equal(t, website, *payload.Website)
+	assert.Equal(t, details, *payload.Details)
 	pubKeyJSON, err := json.Marshal(payload.PubKey)
 	require.NoError(t, err)
 	assert.JSONEq(t, testValidatorPubKey, string(pubKeyJSON))
@@ -182,6 +184,12 @@ func TestCreateValidatorCommandPubKeyValidation(t *testing.T) {
 		{name: "modern rejects malformed JSON", sdkVersion: appsv1.V0_50, pubKey: "not-json", wantErr: true},
 		{name: "modern rejects JSON array", sdkVersion: appsv1.V0_53, pubKey: `[]`, wantErr: true},
 		{name: "modern rejects JSON null", sdkVersion: appsv1.V0_53, pubKey: `null`, wantErr: true},
+		{name: "modern rejects empty object", sdkVersion: appsv1.V0_53, pubKey: `{}`, wantErr: true},
+		{name: "modern rejects missing type", sdkVersion: appsv1.V0_53, pubKey: `{"key":"YQ=="}`, wantErr: true},
+		{name: "modern rejects empty type", sdkVersion: appsv1.V0_53, pubKey: `{"@type":"","key":"YQ=="}`, wantErr: true},
+		{name: "modern rejects missing key", sdkVersion: appsv1.V0_53, pubKey: `{"@type":"/cosmos.crypto.ed25519.PubKey"}`, wantErr: true},
+		{name: "modern rejects empty key", sdkVersion: appsv1.V0_53, pubKey: `{"@type":"/cosmos.crypto.ed25519.PubKey","key":""}`, wantErr: true},
+		{name: "modern rejects invalid key base64", sdkVersion: appsv1.V0_53, pubKey: `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"not-base64"}`, wantErr: true},
 	}
 
 	for _, tt := range tests {

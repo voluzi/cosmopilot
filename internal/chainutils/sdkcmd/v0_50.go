@@ -1,6 +1,7 @@
 package sdkcmd
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -34,13 +35,25 @@ type createValidatorJSON struct {
 	Details                 *string         `json:"details,omitempty"`
 }
 
+type validatorPubKeyJSON struct {
+	Type string `json:"@type"`
+	Key  string `json:"key"`
+}
+
 func (sdk *v0_50) CreateValidatorCommand(validatorFile, account, pubKey, moniker, stakeAmount, chainID, gasPrices string, options ...*ArgOption) (CreateValidatorCommand, error) {
-	var pubKeyObject map[string]json.RawMessage
+	var pubKeyObject validatorPubKeyJSON
 	if err := json.Unmarshal([]byte(pubKey), &pubKeyObject); err != nil {
 		return CreateValidatorCommand{}, fmt.Errorf("decode validator public key: %w", err)
 	}
-	if pubKeyObject == nil {
-		return CreateValidatorCommand{}, fmt.Errorf("decode validator public key: expected JSON object")
+	if pubKeyObject.Type == "" {
+		return CreateValidatorCommand{}, fmt.Errorf("decode validator public key: non-empty @type is required")
+	}
+	keyMaterial, err := base64.StdEncoding.DecodeString(pubKeyObject.Key)
+	if err != nil {
+		return CreateValidatorCommand{}, fmt.Errorf("decode validator public key: decode key material: %w", err)
+	}
+	if len(keyMaterial) == 0 {
+		return CreateValidatorCommand{}, fmt.Errorf("decode validator public key: non-empty key material is required")
 	}
 
 	payload := createValidatorJSON{
