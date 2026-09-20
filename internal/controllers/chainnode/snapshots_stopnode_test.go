@@ -40,6 +40,10 @@ type stopNodePodAPI struct {
 	present   bool
 	deletes   int
 	onDelete  func()
+	// rpcCalls counts node-utils calls made so far; rpcCallsAtDelete freezes that count when the pod
+	// is deleted, so tests can assert that nothing queried the node after it was stopped.
+	rpcCalls         *atomic.Int32
+	rpcCallsAtDelete int32
 }
 
 func (a *stopNodePodAPI) roundTrip(req *http.Request) (*http.Response, error) {
@@ -51,6 +55,9 @@ func (a *stopNodePodAPI) roundTrip(req *http.Request) (*http.Response, error) {
 		}
 		a.deletes++
 		a.present = false
+		if a.rpcCalls != nil {
+			a.rpcCallsAtDelete = a.rpcCalls.Load()
+		}
 		if a.onDelete != nil {
 			a.onDelete()
 		}
@@ -134,6 +141,7 @@ func stopNodeSnapshotChainNode(height int64) *appsv1.ChainNode {
 
 func newStopNodeSnapshotReconciler(t *testing.T, chainNode *appsv1.ChainNode, podAPI *stopNodePodAPI, rpcCalls *atomic.Int32, objects ...client.Object) (*Reconciler, client.Client) {
 	t.Helper()
+	podAPI.rpcCalls = rpcCalls
 	scheme := stopNodeSnapshotScheme(t)
 	seed := append([]client.Object{chainNode}, objects...)
 	backing := fakeclient.NewClientBuilder().
@@ -195,7 +203,8 @@ func TestStartNewSnapshotStopNodeCreatesSnapshotWithPreShutdownHeightWithoutRPC(
 	assert.Equal(t, 1, podAPI.deletes)
 	assert.Equal(t, "123", markerAtDelete)
 	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, phaseAtDelete)
-	assert.Zero(t, rpcCalls.Load())
+	assert.Equal(t, podAPI.rpcCallsAtDelete, rpcCalls.Load(),
+		"the node must not be queried once it is stopped")
 
 	snapshots := storedSnapshots(t, backing)
 	require.Len(t, snapshots, 1)
@@ -262,6 +271,7 @@ func TestEnsureVolumeSnapshotsStopNodeDoesNotAdoptUnrelatedSnapshot(t *testing.T
 		"the pending snapshot must not be satisfied by an unrelated one")
 
 	// Once the unrelated snapshot settles, the pending one is finally taken.
+	require.Len(t, storedSnapshots(t, backing), 1)
 	settled := storedSnapshots(t, backing)[0]
 	settled.CreationTimestamp = metav1.Now()
 	settled.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)}
@@ -279,6 +289,63 @@ func TestEnsureVolumeSnapshotsStopNodeDoesNotAdoptUnrelatedSnapshot(t *testing.T
 	assert.NotContains(t, storedChainNode(t, backing, chainNode).Annotations, stopNodeHeightAnnotation)
 }
 
+// heightReportingUpgradeStatusClient answers with a height, as a running node would.
+type heightReportingUpgradeStatusClient struct {
+	calls  *atomic.Int32
+	height int64
+}
+
+func (c heightReportingUpgradeStatusClient) GetUpgradeStatus(context.Context) (nodeutils.UpgradeStatus, error) {
+	c.calls.Add(1)
+	return nodeutils.UpgradeStatus{LatestHeight: ptr.To(c.height)}, nil
+}
+
+// Snapshot handling runs before the pod reconciliation that refreshes the height, so after an
+// operator outage `.status.latestHeight` can be far behind the running node. The node is still up
+// at this point, so ask it — a snapshot stamped with a long-stale height restores as the wrong
+// version.
+func TestCreateSnapshotStopNodeStampsHeightRefreshedBeforeShutdown(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(100)
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: true}
+	rpcCalls := &atomic.Int32{}
+	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
+	r.upgradeClientFactory = func(string) upgradeStatusClient {
+		return heightReportingUpgradeStatusClient{calls: rpcCalls, height: 5000}
+	}
+
+	var markerAtDelete string
+	podAPI.onDelete = func() {
+		markerAtDelete = storedChainNode(t, backing, chainNode).Annotations[stopNodeHeightAnnotation]
+	}
+
+	snapshot, err := r.createSnapshot(ctx, chainNode)
+
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, "5000", markerAtDelete)
+	assert.Equal(t, "5000", snapshot.Annotations[controllers.AnnotationDataHeight])
+	assert.Equal(t, podAPI.rpcCallsAtDelete, rpcCalls.Load(),
+		"the refresh happens while the node is up, never after it is stopped")
+}
+
+// The refresh is best effort: an unreachable node falls back to the recorded height rather than
+// leaving the snapshot untaken.
+func TestCreateSnapshotStopNodeFallsBackToRecordedHeightWhenRefreshFails(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(123)
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: true}
+	rpcCalls := &atomic.Int32{}
+	r, _ := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
+
+	snapshot, err := r.createSnapshot(ctx, chainNode)
+
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, "123", snapshot.Annotations[controllers.AnnotationDataHeight])
+	assert.Equal(t, 1, podAPI.deletes)
+}
+
 // Without a known height there is nothing to stamp, so the node must be left running.
 func TestCreateSnapshotStopNodeRefusesToStopWithoutKnownHeight(t *testing.T) {
 	ctx := t.Context()
@@ -293,7 +360,6 @@ func TestCreateSnapshotStopNodeRefusesToStopWithoutKnownHeight(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, snapshot)
 	assert.Zero(t, podAPI.deletes)
-	assert.Zero(t, rpcCalls.Load())
 	assert.Empty(t, storedSnapshots(t, backing))
 	assert.NotContains(t, storedChainNode(t, backing, chainNode).Annotations, stopNodeHeightAnnotation)
 }
@@ -342,7 +408,8 @@ func TestEnsureVolumeSnapshotsStopNodeRetriesCreateWithoutRecreatingPodAfterShut
 	require.Len(t, snapshots, 1)
 	assert.Equal(t, "123", snapshots[0].Annotations[controllers.AnnotationDataHeight])
 	assert.Equal(t, 1, podAPI.deletes)
-	assert.Zero(t, rpcCalls.Load())
+	assert.Equal(t, podAPI.rpcCallsAtDelete, rpcCalls.Load(),
+		"the node must not be queried once it is stopped")
 	stored = storedChainNode(t, backing, chainNode)
 	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
 	assert.NotContains(t, stored.Annotations, stopNodeHeightAnnotation)
@@ -366,7 +433,8 @@ func TestEnsureVolumeSnapshotsStopNodeResumesPendingMarkerAfterControllerRestart
 	assert.Equal(t, "500", snapshots[0].Annotations[controllers.AnnotationDataHeight],
 		"the recorded pre-shutdown height wins over the current status")
 	assert.Zero(t, podAPI.deletes)
-	assert.Zero(t, rpcCalls.Load())
+	assert.Equal(t, podAPI.rpcCallsAtDelete, rpcCalls.Load(),
+		"the node must not be queried once it is stopped")
 	stored := storedChainNode(t, backing, chainNode)
 	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
 	assert.NotContains(t, stored.Annotations, stopNodeHeightAnnotation)
@@ -473,7 +541,8 @@ func TestEnsureVolumeSnapshotsStopNodeResumesOnlyAfterSnapshotReadyAndDoesNotLoo
 	require.NoError(t, r.ensureVolumeSnapshots(ctx, stored, true))
 	assert.Equal(t, 1, podAPI.deletes)
 	assert.Len(t, storedSnapshots(t, backing), 1)
-	assert.Zero(t, rpcCalls.Load())
+	assert.Equal(t, podAPI.rpcCallsAtDelete, rpcCalls.Load(),
+		"the node must not be queried once it is stopped")
 }
 
 // Turning snapshots (or stopNode) off must release a node that is being held down for a snapshot.
@@ -511,6 +580,69 @@ func TestEnsureVolumeSnapshotsClearsStopNodeMarkerWhenStopNodeDisabled(t *testin
 	assert.False(t, stopNodeSnapshotHoldsPod(stored))
 	assert.Zero(t, podAPI.deletes)
 	assert.Empty(t, storedSnapshots(t, backing))
+}
+
+// staleSnapshotListClient serves VolumeSnapshot lists from a cache that has not caught up yet,
+// exactly as the manager's cached client can right after this controller created one.
+type staleSnapshotListClient struct {
+	client.Client
+}
+
+func (c *staleSnapshotListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if snapshots, ok := list.(*snapshotv1.VolumeSnapshotList); ok {
+		snapshots.Items = nil
+		return nil
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// Deleting the node's pod re-enqueues the ChainNode immediately, so the next pass can run before
+// the snapshot appears in the cache. Believing that empty list would release the node while its
+// snapshot is still being taken — the one thing stopNode exists to prevent.
+func TestEnsureVolumeSnapshotsStopNodeDoesNotReleaseNodeOnStaleSnapshotList(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(123)
+	chainNode.Annotations = map[string]string{controllers.AnnotationPvcSnapshotInProgress: "true"}
+	chainNode.Status.Phase = appsv1.PhaseChainNodeSnapshotting
+	inFlight := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node-in-flight",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "false",
+				controllers.AnnotationDataHeight:       "123",
+			},
+			Labels: map[string]string{controllers.LabelChainNode: "node"},
+		},
+	}
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: false}
+	rpcCalls := &atomic.Int32{}
+	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls, inFlight)
+	r.Client = &staleSnapshotListClient{Client: r.Client}
+
+	require.NoError(t, r.ensureVolumeSnapshots(ctx, chainNode, false))
+
+	stored := storedChainNode(t, backing, chainNode)
+	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress],
+		"a stale list must not release a node whose snapshot is still in flight")
+	assert.True(t, stopNodeSnapshotHoldsPod(stored))
+	assert.Len(t, storedSnapshots(t, backing), 1, "and must not start a second snapshot")
+}
+
+// A marker nobody can parse identifies no attempt, so it must not be left on the object where it
+// reads as one.
+func TestEnsureVolumeSnapshotsClearsMalformedStopNodeMarker(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(123)
+	chainNode.Annotations = map[string]string{stopNodeHeightAnnotation: "not-a-height"}
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: true}
+	rpcCalls := &atomic.Int32{}
+	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
+
+	require.NoError(t, r.ensureVolumeSnapshots(ctx, chainNode, false))
+
+	assert.NotContains(t, storedChainNode(t, backing, chainNode).Annotations, stopNodeHeightAnnotation)
+	assert.Zero(t, podAPI.deletes)
 }
 
 func TestStopNodeSnapshotHoldsPod(t *testing.T) {

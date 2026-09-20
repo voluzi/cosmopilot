@@ -49,20 +49,26 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		return err
 	}
 	if !chainNode.SnapshotsEnabled() {
-		if err = r.completeAcknowledgedSnapshotExports(ctx, chainNode); err != nil {
-			return err
-		}
 		// Snapshot configuration can be removed while a snapshot annotation is
 		// still persisted. Do not let obsolete configuration pin setNodePhase in
 		// Snapshotting forever; with snapshots disabled there is no snapshot state
-		// for this controller to continue reconciling.
+		// for this controller to continue reconciling. Drop it before the export
+		// cleanup below, whose errors would otherwise strand a pending attempt that
+		// is resumed at an obsolete height once snapshots are re-enabled.
 		if volumeSnapshotInProgress(chainNode) || stopNodeSnapshotPending(chainNode) {
 			logger.Info("clearing pvc snapshot state because snapshots are disabled")
 			setSnapshotInProgress(chainNode, false)
 			clearStopNodeSnapshotHeight(chainNode)
 			return r.Update(ctx, chainNode)
 		}
-		return nil
+		return r.completeAcknowledgedSnapshotExports(ctx, chainNode)
+	}
+	// A marker that cannot be parsed identifies no attempt. Drop it rather than leave it on the
+	// object, where the next attempt would have to overwrite it to make sense of it.
+	if _, ok := chainNode.Annotations[controllers.AnnotationStopNodeSnapshotHeight]; ok && !stopNodeSnapshotPending(chainNode) {
+		logger.Info("clearing malformed stop-node snapshot marker")
+		clearStopNodeSnapshotHeight(chainNode)
+		return r.Update(ctx, chainNode)
 	}
 	// A pending stop-node snapshot holds the node pod down, so release it as soon as the snapshot
 	// can no longer be taken: stopNode turned off, or the PVC this snapshot was for is gone. The
@@ -81,6 +87,16 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	snapshots, err := r.listNodeSnapshots(ctx, chainNode)
 	if err != nil {
 		return err
+	}
+
+	// Deleting the node pod re-enqueues this ChainNode at once, so this list can still be the one
+	// from before the snapshot was created. Acting on it would repair away the state that is holding
+	// the node down, or start a second snapshot. When the ChainNode says a snapshot should exist but
+	// the list does not show one, confirm against the API before believing the list.
+	if stopNodeSnapshotPending(chainNode) || (volumeSnapshotInProgress(chainNode) && !hasActiveVolumeSnapshot(snapshots)) {
+		if snapshots, err = r.listNodeSnapshotsFrom(ctx, r.reservationReader(), chainNode); err != nil {
+			return err
+		}
 	}
 
 	// Sort snapshots by creation time, newest last
@@ -725,8 +741,12 @@ func (r *Reconciler) persistPendingTarballDeletionSuccess(
 }
 
 func (r *Reconciler) listNodeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode) ([]snapshotv1.VolumeSnapshot, error) {
+	return r.listNodeSnapshotsFrom(ctx, r.Client, chainNode)
+}
+
+func (r *Reconciler) listNodeSnapshotsFrom(ctx context.Context, reader client.Reader, chainNode *appsv1.ChainNode) ([]snapshotv1.VolumeSnapshot, error) {
 	list := &snapshotv1.VolumeSnapshotList{}
-	if err := r.List(ctx, list,
+	if err := reader.List(ctx, list,
 		client.InNamespace(chainNode.GetNamespace()),
 		client.MatchingLabels{controllers.LabelChainNode: chainNode.GetName()},
 	); err != nil {
@@ -781,6 +801,12 @@ func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.Chain
 	// persist it before stopping anything so a controller restart resumes at the same height.
 	height, pending := stopNodeSnapshotHeight(chainNode)
 	if !pending {
+		// Snapshot handling runs before the pod reconciliation that normally refreshes the height, so
+		// on a first pass after an operator outage the recorded height can be far behind the node.
+		// The node is still running here, so ask it; the recorded height stays the fallback.
+		if err := r.updateLatestHeight(ctx, chainNode); err != nil {
+			logger.Error(err, "could not refresh latest height before stopping node for snapshot")
+		}
 		height = chainNode.Status.LatestHeight
 		if height <= 0 {
 			return nil, fmt.Errorf("refusing to stop %s for a snapshot: latest height is unknown", chainNode.GetName())

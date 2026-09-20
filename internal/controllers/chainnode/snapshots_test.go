@@ -155,16 +155,18 @@ func TestCreateSnapshotStopsUnboundExistingNodeBeforeCredentialRollout(t *testin
 		Status: appsv1.ChainNodeStatus{LatestHeight: 123},
 	}
 	podDeleted := false
+	rpcCalls := &atomic.Int32{}
+	var rpcCallsAtDelete int32
 	kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method == http.MethodDelete {
 			podDeleted = true
+			rpcCallsAtDelete = rpcCalls.Load()
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Success"}`))}, nil
 		}
 		return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`))}, nil
 	})}
 	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient)
 	require.NoError(t, err)
-	rpcCalls := &atomic.Int32{}
 	controllerClient := fakeclient.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&appsv1.ChainNode{}).
@@ -183,7 +185,7 @@ func TestCreateSnapshotStopsUnboundExistingNodeBeforeCredentialRollout(t *testin
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 	assert.True(t, podDeleted)
-	assert.Zero(t, rpcCalls.Load(), "a stopped node must not be queried for its height")
+	assert.Equal(t, rpcCallsAtDelete, rpcCalls.Load(), "a stopped node must not be queried for its height")
 	stored := &snapshotv1.VolumeSnapshot{}
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
 	assert.Equal(t, "123", stored.Annotations[controllers.AnnotationDataHeight])
