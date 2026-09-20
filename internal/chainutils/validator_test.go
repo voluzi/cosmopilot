@@ -70,6 +70,11 @@ func TestParseCreateValidatorBroadcastResult(t *testing.T) {
 			wantHash: validHash,
 		},
 		{
+			name:     "accepted transaction after automatic gas estimate",
+			output:   "gas estimate: 302357\n" + `{"height":"0","txhash":"` + validHash + `","codespace":"","code":0,"data":"","raw_log":"[]"}`,
+			wantHash: validHash,
+		},
+		{
 			name:       "missing transaction hash",
 			output:     `{"code":0}`,
 			wantErrors: []string{"transaction hash", "required"},
@@ -204,6 +209,8 @@ func TestBuildCreateValidatorPodSDKVersions(t *testing.T) {
 			require.NoError(t, err)
 
 			args := requireContainer(t, pod.Spec.Containers, "create-validator").Args
+			assertCommandArg(t, args, "--gas", "auto")
+			assertCommandArg(t, args, "--gas-adjustment", "1.5")
 			assertCommandArg(t, args, "--output", "json")
 			assertCommandArg(t, args, "--broadcast-mode", "sync")
 			if !tt.modern {

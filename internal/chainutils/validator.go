@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +49,14 @@ func waitForCreateValidatorResult(ctx context.Context, reader createValidatorRes
 }
 
 func parseCreateValidatorBroadcastResult(output string) (*createValidatorBroadcastResult, error) {
+	if firstLine, remainder, found := strings.Cut(output, "\n"); found {
+		if estimate, ok := strings.CutPrefix(firstLine, "gas estimate: "); ok {
+			if _, err := strconv.ParseUint(estimate, 10, 64); err == nil {
+				output = strings.TrimSpace(remainder)
+			}
+		}
+	}
+
 	var result createValidatorBroadcastResult
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return nil, fmt.Errorf("decoding create-validator output: %w", err)
@@ -93,6 +103,8 @@ func (a *App) buildCreateValidatorPod(
 		sdkcmd.WithOptionalArg(sdkcmd.Website, nodeInfo.Website),
 		sdkcmd.WithOptionalArg(sdkcmd.Identity, nodeInfo.Identity),
 		sdkcmd.WithArg(sdkcmd.Node, node),
+		sdkcmd.WithArg(sdkcmd.Gas, "auto"),
+		sdkcmd.WithArg(sdkcmd.GasAdjustment, "1.5"),
 		sdkcmd.WithArg("output", "json"),
 		sdkcmd.WithArg("broadcast-mode", "sync"),
 	)

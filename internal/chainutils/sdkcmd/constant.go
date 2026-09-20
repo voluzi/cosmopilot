@@ -10,5 +10,7 @@ const (
 	CommissionRate          = "commission-rate"
 	MinSelfDelegation       = "min-self-delegation"
 	Node                    = "node"
+	Gas                     = "gas"
+	GasAdjustment           = "gas-adjustment"
 	OutputDocument          = "output-document"
 )
