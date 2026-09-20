@@ -240,7 +240,7 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		}
 
 		if err := r.clearReplacedDataHolds(ctx, chainNode); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("failed to clear halt-height hold for replacement data: %w", err)
+			return nil, ctrl.Result{}, fmt.Errorf("failed to clear holds for replacement data: %w", err)
 		}
 
 		logger.Info("creating pvc", "pvc", chainNode.GetName(), "size", storageSize)

@@ -26,6 +26,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/datasnapshot"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -801,13 +802,7 @@ func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.Chain
 	// persist it before stopping anything so a controller restart resumes at the same height.
 	height, pending := stopNodeSnapshotHeight(chainNode)
 	if !pending {
-		// Snapshot handling runs before the pod reconciliation that normally refreshes the height, so
-		// on a first pass after an operator outage the recorded height can be far behind the node.
-		// The node is still running here, so ask it; the recorded height stays the fallback.
-		if err := r.updateLatestHeight(ctx, chainNode); err != nil {
-			logger.Error(err, "could not refresh latest height before stopping node for snapshot")
-		}
-		height = chainNode.Status.LatestHeight
+		height = r.heightForSnapshot(ctx, chainNode)
 		if height <= 0 {
 			return nil, fmt.Errorf("refusing to stop %s for a snapshot: latest height is unknown", chainNode.GetName())
 		}
@@ -817,12 +812,6 @@ func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.Chain
 		}
 	}
 
-	// Announce the phase before the pod goes away — including on a resumed attempt, which stops the
-	// node again. A ChainNode still claiming Running reports itself ready with no pod behind it.
-	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSnapshotting); err != nil {
-		return nil, err
-	}
-
 	if err := r.stopNodeForSnapshot(ctx, chainNode); err != nil {
 		return nil, err
 	}
@@ -830,8 +819,33 @@ func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.Chain
 	return snapshot, r.Create(ctx, snapshot)
 }
 
+// heightForSnapshot reports the height of the data about to be snapshotted. Snapshot handling runs
+// before the pod reconciliation that normally refreshes the height, so on a first pass after an
+// operator outage the recorded height can be far behind the node. The node is still running here, so
+// ask it: its answer describes the data being snapshotted even when it is below the recorded status,
+// which only ever rises and so outlives a rollback. The recorded height remains the fallback.
+func (r *Reconciler) heightForSnapshot(ctx context.Context, chainNode *appsv1.ChainNode) int64 {
+	logger := log.FromContext(ctx)
+
+	status, err := r.getUpgradeStatus(ctx, chainNode)
+	if err != nil {
+		logger.Error(err, "could not refresh latest height before stopping node for snapshot")
+		return chainNode.Status.LatestHeight
+	}
+	if status.LatestHeight == nil {
+		return chainNode.Status.LatestHeight
+	}
+	if err := r.applyUpgradeStatus(ctx, chainNode, nodeutils.UpgradeStatus{LatestHeight: status.LatestHeight}); err != nil {
+		logger.Error(err, "could not persist refreshed latest height")
+	}
+	return *status.LatestHeight
+}
+
 // stopNodeForSnapshot deletes the node pod and waits for it to be gone, so the snapshot is taken
-// from a quiesced volume. An already absent pod is the desired state, not an error.
+// from a quiesced volume. The phase is announced once the deletion is accepted: announcing it
+// earlier would drop a node out of the ready set that the API then refuses to delete, and leaving it
+// until after the wait would let a ChainNode with no pod report itself ready. An already absent pod
+// is the desired state, not an error.
 func (r *Reconciler) stopNodeForSnapshot(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -841,10 +855,18 @@ func (r *Reconciler) stopNodeForSnapshot(ctx context.Context, chainNode *appsv1.
 	}
 
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
+	terminating := true
 	if err := ph.Delete(ctx); err != nil {
 		if !errors.IsNotFound(err) {
 			return err
 		}
+		terminating = false
+	}
+
+	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSnapshotting); err != nil {
+		return err
+	}
+	if !terminating {
 		return nil
 	}
 	return ph.WaitForPodDeleted(ctx, timeoutPodDeleted)

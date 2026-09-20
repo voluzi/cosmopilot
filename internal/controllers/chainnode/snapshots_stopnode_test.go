@@ -38,8 +38,10 @@ type stopNodePodAPI struct {
 	namespace string
 	name      string
 	present   bool
-	deletes   int
-	onDelete  func()
+	// rejectDelete answers pod deletions with 403, as an admission policy or missing permission would.
+	rejectDelete bool
+	deletes      int
+	onDelete     func()
 	// rpcCalls counts node-utils calls made so far; rpcCallsAtDelete freezes that count when the pod
 	// is deleted, so tests can assert that nothing queried the node after it was stopped.
 	rpcCalls         *atomic.Int32
@@ -50,6 +52,9 @@ func (a *stopNodePodAPI) roundTrip(req *http.Request) (*http.Response, error) {
 	podPath := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", a.namespace, a.name)
 	switch {
 	case req.URL.Path == podPath && req.Method == http.MethodDelete:
+		if a.rejectDelete {
+			return stopNodeAPIResponse(http.StatusForbidden, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":403}`), nil
+		}
 		if !a.present {
 			return stopNodeAPIResponse(http.StatusNotFound, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`), nil
 		}
@@ -191,18 +196,14 @@ func TestStartNewSnapshotStopNodeCreatesSnapshotWithPreShutdownHeightWithoutRPC(
 	// The height must already be persisted when the Pod goes away, or a controller restart in this
 	// window loses it for good.
 	var markerAtDelete string
-	var phaseAtDelete appsv1.ChainNodePhase
 	podAPI.onDelete = func() {
-		atDelete := storedChainNode(t, backing, chainNode)
-		markerAtDelete = atDelete.Annotations[stopNodeHeightAnnotation]
-		phaseAtDelete = atDelete.Status.Phase
+		markerAtDelete = storedChainNode(t, backing, chainNode).Annotations[stopNodeHeightAnnotation]
 	}
 
 	require.NoError(t, r.startNewSnapshot(ctx, chainNode))
 
 	assert.Equal(t, 1, podAPI.deletes)
 	assert.Equal(t, "123", markerAtDelete)
-	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, phaseAtDelete)
 	assert.Equal(t, podAPI.rpcCallsAtDelete, rpcCalls.Load(),
 		"the node must not be queried once it is stopped")
 
@@ -230,16 +231,31 @@ func TestCreateSnapshotStopNodeMarksSnapshottingBeforeStoppingNodeOnResume(t *te
 	rpcCalls := &atomic.Int32{}
 	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
 
-	var phaseAtDelete appsv1.ChainNodePhase
-	podAPI.onDelete = func() {
-		phaseAtDelete = storedChainNode(t, backing, chainNode).Status.Phase
-	}
-
 	_, err := r.createSnapshot(ctx, chainNode)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, podAPI.deletes)
-	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, phaseAtDelete)
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, storedChainNode(t, backing, chainNode).Status.Phase)
+}
+
+// A node the API refuses to delete is still running and serving. Announcing Snapshotting anyway
+// would take it out of the ready set for as long as the rejection persists.
+func TestCreateSnapshotStopNodeKeepsPhaseWhenPodDeletionIsRejected(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(123)
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: true, rejectDelete: true}
+	rpcCalls := &atomic.Int32{}
+	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
+
+	snapshot, err := r.createSnapshot(ctx, chainNode)
+
+	require.Error(t, err)
+	assert.Nil(t, snapshot)
+	stored := storedChainNode(t, backing, chainNode)
+	assert.Equal(t, appsv1.PhaseChainNodeRunning, stored.Status.Phase,
+		"a node that is still serving must not be reported as snapshotting")
+	assert.True(t, stored.IsReady())
+	assert.Empty(t, storedSnapshots(t, backing))
 }
 
 // An unrelated snapshot that happens to be in flight is not this attempt's snapshot: adopting it
@@ -344,6 +360,25 @@ func TestCreateSnapshotStopNodeFallsBackToRecordedHeightWhenRefreshFails(t *test
 	require.NotNil(t, snapshot)
 	assert.Equal(t, "123", snapshot.Annotations[controllers.AnnotationDataHeight])
 	assert.Equal(t, 1, podAPI.deletes)
+}
+
+// status.latestHeight only ever rises, so after a rollback it overstates the data on disk. The
+// stamp must follow what the node actually reports, or the snapshot claims data it does not hold.
+func TestCreateSnapshotStopNodeStampsHeightBelowRecordedStatus(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(5000)
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: true}
+	rpcCalls := &atomic.Int32{}
+	r, _ := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
+	r.upgradeClientFactory = func(string) upgradeStatusClient {
+		return heightReportingUpgradeStatusClient{calls: rpcCalls, height: 4200}
+	}
+
+	snapshot, err := r.createSnapshot(ctx, chainNode)
+
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, "4200", snapshot.Annotations[controllers.AnnotationDataHeight])
 }
 
 // Without a known height there is nothing to stamp, so the node must be left running.
