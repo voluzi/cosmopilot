@@ -95,6 +95,7 @@ var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
 			})).To(Succeed())
 
 			chainNodeSet := app.BuildChainNodeSet(ns.Name, 0)
+			chainNodeSet.Spec.Nodes = nil
 			chainNodeSet.Spec.Validator.Init.Accounts = append(chainNodeSet.Spec.Validator.Init.Accounts, appsv1.AccountAssets{
 				Address: joiningAccount.Address,
 				Assets:  append([]string{}, app.ValidatorConfig.Assets...),
