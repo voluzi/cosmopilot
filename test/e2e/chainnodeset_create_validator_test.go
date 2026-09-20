@@ -79,7 +79,7 @@ var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
 			continue
 		}
 
-		It("should create and bond an Allora SDK v0.50 validator after genesis", Label(apps.LabelPerApp), WithNs(func(ns *corev1.Namespace) {
+		It("should create and bond an Allora SDK v0.50 validator after genesis", Serial, Label(apps.LabelPerApp), WithNs(func(ns *corev1.Namespace) {
 			joiningAccount, err := chainutils.CreateAccount(
 				app.ValidatorConfig.AccountPrefix,
 				app.ValidatorConfig.ValPrefix,
