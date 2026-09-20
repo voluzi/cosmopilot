@@ -183,14 +183,18 @@ func TestStartNewSnapshotStopNodeCreatesSnapshotWithPreShutdownHeightWithoutRPC(
 	// The height must already be persisted when the Pod goes away, or a controller restart in this
 	// window loses it for good.
 	var markerAtDelete string
+	var phaseAtDelete appsv1.ChainNodePhase
 	podAPI.onDelete = func() {
-		markerAtDelete = storedChainNode(t, backing, chainNode).Annotations[stopNodeHeightAnnotation]
+		atDelete := storedChainNode(t, backing, chainNode)
+		markerAtDelete = atDelete.Annotations[stopNodeHeightAnnotation]
+		phaseAtDelete = atDelete.Status.Phase
 	}
 
 	require.NoError(t, r.startNewSnapshot(ctx, chainNode))
 
 	assert.Equal(t, 1, podAPI.deletes)
 	assert.Equal(t, "123", markerAtDelete)
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, phaseAtDelete)
 	assert.Zero(t, rpcCalls.Load())
 
 	snapshots := storedSnapshots(t, backing)
@@ -396,6 +400,38 @@ func TestEnsureVolumeSnapshotsStopNodeRepairClearsMarkerWhenSnapshotAlreadyExist
 	stored := storedChainNode(t, backing, chainNode)
 	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
 	assert.NotContains(t, stored.Annotations, stopNodeHeightAnnotation)
+}
+
+// A snapshot that became usable before the controller managed to record it is still this attempt's
+// snapshot: adopt it rather than stopping the node again for a second one.
+func TestEnsureVolumeSnapshotsStopNodeAdoptsSnapshotThatBecameReadyBeforeBeingRecorded(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(123)
+	chainNode.Annotations = map[string]string{stopNodeHeightAnnotation: "123"}
+	existing := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-already-created",
+			Namespace:         "default",
+			CreationTimestamp: metav1.Now(),
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "false",
+				controllers.AnnotationDataHeight:       "123",
+			},
+			Labels: map[string]string{controllers.LabelChainNode: "node"},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+	}
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: false}
+	rpcCalls := &atomic.Int32{}
+	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls, existing)
+
+	require.NoError(t, r.ensureVolumeSnapshots(ctx, chainNode, false))
+
+	assert.Len(t, storedSnapshots(t, backing), 1, "no second snapshot for an attempt already finished")
+	assert.Zero(t, podAPI.deletes)
+	stored := storedChainNode(t, backing, chainNode)
+	assert.NotContains(t, stored.Annotations, stopNodeHeightAnnotation)
+	assert.NotEmpty(t, stored.Annotations[controllers.AnnotationLastPvcSnapshot])
 }
 
 // The node comes back only once the snapshot is usable, and the cadence then holds: no second

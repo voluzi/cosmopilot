@@ -112,7 +112,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	// so adopt it here instead of taking a second one. It is recognised by the height it was stamped
 	// with: an unrelated snapshot that is merely in flight is not the one the node was stopped for.
 	markerHeight, markerPending := stopNodeSnapshotHeight(chainNode)
-	markerNeedsClear := markerPending && hasActiveSnapshotAtHeight(snapshots, markerHeight)
+	markerNeedsClear := markerPending && hasUnprocessedSnapshotAtHeight(snapshots, markerHeight)
 	if annotationNeedsRepair {
 		logger.Info("repairing pvc snapshot in-progress annotation", "active", activeSnapshot)
 		setSnapshotInProgress(chainNode, activeSnapshot)
@@ -849,14 +849,17 @@ func isSnapshotReady(snapshot *snapshotv1.VolumeSnapshot) bool {
 	return snapshot != nil && snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse
 }
 
-// hasActiveSnapshotAtHeight reports whether a snapshot is being taken of the data at height. It
-// identifies the snapshot a pending stop-node attempt already created, across a reconcile that did
-// not get to record it on the ChainNode.
-func hasActiveSnapshotAtHeight(snapshots []snapshotv1.VolumeSnapshot, height int64) bool {
+// hasUnprocessedSnapshotAtHeight reports whether a snapshot of the data at height exists that this
+// controller has not finished processing. It identifies the snapshot a pending stop-node attempt
+// already created, across a reconcile that did not get to record it on the ChainNode — including
+// one the CSI driver readied in the meantime, which is a finished attempt rather than a reason to
+// stop the node for another. Snapshots already processed carry a true ready annotation.
+func hasUnprocessedSnapshotAtHeight(snapshots []snapshotv1.VolumeSnapshot, height int64) bool {
 	want := strconv.FormatInt(height, 10)
 	for i := range snapshots {
 		snapshot := &snapshots[i]
-		if snapshot.DeletionTimestamp.IsZero() && !isSnapshotReady(snapshot) &&
+		if snapshot.DeletionTimestamp.IsZero() &&
+			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(false) &&
 			snapshot.Annotations[controllers.AnnotationDataHeight] == want {
 			return true
 		}

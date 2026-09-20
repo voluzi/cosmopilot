@@ -250,10 +250,10 @@ last block height observed before the node was stopped, which is a lower bound: 
 be a few blocks ahead of it. That height is recorded on the `ChainNode` before the node is stopped,
 so a controller restart in the middle of a snapshot resumes it instead of abandoning it.
 
-If creating the snapshot fails, the node remains stopped and creation is retried. Setting
+If creating the snapshot fails, the node remains stopped and creation is retried; integrity checks,
+tarball exports and retention for that node resume once the snapshot is recorded. Setting
 `stopNode: false` releases the node; removing the `cosmopilot.voluzi.com/stop-node-snapshot-height`
-annotation only abandons the current attempt, which is then started again when the snapshot is next
-due.
+annotation only abandons the current attempt, which is retried as soon as the node is ready again.
 
 #### When to Use
 - **Unverified Providers**: If your cluster uses a storage backend without clear guarantees of crash consistency.
