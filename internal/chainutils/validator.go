@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -16,6 +18,57 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 )
+
+type createValidatorResultReader interface {
+	WaitForPodSucceeded(context.Context, time.Duration) error
+	GetLogs(context.Context, string) (string, error)
+}
+
+type createValidatorBroadcastResult struct {
+	TxHash    string `json:"txhash"`
+	Code      uint32 `json:"code"`
+	Codespace string `json:"codespace"`
+	RawLog    string `json:"raw_log"`
+}
+
+func waitForCreateValidatorResult(ctx context.Context, reader createValidatorResultReader) (string, error) {
+	if err := reader.WaitForPodSucceeded(ctx, time.Minute); err != nil {
+		return "", err
+	}
+	logs, err := reader.GetLogs(ctx, "create-validator")
+	if err != nil {
+		return "", fmt.Errorf("reading create-validator output: %w", err)
+	}
+	result, err := parseCreateValidatorBroadcastResult(logs)
+	if err != nil {
+		return "", err
+	}
+	return result.TxHash, nil
+}
+
+func parseCreateValidatorBroadcastResult(output string) (*createValidatorBroadcastResult, error) {
+	var result createValidatorBroadcastResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		return nil, fmt.Errorf("decoding create-validator output: %w", err)
+	}
+	if result.Code != 0 {
+		if result.TxHash == "" {
+			return nil, fmt.Errorf("create-validator CheckTx rejected with code %d, codespace %s: %s", result.Code, result.Codespace, result.RawLog)
+		}
+		return nil, fmt.Errorf("create-validator CheckTx rejected for transaction %s with code %d, codespace %s: %s", result.TxHash, result.Code, result.Codespace, result.RawLog)
+	}
+	if result.TxHash == "" {
+		return nil, fmt.Errorf("create-validator transaction hash is required")
+	}
+	hash, err := hex.DecodeString(result.TxHash)
+	if err != nil {
+		return nil, fmt.Errorf("decode create-validator transaction hash: %w", err)
+	}
+	if len(hash) != 32 {
+		return nil, fmt.Errorf("create-validator transaction hash must be 32 bytes, got %d", len(hash))
+	}
+	return &result, nil
+}
 
 func (a *App) buildCreateValidatorPod(
 	pubKey string,
@@ -40,6 +93,8 @@ func (a *App) buildCreateValidatorPod(
 		sdkcmd.WithOptionalArg(sdkcmd.Website, nodeInfo.Website),
 		sdkcmd.WithOptionalArg(sdkcmd.Identity, nodeInfo.Identity),
 		sdkcmd.WithArg(sdkcmd.Node, node),
+		sdkcmd.WithArg("output", "json"),
+		sdkcmd.WithArg("broadcast-mode", "sync"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("building create-validator command: %w", err)
@@ -124,14 +179,14 @@ func (a *App) CreateValidator(
 	nodeInfo *NodeInfo,
 	params *Params,
 	node string,
-) error {
+) (string, error) {
 	pod, err := a.buildCreateValidatorPod(pubKey, nodeInfo, params, node)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if err := controllerutil.SetControllerReference(a.owner, pod, a.scheme); err != nil {
-		return err
+		return "", err
 	}
 
 	ph := k8s.NewPodHelper(a.client, a.restConfig, pod)
@@ -139,26 +194,30 @@ func (a *App) CreateValidator(
 	// Delete the pod if it already exists
 	_ = ph.Delete(ctx)
 
-	// Delete the pod independently of the result
-	defer func() { _ = ph.Delete(ctx) }()
+	// Cleanup must survive request cancellation so the helper cannot be stranded.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = ph.Delete(cleanupCtx)
+	}()
 
 	// Create the pod
 	if err := ph.Create(ctx); err != nil {
-		return err
+		return "", err
 	}
 
 	// Wait for load-account container to be running
 	if err := ph.WaitForInitContainerRunning(ctx, "load-account", time.Minute); err != nil {
-		return err
+		return "", err
 	}
 
 	// Attach to load-account container to insert mnemonic
 	var input bytes.Buffer
 	input.WriteString(fmt.Sprintf("%s\n", account.Mnemonic))
 	if _, _, err := ph.Attach(ctx, "load-account", &input); err != nil {
-		return err
+		return "", err
 	}
 
 	// Wait for the pod to be completed
-	return ph.WaitForPodSucceeded(ctx, time.Minute)
+	return waitForCreateValidatorResult(ctx, ph)
 }

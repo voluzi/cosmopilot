@@ -1,9 +1,12 @@
 package e2e
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -70,6 +73,76 @@ type stakingValidator struct {
 		} `json:"commission_rates"`
 	} `json:"commission"`
 	MinSelfDelegation string `json:"min_self_delegation"`
+}
+
+type normalizedConsensusPubKey struct {
+	Type string
+	Key  []byte
+}
+
+func normalizeConsensusPubKey(raw json.RawMessage) (normalizedConsensusPubKey, error) {
+	var value struct {
+		ProtoType  string `json:"@type"`
+		LegacyType string `json:"type"`
+		Key        string `json:"key"`
+		Value      string `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return normalizedConsensusPubKey{}, fmt.Errorf("decode consensus public key JSON: %w", err)
+	}
+	if value.ProtoType != "" && value.LegacyType != "" && value.ProtoType != value.LegacyType {
+		return normalizedConsensusPubKey{}, fmt.Errorf("conflicting consensus public key types %q and %q", value.ProtoType, value.LegacyType)
+	}
+	keyType := value.ProtoType
+	if keyType == "" {
+		keyType = value.LegacyType
+	}
+	if keyType == "" {
+		return normalizedConsensusPubKey{}, fmt.Errorf("consensus public key type is required")
+	}
+	if value.Key != "" && value.Value != "" && value.Key != value.Value {
+		return normalizedConsensusPubKey{}, fmt.Errorf("conflicting consensus public key values")
+	}
+	keyValue := value.Key
+	if keyValue == "" {
+		keyValue = value.Value
+	}
+	key, err := base64.StdEncoding.DecodeString(keyValue)
+	if err != nil {
+		return normalizedConsensusPubKey{}, fmt.Errorf("decode consensus public key value: %w", err)
+	}
+	if len(key) == 0 {
+		return normalizedConsensusPubKey{}, fmt.Errorf("consensus public key value is required")
+	}
+	return normalizedConsensusPubKey{Type: keyType, Key: key}, nil
+}
+
+func consensusPubKeysMatch(left, right json.RawMessage) (bool, error) {
+	leftKey, err := normalizeConsensusPubKey(left)
+	if err != nil {
+		return false, err
+	}
+	rightKey, err := normalizeConsensusPubKey(right)
+	if err != nil {
+		return false, err
+	}
+	return leftKey.Type == rightKey.Type && bytes.Equal(leftKey.Key, rightKey.Key), nil
+}
+
+func TestNormalizeConsensusPubKeyEquivalentRepresentations(t *testing.T) {
+	t.Parallel()
+
+	expected, err := normalizeConsensusPubKey(json.RawMessage(`{"@type":"/cosmos.crypto.ed25519.PubKey","key":"oWg2ISpLF405Jcm2vXV+2v4fnjodh6aafuIdeoW+rUw="}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := normalizeConsensusPubKey(json.RawMessage(`{"type":"/cosmos.crypto.ed25519.PubKey","value":"oWg2ISpLF405Jcm2vXV+2v4fnjodh6aafuIdeoW+rUw="}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected.Type != actual.Type || !bytes.Equal(expected.Key, actual.Key) {
+		t.Fatalf("equivalent consensus keys differ: expected %#v, actual %#v", expected, actual)
+	}
 }
 
 var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
@@ -203,7 +276,9 @@ var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
 				g.Expect(found).To(BeTrue())
 				g.Expect(validator.Status).To(Equal(bondStatusBonded))
 				g.Expect(validator.Jailed).To(BeFalse())
-				g.Expect(validator.ConsensusPubKey).To(MatchJSON(expectedJoiningPubKey))
+				pubKeysMatch, err := consensusPubKeysMatch(validator.ConsensusPubKey, json.RawMessage(expectedJoiningPubKey))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(pubKeysMatch).To(BeTrue())
 				g.Expect(validator.Description.Moniker).To(Equal(joiningValidatorMoniker))
 				g.Expect(validator.Description.Details).To(Equal(joiningValidatorDetails))
 				g.Expect(validator.Description.Website).To(Equal(joiningValidatorWebsite))
@@ -229,7 +304,9 @@ var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
 				g.Expect(currentNode.Status.AccountAddress).To(Equal(joiningAccount.Address))
 				g.Expect(currentNode.Status.ValidatorStatus).To(Equal(appsv1.ValidatorStatusBonded))
 				g.Expect(currentNode.Status.Jailed).To(BeFalse())
-				g.Expect(currentNode.Status.PubKey).To(MatchJSON(joinedValidator.ConsensusPubKey))
+				pubKeysMatch, err := consensusPubKeysMatch(json.RawMessage(currentNode.Status.PubKey), joinedValidator.ConsensusPubKey)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(pubKeysMatch).To(BeTrue())
 
 				currentSet := &appsv1.ChainNodeSet{}
 				g.Expect(Framework().Client().Get(
@@ -253,7 +330,9 @@ var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
 				g.Expect(parentValidator.Init).To(BeFalse())
 				g.Expect(parentValidator.Address).To(Equal(joinedValidator.OperatorAddress))
 				g.Expect(parentValidator.Status).To(Equal(appsv1.ValidatorStatusBonded))
-				g.Expect(parentValidator.PubKey).To(MatchJSON(joinedValidator.ConsensusPubKey))
+				pubKeysMatch, err = consensusPubKeysMatch(json.RawMessage(parentValidator.PubKey), joinedValidator.ConsensusPubKey)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(pubKeysMatch).To(BeTrue())
 			}).Should(Succeed())
 
 			genesisNode := &appsv1.ChainNode{}

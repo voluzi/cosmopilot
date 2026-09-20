@@ -1,11 +1,15 @@
 package chainutils
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,6 +22,146 @@ import (
 )
 
 const validValidatorPubKey = `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"oWg2ISpLF405Jcm2vXV+2v4fnjodh6aafuIdeoW+rUw="}`
+
+type fakeCreateValidatorResultReader struct {
+	waitErr  error
+	logs     string
+	logsErr  error
+	logsRead int
+}
+
+func (f *fakeCreateValidatorResultReader) WaitForPodSucceeded(context.Context, time.Duration) error {
+	return f.waitErr
+}
+
+func (f *fakeCreateValidatorResultReader) GetLogs(context.Context, string) (string, error) {
+	f.logsRead++
+	return f.logs, f.logsErr
+}
+
+func TestWaitForCreateValidatorResultRejectsCheckTxFailure(t *testing.T) {
+	t.Parallel()
+
+	reader := &fakeCreateValidatorResultReader{
+		logs: `{"code":5,"codespace":"sdk","raw_log":"insufficient fees"}`,
+	}
+
+	_, err := waitForCreateValidatorResult(t.Context(), reader)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "CheckTx rejected")
+	assert.ErrorContains(t, err, "code 5")
+	assert.ErrorContains(t, err, "codespace sdk")
+	assert.ErrorContains(t, err, "insufficient fees")
+}
+
+func TestParseCreateValidatorBroadcastResult(t *testing.T) {
+	t.Parallel()
+
+	validHash := strings.Repeat("ab", 32)
+	tests := []struct {
+		name       string
+		output     string
+		wantHash   string
+		wantErrors []string
+	}{
+		{
+			name:     "accepted transaction",
+			output:   `{"height":"0","txhash":"` + validHash + `","codespace":"","code":0,"data":"","raw_log":"[]"}`,
+			wantHash: validHash,
+		},
+		{
+			name:       "missing transaction hash",
+			output:     `{"code":0}`,
+			wantErrors: []string{"transaction hash", "required"},
+		},
+		{
+			name:       "malformed transaction hash",
+			output:     `{"txhash":"1234","code":0}`,
+			wantErrors: []string{"transaction hash", "32 bytes"},
+		},
+		{
+			name:       "unrelated JSON",
+			output:     `{"status":"ok"}`,
+			wantErrors: []string{"transaction hash", "required"},
+		},
+		{
+			name:       "empty output",
+			output:     "",
+			wantErrors: []string{"decoding create-validator output"},
+		},
+		{
+			name:       "malformed JSON",
+			output:     `{"txhash":`,
+			wantErrors: []string{"decoding create-validator output"},
+		},
+		{
+			name:       "rejected transaction retains chain error without hash",
+			output:     `{"code":7,"codespace":"sdk","raw_log":"invalid sequence"}`,
+			wantErrors: []string{"CheckTx rejected", "code 7", "codespace sdk", "invalid sequence"},
+		},
+		{
+			name:       "rejected transaction includes hash",
+			output:     `{"txhash":"` + validHash + `","code":8,"codespace":"staking","raw_log":"validator exists"}`,
+			wantErrors: []string{"CheckTx rejected", validHash, "code 8", "codespace staking", "validator exists"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := parseCreateValidatorBroadcastResult(tt.output)
+			if len(tt.wantErrors) > 0 {
+				require.Error(t, err)
+				for _, want := range tt.wantErrors {
+					assert.ErrorContains(t, err, want)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantHash, result.TxHash)
+		})
+	}
+}
+
+func TestWaitForCreateValidatorResultStopsBeforeReadingLogsWhenPodFails(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("pod failed")
+	reader := &fakeCreateValidatorResultReader{waitErr: wantErr}
+
+	_, err := waitForCreateValidatorResult(t.Context(), reader)
+
+	require.ErrorIs(t, err, wantErr)
+	assert.Zero(t, reader.logsRead)
+}
+
+func TestWaitForCreateValidatorResultReportsLogReadFailure(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("stream unavailable")
+	reader := &fakeCreateValidatorResultReader{logsErr: wantErr}
+
+	_, err := waitForCreateValidatorResult(t.Context(), reader)
+
+	require.ErrorIs(t, err, wantErr)
+	assert.ErrorContains(t, err, "reading create-validator output")
+	assert.Equal(t, 1, reader.logsRead)
+}
+
+func TestWaitForCreateValidatorResultReturnsAcceptedHash(t *testing.T) {
+	t.Parallel()
+
+	hash := strings.Repeat("ab", 32)
+	reader := &fakeCreateValidatorResultReader{logs: `{"txhash":"` + hash + `","code":0}`}
+
+	got, err := waitForCreateValidatorResult(t.Context(), reader)
+
+	require.NoError(t, err)
+	assert.Equal(t, hash, got)
+	assert.Equal(t, 1, reader.logsRead)
+}
 
 func TestBuildCreateValidatorPodSDKVersions(t *testing.T) {
 	t.Parallel()
@@ -60,6 +204,8 @@ func TestBuildCreateValidatorPodSDKVersions(t *testing.T) {
 			require.NoError(t, err)
 
 			args := requireContainer(t, pod.Spec.Containers, "create-validator").Args
+			assertCommandArg(t, args, "--output", "json")
+			assertCommandArg(t, args, "--broadcast-mode", "sync")
 			if !tt.modern {
 				assert.Equal(t, "--amount", args[3])
 				for _, container := range pod.Spec.InitContainers {
@@ -75,6 +221,17 @@ func TestBuildCreateValidatorPodSDKVersions(t *testing.T) {
 			requireContainer(t, pod.Spec.InitContainers, "write-validator-json")
 		})
 	}
+}
+
+func assertCommandArg(t *testing.T, args []string, key, value string) {
+	t.Helper()
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == key {
+			assert.Equal(t, value, args[i+1])
+			return
+		}
+	}
+	t.Errorf("argument %q not found in %v", key, args)
 }
 
 func TestBuildCreateValidatorPodMaterializesModernValidatorJSON(t *testing.T) {
@@ -162,7 +319,7 @@ func TestCreateValidatorRejectsInvalidModernPubKeyBeforeKubernetesCall(t *testin
 	}}, appsv1.V0_53, nil, WithBinary("appd"), WithImage("example/app:v1"))
 	require.NoError(t, err)
 
-	err = app.CreateValidator(
+	_, err = app.CreateValidator(
 		t.Context(),
 		"not-json",
 		&Account{Mnemonic: "unused"},
