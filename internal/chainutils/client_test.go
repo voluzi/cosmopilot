@@ -2,6 +2,7 @@ package chainutils
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -90,7 +91,9 @@ func TestQueryTx(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantCalls, rpcClient.txCalls)
 			if tt.wantCalls > 0 {
-				assert.Len(t, rpcClient.txHash, 32)
+				wantHash, decodeErr := hex.DecodeString(tt.hash)
+				require.NoError(t, decodeErr)
+				assert.Equal(t, wantHash, rpcClient.txHash)
 				assert.False(t, rpcClient.txProve)
 			}
 		})

@@ -72,7 +72,9 @@ func TestConfirmValidatorSubmitsOnceAndWaitsForMatchingState(t *testing.T) {
 		return strings.Repeat("ab", 32), nil
 	}
 
-	result, err := confirmValidator(t.Context(), client, address, testValidatorPubKeyJSON, submit, testValidatorConfirmationPolicy())
+	policy := testValidatorConfirmationPolicy()
+	policy.Timeout = time.Second
+	result, err := confirmValidator(t.Context(), client, address, testValidatorPubKeyJSON, submit, policy)
 
 	require.NoError(t, err)
 	assert.False(t, result.AlreadyPresent)

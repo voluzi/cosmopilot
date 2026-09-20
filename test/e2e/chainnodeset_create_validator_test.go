@@ -145,6 +145,53 @@ func TestNormalizeConsensusPubKeyEquivalentRepresentations(t *testing.T) {
 	}
 }
 
+func TestNormalizeConsensusPubKeyRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		raw       string
+		wantError string
+	}{
+		{
+			name:      "missing type",
+			raw:       `{"key":"YQ=="}`,
+			wantError: "type is required",
+		},
+		{
+			name:      "conflicting types",
+			raw:       `{"@type":"proto","type":"legacy","key":"YQ=="}`,
+			wantError: "conflicting consensus public key types",
+		},
+		{
+			name:      "empty key",
+			raw:       `{"@type":"proto"}`,
+			wantError: "value is required",
+		},
+		{
+			name:      "invalid base64",
+			raw:       `{"@type":"proto","key":"%%%"}`,
+			wantError: "decode consensus public key value",
+		},
+		{
+			name:      "conflicting values",
+			raw:       `{"@type":"proto","key":"YQ==","value":"Yg=="}`,
+			wantError: "conflicting consensus public key values",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := normalizeConsensusPubKey(json.RawMessage(tt.raw))
+			if err == nil || !bytes.Contains([]byte(err.Error()), []byte(tt.wantError)) {
+				t.Fatalf("normalizeConsensusPubKey() error = %v, want error containing %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
 	for _, app := range apps.All() {
 		if app.Name != "Allora" || app.AppSpec.Version == nil || *app.AppSpec.Version != "v0.14.0" ||
