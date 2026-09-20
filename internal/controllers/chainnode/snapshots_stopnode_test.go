@@ -204,6 +204,75 @@ func TestStartNewSnapshotStopNodeCreatesSnapshotWithPreShutdownHeightWithoutRPC(
 	assert.Equal(t, "true", stored.Annotations[controllers.AnnotationPvcSnapshotInProgress])
 	assert.NotContains(t, stored.Annotations, stopNodeHeightAnnotation)
 	assert.Empty(t, stored.Annotations[controllers.AnnotationLastPvcSnapshot])
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, stored.Status.Phase)
+}
+
+// A resumed attempt stops the node again, so it must announce Snapshotting before doing so: while
+// the phase says Running the ChainNode reports itself ready even though its pod is gone.
+func TestCreateSnapshotStopNodeMarksSnapshottingBeforeStoppingNodeOnResume(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(123)
+	chainNode.Annotations = map[string]string{stopNodeHeightAnnotation: "123"}
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: true}
+	rpcCalls := &atomic.Int32{}
+	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
+
+	var phaseAtDelete appsv1.ChainNodePhase
+	podAPI.onDelete = func() {
+		phaseAtDelete = storedChainNode(t, backing, chainNode).Status.Phase
+	}
+
+	_, err := r.createSnapshot(ctx, chainNode)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, podAPI.deletes)
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, phaseAtDelete)
+}
+
+// An unrelated snapshot that happens to be in flight is not this attempt's snapshot: adopting it
+// would drop the snapshot the node was stopped for.
+func TestEnsureVolumeSnapshotsStopNodeDoesNotAdoptUnrelatedSnapshot(t *testing.T) {
+	ctx := t.Context()
+	chainNode := stopNodeSnapshotChainNode(123)
+	chainNode.Annotations = map[string]string{stopNodeHeightAnnotation: "123"}
+	unrelated := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node-unrelated",
+			Namespace: "default",
+			Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: "false",
+				controllers.AnnotationDataHeight:       "999",
+			},
+			Labels: map[string]string{controllers.LabelChainNode: "node"},
+		},
+	}
+	podAPI := &stopNodePodAPI{namespace: "default", name: "node", present: false}
+	rpcCalls := &atomic.Int32{}
+	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls, unrelated)
+
+	require.NoError(t, r.ensureVolumeSnapshots(ctx, chainNode, false))
+
+	assert.Len(t, storedSnapshots(t, backing), 1)
+	stored := storedChainNode(t, backing, chainNode)
+	assert.Equal(t, "123", stored.Annotations[stopNodeHeightAnnotation],
+		"the pending snapshot must not be satisfied by an unrelated one")
+
+	// Once the unrelated snapshot settles, the pending one is finally taken.
+	settled := storedSnapshots(t, backing)[0]
+	settled.CreationTimestamp = metav1.Now()
+	settled.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)}
+	require.NoError(t, backing.Update(ctx, &settled))
+
+	require.NoError(t, r.ensureVolumeSnapshots(ctx, storedChainNode(t, backing, chainNode), false))
+
+	snapshots := storedSnapshots(t, backing)
+	require.Len(t, snapshots, 2)
+	heights := []string{
+		snapshots[0].Annotations[controllers.AnnotationDataHeight],
+		snapshots[1].Annotations[controllers.AnnotationDataHeight],
+	}
+	assert.Contains(t, heights, "123")
+	assert.NotContains(t, storedChainNode(t, backing, chainNode).Annotations, stopNodeHeightAnnotation)
 }
 
 // Without a known height there is nothing to stamp, so the node must be left running.
