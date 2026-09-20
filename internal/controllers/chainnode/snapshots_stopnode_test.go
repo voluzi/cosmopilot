@@ -42,6 +42,9 @@ type stopNodePodAPI struct {
 	rejectDelete bool
 	deletes      int
 	onDelete     func()
+	// onPodGone fires on the first GET that finds the pod absent, i.e. inside WaitForPodDeleted.
+	// It is the instant the node is down but the snapshot does not exist yet.
+	onPodGone func()
 	// rpcCalls counts node-utils calls made so far; rpcCallsAtDelete freezes that count when the pod
 	// is deleted, so tests can assert that nothing queried the node after it was stopped.
 	rpcCalls         *atomic.Int32
@@ -71,6 +74,9 @@ func (a *stopNodePodAPI) roundTrip(req *http.Request) (*http.Response, error) {
 	case req.URL.Path == podPath && req.Method == http.MethodGet:
 		if a.present {
 			return stopNodeAPIResponse(http.StatusOK, fmt.Sprintf(`{"kind":"Pod","apiVersion":"v1","metadata":{"name":%q,"namespace":%q}}`, a.name, a.namespace)), nil
+		}
+		if a.onPodGone != nil {
+			a.onPodGone()
 		}
 		return stopNodeAPIResponse(http.StatusNotFound, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`), nil
 
@@ -199,11 +205,17 @@ func TestStartNewSnapshotStopNodeCreatesSnapshotWithPreShutdownHeightWithoutRPC(
 	podAPI.onDelete = func() {
 		markerAtDelete = storedChainNode(t, backing, chainNode).Annotations[stopNodeHeightAnnotation]
 	}
+	var phaseWhenPodGone appsv1.ChainNodePhase
+	podAPI.onPodGone = func() {
+		phaseWhenPodGone = storedChainNode(t, backing, chainNode).Status.Phase
+	}
 
 	require.NoError(t, r.startNewSnapshot(ctx, chainNode))
 
 	assert.Equal(t, 1, podAPI.deletes)
 	assert.Equal(t, "123", markerAtDelete)
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, phaseWhenPodGone,
+		"the node must not still claim to be running once its pod is gone")
 	assert.Equal(t, podAPI.rpcCallsAtDelete, rpcCalls.Load(),
 		"the node must not be queried once it is stopped")
 
@@ -221,9 +233,9 @@ func TestStartNewSnapshotStopNodeCreatesSnapshotWithPreShutdownHeightWithoutRPC(
 	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, stored.Status.Phase)
 }
 
-// A resumed attempt stops the node again, so it must announce Snapshotting before doing so: while
-// the phase says Running the ChainNode reports itself ready even though its pod is gone.
-func TestCreateSnapshotStopNodeMarksSnapshottingBeforeStoppingNodeOnResume(t *testing.T) {
+// A resumed attempt stops the node again, so it must announce Snapshotting as part of doing so:
+// while the phase says Running the ChainNode reports itself ready even though its pod is gone.
+func TestCreateSnapshotStopNodeAnnouncesSnapshottingWhileStoppingNodeOnResume(t *testing.T) {
 	ctx := t.Context()
 	chainNode := stopNodeSnapshotChainNode(123)
 	chainNode.Annotations = map[string]string{stopNodeHeightAnnotation: "123"}
@@ -231,10 +243,17 @@ func TestCreateSnapshotStopNodeMarksSnapshottingBeforeStoppingNodeOnResume(t *te
 	rpcCalls := &atomic.Int32{}
 	r, backing := newStopNodeSnapshotReconciler(t, chainNode, podAPI, rpcCalls)
 
+	var phaseWhenPodGone appsv1.ChainNodePhase
+	podAPI.onPodGone = func() {
+		phaseWhenPodGone = storedChainNode(t, backing, chainNode).Status.Phase
+	}
+
 	_, err := r.createSnapshot(ctx, chainNode)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, podAPI.deletes)
+	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, phaseWhenPodGone,
+		"a resumed attempt must announce the phase too, before the node is gone and unannounced")
 	assert.Equal(t, appsv1.PhaseChainNodeSnapshotting, storedChainNode(t, backing, chainNode).Status.Phase)
 }
 
@@ -334,7 +353,6 @@ func TestCreateSnapshotStopNodeStampsHeightRefreshedBeforeShutdown(t *testing.T)
 	podAPI.onDelete = func() {
 		markerAtDelete = storedChainNode(t, backing, chainNode).Annotations[stopNodeHeightAnnotation]
 	}
-
 	snapshot, err := r.createSnapshot(ctx, chainNode)
 
 	require.NoError(t, err)
