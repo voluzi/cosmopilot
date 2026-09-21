@@ -26,6 +26,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/datasnapshot"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -49,19 +50,35 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		return err
 	}
 	if !chainNode.SnapshotsEnabled() {
-		if err = r.completeAcknowledgedSnapshotExports(ctx, chainNode); err != nil {
-			return err
-		}
 		// Snapshot configuration can be removed while a snapshot annotation is
 		// still persisted. Do not let obsolete configuration pin setNodePhase in
 		// Snapshotting forever; with snapshots disabled there is no snapshot state
-		// for this controller to continue reconciling.
-		if volumeSnapshotInProgress(chainNode) {
-			logger.Info("clearing pvc snapshot in-progress annotation because snapshots are disabled")
+		// for this controller to continue reconciling. Drop it before the export
+		// cleanup below, whose errors would otherwise strand a pending attempt that
+		// is resumed at an obsolete height once snapshots are re-enabled.
+		if volumeSnapshotInProgress(chainNode) || stopNodeSnapshotPending(chainNode) {
+			logger.Info("clearing pvc snapshot state because snapshots are disabled")
 			setSnapshotInProgress(chainNode, false)
+			clearStopNodeSnapshotHeight(chainNode)
 			return r.Update(ctx, chainNode)
 		}
-		return nil
+		return r.completeAcknowledgedSnapshotExports(ctx, chainNode)
+	}
+	// A marker that cannot be parsed identifies no attempt. Drop it rather than leave it on the
+	// object, where the next attempt would have to overwrite it to make sense of it.
+	if _, ok := chainNode.Annotations[controllers.AnnotationStopNodeSnapshotHeight]; ok && !stopNodeSnapshotPending(chainNode) {
+		logger.Info("clearing malformed stop-node snapshot marker")
+		clearStopNodeSnapshotHeight(chainNode)
+		return r.Update(ctx, chainNode)
+	}
+	// A pending stop-node snapshot holds the node pod down, so release it as soon as the snapshot
+	// can no longer be taken: stopNode turned off, or the PVC this snapshot was for is gone. The
+	// height guard below would otherwise return before anything clears the marker.
+	if stopNodeSnapshotPending(chainNode) && (!chainNode.Spec.Persistence.Snapshots.ShouldStopNode() ||
+		chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0) {
+		logger.Info("clearing pending stop-node snapshot; it no longer applies")
+		clearStopNodeSnapshotHeight(chainNode)
+		return r.Update(ctx, chainNode)
 	}
 	if chainNode.Status.PvcSize == "" || chainNode.Status.LatestHeight == 0 {
 		return nil
@@ -71,6 +88,16 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	snapshots, err := r.listNodeSnapshots(ctx, chainNode)
 	if err != nil {
 		return err
+	}
+
+	// Deleting the node pod re-enqueues this ChainNode at once, so this list can still be the one
+	// from before the snapshot was created. Acting on it would repair away the state that is holding
+	// the node down, or start a second snapshot. When the ChainNode says a snapshot should exist but
+	// the list does not show one, confirm against the API before believing the list.
+	if stopNodeSnapshotPending(chainNode) || (volumeSnapshotInProgress(chainNode) && !hasActiveVolumeSnapshot(snapshots)) {
+		if snapshots, err = r.listNodeSnapshotsFrom(ctx, r.reservationReader(), chainNode); err != nil {
+			return err
+		}
 	}
 
 	// Sort snapshots by creation time, newest last
@@ -98,6 +125,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	if phaseNeedsRepair {
 		desiredPhase = appsv1.PhaseChainNodeSnapshotting
 	}
+	// A pending stop-node snapshot whose VolumeSnapshot already exists was created but not recorded,
+	// so adopt it here instead of taking a second one. It is recognised by the height it was stamped
+	// with: an unrelated snapshot that is merely in flight is not the one the node was stopped for.
+	markerHeight, markerPending := stopNodeSnapshotHeight(chainNode)
+	markerNeedsClear := markerPending && hasUnprocessedSnapshotAtHeight(snapshots, markerHeight)
 	if annotationNeedsRepair {
 		logger.Info("repairing pvc snapshot in-progress annotation", "active", activeSnapshot)
 		setSnapshotInProgress(chainNode, activeSnapshot)
@@ -106,7 +138,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		logger.Info("repairing last pvc snapshot timestamp", "timestamp", latestCompletedSnapshot)
 		setSnapshotTime(chainNode, latestCompletedSnapshot)
 	}
-	if annotationNeedsRepair || timestampNeedsRepair {
+	if markerNeedsClear {
+		logger.Info("adopting existing snapshot for pending stop-node snapshot")
+		clearStopNodeSnapshotHeight(chainNode)
+	}
+	if annotationNeedsRepair || timestampNeedsRepair || markerNeedsClear {
 		if err = r.Update(ctx, chainNode); err != nil {
 			return err
 		}
@@ -118,6 +154,14 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		if err = r.Status().Update(ctx, chainNode); err != nil {
 			return err
 		}
+	}
+
+	// The node is already stopped for a snapshot that was never created — the pod deletion, the
+	// VolumeSnapshot creation or the controller itself did not survive the previous attempt. Finish
+	// it here, before any other snapshot work, so the node is down for as little as possible.
+	if stopNodeSnapshotPending(chainNode) && !volumeSnapshotInProgress(chainNode) {
+		logger.Info("resuming pending stop-node pvc snapshot")
+		return r.startNewSnapshot(ctx, chainNode)
 	}
 
 	// Grab list of controller-owned tarball names to make sure we delete dangling jobs. If a legacy
@@ -698,8 +742,12 @@ func (r *Reconciler) persistPendingTarballDeletionSuccess(
 }
 
 func (r *Reconciler) listNodeSnapshots(ctx context.Context, chainNode *appsv1.ChainNode) ([]snapshotv1.VolumeSnapshot, error) {
+	return r.listNodeSnapshotsFrom(ctx, r.Client, chainNode)
+}
+
+func (r *Reconciler) listNodeSnapshotsFrom(ctx context.Context, reader client.Reader, chainNode *appsv1.ChainNode) ([]snapshotv1.VolumeSnapshot, error) {
 	list := &snapshotv1.VolumeSnapshotList{}
-	if err := r.List(ctx, list,
+	if err := reader.List(ctx, list,
 		client.InNamespace(chainNode.GetNamespace()),
 		client.MatchingLabels{controllers.LabelChainNode: chainNode.GetName()},
 	); err != nil {
@@ -726,6 +774,9 @@ func (r *Reconciler) startNewSnapshot(ctx context.Context, chainNode *appsv1.Cha
 	)
 
 	setSnapshotInProgress(chainNode, true)
+	// The snapshot is recorded now, so the pending marker has done its job. Clearing it in the same
+	// update keeps the two from ever being set at once.
+	clearStopNodeSnapshotHeight(chainNode)
 	if err := r.Update(ctx, chainNode); err != nil {
 		return err
 	}
@@ -735,33 +786,90 @@ func (r *Reconciler) startNewSnapshot(ctx context.Context, chainNode *appsv1.Cha
 func (r *Reconciler) createSnapshot(ctx context.Context, chainNode *appsv1.ChainNode) (*snapshotv1.VolumeSnapshot, error) {
 	logger := log.FromContext(ctx)
 
-	if chainNode.Spec.Persistence.Snapshots.ShouldStopNode() {
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      chainNode.GetName(),
-				Namespace: chainNode.GetNamespace(),
-			},
+	if !chainNode.Spec.Persistence.Snapshots.ShouldStopNode() {
+		if err := r.updateLatestHeight(ctx, chainNode); err != nil {
+			// When this error happens, the most likely scenario is that pod is not running. So lets not throw the error and
+			// let the rest of the reconcile loop handle the missing pod.
+			logger.Error(err, "error getting latest height (pod is probably missing)")
+			return nil, nil
 		}
+		snapshot := getVolumeSnapshotSpec(chainNode, chainNode.Status.LatestHeight)
+		return snapshot, r.Create(ctx, snapshot)
+	}
 
-		ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
-		if err := ph.Delete(ctx); err != nil {
-			if !errors.IsNotFound(err) {
-				return nil, err
-			}
-		} else {
-			if err := ph.WaitForPodDeleted(ctx, timeoutPodDeleted); err != nil {
-				return nil, err
-			}
+	// A stop-node snapshot cannot ask the node for its height: the pod it would query is the one
+	// being deleted. Use the height ensurePod recorded while the node was still reachable, and
+	// persist it before stopping anything so a controller restart resumes at the same height.
+	height, pending := stopNodeSnapshotHeight(chainNode)
+	if !pending {
+		height = r.heightForSnapshot(ctx, chainNode)
+		if height <= 0 {
+			return nil, fmt.Errorf("refusing to stop %s for a snapshot: latest height is unknown", chainNode.GetName())
+		}
+		setStopNodeSnapshotHeight(chainNode, height)
+		if err := r.Update(ctx, chainNode); err != nil {
+			return nil, err
 		}
 	}
-	if err := r.updateLatestHeight(ctx, chainNode); err != nil {
-		// When this error happens, the most likely scenario is that pod is not running. So lets not throw the error and
-		// let the rest of the reconcile loop handle the missing pod.
-		logger.Error(err, "error getting latest height (pod is probably missing)")
-		return nil, nil
+
+	if err := r.stopNodeForSnapshot(ctx, chainNode); err != nil {
+		return nil, err
 	}
-	snapshot := getVolumeSnapshotSpec(chainNode)
+	snapshot := getVolumeSnapshotSpec(chainNode, height)
 	return snapshot, r.Create(ctx, snapshot)
+}
+
+// heightForSnapshot reports the height of the data about to be snapshotted. Snapshot handling runs
+// before the pod reconciliation that normally refreshes the height, so on a first pass after an
+// operator outage the recorded height can be far behind the node. The node is still running here, so
+// ask it: its answer describes the data being snapshotted even when it is below the recorded status,
+// which only ever rises and so outlives a rollback. The recorded height remains the fallback.
+func (r *Reconciler) heightForSnapshot(ctx context.Context, chainNode *appsv1.ChainNode) int64 {
+	logger := log.FromContext(ctx)
+
+	status, err := r.getUpgradeStatus(ctx, chainNode)
+	if err != nil {
+		logger.Error(err, "could not refresh latest height before stopping node for snapshot")
+		return chainNode.Status.LatestHeight
+	}
+	if status.LatestHeight == nil {
+		return chainNode.Status.LatestHeight
+	}
+	if err := r.applyUpgradeStatus(ctx, chainNode, nodeutils.UpgradeStatus{LatestHeight: status.LatestHeight}); err != nil {
+		logger.Error(err, "could not persist refreshed latest height")
+	}
+	return *status.LatestHeight
+}
+
+// stopNodeForSnapshot deletes the node pod and waits for it to be gone, so the snapshot is taken
+// from a quiesced volume. The phase is announced once the deletion is accepted: announcing it
+// earlier would drop a node out of the ready set that the API then refuses to delete, and leaving it
+// until after the wait would let a ChainNode with no pod report itself ready. An already absent pod
+// is the desired state, not an error.
+func (r *Reconciler) stopNodeForSnapshot(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      chainNode.GetName(),
+			Namespace: chainNode.GetNamespace(),
+		},
+	}
+
+	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, pod)
+	terminating := true
+	if err := ph.Delete(ctx); err != nil {
+		if !errors.IsNotFound(err) {
+			return err
+		}
+		terminating = false
+	}
+
+	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeSnapshotting); err != nil {
+		return err
+	}
+	if !terminating {
+		return nil
+	}
+	return ph.WaitForPodDeleted(ctx, timeoutPodDeleted)
 }
 
 func shouldSnapshot(chainNode *appsv1.ChainNode, nodePodReady bool) bool {
@@ -787,6 +895,24 @@ func shouldSnapshot(chainNode *appsv1.ChainNode, nodePodReady bool) bool {
 
 func isSnapshotReady(snapshot *snapshotv1.VolumeSnapshot) bool {
 	return snapshot != nil && snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse
+}
+
+// hasUnprocessedSnapshotAtHeight reports whether a snapshot of the data at height exists that this
+// controller has not finished processing. It identifies the snapshot a pending stop-node attempt
+// already created, across a reconcile that did not get to record it on the ChainNode — including
+// one the CSI driver readied in the meantime, which is a finished attempt rather than a reason to
+// stop the node for another. Snapshots already processed carry a true ready annotation.
+func hasUnprocessedSnapshotAtHeight(snapshots []snapshotv1.VolumeSnapshot, height int64) bool {
+	want := strconv.FormatInt(height, 10)
+	for i := range snapshots {
+		snapshot := &snapshots[i]
+		if snapshot.DeletionTimestamp.IsZero() &&
+			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(false) &&
+			snapshot.Annotations[controllers.AnnotationDataHeight] == want {
+			return true
+		}
+	}
+	return false
 }
 
 func hasActiveVolumeSnapshot(snapshots []snapshotv1.VolumeSnapshot) bool {
@@ -824,14 +950,17 @@ func isSnapshotExpired(snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
 	return snapshot.CreationTimestamp.UTC().Add(expiration).Before(time.Now().UTC()), nil
 }
 
-func getVolumeSnapshotSpec(chainNode *appsv1.ChainNode) *snapshotv1.VolumeSnapshot {
+// getVolumeSnapshotSpec builds the VolumeSnapshot for the data on the node's PVC at height. The
+// height is passed in because a stop-node snapshot stamps the height observed before the node was
+// stopped, which is not necessarily the one in status by the time the snapshot is created.
+func getVolumeSnapshotSpec(chainNode *appsv1.ChainNode, height int64) *snapshotv1.VolumeSnapshot {
 	spec := &snapshotv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      getSnapshotName(chainNode),
 			Namespace: chainNode.GetNamespace(),
 			Annotations: map[string]string{
 				controllers.AnnotationPvcSnapshotReady: strconv.FormatBool(false),
-				controllers.AnnotationDataHeight:       strconv.FormatInt(chainNode.Status.LatestHeight, 10),
+				controllers.AnnotationDataHeight:       strconv.FormatInt(height, 10),
 			},
 			Labels: WithChainNodeLabels(chainNode, map[string]string{
 				controllers.LabelChainNode: chainNode.GetName(),
@@ -850,6 +979,50 @@ func getVolumeSnapshotSpec(chainNode *appsv1.ChainNode) *snapshotv1.VolumeSnapsh
 	}
 
 	return spec
+}
+
+// stopNodeSnapshotPending reports whether a stop-node snapshot has been committed to but its
+// VolumeSnapshot is not recorded yet. The node pod is stopped (or about to be) for its duration.
+func stopNodeSnapshotPending(chainNode *appsv1.ChainNode) bool {
+	_, ok := stopNodeSnapshotHeight(chainNode)
+	return ok
+}
+
+// stopNodeSnapshotHeight returns the block height observed before the node pod was stopped. This is
+// the height the snapshot is stamped with, recorded so that neither the unreachable pod nor a
+// controller restart can lose it.
+func stopNodeSnapshotHeight(chainNode *appsv1.ChainNode) (int64, bool) {
+	v, ok := chainNode.ObjectMeta.Annotations[controllers.AnnotationStopNodeSnapshotHeight]
+	if !ok {
+		return 0, false
+	}
+	height, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || height <= 0 {
+		return 0, false
+	}
+	return height, true
+}
+
+func setStopNodeSnapshotHeight(chainNode *appsv1.ChainNode, height int64) {
+	if chainNode.ObjectMeta.Annotations == nil {
+		chainNode.ObjectMeta.Annotations = make(map[string]string)
+	}
+	chainNode.ObjectMeta.Annotations[controllers.AnnotationStopNodeSnapshotHeight] = strconv.FormatInt(height, 10)
+}
+
+func clearStopNodeSnapshotHeight(chainNode *appsv1.ChainNode) {
+	delete(chainNode.ObjectMeta.Annotations, controllers.AnnotationStopNodeSnapshotHeight)
+}
+
+// stopNodeSnapshotHoldsPod reports whether reconciliation must stop before ensurePod because the
+// node is deliberately down for a snapshot: either the snapshot is running, or it was committed to
+// and its VolumeSnapshot is still to be created. Recreating the pod in either window would either
+// corrupt the snapshot or abandon it.
+func stopNodeSnapshotHoldsPod(chainNode *appsv1.ChainNode) bool {
+	if !chainNode.SnapshotsEnabled() || !chainNode.Spec.Persistence.Snapshots.ShouldStopNode() {
+		return false
+	}
+	return volumeSnapshotInProgress(chainNode) || stopNodeSnapshotPending(chainNode)
 }
 
 func volumeSnapshotInProgress(chainNode *appsv1.ChainNode) bool {

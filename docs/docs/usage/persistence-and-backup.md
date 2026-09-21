@@ -245,6 +245,16 @@ persistence:
 If you prefer to avoid downtime you can consider enabling [integrity verification](#integrity-checks) instead.
 :::
 
+The node stays stopped until the snapshot reports `readyToUse`. The snapshot is annotated with the
+last block height observed before the node was stopped, which is a lower bound: the data on disk may
+be a few blocks ahead of it. That height is recorded on the `ChainNode` before the node is stopped,
+so a controller restart in the middle of a snapshot resumes it instead of abandoning it.
+
+If creating the snapshot fails, the node remains stopped and creation is retried; integrity checks,
+tarball exports and retention for that node resume once the snapshot is recorded. Setting
+`stopNode: false` releases the node; removing the `cosmopilot.voluzi.com/stop-node-snapshot-height`
+annotation only abandons the current attempt, which is retried as soon as the node is ready again.
+
 #### When to Use
 - **Unverified Providers**: If your cluster uses a storage backend without clear guarantees of crash consistency.
 - **Heavy Write Workloads**: For nodes experiencing intensive writes, where the risk of snapshot inconsistency is higher.

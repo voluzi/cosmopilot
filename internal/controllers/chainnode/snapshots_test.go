@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,37 +155,45 @@ func TestCreateSnapshotStopsUnboundExistingNodeBeforeCredentialRollout(t *testin
 		Status: appsv1.ChainNodeStatus{LatestHeight: 123},
 	}
 	podDeleted := false
+	rpcCalls := &atomic.Int32{}
+	var rpcCallsAtDelete int32
 	kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method == http.MethodDelete {
 			podDeleted = true
+			rpcCallsAtDelete = rpcCalls.Load()
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Success"}`))}, nil
 		}
 		return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`))}, nil
 	})}
 	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient)
 	require.NoError(t, err)
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(chainNode).
+		Build()
 	reconciler := &Reconciler{
-		Client:    fakeclient.NewClientBuilder().WithScheme(scheme).Build(),
-		ClientSet: clientSet,
-		Scheme:    scheme,
+		Client:               controllerClient,
+		ClientSet:            clientSet,
+		Scheme:               scheme,
+		recorder:             record.NewFakeRecorder(10),
+		upgradeClientFactory: countingUpgradeStatusClientFactory(rpcCalls),
 	}
-	originalTransport := http.DefaultTransport
-	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{},
-			Body:       io.NopCloser(strings.NewReader(`{"latestHeight":123,"requiredUpgrade":null}`)),
-		}, nil
-	})
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
 	snapshot, err := reconciler.createSnapshot(context.Background(), chainNode)
 
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 	assert.True(t, podDeleted)
+	assert.Equal(t, rpcCallsAtDelete, rpcCalls.Load(), "a stopped node must not be queried for its height")
 	stored := &snapshotv1.VolumeSnapshot{}
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(snapshot), stored))
+	assert.Equal(t, "123", stored.Annotations[controllers.AnnotationDataHeight])
+	// createSnapshot alone leaves the marker behind; startNewSnapshot clears it once the snapshot is
+	// recorded on the ChainNode.
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(chainNode), storedNode))
+	assert.Equal(t, "123", storedNode.Annotations[controllers.AnnotationStopNodeSnapshotHeight])
 }
 
 func TestGetTarballExportProvider(t *testing.T) {

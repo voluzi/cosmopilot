@@ -239,8 +239,8 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 			}
 		}
 
-		if err := r.clearHaltHeightHold(ctx, chainNode); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("failed to clear halt-height hold for replacement data: %w", err)
+		if err := r.clearReplacedDataHolds(ctx, chainNode); err != nil {
+			return nil, ctrl.Result{}, fmt.Errorf("failed to clear holds for replacement data: %w", err)
 		}
 
 		logger.Info("creating pvc", "pvc", chainNode.GetName(), "size", storageSize)
@@ -325,12 +325,19 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 	return pvc, ctrl.Result{}, nil
 }
 
-func (r *Reconciler) clearHaltHeightHold(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	if _, ok := chainNode.Annotations[appsv1.AnnotationHaltHeightHold]; !ok {
+// clearReplacedDataHolds drops the annotations that describe the data volume being replaced: a
+// halt-height hold, and a pending stop-node snapshot whose recorded height belongs to the old PVC.
+// Restoring from a snapshot rebases the status to a non-zero height, so nothing downstream would
+// recognise that marker as obsolete and the replacement data would be snapshotted under it.
+func (r *Reconciler) clearReplacedDataHolds(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	_, haltHold := chainNode.Annotations[appsv1.AnnotationHaltHeightHold]
+	_, snapshotMarker := chainNode.Annotations[controllers.AnnotationStopNodeSnapshotHeight]
+	if !haltHold && !snapshotMarker {
 		return nil
 	}
 	chainNode.Annotations = maps.Clone(chainNode.Annotations)
 	delete(chainNode.Annotations, appsv1.AnnotationHaltHeightHold)
+	delete(chainNode.Annotations, controllers.AnnotationStopNodeSnapshotHeight)
 	return r.Update(ctx, chainNode)
 }
 

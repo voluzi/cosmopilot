@@ -393,8 +393,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// If the node will be down during snapshot, most methods below will fail.
-	if volumeSnapshotInProgress(chainNode) && chainNode.Spec.Persistence.Snapshots.ShouldStopNode() {
-		logger.Info("exiting reconcile cycle while snapshot is in progress")
+	if stopNodeSnapshotHoldsPod(chainNode) {
+		logger.Info("exiting reconcile cycle while stop-node snapshot is pending or in progress")
 		// This returns before ensurePod, so setNodePhase — and the backfill on its snapshotting
 		// branch — is never reached on this path. Record the image here as well, or a node already
 		// snapshotting when cosmopilot is upgraded keeps an empty .status.appImage for the entire

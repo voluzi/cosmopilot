@@ -22,6 +22,7 @@ snapshot-export cleanup acknowledgement described below.
 | `cosmopilot.voluzi.com/config-hash` | Pod | Hash of the rendered configuration; a change triggers a controlled Pod restart. |
 | `cosmopilot.voluzi.com/pod-spec-hash` | Pod | Hash of the desired Pod spec, used to detect drift. |
 | `cosmopilot.voluzi.com/snapshotting-pvc` | Node | A PVC snapshot is currently in progress. |
+| `cosmopilot.voluzi.com/stop-node-snapshot-height` | Node | A `stopNode` snapshot has been committed to: the node is stopped (or about to be) and its `VolumeSnapshot` is still to be created, at this block height. Removed once the snapshot is recorded. |
 | `cosmopilot.voluzi.com/last-pvc-snapshot` | Node | Timestamp/reference of the last PVC snapshot. |
 | `cosmopilot.voluzi.com/snapshot-ready` | VolumeSnapshot | The snapshot is ready to use. |
 | `cosmopilot.voluzi.com/snapshot-retention` | VolumeSnapshot | Retention marker for the snapshot. |

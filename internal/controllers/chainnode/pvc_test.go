@@ -170,6 +170,60 @@ func TestEnsureDataVolumeClearsHaltHoldWhenSnapshotHeightIsUnknown(t *testing.T)
 	assert.Equal(t, wantUpgrades, persisted.Status.Upgrades)
 }
 
+// A pending stop-node snapshot describes data on the PVC being replaced. Restoring from a snapshot
+// leaves a non-zero height, so nothing else would drop the marker and the replacement data would be
+// snapshotted under the old PVC's height.
+func TestEnsureDataVolumeClearsStopNodeSnapshotMarkerForReplacementData(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "node",
+			Namespace: "default",
+			UID:       "node-uid",
+			Annotations: map[string]string{
+				controllers.AnnotationStopNodeSnapshotHeight: "5000",
+				"example.com/unrelated":                      "preserved",
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{App: "appd", Image: "repo/app", Version: ptr.To("v1")},
+			Persistence: &appsv1.Persistence{
+				RestoreFromSnapshot: &appsv1.PvcSnapshot{Name: "snapshot"},
+				Snapshots:           &appsv1.VolumeSnapshotsConfig{Frequency: "24h", StopNode: ptr.To(true)},
+			},
+		},
+		Status: appsv1.ChainNodeStatus{LatestHeight: 5000},
+	}
+	snapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "snapshot",
+			Namespace:   "default",
+			Annotations: map[string]string{controllers.AnnotationDataHeight: "3000"},
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{},
+	}
+	c := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(node, snapshot).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme}
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+
+	_, _, err := r.ensureDataVolume(t.Context(), nil, stored)
+	require.NoError(t, err)
+
+	persisted := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(node), persisted))
+	assert.NotContains(t, persisted.Annotations, controllers.AnnotationStopNodeSnapshotHeight)
+	assert.Equal(t, "preserved", persisted.Annotations["example.com/unrelated"])
+	assert.Equal(t, int64(3000), persisted.Status.LatestHeight)
+}
+
 func TestEnsureDataVolumePreservesLatestCompletedImageForStateSyncFromScratch(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
