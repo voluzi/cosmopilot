@@ -135,19 +135,40 @@ func (s *NodeUtils) dataSize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *NodeUtils) latestHeight(w http.ResponseWriter, r *http.Request) {
-	log.WithField("height", s.latestBlockHeight.Load()).Info("retrieved latest height")
+	height := int64(0)
+	status := s.upgradeMonitor.Status()
+	if status.LatestHeight != nil {
+		height = *status.LatestHeight
+	}
+	if required := status.RequiredUpgrade; required != nil && s.legacyScheduledUpgradeMatches(*required) {
+		height = required.Height
+	}
+	log.WithField("height", height).Info("retrieved latest height")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(strconv.FormatInt(s.latestBlockHeight.Load(), 10)))
+	_, _ = w.Write([]byte(strconv.FormatInt(height, 10)))
+}
+
+func (s *NodeUtils) legacyScheduledUpgradeMatches(required RequiredUpgrade) bool {
+	if s.upgradeMonitor == nil || s.upgradeMonitor.checker == nil {
+		return false
+	}
+	for _, upgrade := range s.upgradeMonitor.checker.Snapshot().Upgrades {
+		if upgrade.Height == required.Height && upgrade.Source == required.Source && upgrade.Status == UpgradeScheduled {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *NodeUtils) mustUpgrade(w http.ResponseWriter, r *http.Request) {
-	log.WithField("must-upgrade", s.requiresUpgrade.Load()).Info("checked if should upgrade")
-	if s.requiresUpgrade.Load() {
+	requiresUpgrade := s.upgradeMonitor.RequiresUpgrade()
+	log.WithField("must-upgrade", requiresUpgrade).Info("checked if should upgrade")
+	if requiresUpgrade {
 		w.WriteHeader(http.StatusUpgradeRequired)
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
-	_, _ = w.Write([]byte(strconv.FormatBool(s.requiresUpgrade.Load())))
+	_, _ = w.Write([]byte(strconv.FormatBool(requiresUpgrade)))
 }
 
 func (s *NodeUtils) tmkmsConnectionActive(w http.ResponseWriter, r *http.Request) {

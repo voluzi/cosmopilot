@@ -1,9 +1,20 @@
 package chainnode
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
+	"github.com/voluzi/cosmopilot/v2/internal/controllers"
 )
 
 func TestGetUpgrade(t *testing.T) {
@@ -98,6 +109,102 @@ func TestGetUpgrade(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompleteUpgradePersistsStatusBeforeResettingVPA(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	node := upgradePersistenceTestNode()
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node).Build()
+	tracking := &upgradePersistenceClient{Client: base}
+	r := &Reconciler{Client: tracking, Scheme: scheme}
+	current := &appsv1.ChainNode{}
+	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+
+	require.NoError(t, r.completeUpgrade(t.Context(), current, &current.Status.Upgrades[0]))
+	assert.Equal(t, []string{"status", "metadata"}, tracking.chainNodeWrites)
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+	assert.Equal(t, "v2", stored.Status.AppVersion)
+	assert.Equal(t, appsv1.UpgradeCompleted, stored.Status.Upgrades[0].Status)
+	assert.NotContains(t, stored.Annotations, controllers.AnnotationVPAResources)
+	assert.NotEmpty(t, stored.Annotations[controllers.AnnotationVPALastCPUScale])
+	assert.NotEmpty(t, stored.Annotations[controllers.AnnotationVPALastMemoryScale])
+	stored.Status.LatestHeight = 99
+	assert.Equal(t, "v2", stored.GetAppVersion())
+}
+
+func TestCompleteUpgradeDoesNotResetVPAWhenStatusPersistenceFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	node := upgradePersistenceTestNode()
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node).Build()
+	tracking := &upgradePersistenceClient{Client: base, failStatus: true}
+	r := &Reconciler{Client: tracking, Scheme: scheme}
+	current := &appsv1.ChainNode{}
+	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+
+	err := r.completeUpgrade(t.Context(), current, &current.Status.Upgrades[0])
+	require.ErrorContains(t, err, "status persistence failed")
+	assert.Equal(t, []string{"status"}, tracking.chainNodeWrites)
+	assert.Contains(t, current.Annotations, controllers.AnnotationVPAResources)
+	assert.NotContains(t, current.Annotations, controllers.AnnotationVPALastCPUScale)
+	assert.NotContains(t, current.Annotations, controllers.AnnotationVPALastMemoryScale)
+}
+
+func upgradePersistenceTestNode() *appsv1.ChainNode {
+	return &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node", Namespace: "default", UID: "node-uid",
+			Annotations: map[string]string{controllers.AnnotationVPAResources: `{}`},
+		},
+		Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{Image: "app"},
+			VPA: &appsv1.VerticalAutoscalingConfig{Enabled: true, ResetVpaAfterNodeUpgrade: true},
+		},
+		Status: appsv1.ChainNodeStatus{
+			LatestHeight: 100,
+			AppVersion:   "v1",
+			Upgrades: []appsv1.Upgrade{{
+				Height: 100, Image: "app:v2", Status: appsv1.UpgradeOnGoing,
+			}},
+		},
+	}
+}
+
+type upgradePersistenceClient struct {
+	client.Client
+	chainNodeWrites []string
+	failStatus      bool
+}
+
+func (c *upgradePersistenceClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if _, ok := obj.(*appsv1.ChainNode); ok {
+		c.chainNodeWrites = append(c.chainNodeWrites, "metadata")
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *upgradePersistenceClient) Status() client.StatusWriter {
+	return &upgradePersistenceStatusWriter{StatusWriter: c.Client.Status(), client: c}
+}
+
+type upgradePersistenceStatusWriter struct {
+	client.StatusWriter
+	client *upgradePersistenceClient
+}
+
+func (w *upgradePersistenceStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if _, ok := obj.(*appsv1.ChainNode); ok {
+		w.client.chainNodeWrites = append(w.client.chainNodeWrites, "status")
+		if w.client.failStatus {
+			return errors.New("status persistence failed")
+		}
+	}
+	return w.StatusWriter.Update(ctx, obj, opts...)
 }
 
 func TestAddOrUpdateUpgrade(t *testing.T) {

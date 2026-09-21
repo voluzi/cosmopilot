@@ -27,6 +27,15 @@ import (
 // This can be overridden in tests to inject mock clients.
 type StatsClientFactory func(host string) nodeutils.StatsClient
 
+type terminatedAppLogReader func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error)
+
+type nodeStatusClient interface {
+	GetLatestHeight(context.Context) (int64, error)
+	RequiresUpgrade(context.Context) (bool, error)
+}
+
+type nodeStatusClientFactory func(host string) nodeStatusClient
+
 // DefaultStatsClientFactory creates a real nodeutils client.
 func DefaultStatsClientFactory(host string) nodeutils.StatsClient {
 	return nodeutils.NewClient(host)
@@ -41,16 +50,18 @@ func (r *Reconciler) SetStatsClientFactory(factory StatsClientFactory) {
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
 	client.Client
-	ClientSet          *kubernetes.Clientset
-	RestConfig         *rest.Config
-	Scheme             *runtime.Scheme
-	configCache        *ttlcache.Cache[string, map[string]interface{}]
-	nodeClients        *ttlcache.Cache[string, *chainutils.Client]
-	recorder           record.EventRecorder
-	opts               *controllers.ControllerRunOptions
-	disruptionLocks    *lockManager
-	configLocks        *configLockManager
-	statsClientFactory StatsClientFactory
+	ClientSet               *kubernetes.Clientset
+	RestConfig              *rest.Config
+	Scheme                  *runtime.Scheme
+	configCache             *ttlcache.Cache[string, map[string]interface{}]
+	nodeClients             *ttlcache.Cache[string, *chainutils.Client]
+	recorder                record.EventRecorder
+	opts                    *controllers.ControllerRunOptions
+	disruptionLocks         *lockManager
+	configLocks             *configLockManager
+	statsClientFactory      StatsClientFactory
+	nodeStatusClientFactory nodeStatusClientFactory
+	terminatedAppLogReader  terminatedAppLogReader
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {
@@ -91,6 +102,9 @@ func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.Co
 		disruptionLocks:    newLockManager(),
 		configLocks:        newConfigLockManager(),
 		statsClientFactory: DefaultStatsClientFactory,
+		nodeStatusClientFactory: func(host string) nodeStatusClient {
+			return nodeutils.NewClient(host)
+		},
 	}
 	if err := r.setupWithManager(mgr); err != nil {
 		return nil, err
@@ -349,7 +363,7 @@ func (r *Reconciler) getChainNodeClientByHost(host string) (*chainutils.Client, 
 }
 
 func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	height, err := nodeutils.NewClient(chainNode.GetNodeFQDN()).GetLatestHeight(ctx)
+	height, err := r.getNodeStatusClient(chainNode).GetLatestHeight(ctx)
 	if err != nil {
 		return err
 	}
@@ -365,4 +379,43 @@ func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.C
 
 	chainNode.Status.LatestHeight = height
 	return r.Status().Update(ctx, chainNode)
+}
+
+func (r *Reconciler) getNodeStatusClient(chainNode *appsv1.ChainNode) nodeStatusClient {
+	if r.nodeStatusClientFactory != nil {
+		return r.nodeStatusClientFactory(chainNode.GetNodeFQDN())
+	}
+	return nodeutils.NewClient(chainNode.GetNodeFQDN())
+}
+
+func resetDataHeight(chainNode *appsv1.ChainNode, height int64) bool {
+	_, holdExists := chainNode.GetAnnotations()[appsv1.AnnotationHaltHeightHold]
+	changed := chainNode.Status.LatestHeight != height || chainNode.Status.AppVersion != "" || holdExists
+	chainNode.Status.LatestHeight = height
+	chainNode.Status.AppVersion = ""
+	delete(chainNode.Annotations, appsv1.AnnotationHaltHeightHold)
+	return changed
+}
+
+func (r *Reconciler) persistDataHeightReset(ctx context.Context, chainNode *appsv1.ChainNode, height int64) error {
+	statusChanged := chainNode.Status.LatestHeight != height || chainNode.Status.AppVersion != ""
+	hold, holdExists := chainNode.GetAnnotations()[appsv1.AnnotationHaltHeightHold]
+	if statusChanged {
+		latestHeight, appVersion := chainNode.Status.LatestHeight, chainNode.Status.AppVersion
+		chainNode.Status.LatestHeight = height
+		chainNode.Status.AppVersion = ""
+		if err := r.Status().Update(ctx, chainNode); err != nil {
+			chainNode.Status.LatestHeight = latestHeight
+			chainNode.Status.AppVersion = appVersion
+			return err
+		}
+	}
+	if holdExists {
+		delete(chainNode.Annotations, appsv1.AnnotationHaltHeightHold)
+		if err := r.Update(ctx, chainNode); err != nil {
+			chainNode.Annotations[appsv1.AnnotationHaltHeightHold] = hold
+			return err
+		}
+	}
+	return nil
 }

@@ -250,8 +250,11 @@ func (r *Reconciler) ensureConfigs(ctx context.Context, app *chainutils.App, cha
 					return "", err
 				}
 
-				// Set latest height to trust height so that old upgrades are marked as skipped
-				chainNode.Status.LatestHeight = trustHeight
+				// Reset the data identity to the trust height so version selection is
+				// recomputed for the state-sync replacement rather than anchored to old data.
+				if err := r.persistDataHeightReset(ctx, chainNode, trustHeight); err != nil {
+					return "", err
+				}
 			}
 		}
 	}
