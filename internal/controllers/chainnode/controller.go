@@ -32,6 +32,7 @@ type terminatedAppLogReader func(context.Context, *corev1.Pod, string, appTermin
 type nodeStatusClient interface {
 	GetLatestHeight(context.Context) (int64, error)
 	RequiresUpgrade(context.Context) (bool, error)
+	RequiresUpgradeFresh(context.Context) (bool, error)
 }
 
 type nodeStatusClientFactory func(host string) nodeStatusClient
@@ -406,6 +407,10 @@ func (r *Reconciler) getNodeStatusClient(chainNode *appsv1.ChainNode) nodeStatus
 		return r.nodeStatusClientFactory(chainNode.GetNodeFQDN())
 	}
 	return nodeutils.NewClient(chainNode.GetNodeFQDN())
+}
+
+func (r *Reconciler) requiresUpgradeFresh(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	return r.getNodeStatusClient(chainNode).RequiresUpgradeFresh(ctx)
 }
 
 func (r *Reconciler) persistDataHeightReset(ctx context.Context, chainNode *appsv1.ChainNode, height int64) error {
