@@ -1295,6 +1295,23 @@ func TestEnsureVolumeSnapshotsCountRetentionCountsOnlyUsableSnapshots(t *testing
 	assertSnapshotPresent(t, controllerClient, replacement)
 }
 
+func TestEnsureVolumeSnapshotsCountRetentionTreatsCheckingAsUsableWhenVerificationDisabled(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retain := int32(1)
+	chainNode := retentionTestChainNode(now, nil, &retain, ptr.To(true))
+	older := retentionTestSnapshot(chainNode, "snapshot-checking", now.Add(-2*time.Hour), true, true, "")
+	older.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
+	newer := retentionTestSnapshot(chainNode, "snapshot-newer", now.Add(-time.Hour), true, true, "")
+	reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, older, newer)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	storedOlder := &snapshotv1.VolumeSnapshot{}
+	err := controllerClient.Get(t.Context(), client.ObjectKeyFromObject(older), storedOlder)
+	assert.True(t, apierrors.IsNotFound(err))
+	assertSnapshotPresent(t, controllerClient, newer)
+}
+
 func TestEnsureVolumeSnapshotsAgeRetentionReleasesBackupAfterReplacementBecomesUsable(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	retention := "1h"

@@ -917,7 +917,8 @@ func isSnapshotUsableForRetention(snapshot *snapshotv1.VolumeSnapshot, verify bo
 	if verify {
 		return integrityStatus == string(snapshotIntegrityOk)
 	}
-	return integrityStatus == "" || integrityStatus == string(snapshotIntegrityOk)
+	return integrityStatus == "" || integrityStatus == string(snapshotIntegrityOk) ||
+		integrityStatus == string(snapshotIntegrityChecking)
 }
 
 func sortSnapshotsOldestFirst(snapshots []snapshotv1.VolumeSnapshot) {
