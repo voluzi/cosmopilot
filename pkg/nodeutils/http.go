@@ -162,6 +162,12 @@ func (s *NodeUtils) legacyPendingUpgradeMatches(required RequiredUpgrade) bool {
 }
 
 func (s *NodeUtils) mustUpgrade(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("refresh") == "true" {
+		if err := s.upgradeMonitor.reconcile(r.Context(), false); err != nil {
+			writeError(w, "error refreshing upgrade status: %v", err)
+			return
+		}
+	}
 	requiresUpgrade := s.upgradeMonitor.RequiresUpgrade()
 	log.WithField("must-upgrade", requiresUpgrade).Info("checked if should upgrade")
 	if requiresUpgrade {

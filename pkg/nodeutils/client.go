@@ -124,7 +124,16 @@ func (c *Client) GetLatestHeight(ctx context.Context) (int64, error) {
 // RequiresUpgrade checks if the node requires an upgrade.
 // Returns true if an upgrade is required, false otherwise.
 func (c *Client) RequiresUpgrade(ctx context.Context) (bool, error) {
-	body, err := c.httpGetWithStatus(ctx, "/must_upgrade", http.StatusOK, http.StatusUpgradeRequired)
+	return c.requiresUpgrade(ctx, "/must_upgrade")
+}
+
+// RequiresUpgradeFresh refreshes upgrade state before returning it.
+func (c *Client) RequiresUpgradeFresh(ctx context.Context) (bool, error) {
+	return c.requiresUpgrade(ctx, "/must_upgrade?refresh=true")
+}
+
+func (c *Client) requiresUpgrade(ctx context.Context, endpoint string) (bool, error) {
+	body, err := c.httpGetWithStatus(ctx, endpoint, http.StatusOK, http.StatusUpgradeRequired)
 	if err != nil {
 		return false, err
 	}

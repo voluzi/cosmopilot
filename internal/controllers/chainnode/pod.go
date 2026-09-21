@@ -127,14 +127,15 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	case terminalPodWaitForEvidence:
 		logger.V(1).Info("checking running node-utils before waiting for termination evidence", "pod", pod.GetName())
-		if err = r.updateLatestHeight(ctx, chainNode); err != nil {
-			return fmt.Errorf("failed to update latest height for terminal pod %s: %w", chainNode.GetName(), err)
-		}
-		requiresUpgrade, err = r.requiresUpgrade(ctx, chainNode)
+		requiresUpgrade, err = r.requiresUpgradeFresh(ctx, chainNode)
 		if err != nil {
 			return fmt.Errorf("failed to check if terminal pod %s requires upgrade: %w", chainNode.GetName(), err)
 		}
-		if !requiresUpgrade {
+		if requiresUpgrade {
+			if err = r.updateLatestHeight(ctx, chainNode); err != nil {
+				return fmt.Errorf("failed to update latest height for terminal pod %s: %w", chainNode.GetName(), err)
+			}
+		} else {
 			recoveryAction = r.terminalPodRecoveryWithoutNodeUtilsEvidence(ctx, chainNode, currentPod)
 			if err = r.reconcileHaltHeightHoldForAction(ctx, chainNode, recoveryAction); err != nil {
 				return fmt.Errorf("failed to reconcile halt-height hold for %s: %w", chainNode.GetName(), err)

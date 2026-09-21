@@ -427,7 +427,7 @@ func TestEnsurePodUsesRunningNodeUtilsToUpgradeTerminalApp(t *testing.T) {
 	r, node, observedPod := terminalWaitEnsurePodFixture(t, server.URL, nodeClient)
 
 	require.NoError(t, r.ensurePod(t.Context(), nil, node, "config-hash"))
-	assert.Equal(t, []string{"latest", "upgrade"}, nodeClient.calls)
+	assert.Equal(t, []string{"upgrade-fresh", "latest"}, nodeClient.calls)
 	assert.Equal(t, observedPod.UID, requestedUID)
 	assert.Equal(t, int64((timeoutPodDeleted / 2).Seconds()), requestedGrace)
 	assert.Equal(t, "app:v2", selectedImage)
@@ -444,7 +444,7 @@ func TestEnsurePodRetriesWhenRunningNodeUtilsStatusIsUnavailable(t *testing.T) {
 		client  *fakeTerminalNodeUtilsClient
 		wantErr string
 	}{
-		{name: "latest height error", client: &fakeTerminalNodeUtilsClient{heightErr: errors.New("latest unavailable")}, wantErr: "latest unavailable"},
+		{name: "latest height error", client: &fakeTerminalNodeUtilsClient{requiresUpgrade: true, heightErr: errors.New("latest unavailable")}, wantErr: "latest unavailable"},
 		{name: "upgrade query error", client: &fakeTerminalNodeUtilsClient{height: 100, upgradeErr: errors.New("upgrade unavailable")}, wantErr: "upgrade unavailable"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -465,9 +465,9 @@ func TestEnsurePodRetriesWhenRunningNodeUtilsStatusIsUnavailable(t *testing.T) {
 				require.ErrorContains(t, err, tt.wantErr)
 			}
 			assert.Zero(t, deletes.Load())
-			wantCalls := []string{"latest", "upgrade"}
+			wantCalls := []string{"upgrade-fresh"}
 			if tt.client.heightErr != nil {
-				wantCalls = []string{"latest"}
+				wantCalls = []string{"upgrade-fresh", "latest"}
 			}
 			assert.Equal(t, wantCalls, tt.client.calls)
 			storedPod := &corev1.Pod{}
@@ -607,7 +607,7 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 			stored := &appsv1.ChainNode{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
 			assert.Equal(t, tt.wantHold, stored.Annotations[appsv1.AnnotationHaltHeightHold])
-			assert.Equal(t, []string{"latest", "upgrade"}, nodeClient.calls)
+			assert.Equal(t, []string{"upgrade-fresh"}, nodeClient.calls)
 		})
 	}
 }
@@ -779,11 +779,12 @@ func TestEnsurePodMigratesLegacyStoppedHaltOnlyAfterTerminatingPodIsGone(t *test
 }
 
 type fakeTerminalNodeUtilsClient struct {
-	height          int64
-	heightErr       error
-	requiresUpgrade bool
-	upgradeErr      error
-	calls           []string
+	height                int64
+	heightErr             error
+	requiresUpgrade       bool
+	cachedRequiresUpgrade bool
+	upgradeErr            error
+	calls                 []string
 }
 
 func (c *fakeTerminalNodeUtilsClient) GetLatestHeight(context.Context) (int64, error) {
@@ -793,6 +794,11 @@ func (c *fakeTerminalNodeUtilsClient) GetLatestHeight(context.Context) (int64, e
 
 func (c *fakeTerminalNodeUtilsClient) RequiresUpgrade(context.Context) (bool, error) {
 	c.calls = append(c.calls, "upgrade")
+	return c.cachedRequiresUpgrade, c.upgradeErr
+}
+
+func (c *fakeTerminalNodeUtilsClient) RequiresUpgradeFresh(context.Context) (bool, error) {
+	c.calls = append(c.calls, "upgrade-fresh")
 	return c.requiresUpgrade, c.upgradeErr
 }
 

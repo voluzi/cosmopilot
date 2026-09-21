@@ -27,18 +27,32 @@ func TestUpgradeCheckerPreservesLastGoodConfigAndRecovers(t *testing.T) {
 }
 
 func TestUpgradeCheckerTreatsScheduledAndOngoingAsPending(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "upgrades.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{"upgrades":[{"height":100,"status":"ongoing"},{"height":200,"status":"completed"}]}`), 0o600))
-	checker, err := NewUpgradeChecker(path)
-	require.NoError(t, err)
+	for _, tt := range []struct {
+		name    string
+		status  string
+		pending bool
+	}{
+		{name: "scheduled", status: UpgradeScheduled, pending: true},
+		{name: "ongoing", status: UpgradeOnGoing, pending: true},
+		{name: "completed", status: UpgradeCompleted},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "upgrades.json")
+			config := `{"upgrades":[{"height":100,"status":"` + tt.status + `"}]}`
+			require.NoError(t, os.WriteFile(path, []byte(config), 0o600))
+			checker, err := NewUpgradeChecker(path)
+			require.NoError(t, err)
 
-	upgrade, err := checker.GetUpgrade(100)
-	require.NoError(t, err)
-	assert.Equal(t, UpgradeOnGoing, upgrade.Status)
-	require.NoError(t, os.WriteFile(path, []byte(`{"upgrades":[{"height":200,"status":"completed"}]}`), 0o600))
-	require.NoError(t, checker.reload())
-	_, err = checker.GetUpgrade(200)
-	require.Error(t, err)
+			upgrade, err := checker.GetUpgrade(100)
+			if !tt.pending {
+				require.Error(t, err)
+				assert.Nil(t, upgrade)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.status, upgrade.Status)
+		})
+	}
 }
 
 func TestUpgradeCheckerWatchesConfigMapSymlinkReplacement(t *testing.T) {

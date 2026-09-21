@@ -16,6 +16,7 @@ import (
 
 func TestTerminationSignalTerminatesSidecarOnSecondSignalAfterHeldStop(t *testing.T) {
 	sigChan := make(chan os.Signal, 1)
+	t.Cleanup(func() { close(sigChan) })
 	sigChan <- syscall.SIGTERM
 	var stops atomic.Int32
 	var exits atomic.Int32
@@ -35,7 +36,12 @@ func TestTerminationSignalTerminatesSidecarOnSecondSignalAfterHeldStop(t *testin
 	require.Eventually(t, func() bool { return stops.Load() == 1 }, time.Second, time.Millisecond)
 	sigChan <- syscall.SIGTERM
 
-	require.NoError(t, <-done)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for signal handler")
+	}
 	assert.Equal(t, int32(1), exits.Load())
 }
 

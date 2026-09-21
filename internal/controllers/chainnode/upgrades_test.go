@@ -2,8 +2,10 @@ package chainnode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,6 +195,82 @@ func TestCompletedUpgradeCleanupRetriesWithoutExtendingVPACooldown(t *testing.T)
 	assert.Equal(t, firstCooldown, stored.Annotations[controllers.AnnotationVPALastCPUScale])
 	assert.NotContains(t, stored.Annotations, controllers.AnnotationUpgradeCleanup)
 	assert.Equal(t, []string{"metadata"}, retrying.chainNodeWrites)
+}
+
+func TestEnsureUpgradesCompletesMarkerBoundUpgradeAfterHeightDemotion(t *testing.T) {
+	markerTime := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	markerBody, err := json.Marshal(upgradeCleanupMarker{Height: 100, Version: "v2", CooldownAt: markerTime})
+	require.NoError(t, err)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	node := upgradePersistenceTestNode()
+	node.Status.LatestHeight = 101
+	node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}}
+	node.Annotations[controllers.AnnotationUpgradeCleanup] = string(markerBody)
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+	current := &appsv1.ChainNode{}
+	require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+
+	require.NoError(t, r.ensureUpgrades(t.Context(), current, false))
+	require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+	assert.Equal(t, "v2", current.Status.AppVersion)
+	assert.Equal(t, appsv1.UpgradeCompleted, current.Status.Upgrades[0].Status)
+	assert.NotContains(t, current.Annotations, controllers.AnnotationUpgradeCleanup)
+	assert.Equal(t, markerTime.Format(timeLayout), current.Annotations[controllers.AnnotationVPALastCPUScale])
+	assert.Equal(t, markerTime.Format(timeLayout), current.Annotations[controllers.AnnotationVPALastMemoryScale])
+}
+
+func TestEnsureUpgradesDoesNotReviveUnboundOrMismatchedSkippedUpgrade(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		marker     *upgradeCleanupMarker
+		wantErr    string
+		wantMarker bool
+	}{
+		{name: "unrelated skipped upgrade has no marker"},
+		{
+			name:       "mismatched durable marker fails closed",
+			marker:     &upgradeCleanupMarker{Height: 100, Version: "v3", CooldownAt: time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)},
+			wantErr:    "no matching pending or completed upgrade",
+			wantMarker: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			node := upgradePersistenceTestNode()
+			node.Status.LatestHeight = 101
+			node.Status.Upgrades[0].Status = appsv1.UpgradeSkipped
+			node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}}
+			if tt.marker != nil {
+				body, err := json.Marshal(tt.marker)
+				require.NoError(t, err)
+				node.Annotations[controllers.AnnotationUpgradeCleanup] = string(body)
+			}
+			base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node).Build()
+			r := &Reconciler{Client: base, Scheme: scheme}
+			current := &appsv1.ChainNode{}
+			require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+
+			err := r.ensureUpgrades(t.Context(), current, false)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+			assert.Equal(t, appsv1.UpgradeSkipped, current.Status.Upgrades[0].Status)
+			assert.Equal(t, "v1", current.Status.AppVersion)
+			if tt.wantMarker {
+				assert.Contains(t, current.Annotations, controllers.AnnotationUpgradeCleanup)
+			} else {
+				assert.NotContains(t, current.Annotations, controllers.AnnotationUpgradeCleanup)
+			}
+		})
+	}
 }
 
 func upgradePersistenceTestNode() *appsv1.ChainNode {

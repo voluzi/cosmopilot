@@ -297,7 +297,7 @@ func TestStopBeforeStartIsRemembered(t *testing.T) {
 
 func TestStopBeforeStartPreventsListenerPublication(t *testing.T) {
 	checker, configPath := newMonitorTestChecker(t, `{"upgrades":[]}`)
-	server, err := New("appd", WithHost("127.0.0.1"), WithPort(0), WithDataPath(t.TempDir()), WithUpgradesConfig(checker.configFile))
+	server, err := New("appd", WithHost("127.0.0.1"), WithPort(0), WithDataPath(t.TempDir()), WithUpgradesConfig(checker.configFile), WithTerminationMessagePath(filepath.Join(t.TempDir(), "termination.log")))
 	require.NoError(t, err)
 	server.upgradeMonitor.client = &fakeABCIClient{heights: []int64{50}}
 	server.upgradeMonitor.upgradeInfoPath = configPath

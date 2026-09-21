@@ -207,7 +207,7 @@ func (r *Reconciler) finishUpgradeCleanup(ctx context.Context, chainNode *appsv1
 	for i := range chainNode.Status.Upgrades {
 		candidate := &chainNode.Status.Upgrades[i]
 		if candidate.Height == marker.Height && candidate.GetVersion() == marker.Version &&
-			(candidate.Status == appsv1.UpgradeOnGoing || candidate.Status == appsv1.UpgradeCompleted) {
+			(candidate.Status == appsv1.UpgradeOnGoing || candidate.Status == appsv1.UpgradeCompleted || candidate.Status == appsv1.UpgradeSkipped) {
 			upgrade = candidate
 			break
 		}
