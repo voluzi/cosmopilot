@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	abci "github.com/cometbft/cometbft/abci/types"
@@ -14,8 +16,9 @@ import (
 )
 
 const (
-	abciPollInterval   = time.Second
-	abciRequestTimeout = time.Second
+	abciPollInterval       = time.Second
+	abciRequestTimeout     = time.Second
+	sdkUpgradeInfoMaxBytes = 8 * 1024
 )
 
 type RequiredUpgrade struct {
@@ -216,16 +219,36 @@ type sdkUpgradeInfo struct {
 }
 
 func readSDKUpgradeInfo(path string) (sdkUpgradeInfo, error) {
-	body, err := os.ReadFile(path)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return sdkUpgradeInfo{}, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
 	if err != nil {
 		return sdkUpgradeInfo{}, err
 	}
-	var info sdkUpgradeInfo
-	if err := json.Unmarshal(body, &info); err != nil {
+	if !fileInfo.Mode().IsRegular() {
+		return sdkUpgradeInfo{}, fmt.Errorf("SDK upgrade info is not a regular file")
+	}
+	if fileInfo.Size() > sdkUpgradeInfoMaxBytes {
+		return sdkUpgradeInfo{}, fmt.Errorf("SDK upgrade info is too large")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, sdkUpgradeInfoMaxBytes+1))
+	if err != nil {
 		return sdkUpgradeInfo{}, err
 	}
-	if info.Height <= 0 || info.Name == "" {
+	if len(body) > sdkUpgradeInfoMaxBytes {
+		return sdkUpgradeInfo{}, fmt.Errorf("SDK upgrade info is too large")
+	}
+	var upgradeInfo sdkUpgradeInfo
+	if err := json.Unmarshal(body, &upgradeInfo); err != nil {
+		return sdkUpgradeInfo{}, err
+	}
+	if upgradeInfo.Height <= 0 || upgradeInfo.Name == "" {
 		return sdkUpgradeInfo{}, fmt.Errorf("invalid SDK upgrade info")
 	}
-	return info, nil
+	return upgradeInfo, nil
 }

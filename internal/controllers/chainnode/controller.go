@@ -206,6 +206,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	reconcileAppImage := chainNode.GetAppImage()
 
 	if chainNode.RequiresPrivKey() {
 		logger.V(1).Info("ensure validator signing key exists")
@@ -234,6 +235,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// If data initialization is in progress, return early with the requeue result
 	if result.RequeueAfter > 0 || result.Requeue {
 		return result, nil
+	}
+	if chainNode.GetAppImage() != reconcileAppImage {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// If PVC is being deleted lets wait before trying again.
@@ -269,6 +273,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	logger.V(1).Info("ensure config")
 	configHash, err := r.ensureConfigs(ctx, app, chainNode, nodePodRunning)
 	if err != nil {
+		if err == errConfigImageChanged {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -388,15 +395,6 @@ func (r *Reconciler) getNodeStatusClient(chainNode *appsv1.ChainNode) nodeStatus
 	return nodeutils.NewClient(chainNode.GetNodeFQDN())
 }
 
-func resetDataHeight(chainNode *appsv1.ChainNode, height int64) bool {
-	_, holdExists := chainNode.GetAnnotations()[appsv1.AnnotationHaltHeightHold]
-	changed := chainNode.Status.LatestHeight != height || chainNode.Status.AppVersion != "" || holdExists
-	chainNode.Status.LatestHeight = height
-	chainNode.Status.AppVersion = ""
-	delete(chainNode.Annotations, appsv1.AnnotationHaltHeightHold)
-	return changed
-}
-
 func (r *Reconciler) persistDataHeightReset(ctx context.Context, chainNode *appsv1.ChainNode, height int64) error {
 	statusChanged := chainNode.Status.LatestHeight != height || chainNode.Status.AppVersion != ""
 	hold, holdExists := chainNode.GetAnnotations()[appsv1.AnnotationHaltHeightHold]
@@ -416,6 +414,19 @@ func (r *Reconciler) persistDataHeightReset(ctx context.Context, chainNode *apps
 			chainNode.Annotations[appsv1.AnnotationHaltHeightHold] = hold
 			return err
 		}
+	}
+	return nil
+}
+
+func (r *Reconciler) persistHaltHeightHoldClear(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	hold, exists := chainNode.GetAnnotations()[appsv1.AnnotationHaltHeightHold]
+	if !exists {
+		return nil
+	}
+	delete(chainNode.Annotations, appsv1.AnnotationHaltHeightHold)
+	if err := r.Update(ctx, chainNode); err != nil {
+		chainNode.Annotations[appsv1.AnnotationHaltHeightHold] = hold
+		return err
 	}
 	return nil
 }

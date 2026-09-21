@@ -28,9 +28,15 @@ func TestLatestHeightProjectsOnlyMatchingScheduledRequirement(t *testing.T) {
 			wantHeight: "99",
 		},
 		{
-			name:       "ongoing is not replayed",
+			name:       "matching ongoing upgrade remains pending",
 			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade},
-			upgrades:   []Upgrade{{Height: 100, Source: OnChainUpgrade, Status: "ongoing"}},
+			upgrades:   []Upgrade{{Height: 100, Source: OnChainUpgrade, Status: UpgradeOnGoing}},
+			wantHeight: "100",
+		},
+		{
+			name:       "completed is not replayed",
+			required:   &RequiredUpgrade{Height: 100, Source: OnChainUpgrade},
+			upgrades:   []Upgrade{{Height: 100, Source: OnChainUpgrade, Status: UpgradeCompleted}},
 			wantHeight: "99",
 		},
 		{

@@ -26,6 +26,21 @@ func TestUpgradeCheckerPreservesLastGoodConfigAndRecovers(t *testing.T) {
 	assert.Equal(t, int64(200), checker.Snapshot().Upgrades[0].Height)
 }
 
+func TestUpgradeCheckerTreatsScheduledAndOngoingAsPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upgrades.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"upgrades":[{"height":100,"status":"ongoing"},{"height":200,"status":"completed"}]}`), 0o600))
+	checker, err := NewUpgradeChecker(path)
+	require.NoError(t, err)
+
+	upgrade, err := checker.GetUpgrade(100)
+	require.NoError(t, err)
+	assert.Equal(t, UpgradeOnGoing, upgrade.Status)
+	require.NoError(t, os.WriteFile(path, []byte(`{"upgrades":[{"height":200,"status":"completed"}]}`), 0o600))
+	require.NoError(t, checker.reload())
+	_, err = checker.GetUpgrade(200)
+	require.Error(t, err)
+}
+
 func TestUpgradeCheckerWatchesConfigMapSymlinkReplacement(t *testing.T) {
 	dir := t.TempDir()
 	writeVersion := func(name, contents string) {

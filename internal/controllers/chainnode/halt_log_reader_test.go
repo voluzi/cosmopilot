@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/stretchr/testify/assert"
@@ -292,7 +293,7 @@ func TestUpgradePodCommitsTargetWhenDeleteWaitFails(t *testing.T) {
 	getStarted := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
-		case req.Method == http.MethodDelete:
+		case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/default/pods/node":
 			writeChainNodeTestJSON(t, w, http.StatusOK, &metav1.Status{Status: metav1.StatusSuccess})
 		case req.Method == http.MethodGet:
 			getStarted <- struct{}{}
@@ -317,9 +318,21 @@ func TestUpgradePodCommitsTargetWhenDeleteWaitFails(t *testing.T) {
 			err       error
 		}{committed: committed, err: err}
 	}()
-	<-getStarted
+	select {
+	case <-getStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for deletion poll")
+	}
 	cancel()
-	got := <-result
+	var got struct {
+		committed bool
+		err       error
+	}
+	select {
+	case got = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for upgradePod to return")
+	}
 
 	require.Error(t, got.err)
 	assert.True(t, got.committed, "accepted deletion must preserve the selected upgrade target")

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -171,6 +173,26 @@ func TestReadSDKUpgradeInfoReadsOwnerOnlyMarker(t *testing.T) {
 	assert.Equal(t, sdkUpgradeInfo{Name: "v2", Height: 100}, info)
 }
 
+func TestReadSDKUpgradeInfoRejectsUnsafeFilesAndRecovers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade-info.json")
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
+	_, err := readSDKUpgradeInfo(path)
+	require.ErrorContains(t, err, "regular file")
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.Mkdir(path, 0o700))
+	_, err = readSDKUpgradeInfo(path)
+	require.ErrorContains(t, err, "regular file")
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x", sdkUpgradeInfoMaxBytes+1)), 0o600))
+	_, err = readSDKUpgradeInfo(path)
+	require.ErrorContains(t, err, "too large")
+	require.NoError(t, os.WriteFile(path, []byte(`{"name":"v2","height":100}`), 0o600))
+	info, err := readSDKUpgradeInfo(path)
+	require.NoError(t, err)
+	assert.Equal(t, sdkUpgradeInfo{Name: "v2", Height: 100}, info)
+}
+
 func TestUpgradeMonitorManualStopRetriesThenRunsOnlyOnce(t *testing.T) {
 	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[{"height":100,"status":"scheduled","source":"manual"}]}`)
 	client := &fakeABCIClient{heights: []int64{99, 99, 99}}
@@ -203,7 +225,7 @@ func TestUpgradeMonitorClearsRequirementWhenConfigChanges(t *testing.T) {
 
 func TestUpgradeMonitorRunPollsWithoutExternalWakeup(t *testing.T) {
 	checker, infoPath := newMonitorTestChecker(t, `{"upgrades":[]}`)
-	client := &fakeABCIClient{heights: []int64{7}, called: make(chan context.Context, 1)}
+	client := &fakeABCIClient{heights: []int64{7, 8}, called: make(chan context.Context, 2)}
 	monitor := newUpgradeMonitor(client, checker, infoPath, func() error { return nil })
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -213,5 +235,10 @@ func TestUpgradeMonitorRunPollsWithoutExternalWakeup(t *testing.T) {
 	case <-client.called:
 	case <-time.After(2 * time.Second):
 		t.Fatal("upgrade monitor did not poll")
+	}
+	select {
+	case <-client.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upgrade monitor did not poll on ticker")
 	}
 }

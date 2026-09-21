@@ -88,6 +88,14 @@ func TestGetUpgrade(t *testing.T) {
 			height: 100,
 			want:   nil,
 		},
+		{
+			name: "finds matching ongoing upgrade after controller restart",
+			chainNode: &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
+				Height: 100, Image: "myapp:v2", Status: appsv1.UpgradeOnGoing,
+			}}}},
+			height: 100,
+			want:   &appsv1.Upgrade{Height: 100, Image: "myapp:v2", Status: appsv1.UpgradeOnGoing},
+		},
 	}
 
 	for _, tt := range tests {
@@ -123,7 +131,7 @@ func TestCompleteUpgradePersistsStatusBeforeResettingVPA(t *testing.T) {
 	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), current))
 
 	require.NoError(t, r.completeUpgrade(t.Context(), current, &current.Status.Upgrades[0]))
-	assert.Equal(t, []string{"status", "metadata"}, tracking.chainNodeWrites)
+	assert.Equal(t, []string{"metadata", "status", "metadata", "metadata"}, tracking.chainNodeWrites)
 
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
@@ -132,6 +140,7 @@ func TestCompleteUpgradePersistsStatusBeforeResettingVPA(t *testing.T) {
 	assert.NotContains(t, stored.Annotations, controllers.AnnotationVPAResources)
 	assert.NotEmpty(t, stored.Annotations[controllers.AnnotationVPALastCPUScale])
 	assert.NotEmpty(t, stored.Annotations[controllers.AnnotationVPALastMemoryScale])
+	assert.NotContains(t, stored.Annotations, controllers.AnnotationUpgradeCleanup)
 	stored.Status.LatestHeight = 99
 	assert.Equal(t, "v2", stored.GetAppVersion())
 }
@@ -149,10 +158,41 @@ func TestCompleteUpgradeDoesNotResetVPAWhenStatusPersistenceFails(t *testing.T) 
 
 	err := r.completeUpgrade(t.Context(), current, &current.Status.Upgrades[0])
 	require.ErrorContains(t, err, "status persistence failed")
-	assert.Equal(t, []string{"status"}, tracking.chainNodeWrites)
+	assert.Equal(t, []string{"metadata", "status"}, tracking.chainNodeWrites)
 	assert.Contains(t, current.Annotations, controllers.AnnotationVPAResources)
+	assert.Contains(t, current.Annotations, controllers.AnnotationUpgradeCleanup)
 	assert.NotContains(t, current.Annotations, controllers.AnnotationVPALastCPUScale)
 	assert.NotContains(t, current.Annotations, controllers.AnnotationVPALastMemoryScale)
+}
+
+func TestCompletedUpgradeCleanupRetriesWithoutExtendingVPACooldown(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	node := upgradePersistenceTestNode()
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node).Build()
+	failing := &upgradePersistenceClient{Client: base, failMetadataAt: 3}
+	r := &Reconciler{Client: failing, Scheme: scheme}
+	current := &appsv1.ChainNode{}
+	require.NoError(t, failing.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+
+	err := r.completeUpgrade(t.Context(), current, &current.Status.Upgrades[0])
+	require.ErrorContains(t, err, "clear upgrade cleanup marker")
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+	firstCooldown := stored.Annotations[controllers.AnnotationVPALastCPUScale]
+	require.NotEmpty(t, firstCooldown)
+	require.Contains(t, stored.Annotations, controllers.AnnotationUpgradeCleanup)
+	assert.Equal(t, "v2", stored.Status.AppVersion)
+	assert.Equal(t, appsv1.UpgradeCompleted, stored.Status.Upgrades[0].Status)
+
+	retrying := &upgradePersistenceClient{Client: base}
+	r.Client = retrying
+	require.NoError(t, r.ensureUpgrades(t.Context(), stored, false))
+	require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+	assert.Equal(t, firstCooldown, stored.Annotations[controllers.AnnotationVPALastCPUScale])
+	assert.NotContains(t, stored.Annotations, controllers.AnnotationUpgradeCleanup)
+	assert.Equal(t, []string{"metadata"}, retrying.chainNodeWrites)
 }
 
 func upgradePersistenceTestNode() *appsv1.ChainNode {
@@ -179,11 +219,17 @@ type upgradePersistenceClient struct {
 	client.Client
 	chainNodeWrites []string
 	failStatus      bool
+	failMetadataAt  int
+	metadataWrites  int
 }
 
 func (c *upgradePersistenceClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
 	if _, ok := obj.(*appsv1.ChainNode); ok {
 		c.chainNodeWrites = append(c.chainNodeWrites, "metadata")
+		c.metadataWrites++
+		if c.failMetadataAt == c.metadataWrites {
+			return errors.New("metadata persistence failed")
+		}
 	}
 	return c.Client.Update(ctx, obj, opts...)
 }

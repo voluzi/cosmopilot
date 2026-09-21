@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ const (
 
 type NodeUtils struct {
 	server             *http.Server
+	listener           net.Listener
 	router             *mux.Router
 	cfg                *Options
 	client             *chainutils.Client
@@ -44,6 +46,8 @@ type NodeUtils struct {
 	mockStats          *MockStats
 	forcedShutdown     atomic.Bool
 	terminationMu      sync.Mutex
+	lifecycleMu        sync.Mutex
+	stopRequested      bool
 	stopNode           func() error
 	shutdownHTTPServer func() error
 	cancel             context.CancelFunc
@@ -111,9 +115,30 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 func (s *NodeUtils) Start() error {
 	s.registerRoutes()
 	ctx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
 	defer cancel()
 	defer s.client.Close()
+
+	server := &http.Server{Addr: fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port), Handler: s.router}
+	shutdownHTTPServer := func() error {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		return server.Shutdown(shutdownCtx)
+	}
+	s.lifecycleMu.Lock()
+	if s.stopRequested {
+		s.lifecycleMu.Unlock()
+		return nil
+	}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		s.lifecycleMu.Unlock()
+		return err
+	}
+	s.server = server
+	s.listener = listener
+	s.cancel = cancel
+	s.shutdownHTTPServer = shutdownHTTPServer
+	s.lifecycleMu.Unlock()
 
 	go func() {
 		if err := s.upgradeChecker.WatchConfigFile(ctx); err != nil {
@@ -173,14 +198,8 @@ func (s *NodeUtils) Start() error {
 		}
 	}()
 
-	s.server = &http.Server{Addr: fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port), Handler: s.router}
-	s.shutdownHTTPServer = func() error {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		return s.server.Shutdown(shutdownCtx)
-	}
 	log.Infof("server started listening on %s:%d ...\n\n", s.cfg.Host, s.cfg.Port)
-	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 	return nil
@@ -208,10 +227,18 @@ func (s *NodeUtils) StopWithResult(force bool) (StopResult, error) {
 			s.terminationMu.Unlock()
 			return StopCompleted, nil
 		}
-		if err := s.upgradeMonitor.reconcile(context.Background(), false); err != nil {
-			log.WithError(err).Warn("final upgrade reconciliation did not complete")
-		}
+		reconcileErr := s.upgradeMonitor.reconcile(context.Background(), false)
 		status = s.upgradeMonitor.Status()
+		if reconcileErr != nil || (status.LatestHeight == nil && status.RequiredUpgrade == nil) {
+			if reconcileErr != nil {
+				log.WithError(reconcileErr).Warn("final upgrade reconciliation did not complete")
+			}
+			s.terminationMu.Unlock()
+			if s.forcedShutdown.Load() {
+				return StopCompleted, nil
+			}
+			return StopHeld, nil
+		}
 		if !s.forcedShutdown.Load() {
 			s.writeTerminationEvidence(status, false)
 		}
@@ -241,12 +268,15 @@ func (s *NodeUtils) StopWithResult(force bool) (StopResult, error) {
 		return StopHeld, nil
 	}
 
-	if s.server == nil {
-		return StopCompleted, fmt.Errorf("server was not started")
+	s.lifecycleMu.Lock()
+	server := s.server
+	listener := s.listener
+	cancel := s.cancel
+	shutdownHTTPServer := s.shutdownHTTPServer
+	if server == nil {
+		s.stopRequested = true
 	}
-	if s.cancel != nil {
-		s.cancel()
-	}
+	s.lifecycleMu.Unlock()
 
 	// Stop tmkms proxy if it is still alive
 	if s.tmkmsProxy != nil {
@@ -262,14 +292,23 @@ func (s *NodeUtils) StopWithResult(force bool) (StopResult, error) {
 			log.Errorf("failed to stop node: %v", err)
 		}
 	}
+	if cancel != nil {
+		cancel()
+	}
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if server == nil {
+		return StopCompleted, nil
+	}
 
 	log.Debug("shutting down http server")
-	if s.shutdownHTTPServer != nil {
-		return StopCompleted, s.shutdownHTTPServer()
+	if shutdownHTTPServer != nil {
+		return StopCompleted, shutdownHTTPServer()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return StopCompleted, s.server.Shutdown(ctx)
+	return StopCompleted, server.Shutdown(ctx)
 }
 
 func (s *NodeUtils) writeTerminationEvidence(status UpgradeStatus, forced bool) {

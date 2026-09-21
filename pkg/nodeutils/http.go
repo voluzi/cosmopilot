@@ -140,7 +140,7 @@ func (s *NodeUtils) latestHeight(w http.ResponseWriter, r *http.Request) {
 	if status.LatestHeight != nil {
 		height = *status.LatestHeight
 	}
-	if required := status.RequiredUpgrade; required != nil && s.legacyScheduledUpgradeMatches(*required) {
+	if required := status.RequiredUpgrade; required != nil && s.legacyPendingUpgradeMatches(*required) {
 		height = required.Height
 	}
 	log.WithField("height", height).Info("retrieved latest height")
@@ -148,12 +148,13 @@ func (s *NodeUtils) latestHeight(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(strconv.FormatInt(height, 10)))
 }
 
-func (s *NodeUtils) legacyScheduledUpgradeMatches(required RequiredUpgrade) bool {
+func (s *NodeUtils) legacyPendingUpgradeMatches(required RequiredUpgrade) bool {
 	if s.upgradeMonitor == nil || s.upgradeMonitor.checker == nil {
 		return false
 	}
 	for _, upgrade := range s.upgradeMonitor.checker.Snapshot().Upgrades {
-		if upgrade.Height == required.Height && upgrade.Source == required.Source && upgrade.Status == UpgradeScheduled {
+		if upgrade.Height == required.Height && upgrade.Source == required.Source &&
+			(upgrade.Status == UpgradeScheduled || upgrade.Status == UpgradeOnGoing) {
 			return true
 		}
 	}

@@ -64,3 +64,62 @@ func TestEnsureDataVolumeDoesNotCreatePVCWhenHaltHoldClearFails(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsureDataVolumeSnapshotWithoutHeightPreservesCommittedDataIdentity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	node := dataHeightResetTestNode()
+	node.Spec.Persistence = &appsv1.Persistence{RestoreFromSnapshot: &appsv1.PvcSnapshot{Name: "snapshot"}}
+	snapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: node.Namespace},
+		Status:     &snapshotv1.VolumeSnapshotStatus{},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node, snapshot).Build()
+	tracking := &dataHeightResetPersistenceClient{Client: base}
+	r := &Reconciler{Client: tracking}
+	current := &appsv1.ChainNode{}
+	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+
+	pvc, _, err := r.ensureDataVolume(t.Context(), nil, current)
+	require.NoError(t, err)
+	require.NotNil(t, pvc)
+	assert.Equal(t, []string{"metadata", "status"}, tracking.writes)
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+	assert.Equal(t, int64(100), stored.Status.LatestHeight)
+	assert.Equal(t, "v2", stored.Status.AppVersion)
+	assert.NotContains(t, stored.Annotations, appsv1.AnnotationHaltHeightHold)
+	assert.Equal(t, "100", pvc.Annotations[controllers.AnnotationDataHeight])
+}
+
+func TestEnsureDataVolumeSnapshotWithoutHeightDoesNotCreatePVCWhenHoldClearFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	node := dataHeightResetTestNode()
+	node.Spec.Persistence = &appsv1.Persistence{RestoreFromSnapshot: &appsv1.PvcSnapshot{Name: "snapshot"}}
+	snapshot := &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshot", Namespace: node.Namespace},
+		Status:     &snapshotv1.VolumeSnapshotStatus{},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node, snapshot).Build()
+	tracking := &dataHeightResetPersistenceClient{Client: base, failMetadata: true}
+	r := &Reconciler{Client: tracking}
+	current := &appsv1.ChainNode{}
+	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+
+	_, _, err := r.ensureDataVolume(t.Context(), nil, current)
+	require.ErrorContains(t, err, "metadata persistence failed")
+	assert.Equal(t, []string{"metadata"}, tracking.writes)
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+	assert.Equal(t, int64(100), stored.Status.LatestHeight)
+	assert.Equal(t, "v2", stored.Status.AppVersion)
+	assert.Equal(t, "100", stored.Annotations[appsv1.AnnotationHaltHeightHold])
+	pvc := &corev1.PersistentVolumeClaim{}
+	err = tracking.Get(t.Context(), client.ObjectKeyFromObject(node), pvc)
+	assert.True(t, apierrors.IsNotFound(err))
+}

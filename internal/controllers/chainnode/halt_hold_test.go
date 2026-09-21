@@ -162,7 +162,7 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 	}
 }
 
-func TestTerminalPodRecoveryUsesOnlyMatchingScheduledUpgradeEvidence(t *testing.T) {
+func TestTerminalPodRecoveryUsesOnlyMatchingPendingUpgradeEvidence(t *testing.T) {
 	node := &appsv1.ChainNode{
 		Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{}},
 		Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
@@ -183,6 +183,11 @@ func TestTerminalPodRecoveryUsesOnlyMatchingScheduledUpgradeEvidence(t *testing.
 		return nil, errors.New("upgrade recovery must not require halt logs")
 	}
 	assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(t.Context(), node, pod, reader))
+	node.Status.Upgrades[0].Status = appsv1.UpgradeOnGoing
+	assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(t.Context(), node, pod, reader))
+	node.Status.Upgrades[0].Status = appsv1.UpgradeCompleted
+	assert.Equal(t, terminalPodRestart, terminalPodRecoveryFor(t.Context(), node, pod, reader))
+	node.Status.Upgrades[0].Status = appsv1.UpgradeScheduled
 
 	evidence.RequiredUpgrade.Source = nodeutils.ManualUpgrade
 	body, err = json.Marshal(evidence)
