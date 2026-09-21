@@ -1219,6 +1219,382 @@ func TestEnsureVolumeSnapshotsDoesNotDeleteSameNameReplacementAfterTarballMarker
 	assert.Equal(t, replacement.UID, stored.UID)
 }
 
+func TestEnsureVolumeSnapshotsPreservesUsableSnapshotUntilReplacementIsReady(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	tests := []struct {
+		name     string
+		preserve *bool
+		status   *snapshotv1.VolumeSnapshotStatus
+	}{
+		{
+			name:     "default preservation with nil status",
+			preserve: nil,
+		},
+		{
+			name:     "explicit preservation with false readiness",
+			preserve: ptr.To(true),
+			status:   &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(false)},
+		},
+		{
+			name:     "explicit preservation with nonready CSI error",
+			preserve: ptr.To(true),
+			status: &snapshotv1.VolumeSnapshotStatus{
+				ReadyToUse: ptr.To(false),
+				Error:      &snapshotv1.VolumeSnapshotError{Message: ptr.To("temporary CSI failure")},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chainNode := retentionTestChainNode(now, &retention, nil, tt.preserve)
+			usable := retentionTestSnapshot(chainNode, "snapshot-usable", now.Add(-3*time.Hour), true, true, retention)
+			replacement := retentionTestSnapshot(chainNode, "snapshot-replacement", now.Add(-time.Hour), false, false, "")
+			replacement.Status = tt.status
+			reconciler, controllerClient, clientSet := newRetentionTestReconciler(t, chainNode, usable, replacement)
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+			assertSnapshotPresent(t, controllerClient, usable)
+			stored := &snapshotv1.VolumeSnapshot{}
+			require.NoError(t, controllerClient.Get(t.Context(), client.ObjectKeyFromObject(usable), stored))
+			assert.NotContains(t, stored.Annotations, controllers.AnnotationTarballDeletionComplete)
+			for _, action := range clientSet.Actions() {
+				assert.NotEqual(t, "create", action.GetVerb(), "preserving a usable snapshot must not start tarball cleanup")
+			}
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsCountRetentionCountsOnlyUsableSnapshots(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retain := int32(2)
+	chainNode := retentionTestChainNode(now, nil, &retain, ptr.To(true))
+	oldest := retentionTestSnapshot(chainNode, "snapshot-oldest", now.Add(-3*time.Hour), true, true, "")
+	newest := retentionTestSnapshot(chainNode, "snapshot-newest", now.Add(-2*time.Hour), true, true, "")
+	replacement := retentionTestSnapshot(chainNode, "snapshot-pending", now.Add(-time.Hour), false, false, "")
+	reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, oldest, newest, replacement)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	assertSnapshotPresent(t, controllerClient, oldest)
+	assertSnapshotPresent(t, controllerClient, newest)
+
+	storedReplacement := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(t.Context(), client.ObjectKeyFromObject(replacement), storedReplacement))
+	storedReplacement.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)}
+	storedReplacement.Annotations[controllers.AnnotationPvcSnapshotReady] = strconv.FormatBool(true)
+	require.NoError(t, controllerClient.Update(t.Context(), storedReplacement))
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	storedOldest := &snapshotv1.VolumeSnapshot{}
+	err := controllerClient.Get(t.Context(), client.ObjectKeyFromObject(oldest), storedOldest)
+	assert.True(t, apierrors.IsNotFound(err))
+	assertSnapshotPresent(t, controllerClient, newest)
+	assertSnapshotPresent(t, controllerClient, replacement)
+}
+
+func TestEnsureVolumeSnapshotsCountRetentionTreatsCheckingAsUsableWhenVerificationDisabled(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retain := int32(1)
+	chainNode := retentionTestChainNode(now, nil, &retain, ptr.To(true))
+	older := retentionTestSnapshot(chainNode, "snapshot-checking", now.Add(-2*time.Hour), true, true, "")
+	older.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
+	newer := retentionTestSnapshot(chainNode, "snapshot-newer", now.Add(-time.Hour), true, true, "")
+	reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, older, newer)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	storedOlder := &snapshotv1.VolumeSnapshot{}
+	err := controllerClient.Get(t.Context(), client.ObjectKeyFromObject(older), storedOlder)
+	assert.True(t, apierrors.IsNotFound(err))
+	assertSnapshotPresent(t, controllerClient, newer)
+}
+
+func TestEnsureVolumeSnapshotsAgeRetentionReleasesBackupAfterReplacementBecomesUsable(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	chainNode := retentionTestChainNode(now, &retention, nil, ptr.To(true))
+	usable := retentionTestSnapshot(chainNode, "snapshot-usable", now.Add(-3*time.Hour), true, true, retention)
+	replacement := retentionTestSnapshot(chainNode, "snapshot-replacement", now.Add(-time.Hour), false, false, "")
+	reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, usable, replacement)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+	assertSnapshotPresent(t, controllerClient, usable)
+
+	storedReplacement := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(t.Context(), client.ObjectKeyFromObject(replacement), storedReplacement))
+	storedReplacement.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)}
+	storedReplacement.Annotations[controllers.AnnotationPvcSnapshotReady] = strconv.FormatBool(true)
+	require.NoError(t, controllerClient.Update(t.Context(), storedReplacement))
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	storedUsable := &snapshotv1.VolumeSnapshot{}
+	err := controllerClient.Get(t.Context(), client.ObjectKeyFromObject(usable), storedUsable)
+	assert.True(t, apierrors.IsNotFound(err))
+	assertSnapshotPresent(t, controllerClient, replacement)
+}
+
+func TestEnsureVolumeSnapshotsVerificationGatesRetentionReplacement(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	retain := int32(1)
+	tests := []struct {
+		name                 string
+		retention            *string
+		retain               *int32
+		replacementIntegrity string
+	}{
+		{name: "age retention with missing integrity", retention: &retention},
+		{name: "age retention with checking integrity", retention: &retention, replacementIntegrity: string(snapshotIntegrityChecking)},
+		{name: "count retention with missing integrity", retain: &retain},
+		{name: "count retention with checking integrity", retain: &retain, replacementIntegrity: string(snapshotIntegrityChecking)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chainNode := retentionTestChainNode(now, tt.retention, tt.retain, ptr.To(true))
+			chainNode.Spec.Persistence.Snapshots.Verify = ptr.To(true)
+			older := retentionTestSnapshot(chainNode, "snapshot-older", now.Add(-3*time.Hour), true, true, "")
+			if tt.retention != nil {
+				older.Annotations[controllers.AnnotationSnapshotRetention] = *tt.retention
+			}
+			older.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityOk)
+			replacement := retentionTestSnapshot(chainNode, "snapshot-replacement", now.Add(-time.Hour), true, true, "")
+			replacement.TypeMeta = metav1.TypeMeta{
+				APIVersion: snapshotv1.SchemeGroupVersion.String(),
+				Kind:       "VolumeSnapshot",
+			}
+			replacement.Status.RestoreSize = resource.NewQuantity(1, resource.BinarySI)
+			if tt.replacementIntegrity != "" {
+				replacement.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = tt.replacementIntegrity
+			}
+			reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, older, replacement)
+			kubeHTTPClient := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"apiVersion":"batch/v1","kind":"JobList","metadata":{},"items":[]}`)),
+				}, nil
+			})}
+			productionClient, err := kubernetes.NewForConfigAndClient(
+				&rest.Config{Host: "https://kubernetes.invalid"}, kubeHTTPClient,
+			)
+			require.NoError(t, err)
+			reconciler.ClientSet = productionClient
+
+			require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+			assertSnapshotPresent(t, controllerClient, older)
+
+			storedReplacement := &snapshotv1.VolumeSnapshot{}
+			require.NoError(t, controllerClient.Get(t.Context(), client.ObjectKeyFromObject(replacement), storedReplacement))
+			storedReplacement.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityOk)
+			require.NoError(t, controllerClient.Update(t.Context(), storedReplacement))
+			require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+			storedOlder := &snapshotv1.VolumeSnapshot{}
+			err = controllerClient.Get(t.Context(), client.ObjectKeyFromObject(older), storedOlder)
+			assert.True(t, apierrors.IsNotFound(err))
+			assertSnapshotPresent(t, controllerClient, replacement)
+		})
+	}
+}
+
+func TestEnsureVolumeSnapshotsDelaysExportCleanupUntilReplacementIsUsable(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	chainNode := retentionTestChainNode(now, &retention, nil, ptr.To(true))
+	chainNode.Spec.Persistence.Snapshots.ExportTarball = &appsv1.ExportTarballConfig{
+		DeleteOnExpire: ptr.To(true),
+		GCS:            &appsv1.GcsExportConfig{Bucket: "snapshots"},
+	}
+	usable := retentionTestSnapshot(chainNode, "snapshot-usable", now.Add(-3*time.Hour), true, true, retention)
+	usable.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
+	replacement := retentionTestSnapshot(chainNode, "snapshot-replacement", now.Add(-time.Hour), false, false, "")
+	export, err := newSnapshotExportStatus(chainNode, usable)
+	require.NoError(t, err)
+	export.Phase = appsv1.SnapshotExportPhaseUploaded
+	chainNode.Status.SnapshotExports = []appsv1.SnapshotExportStatus{export}
+	reconciler, controllerClient, clientSet := newRetentionTestReconciler(t, chainNode, usable, replacement)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+	assertSnapshotPresent(t, controllerClient, usable)
+	for _, action := range clientSet.Actions() {
+		assert.NotEqual(t, "create", action.GetVerb(), "cleanup must wait for a usable replacement")
+	}
+	storedNode := &appsv1.ChainNode{}
+	require.NoError(t, controllerClient.Get(t.Context(), client.ObjectKeyFromObject(chainNode), storedNode))
+	require.Len(t, storedNode.Status.SnapshotExports, 1)
+	assert.Equal(t, export.ID, storedNode.Status.SnapshotExports[0].ID)
+	assert.Equal(t, export.ObjectName, storedNode.Status.SnapshotExports[0].ObjectName)
+
+	storedReplacement := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(t.Context(), client.ObjectKeyFromObject(replacement), storedReplacement))
+	storedReplacement.Status = &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)}
+	storedReplacement.Annotations[controllers.AnnotationPvcSnapshotReady] = strconv.FormatBool(true)
+	storedReplacement.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
+	require.NoError(t, controllerClient.Update(t.Context(), storedReplacement))
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	createActions := 0
+	for _, action := range clientSet.Actions() {
+		if action.GetVerb() == "create" && action.GetResource().Resource == "jobs" {
+			createActions++
+		}
+	}
+	assert.Equal(t, 1, createActions, "cleanup should start after a usable replacement exists")
+}
+
+func TestEnsureVolumeSnapshotsAgeRetentionPreservesNewestUsableSnapshotDeterministically(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	chainNode := retentionTestChainNode(now, &retention, nil, ptr.To(true))
+	oldest := retentionTestSnapshot(chainNode, "snapshot-oldest", now.Add(-3*time.Hour), true, true, retention)
+	equalTimeA := retentionTestSnapshot(chainNode, "snapshot-a", now.Add(-2*time.Hour), true, true, retention)
+	equalTimeZ := retentionTestSnapshot(chainNode, "snapshot-z", now.Add(-2*time.Hour), true, true, retention)
+	reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, equalTimeZ, oldest, equalTimeA)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	for _, deleted := range []*snapshotv1.VolumeSnapshot{oldest, equalTimeA} {
+		stored := &snapshotv1.VolumeSnapshot{}
+		err := controllerClient.Get(t.Context(), client.ObjectKeyFromObject(deleted), stored)
+		assert.True(t, apierrors.IsNotFound(err), "%s should be expired", deleted.Name)
+	}
+	assertSnapshotPresent(t, controllerClient, equalTimeZ)
+}
+
+func TestEnsureVolumeSnapshotsAgeRetentionPreservesNewestLiveFallback(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	chainNode := retentionTestChainNode(now, &retention, nil, ptr.To(true))
+	oldest := retentionTestSnapshot(chainNode, "snapshot-oldest", now.Add(-3*time.Hour), false, true, retention)
+	newest := retentionTestSnapshot(chainNode, "snapshot-newest", now.Add(-2*time.Hour), false, true, retention)
+	reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, newest, oldest)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	storedOldest := &snapshotv1.VolumeSnapshot{}
+	err := controllerClient.Get(t.Context(), client.ObjectKeyFromObject(oldest), storedOldest)
+	assert.True(t, apierrors.IsNotFound(err))
+	assertSnapshotPresent(t, controllerClient, newest)
+}
+
+func TestEnsureVolumeSnapshotsPreserveLastSnapshotFalseKeepsDestructiveRetention(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	retention := "1h"
+	chainNode := retentionTestChainNode(now, &retention, nil, ptr.To(false))
+	usable := retentionTestSnapshot(chainNode, "snapshot-usable", now.Add(-3*time.Hour), true, true, retention)
+	replacement := retentionTestSnapshot(chainNode, "snapshot-pending", now.Add(-time.Hour), false, false, "")
+	reconciler, controllerClient, _ := newRetentionTestReconciler(t, chainNode, usable, replacement)
+
+	require.NoError(t, reconciler.ensureVolumeSnapshots(t.Context(), chainNode, true))
+
+	stored := &snapshotv1.VolumeSnapshot{}
+	err := controllerClient.Get(t.Context(), client.ObjectKeyFromObject(usable), stored)
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func retentionTestChainNode(
+	now time.Time,
+	retention *string,
+	retain *int32,
+	preserve *bool,
+) *appsv1.ChainNode {
+	return &appsv1.ChainNode{
+		TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "node",
+			Namespace:         "default",
+			UID:               "node-uid",
+			CreationTimestamp: metav1.NewTime(now),
+			Annotations: map[string]string{
+				controllers.AnnotationLastPvcSnapshot: now.Format(timeLayout),
+			},
+		},
+		Spec: appsv1.ChainNodeSpec{Persistence: &appsv1.Persistence{Snapshots: &appsv1.VolumeSnapshotsConfig{
+			Frequency:            "240h",
+			Retention:            retention,
+			Retain:               retain,
+			PreserveLastSnapshot: preserve,
+		}}},
+		Status: appsv1.ChainNodeStatus{
+			Phase:        appsv1.PhaseChainNodeRunning,
+			ChainID:      "chain-1",
+			PvcSize:      "1Gi",
+			LatestHeight: 1,
+		},
+	}
+}
+
+func retentionTestSnapshot(
+	chainNode *appsv1.ChainNode,
+	name string,
+	createdAt time.Time,
+	readyToUse bool,
+	operatorReady bool,
+	retention string,
+) *snapshotv1.VolumeSnapshot {
+	annotations := map[string]string{
+		controllers.AnnotationPvcSnapshotReady: strconv.FormatBool(operatorReady),
+	}
+	if retention != "" {
+		annotations[controllers.AnnotationSnapshotRetention] = retention
+	}
+	return &snapshotv1.VolumeSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         chainNode.Namespace,
+			UID:               types.UID(name + "-uid"),
+			CreationTimestamp: metav1.NewTime(createdAt),
+			Labels:            map[string]string{controllers.LabelChainNode: chainNode.Name},
+			Annotations:       annotations,
+		},
+		Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(readyToUse)},
+	}
+}
+
+func newRetentionTestReconciler(
+	t *testing.T,
+	chainNode *appsv1.ChainNode,
+	snapshots ...*snapshotv1.VolumeSnapshot,
+) (*Reconciler, client.Client, *fake.Clientset) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, snapshotv1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+
+	objects := []client.Object{chainNode}
+	for _, snapshot := range snapshots {
+		objects = append(objects, snapshot)
+	}
+	controllerClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.ChainNode{}).
+		WithObjects(objects...).
+		Build()
+	clientSet := fake.NewSimpleClientset()
+	reconciler := &Reconciler{
+		Client:            controllerClient,
+		snapshotClientSet: clientSet,
+		Scheme:            scheme,
+		opts:              &controllers.ControllerRunOptions{},
+		recorder:          record.NewFakeRecorder(10),
+	}
+	return reconciler, controllerClient, clientSet
+}
+
+func assertSnapshotPresent(t *testing.T, controllerClient client.Client, snapshot *snapshotv1.VolumeSnapshot) {
+	t.Helper()
+	stored := &snapshotv1.VolumeSnapshot{}
+	require.NoError(t, controllerClient.Get(t.Context(), client.ObjectKeyFromObject(snapshot), stored))
+	assert.Nil(t, stored.DeletionTimestamp)
+}
+
 func TestEnsureVolumeSnapshotsHonorsTarballDeletionMarkerForRetention(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	retention := "1h"
@@ -2972,6 +3348,78 @@ func TestIsSnapshotReady(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestIsSnapshotUsableForRetention(t *testing.T) {
+	now := metav1.Now()
+	readySnapshot := func() *snapshotv1.VolumeSnapshot {
+		return &snapshotv1.VolumeSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				controllers.AnnotationPvcSnapshotReady: strconv.FormatBool(true),
+			}},
+			Status: &snapshotv1.VolumeSnapshotStatus{ReadyToUse: ptr.To(true)},
+		}
+	}
+	tests := []struct {
+		name   string
+		verify bool
+		mutate func(*snapshotv1.VolumeSnapshot)
+		want   bool
+	}{
+		{name: "ready without verification", want: true},
+		{name: "ready with successful verification", verify: true, mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityOk)
+		}, want: true},
+		{name: "verification required without result", verify: true, want: false},
+		{name: "verification checking", verify: true, mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
+		}, want: false},
+		{name: "verification checking after verification disabled", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
+		}, want: true},
+		{name: "known failed result after verification disabled", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityCorrupted)
+		}, want: false},
+		{name: "unknown integrity result fails closed", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = "unknown"
+		}, want: false},
+		{name: "operator annotation missing", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			delete(snapshot.Annotations, controllers.AnnotationPvcSnapshotReady)
+		}, want: false},
+		{name: "CSI not ready", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.Status.ReadyToUse = ptr.To(false)
+			snapshot.Status.Error = &snapshotv1.VolumeSnapshotError{Message: ptr.To("temporary CSI failure")}
+		}, want: false},
+		{name: "terminating", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.DeletionTimestamp = &now
+		}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := readySnapshot()
+			if tt.mutate != nil {
+				tt.mutate(snapshot)
+			}
+			assert.Equal(t, tt.want, isSnapshotUsableForRetention(snapshot, tt.verify))
+		})
+	}
+	assert.False(t, isSnapshotUsableForRetention(nil, false))
+}
+
+func TestSnapshotToPreserveFallsBackOnlyToLiveSnapshots(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	snapshots := []snapshotv1.VolumeSnapshot{
+		*retentionTestSnapshot(&appsv1.ChainNode{}, "snapshot-a", now, false, true, ""),
+		*retentionTestSnapshot(&appsv1.ChainNode{}, "snapshot-z", now, false, true, ""),
+	}
+	sortSnapshotsOldestFirst(snapshots)
+	assert.Equal(t, "snapshot-z", snapshotToPreserve(snapshots, false))
+
+	for i := range snapshots {
+		snapshots[i].DeletionTimestamp = ptr.To(metav1.Now())
+	}
+	assert.Empty(t, snapshotToPreserve(snapshots, false))
 }
 
 func TestIsSnapshotExpired(t *testing.T) {

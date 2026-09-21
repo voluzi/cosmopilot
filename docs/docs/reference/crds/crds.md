@@ -1243,8 +1243,8 @@ VolumeSnapshotsConfig holds the configuration of snapshotting feature.
 | ----- | ----------- | ------ | -------- |
 | frequency | How often a snapshot should be created. | string | true |
 | retention | How long a snapshot should be retained. Default is indefinite retention. Cannot be used together with Retain. | *string | false |
-| retain | How many snapshots should be retained. When set, only the most recent N snapshots are kept. Cannot be used together with Retention. | *int32 | false |
-| preserveLastSnapshot | If true, retention policies will not be enforced when only a single snapshot exists. Ensures at least one snapshot is always available. Defaults to true. | *bool | false |
+| retain | How many usable snapshots should be retained. With PreserveLastSnapshot enabled, snapshots that are pending, failed, terminating, or awaiting successful configured integrity verification do not count toward this limit, so the number of VolumeSnapshot objects can temporarily exceed Retain. Cannot be used together with Retention. | *int32 | false |
+| preserveLastSnapshot | If true, retention preserves the newest usable snapshot until a usable replacement exists. A usable snapshot is nonterminating, ready to use, processed by the operator, and successfully verified when Verify is enabled. Set to false to apply retention policies to all snapshot objects. Defaults to true. | *bool | false |
 | snapshotClass | Name of the volume snapshot class to be used. Uses the default class if not specified. | *string | false |
 | stopNode | Whether the node should be stopped while the snapshot is taken. Defaults to `false`. | *bool | false |
 | exportTarball | Whether to create a tarball of data directory in each snapshot and upload it to external storage. | *[ExportTarballConfig](#exporttarballconfig) | false |
