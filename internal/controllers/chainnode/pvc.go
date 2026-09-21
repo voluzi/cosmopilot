@@ -217,15 +217,15 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 			}
 
 			// Get height from the snapshot so that operator knows which version to run in case there were upgrades already.
-			restoreHeight := int64(0)
 			if hs, ok := snapshot.Annotations[controllers.AnnotationDataHeight]; ok {
 				height, err := strconv.ParseInt(hs, 10, 64)
 				if err != nil {
 					return nil, ctrl.Result{}, err
 				}
-				restoreHeight = height
-			}
-			if err = r.persistDataHeightReset(ctx, chainNode, restoreHeight); err != nil {
+				if err = r.persistDataHeightReset(ctx, chainNode, height); err != nil {
+					return nil, ctrl.Result{}, err
+				}
+			} else if err = r.persistHaltHeightHoldClear(ctx, chainNode); err != nil {
 				return nil, ctrl.Result{}, err
 			}
 		} else {

@@ -68,7 +68,7 @@ func main() {
 	}
 
 	go func() {
-		if err := handleTerminationSignal(sigChan, nodeUtilsServer.StopWithResult, signal.Stop, signal.Reset); err != nil {
+		if err := handleTerminationSignals(sigChan, nodeUtilsServer.StopWithResult, func() { os.Exit(0) }); err != nil {
 			log.Errorf("failed to stop nodeutils server: %v", err)
 		}
 	}()
@@ -78,26 +78,30 @@ func main() {
 	}
 }
 
-func handleTerminationSignal(
-	sigChan chan os.Signal,
+func handleTerminationSignals(
+	sigChan <-chan os.Signal,
 	stop func(bool) (nodeutils.StopResult, error),
-	stopNotifications func(chan<- os.Signal),
-	resetSignals func(...os.Signal),
+	terminate func(),
 ) error {
-	sig := <-sigChan
-	log.Infof("received signal: %v", sig)
-	result, err := stop(false)
-	if err != nil {
-		return err
+	var stopErr error
+	stopAttempted := false
+	for sig := range sigChan {
+		log.Infof("received signal: %v", sig)
+		if stopAttempted {
+			terminate()
+			return stopErr
+		}
+		stopAttempted = true
+		result, err := stop(false)
+		if err != nil {
+			stopErr = err
+			continue
+		}
+		if result == nodeutils.StopCompleted {
+			return nil
+		}
 	}
-	if result == nodeutils.StopHeld {
-		// Evidence is durable before StopHeld is returned. Restore default handling
-		// so later lifecycle signals are not swallowed; controller deletion remains
-		// independently bounded by its explicit grace period.
-		stopNotifications(sigChan)
-		resetSignals(syscall.SIGINT, syscall.SIGTERM)
-	}
-	return nil
+	return stopErr
 }
 
 func printHelp() {

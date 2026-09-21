@@ -17,7 +17,7 @@ const (
 	appTerminationLogTimeout  = 3 * time.Second
 )
 
-var plainSDKHaltLine = regexp.MustCompile(`(?:^|\s)(?:(?:INF|INFO)\s+|I\[[^]]+\]\s+)halting node per configuration(?:\s|$)`)
+var plainSDKHaltLine = regexp.MustCompile(`^(?:(?:\S+\s+)?(?:INF|INFO)\s+|I\[[^]]+\]\s+)halting node per configuration(?:\s|$)`)
 
 func hasAuthoritativeHaltLog(logs []byte, haltHeight int64, startedAt, finishedAt time.Time) bool {
 	if len(logs) == 0 || len(logs) > appTerminationLogMaxBytes || logs[len(logs)-1] != '\n' {
@@ -30,9 +30,6 @@ func hasAuthoritativeHaltLog(logs []byte, haltHeight int64, startedAt, finishedA
 		}
 		separator := bytes.IndexByte(line, ' ')
 		if separator <= 0 {
-			if bytes.Contains(line, []byte(sdkHaltMessage)) {
-				return false
-			}
 			continue
 		}
 		recordedAt, err := time.Parse(time.RFC3339Nano, string(line[:separator]))
@@ -41,7 +38,7 @@ func hasAuthoritativeHaltLog(logs []byte, haltHeight int64, startedAt, finishedA
 			continue
 		}
 		if err != nil || recordedAt.Before(startedAt) || !recordedAt.Before(finishedAt.Add(time.Second)) {
-			return false
+			continue
 		}
 		var valid bool
 		if payload[0] == '{' {
@@ -50,7 +47,7 @@ func hasAuthoritativeHaltLog(logs []byte, haltHeight int64, startedAt, finishedA
 			valid = validPlainSDKHaltLine(string(payload), haltHeight)
 		}
 		if !valid {
-			return false
+			continue
 		}
 		return true
 	}

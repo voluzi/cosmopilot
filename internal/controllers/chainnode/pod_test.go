@@ -63,20 +63,30 @@ func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
 
 func TestGetPodSpecUsesEffectiveAppIdentityForNodeUtils(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		app       *corev1.SecurityContext
-		wantUser  int64
-		wantGroup int64
+		name        string
+		app         *corev1.SecurityContext
+		wantUser    int64
+		wantGroup   int64
+		wantNonRoot bool
 	}{
-		{name: "pod-only override does not replace default app identity", wantUser: 1000, wantGroup: 1000},
+		{name: "pod-only override does not replace default app identity", wantUser: 1000, wantGroup: 1000, wantNonRoot: true},
 		{
 			name: "app override takes precedence over pod identity",
 			app: &corev1.SecurityContext{
 				RunAsUser:  ptr.To[int64](3000),
 				RunAsGroup: ptr.To[int64](3001),
 			},
-			wantUser:  3000,
-			wantGroup: 3001,
+			wantUser:    3000,
+			wantGroup:   3001,
+			wantNonRoot: true,
+		},
+		{
+			name: "explicit numeric root identity is mirrored for compatibility",
+			app: &corev1.SecurityContext{
+				RunAsUser:  ptr.To[int64](0),
+				RunAsGroup: ptr.To[int64](0),
+			},
+			wantUser: 0, wantGroup: 0,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,11 +132,15 @@ func TestGetPodSpecUsesEffectiveAppIdentityForNodeUtils(t *testing.T) {
 			if got := *nodeUtils.SecurityContext.RunAsGroup; got != tt.wantGroup {
 				t.Fatalf("node-utils runAsGroup = %d, want %d", got, tt.wantGroup)
 			}
+			if got := *nodeUtils.SecurityContext.RunAsNonRoot; got != tt.wantNonRoot {
+				t.Fatalf("node-utils runAsNonRoot = %t, want %t", got, tt.wantNonRoot)
+			}
+			require.Contains(t, nodeUtils.SecurityContext.Capabilities.Drop, corev1.Capability("ALL"))
 		})
 	}
 }
 
-func TestEffectiveRunIdentityUsesPodFallbackAndRejectsRoot(t *testing.T) {
+func TestEffectiveRunIdentityUsesContainerPrecedenceAndPodFallback(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		app       *corev1.SecurityContext
@@ -146,19 +160,20 @@ func TestEffectiveRunIdentityUsesPodFallbackAndRejectsRoot(t *testing.T) {
 			wantGroup: 2001,
 		},
 		{
-			name: "root app identity is rejected",
+			name: "explicit root identity is preserved",
 			app: &corev1.SecurityContext{
 				RunAsUser:  ptr.To[int64](0),
 				RunAsGroup: ptr.To[int64](0),
 			},
-			wantError: true,
+			wantUser: 0, wantGroup: 0,
 		},
+		{name: "unresolved identity is rejected", app: &corev1.SecurityContext{}, wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			runAsUser, runAsGroup, err := effectiveRunIdentity(tt.app, tt.pod)
 			if tt.wantError {
 				if err == nil {
-					t.Fatal("effectiveRunIdentity() succeeded for a root identity")
+					t.Fatal("effectiveRunIdentity() succeeded for an unresolved identity")
 				}
 				return
 			}
@@ -320,50 +335,15 @@ func TestCommittedUpgradeImageSurvivesHeightMinusOneOnNextReconcile(t *testing.T
 	}
 }
 
-func TestResetDataHeightInvalidatesCommittedVersionAnchor(t *testing.T) {
+func TestPersistDataHeightResetClearsHaltHoldBeforeFreshOrSnapshotData(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
 		height      int64
 		wantVersion string
 	}{
+		{name: "fresh PVC", height: 0, wantVersion: "v1"},
 		{name: "snapshot below upgrade", height: 50, wantVersion: "v1"},
-		{name: "fresh or missing pvc", height: 0, wantVersion: "v1"},
 		{name: "snapshot above upgrade", height: 150, wantVersion: "v2"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			node := &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{appsv1.AnnotationHaltHeightHold: "100"}},
-				Spec:       appsv1.ChainNodeSpec{App: appsv1.AppSpec{Image: "app", Version: ptr.To("v1")}},
-				Status: appsv1.ChainNodeStatus{
-					LatestHeight: 200,
-					AppVersion:   "v2",
-					Upgrades: []appsv1.Upgrade{{
-						Height: 100, Image: "app:v2", Status: appsv1.UpgradeCompleted,
-					}},
-				},
-			}
-
-			if !resetDataHeight(node, tt.height) {
-				t.Fatal("resetDataHeight reported no status change")
-			}
-			if node.Status.AppVersion != "" {
-				t.Fatalf("AppVersion = %q, want cleared anchor", node.Status.AppVersion)
-			}
-			assert.NotContains(t, node.Annotations, appsv1.AnnotationHaltHeightHold)
-			if got := node.GetAppVersion(); got != tt.wantVersion {
-				t.Fatalf("GetAppVersion() = %q, want %q", got, tt.wantVersion)
-			}
-		})
-	}
-}
-
-func TestPersistDataHeightResetClearsHaltHoldBeforeFreshOrSnapshotData(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		height int64
-	}{
-		{name: "fresh PVC", height: 0},
-		{name: "snapshot below halt", height: 50},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
@@ -382,6 +362,7 @@ func TestPersistDataHeightResetClearsHaltHoldBeforeFreshOrSnapshotData(t *testin
 			assert.NotContains(t, stored.Annotations, appsv1.AnnotationHaltHeightHold)
 			assert.Equal(t, tt.height, stored.Status.LatestHeight)
 			assert.Empty(t, stored.Status.AppVersion)
+			assert.Equal(t, tt.wantVersion, stored.GetAppVersion())
 		})
 	}
 }
@@ -436,7 +417,14 @@ func dataHeightResetTestNode() *appsv1.ChainNode {
 			Name: "node", Namespace: "default",
 			Annotations: map[string]string{appsv1.AnnotationHaltHeightHold: "100"},
 		},
-		Status: appsv1.ChainNodeStatus{LatestHeight: 100, AppVersion: "v2"},
+		Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{Image: "app", Version: ptr.To("v1")}},
+		Status: appsv1.ChainNodeStatus{
+			LatestHeight: 100,
+			AppVersion:   "v2",
+			Upgrades: []appsv1.Upgrade{{
+				Height: 100, Image: "app:v2", Status: appsv1.UpgradeCompleted,
+			}},
+		},
 	}
 }
 

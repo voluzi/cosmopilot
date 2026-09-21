@@ -144,7 +144,7 @@ func (u *UpgradeChecker) ShouldUpgrade(height int64) bool {
 
 func (u *UpgradeChecker) GetUpgrade(height int64) (*Upgrade, error) {
 	for _, upgrade := range u.Snapshot().Upgrades {
-		if height >= upgrade.Height && upgrade.Status == UpgradeScheduled {
+		if height >= upgrade.Height && (upgrade.Status == UpgradeScheduled || upgrade.Status == UpgradeOnGoing) {
 			return &upgrade, nil
 		}
 	}

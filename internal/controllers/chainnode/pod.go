@@ -445,6 +445,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, ru
 	securityContext := k8s.RestrictedSecurityContext()
 	securityContext.RunAsUser = ptr.To(runAsUser)
 	securityContext.RunAsGroup = ptr.To(runAsGroup)
+	securityContext.RunAsNonRoot = ptr.To(runAsUser != 0)
 
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
@@ -517,8 +518,8 @@ func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityCo
 	} else if pod != nil && pod.RunAsUser != nil {
 		runAsUser = pod.RunAsUser
 	}
-	if runAsUser == nil || *runAsUser <= 0 {
-		return 0, 0, fmt.Errorf("node-utils requires a non-root numeric runAsUser matching the app container")
+	if runAsUser == nil || *runAsUser < 0 {
+		return 0, 0, fmt.Errorf("node-utils requires a resolved numeric runAsUser matching the app container")
 	}
 
 	var runAsGroup *int64
@@ -527,8 +528,8 @@ func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityCo
 	} else if pod != nil && pod.RunAsGroup != nil {
 		runAsGroup = pod.RunAsGroup
 	}
-	if runAsGroup == nil || *runAsGroup <= 0 {
-		return 0, 0, fmt.Errorf("node-utils requires a non-root numeric runAsGroup matching the app container")
+	if runAsGroup == nil || *runAsGroup < 0 {
+		return 0, 0, fmt.Errorf("node-utils requires a resolved numeric runAsGroup matching the app container")
 	}
 	return *runAsUser, *runAsGroup, nil
 }
@@ -1361,7 +1362,7 @@ func terminalPodRecoveryFor(ctx context.Context, chainNode *appsv1.ChainNode, po
 		return terminalPodNotTerminated
 	}
 	evidence, ok := nodeUtilsTerminationEvidence(pod)
-	if ok && !evidence.ForcedShutdown && matchingScheduledUpgrade(chainNode, evidence.RequiredUpgrade) {
+	if ok && !evidence.ForcedShutdown && matchingPendingUpgrade(chainNode, evidence.RequiredUpgrade) {
 		return terminalPodUpgrade
 	}
 	if !nodeUtilsHasTerminated(pod) {
@@ -1591,12 +1592,13 @@ func nodeUtilsHaltHeight(pod *corev1.Pod) (int64, bool) {
 	return 0, false
 }
 
-func matchingScheduledUpgrade(chainNode *appsv1.ChainNode, required *nodeutils.RequiredUpgrade) bool {
+func matchingPendingUpgrade(chainNode *appsv1.ChainNode, required *nodeutils.RequiredUpgrade) bool {
 	if required == nil {
 		return false
 	}
 	for _, upgrade := range chainNode.Status.Upgrades {
-		if upgrade.Height == required.Height && upgrade.Source == appsv1.UpgradeSource(required.Source) && upgrade.Status == appsv1.UpgradeScheduled {
+		if upgrade.Height == required.Height && upgrade.Source == appsv1.UpgradeSource(required.Source) &&
+			(upgrade.Status == appsv1.UpgradeScheduled || upgrade.Status == appsv1.UpgradeOnGoing) {
 			return true
 		}
 	}
