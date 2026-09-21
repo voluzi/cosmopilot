@@ -444,14 +444,14 @@ func TestEnsurePodRetriesWhenRunningNodeUtilsStatusIsUnavailable(t *testing.T) {
 		client  *fakeTerminalNodeUtilsClient
 		wantErr string
 	}{
-		{name: "latest height error", client: &fakeTerminalNodeUtilsClient{requiresUpgrade: true, heightErr: errors.New("latest unavailable")}, wantErr: "latest unavailable"},
+		{name: "latest height error after fresh negative", client: &fakeTerminalNodeUtilsClient{heightErr: errors.New("latest unavailable")}, wantErr: "latest unavailable"},
 		{name: "upgrade query error", client: &fakeTerminalNodeUtilsClient{height: 100, upgradeErr: errors.New("upgrade unavailable")}, wantErr: "upgrade unavailable"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			var deletes atomic.Int32
+			var mutations atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				if req.Method == http.MethodDelete {
-					deletes.Add(1)
+				if req.Method == http.MethodDelete || req.Method == http.MethodPost {
+					mutations.Add(1)
 				}
 				http.NotFound(w, req)
 			}))
@@ -464,7 +464,7 @@ func TestEnsurePodRetriesWhenRunningNodeUtilsStatusIsUnavailable(t *testing.T) {
 			} else {
 				require.ErrorContains(t, err, tt.wantErr)
 			}
-			assert.Zero(t, deletes.Load())
+			assert.Zero(t, mutations.Load())
 			wantCalls := []string{"upgrade-fresh"}
 			if tt.client.heightErr != nil {
 				wantCalls = []string{"upgrade-fresh", "latest"}
@@ -475,6 +475,28 @@ func TestEnsurePodRetriesWhenRunningNodeUtilsStatusIsUnavailable(t *testing.T) {
 			assert.Equal(t, map[string]string{"identity": "observed"}, storedPod.Labels)
 		})
 	}
+}
+
+func TestEnsurePodDoesNotMutatePodWhenFreshHeightStatusWriteFails(t *testing.T) {
+	var mutations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodDelete || req.Method == http.MethodPost {
+			mutations.Add(1)
+		}
+		http.NotFound(w, req)
+	}))
+	defer server.Close()
+	nodeClient := &fakeTerminalNodeUtilsClient{height: 100}
+	r, node, observedPod := terminalWaitEnsurePodFixture(t, server.URL, nodeClient)
+	r.Client = &dataHeightResetPersistenceClient{Client: r.Client, failStatus: true}
+
+	err := r.ensurePod(t.Context(), nil, node, "config-hash")
+	require.ErrorContains(t, err, "status persistence failed")
+	assert.Zero(t, mutations.Load())
+	assert.Equal(t, []string{"upgrade-fresh", "latest"}, nodeClient.calls)
+	storedPod := &corev1.Pod{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(observedPod), storedPod))
+	assert.Equal(t, observedPod.UID, storedPod.UID)
 }
 
 func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
@@ -607,7 +629,8 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 			stored := &appsv1.ChainNode{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
 			assert.Equal(t, tt.wantHold, stored.Annotations[appsv1.AnnotationHaltHeightHold])
-			assert.Equal(t, []string{"upgrade-fresh"}, nodeClient.calls)
+			assert.Equal(t, int64(100), stored.Status.LatestHeight)
+			assert.Equal(t, []string{"upgrade-fresh", "latest"}, nodeClient.calls)
 		})
 	}
 }
