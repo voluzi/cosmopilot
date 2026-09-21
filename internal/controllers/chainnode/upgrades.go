@@ -15,7 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	appsv1 "github.com/voluzi/cosmopilot/v2/api/v1"
-	"github.com/voluzi/cosmopilot/v2/pkg/nodeutils"
 )
 
 func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.ChainNode, nodePodRunning bool) error {
@@ -119,7 +118,7 @@ func (r *Reconciler) ensureUpgradesConfig(ctx context.Context, chainNode *appsv1
 }
 
 func (r *Reconciler) requiresUpgrade(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	return nodeutils.NewClient(chainNode.GetNodeFQDN()).RequiresUpgrade(ctx)
+	return r.getNodeStatusClient(chainNode).RequiresUpgrade(ctx)
 }
 
 func (r *Reconciler) getUpgrade(chainNode *appsv1.ChainNode, height int64) *appsv1.Upgrade {
@@ -149,6 +148,17 @@ func (r *Reconciler) setUpgradeStatus(ctx context.Context, chainNode *appsv1.Cha
 		}
 	}
 	return fmt.Errorf("cant update upgrade phase: upgrade not found")
+}
+
+func (r *Reconciler) completeUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, upgrade *appsv1.Upgrade) error {
+	chainNode.Status.AppVersion = upgrade.GetVersion()
+	if err := r.setUpgradeStatus(ctx, chainNode, upgrade, appsv1.UpgradeCompleted); err != nil {
+		return err
+	}
+	if err := r.resetVpaAfterUpgrade(ctx, chainNode); err != nil {
+		return fmt.Errorf("failed to reset VPA after upgrade for %s: %w", chainNode.GetName(), err)
+	}
+	return nil
 }
 
 func (r *Reconciler) getGovUpgrades(ctx context.Context, chainNode *appsv1.ChainNode) ([]appsv1.Upgrade, error) {

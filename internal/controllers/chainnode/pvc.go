@@ -217,24 +217,22 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 			}
 
 			// Get height from the snapshot so that operator knows which version to run in case there were upgrades already.
+			restoreHeight := int64(0)
 			if hs, ok := snapshot.Annotations[controllers.AnnotationDataHeight]; ok {
 				height, err := strconv.ParseInt(hs, 10, 64)
 				if err != nil {
 					return nil, ctrl.Result{}, err
 				}
-				chainNode.Status.LatestHeight = height
-				if err = r.Status().Update(ctx, chainNode); err != nil {
-					return nil, ctrl.Result{}, err
-				}
+				restoreHeight = height
+			}
+			if err = r.persistDataHeightReset(ctx, chainNode, restoreHeight); err != nil {
+				return nil, ctrl.Result{}, err
 			}
 		} else {
 			// In case the PVC was deleted on an existing node, lets set latest height to 0 to make sure state-sync
 			// configuration can be applied if necessary.
-			if chainNode.Status.LatestHeight != 0 {
-				chainNode.Status.LatestHeight = 0
-				if err = r.Status().Update(ctx, chainNode); err != nil {
-					return nil, ctrl.Result{}, err
-				}
+			if err = r.persistDataHeightReset(ctx, chainNode, 0); err != nil {
+				return nil, ctrl.Result{}, err
 			}
 		}
 
@@ -290,9 +288,13 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 				if err != nil {
 					return nil, ctrl.Result{}, err
 				}
-				if chainNode.Status.LatestHeight != height {
-					chainNode.Status.LatestHeight = height
-					chainNode.Status.PvcSize = pvc.Spec.Resources.Requests.Storage().String()
+				pvcSize := pvc.Spec.Resources.Requests.Storage().String()
+				pvcSizeChanged := chainNode.Status.PvcSize != pvcSize
+				if err = r.persistDataHeightReset(ctx, chainNode, height); err != nil {
+					return nil, ctrl.Result{}, err
+				}
+				if pvcSizeChanged {
+					chainNode.Status.PvcSize = pvcSize
 					if err = r.Status().Update(ctx, chainNode); err != nil {
 						return nil, ctrl.Result{}, err
 					}

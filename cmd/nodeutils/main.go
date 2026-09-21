@@ -24,9 +24,7 @@ var (
 	dataPath         string
 	upgradesConfig   string
 	blockThreshold   time.Duration
-	traceStore       string
 	logLevel         string
-	createFifo       bool
 	enableTmkmsProxy bool
 	nodeBinaryName   string
 	haltHeight       int64
@@ -61,8 +59,6 @@ func main() {
 		nodeutils.WithBlockThreshold(blockThreshold),
 		nodeutils.WithDataPath(dataPath),
 		nodeutils.WithUpgradesConfig(upgradesConfig),
-		nodeutils.WithTraceStore(traceStore),
-		nodeutils.CreateFifo(createFifo),
 		nodeutils.WithTmkmsProxy(enableTmkmsProxy),
 		nodeutils.WithHaltHeight(haltHeight),
 		nodeutils.WithMockMode(mockMode),
@@ -72,9 +68,7 @@ func main() {
 	}
 
 	go func() {
-		sig := <-sigChan
-		log.Infof("received signal: %v", sig)
-		if err := nodeUtilsServer.Stop(false); err != nil {
+		if err := handleTerminationSignal(sigChan, nodeUtilsServer.StopWithResult, signal.Stop, signal.Reset); err != nil {
 			log.Errorf("failed to stop nodeutils server: %v", err)
 		}
 	}()
@@ -82,6 +76,28 @@ func main() {
 	if err := nodeUtilsServer.Start(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func handleTerminationSignal(
+	sigChan chan os.Signal,
+	stop func(bool) (nodeutils.StopResult, error),
+	stopNotifications func(chan<- os.Signal),
+	resetSignals func(...os.Signal),
+) error {
+	sig := <-sigChan
+	log.Infof("received signal: %v", sig)
+	result, err := stop(false)
+	if err != nil {
+		return err
+	}
+	if result == nodeutils.StopHeld {
+		// Evidence is durable before StopHeld is returned. Restore default handling
+		// so later lifecycle signals are not swallowed; controller deletion remains
+		// independently bounded by its explicit grace period.
+		stopNotifications(sigChan)
+		resetSignals(syscall.SIGINT, syscall.SIGTERM)
+	}
+	return nil
 }
 
 func printHelp() {
