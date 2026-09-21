@@ -3374,6 +3374,9 @@ func TestIsSnapshotUsableForRetention(t *testing.T) {
 		{name: "verification checking", verify: true, mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
 			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
 		}, want: false},
+		{name: "verification checking after verification disabled", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
+			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityChecking)
+		}, want: true},
 		{name: "known failed result after verification disabled", mutate: func(snapshot *snapshotv1.VolumeSnapshot) {
 			snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] = string(snapshotIntegrityCorrupted)
 		}, want: false},
