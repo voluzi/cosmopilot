@@ -215,6 +215,13 @@ persistence:
 The `retention` and `retain` fields are mutually exclusive. You can only use one of them at a time.
 :::
 
+By default, `preserveLastSnapshot: true` keeps the newest usable snapshot until a usable replacement
+exists. A usable snapshot is not being deleted, reports `readyToUse`, has been processed by Cosmopilot,
+and has passed integrity verification when `verify: true`. Count-based retention counts only these
+usable snapshots, so the number of `VolumeSnapshot` objects can temporarily exceed `retain` while a
+replacement is pending or verification is incomplete. Set `preserveLastSnapshot: false` to apply
+retention to all snapshot objects without this safeguard.
+
 ### Snapshot Class
 
 By default, `Cosmopilot` uses the default `VolumeSnapshotClass` configured in your cluster. You can also set a custom one:

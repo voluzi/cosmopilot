@@ -1050,14 +1050,17 @@ type VolumeSnapshotsConfig struct {
 	// +kubebuilder:validation:Format=duration
 	Retention *string `json:"retention,omitempty"`
 
-	// How many snapshots should be retained. When set, only the most recent N snapshots are kept.
+	// How many usable snapshots should be retained. With PreserveLastSnapshot enabled, snapshots that
+	// are pending, failed, terminating, or awaiting successful configured integrity verification do not
+	// count toward this limit, so the number of VolumeSnapshot objects can temporarily exceed Retain.
 	// Cannot be used together with Retention.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	Retain *int32 `json:"retain,omitempty"`
 
-	// If true, retention policies will not be enforced when only a single snapshot exists.
-	// Ensures at least one snapshot is always available. Defaults to true.
+	// If true, retention preserves the newest usable snapshot until a usable replacement exists. A usable
+	// snapshot is nonterminating, ready to use, processed by the operator, and successfully verified when
+	// Verify is enabled. Set to false to apply retention policies to all snapshot objects. Defaults to true.
 	// +optional
 	// +default=true
 	PreserveLastSnapshot *bool `json:"preserveLastSnapshot,omitempty"`

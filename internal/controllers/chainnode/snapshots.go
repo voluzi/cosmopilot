@@ -101,9 +101,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	}
 
 	// Sort snapshots by creation time, newest last
-	sort.Slice(snapshots, func(i, j int) bool {
-		return snapshots[i].CreationTimestamp.Before(&snapshots[j].CreationTimestamp)
-	})
+	sortSnapshotsOldestFirst(snapshots)
 
 	// Repair the snapshotting annotation from the actual snapshot state. Completed
 	// and deleting snapshots must not block future snapshots, while any live
@@ -169,6 +167,10 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 	// fail closed and defer orphan cleanup until the operator acknowledges that unknown export.
 	tarballNames := make([]string, 0)
 	unknownLegacyExport := false
+	protectedSnapshot := ""
+	if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() {
+		protectedSnapshot = snapshotToPreserve(snapshots, chainNode.Spec.Persistence.Snapshots.ShouldVerify())
+	}
 
 	for _, snapshot := range snapshots {
 		if export := snapshotExportFor(chainNode, &snapshot); export != nil {
@@ -370,7 +372,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		// Default case is checking if snapshot has expired (time-based retention).
 		// If tarball is also set for deletion on expire it is also taken care here.
 		default:
-			if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() && len(snapshots) == 1 {
+			if snapshot.Name == protectedSnapshot {
 				logger.Info("skipping retention check to preserve last snapshot", "snapshot", snapshot.GetName(), "retention", snapshot.Annotations[controllers.AnnotationSnapshotRetention])
 			} else {
 				expired, err := isSnapshotExpired(&snapshot)
@@ -431,20 +433,28 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			return err
 		}
 		// Sort snapshots by creation time, newest last
-		sort.Slice(snapshots, func(i, j int) bool {
-			return snapshots[i].CreationTimestamp.Before(&snapshots[j].CreationTimestamp)
-		})
+		sortSnapshotsOldestFirst(snapshots)
+
+		retentionCandidates := snapshots
+		if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() {
+			retentionCandidates = make([]snapshotv1.VolumeSnapshot, 0, len(snapshots))
+			for i := range snapshots {
+				if isSnapshotUsableForRetention(&snapshots[i], chainNode.Spec.Persistence.Snapshots.ShouldVerify()) {
+					retentionCandidates = append(retentionCandidates, snapshots[i])
+				}
+			}
+		}
 
 		// Calculate how many snapshots to delete
-		toDelete := len(snapshots) - int(*retainCount)
-		if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() && toDelete >= len(snapshots) {
-			// Ensure at least one snapshot is preserved
-			toDelete = len(snapshots) - 1
+		retain := int(*retainCount)
+		if chainNode.Spec.Persistence.Snapshots.ShouldPreserveLastSnapshot() && retain < 1 {
+			retain = 1
 		}
+		toDelete := len(retentionCandidates) - retain
 
 		// Delete oldest snapshots (from the beginning of sorted slice)
 		for i := 0; i < toDelete; i++ {
-			snapshot := snapshots[i]
+			snapshot := retentionCandidates[i]
 			// The time-based path above is protected by the switch ordering: an in-flight export is
 			// matched before the retention case ever runs. Count-based retention has no such ordering,
 			// so it must check explicitly, otherwise the VolumeSnapshot backing a running upload is
@@ -895,6 +905,42 @@ func shouldSnapshot(chainNode *appsv1.ChainNode, nodePodReady bool) bool {
 
 func isSnapshotReady(snapshot *snapshotv1.VolumeSnapshot) bool {
 	return snapshot != nil && snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse
+}
+
+func isSnapshotUsableForRetention(snapshot *snapshotv1.VolumeSnapshot, verify bool) bool {
+	if snapshot == nil || !snapshot.DeletionTimestamp.IsZero() || !isSnapshotReady(snapshot) ||
+		snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] != strconv.FormatBool(true) {
+		return false
+	}
+
+	integrityStatus := snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus]
+	if verify {
+		return integrityStatus == string(snapshotIntegrityOk)
+	}
+	return integrityStatus == "" || integrityStatus == string(snapshotIntegrityOk)
+}
+
+func sortSnapshotsOldestFirst(snapshots []snapshotv1.VolumeSnapshot) {
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].CreationTimestamp.Time.Equal(snapshots[j].CreationTimestamp.Time) {
+			return snapshots[i].Name < snapshots[j].Name
+		}
+		return snapshots[i].CreationTimestamp.Before(&snapshots[j].CreationTimestamp)
+	})
+}
+
+func snapshotToPreserve(snapshots []snapshotv1.VolumeSnapshot, verify bool) string {
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		if isSnapshotUsableForRetention(&snapshots[i], verify) {
+			return snapshots[i].Name
+		}
+	}
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		if snapshots[i].DeletionTimestamp.IsZero() {
+			return snapshots[i].Name
+		}
+	}
+	return ""
 }
 
 // hasUnprocessedSnapshotAtHeight reports whether a snapshot of the data at height exists that this
