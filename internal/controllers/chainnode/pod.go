@@ -131,11 +131,10 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		if err != nil {
 			return fmt.Errorf("failed to check if terminal pod %s requires upgrade: %w", chainNode.GetName(), err)
 		}
-		if requiresUpgrade {
-			if err = r.updateLatestHeight(ctx, chainNode); err != nil {
-				return fmt.Errorf("failed to update latest height for terminal pod %s: %w", chainNode.GetName(), err)
-			}
-		} else {
+		if err = r.updateLatestHeight(ctx, chainNode); err != nil {
+			return fmt.Errorf("failed to update latest height for terminal pod %s: %w", chainNode.GetName(), err)
+		}
+		if !requiresUpgrade {
 			recoveryAction = r.terminalPodRecoveryWithoutNodeUtilsEvidence(ctx, chainNode, currentPod)
 			if err = r.reconcileHaltHeightHoldForAction(ctx, chainNode, recoveryAction); err != nil {
 				return fmt.Errorf("failed to reconcile halt-height hold for %s: %w", chainNode.GetName(), err)
