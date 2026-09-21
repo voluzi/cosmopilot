@@ -19,9 +19,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+type cometRPCClient interface {
+	Status(context.Context) (*coretypes.ResultStatus, error)
+	ABCIInfo(context.Context) (*coretypes.ResultABCIInfo, error)
+	Tx(context.Context, []byte, bool) (*coretypes.ResultTx, error)
+}
+
 type Client struct {
 	// http client for cometbft
-	rpcClient *http.HTTP
+	rpcClient cometRPCClient
 
 	// gRPC clients
 	grpcConn      *grpc.ClientConn
@@ -72,6 +78,21 @@ func (c *Client) QueryValidator(ctx context.Context, address string) (*stakingTy
 		return nil, fmt.Errorf("querying validator %s: %w", address, err)
 	}
 	return &response.Validator, nil
+}
+
+func (c *Client) QueryTx(ctx context.Context, hash string) (*coretypes.ResultTx, error) {
+	decodedHash, err := hex.DecodeString(hash)
+	if err != nil {
+		return nil, fmt.Errorf("decode transaction hash: %w", err)
+	}
+	if len(decodedHash) != 32 {
+		return nil, fmt.Errorf("transaction hash must be 32 bytes, got %d", len(decodedHash))
+	}
+	result, err := c.rpcClient.Tx(ctx, decodedHash, false)
+	if err != nil {
+		return nil, fmt.Errorf("querying transaction %s: %w", hash, err)
+	}
+	return result, nil
 }
 
 func (c *Client) GetValidators(ctx context.Context) ([]stakingTypes.Validator, error) {

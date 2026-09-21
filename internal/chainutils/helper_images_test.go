@@ -71,6 +71,10 @@ func TestGeneratedHelperPodsUseVersionedImages(t *testing.T) {
 		Image: "registry.example.com/custom/init:v1",
 	})
 	require.NoError(t, err)
+	validatorPod, err := app.buildCreateValidatorPod(
+		validValidatorPubKey, &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657",
+	)
+	require.NoError(t, err)
 
 	pods := map[string]*corev1.Pod{
 		"config": app.buildConfigGeneratorPod(),
@@ -83,14 +87,13 @@ func TestGeneratedHelperPodsUseVersionedImages(t *testing.T) {
 			extraValidators,
 			[]*InitCommand{{Image: "registry.example.com/custom/genesis-init:v1"}},
 		),
-		"validator": app.buildCreateValidatorPod(
-			"pubkey", &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657",
-		),
+		"validator": validatorPod,
 	}
 	utilityContainers := map[string][]string{
-		"config":  {"busybox"},
-		"data":    {"busybox"},
-		"genesis": {"load-priv-key", "busybox", "set-unbonding-time", "set-voting-period", "set-expedited-voting-period", "load-priv-key-1"},
+		"config":    {"busybox"},
+		"data":      {"busybox"},
+		"genesis":   {"load-priv-key", "busybox", "set-unbonding-time", "set-voting-period", "set-expedited-voting-period", "load-priv-key-1"},
+		"validator": {"write-validator-json"},
 	}
 
 	for name, pod := range pods {
@@ -136,11 +139,13 @@ func TestAppPodsCopyImagePullSecrets(t *testing.T) {
 	params := &Params{ChainID: "chain", Assets: []string{"10stake"}, StakeAmount: "1stake", GasPrices: "0.01stake"}
 	initPod, err := app.BuildInitPod(pvc, nil)
 	require.NoError(t, err)
+	validatorPod, err := app.buildCreateValidatorPod(validValidatorPubKey, &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657")
+	require.NoError(t, err)
 	pods := map[string]*corev1.Pod{
 		"config":    app.buildConfigGeneratorPod(),
 		"data":      initPod,
 		"genesis":   app.buildGenesisPod("owner-key", &Account{Address: "owner"}, &NodeInfo{Moniker: "owner"}, params, nil, nil),
-		"validator": app.buildCreateValidatorPod("pubkey", &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657"),
+		"validator": validatorPod,
 	}
 
 	want := []corev1.LocalObjectReference{{Name: "registry-creds"}}
