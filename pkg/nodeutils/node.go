@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"emperror.dev/errors"
@@ -44,6 +45,8 @@ type NodeUtils struct {
 	fineStats          *statscollector.Collector
 	coarseStats        *statscollector.Collector
 	mockStats          *MockStats
+	dataSizeMu         sync.Mutex
+	statfs             statfsFunc
 	forcedShutdown     atomic.Bool
 	terminationMu      sync.Mutex
 	lifecycleMu        sync.Mutex
@@ -73,6 +76,7 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 		nodeBinaryName: nodeBinaryName,
 		fineStats:      statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
 		coarseStats:    statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
+		statfs:         syscall.Statfs,
 	}
 
 	uc, err := NewUpgradeChecker(options.UpgradesConfig)

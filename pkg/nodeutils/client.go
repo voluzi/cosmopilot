@@ -103,7 +103,7 @@ func (c *Client) httpGetJSON(ctx context.Context, endpoint string, target interf
 	return json.Unmarshal(body, target)
 }
 
-// GetDataSize returns the current size of the node's data directory in bytes.
+// GetDataSize returns the used bytes on the filesystem containing the node's data directory.
 func (c *Client) GetDataSize(ctx context.Context) (int64, error) {
 	body, err := c.httpGet(ctx, "/data_size")
 	if err != nil {
