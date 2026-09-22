@@ -141,6 +141,49 @@ func TestPersistTerminalHaltLatestHeightDoesNotRegressStatus(t *testing.T) {
 	}
 }
 
+func TestRefreshLatestHeightDoesNotRegressStatus(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		freshHeight   int64
+		wantHeight    int64
+		wantAvailable bool
+		wantWrites    []string
+	}{
+		{name: "older height", freshHeight: 99, wantHeight: 100, wantAvailable: true},
+		{name: "equal height", freshHeight: 100, wantHeight: 100, wantAvailable: true},
+		{name: "newer height", freshHeight: 101, wantHeight: 101, wantAvailable: true, wantWrites: []string{"status"}},
+		{name: "zero height", wantHeight: 100},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+				Status:     appsv1.ChainNodeStatus{LatestHeight: 100},
+			}
+			base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(node).Build()
+			tracking := &dataHeightResetPersistenceClient{Client: base}
+			nodeClient := &fakeTerminalNodeUtilsClient{height: tt.freshHeight}
+			r := &Reconciler{
+				Client: tracking,
+				nodeStatusClientFactory: func(string) nodeStatusClient {
+					return nodeClient
+				},
+			}
+
+			freshHeight, available, err := r.refreshLatestHeight(t.Context(), node)
+			require.NoError(t, err)
+			assert.Equal(t, tt.freshHeight, freshHeight)
+			assert.Equal(t, tt.wantAvailable, available)
+			assert.Equal(t, tt.wantHeight, node.Status.LatestHeight)
+			assert.Equal(t, tt.wantWrites, tracking.writes)
+			stored := &appsv1.ChainNode{}
+			require.NoError(t, tracking.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+			assert.Equal(t, tt.wantHeight, stored.Status.LatestHeight)
+		})
+	}
+}
+
 func TestEnsurePodDoesNotDeleteWhenTerminalHaltHeightWriteFails(t *testing.T) {
 	var mutations atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -403,6 +446,8 @@ func TestEnsurePodUsesRunningNodeUtilsToUpgradeTerminalApp(t *testing.T) {
 	var requestedUID types.UID
 	var requestedGrace int64
 	var selectedImage string
+	var livePod *corev1.Pod
+	deleted := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/default/pods/node":
@@ -413,8 +458,13 @@ func TestEnsurePodUsesRunningNodeUtilsToUpgradeTerminalApp(t *testing.T) {
 			requestedUID = *options.Preconditions.UID
 			require.NotNil(t, options.GracePeriodSeconds)
 			requestedGrace = *options.GracePeriodSeconds
+			deleted = true
 			writeChainNodeTestJSON(t, w, http.StatusOK, &metav1.Status{Status: metav1.StatusSuccess})
 		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/default/pods/node":
+			if !deleted {
+				writeChainNodeTestJSON(t, w, http.StatusOK, livePod)
+				return
+			}
 			writeChainNodeTestJSON(t, w, http.StatusNotFound, &metav1.Status{
 				Status: metav1.StatusFailure, Reason: metav1.StatusReasonNotFound,
 				Code: http.StatusNotFound, Message: "old Pod deleted",
@@ -436,6 +486,8 @@ func TestEnsurePodUsesRunningNodeUtilsToUpgradeTerminalApp(t *testing.T) {
 		height: 100, requiresUpgrade: true,
 	}
 	r, node, observedPod := terminalWaitEnsurePodFixture(t, server.URL, nodeClient)
+	livePod = observedPod.DeepCopy()
+	livePod.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
 
 	require.NoError(t, r.ensurePod(t.Context(), nil, node, "config-hash"))
 	assert.Equal(t, []string{"upgrade-fresh", "latest"}, nodeClient.calls)
@@ -447,6 +499,190 @@ func TestEnsurePodUsesRunningNodeUtilsToUpgradeTerminalApp(t *testing.T) {
 	assert.Equal(t, int64(100), stored.Status.LatestHeight)
 	assert.Equal(t, "v2", stored.Status.AppVersion)
 	assert.Equal(t, appsv1.UpgradeCompleted, stored.Status.Upgrades[0].Status)
+}
+
+func TestEnsurePodDiscardsRunningNodeUtilsEvidenceFromReplacement(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		requiresUpgrade bool
+		authoritative   string
+		wantErr         string
+	}{
+		{name: "same-name replacement before identity check", authoritative: "replacement"},
+		{name: "upgrade evidence from same-name replacement", requiresUpgrade: true, authoritative: "replacement"},
+		{name: "pod disappears before identity check", authoritative: "missing"},
+		{name: "identity check error is propagated", authoritative: "error", wantErr: "failed to verify terminal pod"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var authoritativeState atomic.Value
+			authoritativeState.Store("old")
+			var mutations atomic.Int32
+			var livePod *corev1.Pod
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/default/pods/node":
+					switch authoritativeState.Load().(string) {
+					case "old":
+						writeChainNodeTestJSON(t, w, http.StatusOK, livePod)
+					case "replacement":
+						replacement := livePod.DeepCopy()
+						replacement.UID = "replacement-pod"
+						writeChainNodeTestJSON(t, w, http.StatusOK, replacement)
+					case "missing":
+						writeChainNodeTestJSON(t, w, http.StatusNotFound, &metav1.Status{
+							Status: metav1.StatusFailure, Reason: metav1.StatusReasonNotFound,
+							Code: http.StatusNotFound, Message: "observed Pod disappeared",
+						})
+					case "error":
+						writeChainNodeTestJSON(t, w, http.StatusInternalServerError, &metav1.Status{
+							Status: metav1.StatusFailure, Reason: metav1.StatusReasonInternalError,
+							Code: http.StatusInternalServerError, Message: "identity lookup failed",
+						})
+					}
+				case req.Method == http.MethodPatch || req.Method == http.MethodDelete || req.Method == http.MethodPost:
+					mutations.Add(1)
+					writeChainNodeTestJSON(t, w, http.StatusConflict, &metav1.Status{
+						Status: metav1.StatusFailure, Reason: metav1.StatusReasonConflict,
+						Code: http.StatusConflict, Message: "unexpected Pod mutation",
+					})
+				default:
+					http.NotFound(w, req)
+				}
+			}))
+			defer server.Close()
+
+			freshHeight := int64(99)
+			if tt.requiresUpgrade {
+				freshHeight = 100
+			}
+			nodeClient := &fakeTerminalNodeUtilsClient{height: freshHeight, requiresUpgrade: tt.requiresUpgrade}
+			r, node, observedPod := terminalWaitEnsurePodFixture(t, server.URL, nodeClient)
+			livePod = observedPod.DeepCopy()
+			livePod.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
+			nodeClient.onLatest = func() { authoritativeState.Store(tt.authoritative) }
+			haltHeight := int64(100)
+			node.Spec.Config.HaltHeight = &haltHeight
+			observedPod.Spec.InitContainers[0].Env = []corev1.EnvVar{{Name: "HALT_HEIGHT", Value: "100"}}
+			require.NoError(t, r.Update(t.Context(), node))
+			node.Status.AppVersion = "v1"
+			require.NoError(t, r.Status().Update(t.Context(), node))
+			require.NoError(t, r.Update(t.Context(), observedPod))
+
+			err := r.ensurePod(t.Context(), nil, node, "config-hash")
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+			assert.Zero(t, mutations.Load())
+			assert.Equal(t, []string{"upgrade-fresh", "latest"}, nodeClient.calls)
+			stored := &appsv1.ChainNode{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+			assert.NotContains(t, stored.Annotations, appsv1.AnnotationHaltHeightHold)
+			assert.Equal(t, appsv1.UpgradeScheduled, stored.Status.Upgrades[0].Status)
+			assert.Equal(t, "v1", stored.Status.AppVersion)
+		})
+	}
+}
+
+func TestEnsurePodEnforcesExistingHaltHoldOnRunningReplacement(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		conflictFirst bool
+		wantErrFirst  bool
+		wantUIDs      []types.UID
+	}{
+		{name: "deletes running replacement", wantUIDs: []types.UID{"replacement-pod"}},
+		{name: "retries UID conflict with refreshed replacement", conflictFirst: true, wantErrFirst: true, wantUIDs: []types.UID{"replacement-pod", "newer-replacement-pod"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var deletes atomic.Int32
+			var creates atomic.Int32
+			var patches atomic.Int32
+			var requestedUIDs []types.UID
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch {
+				case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/default/pods/node":
+					deletes.Add(1)
+					var options metav1.DeleteOptions
+					require.NoError(t, json.NewDecoder(req.Body).Decode(&options))
+					require.NotNil(t, options.Preconditions)
+					require.NotNil(t, options.Preconditions.UID)
+					requestedUIDs = append(requestedUIDs, *options.Preconditions.UID)
+					if tt.conflictFirst && deletes.Load() == 1 {
+						writeChainNodeTestJSON(t, w, http.StatusConflict, &metav1.Status{
+							Status: metav1.StatusFailure, Reason: metav1.StatusReasonConflict,
+							Code: http.StatusConflict, Message: "pod UID precondition failed",
+						})
+						return
+					}
+					writeChainNodeTestJSON(t, w, http.StatusOK, &metav1.Status{Status: metav1.StatusSuccess})
+				case req.Method == http.MethodPost:
+					creates.Add(1)
+					http.NotFound(w, req)
+				case req.Method == http.MethodPatch:
+					patches.Add(1)
+					http.NotFound(w, req)
+				default:
+					http.NotFound(w, req)
+				}
+			}))
+			defer server.Close()
+
+			nodeClient := &fakeTerminalNodeUtilsClient{heightErr: errors.New("node-utils polling must not run")}
+			r, node, observedPod := terminalWaitEnsurePodFixture(t, server.URL, nodeClient)
+			haltHeight := int64(100)
+			node.Spec.Config.HaltHeight = &haltHeight
+			node.Annotations = map[string]string{appsv1.AnnotationHaltHeightHold: "100"}
+			require.NoError(t, r.Update(t.Context(), node))
+
+			desiredPod, err := r.getPodSpec(t.Context(), node, "config-hash")
+			require.NoError(t, err)
+			replacementPod := desiredPod.DeepCopy()
+			replacementPod.UID = "replacement-pod"
+			replacementPod.Status.Phase = corev1.PodRunning
+			replacementPod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: node.Spec.App.App, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}
+			replacementPod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+				Name: nodeUtilsContainerName, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}
+			require.NoError(t, r.Delete(t.Context(), observedPod))
+			require.NoError(t, r.Create(t.Context(), replacementPod))
+
+			err = r.ensurePod(t.Context(), nil, node, "config-hash")
+			if tt.wantErrFirst {
+				require.Error(t, err)
+				assert.True(t, apierrors.IsConflict(err))
+				require.NoError(t, r.Delete(t.Context(), replacementPod))
+				replacementPod = replacementPod.DeepCopy()
+				replacementPod.ResourceVersion = ""
+				replacementPod.UID = "newer-replacement-pod"
+				require.NoError(t, r.Create(t.Context(), replacementPod))
+				stored := &appsv1.ChainNode{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+				err = r.ensurePod(t.Context(), nil, stored, "config-hash")
+			}
+			require.NoError(t, err)
+			assert.Equal(t, int32(len(tt.wantUIDs)), deletes.Load())
+			assert.Equal(t, tt.wantUIDs, requestedUIDs)
+			assert.Zero(t, creates.Load())
+			assert.Zero(t, patches.Load())
+			assert.Empty(t, nodeClient.calls)
+
+			require.NoError(t, r.Delete(t.Context(), replacementPod))
+			stored := &appsv1.ChainNode{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+			require.NoError(t, r.ensurePod(t.Context(), nil, stored, "config-hash"))
+			assert.Equal(t, int32(len(tt.wantUIDs)), deletes.Load())
+			assert.Zero(t, creates.Load())
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+			assert.Equal(t, "100", stored.Annotations[appsv1.AnnotationHaltHeightHold])
+			assert.Equal(t, appsv1.PhaseChainNodeStopped, stored.Status.Phase)
+		})
+	}
 }
 
 func TestEnsurePodRetriesWhenRunningNodeUtilsStatusIsUnavailable(t *testing.T) {
@@ -549,6 +785,10 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 			haltHeight: ptr.To[int64](100), podHaltHeight: 100, cachedHeight: 97, freshHeight: 98, wantHeight: 98, deleteStatus: http.StatusOK,
 		},
 		{
+			name:       "older fresh height controls recovery without regressing durable progress",
+			haltHeight: ptr.To[int64](100), podHaltHeight: 100, cachedHeight: 100, freshHeight: 98, wantHeight: 100, deleteStatus: http.StatusOK,
+		},
+		{
 			name:       "clean configured exit past H restarts",
 			haltHeight: ptr.To[int64](100), podHaltHeight: 100, cachedHeight: 98, freshHeight: 101, wantHeight: 101, deleteStatus: http.StatusOK,
 		},
@@ -578,6 +818,8 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 			var requestedUID types.UID
 			var holdAtDelete string
 			var cache client.Client
+			var livePod *corev1.Pod
+			deleted := false
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				switch {
 				case req.URL.Path == "/api/v1/namespaces/default/pods/node/log":
@@ -600,8 +842,13 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 						})
 						return
 					}
+					deleted = true
 					writeChainNodeTestJSON(t, w, http.StatusOK, &metav1.Status{Status: metav1.StatusSuccess})
 				case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/default/pods/node":
+					if !deleted {
+						writeChainNodeTestJSON(t, w, http.StatusOK, livePod)
+						return
+					}
 					writeChainNodeTestJSON(t, w, http.StatusNotFound, &metav1.Status{
 						Status: metav1.StatusFailure, Reason: metav1.StatusReasonNotFound,
 						Code: http.StatusNotFound, Message: "old Pod deleted",
@@ -618,6 +865,8 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 			defer server.Close()
 			nodeClient := &fakeTerminalNodeUtilsClient{height: tt.freshHeight}
 			r, node, observedPod := terminalWaitEnsurePodFixture(t, server.URL, nodeClient)
+			livePod = observedPod.DeepCopy()
+			livePod.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
 			cache = r.Client
 			node.Spec.Config.HaltHeight = tt.haltHeight
 			if tt.haltHeight != nil {
@@ -658,12 +907,19 @@ func TestEnsurePodRecreatesCleanExitAcrossReconcilesOffHaltBoundary(t *testing.T
 	var deletes atomic.Int32
 	var creates atomic.Int32
 	var createdImages []string
+	var livePod *corev1.Pod
+	deleted := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/default/pods/node":
 			deletes.Add(1)
+			deleted = true
 			writeChainNodeTestJSON(t, w, http.StatusOK, &metav1.Status{Status: metav1.StatusSuccess})
 		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/default/pods/node":
+			if !deleted {
+				writeChainNodeTestJSON(t, w, http.StatusOK, livePod)
+				return
+			}
 			writeChainNodeTestJSON(t, w, http.StatusNotFound, &metav1.Status{
 				Status: metav1.StatusFailure, Reason: metav1.StatusReasonNotFound,
 				Code: http.StatusNotFound, Message: "old Pod deleted",
@@ -684,6 +940,8 @@ func TestEnsurePodRecreatesCleanExitAcrossReconcilesOffHaltBoundary(t *testing.T
 	defer server.Close()
 	nodeClient := &fakeTerminalNodeUtilsClient{height: 98}
 	r, node, observedPod := terminalWaitEnsurePodFixture(t, server.URL, nodeClient)
+	livePod = observedPod.DeepCopy()
+	livePod.TypeMeta = metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}
 	haltHeight := int64(100)
 	node.Spec.Config.HaltHeight = &haltHeight
 	observedPod.Spec.InitContainers[0].Env = []corev1.EnvVar{{Name: "HALT_HEIGHT", Value: "100"}}
@@ -819,6 +1077,7 @@ func TestEnsurePodMigratesLegacyStoppedHaltOnlyAfterTerminatingPodIsGone(t *test
 type fakeTerminalNodeUtilsClient struct {
 	height                int64
 	heightErr             error
+	onLatest              func()
 	requiresUpgrade       bool
 	cachedRequiresUpgrade bool
 	upgradeErr            error
@@ -871,6 +1130,9 @@ func terminalHaltEnsurePodFixture(
 
 func (c *fakeTerminalNodeUtilsClient) GetLatestHeight(context.Context) (int64, error) {
 	c.calls = append(c.calls, "latest")
+	if c.onLatest != nil {
+		c.onLatest()
+	}
 	return c.height, c.heightErr
 }
 
