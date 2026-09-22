@@ -41,7 +41,7 @@ func TestScanDataSizeRejectsMissingRootAndDepthLimit(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 	require.NoError(t, os.Mkdir(filepath.Join(root, "child"), 0o700))
 	_, err = scanDataSize(t.Context(), root, scanLimits{maxDepth: 1, batchSize: 2})
-	assert.Error(t, err)
+	assert.ErrorContains(t, err, "data directory depth exceeds 1")
 }
 
 func TestScanDataSizeDoesNotFollowRootSymlink(t *testing.T) {
@@ -49,9 +49,13 @@ func TestScanDataSizeDoesNotFollowRootSymlink(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(target, "file"), []byte("long data"), 0o600))
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(target, link))
-	got, err := scanDataSize(t.Context(), link, defaultScanLimits)
-	require.NoError(t, err)
-	assert.Equal(t, int64(len(target)), got)
+	for _, suffix := range []string{"", "/", "///"} {
+		t.Run(strconv.Quote(suffix), func(t *testing.T) {
+			got, err := scanDataSize(t.Context(), link+suffix, defaultScanLimits)
+			require.NoError(t, err)
+			assert.Equal(t, int64(len(target)), got)
+		})
+	}
 }
 
 func TestScanDataSizeStopsOnCancellation(t *testing.T) {

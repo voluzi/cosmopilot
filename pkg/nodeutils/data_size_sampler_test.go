@@ -12,43 +12,75 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func runSamplerForTest(t *testing.T, sampler *dataSizeSampler) context.CancelFunc {
+const samplerTestTimeout = 5 * time.Second
+
+func waitForSamplerSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(samplerTestTimeout):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func runSamplerForTest(t *testing.T, sampler *dataSizeSampler, release ...func()) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { sampler.Run(ctx); close(done) }()
-	t.Cleanup(func() { cancel(); <-done })
+	t.Cleanup(func() {
+		cancel()
+		for _, unblock := range release {
+			unblock()
+		}
+		waitForSamplerSignal(t, done, "sampler worker shutdown")
+	})
 	return cancel
 }
 
 func TestDataSizeSamplerSharesOneMeasurementAndCachesSuccess(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	releaseMeasurement := sync.OnceFunc(func() { close(release) })
 	var calls atomic.Int32
-	sampler := newDataSizeSampler("/data", func(context.Context, string) (int64, error) {
+	sampler := newDataSizeSampler("/data", func(ctx context.Context, _ string) (int64, error) {
 		if calls.Add(1) == 1 {
 			close(entered)
 		}
-		<-release
-		return 123, nil
+		select {
+		case <-release:
+			return 123, nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 	})
-	runSamplerForTest(t, sampler)
+	runSamplerForTest(t, sampler, releaseMeasurement)
 	const clients = 32
-	var wg sync.WaitGroup
-	wg.Add(clients)
+	clientsCtx, cancelClients := context.WithCancel(t.Context())
+	clientsDone := make(chan struct{})
 	results := make(chan int64, clients)
+	var completed atomic.Int32
 	for range clients {
 		go func() {
-			defer wg.Done()
-			got, err := sampler.Size(t.Context())
+			defer func() {
+				if completed.Add(1) == clients {
+					close(clientsDone)
+				}
+			}()
+			got, err := sampler.Size(clientsCtx)
 			if err == nil {
 				results <- got
 			}
 		}()
 	}
-	<-entered
-	close(release)
-	wg.Wait()
+	t.Cleanup(func() {
+		cancelClients()
+		releaseMeasurement()
+		waitForSamplerSignal(t, clientsDone, "shared-measurement clients")
+	})
+	waitForSamplerSignal(t, entered, "shared measurement start")
+	releaseMeasurement()
+	waitForSamplerSignal(t, clientsDone, "shared-measurement clients")
 	close(results)
 	count := 0
 	for got := range results {
@@ -94,6 +126,7 @@ func TestDataSizeSamplerExpiryFailureAndRetry(t *testing.T) {
 func TestDataSizeSamplerWaitTimeoutDoesNotCancelMeasurement(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	releaseMeasurement := sync.OnceFunc(func() { close(release) })
 	var calls atomic.Int32
 	sampler := newDataSizeSampler("/data", func(ctx context.Context, _ string) (int64, error) {
 		calls.Add(1)
@@ -106,11 +139,11 @@ func TestDataSizeSamplerWaitTimeoutDoesNotCancelMeasurement(t *testing.T) {
 		}
 	})
 	sampler.waitLimit = 20 * time.Millisecond
-	runSamplerForTest(t, sampler)
+	runSamplerForTest(t, sampler, releaseMeasurement)
 	_, err := sampler.Size(t.Context())
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
-	<-entered
-	close(release)
+	waitForSamplerSignal(t, entered, "timed-out measurement start")
+	releaseMeasurement()
 	require.Eventually(t, func() bool {
 		sampler.mu.Lock()
 		defer sampler.mu.Unlock()
@@ -132,9 +165,14 @@ func TestDataSizeSamplerCancellationReleasesWaiters(t *testing.T) {
 	cancelWorker := runSamplerForTest(t, sampler)
 	result := make(chan error, 1)
 	go func() { _, err := sampler.Size(t.Context()); result <- err }()
-	<-entered
+	waitForSamplerSignal(t, entered, "canceled measurement start")
 	cancelWorker()
-	require.ErrorIs(t, <-result, context.Canceled)
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(samplerTestTimeout):
+		t.Fatal("timed out waiting for canceled caller")
+	}
 	_, err := sampler.Size(t.Context())
 	assert.ErrorIs(t, err, errDataSizeStopped)
 }

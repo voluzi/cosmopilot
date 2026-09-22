@@ -32,6 +32,7 @@ func scanDataSize(ctx context.Context, path string, limits scanLimits) (int64, e
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	path = trimTrailingPathSeparators(path)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return 0, fmt.Errorf("stat data root %q: %w", path, err)

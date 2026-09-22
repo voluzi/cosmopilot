@@ -51,11 +51,61 @@ func TestMountInfoParsing(t *testing.T) {
 	}
 }
 
+func TestMountInfoAcceptsZeroIDs(t *testing.T) {
+	for _, input := range []string{
+		"0 0 8:1 / / rw - ext4 /dev/disk rw\n",
+		"1 0 8:1 / / rw - ext4 /dev/disk rw\n",
+	} {
+		records, err := parseMountInfo([]byte(input))
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+	}
+	for _, input := range []string{
+		"-1 0 8:1 / / rw - ext4 /dev/disk rw\n",
+		"0 -1 8:1 / / rw - ext4 /dev/disk rw\n",
+		"bad 0 8:1 / / rw - ext4 /dev/disk rw\n",
+		"0 0 8:1 / / rw - ext4 /dev/disk rw\n0 0 8:1 / /other rw - ext4 /dev/disk rw\n",
+	} {
+		_, err := parseMountInfo([]byte(input))
+		assert.Error(t, err, input)
+	}
+}
+
+func TestParseMountID(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		data    string
+		want    int
+		wantErr bool
+	}{
+		{"zero", "pos:\t0\nmnt_id:\t0\n", 0, false},
+		{"positive", "mnt_id:\t2\n", 2, false},
+		{"negative", "mnt_id:\t-1\n", 0, true},
+		{"malformed", "mnt_id:\tbad\n", 0, true},
+		{"absent", "pos:\t0\n", 0, true},
+		{"duplicate zero", "mnt_id:\t0\nmnt_id:\t0\n", 0, true},
+		{"duplicate positive", "mnt_id:\t2\nmnt_id:\t2\n", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseMountID([]byte(tc.data))
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestFilesystemProofChangesFallBackToFreshDirectoryScan(t *testing.T) {
 	tests := []struct {
-		name   string
-		change func(*filesystemProofOps, string, string)
+		name          string
+		change        func(*filesystemProofOps, string, string)
+		wantQualified bool
+		wantSize      int64
 	}{
+		{"stable proof", func(*filesystemProofOps, string, string) {}, true, 5120},
 		{"mountinfo", func(ops *filesystemProofOps, _, _ string) {
 			first := ops.mountInfo
 			calls := 0
@@ -67,7 +117,7 @@ func TestFilesystemProofChangesFallBackToFreshDirectoryScan(t *testing.T) {
 				}
 				return data, err
 			}
-		}},
+		}, false, 5},
 		{"mount ID", func(ops *filesystemProofOps, _, _ string) {
 			calls := 0
 			ops.mountID = func(int) (int, error) {
@@ -77,7 +127,7 @@ func TestFilesystemProofChangesFallBackToFreshDirectoryScan(t *testing.T) {
 				}
 				return 2, nil
 			}
-		}},
+		}, false, 5},
 		{"quota flags", func(ops *filesystemProofOps, _, _ string) {
 			calls := 0
 			ops.flags = func(int) (int, error) {
@@ -87,7 +137,7 @@ func TestFilesystemProofChangesFallBackToFreshDirectoryScan(t *testing.T) {
 				}
 				return 0, nil
 			}
-		}},
+		}, false, 5},
 		{"configured path", func(ops *filesystemProofOps, root, other string) {
 			calls := 0
 			ops.resolve = func(string) (string, error) {
@@ -97,10 +147,10 @@ func TestFilesystemProofChangesFallBackToFreshDirectoryScan(t *testing.T) {
 				}
 				return root, nil
 			}
-		}},
+		}, false, 5},
 		{"reopened inode", func(ops *filesystemProofOps, _, other string) {
 			ops.openDir = func(string) (*os.File, error) { return os.Open(other) }
-		}},
+		}, false, 5},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -121,17 +171,24 @@ func TestFilesystemProofChangesFallBackToFreshDirectoryScan(t *testing.T) {
 				openDir: os.Open,
 			}
 			tt.change(&ops, root, other)
-			proofCalled, qualified := false, true
+			proofCalled, qualified := false, false
+			var proofErr error
 			got, err := measureDataSizeWithProof(t.Context(), root, func(ctx context.Context, path string, opened *os.File) (int64, bool, error) {
 				proofCalled = true
-				bytes, fast, proofErr := dedicatedFilesystemUsedBytesWithOps(ctx, path, opened, ops)
+				bytes, fast, err := dedicatedFilesystemUsedBytesWithOps(ctx, path, opened, ops)
 				qualified = fast
-				return bytes, fast, proofErr
+				proofErr = err
+				return bytes, fast, err
 			})
 			require.NoError(t, err)
 			assert.True(t, proofCalled)
-			assert.False(t, qualified)
-			assert.Equal(t, int64(len("owned")), got)
+			assert.NoError(t, proofErr)
+			assert.Equal(t, tt.wantQualified, qualified)
+			if tt.wantQualified {
+				assert.Equal(t, tt.wantSize, got)
+			} else {
+				assert.Equal(t, int64(len("owned")), got)
+			}
 		})
 	}
 }
