@@ -123,9 +123,7 @@ func (s *NodeUtils) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *NodeUtils) dataSize(w http.ResponseWriter, r *http.Request) {
-	s.dataSizeMu.Lock()
-	size, err := filesystemUsedBytes(s.cfg.DataPath, s.statfs)
-	s.dataSizeMu.Unlock()
+	size, err := s.dataSizeSampler.Size(r.Context())
 	if err != nil {
 		writeError(w, "error getting data size: %v", err)
 		return
