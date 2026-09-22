@@ -173,6 +173,38 @@ func TestReadSDKUpgradeInfoReadsOwnerOnlyMarker(t *testing.T) {
 	assert.Equal(t, sdkUpgradeInfo{Name: "v2", Height: 100}, info)
 }
 
+func TestReadSDKUpgradeInfoSizeBoundary(t *testing.T) {
+	const maxSize = 1024 * 1024
+	prefix := `{"name":"v2","height":100,"info":"`
+	suffix := `"}`
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "one byte below limit", size: maxSize - 1},
+		{name: "at limit", size: maxSize},
+		{name: "one byte over limit", size: maxSize + 1, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(prefix + strings.Repeat("x", tt.size-len(prefix)-len(suffix)) + suffix)
+			require.Len(t, body, tt.size)
+			path := filepath.Join(t.TempDir(), "upgrade-info.json")
+			require.NoError(t, os.WriteFile(path, body, 0o600))
+
+			info, err := readSDKUpgradeInfo(path)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "too large")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, sdkUpgradeInfo{Name: "v2", Height: 100}, info)
+		})
+	}
+}
+
 func TestReadSDKUpgradeInfoRejectsUnsafeFilesAndRecovers(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "upgrade-info.json")

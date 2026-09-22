@@ -18,7 +18,7 @@ import (
 const (
 	abciPollInterval       = time.Second
 	abciRequestTimeout     = time.Second
-	sdkUpgradeInfoMaxBytes = 8 * 1024
+	sdkUpgradeInfoMaxBytes = 1024 * 1024
 )
 
 type RequiredUpgrade struct {
