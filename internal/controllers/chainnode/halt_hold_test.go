@@ -1,11 +1,8 @@
 package chainnode
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +11,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -25,149 +21,37 @@ import (
 
 func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 	for _, tt := range []struct {
-		name           string
-		cachedHeight   int64
-		podHaltHeight  int64
-		evidenceTarget int64
-		forced         bool
-		conflictingEnv bool
-		appExitCode    int32
-		appReason      string
-		appSignal      int32
-		appLogs        string
-		wantAction     terminalPodRecoveryAction
-		wantHold       string
+		name              string
+		cachedHeight      int64
+		podHaltHeight     int64
+		evidenceTarget    int64
+		evidenceHeight    *int64
+		forced            bool
+		conflictingEnv    bool
+		malformedEvidence bool
+		appExitCode       int32
+		appReason         string
+		appSignal         int32
+		clearIdentity     bool
+		wantAction        terminalPodRecoveryAction
+		wantHold          string
 	}{
-		{
-			name:           "clean native halt recovers despite cached H minus two",
-			cachedHeight:   98,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodHold,
-			wantHold:       "100",
-		},
-		{
-			name:           "signal-style native halt recovers with authoritative log",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appExitCode:    143,
-			appReason:      "Error",
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodHold,
-			wantHold:       "100",
-		},
-		{
-			name:           "OOM at H minus one is recreated",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appExitCode:    137,
-			appReason:      "OOMKilled",
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "nonzero error at H minus one recovers with authoritative log",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appExitCode:    1,
-			appReason:      "Error",
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodHold,
-			wantHold:       "100",
-		},
-		{
-			name:           "nonzero error without authoritative log is recreated",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appExitCode:    1,
-			appReason:      "Error",
-			appLogs:        "",
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "SIGKILL is recreated",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appExitCode:    1,
-			appReason:      "Error",
-			appSignal:      9,
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "signal-style exit without authoritative log is recreated",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appExitCode:    143,
-			appReason:      "Error",
-			appLogs:        sdkHaltJSON(99, 0),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "forced shutdown is recreated",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			forced:         true,
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "different pod halt target is recreated",
-			cachedHeight:   99,
-			podHaltHeight:  99,
-			evidenceTarget: 99,
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "ambiguous pod halt target is recreated",
-			cachedHeight:   99,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			conflictingEnv: true,
-			appLogs:        sdkHaltJSON(100, 0),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "halt-time exit is recreated",
-			cachedHeight:   98,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appLogs:        sdkHaltJSON(100, 1700000000),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "direct clean exit without halt log is recreated",
-			cachedHeight:   98,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appLogs:        "2026-09-21T12:00:30Z I[2026-09-21|12:00:30.000] caught signal signal=terminated\n",
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "wrong logged height is recreated",
-			cachedHeight:   98,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appLogs:        sdkHaltJSON(99, 0),
-			wantAction:     terminalPodRestart,
-		},
-		{
-			name:           "oversized log tail is recreated",
-			cachedHeight:   98,
-			podHaltHeight:  100,
-			evidenceTarget: 100,
-			appLogs:        strings.Repeat("x", appTerminationLogMaxBytes+1),
-			wantAction:     terminalPodRestart,
-		},
+		{name: "clean exit at H minus one holds despite stale cache", cachedHeight: 98, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), wantAction: terminalPodHold, wantHold: "100"},
+		{name: "clean exit at H holds despite stale cache", cachedHeight: 98, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](100), wantAction: terminalPodHold, wantHold: "100"},
+		{name: "signal-style exit at boundary holds", cachedHeight: 98, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), appExitCode: 143, appReason: "Error", wantAction: terminalPodHold, wantHold: "100"},
+		{name: "eligible nonzero exit at boundary holds", cachedHeight: 98, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](100), appExitCode: 1, appReason: "Error", wantAction: terminalPodHold, wantHold: "100"},
+		{name: "container identity is not required", cachedHeight: 98, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), clearIdentity: true, wantAction: terminalPodHold, wantHold: "100"},
+		{name: "evidence at H minus two restarts", cachedHeight: 98, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](98), wantAction: terminalPodRestart},
+		{name: "evidence past H restarts", cachedHeight: 100, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](101), wantAction: terminalPodRestart},
+		{name: "missing evidence height restarts", cachedHeight: 100, podHaltHeight: 100, evidenceTarget: 100, wantAction: terminalPodRestart},
+		{name: "current evidence overrides cached boundary", cachedHeight: 100, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](98), wantAction: terminalPodRestart},
+		{name: "OOM at boundary restarts", cachedHeight: 99, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), appExitCode: 137, appReason: "OOMKilled", wantAction: terminalPodRestart},
+		{name: "SIGKILL at boundary restarts", cachedHeight: 99, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), appExitCode: 1, appReason: "Error", appSignal: 9, wantAction: terminalPodRestart},
+		{name: "forced shutdown restarts", cachedHeight: 99, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), forced: true, wantAction: terminalPodRestart},
+		{name: "different pod halt target restarts", cachedHeight: 99, podHaltHeight: 99, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), wantAction: terminalPodRestart},
+		{name: "different evidence target restarts", cachedHeight: 99, podHaltHeight: 100, evidenceTarget: 99, evidenceHeight: ptr.To[int64](99), wantAction: terminalPodRestart},
+		{name: "ambiguous pod halt target restarts", cachedHeight: 99, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), conflictingEnv: true, wantAction: terminalPodRestart},
+		{name: "malformed current evidence restarts", cachedHeight: 99, podHaltHeight: 100, evidenceTarget: 100, evidenceHeight: ptr.To[int64](99), malformedEvidence: true, wantAction: terminalPodRestart},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			haltHeight := int64(100)
@@ -179,25 +63,34 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 				},
 				Status: appsv1.ChainNodeStatus{LatestHeight: tt.cachedHeight},
 			}
-			pod := terminalEvidencePod(t, tt.podHaltHeight, tt.evidenceTarget, tt.cachedHeight, tt.forced, tt.appExitCode, tt.appReason)
+			pod := terminalEvidencePod(t, tt.podHaltHeight, tt.evidenceTarget, ptr.Deref(tt.evidenceHeight, 0), tt.forced, tt.appExitCode, tt.appReason)
+			evidence, ok := nodeUtilsTerminationEvidence(pod)
+			require.True(t, ok)
+			evidence.LatestHeight = tt.evidenceHeight
+			body, err := json.Marshal(evidence)
+			require.NoError(t, err)
+			pod.Status.InitContainerStatuses[0].State.Terminated.Message = string(body)
+			if tt.malformedEvidence {
+				pod.Status.InitContainerStatuses[0].State.Terminated.Message = "not-json"
+			}
 			pod.Status.ContainerStatuses[0].State.Terminated.Signal = tt.appSignal
+			if tt.clearIdentity {
+				terminated := pod.Status.ContainerStatuses[0].State.Terminated
+				terminated.ContainerID = ""
+				terminated.StartedAt = metav1.Time{}
+				terminated.FinishedAt = metav1.Time{}
+			}
 			if tt.conflictingEnv {
 				pod.Spec.InitContainers[0].Env = append(pod.Spec.InitContainers[0].Env,
 					corev1.EnvVar{Name: "HALT_HEIGHT", Value: "101"})
 			}
 
-			reader := func(_ context.Context, _ *corev1.Pod, container string, identity appTerminationIdentity) ([]byte, error) {
-				assert.Equal(t, "appd", container)
-				assert.Equal(t, types.UID("pod-uid"), identity.PodUID)
-				assert.Equal(t, "containerd://app", identity.ContainerID)
-				return []byte(tt.appLogs), nil
-			}
-			assert.Equal(t, tt.wantAction, terminalPodRecoveryFor(t.Context(), node, pod, reader))
+			assert.Equal(t, tt.wantAction, terminalPodRecoveryFor(node, pod))
 
 			scheme := runtime.NewScheme()
 			require.NoError(t, appsv1.AddToScheme(scheme))
 			backing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
-			r := &Reconciler{Client: backing, terminatedAppLogReader: reader}
+			r := &Reconciler{Client: backing}
 			require.NoError(t, r.reconcileHaltHeightHold(t.Context(), node, pod))
 
 			stored := &appsv1.ChainNode{}
@@ -208,37 +101,34 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 }
 
 func TestTerminalPodRecoveryUsesOnlyMatchingPendingUpgradeEvidence(t *testing.T) {
-	node := &appsv1.ChainNode{
-		Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{}},
-		Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
-			Height: 100,
-			Source: appsv1.OnChainUpgrade,
-			Status: appsv1.UpgradeScheduled,
-		}}},
-	}
-	pod := terminalEvidencePod(t, 0, 0, 98, false, 1, "Error")
-	evidence, ok := nodeUtilsTerminationEvidence(pod)
-	require.True(t, ok)
-	evidence.RequiredUpgrade = &nodeutils.RequiredUpgrade{Height: 100, Source: nodeutils.OnChainUpgrade}
-	body, err := json.Marshal(evidence)
-	require.NoError(t, err)
-	pod.Status.InitContainerStatuses[0].State.Terminated.Message = string(body)
+	for _, source := range []struct {
+		name string
+		app  appsv1.UpgradeSource
+		node nodeutils.UpgradeSource
+	}{
+		{name: "on-chain", app: appsv1.OnChainUpgrade, node: nodeutils.OnChainUpgrade},
+		{name: "manual", app: appsv1.ManualUpgrade, node: nodeutils.ManualUpgrade},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			node := &appsv1.ChainNode{
+				Spec:   appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{}},
+				Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{Height: 100, Source: source.app, Status: appsv1.UpgradeScheduled}}},
+			}
+			pod := terminalEvidencePod(t, 0, 0, 98, false, 1, "Error")
+			evidence, ok := nodeUtilsTerminationEvidence(pod)
+			require.True(t, ok)
+			evidence.RequiredUpgrade = &nodeutils.RequiredUpgrade{Height: 100, Source: source.node}
+			body, err := json.Marshal(evidence)
+			require.NoError(t, err)
+			pod.Status.InitContainerStatuses[0].State.Terminated.Message = string(body)
 
-	reader := func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error) {
-		return nil, errors.New("upgrade recovery must not require halt logs")
+			assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(node, pod))
+			node.Status.Upgrades[0].Status = appsv1.UpgradeOnGoing
+			assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(node, pod))
+			node.Status.Upgrades[0].Status = appsv1.UpgradeCompleted
+			assert.Equal(t, terminalPodRestart, terminalPodRecoveryFor(node, pod))
+		})
 	}
-	assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(t.Context(), node, pod, reader))
-	node.Status.Upgrades[0].Status = appsv1.UpgradeOnGoing
-	assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(t.Context(), node, pod, reader))
-	node.Status.Upgrades[0].Status = appsv1.UpgradeCompleted
-	assert.Equal(t, terminalPodRestart, terminalPodRecoveryFor(t.Context(), node, pod, reader))
-	node.Status.Upgrades[0].Status = appsv1.UpgradeScheduled
-
-	evidence.RequiredUpgrade.Source = nodeutils.ManualUpgrade
-	body, err = json.Marshal(evidence)
-	require.NoError(t, err)
-	pod.Status.InitContainerStatuses[0].State.Terminated.Message = string(body)
-	assert.Equal(t, terminalPodRestart, terminalPodRecoveryFor(t.Context(), node, pod, reader))
 }
 
 func TestTerminalPodRecoveryWaitsForCurrentSidecarEvidence(t *testing.T) {
@@ -247,92 +137,93 @@ func TestTerminalPodRecoveryWaitsForCurrentSidecarEvidence(t *testing.T) {
 	pod.Status.InitContainerStatuses[0].State.Terminated = nil
 	pod.Status.InitContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{}
 
-	assert.Equal(t, terminalPodWaitForEvidence, terminalPodRecoveryFor(t.Context(), node, pod, nil))
+	assert.Equal(t, terminalPodWaitForEvidence, terminalPodRecoveryFor(node, pod))
 }
 
-func TestTerminalPodRecoveryWithoutNodeUtilsEvidenceAcceptsOnlyAuthoritativeSignalHalt(t *testing.T) {
-	for _, tt := range []struct {
-		name       string
-		exitCode   int32
-		reason     string
-		signal     int32
-		logs       string
-		wantAction terminalPodRecoveryAction
-	}{
-		{
-			name: "signal-style halt", exitCode: 143, reason: "Error",
-			logs: sdkHaltJSON(100, 0), wantAction: terminalPodHold,
-		},
-		{
-			name: "OOM", exitCode: 137, reason: "OOMKilled",
-			logs: sdkHaltJSON(100, 0), wantAction: terminalPodRestart,
-		},
-		{
-			name: "ordinary nonzero halt", exitCode: 1, reason: "Error",
-			logs: sdkHaltJSON(100, 0), wantAction: terminalPodHold,
-		},
-		{
-			name: "ordinary nonzero without authoritative halt", exitCode: 1, reason: "Error",
-			logs: "", wantAction: terminalPodRestart,
-		},
-		{
-			name: "SIGKILL", exitCode: 1, reason: "Error", signal: 9,
-			logs: sdkHaltJSON(100, 0), wantAction: terminalPodRestart,
-		},
-		{
-			name: "signal-style exit without authoritative halt", exitCode: 143, reason: "Error",
-			logs: sdkHaltJSON(99, 0), wantAction: terminalPodRestart,
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			haltHeight := int64(100)
-			node := &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{
-				App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{HaltHeight: &haltHeight},
-			}}
-			pod := terminalEvidencePod(t, haltHeight, haltHeight, 99, false, tt.exitCode, tt.reason)
-			pod.Status.ContainerStatuses[0].State.Terminated.Signal = tt.signal
-			reader := func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error) {
-				return []byte(tt.logs), nil
-			}
-
-			assert.Equal(t, tt.wantAction,
-				terminalPodRecoveryWithoutNodeUtilsEvidence(t.Context(), node, pod, reader))
-		})
-	}
-}
-
-func TestTerminalPodRecoveryRetriesLogTransportFailureWithoutDeleting(t *testing.T) {
+func TestTerminalPodRecoveryRequiresCurrentAppTermination(t *testing.T) {
 	haltHeight := int64(100)
 	node := &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{
 		App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{HaltHeight: &haltHeight},
 	}}
-	pod := terminalEvidencePod(t, 100, 100, 98, false, 0, "Completed")
-	reader := func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error) {
-		return nil, errors.New("apiserver unavailable")
+	for _, tt := range []struct {
+		name        string
+		state       corev1.ContainerState
+		phase       corev1.PodPhase
+		terminating bool
+		want        terminalPodRecoveryAction
+	}{
+		{name: "running application", state: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}, want: terminalPodNotTerminated},
+		{name: "waiting application", state: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}, want: terminalPodNotTerminated},
+		{name: "failed pod without application termination", phase: corev1.PodFailed, want: terminalPodRestart},
+		{name: "terminating pod", state: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}, terminating: true, want: terminalPodNotTerminated},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := terminalEvidencePod(t, 100, 100, 99, false, 0, "Completed")
+			pod.Status.ContainerStatuses[0].State = tt.state
+			pod.Status.Phase = tt.phase
+			if tt.terminating {
+				now := metav1.Now()
+				pod.DeletionTimestamp = &now
+				pod.Finalizers = []string{"test.cosmopilot.voluzi.com/terminating"}
+			}
+			assert.Equal(t, tt.want, terminalPodRecoveryFor(node, pod))
+		})
 	}
-
-	assert.Equal(t, terminalPodRetry, terminalPodRecoveryFor(t.Context(), node, pod, reader))
 }
 
-func TestAppTerminationIdentityRejectsPodOrContainerReuse(t *testing.T) {
-	pod := terminalEvidencePod(t, 100, 100, 98, false, 0, "Completed")
-	identity, ok := currentAppTerminationIdentity(pod, "appd")
-	require.True(t, ok)
-	assert.True(t, sameAppTerminationIdentity(identity, pod, "appd"))
+func TestTerminalPodRecoveryRejectsNonPositiveHaltTarget(t *testing.T) {
+	for _, haltHeight := range []int64{0, -1} {
+		node := &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{
+			App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{HaltHeight: &haltHeight},
+		}}
+		pod := terminalEvidencePod(t, haltHeight, haltHeight, haltHeight, false, 0, "Completed")
+		assert.Equal(t, terminalPodRestart, terminalPodRecoveryFor(node, pod))
+	}
+}
 
-	changedPod := pod.DeepCopy()
-	changedPod.UID = "replacement-pod"
-	assert.False(t, sameAppTerminationIdentity(identity, changedPod, "appd"))
+func TestTerminalPodRecoveryWithoutNodeUtilsEvidenceUsesStructuredBoundary(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		latestHeight int64
+		podTarget    int64
+		exitCode     int32
+		reason       string
+		signal       int32
+		wantAction   terminalPodRecoveryAction
+	}{
+		{name: "clean exit at H minus one holds", latestHeight: 99, podTarget: 100, wantAction: terminalPodHold},
+		{name: "clean exit at H holds", latestHeight: 100, podTarget: 100, wantAction: terminalPodHold},
+		{name: "signal-style exit at boundary holds", latestHeight: 99, podTarget: 100, exitCode: 143, reason: "Error", wantAction: terminalPodHold},
+		{name: "eligible nonzero exit at boundary holds", latestHeight: 100, podTarget: 100, exitCode: 1, reason: "Error", wantAction: terminalPodHold},
+		{name: "H minus two restarts", latestHeight: 98, podTarget: 100, wantAction: terminalPodRestart},
+		{name: "past H restarts", latestHeight: 101, podTarget: 100, wantAction: terminalPodRestart},
+		{name: "target mismatch restarts", latestHeight: 99, podTarget: 99, wantAction: terminalPodRestart},
+		{name: "OOM restarts", latestHeight: 99, podTarget: 100, exitCode: 137, reason: "OOMKilled", wantAction: terminalPodRestart},
+		{name: "SIGKILL restarts", latestHeight: 99, podTarget: 100, exitCode: 1, reason: "Error", signal: 9, wantAction: terminalPodRestart},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			haltHeight := int64(100)
+			node := &appsv1.ChainNode{
+				Spec:   appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{HaltHeight: &haltHeight}},
+				Status: appsv1.ChainNodeStatus{LatestHeight: tt.latestHeight},
+			}
+			pod := terminalEvidencePod(t, tt.podTarget, haltHeight, tt.latestHeight, false, tt.exitCode, tt.reason)
+			pod.Status.ContainerStatuses[0].State.Terminated.Signal = tt.signal
 
-	changedContainer := pod.DeepCopy()
-	changedContainer.Status.ContainerStatuses[0].State.Terminated.ContainerID = "containerd://replacement"
-	assert.False(t, sameAppTerminationIdentity(identity, changedContainer, "appd"))
+			assert.Equal(t, tt.wantAction, terminalPodRecoveryWithoutNodeUtilsEvidence(node, pod, tt.latestHeight, true))
+		})
+	}
+}
 
-	changedTimes := pod.DeepCopy()
-	changedTimes.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.NewTime(
-		changedTimes.Status.ContainerStatuses[0].State.Terminated.FinishedAt.Add(time.Second),
-	)
-	assert.False(t, sameAppTerminationIdentity(identity, changedTimes, "appd"))
+func TestTerminalPodRecoveryWithoutNodeUtilsEvidenceNoOpsForUnavailablePod(t *testing.T) {
+	node := &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd"}}}
+	assert.Equal(t, terminalPodNotTerminated, terminalPodRecoveryWithoutNodeUtilsEvidence(node, nil, 0, false))
+
+	pod := terminalEvidencePod(t, 100, 100, 99, false, 0, "Completed")
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{"test.cosmopilot.voluzi.com/terminating"}
+	assert.Equal(t, terminalPodNotTerminated, terminalPodRecoveryWithoutNodeUtilsEvidence(node, pod, 0, false))
 }
 
 func TestReconcileHaltHeightHoldClearsStaleIntent(t *testing.T) {
@@ -345,26 +236,14 @@ func TestReconcileHaltHeightHoldClearsStaleIntent(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			node := &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        "node",
-					Namespace:   "default",
-					Annotations: map[string]string{appsv1.AnnotationHaltHeightHold: "100"},
-				},
-				Spec: appsv1.ChainNodeSpec{
-					App:    appsv1.AppSpec{App: "appd"},
-					Config: &appsv1.Config{HaltHeight: tt.haltHeight},
-				},
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", Annotations: map[string]string{appsv1.AnnotationHaltHeightHold: "100"}},
+				Spec:       appsv1.ChainNodeSpec{App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{HaltHeight: tt.haltHeight}},
 			}
 			pod := terminalEvidencePod(t, 100, 100, 99, false, 0, "Completed")
 			scheme := runtime.NewScheme()
 			require.NoError(t, appsv1.AddToScheme(scheme))
 			backing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
-			r := &Reconciler{
-				Client: backing,
-				terminatedAppLogReader: func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error) {
-					return []byte(sdkHaltJSON(100, 0)), nil
-				},
-			}
+			r := &Reconciler{Client: backing}
 
 			require.NoError(t, r.reconcileHaltHeightHold(t.Context(), node, pod))
 
@@ -408,12 +287,6 @@ func TestShouldMigrateLegacyHaltHeightHold(t *testing.T) {
 	}
 }
 
-func sdkHaltJSON(height, haltTime int64) string {
-	return `2026-09-21T12:00:30Z {"level":"info","height":` + strconv.FormatInt(height, 10) +
-		`,"time":` + strconv.FormatInt(haltTime, 10) +
-		`,"_msg":"halting node per configuration"}` + "\n"
-}
-
 func terminalEvidencePod(
 	t *testing.T,
 	podHaltHeight int64,
@@ -442,19 +315,14 @@ func terminalEvidencePod(
 				Name:        "appd",
 				ContainerID: "containerd://app",
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-					ExitCode:    appExitCode,
-					Reason:      appReason,
-					ContainerID: "containerd://app",
-					StartedAt:   metav1.NewTime(time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)),
-					FinishedAt:  metav1.NewTime(time.Date(2026, 9, 21, 12, 1, 0, 0, time.UTC)),
+					ExitCode: appExitCode, Reason: appReason, ContainerID: "containerd://app",
+					StartedAt:  metav1.NewTime(time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)),
+					FinishedAt: metav1.NewTime(time.Date(2026, 9, 21, 12, 1, 0, 0, time.UTC)),
 				}},
 			}},
 			InitContainerStatuses: []corev1.ContainerStatus{{
-				Name: nodeUtilsContainerName,
-				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-					ExitCode: 0,
-					Message:  string(body),
-				}},
+				Name:  nodeUtilsContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: string(body)}},
 			}},
 		},
 	}

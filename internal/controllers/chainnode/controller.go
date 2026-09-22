@@ -27,8 +27,6 @@ import (
 // This can be overridden in tests to inject mock clients.
 type StatsClientFactory func(host string) nodeutils.StatsClient
 
-type terminatedAppLogReader func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error)
-
 type nodeStatusClient interface {
 	GetLatestHeight(context.Context) (int64, error)
 	RequiresUpgrade(context.Context) (bool, error)
@@ -62,7 +60,6 @@ type Reconciler struct {
 	configLocks             *configLockManager
 	statsClientFactory      StatsClientFactory
 	nodeStatusClientFactory nodeStatusClientFactory
-	terminatedAppLogReader  terminatedAppLogReader
 }
 
 func New(mgr ctrl.Manager, clientSet *kubernetes.Clientset, opts *controllers.ControllerRunOptions) (*Reconciler, error) {
@@ -371,22 +368,30 @@ func (r *Reconciler) getChainNodeClientByHost(host string) (*chainutils.Client, 
 }
 
 func (r *Reconciler) updateLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	_, _, err := r.refreshLatestHeight(ctx, chainNode)
+	return err
+}
+
+func (r *Reconciler) refreshLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode) (int64, bool, error) {
 	height, err := r.getNodeStatusClient(chainNode).GetLatestHeight(ctx)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	// If height is 0 then node-utils didn't grab latest height yet, so lets not update it.
 	if height == 0 {
-		return nil
+		return 0, false, nil
 	}
 
 	// Avoid API call if there is nothing to change
 	if height == chainNode.Status.LatestHeight {
-		return nil
+		return height, true, nil
 	}
 
 	chainNode.Status.LatestHeight = height
-	return r.Status().Update(ctx, chainNode)
+	if err := r.Status().Update(ctx, chainNode); err != nil {
+		return 0, false, err
+	}
+	return height, true, nil
 }
 
 func (r *Reconciler) getNodeStatusClient(chainNode *appsv1.ChainNode) nodeStatusClient {
