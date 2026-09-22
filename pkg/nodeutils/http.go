@@ -15,7 +15,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/voluzi/cosmopilot/v2/pkg/statscollector"
-	"github.com/voluzi/cosmopilot/v2/pkg/utils"
 )
 
 func (s *NodeUtils) registerRoutes() {
@@ -124,7 +123,9 @@ func (s *NodeUtils) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *NodeUtils) dataSize(w http.ResponseWriter, r *http.Request) {
-	size, err := utils.DirSize(s.cfg.DataPath)
+	s.dataSizeMu.Lock()
+	size, err := filesystemUsedBytes(s.cfg.DataPath, s.statfs)
+	s.dataSizeMu.Unlock()
 	if err != nil {
 		writeError(w, "error getting data size: %v", err)
 		return
