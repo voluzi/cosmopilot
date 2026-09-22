@@ -120,6 +120,9 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	var requiresUpgrade bool
 	switch recoveryAction {
 	case terminalPodHold:
+		if err = r.persistTerminalHaltLatestHeight(ctx, chainNode, currentPod); err != nil {
+			return fmt.Errorf("failed to persist terminal halt height for %s: %w", chainNode.GetName(), err)
+		}
 		logger.Info("holding node at configured halt height", "halt-height", chainNode.Spec.Config.GetHaltHeight())
 		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
 	case terminalPodRestart:
@@ -440,11 +443,11 @@ func (r *Reconciler) buildBaseVolumes(chainNode *appsv1.ChainNode) []corev1.Volu
 }
 
 // buildNodeUtilsInitContainer creates the node-utils sidecar init container.
-func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, runAsUser, runAsGroup int64) corev1.Container {
+func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, runAsUser int64, runAsGroup *int64) corev1.Container {
 	var sidecarRestartAlways = corev1.ContainerRestartPolicyAlways
 	securityContext := k8s.RestrictedSecurityContext()
 	securityContext.RunAsUser = ptr.To(runAsUser)
-	securityContext.RunAsGroup = ptr.To(runAsGroup)
+	securityContext.RunAsGroup = runAsGroup
 	securityContext.RunAsNonRoot = ptr.To(runAsUser != 0)
 
 	return corev1.Container{
@@ -511,7 +514,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, ru
 	}
 }
 
-func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityContext) (int64, int64, error) {
+func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityContext) (int64, *int64, error) {
 	var runAsUser *int64
 	if app != nil && app.RunAsUser != nil {
 		runAsUser = app.RunAsUser
@@ -519,7 +522,7 @@ func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityCo
 		runAsUser = pod.RunAsUser
 	}
 	if runAsUser == nil || *runAsUser < 0 {
-		return 0, 0, fmt.Errorf("node-utils requires a resolved numeric runAsUser matching the app container")
+		return 0, nil, fmt.Errorf("node-utils requires a resolved numeric runAsUser matching the app container")
 	}
 
 	var runAsGroup *int64
@@ -528,10 +531,10 @@ func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityCo
 	} else if pod != nil && pod.RunAsGroup != nil {
 		runAsGroup = pod.RunAsGroup
 	}
-	if runAsGroup == nil || *runAsGroup < 0 {
-		return 0, 0, fmt.Errorf("node-utils requires a resolved numeric runAsGroup matching the app container")
+	if runAsGroup != nil && *runAsGroup < 0 {
+		return 0, nil, fmt.Errorf("node-utils requires a non-negative runAsGroup matching the app container")
 	}
-	return *runAsUser, *runAsGroup, nil
+	return *runAsUser, runAsGroup, nil
 }
 
 // buildAppContainer creates the main application container with its configuration.
@@ -1368,7 +1371,7 @@ func terminalPodRecoveryFor(ctx context.Context, chainNode *appsv1.ChainNode, po
 	if !nodeUtilsHasTerminated(pod) {
 		return terminalPodWaitForEvidence
 	}
-	if !cleanTermination(terminated) {
+	if !validHaltTermination(terminated) {
 		return terminalPodRestart
 	}
 	if ok && validHaltEvidence(chainNode, pod, evidence) {
@@ -1408,7 +1411,7 @@ func terminalPodRecoveryWithoutNodeUtilsEvidence(
 		return terminalPodRetry
 	}
 	terminated, ok := appTermination(pod, chainNode.Spec.App.App)
-	if !ok || !cleanTermination(terminated) {
+	if !ok || !validHaltTermination(terminated) {
 		return terminalPodRestart
 	}
 	haltHeight, ok := configuredPodHaltHeight(chainNode, pod)
@@ -1519,6 +1522,11 @@ func cleanTermination(terminated *corev1.ContainerStateTerminated) bool {
 	return terminated.ExitCode == 0 && terminated.Reason != "OOMKilled" && terminated.Reason != "Error"
 }
 
+func validHaltTermination(terminated *corev1.ContainerStateTerminated) bool {
+	return cleanTermination(terminated) ||
+		terminated.ExitCode != 0 && terminated.ExitCode != 137 && terminated.Signal != 9 && terminated.Reason == "Error"
+}
+
 func nodeUtilsHasTerminated(pod *corev1.Pod) bool {
 	for _, status := range pod.Status.InitContainerStatuses {
 		if status.Name == nodeUtilsContainerName {
@@ -1554,7 +1562,22 @@ func validHaltEvidence(chainNode *appsv1.ChainNode, pod *corev1.Pod, evidence no
 		return false
 	}
 	terminated, ok := appTermination(pod, chainNode.Spec.App.App)
-	return ok && cleanTermination(terminated) && !isPodTerminating(pod)
+	return ok && validHaltTermination(terminated) && !isPodTerminating(pod)
+}
+
+func (r *Reconciler) persistTerminalHaltLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {
+	evidence, ok := nodeUtilsTerminationEvidence(pod)
+	if !ok || evidence.LatestHeight == nil || *evidence.LatestHeight <= chainNode.Status.LatestHeight {
+		return nil
+	}
+
+	previousHeight := chainNode.Status.LatestHeight
+	chainNode.Status.LatestHeight = *evidence.LatestHeight
+	if err := r.Status().Update(ctx, chainNode); err != nil {
+		chainNode.Status.LatestHeight = previousHeight
+		return err
+	}
+	return nil
 }
 
 func configuredPodHaltHeight(chainNode *appsv1.ChainNode, pod *corev1.Pod) (int64, bool) {

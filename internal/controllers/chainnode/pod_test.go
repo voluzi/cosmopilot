@@ -35,7 +35,7 @@ func TestGeneratedPodComponentsContainNoTraceStoreArtifacts(t *testing.T) {
 			t.Fatal("generated pod still contains trace volume")
 		}
 	}
-	nodeUtils := r.buildNodeUtilsInitContainer(chainNode, 1000, 1000)
+	nodeUtils := r.buildNodeUtilsInitContainer(chainNode, 1000, ptr.To[int64](1000))
 	for _, env := range nodeUtils.Env {
 		if env.Name == "TRACE_STORE" || env.Name == "CREATE_FIFO" {
 			t.Fatalf("node-utils still contains trace environment %s", env.Name)
@@ -140,6 +140,90 @@ func TestGetPodSpecUsesEffectiveAppIdentityForNodeUtils(t *testing.T) {
 	}
 }
 
+func TestGetPodSpecAllowsUIDWithoutGIDForNodeUtils(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		app      *corev1.SecurityContext
+		pod      *corev1.PodSecurityContext
+		wantUser int64
+	}{
+		{
+			name:     "app UID only",
+			app:      &corev1.SecurityContext{RunAsUser: ptr.To[int64](3000)},
+			pod:      &corev1.PodSecurityContext{},
+			wantUser: 3000,
+		},
+		{
+			name:     "pod UID only",
+			app:      &corev1.SecurityContext{},
+			pod:      &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](2000)},
+			wantUser: 2000,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			chainNode := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
+				Spec: appsv1.ChainNodeSpec{
+					App:    appsv1.AppSpec{App: "appd"},
+					Config: &appsv1.Config{SecurityContext: tt.app, PodSecurityContext: tt.pod},
+				},
+			}
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name, Namespace: chainNode.Namespace}}
+			r := &Reconciler{
+				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build(),
+				Scheme: scheme,
+				opts:   &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+			}
+
+			pod, err := r.getPodSpec(t.Context(), chainNode, "config-hash")
+			require.NoError(t, err)
+			nodeUtils := pod.Spec.InitContainers[0]
+			require.NotNil(t, nodeUtils.SecurityContext.RunAsUser)
+			assert.Equal(t, tt.wantUser, *nodeUtils.SecurityContext.RunAsUser)
+			assert.Nil(t, nodeUtils.SecurityContext.RunAsGroup)
+			assert.True(t, *nodeUtils.SecurityContext.RunAsNonRoot)
+			require.Contains(t, nodeUtils.SecurityContext.Capabilities.Drop, corev1.Capability("ALL"))
+		})
+	}
+}
+
+func TestEffectiveRunIdentityRejectsNegativeExplicitIDs(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		app  *corev1.SecurityContext
+		pod  *corev1.PodSecurityContext
+	}{
+		{
+			name: "negative app UID",
+			app:  &corev1.SecurityContext{RunAsUser: ptr.To[int64](-1)},
+		},
+		{
+			name: "negative pod UID",
+			pod:  &corev1.PodSecurityContext{RunAsUser: ptr.To[int64](-1)},
+		},
+		{
+			name: "negative app GID",
+			app: &corev1.SecurityContext{
+				RunAsUser: ptr.To[int64](1000), RunAsGroup: ptr.To[int64](-1),
+			},
+		},
+		{
+			name: "negative pod GID",
+			pod: &corev1.PodSecurityContext{
+				RunAsUser: ptr.To[int64](1000), RunAsGroup: ptr.To[int64](-1),
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := effectiveRunIdentity(tt.app, tt.pod)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestEffectiveRunIdentityUsesContainerPrecedenceAndPodFallback(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
@@ -183,8 +267,9 @@ func TestEffectiveRunIdentityUsesContainerPrecedenceAndPodFallback(t *testing.T)
 			if runAsUser != tt.wantUser {
 				t.Fatalf("runAsUser = %d, want %d", runAsUser, tt.wantUser)
 			}
-			if runAsGroup != tt.wantGroup {
-				t.Fatalf("runAsGroup = %d, want %d", runAsGroup, tt.wantGroup)
+			require.NotNil(t, runAsGroup)
+			if *runAsGroup != tt.wantGroup {
+				t.Fatalf("runAsGroup = %d, want %d", *runAsGroup, tt.wantGroup)
 			}
 		})
 	}
@@ -430,9 +515,10 @@ func dataHeightResetTestNode() *appsv1.ChainNode {
 
 type dataHeightResetPersistenceClient struct {
 	client.Client
-	writes       []string
-	failMetadata bool
-	failStatus   bool
+	writes           []string
+	failMetadata     bool
+	failStatus       bool
+	failStatusHeight *int64
 }
 
 func (c *dataHeightResetPersistenceClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
@@ -455,9 +541,10 @@ type dataHeightResetStatusWriter struct {
 }
 
 func (w *dataHeightResetStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-	if _, ok := obj.(*appsv1.ChainNode); ok {
+	if node, ok := obj.(*appsv1.ChainNode); ok {
 		w.client.writes = append(w.client.writes, "status")
-		if w.client.failStatus {
+		if w.client.failStatus ||
+			(w.client.failStatusHeight != nil && node.Status.LatestHeight == *w.client.failStatusHeight) {
 			return errors.New("status persistence failed")
 		}
 	}
