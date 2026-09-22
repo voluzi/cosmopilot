@@ -156,21 +156,28 @@ func readMountID(fd int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return parseMountID(data)
+}
+
+func parseMountID(data []byte) (int, error) {
 	id := 0
+	found := false
+	var err error
 	for _, line := range strings.Split(string(data), "\n") {
 		if !strings.HasPrefix(line, "mnt_id:") {
 			continue
 		}
-		if id != 0 {
+		if found {
 			return 0, fmt.Errorf("duplicate mount ID")
 		}
+		found = true
 		value := strings.TrimSpace(strings.TrimPrefix(line, "mnt_id:"))
 		id, err = strconv.Atoi(value)
-		if err != nil || id <= 0 {
+		if err != nil || id < 0 {
 			return 0, fmt.Errorf("invalid mount ID %q", value)
 		}
 	}
-	if id == 0 {
+	if !found {
 		return 0, fmt.Errorf("mount ID absent")
 	}
 	return id, nil
@@ -204,7 +211,7 @@ func parseMountInfo(data []byte) ([]mountRecord, error) {
 		}
 		id, idErr := strconv.Atoi(fields[0])
 		parent, parentErr := strconv.Atoi(fields[1])
-		if idErr != nil || parentErr != nil || id <= 0 || parent <= 0 || ids[id] {
+		if idErr != nil || parentErr != nil || id < 0 || parent < 0 || ids[id] {
 			return nil, fmt.Errorf("invalid or duplicate mount ID")
 		}
 		ids[id] = true

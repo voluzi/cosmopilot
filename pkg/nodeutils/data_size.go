@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -15,10 +16,22 @@ func measureDataSize(ctx context.Context, path string) (int64, error) {
 
 type filesystemProofFunc func(context.Context, string, *os.File) (int64, bool, error)
 
+func trimTrailingPathSeparators(path string) string {
+	if path == "" {
+		return path
+	}
+	trimmed := strings.TrimRight(path, string(os.PathSeparator))
+	if trimmed == "" {
+		return string(os.PathSeparator)
+	}
+	return trimmed
+}
+
 func measureDataSizeWithProof(ctx context.Context, path string, proof filesystemProofFunc) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	path = trimTrailingPathSeparators(path)
 	info, err := os.Lstat(path)
 	if err != nil {
 		return 0, fmt.Errorf("stat data root %q: %w", path, err)
@@ -54,7 +67,7 @@ func measureDataSizeWithProof(ctx context.Context, path string, proof filesystem
 }
 
 func sameDataRoot(path string, openedInfo os.FileInfo) bool {
-	current, err := os.Lstat(path)
+	current, err := os.Lstat(trimTrailingPathSeparators(path))
 	return err == nil && current.IsDir() && os.SameFile(current, openedInfo)
 }
 
