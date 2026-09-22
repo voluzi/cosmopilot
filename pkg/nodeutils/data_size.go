@@ -16,22 +16,31 @@ func filesystemUsedBytes(path string, statfs statfsFunc) (int64, error) {
 	if err := statfs(path, &stats); err != nil {
 		return 0, fmt.Errorf("statfs %q: %w", path, err)
 	}
-	if stats.Bsize <= 0 {
-		return 0, fmt.Errorf("invalid filesystem block size: %d", stats.Bsize)
-	}
+	return usedBytesFromBlocks(
+		uint64(stats.Blocks),
+		uint64(stats.Bfree),
+		int64(stats.Bsize),
+		filesystemFragmentSize(&stats),
+	)
+}
 
-	blocks := uint64(stats.Blocks)
-	freeBlocks := uint64(stats.Bfree)
+func usedBytesFromBlocks(blocks, freeBlocks uint64, blockSize, fragmentSize int64) (int64, error) {
+	if fragmentSize == 0 {
+		fragmentSize = blockSize
+	}
+	if fragmentSize <= 0 {
+		return 0, fmt.Errorf("invalid filesystem fragment size: %d", fragmentSize)
+	}
 	if freeBlocks > blocks {
 		return 0, fmt.Errorf("invalid filesystem counters: %d free blocks exceed %d total blocks", freeBlocks, blocks)
 	}
 
 	usedBlocks := blocks - freeBlocks
-	blockSize := uint64(stats.Bsize)
+	bytesPerBlock := uint64(fragmentSize)
 	const maxInt64 = uint64(1<<63 - 1)
-	if usedBlocks > maxInt64/blockSize {
+	if usedBlocks > maxInt64/bytesPerBlock {
 		return 0, fmt.Errorf("filesystem used bytes overflow int64")
 	}
 
-	return int64(usedBlocks * blockSize), nil
+	return int64(usedBlocks * bytesPerBlock), nil
 }
