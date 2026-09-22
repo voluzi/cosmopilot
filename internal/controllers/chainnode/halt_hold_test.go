@@ -33,6 +33,7 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 		conflictingEnv bool
 		appExitCode    int32
 		appReason      string
+		appSignal      int32
 		appLogs        string
 		wantAction     terminalPodRecoveryAction
 		wantHold       string
@@ -42,6 +43,17 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 			cachedHeight:   98,
 			podHaltHeight:  100,
 			evidenceTarget: 100,
+			appLogs:        sdkHaltJSON(100, 0),
+			wantAction:     terminalPodHold,
+			wantHold:       "100",
+		},
+		{
+			name:           "signal-style native halt recovers with authoritative log",
+			cachedHeight:   99,
+			podHaltHeight:  100,
+			evidenceTarget: 100,
+			appExitCode:    143,
+			appReason:      "Error",
 			appLogs:        sdkHaltJSON(100, 0),
 			wantAction:     terminalPodHold,
 			wantHold:       "100",
@@ -57,13 +69,45 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 			wantAction:     terminalPodRestart,
 		},
 		{
-			name:           "nonzero error at H minus one is recreated",
+			name:           "nonzero error at H minus one recovers with authoritative log",
 			cachedHeight:   99,
 			podHaltHeight:  100,
 			evidenceTarget: 100,
 			appExitCode:    1,
 			appReason:      "Error",
 			appLogs:        sdkHaltJSON(100, 0),
+			wantAction:     terminalPodHold,
+			wantHold:       "100",
+		},
+		{
+			name:           "nonzero error without authoritative log is recreated",
+			cachedHeight:   99,
+			podHaltHeight:  100,
+			evidenceTarget: 100,
+			appExitCode:    1,
+			appReason:      "Error",
+			appLogs:        "",
+			wantAction:     terminalPodRestart,
+		},
+		{
+			name:           "SIGKILL is recreated",
+			cachedHeight:   99,
+			podHaltHeight:  100,
+			evidenceTarget: 100,
+			appExitCode:    1,
+			appReason:      "Error",
+			appSignal:      9,
+			appLogs:        sdkHaltJSON(100, 0),
+			wantAction:     terminalPodRestart,
+		},
+		{
+			name:           "signal-style exit without authoritative log is recreated",
+			cachedHeight:   99,
+			podHaltHeight:  100,
+			evidenceTarget: 100,
+			appExitCode:    143,
+			appReason:      "Error",
+			appLogs:        sdkHaltJSON(99, 0),
 			wantAction:     terminalPodRestart,
 		},
 		{
@@ -136,6 +180,7 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 				Status: appsv1.ChainNodeStatus{LatestHeight: tt.cachedHeight},
 			}
 			pod := terminalEvidencePod(t, tt.podHaltHeight, tt.evidenceTarget, tt.cachedHeight, tt.forced, tt.appExitCode, tt.appReason)
+			pod.Status.ContainerStatuses[0].State.Terminated.Signal = tt.appSignal
 			if tt.conflictingEnv {
 				pod.Spec.InitContainers[0].Env = append(pod.Spec.InitContainers[0].Env,
 					corev1.EnvVar{Name: "HALT_HEIGHT", Value: "101"})
@@ -203,6 +248,57 @@ func TestTerminalPodRecoveryWaitsForCurrentSidecarEvidence(t *testing.T) {
 	pod.Status.InitContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{}
 
 	assert.Equal(t, terminalPodWaitForEvidence, terminalPodRecoveryFor(t.Context(), node, pod, nil))
+}
+
+func TestTerminalPodRecoveryWithoutNodeUtilsEvidenceAcceptsOnlyAuthoritativeSignalHalt(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		exitCode   int32
+		reason     string
+		signal     int32
+		logs       string
+		wantAction terminalPodRecoveryAction
+	}{
+		{
+			name: "signal-style halt", exitCode: 143, reason: "Error",
+			logs: sdkHaltJSON(100, 0), wantAction: terminalPodHold,
+		},
+		{
+			name: "OOM", exitCode: 137, reason: "OOMKilled",
+			logs: sdkHaltJSON(100, 0), wantAction: terminalPodRestart,
+		},
+		{
+			name: "ordinary nonzero halt", exitCode: 1, reason: "Error",
+			logs: sdkHaltJSON(100, 0), wantAction: terminalPodHold,
+		},
+		{
+			name: "ordinary nonzero without authoritative halt", exitCode: 1, reason: "Error",
+			logs: "", wantAction: terminalPodRestart,
+		},
+		{
+			name: "SIGKILL", exitCode: 1, reason: "Error", signal: 9,
+			logs: sdkHaltJSON(100, 0), wantAction: terminalPodRestart,
+		},
+		{
+			name: "signal-style exit without authoritative halt", exitCode: 143, reason: "Error",
+			logs: sdkHaltJSON(99, 0), wantAction: terminalPodRestart,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			haltHeight := int64(100)
+			node := &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{
+				App: appsv1.AppSpec{App: "appd"}, Config: &appsv1.Config{HaltHeight: &haltHeight},
+			}}
+			pod := terminalEvidencePod(t, haltHeight, haltHeight, 99, false, tt.exitCode, tt.reason)
+			pod.Status.ContainerStatuses[0].State.Terminated.Signal = tt.signal
+			reader := func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error) {
+				return []byte(tt.logs), nil
+			}
+
+			assert.Equal(t, tt.wantAction,
+				terminalPodRecoveryWithoutNodeUtilsEvidence(t.Context(), node, pod, reader))
+		})
+	}
 }
 
 func TestTerminalPodRecoveryRetriesLogTransportFailureWithoutDeleting(t *testing.T) {

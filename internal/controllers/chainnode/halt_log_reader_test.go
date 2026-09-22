@@ -75,9 +75,9 @@ func TestEnsurePodDoesNotPatchReplacementBeforeTerminalHaltDelete(t *testing.T) 
 			App:    appsv1.AppSpec{App: "appd", Image: "app:v1"},
 			Config: &appsv1.Config{HaltHeight: &haltHeight},
 		},
-		Status: appsv1.ChainNodeStatus{LatestHeight: 98, Phase: appsv1.PhaseChainNodeRunning},
+		Status: appsv1.ChainNodeStatus{LatestHeight: 97, Phase: appsv1.PhaseChainNodeRunning},
 	}
-	observedPod := terminalEvidencePod(t, 100, 100, 98, false, 0, "Completed")
+	observedPod := terminalEvidencePod(t, 100, 100, 99, false, 0, "Completed")
 	observedPod.Name = chainNode.Name
 	observedPod.Namespace = chainNode.Namespace
 	observedPod.Labels = map[string]string{"identity": "observed"}
@@ -90,6 +90,8 @@ func TestEnsurePodDoesNotPatchReplacementBeforeTerminalHaltDelete(t *testing.T) 
 
 	var patches atomic.Int32
 	var requestedUID types.UID
+	var latestHeightAtDelete int64
+	var cache client.Client
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch req.Method {
 		case http.MethodPatch:
@@ -97,6 +99,9 @@ func TestEnsurePodDoesNotPatchReplacementBeforeTerminalHaltDelete(t *testing.T) 
 			w.Header().Set("Content-Type", "application/json")
 			require.NoError(t, json.NewEncoder(w).Encode(replacementPod))
 		case http.MethodDelete:
+			stored := &appsv1.ChainNode{}
+			require.NoError(t, cache.Get(t.Context(), client.ObjectKeyFromObject(chainNode), stored))
+			latestHeightAtDelete = stored.Status.LatestHeight
 			var options metav1.DeleteOptions
 			require.NoError(t, json.NewDecoder(req.Body).Decode(&options))
 			if options.Preconditions != nil && options.Preconditions.UID != nil {
@@ -116,7 +121,7 @@ func TestEnsurePodDoesNotPatchReplacementBeforeTerminalHaltDelete(t *testing.T) 
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
-	cache := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(chainNode).
+	cache = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(chainNode).
 		WithObjects(chainNode, observedPod, config).Build()
 	r := &Reconciler{
 		Client:    cache,
@@ -132,7 +137,71 @@ func TestEnsurePodDoesNotPatchReplacementBeforeTerminalHaltDelete(t *testing.T) 
 	require.Error(t, err)
 	assert.Zero(t, patches.Load(), "terminal recovery must not patch a same-name replacement")
 	assert.Equal(t, observedPod.UID, requestedUID)
+	assert.Equal(t, int64(99), latestHeightAtDelete)
 	assert.Equal(t, map[string]string{"identity": "replacement"}, replacementPod.Labels)
+}
+
+func TestEnsurePodDoesNotEraseTerminalHaltHeightWithoutPositiveEvidence(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		cachedHeight   int64
+		evidenceHeight *int64
+	}{
+		{name: "missing height", cachedHeight: 97},
+		{name: "zero height", cachedHeight: 97, evidenceHeight: ptr.To[int64](0)},
+		{name: "unchanged height", cachedHeight: 97, evidenceHeight: ptr.To[int64](97)},
+		{name: "older height", cachedHeight: 100, evidenceHeight: ptr.To[int64](99)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var heightAtDelete int64
+			var writesAtDelete []string
+			var tracking *dataHeightResetPersistenceClient
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodDelete {
+					stored := &appsv1.ChainNode{}
+					require.NoError(t, tracking.Get(t.Context(), client.ObjectKey{Name: "node", Namespace: "default"}, stored))
+					heightAtDelete = stored.Status.LatestHeight
+					writesAtDelete = append(writesAtDelete, tracking.writes...)
+					writeChainNodeTestJSON(t, w, http.StatusConflict, &metav1.Status{
+						Status: metav1.StatusFailure, Reason: metav1.StatusReasonConflict,
+						Code: http.StatusConflict, Message: "stop after observing delete",
+					})
+					return
+				}
+				http.NotFound(w, req)
+			}))
+			defer server.Close()
+
+			r, node, _ := terminalHaltEnsurePodFixture(t, server.URL, tt.cachedHeight, tt.evidenceHeight)
+			tracking = &dataHeightResetPersistenceClient{Client: r.Client}
+			r.Client = tracking
+
+			require.Error(t, r.ensurePod(t.Context(), nil, node, "config-hash"))
+			assert.Equal(t, tt.cachedHeight, heightAtDelete)
+			assert.Equal(t, []string{"metadata"}, writesAtDelete)
+		})
+	}
+}
+
+func TestEnsurePodDoesNotDeleteWhenTerminalHaltHeightWriteFails(t *testing.T) {
+	var mutations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodDelete || req.Method == http.MethodPost {
+			mutations.Add(1)
+		}
+		http.NotFound(w, req)
+	}))
+	defer server.Close()
+
+	height := int64(99)
+	r, node, _ := terminalHaltEnsurePodFixture(t, server.URL, 97, &height)
+	tracking := &dataHeightResetPersistenceClient{Client: r.Client, failStatusHeight: &height}
+	r.Client = tracking
+
+	err := r.ensurePod(t.Context(), nil, node, "config-hash")
+	require.ErrorContains(t, err, "status persistence failed")
+	assert.Zero(t, mutations.Load())
+	assert.Equal(t, []string{"metadata", "status"}, tracking.writes)
 }
 
 func TestRecreatePodRejectsReplacementAfterValidatedHaltLogs(t *testing.T) {
@@ -531,6 +600,27 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 			deleteStatus: http.StatusConflict,
 		},
 		{
+			name:         "signal-style configured halt persists hold before delete",
+			haltHeight:   ptr.To[int64](100),
+			appExitCode:  143,
+			appReason:    "Error",
+			appLogs:      sdkHaltJSON(100, 0),
+			wantDelete:   true,
+			wantHold:     "100",
+			wantReader:   true,
+			deleteStatus: http.StatusConflict,
+		},
+		{
+			name:         "signal-style exit without authoritative halt restarts",
+			haltHeight:   ptr.To[int64](100),
+			appExitCode:  143,
+			appReason:    "Error",
+			appLogs:      sdkHaltJSON(99, 0),
+			wantDelete:   true,
+			wantReader:   true,
+			deleteStatus: http.StatusOK,
+		},
+		{
 			name:         "clean non-halt restarts",
 			haltHeight:   ptr.To[int64](100),
 			appLogs:      "2026-09-21T12:00:30Z I[2026-09-21|12:00:30.000] caught signal signal=terminated\n",
@@ -608,6 +698,7 @@ func TestEnsurePodRecoversTerminalAppWhileNodeUtilsIsRunning(t *testing.T) {
 			}
 			require.NoError(t, r.Update(t.Context(), node))
 			require.NoError(t, r.Update(t.Context(), observedPod))
+			require.NoError(t, r.Status().Update(t.Context(), observedPod))
 			var readerCalls atomic.Int32
 			r.terminatedAppLogReader = func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error) {
 				readerCalls.Add(1)
@@ -808,6 +899,53 @@ type fakeTerminalNodeUtilsClient struct {
 	cachedRequiresUpgrade bool
 	upgradeErr            error
 	calls                 []string
+}
+
+func terminalHaltEnsurePodFixture(
+	t *testing.T,
+	apiServer string,
+	cachedHeight int64,
+	evidenceHeight *int64,
+) (*Reconciler, *appsv1.ChainNode, *corev1.Pod) {
+	t.Helper()
+	haltHeight := int64(100)
+	node := &appsv1.ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+		Spec: appsv1.ChainNodeSpec{
+			App:    appsv1.AppSpec{App: "appd", Image: "app", Version: ptr.To("v1")},
+			Config: &appsv1.Config{HaltHeight: &haltHeight},
+		},
+		Status: appsv1.ChainNodeStatus{LatestHeight: cachedHeight, Phase: appsv1.PhaseChainNodeRestarting},
+	}
+	observedPod := terminalEvidencePod(t, haltHeight, haltHeight, 0, false, 0, "Completed")
+	observedPod.Name = node.Name
+	observedPod.Namespace = node.Namespace
+	evidence, ok := nodeUtilsTerminationEvidence(observedPod)
+	require.True(t, ok)
+	evidence.LatestHeight = evidenceHeight
+	body, err := json.Marshal(evidence)
+	require.NoError(t, err)
+	observedPod.Status.InitContainerStatuses[0].State.Terminated.Message = string(body)
+	config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace}}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	cache := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).
+		WithObjects(node, observedPod, config).Build()
+	clientSet, err := kubernetes.NewForConfig(&rest.Config{Host: apiServer})
+	require.NoError(t, err)
+	r := &Reconciler{
+		Client:    cache,
+		ClientSet: clientSet,
+		Scheme:    scheme,
+		recorder:  record.NewFakeRecorder(10),
+		opts:      &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
+		terminatedAppLogReader: func(context.Context, *corev1.Pod, string, appTerminationIdentity) ([]byte, error) {
+			return []byte(sdkHaltJSON(haltHeight, 0)), nil
+		},
+	}
+	return r, node, observedPod
 }
 
 func (c *fakeTerminalNodeUtilsClient) GetLatestHeight(context.Context) (int64, error) {
