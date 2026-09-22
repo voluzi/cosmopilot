@@ -396,7 +396,7 @@ func (r *Reconciler) refreshLatestHeight(ctx context.Context, chainNode *appsv1.
 	}
 
 	// Avoid API call if there is nothing to change
-	if height == chainNode.Status.LatestHeight {
+	if height <= chainNode.Status.LatestHeight {
 		return height, true, nil
 	}
 

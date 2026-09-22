@@ -63,7 +63,7 @@ func TestTerminalPodRecoveryRequiresBoundHaltEvidence(t *testing.T) {
 				},
 				Status: appsv1.ChainNodeStatus{LatestHeight: tt.cachedHeight},
 			}
-			pod := terminalEvidencePod(t, tt.podHaltHeight, tt.evidenceTarget, ptr.Deref(tt.evidenceHeight, 0), tt.forced, tt.appExitCode, tt.appReason)
+			pod := terminalEvidencePod(t, tt.podHaltHeight, tt.evidenceTarget, 0, tt.forced, tt.appExitCode, tt.appReason)
 			evidence, ok := nodeUtilsTerminationEvidence(pod)
 			require.True(t, ok)
 			evidence.LatestHeight = tt.evidenceHeight
@@ -125,6 +125,20 @@ func TestTerminalPodRecoveryUsesOnlyMatchingPendingUpgradeEvidence(t *testing.T)
 			assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(node, pod))
 			node.Status.Upgrades[0].Status = appsv1.UpgradeOnGoing
 			assert.Equal(t, terminalPodUpgrade, terminalPodRecoveryFor(node, pod))
+			node.Status.Upgrades[0].Status = appsv1.UpgradeScheduled
+			if source.node == nodeutils.OnChainUpgrade {
+				evidence.RequiredUpgrade.Source = nodeutils.ManualUpgrade
+			} else {
+				evidence.RequiredUpgrade.Source = nodeutils.OnChainUpgrade
+			}
+			body, err = json.Marshal(evidence)
+			require.NoError(t, err)
+			pod.Status.InitContainerStatuses[0].State.Terminated.Message = string(body)
+			assert.Equal(t, terminalPodRestart, terminalPodRecoveryFor(node, pod))
+			evidence.RequiredUpgrade.Source = source.node
+			body, err = json.Marshal(evidence)
+			require.NoError(t, err)
+			pod.Status.InitContainerStatuses[0].State.Terminated.Message = string(body)
 			node.Status.Upgrades[0].Status = appsv1.UpgradeCompleted
 			assert.Equal(t, terminalPodRestart, terminalPodRecoveryFor(node, pod))
 		})

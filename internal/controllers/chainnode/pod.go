@@ -112,6 +112,10 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	}
 
 	recoveryAction := terminalPodRecoveryFor(chainNode, currentPod)
+	if mustStop, _ := chainNode.MustStop(); mustStop && recoveryAction != terminalPodHold {
+		logger.Info("enforcing existing halt-height hold", "halt-height", chainNode.Spec.Config.GetHaltHeight())
+		return r.recreatePod(ctx, chainNode, currentPod, pod, false)
+	}
 	if err = r.reconcileHaltHeightHoldForAction(ctx, chainNode, recoveryAction); err != nil {
 		return fmt.Errorf("failed to reconcile halt-height hold for %s: %w", chainNode.GetName(), err)
 	}
@@ -136,6 +140,13 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		latestHeight, latestHeightAvailable, heightErr := r.refreshLatestHeight(ctx, chainNode)
 		if heightErr != nil {
 			return fmt.Errorf("failed to update latest height for terminal pod %s: %w", chainNode.GetName(), heightErr)
+		}
+		current, currentErr := r.terminalEvidencePodIsCurrent(ctx, currentPod)
+		if currentErr != nil {
+			return fmt.Errorf("failed to verify terminal pod %s identity: %w", chainNode.GetName(), currentErr)
+		}
+		if !current {
+			return nil
 		}
 		if !requiresUpgrade {
 			recoveryAction = terminalPodRecoveryWithoutNodeUtilsEvidence(
@@ -364,6 +375,20 @@ func (r *Reconciler) podIsAuthoritativelyAbsent(ctx context.Context, observedPod
 		return true, nil
 	}
 	return false, err
+}
+
+func (r *Reconciler) terminalEvidencePodIsCurrent(ctx context.Context, observedPod *corev1.Pod) (bool, error) {
+	if observedPod.UID == "" {
+		return false, nil
+	}
+	currentPod, err := r.ClientSet.CoreV1().Pods(observedPod.Namespace).Get(ctx, observedPod.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return currentPod.UID != "" && currentPod.UID == observedPod.UID && !isPodTerminating(currentPod), nil
 }
 
 // getConfigFilesMounts loads the ConfigMap and returns individual volume mounts for each config file.
