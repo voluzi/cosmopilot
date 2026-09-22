@@ -1,27 +1,61 @@
 package nodeutils
 
 import (
+	"context"
 	"fmt"
-	"syscall"
+	"os"
+	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
-type statfsFunc func(string, *syscall.Statfs_t) error
+func measureDataSize(ctx context.Context, path string) (int64, error) {
+	return measureDataSizeWithProof(ctx, path, dedicatedFilesystemUsedBytes)
+}
 
-func filesystemUsedBytes(path string, statfs statfsFunc) (int64, error) {
-	if statfs == nil {
-		return 0, fmt.Errorf("statfs is not configured")
-	}
+type filesystemProofFunc func(context.Context, string, *os.File) (int64, bool, error)
 
-	var stats syscall.Statfs_t
-	if err := statfs(path, &stats); err != nil {
-		return 0, fmt.Errorf("statfs %q: %w", path, err)
+func measureDataSizeWithProof(ctx context.Context, path string, proof filesystemProofFunc) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
-	return usedBytesFromBlocks(
-		uint64(stats.Blocks),
-		uint64(stats.Bfree),
-		int64(stats.Bsize),
-		filesystemFragmentSize(&stats),
-	)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, fmt.Errorf("stat data root %q: %w", path, err)
+	}
+	if !info.IsDir() {
+		return scanDataSize(ctx, path, defaultScanLimits)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return 0, fmt.Errorf("absolute data path %q: %w", path, err)
+	}
+	canonical, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return 0, fmt.Errorf("resolve data path %q: %w", path, err)
+	}
+	fd, err := unix.Open(canonical, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return 0, fmt.Errorf("open data root %q: %w", canonical, err)
+	}
+	root := os.NewFile(uintptr(fd), canonical)
+	defer root.Close()
+	openedInfo, err := root.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat open data root %q: %w", canonical, err)
+	}
+	if !os.SameFile(info, openedInfo) {
+		return scanDataSize(ctx, path, defaultScanLimits)
+	}
+	if size, qualified, err := proof(ctx, absPath, root); err == nil && qualified && sameDataRoot(path, openedInfo) {
+		return size, nil
+	}
+	return scanDataSize(ctx, path, defaultScanLimits)
+}
+
+func sameDataRoot(path string, openedInfo os.FileInfo) bool {
+	current, err := os.Lstat(path)
+	return err == nil && current.IsDir() && os.SameFile(current, openedInfo)
 }
 
 func usedBytesFromBlocks(blocks, freeBlocks uint64, blockSize, fragmentSize int64) (int64, error) {

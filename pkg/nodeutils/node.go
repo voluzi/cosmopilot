@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"emperror.dev/errors"
@@ -57,8 +56,7 @@ type NodeUtils struct {
 	fineStats              *statscollector.Collector
 	coarseStats            *statscollector.Collector
 	mockStats              *MockStats
-	dataSizeMu             sync.Mutex
-	statfs                 statfsFunc
+	dataSizeSampler        *dataSizeSampler
 	shutdownStarted        atomic.Bool
 	forcedShutdown         atomic.Bool
 	terminationEvidenceMu  sync.Mutex
@@ -82,7 +80,7 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 		signerPeerResolver: net.DefaultResolver,
 		fineStats:          statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
 		coarseStats:        statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
-		statfs:             syscall.Statfs,
+		dataSizeSampler:    newDataSizeSampler(options.DataPath, measureDataSize),
 	}
 	nodeUtils.stopNode = nodeUtils.StopNode
 
@@ -219,6 +217,7 @@ func (s *NodeUtils) Start() error {
 	s.cancel = cancel
 	defer cancel()
 	defer s.client.Close()
+	go s.dataSizeSampler.Run(ctx)
 
 	go func() {
 		if err := s.upgradeChecker.WatchConfigFile(ctx); err != nil {

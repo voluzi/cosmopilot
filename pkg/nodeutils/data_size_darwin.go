@@ -2,8 +2,11 @@
 
 package nodeutils
 
-import "syscall"
+import (
+	"context"
+	"os"
+)
 
-func filesystemFragmentSize(*syscall.Statfs_t) int64 {
-	return 0
+func dedicatedFilesystemUsedBytes(context.Context, string, *os.File) (int64, bool, error) {
+	return 0, false, nil
 }
