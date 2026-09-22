@@ -44,6 +44,7 @@ type NodeUtils struct {
 	fineStats          *statscollector.Collector
 	coarseStats        *statscollector.Collector
 	mockStats          *MockStats
+	dataSizeSampler    *dataSizeSampler
 	forcedShutdown     atomic.Bool
 	terminationMu      sync.Mutex
 	lifecycleMu        sync.Mutex
@@ -68,11 +69,12 @@ func New(nodeBinaryName string, opts ...Option) (*NodeUtils, error) {
 	}
 
 	nodeUtils := &NodeUtils{
-		cfg:            options,
-		router:         mux.NewRouter(),
-		nodeBinaryName: nodeBinaryName,
-		fineStats:      statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
-		coarseStats:    statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
+		cfg:             options,
+		router:          mux.NewRouter(),
+		nodeBinaryName:  nodeBinaryName,
+		fineStats:       statscollector.NewCollector(int(time.Hour / fineStatsCollectorInterval)),
+		coarseStats:     statscollector.NewCollector(int((24 * time.Hour) / coarseStatsCollectorInterval)),
+		dataSizeSampler: newDataSizeSampler(options.DataPath, measureDataSize),
 	}
 
 	uc, err := NewUpgradeChecker(options.UpgradesConfig)
@@ -139,6 +141,7 @@ func (s *NodeUtils) Start() error {
 	s.cancel = cancel
 	s.shutdownHTTPServer = shutdownHTTPServer
 	s.lifecycleMu.Unlock()
+	go s.dataSizeSampler.Run(ctx)
 
 	go func() {
 		if err := s.upgradeChecker.WatchConfigFile(ctx); err != nil {
