@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"path"
 	"path/filepath"
@@ -112,7 +111,7 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		return r.ensureMissingPod(ctx, chainNode, pod)
 	}
 
-	recoveryAction := r.terminalPodRecoveryFor(ctx, chainNode, currentPod)
+	recoveryAction := terminalPodRecoveryFor(chainNode, currentPod)
 	if err = r.reconcileHaltHeightHoldForAction(ctx, chainNode, recoveryAction); err != nil {
 		return fmt.Errorf("failed to reconcile halt-height hold for %s: %w", chainNode.GetName(), err)
 	}
@@ -134,11 +133,14 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 		if err != nil {
 			return fmt.Errorf("failed to check if terminal pod %s requires upgrade: %w", chainNode.GetName(), err)
 		}
-		if err = r.updateLatestHeight(ctx, chainNode); err != nil {
-			return fmt.Errorf("failed to update latest height for terminal pod %s: %w", chainNode.GetName(), err)
+		latestHeight, latestHeightAvailable, heightErr := r.refreshLatestHeight(ctx, chainNode)
+		if heightErr != nil {
+			return fmt.Errorf("failed to update latest height for terminal pod %s: %w", chainNode.GetName(), heightErr)
 		}
 		if !requiresUpgrade {
-			recoveryAction = r.terminalPodRecoveryWithoutNodeUtilsEvidence(ctx, chainNode, currentPod)
+			recoveryAction = terminalPodRecoveryWithoutNodeUtilsEvidence(
+				chainNode, currentPod, latestHeight, latestHeightAvailable,
+			)
 			if err = r.reconcileHaltHeightHoldForAction(ctx, chainNode, recoveryAction); err != nil {
 				return fmt.Errorf("failed to reconcile halt-height hold for %s: %w", chainNode.GetName(), err)
 			}
@@ -149,16 +151,12 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 			case terminalPodRestart:
 				logger.Info("recreating terminal pod without valid halt or upgrade evidence", "pod", pod.GetName())
 				return r.recreatePod(ctx, chainNode, currentPod, pod, false)
-			case terminalPodRetry:
-				logger.V(1).Info("retrying terminal pod recovery after log verification failed", "pod", pod.GetName())
+			case terminalPodNotTerminated:
 				return nil
 			default:
 				return fmt.Errorf("unexpected terminal recovery action %d for %s", recoveryAction, currentPod.GetName())
 			}
 		}
-	case terminalPodRetry:
-		logger.V(1).Info("retrying terminal pod recovery after log verification failed", "pod", pod.GetName())
-		return nil
 	case terminalPodUpgrade:
 		evidence, ok := nodeUtilsTerminationEvidence(currentPod)
 		if !ok || evidence.RequiredUpgrade == nil {
@@ -1347,13 +1345,12 @@ type terminalPodRecoveryAction uint8
 const (
 	terminalPodNotTerminated terminalPodRecoveryAction = iota
 	terminalPodWaitForEvidence
-	terminalPodRetry
 	terminalPodRestart
 	terminalPodUpgrade
 	terminalPodHold
 )
 
-func terminalPodRecoveryFor(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod, readLogs terminatedAppLogReader) terminalPodRecoveryAction {
+func terminalPodRecoveryFor(chainNode *appsv1.ChainNode, pod *corev1.Pod) terminalPodRecoveryAction {
 	if pod == nil || isPodTerminating(pod) {
 		return terminalPodNotTerminated
 	}
@@ -1375,40 +1372,19 @@ func terminalPodRecoveryFor(ctx context.Context, chainNode *appsv1.ChainNode, po
 		return terminalPodRestart
 	}
 	if ok && validHaltEvidence(chainNode, pod, evidence) {
-		if readLogs == nil {
-			return terminalPodRestart
-		}
-		identity, identityOK := currentAppTerminationIdentity(pod, chainNode.Spec.App.App)
-		if !identityOK {
-			return terminalPodRestart
-		}
-		logs, err := readLogs(ctx, pod, chainNode.Spec.App.App, identity)
-		if err != nil {
-			return terminalPodRetry
-		}
-		if hasAuthoritativeHaltLog(logs, *chainNode.Spec.Config.HaltHeight, identity.StartedAt.Time, identity.FinishedAt.Time) {
-			return terminalPodHold
-		}
+		return terminalPodHold
 	}
 	return terminalPodRestart
 }
 
-func (r *Reconciler) terminalPodRecoveryFor(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) terminalPodRecoveryAction {
-	readLogs := r.terminatedAppLogReader
-	if readLogs == nil {
-		readLogs = r.readTerminatedAppLogs
-	}
-	return terminalPodRecoveryFor(ctx, chainNode, pod, readLogs)
-}
-
 func terminalPodRecoveryWithoutNodeUtilsEvidence(
-	ctx context.Context,
 	chainNode *appsv1.ChainNode,
 	pod *corev1.Pod,
-	readLogs terminatedAppLogReader,
+	latestHeight int64,
+	latestHeightAvailable bool,
 ) terminalPodRecoveryAction {
 	if pod == nil || isPodTerminating(pod) {
-		return terminalPodRetry
+		return terminalPodNotTerminated
 	}
 	terminated, ok := appTermination(pod, chainNode.Spec.App.App)
 	if !ok || !validHaltTermination(terminated) {
@@ -1418,94 +1394,10 @@ func terminalPodRecoveryWithoutNodeUtilsEvidence(
 	if !ok {
 		return terminalPodRestart
 	}
-	identity, ok := currentAppTerminationIdentity(pod, chainNode.Spec.App.App)
-	if !ok {
-		return terminalPodRestart
-	}
-	if readLogs == nil {
-		return terminalPodRetry
-	}
-	logs, err := readLogs(ctx, pod, chainNode.Spec.App.App, identity)
-	if err != nil {
-		return terminalPodRetry
-	}
-	if hasAuthoritativeHaltLog(logs, haltHeight, identity.StartedAt.Time, identity.FinishedAt.Time) {
+	if latestHeightAvailable && atHaltBoundary(latestHeight, haltHeight) {
 		return terminalPodHold
 	}
 	return terminalPodRestart
-}
-
-func (r *Reconciler) terminalPodRecoveryWithoutNodeUtilsEvidence(
-	ctx context.Context,
-	chainNode *appsv1.ChainNode,
-	pod *corev1.Pod,
-) terminalPodRecoveryAction {
-	readLogs := r.terminatedAppLogReader
-	if readLogs == nil {
-		readLogs = r.readTerminatedAppLogs
-	}
-	return terminalPodRecoveryWithoutNodeUtilsEvidence(ctx, chainNode, pod, readLogs)
-}
-
-type appTerminationIdentity struct {
-	PodUID      types.UID
-	ContainerID string
-	StartedAt   metav1.Time
-	FinishedAt  metav1.Time
-}
-
-func currentAppTerminationIdentity(pod *corev1.Pod, container string) (appTerminationIdentity, bool) {
-	terminated, ok := appTermination(pod, container)
-	if !ok || pod.UID == "" || terminated.ContainerID == "" || terminated.StartedAt.IsZero() ||
-		terminated.FinishedAt.IsZero() || terminated.FinishedAt.Before(&terminated.StartedAt) {
-		return appTerminationIdentity{}, false
-	}
-	return appTerminationIdentity{
-		PodUID:      pod.UID,
-		ContainerID: terminated.ContainerID,
-		StartedAt:   terminated.StartedAt,
-		FinishedAt:  terminated.FinishedAt,
-	}, true
-}
-
-func sameAppTerminationIdentity(expected appTerminationIdentity, pod *corev1.Pod, container string) bool {
-	actual, ok := currentAppTerminationIdentity(pod, container)
-	return ok && actual.PodUID == expected.PodUID && actual.ContainerID == expected.ContainerID &&
-		actual.StartedAt.Equal(&expected.StartedAt) && actual.FinishedAt.Equal(&expected.FinishedAt)
-}
-
-func (r *Reconciler) readTerminatedAppLogs(ctx context.Context, pod *corev1.Pod, container string, identity appTerminationIdentity) ([]byte, error) {
-	tailLines := int64(200)
-	limitBytes := int64(appTerminationLogMaxBytes + 1)
-	logsCtx, cancel := context.WithTimeout(ctx, appTerminationLogTimeout)
-	defer cancel()
-	req := r.ClientSet.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
-		Container:  container,
-		Previous:   false,
-		Timestamps: true,
-		TailLines:  &tailLines,
-		LimitBytes: &limitBytes,
-	})
-	stream, err := req.Stream(logsCtx)
-	if err != nil {
-		return nil, err
-	}
-	body, readErr := io.ReadAll(io.LimitReader(stream, limitBytes+1))
-	closeErr := stream.Close()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	current, err := r.ClientSet.CoreV1().Pods(pod.Namespace).Get(logsCtx, pod.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	if !sameAppTerminationIdentity(identity, current, container) {
-		return nil, fmt.Errorf("terminated app identity changed while reading logs")
-	}
-	return body, nil
 }
 
 func appTermination(pod *corev1.Pod, name string) (*corev1.ContainerStateTerminated, bool) {
@@ -1561,8 +1453,15 @@ func validHaltEvidence(chainNode *appsv1.ChainNode, pod *corev1.Pod, evidence no
 	if !ok || evidence.HaltHeight != haltHeight {
 		return false
 	}
+	if evidence.LatestHeight == nil || !atHaltBoundary(*evidence.LatestHeight, haltHeight) {
+		return false
+	}
 	terminated, ok := appTermination(pod, chainNode.Spec.App.App)
 	return ok && validHaltTermination(terminated) && !isPodTerminating(pod)
+}
+
+func atHaltBoundary(latestHeight, haltHeight int64) bool {
+	return latestHeight == haltHeight || latestHeight == haltHeight-1
 }
 
 func (r *Reconciler) persistTerminalHaltLatestHeight(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {
@@ -1629,7 +1528,7 @@ func matchingPendingUpgrade(chainNode *appsv1.ChainNode, required *nodeutils.Req
 }
 
 func (r *Reconciler) reconcileHaltHeightHold(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {
-	return r.reconcileHaltHeightHoldForAction(ctx, chainNode, r.terminalPodRecoveryFor(ctx, chainNode, pod))
+	return r.reconcileHaltHeightHoldForAction(ctx, chainNode, terminalPodRecoveryFor(chainNode, pod))
 }
 
 func shouldMigrateLegacyHaltHeightHold(chainNode *appsv1.ChainNode) bool {
