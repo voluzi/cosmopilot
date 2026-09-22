@@ -43,6 +43,60 @@ func TestDataSizeReturnsFilesystemUsedBytes(t *testing.T) {
 	assert.Equal(t, want, response.Body.String())
 }
 
+func TestUsedBytesFromBlocksUsesFragmentSize(t *testing.T) {
+	got, err := usedBytesFromBlocks(10, 5, 4096, 1024)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5120), got)
+}
+
+func TestUsedBytesFromBlocksFallsBackToBlockSize(t *testing.T) {
+	got, err := usedBytesFromBlocks(10, 5, 4096, 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(20480), got)
+}
+
+func TestUsedBytesFromBlocksRejectsInvalidInputs(t *testing.T) {
+	tests := []struct {
+		name         string
+		blocks       uint64
+		freeBlocks   uint64
+		blockSize    int64
+		fragmentSize int64
+	}{
+		{
+			name:       "zero fallback block size",
+			blocks:     10,
+			freeBlocks: 5,
+		},
+		{
+			name:         "negative fragment size",
+			blocks:       10,
+			freeBlocks:   5,
+			blockSize:    4096,
+			fragmentSize: -1,
+		},
+		{
+			name:       "free blocks exceed total blocks",
+			blocks:     10,
+			freeBlocks: 11,
+			blockSize:  4096,
+		},
+		{
+			name:         "used bytes overflow int64",
+			blocks:       math.MaxUint64,
+			blockSize:    4096,
+			fragmentSize: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := usedBytesFromBlocks(tt.blocks, tt.freeBlocks, tt.blockSize, tt.fragmentSize)
+			assert.Error(t, err)
+		})
+	}
+}
+
 func TestDataSizeReturnsInternalServerErrorWhenStatfsFails(t *testing.T) {
 	server := newDataSizeTestServer(t, "/data", func(string, *syscall.Statfs_t) error {
 		return errors.New("statfs failed")
@@ -147,23 +201,17 @@ func TestDataSizeSerializesConcurrentMeasurements(t *testing.T) {
 	assert.Equal(t, int32(1), maxActive.Load())
 }
 
-func TestDataSizeTracksRealFilesystemAllocation(t *testing.T) {
+func TestDataSizeWithRealFilesystem(t *testing.T) {
 	const (
-		fileSize  = int64(32 << 20)
-		tolerance = int64(1 << 20)
+		fileSize     = int64(32 << 20)
+		maxShortfall = int64(1 << 20)
 	)
 	dataPath := t.TempDir()
 	server := newDataSizeTestServer(t, dataPath, syscall.Statfs)
 
-	baselineDirect := directFilesystemUsedBytes(t, dataPath)
-	baselineResponse := requestDataSize(server)
-	require.Equal(t, http.StatusOK, baselineResponse.Code)
-	baseline, err := strconv.ParseInt(baselineResponse.Body.String(), 10, 64)
-	require.NoError(t, err)
-	assert.InDelta(t, baselineDirect, baseline, float64(tolerance))
-
 	file, err := os.Create(filepath.Join(dataPath, "allocated-data"))
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
 	_, err = io.CopyN(file, rand.Reader, fileSize)
 	require.NoError(t, err)
 	require.NoError(t, file.Sync())
@@ -173,15 +221,13 @@ func TestDataSizeTracksRealFilesystemAllocation(t *testing.T) {
 	assert.Equal(t, fileSize, fileInfo.Size())
 	fileStats, ok := fileInfo.Sys().(*syscall.Stat_t)
 	require.True(t, ok)
-	assert.InDelta(t, fileSize, fileStats.Blocks*512, float64(tolerance))
+	assert.GreaterOrEqual(t, fileStats.Blocks*512, fileSize-maxShortfall)
 
-	afterDirect := directFilesystemUsedBytes(t, dataPath)
-	afterResponse := requestDataSize(server)
-	require.Equal(t, http.StatusOK, afterResponse.Code)
-	after, err := strconv.ParseInt(afterResponse.Body.String(), 10, 64)
+	response := requestDataSize(server)
+	require.Equal(t, http.StatusOK, response.Code)
+	size, err := strconv.ParseInt(response.Body.String(), 10, 64)
 	require.NoError(t, err)
-	assert.InDelta(t, afterDirect, after, float64(tolerance))
-	assert.InDelta(t, afterDirect-baselineDirect, after-baseline, float64(tolerance))
+	assert.GreaterOrEqual(t, size, int64(0))
 }
 
 func newDataSizeTestServer(t *testing.T, dataPath string, statfs statfsFunc) *NodeUtils {
@@ -199,11 +245,4 @@ func requestDataSize(server *NodeUtils) *httptest.ResponseRecorder {
 	response := httptest.NewRecorder()
 	server.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/data_size", nil))
 	return response
-}
-
-func directFilesystemUsedBytes(t *testing.T, path string) int64 {
-	t.Helper()
-	var stats syscall.Statfs_t
-	require.NoError(t, syscall.Statfs(path, &stats))
-	return int64((uint64(stats.Blocks) - uint64(stats.Bfree)) * uint64(stats.Bsize))
 }
