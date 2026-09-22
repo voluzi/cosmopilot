@@ -20,8 +20,10 @@ func TestDataSizeMountIntegration(t *testing.T) {
 	if path == "" {
 		t.Skip("requires disposable Linux mount fixtures")
 	}
-	wantFast, err := strconv.ParseBool(os.Getenv("COSMOPILOT_DATA_SIZE_TEST_FAST"))
-	require.NoError(t, err)
+	fastValue := os.Getenv("COSMOPILOT_DATA_SIZE_TEST_FAST")
+	require.NotEmpty(t, fastValue, "COSMOPILOT_DATA_SIZE_TEST_FAST is required when COSMOPILOT_DATA_SIZE_TEST_PATH is set")
+	wantFast, err := strconv.ParseBool(fastValue)
+	require.NoError(t, err, "COSMOPILOT_DATA_SIZE_TEST_FAST must be a valid boolean")
 	root, err := os.Open(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, root.Close()) })
