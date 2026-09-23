@@ -1360,7 +1360,7 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 	logger.V(1).Info("deleting pod", "pod", currentPod.GetName())
 	deletePod := currentPod.DeepCopy()
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, deletePod)
-	if err := ph.Delete(ctx); err != nil {
+	if err := ph.DeleteWithUIDPrecondition(ctx); err != nil {
 		return fmt.Errorf("failed to delete pod %s for recreation: %w", currentPod.GetName(), err)
 	}
 

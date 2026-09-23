@@ -46,6 +46,15 @@ func (p *PodHelper) Delete(ctx context.Context) error {
 	return p.client.CoreV1().Pods(p.pod.GetNamespace()).Delete(ctx, p.pod.GetName(), metav1.DeleteOptions{})
 }
 
+func (p *PodHelper) DeleteWithUIDPrecondition(ctx context.Context) error {
+	uid := p.pod.UID
+	if uid == "" {
+		return fmt.Errorf("cannot delete pod %s/%s without UID", p.pod.Namespace, p.pod.Name)
+	}
+	return p.client.CoreV1().Pods(p.pod.Namespace).Delete(ctx, p.pod.Name,
+		metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+}
+
 func (p *PodHelper) WaitForPodRunning(ctx context.Context, timeout time.Duration) error {
 	return p.WaitForPodPhase(ctx, timeout, corev1.PodRunning)
 }

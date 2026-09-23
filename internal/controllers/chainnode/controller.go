@@ -10,6 +10,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -434,7 +435,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	if signingConfigPending {
 		logger.Info("waiting for signing configuration transition before updating config")
-		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
+		return normalRequeueResult(chainNode), nil
 	}
 
 	// Create/update configmap with config files
@@ -478,7 +479,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err = r.finalizeCosmoGuard(ctx, chainNode, false); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
+		return normalRequeueResult(chainNode), nil
 	}
 
 	logger.V(1).Info("ensure routing")
@@ -538,7 +539,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if dashboardRoutesPending {
 		return ctrl.Result{RequeueAfter: dashboardRouteCheckPeriod}, nil
 	}
-	return ctrl.Result{RequeueAfter: chainNode.GetReconcilePeriod()}, nil
+	return normalRequeueResult(chainNode), nil
+}
+
+func normalRequeueResult(chainNode *appsv1.ChainNode) ctrl.Result {
+	period := chainNode.GetReconcilePeriod()
+	// Status-only updates are filtered, so a deferred replacement needs a bounded poll.
+	if apiMeta.IsStatusConditionTrue(chainNode.Status.Conditions, appsv1.ConditionPodRecreationDeferred) &&
+		(period <= 0 || period > 15*time.Second) {
+		period = 15 * time.Second
+	}
+	return ctrl.Result{RequeueAfter: period}
 }
 
 func (r *Reconciler) validateNodeUtilsRunIdentity(chainNode *appsv1.ChainNode) error {

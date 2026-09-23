@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -198,6 +200,52 @@ func TestRecreatePodDefersWithoutChangingPhase(t *testing.T) {
 			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(target), stored))
 		})
 	}
+}
+
+func TestRecreatePodDeleteRejectsReplacedUID(t *testing.T) {
+	scheme := nodeUtilsAuthTestScheme(t)
+	node := nodeUtilsAuthTestNode()
+	node.Status.ChainID = "chain"
+	node.Status.Phase = appsv1.PhaseChainNodeRunning
+	oldPod := disruptionTestPod(node.Namespace, node.Name, true)
+	oldPod.UID = types.UID("old-uid")
+	oldPod.Labels[controllers.LabelChainID] = "chain"
+	backing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, oldPod).WithStatusSubresource(node).Build()
+	var replacedPodDeleted bool
+	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid", ContentConfig: rest.ContentConfig{ContentType: "application/json"}},
+		&http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			status := http.StatusInternalServerError
+			body := `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"unexpected request","code":500}`
+			if req.Method == http.MethodDelete {
+				var options metav1.DeleteOptions
+				payload, err := io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+				if err := json.Unmarshal(payload, &options); err != nil {
+					return nil, err
+				}
+				if options.Preconditions != nil && options.Preconditions.UID != nil && *options.Preconditions.UID != types.UID("replacement-uid") {
+					status = http.StatusConflict
+					body = `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"UID precondition failed","reason":"Conflict","code":409}`
+				} else {
+					replacedPodDeleted = true
+					status = http.StatusOK
+					body = `{"kind":"Status","apiVersion":"v1","status":"Success"}`
+				}
+			} else if req.Method == http.MethodGet && replacedPodDeleted {
+				status = http.StatusNotFound
+				body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
+			}
+			return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(body))}, nil
+		})})
+	require.NoError(t, err)
+	r := &Reconciler{Client: backing, APIReader: backing, ClientSet: clientSet, recorder: record.NewFakeRecorder(10),
+		opts: &controllers.ControllerRunOptions{DisruptionMaxUnavailable: 1}, disruptionLocks: newLockManager()}
+	err = r.recreatePod(t.Context(), node, oldPod, oldPod.DeepCopy(), true)
+	require.True(t, apierrors.IsConflict(err), "expected a retryable UID precondition conflict, got %v", err)
+	require.False(t, replacedPodDeleted, "replacement Pod must survive an old UID deletion attempt")
 }
 
 func TestPodRecreationDeferredTransitionsAndPreservesConditions(t *testing.T) {
