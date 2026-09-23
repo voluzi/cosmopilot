@@ -61,7 +61,7 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 	var parts []string
 	report := func(names []string, format string) {
 		if len(names) > 0 {
-			parts = append(parts, fmt.Sprintf(format, strings.Join(names, ", ")))
+			parts = append(parts, fmt.Sprintf(format, joinNames(names)))
 		}
 	}
 	report(missing, "CosmoGuard %s is enabled without a config ConfigMap and is not reconciled; public API traffic may not be filtered")
@@ -84,6 +84,17 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 	}
 	condition.Message = strings.Join(parts, "; ")
 	return condition
+}
+
+// maxListedNames bounds how many guards or routes one message lists, keeping large ChainNodeSets well
+// under the 32768-character limit on condition messages.
+const maxListedNames = 10
+
+func joinNames(names []string) string {
+	if len(names) <= maxListedNames {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:maxListedNames], ", "), len(names)-maxListedNames)
 }
 
 // UpdateCosmoGuardCondition sets conditions to desired (removing the condition when desired is nil). It

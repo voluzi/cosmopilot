@@ -441,7 +441,12 @@ func (r *Reconciler) guardGatewayRoutesProgrammed(ctx context.Context, chainNode
 	}
 
 	httpRoutes := &gwapiv1.HTTPRouteList{}
-	if err := r.List(ctx, httpRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+	if err := r.List(ctx, httpRoutes, client.InNamespace(chainNode.GetNamespace())); err != nil {
+		// Without the CRDs there are no routes to wait for; any other error leaves the status unknown.
+		if !controllers.IsCRDNotInstalled(err) {
+			return false
+		}
+	} else {
 		for i := range httpRoutes.Items {
 			rt := &httpRoutes.Items[i]
 			if !metav1.IsControlledBy(rt, chainNode) || rt.Name == dashboard || rt.Name == dashboard+"-http-redirect" {
@@ -459,7 +464,11 @@ func (r *Reconciler) guardGatewayRoutesProgrammed(ctx context.Context, chainNode
 		}
 	}
 	grpcRoutes := &gwapiv1.GRPCRouteList{}
-	if err := r.List(ctx, grpcRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+	if err := r.List(ctx, grpcRoutes, client.InNamespace(chainNode.GetNamespace())); err != nil {
+		if !controllers.IsCRDNotInstalled(err) {
+			return false
+		}
+	} else {
 		for i := range grpcRoutes.Items {
 			rt := &grpcRoutes.Items[i]
 			if !metav1.IsControlledBy(rt, chainNode) {

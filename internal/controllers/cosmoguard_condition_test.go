@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -127,4 +128,14 @@ func TestUpdateCosmoGuardConditionEventsOnlyOnTransitions(t *testing.T) {
 			require.Equal(t, step.desired.Message, current.Message, step.name)
 		}
 	}
+}
+
+func TestCosmoGuardConditionBoundsListedNames(t *testing.T) {
+	var guards []GuardState
+	for i := 0; i < 500; i++ {
+		guards = append(guards, GuardState{Name: fmt.Sprintf("%0200d", i), Route: true})
+	}
+	got := CosmoGuardCondition(guards, 1)
+	require.Contains(t, got.Message, "and 490 more")
+	require.Less(t, len(got.Message), 32768, "a condition message must fit the CRD limit")
 }

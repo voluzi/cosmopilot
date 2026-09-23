@@ -495,7 +495,7 @@ func guardConditionAfterReconcile(t *testing.T, r *Reconciler, nodeSet *appsv1.C
 	require.NoError(t, err)
 	routes, err := r.ensureServices(ctx, nodeSet, guards)
 	require.NoError(t, err)
-	require.NoError(t, r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routes...)))
+	require.NoError(t, r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routes.forCondition(true)...)))
 	return meta.FindStatusCondition(nodeSet.Status.Conditions, appsv1.ConditionCosmoGuardReady)
 }
 
@@ -625,4 +625,22 @@ func TestSwitchedGlobalRouteStaysReadyDuringGuardScaleOut(t *testing.T) {
 	cond := guardConditionAfterReconcile(t, r, nodeSet)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+}
+
+// TestGatewayRoutesNotAppliedAreReportedNotSwitched verifies gateway routes are not reported as guarded
+// when the Gateway API routes could not be applied: traffic may still use a preserved legacy Ingress.
+func TestGatewayRoutesNotAppliedAreReportedNotSwitched(t *testing.T) {
+	routes := routeGuardStates{
+		ingress: []controllers.GuardState{{Name: "ingress", Route: true, Serving: true, Routed: true}},
+		gateway: []controllers.GuardState{
+			{Name: "gateway", Route: true, Serving: true, Routed: true},
+			{Name: "mixed", Route: true, Bypassed: true},
+		},
+	}
+	assert.Equal(t, append(routes.ingress, routes.gateway...), routes.forCondition(true))
+	assert.Equal(t, []controllers.GuardState{
+		{Name: "ingress", Route: true, Serving: true, Routed: true},
+		{Name: "gateway", Route: true},
+		{Name: "mixed", Route: true, Bypassed: true},
+	}, routes.forCondition(false))
 }

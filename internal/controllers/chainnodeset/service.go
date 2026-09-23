@@ -202,12 +202,32 @@ func sortedKeys(set map[string]struct{}) []string {
 	return out
 }
 
+// routeGuardStates is the guard state of each global route Service, for the CosmoGuardReady condition.
+type routeGuardStates struct {
+	ingress []controllers.GuardState
+	gateway []controllers.GuardState
+}
+
+// forCondition returns the route states to report. When the Gateway API routes could not be applied,
+// the gateway routes are reported as not switched: traffic may still flow through a preserved legacy
+// Ingress, whose backend this reconcile does not control.
+func (s routeGuardStates) forCondition(gatewayApplied bool) []controllers.GuardState {
+	states := append([]controllers.GuardState(nil), s.ingress...)
+	for _, state := range s.gateway {
+		if !gatewayApplied && !state.Bypassed {
+			state.Serving, state.Routed = false, false
+		}
+		states = append(states, state)
+	}
+	return states
+}
+
 // ensureServices reconciles the group and global Services. It returns the guard state of each global
-// route Service that CosmoGuard can front, for the CosmoGuardReady condition: those flip on a stricter
-// rollout gate than the group Services, so a serving group guard does not mean its routes are guarded.
-func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guards cosmoGuardReconcile) ([]controllers.GuardState, error) {
+// route Service that CosmoGuard can front: those flip on a stricter rollout gate than the group
+// Services, so a serving group guard does not mean its routes are guarded.
+func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guards cosmoGuardReconcile) (routeGuardStates, error) {
 	logger := log.FromContext(ctx)
-	var routeStates []controllers.GuardState
+	var routes routeGuardStates
 
 	expectedGroup := map[string]bool{}
 	expectedGlobal := map[string]bool{}
@@ -228,11 +248,11 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	// present) OR keep an already-flipped route flipped through subsequent rolls (sticky).
 	// Routes served through the "-internal" Services bypass CosmoGuard by configuration, so they are not
 	// reported.
-	routeFlip := func(groups []string, serviceName string, useInternal bool) bool {
+	routeFlip := func(routeStates *[]controllers.GuardState, groups []string, serviceName string, useInternal bool) bool {
 		if !cosmoGuardRouteGuardable(nodeSet, groups) {
 			// A route over a guarded group that also spans an unguarded one selects raw pods forever.
 			if !useInternal && routeSpansGuardedGroup(nodeSet, groups) {
-				routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Route: true, Bypassed: true})
+				*routeStates = append(*routeStates, controllers.GuardState{Name: serviceName, Route: true, Bypassed: true})
 			}
 			return false
 		}
@@ -245,7 +265,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 			if routed {
 				serving = cosmoGuardRouteReady(nodeSet, groups, guards.serving)
 			}
-			routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Route: true, Serving: serving, Routed: routed})
+			*routeStates = append(*routeStates, controllers.GuardState{Name: serviceName, Route: true, Serving: serving, Routed: routed})
 		}
 		return rolledOut || routed
 	}
@@ -253,56 +273,56 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	for _, group := range nodeSet.Spec.Nodes {
 		svc, err := r.getServiceSpec(nodeSet, group, guards.ready[group.Name])
 		if err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 		if err = ensure(svc, scopeGroup); err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 
 		svc, err = r.getInternalServiceSpec(nodeSet, group)
 		if err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 		if err = ensure(svc, scopeGroup); err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 	}
 
 	for _, ingress := range nodeSet.Spec.Ingresses {
-		svc, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(ingress.Groups, ingress.GetName(nodeSet), ingress.UseInternal()))
+		svc, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(&routes.ingress, ingress.Groups, ingress.GetName(nodeSet), ingress.UseInternal()))
 		if err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 		if err = ensure(svc, scopeGlobal); err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 
 		svc, err = r.getGlobalInternalServiceSpec(nodeSet, ingress)
 		if err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 		if err = ensure(svc, scopeGlobal); err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 	}
 
 	for _, gw := range nodeSet.Spec.GatewayRoutes {
 		// The gateway's global Service is "<set>-global-<name>" (gw.GetName is the "-gw" route name,
 		// NOT the Service), so the sticky check must look up the actual Service.
-		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name), gw.UseInternal()))
+		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(&routes.gateway, gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name), gw.UseInternal()))
 		if err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 		if err = ensure(svc, scopeGlobal); err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 
 		svc, err = r.getGlobalGatewayInternalServiceSpec(nodeSet, gw)
 		if err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 		if err = ensure(svc, scopeGlobal); err != nil {
-			return nil, err
+			return routeGuardStates{}, err
 		}
 	}
 
@@ -311,7 +331,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	// deprecated group-level UseInternalServices option.
 	groupServices, err := r.listChainNodeSetServices(ctx, nodeSet, controllers.LabelScope, scopeGroup)
 	if err != nil {
-		return nil, err
+		return routeGuardStates{}, err
 	}
 
 	for _, svc := range groupServices.Items {
@@ -320,7 +340,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if groupGone || !expectedGroup[svc.GetName()] {
 			deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
 			if err != nil {
-				return nil, err
+				return routeGuardStates{}, err
 			}
 			if deleted {
 				logger.Info("deleted service", "svc", svc.GetName())
@@ -330,7 +350,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 
 	globalServices, err := r.listChainNodeSetServices(ctx, nodeSet, controllers.LabelScope, scopeGlobal)
 	if err != nil {
-		return nil, err
+		return routeGuardStates{}, err
 	}
 
 	for _, svc := range globalServices.Items {
@@ -341,7 +361,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if ownerGone || !expectedGlobal[svc.GetName()] {
 			deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
 			if err != nil {
-				return nil, err
+				return routeGuardStates{}, err
 			}
 			if deleted {
 				logger.Info("deleted service", "svc", svc.GetName())
@@ -349,7 +369,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		}
 	}
 
-	return routeStates, nil
+	return routes, nil
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {

@@ -420,7 +420,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Reported once every route is reconciled, so the condition describes the routes as they are.
-	if err := r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routeGuards...)); err != nil {
+	if err := r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routeGuards.forCondition(gatewayApplied)...)); err != nil {
 		return ctrl.Result{}, err
 	}
 

@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -890,4 +891,27 @@ func TestGatewayRouteOnGuardIsNotReadyUntilProgrammed(t *testing.T) {
 	require.NoError(t, r.Update(ctx, route))
 	cond = reconcileGuardAndReport(t, r, cn)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+}
+
+type routeListErrorClient struct {
+	client.Client
+}
+
+func (c routeListErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*gwapiv1.HTTPRouteList); ok {
+		return fmt.Errorf("apiserver unavailable")
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestGatewayRouteStatusUnknownIsNotReady verifies an error listing the node's routes, other than the
+// Gateway API CRDs being absent, is not taken as "no route to wait for".
+func TestGatewayRouteStatusUnknownIsNotReady(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Gateway = &appsv1.GatewayConfig{Host: "example.com"}
+	r := cosmoGuardTestReconciler(t, cn)
+	assert.True(t, r.guardGatewayRoutesProgrammed(context.Background(), cn), "no routes, nothing to wait for")
+
+	r.Client = routeListErrorClient{Client: r.Client}
+	assert.False(t, r.guardGatewayRoutesProgrammed(context.Background(), cn))
 }
