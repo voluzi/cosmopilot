@@ -81,7 +81,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 				logger.Info("gateway api crds not installed, preserving existing P2P service")
 				return r.clearPublicAddressIfSet(ctx, chainNode)
 			}
-			if err := r.Delete(ctx, p2p); err != nil && !errors.IsNotFound(err) {
+			if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p.DeepCopy(), chainNode); err != nil {
 				return fmt.Errorf("failed to delete stale P2P service %s: %w", p2p.GetName(), err)
 			}
 
@@ -212,11 +212,11 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 		}
 	} else {
 		// Delete the P2P service and TCPRoute if they exist
-		if err := r.Delete(ctx, p2p); err != nil {
-			if !errors.IsNotFound(err) {
-				return fmt.Errorf("failed to delete P2P service %s: %w", p2p.GetName(), err)
-			}
-		} else {
+		deleted, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p.DeepCopy(), chainNode)
+		if err != nil {
+			return fmt.Errorf("failed to delete P2P service %s: %w", p2p.GetName(), err)
+		}
+		if deleted {
 			logger.Info("deleted service", "svc", p2p.GetName())
 		}
 		if err := r.cleanupTCPRoute(ctx, chainNode); err != nil {
@@ -285,7 +285,7 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 		}
 		return fmt.Errorf("failed to get service %s: %w", svc.GetName(), err)
 	}
-	if err := requireSameControllerOwner(currentSvc, svc, "Service"); err != nil {
+	if err := controllers.RequireSameController(currentSvc, svc, "Service"); err != nil {
 		return err
 	}
 

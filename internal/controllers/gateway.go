@@ -166,6 +166,10 @@ func EnsureHTTPRoute(ctx context.Context, c client.Client, route *gwapiv1.HTTPRo
 		return false, err
 	}
 
+	if err := RequireSameController(current, route, "HTTPRoute"); err != nil {
+		return false, err
+	}
+
 	patchResult, err := patch.DefaultPatchMaker.Calculate(current, route)
 	if err != nil {
 		return false, err
@@ -218,6 +222,10 @@ func EnsureGRPCRoute(ctx context.Context, c client.Client, route *gwapiv1.GRPCRo
 		return false, err
 	}
 
+	if err := RequireSameController(current, route, "GRPCRoute"); err != nil {
+		return false, err
+	}
+
 	patchResult, err := patch.DefaultPatchMaker.Calculate(current, route)
 	if err != nil {
 		return false, err
@@ -267,6 +275,10 @@ func EnsureTCPRoute(ctx context.Context, c client.Client, route *gwapiv1a2.TCPRo
 			}
 			return true, nil
 		}
+		return false, err
+	}
+
+	if err := RequireSameController(current, route, "TCPRoute"); err != nil {
 		return false, err
 	}
 

@@ -312,7 +312,7 @@ func (r *Reconciler) ensureConfigMap(ctx context.Context, cm *corev1.ConfigMap) 
 		}
 		return fmt.Errorf("failed to get configmap %s: %w", cm.GetName(), err)
 	}
-	if err := requireSameControllerOwner(currentCm, cm, "ConfigMap"); err != nil {
+	if err := controllers.RequireSameController(currentCm, cm, "ConfigMap"); err != nil {
 		return err
 	}
 

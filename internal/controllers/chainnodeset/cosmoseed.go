@@ -100,12 +100,12 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 			return err
 		}
 		// Clean up any lingering HTTPRoute from a previous Gateway config
-		if err = r.Delete(ctx, &gwapiv1.HTTPRoute{
+		if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1.HTTPRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      seedRouteName,
 				Namespace: nodeSet.GetNamespace(),
 			},
-		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+		}, nodeSet); err != nil {
 			return err
 		}
 	} else if nodeSet.Spec.Cosmoseed.Gateway != nil {
@@ -120,31 +120,18 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 		// Only clean up the legacy Ingress if the HTTPRoute was actually applied,
 		// otherwise (Gateway API CRDs missing) we would lose seed HTTP exposure.
 		if applied {
-			if err = r.Delete(ctx, &netv1.Ingress{
+			if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &netv1.Ingress{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      seedRouteName,
 					Namespace: nodeSet.GetNamespace(),
 				},
-			}); err != nil && !errors.IsNotFound(err) {
+			}, nodeSet); err != nil {
 				return err
 			}
 		}
 	} else {
 		// Neither ingress nor gateway configured — clean up both
-		if err := r.Delete(ctx, &netv1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      seedRouteName,
-				Namespace: nodeSet.GetNamespace(),
-			},
-		}); err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-		if err := r.Delete(ctx, &gwapiv1.HTTPRoute{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      seedRouteName,
-				Namespace: nodeSet.GetNamespace(),
-			},
-		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+		if err := r.deleteOwnedSeedRoutes(ctx, nodeSet); err != nil {
 			return err
 		}
 	}
@@ -185,6 +172,20 @@ func (r *Reconciler) retireLegacyCosmoseedStatefulSetBeforeScaleUp(
 	return true, nil
 }
 
+// deleteOwnedSeedRoutes removes the seed Ingress and HTTPRoute when this ChainNodeSet controls them.
+func (r *Reconciler) deleteOwnedSeedRoutes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {
+	name := fmt.Sprintf("%s-seed", nodeSet.GetName())
+	if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, &netv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nodeSet.GetNamespace()},
+	}, nodeSet); err != nil {
+		return err
+	}
+	_, err := controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nodeSet.GetNamespace()},
+	}, nodeSet)
+	return err
+}
+
 func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {
 	// Cleanup statefulset
 	logger := log.FromContext(ctx)
@@ -193,32 +194,17 @@ func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.Chai
 	}
 
 	// Cleanup statefulset
-	if err := r.Delete(ctx, &appsv1.StatefulSet{
+	if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-seed", nodeSet.GetName()),
 			Namespace: nodeSet.GetNamespace(),
 		},
-	}); err != nil && !errors.IsNotFound(err) {
+	}, nodeSet); err != nil {
 		return err
 	}
 
-	// Cleanup ingress
-	if err := r.Delete(ctx, &netv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-seed", nodeSet.GetName()),
-			Namespace: nodeSet.GetNamespace(),
-		},
-	}); err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
-	// Cleanup httproute
-	if err := r.Delete(ctx, &gwapiv1.HTTPRoute{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-seed", nodeSet.GetName()),
-			Namespace: nodeSet.GetNamespace(),
-		},
-	}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+	// Cleanup ingress and httproute
+	if err := r.deleteOwnedSeedRoutes(ctx, nodeSet); err != nil {
 		return err
 	}
 
@@ -233,7 +219,7 @@ func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.Chai
 		}
 	} else {
 		for _, route := range tcpRouteList.Items {
-			if err := r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+			if _, err := controllers.DeleteControlledObject(ctx, r.Client, &route, nodeSet); err != nil {
 				return err
 			}
 		}
@@ -248,9 +234,12 @@ func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.Chai
 		return err
 	}
 	for _, svc := range svcList.Items {
-		logger.Info("deleting stale service", "name", svc.Name)
-		if err := r.Delete(ctx, &svc); err != nil {
+		deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
+		if err != nil {
 			return err
+		}
+		if deleted {
+			logger.Info("deleted stale service", "name", svc.Name)
 		}
 	}
 
@@ -631,7 +620,7 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 				if err != nil {
 					return nil, err
 				}
-				if err = r.Delete(ctx, staleSvc); err != nil && !errors.IsNotFound(err) {
+				if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, staleSvc, nodeSet); err != nil {
 					return nil, err
 				}
 
@@ -654,12 +643,12 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 				}
 			} else {
 				// LoadBalancer/NodePort mode: delete any stale TCPRoute
-				if err = r.Delete(ctx, &gwapiv1a2.TCPRoute{
+				if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1a2.TCPRoute{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      fmt.Sprintf("%s-seed-%d-p2p", nodeSet.GetName(), i),
 						Namespace: nodeSet.GetNamespace(),
 					},
-				}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+				}, nodeSet); err != nil {
 					return nil, err
 				}
 
@@ -691,9 +680,12 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 
 	for _, svc := range svcList.Items {
 		if !expected[svc.Name] {
-			log.FromContext(ctx).Info("deleting stale service", "name", svc.Name)
-			if err := r.Delete(ctx, &svc); err != nil {
+			deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
+			if err != nil {
 				return nil, err
+			}
+			if deleted {
+				log.FromContext(ctx).Info("deleted stale service", "name", svc.Name)
 			}
 		}
 	}
@@ -710,9 +702,12 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 	} else {
 		for _, route := range tcpRouteList.Items {
 			if !expectedTCPRoutes[route.Name] {
-				log.FromContext(ctx).Info("deleting stale tcproute", "name", route.Name)
-				if err := r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+				deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &route, nodeSet)
+				if err != nil {
 					return nil, err
+				}
+				if deleted {
+					log.FromContext(ctx).Info("deleted stale tcproute", "name", route.Name)
 				}
 			}
 		}

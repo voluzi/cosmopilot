@@ -298,9 +298,12 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		groupName, hasGroup := svc.Labels[controllers.LabelChainNodeSetGroup]
 		groupGone := !hasGroup || !ContainsGroup(nodeSet.Spec.Nodes, groupName)
 		if groupGone || !expectedGroup[svc.GetName()] {
-			logger.Info("deleting service", "svc", svc.GetName())
-			if err = r.Delete(ctx, &svc); err != nil {
+			deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
+			if err != nil {
 				return err
+			}
+			if deleted {
+				logger.Info("deleted service", "svc", svc.GetName())
 			}
 		}
 	}
@@ -316,9 +319,12 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		ownerGone := !ContainsGlobalIngress(nodeSet.Spec.Ingresses, ingressName, false) &&
 			!ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, gatewayName)
 		if ownerGone || !expectedGlobal[svc.GetName()] {
-			logger.Info("deleting service", "svc", svc.GetName())
-			if err = r.Delete(ctx, &svc); err != nil {
+			deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
+			if err != nil {
 				return err
+			}
+			if deleted {
+				logger.Info("deleted service", "svc", svc.GetName())
 			}
 		}
 	}
@@ -743,6 +749,7 @@ func (r *Reconciler) listChainNodeSetServices(ctx context.Context, nodeSet *apps
 
 	serviceList := &corev1.ServiceList{}
 	return serviceList, r.List(ctx, serviceList, &client.ListOptions{
+		Namespace:     nodeSet.GetNamespace(),
 		LabelSelector: labels.SelectorFromSet(selectorMap),
 	})
 }

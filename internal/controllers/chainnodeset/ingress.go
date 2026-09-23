@@ -39,12 +39,12 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 			}
 
 			if !globalIngress.EnableGRPC {
-				if err = r.Delete(ctx, &v1.Ingress{
+				if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &v1.Ingress{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      globalIngress.GetGrpcName(nodeSet),
 						Namespace: nodeSet.Namespace,
 					},
-				}); err != nil && !errors.IsNotFound(err) {
+				}, nodeSet); err != nil {
 					return err
 				}
 			} else {
@@ -74,9 +74,12 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 			logger.Info("preserving ingress; replacement gateway route not applied", "ingress", ing.GetName())
 			continue
 		}
-		logger.Info("deleting ingress", "ingress", ing.GetName())
-		if err = r.Delete(ctx, &ing); err != nil {
+		deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &ing, nodeSet)
+		if err != nil {
 			return err
+		}
+		if deleted {
+			logger.Info("deleted ingress", "ingress", ing.GetName())
 		}
 	}
 
@@ -87,9 +90,12 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 		return err
 	}
 	for _, ing := range groupIngresses.Items {
-		logger.Info("deleting legacy group ingress", "ingress", ing.GetName())
-		if err = r.Delete(ctx, &ing); err != nil {
+		deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &ing, nodeSet)
+		if err != nil {
 			return err
+		}
+		if deleted {
+			logger.Info("deleted legacy group ingress", "ingress", ing.GetName())
 		}
 	}
 
@@ -106,6 +112,9 @@ func (r *Reconciler) ensureIngress(ctx context.Context, ingress *v1.Ingress) err
 			logger.Info("creating ingress", "ingress", ingress.GetName())
 			return r.Create(ctx, ingress)
 		}
+		return err
+	}
+	if err := controllers.RequireSameController(currentIg, ingress, "Ingress"); err != nil {
 		return err
 	}
 
@@ -338,6 +347,7 @@ func (r *Reconciler) listChainNodeSetIngresses(ctx context.Context, nodeSet *app
 
 	ingressList := &v1.IngressList{}
 	return ingressList, r.List(ctx, ingressList, &client.ListOptions{
+		Namespace:     nodeSet.GetNamespace(),
 		LabelSelector: labels.SelectorFromSet(selectorMap),
 	})
 }
