@@ -427,15 +427,20 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 		}
 	}
 
-	serving, err := cosmoguard.IsServing(ctx, r.Client, chainNode.GetNamespace(), chainNode.CosmoGuardName())
-	if err != nil {
-		return false, err
+	// Routes through the "-internal" Services bypass the guard by configuration, so they are not reported.
+	var guards []controllers.GuardState
+	if !chainNode.UseInternal() {
+		serving, err := cosmoguard.IsServing(ctx, r.Client, chainNode.GetNamespace(), chainNode.CosmoGuardName())
+		if err != nil {
+			return false, err
+		}
+		guards = []controllers.GuardState{{
+			Name:    chainNode.CosmoGuardName(),
+			Serving: serving,
+			Routed:  r.standaloneRouteTargetsGuard(ctx, chainNode),
+		}}
 	}
-	if err := r.updateCosmoGuardCondition(ctx, chainNode, []controllers.GuardState{{
-		Name:    chainNode.CosmoGuardName(),
-		Serving: serving,
-		Routed:  r.standaloneRouteTargetsGuard(ctx, chainNode),
-	}}); err != nil {
+	if err := r.updateCosmoGuardCondition(ctx, chainNode, guards); err != nil {
 		return false, err
 	}
 

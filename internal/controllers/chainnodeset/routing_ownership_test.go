@@ -102,7 +102,8 @@ func TestServiceCleanupOnlyDeletesOwnedServices(t *testing.T) {
 	twinGroup := createControlled(t, r, &corev1.Service{ObjectMeta: routingObjectMeta("other", "ns-gone", group)}, twin)
 	twinGlobal := createControlled(t, r, &corev1.Service{ObjectMeta: routingObjectMeta("other", "ns-global-gone", global)}, twin)
 
-	require.NoError(t, r.ensureServices(context.Background(), owner, cosmoGuardReconcile{}))
+	_, err := r.ensureServices(context.Background(), owner, cosmoGuardReconcile{})
+	require.NoError(t, err)
 	requireDeleted(t, r, ownedGroup)
 	requireDeleted(t, r, ownedGlobal)
 	requireKept(t, r, foreignSvc)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -482,4 +483,81 @@ func TestGroupGuardWithoutConfigIsReported(t *testing.T) {
 	guards, err := r.ensureCosmoGuards(context.Background(), nodeSet)
 	require.NoError(t, err)
 	require.Equal(t, []controllers.GuardState{{Name: groupCosmoGuardName(nodeSet, group), ConfigMissing: true}}, guards.states)
+}
+
+// guardConditionAfterReconcile runs the guard and Service reconciliation and returns the resulting
+// CosmoGuardReady condition, as the controller does.
+func guardConditionAfterReconcile(t *testing.T, r *Reconciler, nodeSet *appsv1.ChainNodeSet) *metav1.Condition {
+	t.Helper()
+	ctx := context.Background()
+	guards, err := r.ensureCosmoGuards(ctx, nodeSet)
+	require.NoError(t, err)
+	routes, err := r.ensureServices(ctx, nodeSet, guards)
+	require.NoError(t, err)
+	require.NoError(t, r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routes...)))
+	return meta.FindStatusCondition(nodeSet.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+}
+
+// TestGlobalRouteNotFilteredWhileGuardPartlyRolledOut verifies a global route is reported as not
+// filtered while the group guard serves on some replicas only: the group Service flips on the first
+// ready replica, but a global route Service flips only once every replica is up.
+func TestGlobalRouteNotFilteredWhileGuardPartlyRolledOut(t *testing.T) {
+	ctx := context.Background()
+	nodeSet, group := guardedNodeSet()
+	group.Config.CosmoGuard.Replicas = ptr.To[int32](2)
+	nodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{group}
+	nodeSet.Spec.Ingresses = []appsv1.GlobalIngressConfig{{Name: "public", Groups: []string{group.Name}}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	_, err := r.ensureCosmoGuards(ctx, nodeSet)
+	require.NoError(t, err)
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: groupCosmoGuardName(nodeSet, group)}, sts))
+	sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: sts.Generation, Replicas: 2, ReadyReplicas: 1, UpdatedReplicas: 2}
+	require.NoError(t, r.Status().Update(ctx, sts))
+
+	cond := guardConditionAfterReconcile(t, r, nodeSet)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	route := nodeSet.Spec.Ingresses[0].GetName(nodeSet)
+	assert.Contains(t, cond.Message, route+" is not serving yet")
+	assert.Contains(t, cond.Message, "not filtered")
+	assert.NotContains(t, cond.Message, groupCosmoGuardName(nodeSet, group)+" is not serving",
+		"the group guard itself is serving")
+
+	sts.Status.ReadyReplicas = 2
+	require.NoError(t, r.Status().Update(ctx, sts))
+	cond = guardConditionAfterReconcile(t, r, nodeSet)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+}
+
+// TestGroupGuardDownAfterFlipKeepsRoutesOnGuard verifies a group guard that stops serving after its
+// Service has flipped is reported as keeping traffic on the guard rather than unfiltered.
+func TestGroupGuardDownAfterFlipKeepsRoutesOnGuard(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	r := newValidatorTestReconciler(t, nodeSet)
+	flipped := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: group.GetServiceName(nodeSet), Namespace: "ns"},
+		Spec:       corev1.ServiceSpec{Selector: cosmoGuardGroupSelector(nodeSet, group)},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, flipped, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), flipped))
+
+	cond := guardConditionAfterReconcile(t, r, nodeSet)
+	require.NotNil(t, cond)
+	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
+	assert.Contains(t, cond.Message, "stay on the guard")
+	assert.NotContains(t, cond.Message, "not filtered")
+}
+
+// TestGlobalRouteThroughInternalServicesIsNotReported verifies a route that bypasses CosmoGuard by
+// configuration (useInternalServices) is not reported as a guarded route.
+func TestGlobalRouteThroughInternalServicesIsNotReported(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	nodeSet.Spec.Ingresses = []appsv1.GlobalIngressConfig{{Name: "public", Groups: []string{group.Name}, UseInternalServices: ptr.To(true)}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	cond := guardConditionAfterReconcile(t, r, nodeSet)
+	require.NotNil(t, cond)
+	assert.NotContains(t, cond.Message, nodeSet.Spec.Ingresses[0].GetName(nodeSet))
 }

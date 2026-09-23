@@ -36,12 +36,12 @@ Cosmopilot keeps public API routes (Ingress, Gateway routes and the group/global
 
 The consequence is that **until the guard serves for the first time, public API traffic reaches the node directly and is not filtered** by your rules. That also applies to a node that is created with CosmoGuard enabled, and for as long as the guard cannot start (for example a missing rules `ConfigMap`, an image pull failure or a crash loop). Once routes have switched to the guard they stay there, so a later guard outage makes the endpoints unavailable rather than unfiltered.
 
-Cosmopilot reports this state through the `CosmoGuardReady` condition on the `ChainNode` (standalone guards) or the `ChainNodeSet` (group guards), and records an event on every transition:
+Cosmopilot reports this state through the `CosmoGuardReady` condition: on the `ChainNode` for a standalone node, or for a `ChainNodeSet` child with its own individual ingress/gateway (which gets its own guard), and on the `ChainNodeSet` for group guards and the global ingress/gateway routes in front of them. A global route switches to the guard only once every guard replica is up, so it can stay unfiltered for a while after the group guard starts serving; the condition lists it separately. Cosmopilot records a Warning event when the condition turns `False` for a new reason and a Normal event when it recovers:
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `CosmoGuardServing` | Every guard is serving and public API routes go through it. |
-| `False` | `CosmoGuardNotServing` | A guard is not serving. The message says whether routes still reach the node directly (not filtered) or already stay on the guard. |
+| `False` | `CosmoGuardNotServing` | A guard, or a global route in front of it, is not serving. The message names each one and says whether its routes still reach the node directly (not filtered) or already stay on the guard. |
 | `False` | `CosmoGuardConfigMissing` | CosmoGuard is enabled without a rules `ConfigMap`, so no guard is deployed and traffic is not filtered. |
 
 ```bash
@@ -49,6 +49,12 @@ kubectl get chainnodeset <name> -o jsonpath='{.status.conditions[?(@.type=="Cosm
 ```
 
 If you need the rules enforced from the very first request, wait for `CosmoGuardReady=True` before exposing the endpoints publicly.
+
+Routes configured with `useInternalServices: true` bypass CosmoGuard by design and are not covered by the condition.
+
+:::note
+`.status.conditions` on `ChainNodeSet` is new. Helm does not upgrade CRDs, so apply the CRDs of the target release before upgrading the operator; otherwise the API server drops the condition and the operator rewrites it, with a Warning event, on every reconcile.
+:::
 
 ## Why Use CosmoGuard?
 

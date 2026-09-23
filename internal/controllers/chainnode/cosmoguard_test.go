@@ -13,7 +13,6 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -721,7 +720,7 @@ func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 	r := cosmoGuardTestReconciler(t, cn)
 
 	require.NoError(t, ensureGuard(r, ctx, cn))
-	cond := apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	cond := meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
@@ -738,7 +737,7 @@ func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 	sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: sts.Generation, ReadyReplicas: 1}
 	require.NoError(t, r.Status().Update(ctx, sts))
 	require.NoError(t, ensureGuard(r, ctx, cn))
-	cond = apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	cond = meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	events = drainEvents(r)
@@ -747,13 +746,13 @@ func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(cn), stored))
-	require.NotNil(t, apimeta.FindStatusCondition(stored.Status.Conditions, appsv1.ConditionCosmoGuardReady),
+	require.NotNil(t, meta.FindStatusCondition(stored.Status.Conditions, appsv1.ConditionCosmoGuardReady),
 		"the condition is persisted in status")
 
 	cn.Spec.Config.CosmoGuard.Enable = false
 	require.NoError(t, r.Update(ctx, cn))
 	require.NoError(t, ensureGuard(r, ctx, cn))
-	assert.Nil(t, apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady))
+	assert.Nil(t, meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady))
 }
 
 // TestStandaloneGuardWithoutConfigReportsConfigMissing verifies a guard enabled without a rules
@@ -764,10 +763,36 @@ func TestStandaloneGuardWithoutConfigReportsConfigMissing(t *testing.T) {
 	r := cosmoGuardTestReconciler(t, cn)
 
 	require.NoError(t, ensureGuard(r, context.Background(), cn))
-	cond := apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	cond := meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
 	require.NotNil(t, cond)
 	assert.Equal(t, appsv1.ReasonCosmoGuardConfigMissing, cond.Reason)
 	events := drainEvents(r)
 	require.Len(t, events, 1)
 	assert.Contains(t, events[0], "Warning "+appsv1.ReasonCosmoGuardConfigMissing)
+}
+
+// TestStandaloneGuardDownAfterFlipKeepsRoutesOnGuard verifies a guard that stops serving after the
+// node's routes moved to it is reported as keeping traffic on the guard rather than unfiltered.
+func TestStandaloneGuardDownAfterFlipKeepsRoutesOnGuard(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "example.com"}
+	r := cosmoGuardTestReconciler(t, cn, guardIngress("node-0", "node-0-cg"))
+
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
+	cond := meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
+	assert.Contains(t, cond.Message, "stay on the guard")
+	assert.NotContains(t, cond.Message, "not filtered")
+}
+
+// TestStandaloneGuardBypassedByInternalServicesIsNotReported verifies routes configured to use the
+// "-internal" Services, which bypass the guard by design, do not report guard readiness.
+func TestStandaloneGuardBypassedByInternalServicesIsNotReported(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "example.com", UseInternalServices: ptr.To(true)}
+	r := cosmoGuardTestReconciler(t, cn)
+
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
+	assert.Nil(t, meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady))
 }

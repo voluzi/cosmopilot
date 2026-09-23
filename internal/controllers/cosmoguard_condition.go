@@ -13,11 +13,11 @@ import (
 
 // GuardState is the observed state of one CosmoGuard deployment fronting public API routes.
 type GuardState struct {
-	// Name identifies the guard in messages: its deployment name, or the group it fronts.
+	// Name identifies the guard, or the route Service it fronts, in messages.
 	Name string
 	// ConfigMissing is true when the guard is enabled without a config ConfigMap and so was not deployed.
 	ConfigMissing bool
-	// Serving is true when the guard has ready replicas for its current generation.
+	// Serving is true when the guard is ready to take the traffic (for a route Service, its flip gate).
 	Serving bool
 	// Routed is true when the public routes already point at the guard (they stay there once flipped).
 	Routed bool

@@ -397,10 +397,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureServices(ctx, nodeSet, guards); err != nil {
+	routeGuards, err := r.ensureServices(ctx, nodeSet, guards)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.updateCosmoGuardCondition(ctx, nodeSet, guards.states); err != nil {
+	if err := r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routeGuards...)); err != nil {
 		return ctrl.Result{}, err
 	}
 
