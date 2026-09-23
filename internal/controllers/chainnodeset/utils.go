@@ -177,6 +177,9 @@ func (r *Reconciler) ensureStatefulSet(ctx context.Context, ss *appsv1.StatefulS
 		}
 		return err
 	}
+	if err := controllers.RequireSameController(currentStatefulset, ss, "StatefulSet"); err != nil {
+		return err
+	}
 
 	ss.Spec.VolumeClaimTemplates = currentStatefulset.Spec.VolumeClaimTemplates
 	patchResult, err := patch.DefaultPatchMaker.Calculate(currentStatefulset, ss, patch.IgnoreStatusFields())

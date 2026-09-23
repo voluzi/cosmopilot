@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,12 +67,12 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 			}
 			desiredGRPCRouteNames[grpcRoute.Name] = true
 		} else {
-			if err = r.Delete(ctx, &gwapiv1.GRPCRoute{
+			if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1.GRPCRoute{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      grpcRouteName,
 					Namespace: nodeSet.GetNamespace(),
 				},
-			}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+			}, nodeSet); err != nil {
 				return false, err
 			}
 		}
@@ -92,7 +91,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 		}
 		if !desiredHTTPRouteNames[route.Name] {
 			logger.Info("deleting stale httproute", "httproute", route.GetName())
-			if err = r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+			if _, err = controllers.DeleteControlledObject(ctx, r.Client, &route, nodeSet); err != nil {
 				return false, err
 			}
 		}
@@ -104,7 +103,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, nodeSet *appsv1.Ch
 		}
 		if !desiredGRPCRouteNames[route.Name] {
 			logger.Info("deleting stale grpcroute", "grpcroute", route.GetName())
-			if err = r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+			if _, err = controllers.DeleteControlledObject(ctx, r.Client, &route, nodeSet); err != nil {
 				return false, err
 			}
 		}

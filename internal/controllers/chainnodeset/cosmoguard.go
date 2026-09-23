@@ -484,7 +484,7 @@ func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv
 			continue
 		}
 		logger.Info("deleting stale cosmoguard dashboard ingress", "name", in.GetName())
-		if err := client.IgnoreNotFound(r.Delete(ctx, in)); err != nil {
+		if _, err := controllers.DeleteControlledObject(ctx, r.Client, in, nodeSet); err != nil {
 			return err
 		}
 	}
@@ -501,7 +501,7 @@ func (r *Reconciler) cleanupStaleCosmoGuards(ctx context.Context, nodeSet *appsv
 				continue
 			}
 			logger.Info("deleting stale cosmoguard dashboard httproute", "name", route.GetName())
-			if err := r.Delete(ctx, route); err != nil && !apierrors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+			if _, err := controllers.DeleteControlledObject(ctx, r.Client, route, nodeSet); err != nil {
 				return err
 			}
 		}

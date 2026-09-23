@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	v1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,12 +63,12 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 			routesApplied = false
 		}
 	} else {
-		if err = r.Delete(ctx, &gwapiv1.GRPCRoute{
+		if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1.GRPCRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      grpcRouteName,
 				Namespace: chainNode.GetNamespace(),
 			},
-		}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+		}, chainNode); err != nil {
 			return err
 		}
 	}
@@ -82,7 +80,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 	}
 	for _, route := range existingRoutes {
 		if !desiredNames[route.Name] {
-			if err = r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+			if _, err = controllers.DeleteControlledObject(ctx, r.Client, &route, chainNode); err != nil {
 				return err
 			}
 		}
@@ -94,24 +92,7 @@ func (r *Reconciler) ensureGatewayRoutes(ctx context.Context, chainNode *appsv1.
 	if !routesApplied {
 		return nil
 	}
-	if err = r.Delete(ctx, &v1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      chainNode.GetName(),
-			Namespace: chainNode.GetNamespace(),
-		},
-	}); err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	if err = r.Delete(ctx, &v1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-grpc", chainNode.GetName()),
-			Namespace: chainNode.GetNamespace(),
-		},
-	}); err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
-	return nil
+	return r.deleteOwnedIngresses(ctx, chainNode)
 }
 
 // getHTTPRouteSpecs returns one HTTPRoute per enabled HTTP endpoint (each has its own backend port).
@@ -242,16 +223,13 @@ func (r *Reconciler) listChainNodeHTTPRoutes(ctx context.Context, chainNode *app
 }
 
 func (r *Reconciler) cleanupTCPRoute(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	err := r.Delete(ctx, &gwapiv1a2.TCPRoute{
+	_, err := controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1a2.TCPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-p2p", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),
 		},
-	})
-	if err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
-		return err
-	}
-	return nil
+	}, chainNode)
+	return err
 }
 
 func (r *Reconciler) cleanupGatewayRoutes(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -260,19 +238,16 @@ func (r *Reconciler) cleanupGatewayRoutes(ctx context.Context, chainNode *appsv1
 		return err
 	}
 	for _, route := range routes {
-		if err = r.Delete(ctx, &route); err != nil && !errors.IsNotFound(err) {
+		if _, err = controllers.DeleteControlledObject(ctx, r.Client, &route, chainNode); err != nil {
 			return err
 		}
 	}
 
-	if err = r.Delete(ctx, &gwapiv1.GRPCRoute{
+	_, err = controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-grpc", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),
 		},
-	}); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
-		return err
-	}
-
-	return nil
+	}, chainNode)
+	return err
 }

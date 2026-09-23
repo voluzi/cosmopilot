@@ -948,7 +948,7 @@ func TestEnsureServiceRefusesForeignOwner(t *testing.T) {
 
 	err = r.ensureService(context.Background(), desired)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "managed by another owner")
+	assert.Contains(t, err.Error(), "is unowned; refusing to adopt it")
 }
 
 // TestValidateForReconcileHonorsExistingStatus verifies the controller's no-webhook validation

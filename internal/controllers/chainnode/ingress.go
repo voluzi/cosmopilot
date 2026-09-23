@@ -20,53 +20,50 @@ import (
 
 func (r *Reconciler) ensureIngresses(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	if chainNode.Spec.Ingress == nil {
-		// let's try to delete ingresses if they exist
-		if err := r.Delete(ctx, &v1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      chainNode.GetName(),
-				Namespace: chainNode.GetNamespace(),
-			},
-		}); err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-		if err := r.Delete(ctx, &v1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-grpc", chainNode.GetName()),
-				Namespace: chainNode.GetNamespace(),
-			},
-		}); err != nil && !errors.IsNotFound(err) {
+		// Remove only the Ingresses this ChainNode owns.
+		return r.deleteOwnedIngresses(ctx, chainNode)
+	}
+
+	// Resolve the API backend once (readiness-gated for a standalone/individual guard) so all
+	// ingress rules point at the same Service and stay on the raw node until the guard is serving.
+	apiSvcName := r.apiServiceName(ctx, chainNode)
+
+	ingress, err := r.getIngressSpec(chainNode, apiSvcName)
+	if err != nil {
+		return err
+	}
+
+	if err = r.ensureIngress(ctx, ingress); err != nil {
+		return err
+	}
+
+	grpcIngress, err := r.getGrpcIngressSpec(chainNode, apiSvcName)
+	if err != nil {
+		return err
+	}
+
+	if !chainNode.Spec.Ingress.EnableGRPC {
+		if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, grpcIngress, chainNode); err != nil {
 			return err
 		}
 	} else {
-		// Resolve the API backend once (readiness-gated for a standalone/individual guard) so all
-		// ingress rules point at the same Service and stay on the raw node until the guard is serving.
-		apiSvcName := r.apiServiceName(ctx, chainNode)
-
-		ingress, err := r.getIngressSpec(chainNode, apiSvcName)
-		if err != nil {
+		if err = r.ensureIngress(ctx, grpcIngress); err != nil {
 			return err
-		}
-
-		if err = r.ensureIngress(ctx, ingress); err != nil {
-			return err
-		}
-
-		grpcIngress, err := r.getGrpcIngressSpec(chainNode, apiSvcName)
-		if err != nil {
-			return err
-		}
-
-		if !chainNode.Spec.Ingress.EnableGRPC {
-			if err = r.Delete(ctx, grpcIngress); err != nil && !errors.IsNotFound(err) {
-				return err
-			}
-		} else {
-			if err = r.ensureIngress(ctx, grpcIngress); err != nil {
-				return err
-			}
 		}
 	}
 
+	return nil
+}
+
+// deleteOwnedIngresses removes the API and gRPC Ingresses of this ChainNode, leaving same-name
+// Ingresses that belong to someone else in place.
+func (r *Reconciler) deleteOwnedIngresses(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	for _, name := range []string{chainNode.GetName(), fmt.Sprintf("%s-grpc", chainNode.GetName())} {
+		ingress := &v1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: chainNode.GetNamespace()}}
+		if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, ingress, chainNode); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -80,6 +77,9 @@ func (r *Reconciler) ensureIngress(ctx context.Context, ingress *v1.Ingress) err
 			logger.Info("creating ingress", "ingress", ingress.GetName())
 			return r.Create(ctx, ingress)
 		}
+		return err
+	}
+	if err := controllers.RequireSameController(currentIg, ingress, "Ingress"); err != nil {
 		return err
 	}
 
