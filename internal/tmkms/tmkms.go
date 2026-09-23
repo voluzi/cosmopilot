@@ -84,8 +84,9 @@ func (kms *KMS) deleteConfigMap(ctx context.Context) error {
 	if err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !metav1.IsControlledBy(cm, kms.Owner) {
-		return nil
+	owned, err := kms.controlledByOwnerOrPredecessor(cm)
+	if err != nil || !owned {
+		return err
 	}
 	return ignoreGoneOrReplaced(cms.Delete(ctx, kms.Name, deleteExactly(cm.GetUID())))
 }
@@ -134,7 +135,7 @@ func (kms *KMS) ensureIdentityKey(ctx context.Context) error {
 			return err
 		}
 		if !owned {
-			return notOwnedError("Secret", kms.Name)
+			return kms.notClaimedError("Secret", ClassIdentity)
 		}
 		if _, ok := secret.Data[identityKeyName]; !ok {
 			return fmt.Errorf("tmKMS Secret %q has no %s key", kms.Name, identityKeyName)
@@ -266,15 +267,28 @@ func (kms *KMS) ensureConfigMap(ctx context.Context) error {
 		return err
 	}
 
-	cm, err := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Get(ctx, kms.Name, metav1.GetOptions{})
+	cms := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace())
+	cm, err := cms.Get(ctx, kms.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			_, err = kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Create(ctx, spec, metav1.CreateOptions{})
+			_, err = cms.Create(ctx, spec, metav1.CreateOptions{})
 		}
 		return err
 	}
 	if !metav1.IsControlledBy(cm, kms.Owner) {
-		return notOwnedError("ConfigMap", kms.Name)
+		predecessor, err := kms.controlledByOwnerOrPredecessor(cm)
+		if err != nil {
+			return err
+		}
+		if !predecessor {
+			return notOwnedError("ConfigMap", kms.Name)
+		}
+		// Left by a deleted owner of the same name and still waiting for garbage collection.
+		if err := ignoreGoneOrReplaced(cms.Delete(ctx, kms.Name, deleteExactly(cm.GetUID()))); err != nil {
+			return err
+		}
+		_, err = cms.Create(ctx, spec, metav1.CreateOptions{})
+		return err
 	}
 
 	// Update when config changes
@@ -322,7 +336,7 @@ func (kms *KMS) ensurePVC(ctx context.Context) error {
 		return err
 	}
 	if !owned {
-		return notOwnedError("PersistentVolumeClaim", kms.Name)
+		return kms.notClaimedError("PersistentVolumeClaim", ClassState)
 	}
 	if kms.stamp(pvc, ClassState) {
 		_, err = pvcs.Update(ctx, pvc, metav1.UpdateOptions{})

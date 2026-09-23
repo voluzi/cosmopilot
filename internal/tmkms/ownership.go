@@ -9,12 +9,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 )
 
 // Resource classes for the durable objects this package generates. They are attribution only: no
-// deletion policy finalizes them, so the identity Secret and the signing state PVC keep outliving the
-// ChainNode exactly as they did before they were stamped.
+// deletion policy processes them and they carry no owner references, so the identity Secret and the
+// signing state PVC outlive the ChainNode.
 const (
 	ClassIdentity = "tmkmsIdentity"
 	ClassState    = "tmkmsState"
@@ -28,6 +30,8 @@ type Attribution interface {
 	// Attributed reports whether object carries any attribution, and whether that attribution names
 	// this root (by identity, so a recreated root with a new UID still matches) and class.
 	Attributed(object metav1.Object, class string) (stamped, owned bool)
+	// Describe tells an operator how to attribute an existing object to the root for class by hand.
+	Describe(class string) string
 }
 
 // claims reports whether an existing identity Secret or state PVC belongs to this KMS. Deterministic
@@ -101,6 +105,30 @@ func notOwnedError(kind, name string) error {
 		"(remove the conflicting object or rename the ChainNode)", kind, name)
 }
 
+// notClaimedError explains a refused identity Secret or state PVC. These may hold this validator's
+// key material or double-sign protection state, so the remedy must never be to delete them.
+func (kms *KMS) notClaimedError(kind, class string) error {
+	return fmt.Errorf("tmKMS %s %q exists but cannot be proven to belong to this ChainNode; refusing to use it. "+
+		"Do not delete it if it holds this validator's TmKMS identity or signing state: if it does, %s; "+
+		"otherwise rename the ChainNode", kind, kms.Name, kms.Config.Attribution.Describe(class))
+}
+
+// controlledByOwnerOrPredecessor reports whether object's controller is the owner, or an earlier owner
+// with the same kind and name that was deleted and recreated: its objects wait for garbage collection
+// and no other object can hold that name in the namespace.
+func (kms *KMS) controlledByOwnerOrPredecessor(object metav1.Object) (bool, error) {
+	controller := metav1.GetControllerOf(object)
+	if controller == nil {
+		return false, nil
+	}
+	probe := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: kms.Owner.GetNamespace()}}
+	if err := controllerutil.SetControllerReference(kms.Owner, probe, kms.Scheme); err != nil {
+		return false, err
+	}
+	want := metav1.GetControllerOf(probe)
+	return controller.APIVersion == want.APIVersion && controller.Kind == want.Kind && controller.Name == want.Name, nil
+}
+
 // replaceHelperPod removes a leftover helper pod from a previous attempt before a new one is created.
 // A same-name pod that this owner does not control is left alone and reported.
 func (kms *KMS) replaceHelperPod(ctx context.Context, name string) error {
@@ -111,7 +139,11 @@ func (kms *KMS) replaceHelperPod(ctx context.Context, name string) error {
 		}
 		return err
 	}
-	if !metav1.IsControlledBy(existing, kms.Owner) {
+	owned, err := kms.controlledByOwnerOrPredecessor(existing)
+	if err != nil {
+		return err
+	}
+	if !owned {
 		return fmt.Errorf("tmKMS helper pod %q is managed by another owner; refusing to replace it "+
 			"(remove the conflicting pod or rename the ChainNode)", name)
 	}

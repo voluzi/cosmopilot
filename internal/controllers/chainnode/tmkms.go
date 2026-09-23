@@ -26,6 +26,15 @@ func newTmkmsAttribution(chainNode *appsv1.ChainNode) tmkmsAttribution {
 	return tmkmsAttribution{root: resourcecleanup.RootOwnerFor(chainNode)}
 }
 
+func (a tmkmsAttribution) Describe(class string) string {
+	return fmt.Sprintf("annotate it with %s=%s, %s=%s, %s=%s, %s=%s and %s=%s",
+		resourcecleanup.AnnotationResourceClass, class,
+		resourcecleanup.AnnotationRootOwnerAPIVersion, a.root.APIVersion,
+		resourcecleanup.AnnotationRootOwnerKind, a.root.Kind,
+		resourcecleanup.AnnotationRootOwnerName, a.root.Name,
+		resourcecleanup.AnnotationRootOwnerNamespace, a.root.Namespace)
+}
+
 func (a tmkmsAttribution) Stamp(object metav1.Object, class string) bool {
 	return resourcecleanup.Stamp(object, a.root, resourcecleanup.ResourceClass(class))
 }
@@ -47,7 +56,7 @@ func (a tmkmsAttribution) Attributed(object metav1.Object, class string) (bool, 
 
 func (r *Reconciler) ensureTmKMSConfig(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	if !chainNode.UsesTmKms() {
-		// Configuration not specified or removed. Let's try to delete it anyway.
+		// Configuration not specified or removed: remove leftovers this ChainNode owns.
 		return tmkms.New(r.ClientSet,
 			r.Scheme,
 			fmt.Sprintf("%s-tmkms", chainNode.GetName()),

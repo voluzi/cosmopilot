@@ -39,6 +39,10 @@ func (a testAttribution) Stamp(object metav1.Object, class string) bool {
 	return true
 }
 
+func (a testAttribution) Describe(class string) string {
+	return "set " + testRootAnnotation + "=" + a.root + " and " + testClassAnnotation + "=" + class
+}
+
 func (a testAttribution) Attributed(object metav1.Object, class string) (bool, bool) {
 	annotations := object.GetAnnotations()
 	root, stamped := annotations[testRootAnnotation]
@@ -197,7 +201,10 @@ func TestDeployConfigRefusesIdentitySecretsItCannotClaim(t *testing.T) {
 			original := build(f)
 			f.create(original)
 
-			requireErrorContains(t, f.kms().DeployConfig(context.Background()), "not managed by this ChainNode")
+			err := f.kms().DeployConfig(context.Background())
+			requireErrorContains(t, err, "cannot be proven to belong to this ChainNode")
+			requireErrorContains(t, err, "Do not delete it")
+			requireErrorContains(t, err, "set "+testRootAnnotation+"=validator and "+testClassAnnotation+"="+ClassIdentity)
 			got := f.secret()
 			if got.Annotations[testRootAnnotation] != original.Annotations[testRootAnnotation] {
 				t.Fatalf("refused Secret was re-attributed: %v", got.Annotations)
@@ -311,12 +318,12 @@ func TestDeployConfigStatePVCOwnership(t *testing.T) {
 			f.create(p)
 			f.create(ownerPodMounting(f, "", "validator-tmkms"))
 		}},
-		{name: "other shape not mounted is refused", err: "not managed by this ChainNode", setup: func(f *ownershipFixture) {
+		{name: "other shape not mounted is refused", err: "cannot be proven to belong to this ChainNode", setup: func(f *ownershipFixture) {
 			p := legacyStatePVC()
 			p.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("5Gi")
 			f.create(p)
 		}},
-		{name: "mounted by a pod the owner does not control is refused", err: "not managed by this ChainNode", setup: func(f *ownershipFixture) {
+		{name: "mounted by a pod the owner does not control is refused", err: "cannot be proven to belong to this ChainNode", setup: func(f *ownershipFixture) {
 			p := legacyStatePVC()
 			p.Spec.AccessModes = append(p.Spec.AccessModes, corev1.ReadOnlyMany)
 			f.create(p)
@@ -325,7 +332,7 @@ func TestDeployConfigStatePVCOwnership(t *testing.T) {
 			f.controlledBy(pod, f.foreign)
 			f.create(pod)
 		}},
-		{name: "controlled by another owner is refused", err: "not managed by this ChainNode", setup: func(f *ownershipFixture) {
+		{name: "controlled by another owner is refused", err: "cannot be proven to belong to this ChainNode", setup: func(f *ownershipFixture) {
 			p := legacyStatePVC()
 			f.controlledBy(p, f.foreign)
 			f.create(p)
@@ -460,5 +467,102 @@ func TestReplaceHelperPodOnlyDeletesOwnedPods(t *testing.T) {
 	}
 	if pre := f.deletes["pods/"+owned.Name]; pre == nil || pre.UID == nil || *pre.UID != "pod-uid" {
 		t.Fatalf("owned helper pod delete preconditions = %v, want UID pod-uid", pre)
+	}
+}
+
+func TestUndeployConfigDeletesOwnedSecretWhenConfigMapIsMissing(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.create(legacyIdentitySecret())
+
+	if err := f.kms().UndeployConfig(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.exists("secret") {
+		t.Fatal("owned identity Secret must be deleted when the ConfigMap is already gone")
+	}
+}
+
+func TestUndeployConfigKeepsForeignSecretOfLegacyShape(t *testing.T) {
+	f := newOwnershipFixture(t)
+	secret := legacyIdentitySecret()
+	f.controlledBy(secret, f.foreign)
+	f.create(secret)
+
+	if err := f.kms().UndeployConfig(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !f.exists("secret") {
+		t.Fatal("a Secret controlled by another owner must be kept even when it has the legacy shape")
+	}
+}
+
+func TestUndeployConfigTreatsReplacedObjectsAsGone(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.create(legacyIdentitySecret())
+	// The apiserver answers 409 when the UID precondition no longer matches a same-name replacement.
+	f.client.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(corev1.Resource("secrets"), "validator-tmkms", fmt.Errorf("uid mismatch"))
+	})
+
+	if err := f.kms().UndeployConfig(context.Background()); err != nil {
+		t.Fatalf("a replaced Secret must not fail the cleanup: %v", err)
+	}
+}
+
+// predecessorOf returns an owner with the same kind and name as owner but a different UID, as left
+// behind when a ChainNode is deleted and recreated under the same name.
+func predecessorOf(owner *corev1.ConfigMap) *corev1.ConfigMap {
+	predecessor := owner.DeepCopy()
+	predecessor.UID = "predecessor-uid"
+	return predecessor
+}
+
+func TestDeployConfigReplacesPredecessorConfigMap(t *testing.T) {
+	f := newOwnershipFixture(t)
+	f.create(legacyIdentitySecret())
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms", Namespace: "default", UID: "old-cm"},
+		Data:       map[string]string{configFileName: "stale"},
+	}
+	f.controlledBy(cm, predecessorOf(f.owner))
+	f.create(cm)
+
+	if err := f.kms().DeployConfig(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.client.CoreV1().ConfigMaps("default").Get(context.Background(), "validator-tmkms", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !metav1.IsControlledBy(got, f.owner) || got.Data[configFileName] == "stale" {
+		t.Fatalf("predecessor ConfigMap was not replaced: owner=%v data=%q", got.OwnerReferences, got.Data[configFileName])
+	}
+	if pre := f.deletes["configmaps/validator-tmkms"]; pre == nil || pre.UID == nil || *pre.UID != "old-cm" {
+		t.Fatalf("predecessor ConfigMap delete preconditions = %v, want UID old-cm", pre)
+	}
+}
+
+func TestPredecessorHelperPodAndConfigMapAreCleanedUp(t *testing.T) {
+	f := newOwnershipFixture(t)
+	predecessor := predecessorOf(f.owner)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms", Namespace: "default"}}
+	f.controlledBy(cm, predecessor)
+	f.create(cm)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms-generate-identity", Namespace: "default", UID: "old-pod"}}
+	f.controlledBy(pod, predecessor)
+	f.create(pod)
+	kms := f.kms()
+
+	if err := kms.replaceHelperPod(context.Background(), pod.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := kms.UndeployConfig(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.exists("configmap") {
+		t.Fatal("predecessor ConfigMap must be removed on undeploy")
+	}
+	if _, err := f.client.CoreV1().Pods("default").Get(context.Background(), pod.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("predecessor helper pod must be removed, got %v", err)
 	}
 }
