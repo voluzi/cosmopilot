@@ -3,6 +3,7 @@ package tmkms
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -332,6 +333,22 @@ func TestDeployConfigStatePVCOwnership(t *testing.T) {
 			f.controlledBy(pod, f.foreign)
 			f.create(pod)
 		}},
+		{name: "legacy shape in block mode is refused", err: "cannot be proven to belong to this ChainNode", setup: func(f *ownershipFixture) {
+			p := legacyStatePVC()
+			p.Spec.VolumeMode = ptr.To(corev1.PersistentVolumeBlock)
+			f.create(p)
+		}},
+		{name: "legacy shape in filesystem mode is adopted", setup: func(f *ownershipFixture) {
+			p := legacyStatePVC()
+			p.Spec.VolumeMode = ptr.To(corev1.PersistentVolumeFilesystem)
+			f.create(p)
+		}},
+		{name: "attributed block volume is refused", err: "is a block volume", setup: func(f *ownershipFixture) {
+			p := legacyStatePVC()
+			p.Spec.VolumeMode = ptr.To(corev1.PersistentVolumeBlock)
+			p.Annotations = map[string]string{testRootAnnotation: "validator", testClassAnnotation: ClassState}
+			f.create(p)
+		}},
 		{name: "controlled by another owner is refused", err: "cannot be proven to belong to this ChainNode", setup: func(f *ownershipFixture) {
 			p := legacyStatePVC()
 			f.controlledBy(p, f.foreign)
@@ -343,12 +360,13 @@ func TestDeployConfigStatePVCOwnership(t *testing.T) {
 			f := newOwnershipFixture(t)
 			f.create(legacyIdentitySecret())
 			tc.setup(f)
+			before := f.pvc().Annotations
 
 			err := f.kms(PersistState(true)).DeployConfig(context.Background())
 			if tc.err != "" {
 				requireErrorContains(t, err, tc.err)
-				if _, stamped := (testAttribution{}).Attributed(f.pvc(), ClassState); stamped {
-					t.Fatal("refused PVC was attributed")
+				if got := f.pvc().Annotations; !reflect.DeepEqual(got, before) {
+					t.Fatalf("refused PVC annotations changed from %v to %v", before, got)
 				}
 				return
 			}

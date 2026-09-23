@@ -97,7 +97,12 @@ func hasStatePVCShape(pvc *corev1.PersistentVolumeClaim) bool {
 	got, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 	return ok && got.Cmp(want) == 0 &&
 		len(pvc.Spec.AccessModes) == 1 && pvc.Spec.AccessModes[0] == corev1.ReadWriteOnce &&
-		pvc.Spec.DataSource == nil && pvc.Spec.DataSourceRef == nil
+		pvc.Spec.DataSource == nil && pvc.Spec.DataSourceRef == nil && !isBlockVolume(pvc)
+}
+
+// isBlockVolume reports a raw block claim, which the TmKMS container cannot mount as its data directory.
+func isBlockVolume(pvc *corev1.PersistentVolumeClaim) bool {
+	return pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode == corev1.PersistentVolumeBlock
 }
 
 func notOwnedError(kind, name string) error {

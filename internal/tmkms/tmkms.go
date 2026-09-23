@@ -341,6 +341,9 @@ func (kms *KMS) ensurePVC(ctx context.Context) error {
 	if !owned {
 		return kms.notClaimedError("PersistentVolumeClaim", ClassState)
 	}
+	if isBlockVolume(pvc) {
+		return fmt.Errorf("tmKMS PersistentVolumeClaim %q is a block volume; TmKMS needs a filesystem volume for its state", kms.Name)
+	}
 	if kms.stamp(pvc, ClassState) {
 		_, err = pvcs.Update(ctx, pvc, metav1.UpdateOptions{})
 	}
