@@ -561,3 +561,27 @@ func TestGlobalRouteThroughInternalServicesIsNotReported(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.NotContains(t, cond.Message, nodeSet.Spec.Ingresses[0].GetName(nodeSet))
 }
+
+// TestGlobalRouteSpanningUnguardedGroupIsReportedBypassed verifies a global route over a guarded group
+// and an unguarded one, which selects raw node pods forever, is reported instead of hidden behind a
+// serving group guard.
+func TestGlobalRouteSpanningUnguardedGroupIsReportedBypassed(t *testing.T) {
+	ctx := context.Background()
+	nodeSet, group := guardedNodeSet()
+	plain := appsv1.NodeGroupSpec{Name: "archive"}
+	nodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{group, plain}
+	nodeSet.Spec.Ingresses = []appsv1.GlobalIngressConfig{{Name: "public", Groups: []string{group.Name, plain.Name}}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	_, err := r.ensureCosmoGuards(ctx, nodeSet)
+	require.NoError(t, err)
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: groupCosmoGuardName(nodeSet, group)}, sts))
+	sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: sts.Generation, Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1}
+	require.NoError(t, r.Status().Update(ctx, sts))
+
+	cond := guardConditionAfterReconcile(t, r, nodeSet)
+	require.NotNil(t, cond)
+	assert.Equal(t, appsv1.ReasonCosmoGuardBypassed, cond.Reason)
+	assert.Contains(t, cond.Message, nodeSet.Spec.Ingresses[0].GetName(nodeSet)+" also spans groups without CosmoGuard")
+}

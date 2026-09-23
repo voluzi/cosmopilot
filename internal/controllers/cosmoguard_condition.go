@@ -21,6 +21,9 @@ type GuardState struct {
 	Serving bool
 	// Routed is true when the public routes already point at the guard (they stay there once flipped).
 	Routed bool
+	// Bypassed is true for a route that can never go through a guard because it also spans groups
+	// without one.
+	Bypassed bool
 }
 
 // CosmoGuardCondition summarises guard states into the CosmoGuardReady condition. It returns nil when
@@ -29,11 +32,13 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 	if len(guards) == 0 {
 		return nil
 	}
-	var missing, bypassed, stalled []string
+	var missing, unguardable, bypassed, stalled []string
 	for _, guard := range guards {
 		switch {
 		case guard.ConfigMissing:
 			missing = append(missing, guard.Name)
+		case guard.Bypassed:
+			unguardable = append(unguardable, guard.Name)
 		case guard.Serving:
 		case guard.Routed:
 			stalled = append(stalled, guard.Name)
@@ -48,8 +53,12 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 	}
 	var problems []string
 	if len(missing) > 0 {
-		problems = append(problems, fmt.Sprintf("CosmoGuard %s is enabled without a config ConfigMap and is not deployed; public API traffic is not filtered",
+		problems = append(problems, fmt.Sprintf("CosmoGuard %s is enabled without a config ConfigMap and is not reconciled; public API traffic may not be filtered",
 			strings.Join(missing, ", ")))
+	}
+	if len(unguardable) > 0 {
+		problems = append(problems, fmt.Sprintf("public route %s also spans groups without CosmoGuard and is never filtered",
+			strings.Join(unguardable, ", ")))
 	}
 	if len(bypassed) > 0 {
 		problems = append(problems, fmt.Sprintf("CosmoGuard %s is not serving yet; public API routes reach the node directly and are not filtered until it is ready",
@@ -62,6 +71,10 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 	switch {
 	case len(missing) > 0:
 		condition.Reason = appsv1.ReasonCosmoGuardConfigMissing
+	case len(bypassed) > 0 || len(stalled) > 0:
+		condition.Reason = appsv1.ReasonCosmoGuardNotServing
+	case len(unguardable) > 0:
+		condition.Reason = appsv1.ReasonCosmoGuardBypassed
 	case len(problems) > 0:
 		condition.Reason = appsv1.ReasonCosmoGuardNotServing
 	default:

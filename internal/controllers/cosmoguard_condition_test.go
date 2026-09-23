@@ -37,6 +37,18 @@ func TestCosmoGuardCondition(t *testing.T) {
 			contains: []string{"node-cg is not serving; public API routes stay on the guard"},
 		},
 		{
+			name:   "route that can never be guarded",
+			guards: []GuardState{{Name: "a-cg", Serving: true}, {Name: "public", Bypassed: true}},
+			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardBypassed,
+			contains: []string{"public route public also spans groups without CosmoGuard and is never filtered"},
+		},
+		{
+			name:   "a guard that is not serving outranks a bypassed route",
+			guards: []GuardState{{Name: "b-cg"}, {Name: "public", Bypassed: true}},
+			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardNotServing,
+			contains: []string{"b-cg is not serving yet", "public route public"},
+		},
+		{
 			name:   "config missing wins and every problem is listed",
 			guards: []GuardState{{Name: "a-cg", ConfigMissing: true}, {Name: "b-cg"}, {Name: "c-cg", Serving: true}},
 			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardConfigMissing,

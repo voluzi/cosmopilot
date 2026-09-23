@@ -673,6 +673,20 @@ func cosmoGuardRouteReady(nodeSet *appsv1.ChainNodeSet, groups []string, guardRe
 	return true
 }
 
+// routeSpansGuardedGroup reports whether any of the route's groups runs a CosmoGuard.
+func routeSpansGuardedGroup(nodeSet *appsv1.ChainNodeSet, groups []string) bool {
+	for _, groupName := range groups {
+		g := findNodeGroup(nodeSet, groupName)
+		if g == nil || g.GetInstances() == 0 {
+			continue
+		}
+		if cfg := g.GetServiceConfig(); cfg != nil && cfg.CosmoGuardEnabled() {
+			return true
+		}
+	}
+	return false
+}
+
 // findNodeGroup returns the named group from .spec.nodes, or nil.
 func findNodeGroup(nodeSet *appsv1.ChainNodeSet, name string) *appsv1.NodeGroupSpec {
 	for i := range nodeSet.Spec.Nodes {

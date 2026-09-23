@@ -230,6 +230,10 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	// reported.
 	routeFlip := func(groups []string, serviceName string, useInternal bool) bool {
 		if !cosmoGuardRouteGuardable(nodeSet, groups) {
+			// A route over a guarded group that also spans an unguarded one selects raw pods forever.
+			if !useInternal && routeSpansGuardedGroup(nodeSet, groups) {
+				routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Bypassed: true})
+			}
 			return false
 		}
 		rolledOut := cosmoGuardRouteReady(nodeSet, groups, guards.fullyReady)

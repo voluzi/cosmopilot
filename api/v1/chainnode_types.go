@@ -65,8 +65,11 @@ const (
 	// ReasonCosmoGuardNotServing indicates that a managed CosmoGuard is not serving.
 	ReasonCosmoGuardNotServing = "CosmoGuardNotServing"
 	// ReasonCosmoGuardConfigMissing indicates that CosmoGuard is enabled without a config ConfigMap, so
-	// no guard is deployed.
+	// its guard is not reconciled.
 	ReasonCosmoGuardConfigMissing = "CosmoGuardConfigMissing"
+	// ReasonCosmoGuardBypassed indicates a public route that also spans groups without CosmoGuard, so it
+	// never goes through a guard.
+	ReasonCosmoGuardBypassed = "CosmoGuardBypassed"
 
 	// ReasonUpgradeSuccess indicates that the upgrade completed successfully.
 	ReasonUpgradeSuccess            = "UpgradeSuccessful"

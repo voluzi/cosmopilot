@@ -42,7 +42,8 @@ Cosmopilot reports this state through the `CosmoGuardReady` condition: on the `C
 | --- | --- | --- |
 | `True` | `CosmoGuardServing` | Every guard is serving and public API routes go through it. |
 | `False` | `CosmoGuardNotServing` | A guard, or a global route in front of it, is not serving. The message names each one and says whether its routes still reach the node directly (not filtered) or already stay on the guard. |
-| `False` | `CosmoGuardConfigMissing` | CosmoGuard is enabled without a rules `ConfigMap`, so no guard is deployed and traffic is not filtered. |
+| `False` | `CosmoGuardConfigMissing` | CosmoGuard is enabled without a rules `ConfigMap`, so its guard is not reconciled and traffic may not be filtered. |
+| `False` | `CosmoGuardBypassed` | A global route also spans a group without CosmoGuard, so it always reaches the nodes directly and is never filtered. |
 
 ```bash
 kubectl get chainnodeset <name> -o jsonpath='{.status.conditions[?(@.type=="CosmoGuardReady")]}'
@@ -50,7 +51,7 @@ kubectl get chainnodeset <name> -o jsonpath='{.status.conditions[?(@.type=="Cosm
 
 If you need the rules enforced from the very first request, wait for `CosmoGuardReady=True` before exposing the endpoints publicly.
 
-Routes configured with `useInternalServices: true` bypass CosmoGuard by design and are not covered by the condition.
+Routes configured with `useInternalServices: true` bypass CosmoGuard by design and are not covered by the condition. The condition is refreshed whenever Cosmopilot reconciles the guard, so it can lag while a reconcile is held earlier (for example a stopped node or a signer migration).
 
 :::note
 `.status.conditions` on `ChainNodeSet` is new. Helm does not upgrade CRDs, so apply the CRDs of the target release before upgrading the operator; otherwise the API server drops the condition and the operator rewrites it, with a Warning event, on every reconcile.
