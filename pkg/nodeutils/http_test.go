@@ -60,6 +60,33 @@ func newShutdownTestServer(token string, stop func() error) *NodeUtils {
 	return s
 }
 
+func TestPrimaryRouterDoesNotServePprof(t *testing.T) {
+	s := newShutdownTestServer(testShutdownToken, func() error { return nil })
+	s.cfg.MockMode = true
+
+	for _, path := range []string{
+		"/debug/pprof/", "/debug/pprof/allocs", "/debug/pprof/block",
+		"/debug/pprof/goroutine", "/debug/pprof/heap", "/debug/pprof/mutex",
+		"/debug/pprof/threadcreate", "/debug/pprof/cmdline", "/debug/pprof/profile",
+		"/debug/pprof/symbol", "/debug/pprof/trace",
+	} {
+		for _, method := range []string{
+			http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+			http.MethodDelete, http.MethodOptions, http.MethodPatch,
+		} {
+			t.Run(method+" "+path, func(t *testing.T) {
+				response := httptest.NewRecorder()
+				s.router.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+				assert.Equal(t, http.StatusNotFound, response.Code)
+			})
+		}
+	}
+
+	response := httptest.NewRecorder()
+	s.router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
+	assert.Equal(t, http.StatusOK, response.Code)
+}
+
 func TestUpgradeStatusEndpointPreservesLegacyWireFormats(t *testing.T) {
 	height := int64(99)
 	observed := time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC)

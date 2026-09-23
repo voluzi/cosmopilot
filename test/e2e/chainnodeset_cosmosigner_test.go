@@ -7,10 +7,12 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,10 +24,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	chainnodecontroller "github.com/voluzi/cosmopilot/v3/internal/controllers/chainnode"
@@ -188,12 +192,15 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 			cns := buildNamedValidatorCosmosignerSet(app, ns.Name, 3)
 			resourceName := fmt.Sprintf("%s-signer", cns.Name)
 			validatorName := fmt.Sprintf("%s-validators-0", cns.Name)
+			liveHeight := func() (int64, error) {
+				return liveValidatorHeight(Framework().Context(), Framework().KubeClient(), ns.Name, validatorName)
+			}
 			tlsSecretName := createRaftTLSSecret(ns.Name, resourceName)
 			cns.Spec.Cosmosigner.RaftTLSSecret = ptr.To(tlsSecretName)
 			Expect(Framework().Client().Create(Framework().Context(), cns)).To(Succeed())
 
 			Eventually(func() (int64, error) {
-				return observedChainNodeHeight(ns.Name, validatorName)
+				return liveHeight()
 			}).Should(BeNumerically(">", 3), "the initial TLS-secured Raft cluster should produce blocks")
 			pods := waitForReadySignerPods(ns.Name, resourceName, 3)
 			leaderName := waitForSignerLeader(ns.Name, resourceName, "")
@@ -204,8 +211,14 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 				}
 			}
 			Expect(leaderUID).NotTo(BeEmpty())
-			heightBeforeFailover, err := observedChainNodeHeight(ns.Name, validatorName)
-			Expect(err).NotTo(HaveOccurred())
+			var heightBeforeFailover int64
+			Eventually(func() (int64, error) {
+				height, err := liveHeight()
+				if err == nil {
+					heightBeforeFailover = height
+				}
+				return height, err
+			}, 5*time.Minute, time.Second).Should(BeNumerically(">", 3), "capture a live baseline before deleting the signer leader")
 
 			leaderPod := &corev1.Pod{}
 			Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: leaderName}, leaderPod)).To(Succeed())
@@ -213,7 +226,7 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 			newLeaderName := waitForSignerLeader(ns.Name, resourceName, leaderName)
 			Expect(newLeaderName).NotTo(Equal(leaderName))
 			Eventually(func() (int64, error) {
-				return observedChainNodeHeight(ns.Name, validatorName)
+				return liveHeight()
 			}).Should(BeNumerically(">", heightBeforeFailover), "a surviving Raft replica should resume signing after leader deletion")
 			pods = waitForReadySignerPods(ns.Name, resourceName, 3)
 
@@ -235,18 +248,18 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 				Expect(Framework().Client().Delete(Framework().Context(), pod)).To(Succeed())
 			}
 			for _, name := range heldNames {
-				waitForTerminatingSignerPod(ns.Name, name, heldUIDs[name], true)
+				waitForTerminatedSignerPod(ns.Name, name, heldUIDs[name])
 			}
 
-			stableHeight := waitForStableChainNodeHeight(ns.Name, validatorName, 10*time.Second)
+			stableHeight := waitForStableChainNodeHeight(liveHeight, 10*time.Second)
 			Consistently(func() (int64, error) {
-				return observedChainNodeHeight(ns.Name, validatorName)
+				return liveHeight()
 			}, 10*time.Second, time.Second).Should(Equal(stableHeight))
 
 			setPodTestFinalizer(ns.Name, heldNames[0], false)
 			waitForReplacementSignerPod(ns.Name, heldNames[0], heldUIDs[heldNames[0]])
 			Eventually(func() (int64, error) {
-				return observedChainNodeHeight(ns.Name, validatorName)
+				return liveHeight()
 			}).Should(BeNumerically(">", stableHeight), "restoring a second voter should restore Raft quorum and signing")
 
 			setPodTestFinalizer(ns.Name, heldNames[1], false)
@@ -1033,6 +1046,28 @@ func waitForTerminatingSignerPod(namespace, name, uid string, requireNotReady bo
 	}).Should(BeTrue())
 }
 
+func waitForTerminatedSignerPod(namespace, name, uid string) {
+	Eventually(func() bool {
+		pod := &corev1.Pod{}
+		if err := Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: namespace, Name: name}, pod); err != nil {
+			return false
+		}
+		return heldSignerContainerTerminated(pod, uid)
+	}).Should(BeTrue())
+}
+
+func heldSignerContainerTerminated(pod *corev1.Pod, uid string) bool {
+	if string(pod.UID) != uid || pod.DeletionTimestamp == nil {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == "cosmosigner" {
+			return status.State.Terminated != nil
+		}
+	}
+	return false
+}
+
 func waitForReplacementSignerPod(namespace, name, oldUID string) {
 	Eventually(func() bool {
 		pod := &corev1.Pod{}
@@ -1051,19 +1086,39 @@ func observedChainNodeSetHeight(cns *appsv1.ChainNodeSet) (int64, error) {
 	return current.Status.LatestHeight, nil
 }
 
-func observedChainNodeHeight(namespace, name string) (int64, error) {
-	current := &appsv1.ChainNode{}
-	if err := Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: namespace, Name: name}, current); err != nil {
-		return 0, err
+func liveValidatorHeight(ctx context.Context, kube kubernetes.Interface, namespace, podName string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	body, err := kube.CoreV1().Pods(namespace).ProxyGet("http", podName, strconv.Itoa(chainutils.RpcPort), "status", nil).DoRaw(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read validator %s/%s RPC status: %w", namespace, podName, err)
 	}
-	return current.Status.LatestHeight, nil
+	var response struct {
+		Result struct {
+			SyncInfo struct {
+				LatestBlockHeight string `json:"latest_block_height"`
+			} `json:"sync_info"`
+		} `json:"result"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return 0, fmt.Errorf("decode validator RPC status: %w", err)
+	}
+	if len(response.Error) > 0 && string(response.Error) != "null" {
+		return 0, fmt.Errorf("validator RPC status error: %s", response.Error)
+	}
+	height, err := strconv.ParseInt(response.Result.SyncInfo.LatestBlockHeight, 10, 64)
+	if err != nil || height <= 0 {
+		return 0, fmt.Errorf("invalid validator RPC height %q", response.Result.SyncInfo.LatestBlockHeight)
+	}
+	return height, nil
 }
 
-func waitForStableChainNodeHeight(namespace, name string, stableFor time.Duration) int64 {
+func waitForStableChainNodeHeight(readHeight func() (int64, error), stableFor time.Duration) int64 {
 	var height int64
 	var unchangedSince time.Time
 	Eventually(func() (bool, error) {
-		current, err := observedChainNodeHeight(namespace, name)
+		current, err := readHeight()
 		if err != nil {
 			return false, err
 		}
