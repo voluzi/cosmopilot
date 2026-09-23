@@ -135,9 +135,9 @@ func TestRequireSameController(t *testing.T) {
 
 	require.NoError(t, RequireSameController(serviceControlledBy(t, scheme, "node", owner), desired, "Service"))
 	require.ErrorContains(t, RequireSameController(serviceControlledBy(t, scheme, "node", foreign), desired, "Service"),
-		"managed by another owner")
+		`managed by another owner (ConfigMap "other")`)
 	require.ErrorContains(t, RequireSameController(serviceControlledBy(t, scheme, "node", nil), desired, "Service"),
-		"managed by another owner")
+		"is unowned; refusing to adopt it")
 	require.ErrorContains(t, RequireSameController(desired, serviceControlledBy(t, scheme, "node", nil), "Service"),
 		"has no controller owner")
 }

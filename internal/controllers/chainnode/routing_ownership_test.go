@@ -106,7 +106,7 @@ func TestGatewayCleanupKeepsRoutesItDoesNotControl(t *testing.T) {
 	ownedHTTP.Labels = routeLabels
 	controlled(t, r, ownedHTTP, owner)
 	foreignGRPC := controlled(t, r, &gwapiv1.GRPCRoute{ObjectMeta: routeMeta("node-grpc")}, foreign)
-	foreignTCP := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, nil)
+	foreignTCP := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, foreign)
 
 	require.NoError(t, r.cleanupGatewayRoutes(context.Background(), owner))
 	require.NoError(t, r.cleanupTCPRoute(context.Background(), owner))
