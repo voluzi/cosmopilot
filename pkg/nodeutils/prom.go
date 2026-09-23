@@ -9,6 +9,7 @@ import (
 
 	prom "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 )
 
 func StateSyncChunkMetricsExist(ctx context.Context, metricsURL string) (bool, error) {
@@ -26,7 +27,8 @@ func StateSyncChunkMetricsExist(ctx context.Context, metricsURL string) (bool, e
 		return false, fmt.Errorf("GET %s: %s: %s", metricsURL, resp.Status, strings.TrimSpace(string(b)))
 	}
 
-	parser := expfmt.TextParser{}
+	// The zero-value TextParser has no name validation scheme and panics on the first metric.
+	parser := expfmt.NewTextParser(model.UTF8Validation)
 	fams, err := parser.TextToMetricFamilies(resp.Body)
 	if err != nil {
 		return false, err
