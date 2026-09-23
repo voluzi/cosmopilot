@@ -63,7 +63,7 @@ This creates a PDB named `<nodeset>-<group>-validator` selecting only that group
 
 ## Notes
 
-- The operator's managed replacement check is separate from Kubernetes PDBs. Configure its global limit with Helm's `disruptionMaxUnavailable` (default `1`). There is no per-group controller budget in this release. Raising the global limit also increases permitted validator unavailability. Pods that are Syncing or otherwise not ready count as unavailable, and an already-unavailable pod may still be replaced for recovery. The operator defers a ready pod's replacement when the limit is exhausted and reports `PodRecreationDeferred` on the ChainNode.
+- The operator's managed replacement check is separate from Kubernetes PDBs. Configure its global limit with Helm's `disruptionMaxUnavailable` (default `1`). There is no per-group controller budget in this release. Raising the global limit also increases permitted validator unavailability. Syncing pods count as unavailable by default; with `config.ignoreSyncing: true`, the app readiness probe uses `/health`, so a syncing pod may count as available. Other not-ready pods count as unavailable, and an already-unavailable pod may still be replaced for recovery. The operator defers a ready pod's replacement when the limit is exhausted and reports `PodRecreationDeferred` on the ChainNode.
 - Replacement checks apply within a namespace and disruption domain. Validator pods on the same chain share a domain across nodesets and groups; non-validator domain labels follow `ignoreGroupOnDisruptionChecks`.
 - PDBs are currently supported only on `ChainNodeSet` resources.
 - `minAvailable` defaults to the number of instances minus one for node groups.

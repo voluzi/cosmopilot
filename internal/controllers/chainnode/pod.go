@@ -1353,15 +1353,14 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 	}
 
 	logger.Info("recreating pod", "pod", currentPod.GetName())
-	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRestarting); err != nil {
-		return fmt.Errorf("failed to update phase to Restarting for %s: %w", chainNode.GetName(), err)
-	}
-
 	logger.V(1).Info("deleting pod", "pod", currentPod.GetName())
 	deletePod := currentPod.DeepCopy()
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, deletePod)
 	if err := ph.DeleteWithUIDPrecondition(ctx); err != nil {
 		return fmt.Errorf("failed to delete pod %s for recreation: %w", currentPod.GetName(), err)
+	}
+	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRestarting); err != nil {
+		return fmt.Errorf("failed to update phase to Restarting for %s: %w", chainNode.GetName(), err)
 	}
 
 	// There is no need to wait for pod to be deleted if we are keeping it stopped

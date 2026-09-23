@@ -50,6 +50,8 @@ This example highlights the three mandatory configuration sections required to d
 - [genesis](../reference/crds#genesisconfig): Defines the source of the genesis file required to initialize the node (not required if [Initializing a new Network](../usage/initializing-new-network)).
 - [peers](../reference/crds#peer): Lists the peer nodes to connect with for network communication.
 
+Automatic peer discovery for a `ChainNode` looks only at Services in its own namespace. If peers are in another namespace, configure them explicitly in `spec.peers` using a reachable IP or DNS name (for an in-cluster Service, use its namespace-qualified Kubernetes FQDN). Earlier cluster-wide discovery emitted bare Service names, which were not reliably resolvable across namespaces.
+
 To create the node, save the manifest to a file (e.g. `node.yaml`) and apply it to your Kubernetes cluster:
 
 ```bash

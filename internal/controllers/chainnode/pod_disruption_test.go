@@ -246,6 +246,10 @@ func TestRecreatePodDeleteRejectsReplacedUID(t *testing.T) {
 	err = r.recreatePod(t.Context(), node, oldPod, oldPod.DeepCopy(), true)
 	require.True(t, apierrors.IsConflict(err), "expected a retryable UID precondition conflict, got %v", err)
 	require.False(t, replacedPodDeleted, "replacement Pod must survive an old UID deletion attempt")
+	require.Equal(t, appsv1.PhaseChainNodeRunning, node.Status.Phase)
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, backing.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
+	require.Equal(t, appsv1.PhaseChainNodeRunning, stored.Status.Phase)
 }
 
 func TestPodRecreationDeferredTransitionsAndPreservesConditions(t *testing.T) {
