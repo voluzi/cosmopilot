@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
@@ -203,6 +204,21 @@ func TestRecreatePodDefersWithoutChangingPhase(t *testing.T) {
 }
 
 func TestRecreatePodDeleteRejectsReplacedUID(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		preventDisruption bool
+	}{
+		{name: "with disruption checks", preventDisruption: true},
+		{name: "without disruption checks", preventDisruption: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testRecreatePodDeleteRejectsReplacedUID(t, tt.preventDisruption)
+		})
+	}
+}
+
+func testRecreatePodDeleteRejectsReplacedUID(t *testing.T, preventDisruption bool) {
+	t.Helper()
 	scheme := nodeUtilsAuthTestScheme(t)
 	node := nodeUtilsAuthTestNode()
 	node.Status.ChainID = "chain"
@@ -243,13 +259,96 @@ func TestRecreatePodDeleteRejectsReplacedUID(t *testing.T) {
 	require.NoError(t, err)
 	r := &Reconciler{Client: backing, APIReader: backing, ClientSet: clientSet, recorder: record.NewFakeRecorder(10),
 		opts: &controllers.ControllerRunOptions{DisruptionMaxUnavailable: 1}, disruptionLocks: newLockManager()}
-	err = r.recreatePod(t.Context(), node, oldPod, oldPod.DeepCopy(), true)
+	err = r.recreatePod(t.Context(), node, oldPod, oldPod.DeepCopy(), preventDisruption)
 	require.True(t, apierrors.IsConflict(err), "expected a retryable UID precondition conflict, got %v", err)
 	require.False(t, replacedPodDeleted, "replacement Pod must survive an old UID deletion attempt")
 	require.Equal(t, appsv1.PhaseChainNodeRunning, node.Status.Phase)
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, backing.Get(t.Context(), client.ObjectKeyFromObject(node), stored))
 	require.Equal(t, appsv1.PhaseChainNodeRunning, stored.Status.Phase)
+}
+
+func TestRecreatePodStopsNodeUtilsBeforeStatusFailure(t *testing.T) {
+	scheme := nodeUtilsAuthTestScheme(t)
+	node := nodeUtilsAuthTestNode()
+	node.Status.Phase = appsv1.PhaseChainNodeRunning
+	node.Status.LatestHeight = 100
+	haltHeight := int64(100)
+	node.Spec.Config.HaltHeight = &haltHeight
+	credential := nodeUtilsShutdownCredential{name: nodeUtilsShutdownSecretNameForToken(testShutdownToken), uid: "secret-uid", token: testShutdownToken}
+	secret := ownedNodeUtilsSecret(t, scheme, node, credential.token, credential.uid)
+	currentPod := podWithShutdownCredential(t, scheme, node, credential)
+	currentPod.UID = "current-pod-uid"
+	statusErr := errors.New("status update sentinel")
+	backing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, currentPod, secret).
+		WithStatusSubresource(node).WithInterceptorFuncs(interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, name string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			return statusErr
+		},
+	}).Build()
+	created := false
+	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"},
+		&http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodPost {
+				created = true
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"kind":"Status","apiVersion":"v1","status":"Success"}`))}, nil
+		})})
+	require.NoError(t, err)
+	shutdown := &fakeNodeUtilsShutdownClient{}
+	var shutdownToken string
+	r := &Reconciler{Client: backing, APIReader: backing, ClientSet: clientSet, recorder: record.NewFakeRecorder(10),
+		shutdownClientFactory: func(_ string, token string) nodeUtilsShutdownClient {
+			shutdownToken = token
+			return shutdown
+		}}
+	err = r.recreatePod(t.Context(), node, currentPod, currentPod.DeepCopy(), false)
+	require.ErrorIs(t, err, statusErr)
+	require.True(t, shutdown.called, "node-utils shutdown must run even when Stopped status cannot be persisted")
+	require.Equal(t, credential.token, shutdownToken)
+	require.False(t, created, "a halted node must not be recreated")
+}
+
+func TestRecreatePodContinuesReplacementAfterRestartingStatusFailure(t *testing.T) {
+	scheme := nodeUtilsAuthTestScheme(t)
+	node := nodeUtilsAuthTestNode()
+	node.Status.Phase = appsv1.PhaseChainNodeRunning
+	currentPod := disruptionTestPod(node.Namespace, node.Name, true)
+	currentPod.UID = "current-pod-uid"
+	statusErr := errors.New("Restarting status sentinel")
+	backing := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, currentPod).
+		WithStatusSubresource(node).WithInterceptorFuncs(interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, name string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if obj.(*appsv1.ChainNode).Status.Phase == appsv1.PhaseChainNodeRestarting {
+				return statusErr
+			}
+			return cl.Status().Update(ctx, obj, opts...)
+		},
+	}).Build()
+	created := false
+	clientSet, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "https://kubernetes.invalid"},
+		&http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			status := http.StatusOK
+			body := `{"kind":"Status","apiVersion":"v1","status":"Success"}`
+			switch req.Method {
+			case http.MethodGet:
+				status = http.StatusNotFound
+				body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
+			case http.MethodPost:
+				created = true
+				status = http.StatusInternalServerError
+				body = `{"kind":"Status","apiVersion":"v1","status":"Failure","message":"create sentinel","code":500}`
+			}
+			return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(body))}, nil
+		})})
+	require.NoError(t, err)
+	r := &Reconciler{Client: backing, APIReader: backing, ClientSet: clientSet, recorder: record.NewFakeRecorder(10)}
+	err = r.recreatePod(t.Context(), node, currentPod, currentPod.DeepCopy(), false)
+	require.ErrorContains(t, err, "create sentinel")
+	require.NotErrorIs(t, err, statusErr)
+	require.True(t, created, "replacement creation must be attempted after a Restarting status failure")
 }
 
 func TestPodRecreationDeferredTransitionsAndPreservesConditions(t *testing.T) {

@@ -1359,9 +1359,6 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 	if err := ph.DeleteWithUIDPrecondition(ctx); err != nil {
 		return fmt.Errorf("failed to delete pod %s for recreation: %w", currentPod.GetName(), err)
 	}
-	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRestarting); err != nil {
-		return fmt.Errorf("failed to update phase to Restarting for %s: %w", chainNode.GetName(), err)
-	}
 
 	// There is no need to wait for pod to be deleted if we are keeping it stopped
 	if mustStop, stopReason := chainNode.MustStop(); mustStop {
@@ -1373,6 +1370,9 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 			logger.Info("failed to stop node utils container", "pod", currentPod.GetName(), "error", err.Error())
 		}
 		return r.setNodePhase(ctx, chainNode)
+	}
+	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRestarting); err != nil {
+		logger.Error(err, "failed to update phase to Restarting after deleting pod", "pod", currentPod.GetName())
 	}
 
 	if err := ph.WaitForPodDeleted(ctx, timeoutPodDeleted); err != nil {
