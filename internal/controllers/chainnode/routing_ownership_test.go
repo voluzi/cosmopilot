@@ -30,7 +30,7 @@ func routingOwnershipReconciler(t *testing.T) (*Reconciler, *appsv1.ChainNode, *
 	require.NoError(t, gwapiv1a2.Install(scheme))
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "owner-uid"}}
 	foreign := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "foreign-uid"}}
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).Build()
 	return &Reconciler{Client: c, Scheme: scheme}, owner, foreign
 }
 
@@ -149,4 +149,23 @@ func TestDisabledExposeDeletesOwnedP2PResources(t *testing.T) {
 	require.NoError(t, r.cleanupP2PExposure(context.Background(), owner, desired))
 	requireGone(t, r, p2p)
 	requireGone(t, r, tcp)
+}
+
+func TestDisabledExposeClearsPublicAddress(t *testing.T) {
+	r, owner, _ := routingOwnershipReconciler(t)
+	require.NoError(t, r.Create(context.Background(), owner))
+	owner.Status.PublicAddress = "abc@203.0.113.10:26656"
+	require.NoError(t, r.Status().Update(context.Background(), owner))
+	controlled(t, r, &corev1.Service{ObjectMeta: routeMeta("node-p2p")}, owner)
+
+	desired, err := r.getP2pServiceSpec(owner)
+	require.NoError(t, err)
+	for range 2 {
+		require.NoError(t, r.cleanupP2PExposure(context.Background(), owner, desired))
+	}
+
+	live := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(owner), live))
+	require.Empty(t, live.Status.PublicAddress)
+	require.Empty(t, owner.Status.PublicAddress)
 }

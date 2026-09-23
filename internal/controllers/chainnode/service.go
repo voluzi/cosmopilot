@@ -218,7 +218,8 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 }
 
 // cleanupP2PExposure deletes the P2P Service and TCPRoute of a node whose P2P exposure is disabled,
-// leaving same-name objects that belong to someone else in place.
+// leaving same-name objects that belong to someone else in place, and stops advertising the public
+// address the removed exposure provided.
 func (r *Reconciler) cleanupP2PExposure(ctx context.Context, chainNode *appsv1.ChainNode, p2p *corev1.Service) error {
 	deleted, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p, chainNode)
 	if err != nil {
@@ -230,7 +231,7 @@ func (r *Reconciler) cleanupP2PExposure(ctx context.Context, chainNode *appsv1.C
 	if err := r.cleanupTCPRoute(ctx, chainNode); err != nil {
 		return fmt.Errorf("failed to cleanup TCPRoute for %s: %w", chainNode.GetName(), err)
 	}
-	return nil
+	return r.clearPublicAddressIfSet(ctx, chainNode)
 }
 
 // clearPublicAddressIfSet wipes .status.publicAddress when we cannot derive a
