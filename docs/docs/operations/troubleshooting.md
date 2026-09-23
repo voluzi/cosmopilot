@@ -109,9 +109,14 @@ Keep the port-forward running. In another terminal, collect and inspect the prof
 ```bash
 curl -o heap.pb.gz http://127.0.0.1:6666/debug/pprof/heap
 curl -o cpu.pb.gz 'http://127.0.0.1:6666/debug/pprof/profile?seconds=10'
+curl -o trace.out 'http://127.0.0.1:6666/debug/pprof/trace?seconds=5'
 go tool pprof -top heap.pb.gz
 go tool pprof -top cpu.pb.gz
+go tool trace trace.out
 ```
+
+Execution traces use Go's trace format and `go tool trace`; CPU and heap
+profiles use `go tool pprof`.
 
 These profiles describe the `node-utils` Go process, not the Cosmos process or
 total Pod memory. The port is loopback only and is not exposed by a Service or
