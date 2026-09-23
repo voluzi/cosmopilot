@@ -496,6 +496,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	if err = r.reportCosmoGuardReadiness(ctx, chainNode); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Tear down a no-longer-used standalone guard AFTER routes have been retargeted to the raw node
 	// Service, so a live ingress/gateway route never points at a deleted guard backend.
 	// deferWhileRouted=true: hold teardown if a route still targets the guard (e.g. a preserved Ingress

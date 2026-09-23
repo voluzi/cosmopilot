@@ -371,9 +371,7 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 
 	if chainNode.Spec.Config.GetCosmoGuardConfig() == nil {
 		logger.Info("cosmoguard enabled without a config ConfigMap; skipping")
-		return false, r.updateCosmoGuardCondition(ctx, chainNode, []controllers.GuardState{{
-			Name: chainNode.CosmoGuardName(), ConfigMissing: true,
-		}})
+		return false, nil
 	}
 
 	params := r.cosmoGuardParams(chainNode)
@@ -427,24 +425,32 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 		}
 	}
 
-	// Routes through the "-internal" Services bypass the guard by configuration, so they are not reported.
-	var guards []controllers.GuardState
-	if !chainNode.UseInternal() {
-		serving, err := cosmoguard.IsServing(ctx, r.Client, chainNode.GetNamespace(), chainNode.CosmoGuardName())
-		if err != nil {
-			return false, err
-		}
-		guards = []controllers.GuardState{{
-			Name:    chainNode.CosmoGuardName(),
-			Serving: serving,
-			Routed:  r.standaloneRouteTargetsGuard(ctx, chainNode),
-		}}
-	}
-	if err := r.updateCosmoGuardCondition(ctx, chainNode, guards); err != nil {
-		return false, err
-	}
-
 	return r.reconcileCosmoGuardDashboard(ctx, chainNode, params)
+}
+
+// reportCosmoGuardReadiness records whether the node's standalone guard is filtering its public API
+// traffic. It runs after routing, so the condition describes the routes as they are now rather than
+// as they will be once the reconcile gets there.
+func (r *Reconciler) reportCosmoGuardReadiness(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	// Routes through the "-internal" Services bypass the guard by configuration, so they are not reported.
+	if !r.standaloneGuardManaged(chainNode) || chainNode.UseInternal() {
+		return r.updateCosmoGuardCondition(ctx, chainNode, nil)
+	}
+	name := chainNode.CosmoGuardName()
+	if chainNode.Spec.Config.GetCosmoGuardConfig() == nil {
+		return r.updateCosmoGuardCondition(ctx, chainNode, []controllers.GuardState{{Name: name, ConfigMissing: true}})
+	}
+	serving, err := cosmoguard.IsServing(ctx, r.Client, chainNode.GetNamespace(), name)
+	if err != nil {
+		return err
+	}
+	state := controllers.GuardState{Name: name, Serving: serving}
+	if chainNode.Spec.Ingress != nil || chainNode.Spec.Gateway != nil {
+		// Traffic is filtered only once the node's own routes point at the guard.
+		state.Routed = r.standaloneRouteTargetsGuard(ctx, chainNode)
+		state.Serving = serving && state.Routed
+	}
+	return r.updateCosmoGuardCondition(ctx, chainNode, []controllers.GuardState{state})
 }
 
 // updateCosmoGuardCondition records whether the node's standalone guard is filtering its public API

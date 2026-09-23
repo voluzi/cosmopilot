@@ -177,6 +177,7 @@ func TestZeroInstanceGroupSkipsGuard(t *testing.T) {
 	assert.NotContains(t, res.expected, name, "no guard expected for a zero-instance group")
 	assert.False(t, res.ready[group.Name], "zero-instance group must not flip its Service to a guard")
 	assert.False(t, cosmoGuardRouteGuardable(nodeSet, []string{group.Name}), "route over a zero-instance group is not guardable")
+	assert.Empty(t, res.states, "a zero-instance group is not reported in the CosmoGuardReady condition")
 }
 
 // TestGuardParamsUseDiscovery verifies a group's guard is configured to discover node pods through
@@ -520,9 +521,9 @@ func TestGlobalRouteNotFilteredWhileGuardPartlyRolledOut(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	route := nodeSet.Spec.Ingresses[0].GetName(nodeSet)
-	assert.Contains(t, cond.Message, route+" is not serving yet")
+	assert.Contains(t, cond.Message, "public route "+route+" has not switched to its guard yet")
 	assert.Contains(t, cond.Message, "not filtered")
-	assert.NotContains(t, cond.Message, groupCosmoGuardName(nodeSet, group)+" is not serving",
+	assert.NotContains(t, cond.Message, "CosmoGuard "+groupCosmoGuardName(nodeSet, group),
 		"the group guard itself is serving")
 
 	sts.Status.ReadyReplicas = 2

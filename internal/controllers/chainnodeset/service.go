@@ -232,14 +232,14 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		if !cosmoGuardRouteGuardable(nodeSet, groups) {
 			// A route over a guarded group that also spans an unguarded one selects raw pods forever.
 			if !useInternal && routeSpansGuardedGroup(nodeSet, groups) {
-				routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Bypassed: true})
+				routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Route: true, Bypassed: true})
 			}
 			return false
 		}
 		rolledOut := cosmoGuardRouteReady(nodeSet, groups, guards.fullyReady)
 		routed := r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), serviceName)
 		if !useInternal {
-			routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Serving: rolledOut, Routed: routed})
+			routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Route: true, Serving: rolledOut, Routed: routed})
 		}
 		return rolledOut || routed
 	}

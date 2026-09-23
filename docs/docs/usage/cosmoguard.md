@@ -41,7 +41,7 @@ Cosmopilot reports this state through the `CosmoGuardReady` condition: on the `C
 | Status | Reason | Meaning |
 | --- | --- | --- |
 | `True` | `CosmoGuardServing` | Every guard is serving and public API routes go through it. |
-| `False` | `CosmoGuardNotServing` | A guard, or a global route in front of it, is not serving. The message names each one and says whether its routes still reach the node directly (not filtered) or already stay on the guard. |
+| `False` | `CosmoGuardNotServing` | A guard is not filtering yet, or a public route has not switched to it. The message names each one and says whether its traffic still reaches the nodes directly (not filtered) or already stays on the guard. |
 | `False` | `CosmoGuardConfigMissing` | CosmoGuard is enabled without a rules `ConfigMap`, so its guard is not reconciled and traffic may not be filtered. |
 | `False` | `CosmoGuardBypassed` | A global route also spans a group without CosmoGuard, so it always reaches the nodes directly and is never filtered. |
 
@@ -51,10 +51,10 @@ kubectl get chainnodeset <name> -o jsonpath='{.status.conditions[?(@.type=="Cosm
 
 If you need the rules enforced from the very first request, wait for `CosmoGuardReady=True` before exposing the endpoints publicly.
 
-Routes configured with `useInternalServices: true` bypass CosmoGuard by design and are not covered by the condition. The condition is refreshed whenever Cosmopilot reconciles the guard, so it can lag while a reconcile is held earlier (for example a stopped node or a signer migration).
+Routes configured with `useInternalServices: true` bypass CosmoGuard by design and are not covered by the condition. The condition is refreshed after Cosmopilot reconciles the routes, so it describes the routes as they are; while a reconcile is held before that step (for example a stopped node or a pending signer migration) it keeps its last value.
 
 :::note
-`.status.conditions` on `ChainNodeSet` is new. Helm does not upgrade CRDs, so apply the CRDs of the target release before upgrading the operator; otherwise the API server drops the condition and the operator rewrites it, with a Warning event, on every reconcile.
+`.status.conditions` on `ChainNodeSet` is new. Helm does not upgrade CRDs, so apply the CRDs of the target release before upgrading the operator; otherwise the API server drops the condition and the operator rewrites it on every reconcile (with a Warning event whenever it is `False`).
 :::
 
 ## Why Use CosmoGuard?

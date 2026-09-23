@@ -711,16 +711,33 @@ func drainEvents(r *Reconciler) []string {
 	}
 }
 
-// TestStandaloneGuardReportsReadinessCondition verifies the node reports that its public API routes are
-// not filtered until the guard first serves, recovers once it does, and drops the condition when
-// CosmoGuard is disabled. Events are recorded only on transitions.
+// reconcileGuardAndReport runs the guard reconcile and the post-routing readiness report, as the
+// controller does, and returns the resulting condition.
+func reconcileGuardAndReport(t *testing.T, r *Reconciler, cn *appsv1.ChainNode) *metav1.Condition {
+	t.Helper()
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
+	require.NoError(t, r.reportCosmoGuardReadiness(context.Background(), cn))
+	return meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+}
+
+func markGuardServing(t *testing.T, r *Reconciler, name string) {
+	t.Helper()
+	ctx := context.Background()
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, sts))
+	sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: sts.Generation, ReadyReplicas: 1}
+	require.NoError(t, r.Status().Update(ctx, sts))
+}
+
+// TestStandaloneGuardReportsReadinessCondition verifies a node reached only through its guard Service
+// reports unfiltered traffic until the guard serves, recovers once it does, and drops the condition
+// when CosmoGuard is disabled. Events are recorded only on transitions.
 func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 	ctx := context.Background()
 	cn := guardedChainNode("node-0", false)
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, ensureGuard(r, ctx, cn))
-	cond := meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	cond := reconcileGuardAndReport(t, r, cn)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
@@ -729,15 +746,11 @@ func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Contains(t, events[0], "Warning "+appsv1.ReasonCosmoGuardNotServing)
 
-	require.NoError(t, ensureGuard(r, ctx, cn))
+	reconcileGuardAndReport(t, r, cn)
 	assert.Empty(t, drainEvents(r), "an unchanged condition records no event")
 
-	sts := &k8sappsv1.StatefulSet{}
-	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
-	sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: sts.Generation, ReadyReplicas: 1}
-	require.NoError(t, r.Status().Update(ctx, sts))
-	require.NoError(t, ensureGuard(r, ctx, cn))
-	cond = meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	markGuardServing(t, r, "node-0-cg")
+	cond = reconcileGuardAndReport(t, r, cn)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	events = drainEvents(r)
@@ -751,8 +764,30 @@ func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 
 	cn.Spec.Config.CosmoGuard.Enable = false
 	require.NoError(t, r.Update(ctx, cn))
+	assert.Nil(t, reconcileGuardAndReport(t, r, cn))
+}
+
+// TestServingGuardIsNotReadyUntilRoutesSwitch verifies a serving guard is not reported as filtering
+// while the node's own routes still point at the node, and is once they target the guard.
+func TestServingGuardIsNotReadyUntilRoutesSwitch(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "example.com"}
+	raw := guardIngress("node-0", "node-0")
+	r := cosmoGuardTestReconciler(t, cn, raw)
+
 	require.NoError(t, ensureGuard(r, ctx, cn))
-	assert.Nil(t, meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady))
+	markGuardServing(t, r, "node-0-cg")
+	cond := reconcileGuardAndReport(t, r, cn)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status, "the Ingress still reaches the node directly")
+	assert.Contains(t, cond.Message, "not filtered")
+
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(raw), raw))
+	raw.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name = "node-0-cg"
+	require.NoError(t, r.Update(ctx, raw))
+	cond = reconcileGuardAndReport(t, r, cn)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
 }
 
 // TestStandaloneGuardWithoutConfigReportsConfigMissing verifies a guard enabled without a rules
@@ -762,8 +797,7 @@ func TestStandaloneGuardWithoutConfigReportsConfigMissing(t *testing.T) {
 	cn.Spec.Config.CosmoGuard.Config = nil
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, ensureGuard(r, context.Background(), cn))
-	cond := meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	cond := reconcileGuardAndReport(t, r, cn)
 	require.NotNil(t, cond)
 	assert.Equal(t, appsv1.ReasonCosmoGuardConfigMissing, cond.Reason)
 	events := drainEvents(r)
@@ -778,12 +812,27 @@ func TestStandaloneGuardDownAfterFlipKeepsRoutesOnGuard(t *testing.T) {
 	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "example.com"}
 	r := cosmoGuardTestReconciler(t, cn, guardIngress("node-0", "node-0-cg"))
 
-	require.NoError(t, ensureGuard(r, context.Background(), cn))
-	cond := meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	cond := reconcileGuardAndReport(t, r, cn)
 	require.NotNil(t, cond)
 	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
 	assert.Contains(t, cond.Message, "stay on the guard")
 	assert.NotContains(t, cond.Message, "not filtered")
+}
+
+// TestChildWithIndividualIngressReportsItsOwnGuard verifies a ChainNodeSet child with its own ingress,
+// which runs its own guard, reports that guard on the child.
+func TestChildWithIndividualIngressReportsItsOwnGuard(t *testing.T) {
+	cn := guardedChainNode("chain-fullnodes-0", true)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "0.rpc.example.com"}
+	r := cosmoGuardTestReconciler(t, cn)
+
+	cond := reconcileGuardAndReport(t, r, cn)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "chain-fullnodes-0-cg")
+
+	child := guardedChainNode("chain-fullnodes-1", true)
+	r = cosmoGuardTestReconciler(t, child)
+	assert.Nil(t, reconcileGuardAndReport(t, r, child), "a child fronted by its group guard reports nothing")
 }
 
 // TestStandaloneGuardBypassedByInternalServicesIsNotReported verifies routes configured to use the
@@ -793,6 +842,5 @@ func TestStandaloneGuardBypassedByInternalServicesIsNotReported(t *testing.T) {
 	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "example.com", UseInternalServices: ptr.To(true)}
 	r := cosmoGuardTestReconciler(t, cn)
 
-	require.NoError(t, ensureGuard(r, context.Background(), cn))
-	assert.Nil(t, meta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady))
+	assert.Nil(t, reconcileGuardAndReport(t, r, cn))
 }

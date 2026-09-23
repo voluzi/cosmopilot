@@ -28,7 +28,7 @@ func TestCosmoGuardCondition(t *testing.T) {
 			name:   "not serving before the first flip",
 			guards: []GuardState{{Name: "node-cg"}},
 			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardNotServing,
-			contains: []string{"node-cg is not serving yet", "reach the node directly and are not filtered"},
+			contains: []string{"node-cg is not filtering traffic yet", "reach the node directly and are not filtered"},
 		},
 		{
 			name:   "not serving after the flip",
@@ -46,13 +46,33 @@ func TestCosmoGuardCondition(t *testing.T) {
 			name:   "a guard that is not serving outranks a bypassed route",
 			guards: []GuardState{{Name: "b-cg"}, {Name: "public", Bypassed: true}},
 			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardNotServing,
-			contains: []string{"b-cg is not serving yet", "public route public"},
+			contains: []string{"b-cg is not filtering traffic yet", "public route public"},
+		},
+		{
+			name:   "route not switched yet",
+			guards: []GuardState{{Name: "a-cg", Serving: true}, {Name: "chain-global-public", Route: true}},
+			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardNotServing,
+			contains: []string{"public route chain-global-public has not switched to its guard yet", "not filtered"},
+		},
+		{
+			name:   "route on a guard that stopped serving",
+			guards: []GuardState{{Name: "chain-global-public", Route: true, Routed: true}},
+			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardNotServing,
+			contains: []string{"public route chain-global-public stays on its guard, which is not serving"},
+		},
+		{
+			name: "one unswitched route outranks several bypassed routes",
+			guards: []GuardState{
+				{Name: "r1", Route: true, Bypassed: true}, {Name: "r2", Route: true, Bypassed: true}, {Name: "r3", Route: true},
+			},
+			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardNotServing,
+			contains: []string{"r1, r2 also spans groups without CosmoGuard", "r3 has not switched"},
 		},
 		{
 			name:   "config missing wins and every problem is listed",
 			guards: []GuardState{{Name: "a-cg", ConfigMissing: true}, {Name: "b-cg"}, {Name: "c-cg", Serving: true}},
 			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardConfigMissing,
-			contains: []string{"a-cg is enabled without a config ConfigMap", "b-cg is not serving yet"},
+			contains: []string{"a-cg is enabled without a config ConfigMap", "b-cg is not filtering traffic yet"},
 		},
 	}
 	for _, tc := range cases {

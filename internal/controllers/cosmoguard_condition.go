@@ -24,6 +24,8 @@ type GuardState struct {
 	// Bypassed is true for a route that can never go through a guard because it also spans groups
 	// without one.
 	Bypassed bool
+	// Route is true when the entry is a public route Service rather than a guard.
+	Route bool
 }
 
 // CosmoGuardCondition summarises guard states into the CosmoGuardReady condition. It returns nil when
@@ -32,7 +34,7 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 	if len(guards) == 0 {
 		return nil
 	}
-	var missing, unguardable, bypassed, stalled []string
+	var missing, unguardable, unflippedGuards, unflippedRoutes, stalledGuards, stalledRoutes []string
 	for _, guard := range guards {
 		switch {
 		case guard.ConfigMissing:
@@ -40,10 +42,15 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 		case guard.Bypassed:
 			unguardable = append(unguardable, guard.Name)
 		case guard.Serving:
+			// Serving guards and switched routes are not a problem.
+		case guard.Routed && guard.Route:
+			stalledRoutes = append(stalledRoutes, guard.Name)
 		case guard.Routed:
-			stalled = append(stalled, guard.Name)
+			stalledGuards = append(stalledGuards, guard.Name)
+		case guard.Route:
+			unflippedRoutes = append(unflippedRoutes, guard.Name)
 		default:
-			bypassed = append(bypassed, guard.Name)
+			unflippedGuards = append(unflippedGuards, guard.Name)
 		}
 	}
 	condition := &metav1.Condition{
@@ -52,31 +59,24 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 		ObservedGeneration: generation,
 	}
 	var problems []string
-	if len(missing) > 0 {
-		problems = append(problems, fmt.Sprintf("CosmoGuard %s is enabled without a config ConfigMap and is not reconciled; public API traffic may not be filtered",
-			strings.Join(missing, ", ")))
+	report := func(names []string, format string) {
+		if len(names) > 0 {
+			problems = append(problems, fmt.Sprintf(format, strings.Join(names, ", ")))
+		}
 	}
-	if len(unguardable) > 0 {
-		problems = append(problems, fmt.Sprintf("public route %s also spans groups without CosmoGuard and is never filtered",
-			strings.Join(unguardable, ", ")))
-	}
-	if len(bypassed) > 0 {
-		problems = append(problems, fmt.Sprintf("CosmoGuard %s is not serving yet; public API routes reach the node directly and are not filtered until it is ready",
-			strings.Join(bypassed, ", ")))
-	}
-	if len(stalled) > 0 {
-		problems = append(problems, fmt.Sprintf("CosmoGuard %s is not serving; public API routes stay on the guard",
-			strings.Join(stalled, ", ")))
-	}
+	report(missing, "CosmoGuard %s is enabled without a config ConfigMap and is not reconciled; public API traffic may not be filtered")
+	report(unflippedGuards, "CosmoGuard %s is not filtering traffic yet; public API routes reach the node directly and are not filtered until it serves them")
+	report(unflippedRoutes, "public route %s has not switched to its guard yet; it reaches the nodes directly and is not filtered")
+	report(stalledGuards, "CosmoGuard %s is not serving; public API routes stay on the guard")
+	report(stalledRoutes, "public route %s stays on its guard, which is not serving")
+	report(unguardable, "public route %s also spans groups without CosmoGuard and is never filtered")
 	switch {
 	case len(missing) > 0:
 		condition.Reason = appsv1.ReasonCosmoGuardConfigMissing
-	case len(bypassed) > 0 || len(stalled) > 0:
+	case len(unflippedGuards)+len(unflippedRoutes)+len(stalledGuards)+len(stalledRoutes) > 0:
 		condition.Reason = appsv1.ReasonCosmoGuardNotServing
 	case len(unguardable) > 0:
 		condition.Reason = appsv1.ReasonCosmoGuardBypassed
-	case len(problems) > 0:
-		condition.Reason = appsv1.ReasonCosmoGuardNotServing
 	default:
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = appsv1.ReasonCosmoGuardServing
