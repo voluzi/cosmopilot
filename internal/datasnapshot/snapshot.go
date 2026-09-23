@@ -889,6 +889,7 @@ func deletionJobFromUpload(
 	name := snapshotNameFromJob(upload)
 	container.Args = []string{provider, typeDelete, container.Args[3], name}
 	container.WorkingDir = "/app"
+	container.Resources = corev1.ResourceRequirements{}
 	container.VolumeMounts = slices.DeleteFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
 		return mount.Name == "data"
 	})
@@ -1501,53 +1502,36 @@ func cleanUpNewUploadJob(
 	return cause
 }
 
-// uploadContainerName is the export upload job's container, named in its pod failure policy.
+// uploadContainerName is the export upload job's container.
 const uploadContainerName = "dataexporter"
 
-// uploadJobResources returns the configured export pod resources or, when unset, a request of
-// chunkSize × (concurrentJobs + 1) for resourceName: the exporter holds one read chunk plus one per
-// in-flight part (in memory for GCS, spooled to the container's writable layer for S3).
-func uploadJobResources(cfg *appsv1.ExportTarballConfig, resourceName corev1.ResourceName, chunkSize string, concurrentJobs int) corev1.ResourceRequirements {
+// uploadJobResources returns the configured export pod resources, or the given default requests.
+func uploadJobResources(cfg *appsv1.ExportTarballConfig, defaults corev1.ResourceList) corev1.ResourceRequirements {
 	if cfg != nil && cfg.Resources != nil {
 		return *cfg.Resources
 	}
-	size, err := datasize.ParseString(chunkSize)
-	if err != nil || concurrentJobs < 0 {
-		return corev1.ResourceRequirements{}
-	}
-	request := int64(size.Bytes()) * int64(concurrentJobs+1)
-	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{resourceName: *resource.NewQuantity(request, resource.BinarySI)},
-	}
+	return corev1.ResourceRequirements{Requests: defaults}
 }
 
-// uploadJobPodFailurePolicy keeps evictions, preemptions and external kills of the export pod from
-// consuming the Job's only attempt, like the integrity-check Job.
+// uploadRequest returns size × multiplier as a quantity, or false when size cannot be parsed.
+func uploadRequest(size string, multiplier int) (resource.Quantity, bool) {
+	parsed, err := datasize.ParseString(size)
+	if err != nil || multiplier < 1 {
+		return resource.Quantity{}, false
+	}
+	return *resource.NewQuantity(int64(parsed.Bytes())*int64(multiplier), resource.BinarySI), true
+}
+
+// uploadJobPodFailurePolicy keeps evictions, preemptions and drains of the export pod from consuming the
+// Job's only attempt. Other failures, OOM kills included, still count.
 func uploadJobPodFailurePolicy() *batchv1.PodFailurePolicy {
 	return &batchv1.PodFailurePolicy{
-		Rules: []batchv1.PodFailurePolicyRule{
-			{
-				Action: batchv1.PodFailurePolicyActionCount,
-				OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
-					ContainerName: ptr.To(uploadContainerName),
-					Operator:      batchv1.PodFailurePolicyOnExitCodesOpNotIn,
-					Values:        []int32{137, 143},
-				},
-			},
-			{
-				Action: batchv1.PodFailurePolicyActionIgnore,
-				OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{{
-					Type:   corev1.DisruptionTarget,
-					Status: corev1.ConditionTrue,
-				}},
-			},
-			{
-				Action: batchv1.PodFailurePolicyActionIgnore,
-				OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
-					Operator: batchv1.PodFailurePolicyOnExitCodesOpIn,
-					Values:   []int32{137, 143},
-				},
-			},
-		},
+		Rules: []batchv1.PodFailurePolicyRule{{
+			Action: batchv1.PodFailurePolicyActionIgnore,
+			OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{{
+				Type:   corev1.DisruptionTarget,
+				Status: corev1.ConditionTrue,
+			}},
+		}},
 	}
 }

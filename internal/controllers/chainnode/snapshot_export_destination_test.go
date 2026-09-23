@@ -1897,3 +1897,23 @@ func getDestinationTestNode(t *testing.T, reconciler *Reconciler, node *appsv1.C
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(node), stored))
 	return stored
 }
+
+func TestTarballProviderForExportAppliesConfiguredExportResources(t *testing.T) {
+	resources := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("3Gi")},
+	}
+	node := destinationTestChainNode(&appsv1.ExportTarballConfig{
+		GCS:       &appsv1.GcsExportConfig{Bucket: "snapshots"},
+		Resources: resources,
+	})
+	reconciler := destinationTestReconciler(t, node, nil)
+	export := &appsv1.SnapshotExportStatus{Destination: appsv1.SnapshotExportDestination{
+		Provider: appsv1.SnapshotExportProviderGCS, Bucket: "snapshots",
+	}}
+
+	provider, err := reconciler.tarballProviderForExport(node, export)
+	require.NoError(t, err)
+	gcs, ok := provider.(*datasnapshot.GCS)
+	require.True(t, ok)
+	assert.Equal(t, resources, gcs.ExportConfig.Resources)
+}

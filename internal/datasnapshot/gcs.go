@@ -118,6 +118,15 @@ func (gcs *GCS) serviceAccountName() string {
 	return *gcs.Config.ServiceAccountName
 }
 
+// defaultUploadRequests requests the memory the exporter holds: one read chunk plus one per in-flight part.
+func (gcs *GCS) defaultUploadRequests() corev1.ResourceList {
+	requests := corev1.ResourceList{}
+	if memory, ok := uploadRequest(gcs.Config.GetChunkSize(), gcs.Config.GetConcurrentJobs()+1); ok {
+		requests[corev1.ResourceMemory] = memory
+	}
+	return requests
+}
+
 func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -148,10 +157,9 @@ func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 						},
 					}}, gcs.credentialsVolume()...),
 					Containers: []corev1.Container{{
-						Name:  uploadContainerName,
-						Image: gcs.dataExporterImage,
-						Resources: uploadJobResources(gcs.ExportConfig, corev1.ResourceMemory,
-							gcs.Config.GetChunkSize(), gcs.Config.GetConcurrentJobs()),
+						Name:            uploadContainerName,
+						Image:           gcs.dataExporterImage,
+						Resources:       uploadJobResources(gcs.ExportConfig, gcs.defaultUploadRequests()),
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},

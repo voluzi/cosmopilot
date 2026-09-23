@@ -1143,7 +1143,8 @@ type ExportTarballConfig struct {
 	S3 *S3ExportConfig `json:"s3,omitempty"`
 
 	// Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
-	// (concurrentJobs + 1) of memory for GCS, or of ephemeral storage for the S3 part spool.
+	// (concurrentJobs + 1) of memory for GCS; for S3 it requests that much ephemeral storage for the
+	// part spool, plus bufferSize of memory.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }

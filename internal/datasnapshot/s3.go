@@ -91,6 +91,19 @@ func (provider *S3) uploadEnv() []corev1.EnvVar {
 	)
 }
 
+// defaultUploadRequests requests ephemeral storage for the parts spooled to the container's writable
+// layer (one read chunk plus one per in-flight part) and memory for the spool buffer.
+func (provider *S3) defaultUploadRequests() corev1.ResourceList {
+	requests := corev1.ResourceList{}
+	if storage, ok := uploadRequest(provider.Config.GetChunkSize(), provider.Config.GetConcurrentJobs()+1); ok {
+		requests[corev1.ResourceEphemeralStorage] = storage
+	}
+	if memory, ok := uploadRequest(provider.Config.GetBufferSize(), 1); ok {
+		requests[corev1.ResourceMemory] = memory
+	}
+	return requests
+}
+
 func (provider *S3) uploadJob(name string) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -121,10 +134,9 @@ func (provider *S3) uploadJob(name string) *batchv1.Job {
 						},
 					}},
 					Containers: []corev1.Container{{
-						Name:  uploadContainerName,
-						Image: provider.dataExporterImage,
-						Resources: uploadJobResources(provider.ExportConfig, corev1.ResourceEphemeralStorage,
-							provider.Config.GetChunkSize(), provider.Config.GetConcurrentJobs()),
+						Name:            uploadContainerName,
+						Image:           provider.dataExporterImage,
+						Resources:       uploadJobResources(provider.ExportConfig, provider.defaultUploadRequests()),
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"s3", "upload", "data", provider.Config.Bucket, name},

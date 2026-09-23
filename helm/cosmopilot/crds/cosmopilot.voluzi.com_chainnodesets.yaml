@@ -5785,7 +5785,8 @@ spec:
                                 resources:
                                   description: |-
                                     Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
-                                    (concurrentJobs + 1) of memory for GCS, or of ephemeral storage for the S3 part spool.
+                                    (concurrentJobs + 1) of memory for GCS; for S3 it requests that much ephemeral storage for the
+                                    part spool, plus bufferSize of memory.
                                   properties:
                                     claims:
                                       description: |-
@@ -10870,7 +10871,8 @@ spec:
                                     resources:
                                       description: |-
                                         Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
-                                        (concurrentJobs + 1) of memory for GCS, or of ephemeral storage for the S3 part spool.
+                                        (concurrentJobs + 1) of memory for GCS; for S3 it requests that much ephemeral storage for the
+                                        part spool, plus bufferSize of memory.
                                       properties:
                                         claims:
                                           description: |-
@@ -16667,7 +16669,8 @@ spec:
                               resources:
                                 description: |-
                                   Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
-                                  (concurrentJobs + 1) of memory for GCS, or of ephemeral storage for the S3 part spool.
+                                  (concurrentJobs + 1) of memory for GCS; for S3 it requests that much ephemeral storage for the
+                                  part spool, plus bufferSize of memory.
                                 properties:
                                   claims:
                                     description: |-

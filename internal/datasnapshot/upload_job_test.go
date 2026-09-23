@@ -14,46 +14,40 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
-func requireUploadJobHardening(t *testing.T, job *batchv1.Job, resourceName corev1.ResourceName, want int64) {
+func requireUploadJobHardening(t *testing.T, job *batchv1.Job, wantRequests corev1.ResourceList) {
 	t.Helper()
-	container := job.Spec.Template.Spec.Containers[0]
-	request, ok := container.Resources.Requests[resourceName]
-	require.True(t, ok, "export pod must request %s", resourceName)
-	assert.Equal(t, want, request.Value())
+	requests := job.Spec.Template.Spec.Containers[0].Resources.Requests
+	require.Len(t, requests, len(wantRequests))
+	for name, want := range wantRequests {
+		got, ok := requests[name]
+		require.True(t, ok, "export pod must request %s", name)
+		assert.Zero(t, want.Cmp(got), "%s: want %s, got %s", name, want.String(), got.String())
+	}
 
-	policy := job.Spec.PodFailurePolicy
-	require.NotNil(t, policy, "evictions must not consume the export Job's only attempt")
-	var ignoresDisruption, ignoresKills bool
-	for _, rule := range policy.Rules {
-		if rule.Action != batchv1.PodFailurePolicyActionIgnore {
-			continue
-		}
-		for _, cond := range rule.OnPodConditions {
-			ignoresDisruption = ignoresDisruption || cond.Type == corev1.DisruptionTarget
-		}
-		if rule.OnExitCodes != nil && rule.OnExitCodes.Operator == batchv1.PodFailurePolicyOnExitCodesOpIn {
-			ignoresKills = assert.ElementsMatch(t, []int32{137, 143}, rule.OnExitCodes.Values)
-		}
-	}
-	assert.True(t, ignoresDisruption)
-	assert.True(t, ignoresKills)
-	for _, rule := range policy.Rules {
-		if rule.OnExitCodes != nil && rule.OnExitCodes.ContainerName != nil {
-			assert.Equal(t, container.Name, *rule.OnExitCodes.ContainerName)
-		}
-	}
+	// Only disruptions are ignored: an OOM kill or exporter error must still fail the Job.
+	require.Equal(t, &batchv1.PodFailurePolicy{Rules: []batchv1.PodFailurePolicyRule{{
+		Action: batchv1.PodFailurePolicyActionIgnore,
+		OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{{
+			Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue,
+		}},
+	}}}, job.Spec.PodFailurePolicy)
 }
 
 func TestUploadJobsRequestResourcesAndIgnoreDisruptions(t *testing.T) {
 	gcs := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
 		Bucket: "snapshots", ChunkSize: ptr.To("100MB"), ConcurrentJobs: ptr.To(3),
 	}})
-	requireUploadJobHardening(t, gcs.uploadJob("snapshot"), corev1.ResourceMemory, int64(4*100*datasize.MB))
+	requireUploadJobHardening(t, gcs.uploadJob("snapshot"), corev1.ResourceList{
+		corev1.ResourceMemory: *resource.NewQuantity(int64(4*100*datasize.MB), resource.BinarySI),
+	})
 
 	s3 := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
-		Bucket: "snapshots", Region: "eu-west-1", ChunkSize: ptr.To("64MB"), ConcurrentJobs: ptr.To(2),
+		Bucket: "snapshots", Region: "eu-west-1", ChunkSize: ptr.To("64MB"), BufferSize: ptr.To("16MB"), ConcurrentJobs: ptr.To(2),
 	}})
-	requireUploadJobHardening(t, s3.uploadJob("snapshot"), corev1.ResourceEphemeralStorage, int64(3*64*datasize.MB))
+	requireUploadJobHardening(t, s3.uploadJob("snapshot"), corev1.ResourceList{
+		corev1.ResourceEphemeralStorage: *resource.NewQuantity(int64(3*64*datasize.MB), resource.BinarySI),
+		corev1.ResourceMemory:           *resource.NewQuantity(int64(16*datasize.MB), resource.BinarySI),
+	})
 }
 
 func TestUploadJobsUseConfiguredResources(t *testing.T) {
@@ -66,4 +60,14 @@ func TestUploadJobsUseConfiguredResources(t *testing.T) {
 
 	s3 := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "snapshots", Region: "eu-west-1"}, Resources: custom})
 	assert.Equal(t, *custom, s3.uploadJob("snapshot").Spec.Template.Spec.Containers[0].Resources)
+}
+
+func TestDeletionJobFromUploadDropsExportResources(t *testing.T) {
+	gcs := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "snapshots"}})
+	upload := gcs.uploadJob("snapshot")
+	require.NotEmpty(t, upload.Spec.Template.Spec.Containers[0].Resources.Requests)
+
+	deletion, err := deletionJobFromUpload(upload, gcs.Owner, gcsExporter, SnapshotJobIdentity{})
+	require.NoError(t, err)
+	assert.Empty(t, deletion.Spec.Template.Spec.Containers[0].Resources)
 }
