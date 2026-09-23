@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	neturl "net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -274,12 +275,11 @@ mv -fT "$candidate_path" "$destination"
 `
 
 func buildGenesisDownloadCommand(url, destPath string, sha *string) []string {
-	lowerURL := strings.ToLower(url)
 	compression := "plain"
-	switch {
-	case strings.HasSuffix(lowerURL, ".gz"):
+	switch lowerPath := strings.ToLower(genesisURLPath(url)); {
+	case strings.HasSuffix(lowerPath, ".gz"):
 		compression = "gzip"
-	case strings.HasSuffix(lowerURL, ".zst"):
+	case strings.HasSuffix(lowerPath, ".zst"):
 		compression = "zstd"
 	}
 
@@ -291,4 +291,14 @@ func buildGenesisDownloadCommand(url, destPath string, sha *string) []string {
 	}
 
 	return []string{"-c", genesisDownloadScript, "genesis-download", url, destPath, compression, verifySHA, expectedSHA}
+}
+
+// genesisURLPath returns the path component of a genesis URL, so a query string or fragment (as on a
+// signed object-store URL) does not hide the compression extension.
+func genesisURLPath(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return u.Path
 }

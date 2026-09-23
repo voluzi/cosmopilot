@@ -195,6 +195,7 @@ func TestBuildCreateValidatorPodSDKVersions(t *testing.T) {
 
 			pod, err := app.buildCreateValidatorPod(
 				validValidatorPubKey,
+				"",
 				&NodeInfo{Moniker: "validator"},
 				&Params{
 					ChainID:                 "chain-1",
@@ -261,6 +262,7 @@ func TestBuildCreateValidatorPodMaterializesModernValidatorJSON(t *testing.T) {
 	minimum := "7"
 	pod, err := app.buildCreateValidatorPod(
 		validValidatorPubKey,
+		"",
 		&NodeInfo{Moniker: "validator", Details: &details},
 		&Params{
 			ChainID:                 "chain-1",

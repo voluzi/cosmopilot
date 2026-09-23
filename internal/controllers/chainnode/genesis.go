@@ -28,6 +28,11 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 			return fmt.Errorf("pvc not found for chainnode %s/%s", chainNode.Namespace, chainNode.Name)
 		}
 		if v, ok := pvc.Annotations[controllers.AnnotationGenesisDownloaded]; ok && v == controllers.StringValueTrue {
+			// The marker is persisted before status.chainID, so a failed status write leaves the chain ID
+			// empty and nothing else would ever set it.
+			if chainNode.Status.ChainID == "" {
+				return r.restoreDataVolumeChainID(ctx, chainNode)
+			}
 			// Genesis is on the data volume (always an external source). Record the digest if missing here
 			// too — this branch returns before the chainID branch below, so otherwise a data-volume node
 			// would keep an empty digest and could later be converted to an init validator (see no-webhook
@@ -62,6 +67,35 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 		return nil
 	}
 	return r.getGenesis(ctx, app, chainNode)
+}
+
+// restoreDataVolumeChainID sets status.chainID for a node whose genesis is already on the data volume
+// but whose chain ID was never recorded. The genesis is fetched again only to read its chain ID; the
+// file on the volume is left untouched.
+func (r *Reconciler) restoreDataVolumeChainID(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	g := chainNode.Spec.Genesis
+	var genesis string
+	var err error
+	switch {
+	case g.ChainID != nil:
+		chainNode.SetEstablishedChainID(*g.ChainID)
+		return r.Status().Update(ctx, chainNode)
+	case g.Url != nil:
+		genesis, err = chainutils.RetrieveGenesisFromURL(ctx, *g.Url, g.GenesisSHA)
+	case g.FromNodeRPC != nil:
+		genesis, err = chainutils.RetrieveGenesisFromNodeRPC(ctx, g.FromNodeRPC.GetGenesisFromRPCUrl(), g.GenesisSHA)
+	default:
+		return fmt.Errorf("cannot restore chain ID: genesis has no chainID, url or fromNodeRPC")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to retrieve genesis to restore chain ID: %w", err)
+	}
+	chainID, err := chainutils.ExtractChainIdFromGenesis(genesis)
+	if err != nil {
+		return fmt.Errorf("failed to extract chainID from retrieved genesis: %w", err)
+	}
+	chainNode.SetEstablishedChainID(chainID)
+	return r.Status().Update(ctx, chainNode)
 }
 
 // recordGenesisDigestIfMissing records the genesis signing fingerprint (for a node that initialized
