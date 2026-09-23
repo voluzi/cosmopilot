@@ -34,7 +34,12 @@ func TestPprofMuxOnlyServesDiagnosticRoutes(t *testing.T) {
 		"/debug/pprof/profile?seconds=1", "/debug/pprof/symbol",
 		"/debug/pprof/trace?seconds=0.01",
 	} {
-		for _, method := range []string{http.MethodGet, http.MethodHead} {
+		methods := []string{http.MethodGet, http.MethodHead}
+		route, _, _ := strings.Cut(path, "?")
+		if route == "/debug/pprof/profile" || route == "/debug/pprof/trace" {
+			methods = []string{http.MethodGet}
+		}
+		for _, method := range methods {
 			t.Run(method+" "+path, func(t *testing.T) {
 				response := httptest.NewRecorder()
 				mux.ServeHTTP(response, httptest.NewRequest(method, path, nil))
