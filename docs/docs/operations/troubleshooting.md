@@ -100,6 +100,12 @@ Builds containing the profiling endpoint serve Go runtime profiles on
 `127.0.0.1:6666` inside the Pod. Forward that loopback port when diagnosing the
 `node-utils` sidecar:
 
+> **Warning:** TCP port `6666` is reserved for node-utils profiling. Do not
+> configure the Cosmos application or other containers in the same Pod to use it.
+> The node-utils sidecar can bind it before the application starts, causing a
+> conflicting application listener to fail. The profiling port is fixed; it does
+> not automatically switch to another port.
+
 ```bash
 kubectl port-forward pod/<node-pod> 6666:6666
 ```
@@ -123,7 +129,8 @@ total Pod memory. The port is loopback only and is not exposed by a Service or
 Ingress, but other containers in the same Pod can reach it. Profiles may contain
 sensitive process data; keep access to the Pod and port-forward controlled.
 A CPU profile or execution trace collects data only while requested;
-block and mutex sampling remain at Go's defaults. If port 6666 is occupied,
+block and mutex sampling remain at Go's defaults. If port 6666 is already occupied
+when the profiling listener starts,
 `node-utils` logs a warning and continues without profiling.
 
 ## TMKMS / Vault issues (deprecated)
