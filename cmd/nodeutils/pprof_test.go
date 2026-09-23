@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,36 +27,80 @@ func TestPprofMuxOnlyServesDiagnosticRoutes(t *testing.T) {
 	})
 
 	mux := newPprofMux()
-	for _, tt := range []struct {
-		path       string
-		wantStatus int
-	}{
-		{path: "/debug/pprof/", wantStatus: http.StatusOK},
-		{path: "/debug/pprof/heap", wantStatus: http.StatusOK},
-		{path: "/debug/pprof/goroutine", wantStatus: http.StatusOK},
-		{path: "/debug/pprof/cmdline", wantStatus: http.StatusOK},
-		{path: "/debug/pprof/symbol", wantStatus: http.StatusOK},
-		{path: "/health", wantStatus: http.StatusNotFound},
-		{path: "/data_size", wantStatus: http.StatusNotFound},
-		{path: "/shutdown", wantStatus: http.StatusNotFound},
-		{path: "/not-found", wantStatus: http.StatusNotFound},
-		{path: defaultRoute, wantStatus: http.StatusNotFound},
+	for _, path := range []string{
+		"/debug/pprof/", "/debug/pprof/allocs", "/debug/pprof/block",
+		"/debug/pprof/goroutine", "/debug/pprof/heap", "/debug/pprof/mutex",
+		"/debug/pprof/threadcreate", "/debug/pprof/cmdline",
+		"/debug/pprof/profile?seconds=1", "/debug/pprof/symbol",
+		"/debug/pprof/trace?seconds=0.01",
 	} {
-		t.Run(tt.path, func(t *testing.T) {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			t.Run(method+" "+path, func(t *testing.T) {
+				response := httptest.NewRecorder()
+				mux.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+				if response.Code != http.StatusOK {
+					t.Fatalf("%s %s = %d, want 200", method, path, response.Code)
+				}
+			})
+		}
+	}
+
+	for _, path := range []string{"/health", "/data_size", "/shutdown", "/not-found", defaultRoute} {
+		t.Run("GET "+path, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tt.path, nil))
-			if response.Code != tt.wantStatus {
-				t.Fatalf("GET %s = %d, want %d", tt.path, response.Code, tt.wantStatus)
+			mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("GET %s = %d, want 404", path, response.Code)
 			}
 		})
 	}
 
-	for _, path := range []string{"/debug/pprof/", "/debug/pprof/heap", "/debug/pprof/profile", "/debug/pprof/trace"} {
-		t.Run("POST "+path, func(t *testing.T) {
-			response := httptest.NewRecorder()
-			mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
-			if response.Code != http.StatusMethodNotAllowed {
-				t.Fatalf("POST %s = %d, want 405", path, response.Code)
+	for _, path := range []string{
+		"/debug/pprof/", "/debug/pprof/heap", "/debug/pprof/profile",
+		"/debug/pprof/trace", "/debug/pprof/cmdline", "/debug/pprof/symbol",
+	} {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions, http.MethodPatch} {
+			t.Run(method+" "+path, func(t *testing.T) {
+				response := httptest.NewRecorder()
+				mux.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+				if response.Code != http.StatusMethodNotAllowed {
+					t.Fatalf("%s %s = %d, want 405", method, path, response.Code)
+				}
+				if got := response.Header().Get("Allow"); got != "GET, HEAD" {
+					t.Fatalf("%s %s Allow = %q, want %q", method, path, got, "GET, HEAD")
+				}
+			})
+		}
+	}
+}
+
+func TestPprofMuxCompatibility(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"0", "1"} {
+		t.Run("httpmuxgo121="+mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, executable, "-test.run=^TestPprofMuxOnlyServesDiagnosticRoutes$", "-test.count=1")
+			var environment []string
+			var godebug []string
+			for _, variable := range os.Environ() {
+				if !strings.HasPrefix(variable, "GODEBUG=") {
+					environment = append(environment, variable)
+					continue
+				}
+				for _, option := range strings.Split(strings.TrimPrefix(variable, "GODEBUG="), ",") {
+					if option != "" && !strings.HasPrefix(option, "httpmuxgo121=") {
+						godebug = append(godebug, option)
+					}
+				}
+			}
+			command.Env = append(environment, "GODEBUG="+strings.Join(append(godebug, "httpmuxgo121="+mode), ","))
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("diagnostic routes with httpmuxgo121=%s: %v\n%s", mode, err, output)
 			}
 		})
 	}

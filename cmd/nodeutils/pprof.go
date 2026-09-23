@@ -15,12 +15,23 @@ const pprofAddress = "127.0.0.1:6666"
 
 func newPprofMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
-	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	mux.HandleFunc("/debug/pprof/", pprofGetOrHead(pprof.Index))
+	mux.HandleFunc("/debug/pprof/cmdline", pprofGetOrHead(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/profile", pprofGetOrHead(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/symbol", pprofGetOrHead(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", pprofGetOrHead(pprof.Trace))
 	return mux
+}
+
+func pprofGetOrHead(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func runWithPprof(address string, primaryPort int, serve func() error) error {
