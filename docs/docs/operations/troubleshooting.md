@@ -132,6 +132,8 @@ A CPU profile or execution trace collects data only while requested;
 block and mutex sampling remain at Go's defaults. If port 6666 is already occupied
 when the profiling listener starts,
 `node-utils` logs a warning and continues without profiling.
+If the node-utils primary API is configured on port 6666, that API keeps the port;
+`node-utils` logs a warning and disables profiling.
 
 ## TMKMS / Vault issues (deprecated)
 
