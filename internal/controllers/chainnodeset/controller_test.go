@@ -1956,13 +1956,33 @@ func TestSignerImportSourcePendingCreateValidatorExplicitKey(t *testing.T) {
 // status.validators has no pubKey for it yet, but the preflight must not refuse, and the child must
 // stay a remote signer target instead of signing locally.
 func TestPrepareCosmosignerImportsToleratesRecreatedInstanceZeroForServedSoftwareSigner(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		record func(st *appsv1.CosmosignerStatus, signer appsv1.ResolvedSigner)
+	}{
+		{name: "current digest served", record: func(st *appsv1.CosmosignerStatus, signer appsv1.ResolvedSigner) {
+			st.SigningDigest = signer.Digest()
+		}},
+		{name: "identity served before a target-group edit", record: func(st *appsv1.CosmosignerStatus, signer appsv1.ResolvedSigner) {
+			st.SigningDigest = "digest-before-target-group-edit"
+			st.ServingIdentity = signer.ValidatorTargetedIdentity()
+			st.ServingGroup = signer.ValidatorGroup
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testRecreatedInstanceZeroForServedSoftwareSigner(t, tc.record)
+		})
+	}
+}
+
+func testRecreatedInstanceZeroForServedSoftwareSigner(t *testing.T, record func(*appsv1.CosmosignerStatus, appsv1.ResolvedSigner)) {
 	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
 	nodeSet.UID = types.UID("nodeset-uid")
 	nodeSet.Spec.Nodes[0].Validator.PrivateKeySecret = nil
 	nodeSet.Spec.Nodes[0].Validator.CreateValidator = &appsv1.CreateValidatorConfig{}
 	nodeSet.Status.ChainID = "test-localnet"
 	signer := resolveSingleSigner(t, nodeSet)
-	nodeSet.EnsureCosmosignerStatus(signer.Name).SigningDigest = signer.Digest()
+	record(nodeSet.EnsureCosmosignerStatus(signer.Name), signer)
 	key, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
 	source := &corev1.Secret{

@@ -1277,9 +1277,9 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 	}
 	blocked := blockedSignerTargets{}
 	for _, s := range nodeSet.ResolveCosmosigners() {
-		// A software signer that already served its current digest has proven its key; a recreated
+		// A software signer that already served this signing identity has proven its key; a recreated
 		// instance-0 child only lacks a recorded pubKey until ensureValidator refreshes it.
-		if s.Spec.UsesSoftwareBackend() && r.signerImportSourcePending(nodeSet, s) && !signerServedCurrentDigest(nodeSet, s) {
+		if s.Spec.UsesSoftwareBackend() && r.signerImportSourcePending(nodeSet, s) && !signerServedCurrentIdentity(nodeSet, s) {
 			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
 			if err != nil {
 				return nil, false, err
@@ -2520,12 +2520,21 @@ func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s a
 	return !pubKeyRecorded()
 }
 
-func signerServedCurrentDigest(nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) bool {
+// signerServedCurrentIdentity reports whether the signer already served its current signing identity
+// for the same validator group. The digest also covers target groups and replicas, so an edit to those
+// (a migration in progress) must not make an established key look unproven.
+func signerServedCurrentIdentity(nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) bool {
 	if nodeSet.Status.ChainID == "" {
 		return false
 	}
 	st := nodeSet.GetCosmosignerStatus(s.Name)
-	return st != nil && st.SigningDigest != "" && st.SigningDigest == s.Digest()
+	if st == nil {
+		return false
+	}
+	if st.SigningDigest != "" && st.SigningDigest == s.Digest() {
+		return true
+	}
+	return st.ServingIdentity != "" && st.ServingIdentity == s.ValidatorTargetedIdentity() && st.ServingGroup == s.ValidatorGroup
 }
 
 // signerTargetInitializesGenesis reports whether the validator a signer targets initializes a new
