@@ -13,10 +13,12 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -53,9 +55,10 @@ func cosmoGuardTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	require.NoError(t, gwapiv1.Install(scheme))
 
 	return &Reconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
-		Scheme: scheme,
-		opts:   &controllers.ControllerRunOptions{CosmoGuardImage: "ghcr.io/voluzi/cosmoguard:4.0.3"},
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(&appsv1.ChainNode{}).Build(),
+		Scheme:   scheme,
+		recorder: record.NewFakeRecorder(100),
+		opts:     &controllers.ControllerRunOptions{CosmoGuardImage: "ghcr.io/voluzi/cosmoguard:4.0.3"},
 	}
 }
 
@@ -593,6 +596,7 @@ func TestFinalizeTearsDownGuardWhenNodeBecomesChild(t *testing.T) {
 
 	// The node joins a ChainNodeSet; ensure no longer manages a guard and finalize tears the old one down.
 	markChainNodeSetChild(cn)
+	require.NoError(t, r.Update(context.Background(), cn))
 	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})
@@ -613,6 +617,7 @@ func TestChildWithIndividualIngressGetsGuard(t *testing.T) {
 
 	// Removing the individual ingress tears the per-node guard back down.
 	cn.Spec.Ingress = nil
+	require.NoError(t, r.Update(context.Background(), cn))
 	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 	assert.Equal(t, "chain-fullnodes-0", r.apiServiceName(context.Background(), cn))
@@ -678,6 +683,7 @@ func TestDisableGuardUndeploys(t *testing.T) {
 
 	// Disable, then finalize (teardown runs after routes are retargeted, not in ensureCosmoGuard).
 	cn.Spec.Config.CosmoGuard.Enable = false
+	require.NoError(t, r.Update(context.Background(), cn))
 	require.NoError(t, ensureGuard(r, context.Background(), cn))
 	require.NoError(t, r.finalizeCosmoGuard(context.Background(), cn, true))
 
@@ -691,4 +697,77 @@ func TestDisableGuardUndeploys(t *testing.T) {
 		err = r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: name}, &gwapiv1.HTTPRoute{})
 		assert.True(t, apierrors.IsNotFound(err), "dashboard HTTPRoute %s should be removed when disabled", name)
 	}
+}
+
+func drainEvents(r *Reconciler) []string {
+	var events []string
+	recorder := r.recorder.(*record.FakeRecorder)
+	for {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		default:
+			return events
+		}
+	}
+}
+
+// TestStandaloneGuardReportsReadinessCondition verifies the node reports that its public API routes are
+// not filtered until the guard first serves, recovers once it does, and drops the condition when
+// CosmoGuard is disabled. Events are recorded only on transitions.
+func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	r := cosmoGuardTestReconciler(t, cn)
+
+	require.NoError(t, ensureGuard(r, ctx, cn))
+	cond := apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
+	assert.Contains(t, cond.Message, "not filtered")
+	events := drainEvents(r)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "Warning "+appsv1.ReasonCosmoGuardNotServing)
+
+	require.NoError(t, ensureGuard(r, ctx, cn))
+	assert.Empty(t, drainEvents(r), "an unchanged condition records no event")
+
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, sts))
+	sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: sts.Generation, ReadyReplicas: 1}
+	require.NoError(t, r.Status().Update(ctx, sts))
+	require.NoError(t, ensureGuard(r, ctx, cn))
+	cond = apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	events = drainEvents(r)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "Normal "+appsv1.ReasonCosmoGuardServing)
+
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(cn), stored))
+	require.NotNil(t, apimeta.FindStatusCondition(stored.Status.Conditions, appsv1.ConditionCosmoGuardReady),
+		"the condition is persisted in status")
+
+	cn.Spec.Config.CosmoGuard.Enable = false
+	require.NoError(t, r.Update(ctx, cn))
+	require.NoError(t, ensureGuard(r, ctx, cn))
+	assert.Nil(t, apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady))
+}
+
+// TestStandaloneGuardWithoutConfigReportsConfigMissing verifies a guard enabled without a rules
+// ConfigMap (only reachable when CRD validation is bypassed) is reported instead of skipped silently.
+func TestStandaloneGuardWithoutConfigReportsConfigMissing(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Config = nil
+	r := cosmoGuardTestReconciler(t, cn)
+
+	require.NoError(t, ensureGuard(r, context.Background(), cn))
+	cond := apimeta.FindStatusCondition(cn.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, appsv1.ReasonCosmoGuardConfigMissing, cond.Reason)
+	events := drainEvents(r)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "Warning "+appsv1.ReasonCosmoGuardConfigMissing)
 }

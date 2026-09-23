@@ -225,6 +225,8 @@ type cosmoGuardReconcile struct {
 	// admits (Gateway API CRDs are optional, so the controller cannot Own HTTPRoute), so the caller
 	// requeues sooner than the reconcile period to keep the make-before-break cutover responsive.
 	routesPending bool
+	// states records each enabled group guard for the CosmoGuardReady condition.
+	states []controllers.GuardState
 }
 
 // ensureCosmoGuards reconciles the per-group CosmoGuard deployments and reports, per group, whether
@@ -241,6 +243,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 	expectedIngress := map[string]bool{}
 	expectedRoutes := map[string]bool{}
 	routesPending := false
+	var states []controllers.GuardState
 
 	for _, group := range nodeSet.Spec.Nodes {
 		cfg := group.GetServiceConfig()
@@ -259,6 +262,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 			// The CRD requires a config ConfigMap, but guard against a nil deref in the builder in case
 			// validation was bypassed. Skip this group's guard until a config is provided.
 			logger.Info("cosmoguard enabled without a config ConfigMap; skipping", "group", group.Name)
+			states = append(states, controllers.GuardState{Name: groupCosmoGuardName(nodeSet, group), ConfigMissing: true})
 			continue
 		}
 
@@ -369,8 +373,10 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		// replica restarting) instead of briefly reverting to raw node pods and bypassing policy. The
 		// first flip still requires the guard to actually be serving (make-before-break). On disable the
 		// group is skipped above, so its Service reverts to raw regardless of prior flip state.
-		flipped := serving || r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), group.GetServiceName(nodeSet))
+		routed := r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), group.GetServiceName(nodeSet))
+		flipped := serving || routed
 		ready[group.Name] = flipped
+		states = append(states, controllers.GuardState{Name: name, Serving: serving, Routed: routed})
 		if !serving {
 			logger.Info("cosmoguard not yet serving", "group", group.Name, "cosmoguard", name, "keeping-flip", flipped)
 		}
@@ -391,7 +397,25 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		expectedIngress: expectedIngress,
 		expectedRoutes:  expectedRoutes,
 		routesPending:   routesPending,
+		states:          states,
 	}, nil
+}
+
+// updateCosmoGuardCondition records whether the group guards are filtering the set's public API
+// routes; no guards removes the condition.
+func (r *Reconciler) updateCosmoGuardCondition(ctx context.Context, nodeSet *appsv1.ChainNodeSet, guards []controllers.GuardState) error {
+	desired := controllers.CosmoGuardCondition(guards, nodeSet.Generation)
+	changed, eventType := controllers.UpdateCosmoGuardCondition(&nodeSet.Status.Conditions, desired)
+	if !changed {
+		return nil
+	}
+	if err := r.Status().Update(ctx, nodeSet); err != nil {
+		return fmt.Errorf("failed to update cosmoguard condition for %s: %w", nodeSet.GetName(), err)
+	}
+	if eventType != "" {
+		r.recorder.Event(nodeSet, eventType, desired.Reason, desired.Message)
+	}
+	return nil
 }
 
 // serviceSelectsGuard reports whether the named Service currently selects CosmoGuard pods (i.e. it

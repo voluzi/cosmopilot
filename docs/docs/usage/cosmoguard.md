@@ -30,6 +30,26 @@ You don't configure any of this — enabling CosmoGuard is enough.
 Earlier releases ran CosmoGuard as a sidecar container inside each node pod. Enabling CosmoGuard no longer modifies the node pod. When you upgrade, Cosmopilot brings the standalone guard up first and only routes traffic through it once it is ready (make-before-break), then recreates the node pods without the sidecar. Your rules `ConfigMap` is never modified.
 :::
 
+## Traffic While the Guard Starts
+
+Cosmopilot keeps public API routes (Ingress, Gateway routes and the group/global Services) pointed at the node itself until the guard is serving, then switches them to the guard. This is deliberate: CosmoGuard is usually added to nodes that are already serving traffic, and the endpoints must keep working while the guard is being deployed.
+
+The consequence is that **until the guard serves for the first time, public API traffic reaches the node directly and is not filtered** by your rules. That also applies to a node that is created with CosmoGuard enabled, and for as long as the guard cannot start (for example a missing rules `ConfigMap`, an image pull failure or a crash loop). Once routes have switched to the guard they stay there, so a later guard outage makes the endpoints unavailable rather than unfiltered.
+
+Cosmopilot reports this state through the `CosmoGuardReady` condition on the `ChainNode` (standalone guards) or the `ChainNodeSet` (group guards), and records an event on every transition:
+
+| Status | Reason | Meaning |
+| --- | --- | --- |
+| `True` | `CosmoGuardServing` | Every guard is serving and public API routes go through it. |
+| `False` | `CosmoGuardNotServing` | A guard is not serving. The message says whether routes still reach the node directly (not filtered) or already stay on the guard. |
+| `False` | `CosmoGuardConfigMissing` | CosmoGuard is enabled without a rules `ConfigMap`, so no guard is deployed and traffic is not filtered. |
+
+```bash
+kubectl get chainnodeset <name> -o jsonpath='{.status.conditions[?(@.type=="CosmoGuardReady")]}'
+```
+
+If you need the rules enforced from the very first request, wait for `CosmoGuardReady=True` before exposing the endpoints publicly.
+
 ## Why Use CosmoGuard?
 
 - **Fine-Grained API Access Control:** Manage access on a per-endpoint level (RPC, LCD, gRPC, EVM).

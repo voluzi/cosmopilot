@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -436,4 +437,49 @@ func TestCosmoGuardRouteReady(t *testing.T) {
 	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": false}))
 	assert.True(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": true}))
 	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"a", "b"}, map[string]bool{"a": true, "b": false}))
+}
+
+// TestGroupGuardReadinessCondition verifies the ChainNodeSet reports a group guard that is not serving
+// yet (its routes are not filtered), records one Warning event for the transition, and clears the
+// condition once no group has a guard.
+func TestGroupGuardReadinessCondition(t *testing.T) {
+	ctx := context.Background()
+	nodeSet, group := guardedNodeSet()
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	guards, err := r.ensureCosmoGuards(ctx, nodeSet)
+	require.NoError(t, err)
+	require.NoError(t, r.updateCosmoGuardCondition(ctx, nodeSet, guards.states))
+
+	cond := meta.FindStatusCondition(nodeSet.Status.Conditions, appsv1.ConditionCosmoGuardReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
+	assert.Contains(t, cond.Message, groupCosmoGuardName(nodeSet, group))
+	assert.Contains(t, cond.Message, "not filtered")
+
+	stored := &appsv1.ChainNodeSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(nodeSet), stored))
+	require.NotNil(t, meta.FindStatusCondition(stored.Status.Conditions, appsv1.ConditionCosmoGuardReady))
+
+	require.NoError(t, r.updateCosmoGuardCondition(ctx, nodeSet, guards.states))
+	events := r.recorder.(*record.FakeRecorder).Events
+	require.Len(t, events, 1, "the transition is recorded once")
+	assert.Contains(t, <-events, "Warning "+appsv1.ReasonCosmoGuardNotServing)
+
+	require.NoError(t, r.updateCosmoGuardCondition(ctx, nodeSet, nil))
+	assert.Nil(t, meta.FindStatusCondition(nodeSet.Status.Conditions, appsv1.ConditionCosmoGuardReady))
+}
+
+// TestGroupGuardWithoutConfigIsReported verifies a group guard skipped for a missing config ConfigMap
+// is reported in the condition rather than only logged.
+func TestGroupGuardWithoutConfigIsReported(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	group.Config.CosmoGuard.Config = nil
+	nodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{group}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	guards, err := r.ensureCosmoGuards(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.Equal(t, []controllers.GuardState{{Name: groupCosmoGuardName(nodeSet, group), ConfigMissing: true}}, guards.states)
 }

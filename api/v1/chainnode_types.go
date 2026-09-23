@@ -55,6 +55,18 @@ const (
 	ConditionSnapshotExportCleanup = "SnapshotExportCleanup"
 	// ConditionPodRecreationDeferred indicates that disruption coordination or capacity delayed replacement.
 	ConditionPodRecreationDeferred = "PodRecreationDeferred"
+	// ConditionCosmoGuardReady reports whether the CosmoGuard deployments fronting this resource's
+	// public API routes are serving. Until a guard first serves, those routes reach the node directly
+	// and are not filtered.
+	ConditionCosmoGuardReady = "CosmoGuardReady"
+
+	// ReasonCosmoGuardServing indicates that every managed CosmoGuard is serving.
+	ReasonCosmoGuardServing = "CosmoGuardServing"
+	// ReasonCosmoGuardNotServing indicates that a managed CosmoGuard is not serving.
+	ReasonCosmoGuardNotServing = "CosmoGuardNotServing"
+	// ReasonCosmoGuardConfigMissing indicates that CosmoGuard is enabled without a config ConfigMap, so
+	// no guard is deployed.
+	ReasonCosmoGuardConfigMissing = "CosmoGuardConfigMissing"
 
 	// ReasonUpgradeSuccess indicates that the upgrade completed successfully.
 	ReasonUpgradeSuccess            = "UpgradeSuccessful"

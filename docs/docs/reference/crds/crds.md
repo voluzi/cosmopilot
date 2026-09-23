@@ -280,6 +280,7 @@ ChainNodeSetStatus defines the observed state of ChainNodeSet.
 | validatorStatus | Current status of the first validator in spec order (legacy alias). See .status.validators for the full list. | ValidatorStatus | false |
 | pubKey | Public key of the first validator in spec order (legacy alias). See .status.validators for the full list. | string | false |
 | upgrades | All scheduled or completed upgrades performed by cosmopilot on ChainNodes of this ChainNodeSet. | [][Upgrade](#upgrade) | false |
+| conditions | Conditions to track state of the ChainNodeSet. | []metav1.Condition | false |
 | latestHeight | Last height read on the nodes by cosmopilot. | int64 | false |
 | seeds | Status of seed nodes (cosmoseed) | [][SeedStatus](#seedstatus) | false |
 | cosmosigners | Cosmosigners records controller-managed state for each managed cosmosigner deployment (the top-level .spec.cosmosigner and each per-group .spec.nodes[].cosmosigner). Keyed by the signer's resource name. Not meant to be set by hand. | [][CosmosignerStatus](#cosmosignerstatus) | false |

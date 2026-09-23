@@ -360,6 +360,9 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 	logger := log.FromContext(ctx)
 
 	if !r.standaloneGuardManaged(chainNode) {
+		if err := r.updateCosmoGuardCondition(ctx, chainNode, nil); err != nil {
+			return false, err
+		}
 		return r.reconcileCosmoGuardDashboard(ctx, chainNode, cosmoguard.Params{
 			Name:      chainNode.CosmoGuardName(),
 			Namespace: chainNode.GetNamespace(),
@@ -368,7 +371,9 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 
 	if chainNode.Spec.Config.GetCosmoGuardConfig() == nil {
 		logger.Info("cosmoguard enabled without a config ConfigMap; skipping")
-		return false, nil
+		return false, r.updateCosmoGuardCondition(ctx, chainNode, []controllers.GuardState{{
+			Name: chainNode.CosmoGuardName(), ConfigMissing: true,
+		}})
 	}
 
 	params := r.cosmoGuardParams(chainNode)
@@ -422,5 +427,34 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 		}
 	}
 
+	serving, err := cosmoguard.IsServing(ctx, r.Client, chainNode.GetNamespace(), chainNode.CosmoGuardName())
+	if err != nil {
+		return false, err
+	}
+	if err := r.updateCosmoGuardCondition(ctx, chainNode, []controllers.GuardState{{
+		Name:    chainNode.CosmoGuardName(),
+		Serving: serving,
+		Routed:  r.standaloneRouteTargetsGuard(ctx, chainNode),
+	}}); err != nil {
+		return false, err
+	}
+
 	return r.reconcileCosmoGuardDashboard(ctx, chainNode, params)
+}
+
+// updateCosmoGuardCondition records whether the node's standalone guard is filtering its public API
+// routes; nil guards removes the condition.
+func (r *Reconciler) updateCosmoGuardCondition(ctx context.Context, chainNode *appsv1.ChainNode, guards []controllers.GuardState) error {
+	desired := controllers.CosmoGuardCondition(guards, chainNode.Generation)
+	changed, eventType := controllers.UpdateCosmoGuardCondition(&chainNode.Status.Conditions, desired)
+	if !changed {
+		return nil
+	}
+	if err := r.Status().Update(ctx, chainNode); err != nil {
+		return fmt.Errorf("failed to update cosmoguard condition for %s: %w", chainNode.GetName(), err)
+	}
+	if eventType != "" {
+		r.recorder.Event(chainNode, eventType, desired.Reason, desired.Message)
+	}
+	return nil
 }

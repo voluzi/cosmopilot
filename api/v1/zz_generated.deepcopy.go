@@ -311,6 +311,13 @@ func (in *ChainNodeSetStatus) DeepCopyInto(out *ChainNodeSetStatus) {
 		*out = make([]Upgrade, len(*in))
 		copy(*out, *in)
 	}
+	if in.Conditions != nil {
+		in, out := &in.Conditions, &out.Conditions
+		*out = make([]metav1.Condition, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.Seeds != nil {
 		in, out := &in.Seeds, &out.Seeds
 		*out = make([]SeedStatus, len(*in))

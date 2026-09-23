@@ -166,6 +166,10 @@ type ChainNodeSetStatus struct {
 	// +optional
 	Upgrades []Upgrade `json:"upgrades,omitempty"`
 
+	// Conditions to track state of the ChainNodeSet.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
 	// Last height read on the nodes by cosmopilot.
 	// +optional
 	LatestHeight int64 `json:"latestHeight,omitempty"`

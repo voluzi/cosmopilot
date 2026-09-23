@@ -400,6 +400,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.ensureServices(ctx, nodeSet, guards); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.updateCosmoGuardCondition(ctx, nodeSet, guards.states); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if err := r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress, guards.expectedRoutes); err != nil {
 		return ctrl.Result{}, err
