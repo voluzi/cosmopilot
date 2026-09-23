@@ -12,9 +12,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
@@ -23,13 +25,13 @@ import (
 
 type KMS struct {
 	Name   string
-	Owner  metav1.Object
-	Client *kubernetes.Clientset
+	Owner  client.Object
+	Client kubernetes.Interface
 	Scheme *runtime.Scheme
 	Config *Config
 }
 
-func New(client *kubernetes.Clientset, scheme *runtime.Scheme, name string, owner metav1.Object, opts ...Option) *KMS {
+func New(client kubernetes.Interface, scheme *runtime.Scheme, name string, owner client.Object, opts ...Option) *KMS {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(cfg)
@@ -44,6 +46,9 @@ func New(client *kubernetes.Clientset, scheme *runtime.Scheme, name string, owne
 }
 
 func (kms *KMS) DeployConfig(ctx context.Context) error {
+	if kms.Config.Attribution == nil {
+		return fmt.Errorf("tmKMS %q has no resource attribution configured", kms.Name)
+	}
 	if err := kms.ensureIdentityKey(ctx); err != nil {
 		return err
 	}
@@ -58,17 +63,61 @@ func (kms *KMS) DeployConfig(ctx context.Context) error {
 	return nil
 }
 
+// UndeployConfig removes the ConfigMap and identity Secret this KMS created. Same-name objects that
+// belong to someone else are left in place, and the signing state PVC is always kept.
 func (kms *KMS) UndeployConfig(ctx context.Context) error {
+	if kms.Config.Attribution == nil {
+		return fmt.Errorf("tmKMS %q has no resource attribution configured", kms.Name)
+	}
 	var configMapErr error
-	if err := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Delete(ctx, kms.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	if err := kms.deleteConfigMap(ctx); err != nil {
 		configMapErr = fmt.Errorf("delete tmKMS ConfigMap %q: %w", kms.Name, err)
 	}
 
 	var secretErr error
-	if err := kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace()).Delete(ctx, kms.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	if err := kms.deleteIdentitySecret(ctx); err != nil {
 		secretErr = fmt.Errorf("delete tmKMS Secret %q: %w", kms.Name, err)
 	}
 	return errors.Join(configMapErr, secretErr)
+}
+
+func (kms *KMS) deleteConfigMap(ctx context.Context) error {
+	cms := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace())
+	cm, err := cms.Get(ctx, kms.Name, metav1.GetOptions{})
+	if err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	owned, err := kms.controlledByOwnerOrPredecessor(cm)
+	if err != nil || !owned {
+		return err
+	}
+	return ignoreGoneOrReplaced(cms.Delete(ctx, kms.Name, deleteExactly(cm.GetUID())))
+}
+
+func (kms *KMS) deleteIdentitySecret(ctx context.Context) error {
+	secrets := kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace())
+	secret, err := secrets.Get(ctx, kms.Name, metav1.GetOptions{})
+	if err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	owned, err := kms.claims(ctx, secret, ClassIdentity, hasIdentitySecretShape(secret))
+	if err != nil || !owned {
+		return err
+	}
+	return ignoreGoneOrReplaced(secrets.Delete(ctx, kms.Name, deleteExactly(secret.GetUID())))
+}
+
+func deleteExactly(uid types.UID) metav1.DeleteOptions {
+	return metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}
+}
+
+// ignoreGoneOrReplaced treats a missing object, or one replaced after it was read (UID precondition
+// conflict), as nothing left to delete.
+func ignoreGoneOrReplaced(err error) error {
+	if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+		return nil
+	}
+	return err
 }
 
 func (kms *KMS) getConfigToml() (string, error) {
@@ -81,24 +130,42 @@ func (kms *KMS) getConfigHash() string {
 }
 
 func (kms *KMS) ensureIdentityKey(ctx context.Context) error {
-	_, err := kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace()).Get(ctx, kms.Name, metav1.GetOptions{})
-	if err != nil && apierrors.IsNotFound(err) {
-		var key string
-		key, err = kms.generateKmsIdentityKey(ctx)
+	secrets := kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace())
+	secret, err := secrets.Get(ctx, kms.Name, metav1.GetOptions{})
+	if err == nil {
+		owned, err := kms.claims(ctx, secret, ClassIdentity, hasIdentitySecretShape(secret))
 		if err != nil {
 			return err
 		}
-
-		spec := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      kms.Name,
-				Namespace: kms.Owner.GetNamespace(),
-			},
-			Immutable: ptr.To(true),
-			Data:      map[string][]byte{identityKeyName: []byte(key)},
+		if !owned {
+			return kms.notClaimedError("Secret", ClassIdentity)
 		}
-		_, err = kms.Client.CoreV1().Secrets(kms.Owner.GetNamespace()).Create(ctx, spec, metav1.CreateOptions{})
+		if _, ok := secret.Data[identityKeyName]; !ok {
+			return fmt.Errorf("tmKMS Secret %q has no %s key", kms.Name, identityKeyName)
+		}
+		if kms.stamp(secret, ClassIdentity) {
+			_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
+		}
+		return err
 	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	key, err := kms.generateKmsIdentityKey(ctx)
+	if err != nil {
+		return err
+	}
+	spec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kms.Name,
+			Namespace: kms.Owner.GetNamespace(),
+		},
+		Immutable: ptr.To(true),
+		Data:      map[string][]byte{identityKeyName: []byte(key)},
+	}
+	kms.stamp(spec, ClassIdentity)
+	_, err = secrets.Create(ctx, spec, metav1.CreateOptions{})
 	return err
 }
 
@@ -108,17 +175,16 @@ func (kms *KMS) generateKmsIdentityKey(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	if err := kms.replaceHelperPod(ctx, pod.GetName()); err != nil {
+		return "", err
+	}
+
 	ph := k8s.NewPodHelper(kms.Client, nil, pod)
-
-	// Delete the pod if it already exists
-	_ = ph.Delete(ctx)
-
-	// Delete the pod independently of the result
-	defer func() { _ = ph.Delete(ctx) }()
-
 	if err := ph.Create(ctx); err != nil {
 		return "", err
 	}
+	// Delete the pod independently of the result
+	defer func() { _ = ph.DeleteWithUIDPrecondition(ctx) }()
 
 	// Wait for the pod to finish
 	if err := ph.WaitForPodSucceeded(ctx, time.Minute); err != nil {
@@ -204,11 +270,27 @@ func (kms *KMS) ensureConfigMap(ctx context.Context) error {
 		return err
 	}
 
-	cm, err := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Get(ctx, kms.Name, metav1.GetOptions{})
+	cms := kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace())
+	cm, err := cms.Get(ctx, kms.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			_, err = kms.Client.CoreV1().ConfigMaps(kms.Owner.GetNamespace()).Create(ctx, spec, metav1.CreateOptions{})
+			_, err = cms.Create(ctx, spec, metav1.CreateOptions{})
 		}
+		return err
+	}
+	if !metav1.IsControlledBy(cm, kms.Owner) {
+		predecessor, err := kms.controlledByOwnerOrPredecessor(cm)
+		if err != nil {
+			return err
+		}
+		if !predecessor {
+			return notOwnedError("ConfigMap", kms.Name)
+		}
+		// Left by a deleted owner of the same name and still waiting for garbage collection.
+		if err := ignoreGoneOrReplaced(cms.Delete(ctx, kms.Name, deleteExactly(cm.GetUID()))); err != nil {
+			return err
+		}
+		_, err = cms.Create(ctx, spec, metav1.CreateOptions{})
 		return err
 	}
 
@@ -243,14 +325,29 @@ func (kms *KMS) ensurePVC(ctx context.Context) error {
 		},
 	}
 
-	_, err = kms.Client.CoreV1().PersistentVolumeClaims(kms.Owner.GetNamespace()).Get(ctx, kms.Name, metav1.GetOptions{})
+	pvcs := kms.Client.CoreV1().PersistentVolumeClaims(kms.Owner.GetNamespace())
+	pvc, err := pvcs.Get(ctx, kms.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			_, err = kms.Client.CoreV1().PersistentVolumeClaims(kms.Owner.GetNamespace()).Create(ctx, spec, metav1.CreateOptions{})
+			kms.stamp(spec, ClassState)
+			_, err = pvcs.Create(ctx, spec, metav1.CreateOptions{})
 		}
 		return err
 	}
-	return nil
+	owned, err := kms.claims(ctx, pvc, ClassState, hasStatePVCShape(pvc))
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return kms.notClaimedError("PersistentVolumeClaim", ClassState)
+	}
+	if isBlockVolume(pvc) {
+		return fmt.Errorf("tmKMS PersistentVolumeClaim %q is a block volume; TmKMS needs a filesystem volume for its state", kms.Name)
+	}
+	if kms.stamp(pvc, ClassState) {
+		_, err = pvcs.Update(ctx, pvc, metav1.UpdateOptions{})
+	}
+	return err
 }
 
 func (kms *KMS) GetVolumes() []corev1.Volume {

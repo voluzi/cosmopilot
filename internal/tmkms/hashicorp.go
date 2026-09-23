@@ -225,17 +225,16 @@ func (v HashicorpProvider) UploadKey(ctx context.Context, kms *KMS, key string) 
 		return err
 	}
 
+	if err := kms.replaceHelperPod(ctx, pod.GetName()); err != nil {
+		return err
+	}
+
 	ph := k8s.NewPodHelper(kms.Client, nil, pod)
-
-	// Delete the pod if it already exists
-	_ = ph.Delete(ctx)
-
-	// Delete the pod independently of the result
-	defer func() { _ = ph.Delete(ctx) }()
-
 	if err := ph.Create(ctx); err != nil {
 		return err
 	}
+	// Delete the pod independently of the result
+	defer func() { _ = ph.DeleteWithUIDPrecondition(ctx) }()
 
 	// TODO: handle key already existing error
 	if err := ph.WaitForPodSucceeded(ctx, time.Minute); err != nil {

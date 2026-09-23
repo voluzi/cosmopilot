@@ -44,6 +44,7 @@ type Config struct {
 	Providers        map[string][]Provider         `toml:"providers"`
 	PersistState     bool                          `toml:"-"`
 	Resources        corev1.ResourceRequirements   `toml:"-"`
+	Attribution      Attribution                   `toml:"-"`
 }
 
 type Option func(*Config)
@@ -52,6 +53,14 @@ type Provider interface {
 	getVolumes() []corev1.Volume
 	getVolumeMounts() []corev1.VolumeMount
 	getContainers() []corev1.Container
+}
+
+// WithAttribution sets how the durable identity Secret and state PVC are attributed to their root.
+// DeployConfig and UndeployConfig refuse to run without it.
+func WithAttribution(attribution Attribution) Option {
+	return func(cfg *Config) {
+		cfg.Attribution = attribution
+	}
 }
 
 func WithImage(s string) Option {

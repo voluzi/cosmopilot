@@ -6,22 +6,62 @@ import (
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v3/internal/tmkms"
 )
 
+// tmkmsAttribution attributes the TmKMS identity Secret and state PVC to the ChainNode's cleanup root.
+type tmkmsAttribution struct {
+	root resourcecleanup.RootOwner
+}
+
+func newTmkmsAttribution(chainNode *appsv1.ChainNode) tmkmsAttribution {
+	return tmkmsAttribution{root: resourcecleanup.RootOwnerFor(chainNode)}
+}
+
+func (a tmkmsAttribution) Describe(class string) string {
+	return fmt.Sprintf("annotate it with %s=%s, %s=%s, %s=%s, %s=%s and %s=%s",
+		resourcecleanup.AnnotationResourceClass, class,
+		resourcecleanup.AnnotationRootOwnerAPIVersion, a.root.APIVersion,
+		resourcecleanup.AnnotationRootOwnerKind, a.root.Kind,
+		resourcecleanup.AnnotationRootOwnerName, a.root.Name,
+		resourcecleanup.AnnotationRootOwnerNamespace, a.root.Namespace)
+}
+
+func (a tmkmsAttribution) Stamp(object metav1.Object, class string) bool {
+	return resourcecleanup.Stamp(object, a.root, resourcecleanup.ResourceClass(class))
+}
+
+// Attributed matches the root by kind, name and namespace but not UID: a root recreated under the same
+// name must keep its TmKMS identity and double-sign protection state.
+func (a tmkmsAttribution) Attributed(object metav1.Object, class string) (bool, bool) {
+	annotations := object.GetAnnotations()
+	stampedClass, stamped := annotations[resourcecleanup.AnnotationResourceClass]
+	if !stamped {
+		return false, false
+	}
+	return true, stampedClass == class &&
+		annotations[resourcecleanup.AnnotationRootOwnerAPIVersion] == a.root.APIVersion &&
+		annotations[resourcecleanup.AnnotationRootOwnerKind] == a.root.Kind &&
+		annotations[resourcecleanup.AnnotationRootOwnerName] == a.root.Name &&
+		annotations[resourcecleanup.AnnotationRootOwnerNamespace] == a.root.Namespace
+}
+
 func (r *Reconciler) ensureTmKMSConfig(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	if !chainNode.UsesTmKms() {
-		// Configuration not specified or removed. Let's try to delete it anyway.
+		// Configuration not specified or removed: remove leftovers this ChainNode owns.
 		return tmkms.New(r.ClientSet,
 			r.Scheme,
 			fmt.Sprintf("%s-tmkms", chainNode.GetName()),
-			chainNode).
+			chainNode,
+			tmkms.WithAttribution(newTmkmsAttribution(chainNode))).
 			UndeployConfig(ctx)
 	}
 
@@ -93,6 +133,7 @@ func (r *Reconciler) getTmkms(chainNode *appsv1.ChainNode) (tmkms.Provider, *tmk
 	}
 
 	var tmkmsOptions []tmkms.Option
+	tmkmsOptions = append(tmkmsOptions, tmkms.WithAttribution(newTmkmsAttribution(chainNode)))
 	tmkmsOptions = append(tmkmsOptions, tmkms.WithResources(chainNode.Spec.Validator.TmKMS.GetResources()))
 	tmkmsOptions = append(tmkmsOptions, tmkms.WithImage(r.opts.GetTmKmsImage()))
 	tmkmsOptions = append(tmkmsOptions, tmkms.WithImagePullSecrets(chainNodeImagePullSecrets(chainNode)))
