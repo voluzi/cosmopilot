@@ -66,7 +66,7 @@ func DeleteOwned(ctx context.Context, c client.Client, owner client.Object, name
 		// A resource of the same name owned by someone else — leave it untouched.
 		return nil
 	}
-	if err := c.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) && !controllers.IsCRDNotInstalled(err) {
+	if _, err := controllers.DeleteControlledObject(ctx, c, obj, owner); err != nil {
 		return fmt.Errorf("failed to delete cosmoguard %T %q: %w", obj, name, err)
 	}
 	return nil

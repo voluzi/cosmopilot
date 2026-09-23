@@ -146,3 +146,35 @@ func TestSeedStatefulSetRefusesForeignStatefulSet(t *testing.T) {
 	require.Equal(t, "foreign", live.Labels["app"])
 	require.Equal(t, foreign.UID, metav1.GetControllerOf(live).UID)
 }
+
+func TestGlobalIngressRefusesForeignIngress(t *testing.T) {
+	r, owner, _, foreign := routingOwnershipReconciler(t)
+	current := &networkingv1.Ingress{ObjectMeta: routingObjectMeta("default", "ns-public", map[string]string{"app": "foreign"})}
+	createControlled(t, r, current, foreign)
+
+	desired := &networkingv1.Ingress{ObjectMeta: routingObjectMeta("default", "ns-public", map[string]string{"app": "ns"})}
+	require.NoError(t, controllerutil.SetControllerReference(owner, desired, r.Scheme))
+
+	require.ErrorContains(t, r.ensureIngress(context.Background(), desired), "managed by another owner")
+	live := &networkingv1.Ingress{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(current), live))
+	require.Equal(t, "foreign", live.Labels["app"])
+	require.Equal(t, foreign.UID, metav1.GetControllerOf(live).UID)
+}
+
+func TestGlobalGatewayCleanupOnlyDeletesOwnedRoutes(t *testing.T) {
+	r, owner, _, foreign := routingOwnershipReconciler(t)
+	global := map[string]string{controllers.LabelChainNodeSet: "ns", labelGlobalGateway: "old"}
+
+	ownedHTTP := createControlled(t, r, &gwapiv1.HTTPRoute{ObjectMeta: routingObjectMeta("default", "ns-old-rpc", global)}, owner)
+	foreignHTTP := createControlled(t, r, &gwapiv1.HTTPRoute{ObjectMeta: routingObjectMeta("default", "user-rpc", global)}, foreign)
+	ownedGRPC := createControlled(t, r, &gwapiv1.GRPCRoute{ObjectMeta: routingObjectMeta("default", "ns-old-grpc", global)}, owner)
+	unownedGRPC := createControlled(t, r, &gwapiv1.GRPCRoute{ObjectMeta: routingObjectMeta("default", "user-grpc", global)}, nil)
+
+	_, err := r.ensureGatewayRoutes(context.Background(), owner)
+	require.NoError(t, err)
+	requireDeleted(t, r, ownedHTTP)
+	requireKept(t, r, foreignHTTP)
+	requireDeleted(t, r, ownedGRPC)
+	requireKept(t, r, unownedGRPC)
+}

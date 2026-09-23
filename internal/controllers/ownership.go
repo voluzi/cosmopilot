@@ -21,7 +21,8 @@ func RequireSameController(existing, desired metav1.Object, kind string) error {
 		return fmt.Errorf("desired %s %q has no controller owner", kind, desired.GetName())
 	}
 	if got == nil || got.UID != want.UID {
-		return fmt.Errorf("%s %q is managed by another owner or is unowned; refusing to overwrite it", kind, existing.GetName())
+		return fmt.Errorf("%s %q is managed by another owner or is unowned; refusing to overwrite it "+
+			"(remove the conflicting object or rename the ChainNode/ChainNodeSet)", kind, existing.GetName())
 	}
 	return nil
 }

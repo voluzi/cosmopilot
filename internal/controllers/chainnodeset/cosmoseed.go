@@ -187,7 +187,6 @@ func (r *Reconciler) deleteOwnedSeedRoutes(ctx context.Context, nodeSet *v1.Chai
 }
 
 func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {
-	// Cleanup statefulset
 	logger := log.FromContext(ctx)
 	if err := r.attributeCosmoseedDataVolumes(ctx, nodeSet); err != nil {
 		return err
