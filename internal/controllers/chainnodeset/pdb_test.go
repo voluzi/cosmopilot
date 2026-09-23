@@ -847,3 +847,28 @@ func (c *pdbUIDGuardClient) Delete(ctx context.Context, object client.Object, op
 	}
 	return c.Client.Delete(ctx, object, opts...)
 }
+
+// TestEnsurePodDisruptionBudgetsZeroInstanceGroupRendersValidMinAvailable covers a regular group scaled
+// to zero with its PDB enabled: the default minAvailable must not go negative, which the API server
+// rejects on every reconcile.
+func TestEnsurePodDisruptionBudgetsZeroInstanceGroupRendersValidMinAvailable(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: types.UID("test-uid")},
+		Spec: appsv1.ChainNodeSetSpec{
+			Nodes: []appsv1.NodeGroupSpec{{
+				Name:      "fullnodes",
+				Instances: ptr.To(0),
+				PDB:       &appsv1.PdbConfig{Enabled: true},
+			}},
+		},
+		Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+	}
+	r := newPdbTestReconciler(t, nodeSet)
+
+	require.NoError(t, r.ensurePodDisruptionBudgets(context.Background(), nodeSet))
+
+	pdb := getPdb(t, r, "default", "test-nodeset-fullnodes")
+	require.NotNil(t, pdb)
+	require.NotNil(t, pdb.Spec.MinAvailable)
+	assert.Equal(t, 0, pdb.Spec.MinAvailable.IntValue())
+}

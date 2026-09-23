@@ -51,6 +51,12 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	signerNames := reservationOwnerSignerNames(owner)
 	childControllerUIDs := make(map[types.UID]struct{})
 	childWorkloadUIDs := make(map[types.UID]struct{})
+	if _, ok := owner.(*appsv1.ChainNode); ok {
+		var err error
+		if signerNames, err = dropChainNodeSetSigners(ctx, reader, namespace, signerNames, childWorkloadUIDs); err != nil {
+			return false, err
+		}
+	}
 	if _, ok := owner.(*appsv1.ChainNodeSet); ok {
 		children := &appsv1.ChainNodeList{}
 		if err := reader.List(ctx, children, client.InNamespace(namespace)); err != nil {
@@ -913,6 +919,31 @@ func reservationOwnerSignerNames(owner client.Object) []string {
 	default:
 		return nil
 	}
+}
+
+// dropChainNodeSetSigners removes from a ChainNode's signer names any StatefulSet controlled by a
+// ChainNodeSet: a same-name ChainNodeSet's signer is never this ChainNode's, so it must neither block
+// the ChainNode's finalizer nor keep it waiting on the set's signer Pods. The StatefulSet UIDs are
+// added to skipUIDs so the Pods they control are ignored.
+func dropChainNodeSetSigners(ctx context.Context, reader client.Reader, namespace string, names []string, skipUIDs map[types.UID]struct{}) ([]string, error) {
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		sts := &appsk8sv1.StatefulSet{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return nil, err
+			}
+			kept = append(kept, name)
+			continue
+		}
+		if controller := metav1.GetControllerOf(sts); controller != nil && controller.Kind == "ChainNodeSet" &&
+			strings.HasPrefix(controller.APIVersion, appsv1.GroupVersion.Group+"/") {
+			skipUIDs[sts.GetUID()] = struct{}{}
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept, nil
 }
 
 func podMatchesSignerNames(pod *corev1.Pod, signerNames []string) bool {

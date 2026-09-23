@@ -83,14 +83,16 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 		delete(groupList, group.Name)
 	}
 
-	// Remove nodes from deleted groups
-	for group, count := range groupList {
-		for i := 0; i < count; i++ {
-			nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, i)
-			logger.Info("removing chainnode", "group", group, "chainnode", nodeName)
-			if err := r.removeNode(ctx, nodeSet, group, i); err != nil {
-				return err
-			}
+	// Remove nodes from deleted groups. Iterate the listed children rather than synthesizing names
+	// from a count, so ordinal gaps cannot leave a higher ordinal behind.
+	for _, node := range chainNodes.Items {
+		group := node.Labels[controllers.LabelChainNodeSetGroup]
+		if _, deleted := groupList[group]; !deleted || !nodeSetOwnsChild(nodeSet, &node) {
+			continue
+		}
+		logger.Info("removing chainnode", "group", group, "chainnode", node.Name)
+		if err := r.removeNode(ctx, nodeSet, node.Name); err != nil {
+			return err
 		}
 	}
 
@@ -216,14 +218,19 @@ func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context
 		return err
 	}
 
-	currentSize := len(chainNodeList.Items)
 	desiredSize := group.GetInstances()
+	desiredNames := make(map[string]struct{}, desiredSize)
+	for i := 0; i < desiredSize; i++ {
+		desiredNames[fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group.Name, i)] = struct{}{}
+	}
 
-	// Remove ChainNodes if necessary
-	for i := currentSize - 1; i >= desiredSize; i-- {
-		nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group.Name, i)
-		logger.Info("removing chainnode", "group", group.Name, "chainnode", nodeName)
-		if err := r.removeNode(ctx, nodeSet, group.Name, i); err != nil {
+	// Remove every listed ChainNode outside the desired ordinals, whatever gaps precede it.
+	for _, node := range chainNodeList.Items {
+		if _, ok := desiredNames[node.Name]; ok || !nodeSetOwnsChild(nodeSet, &node) {
+			continue
+		}
+		logger.Info("removing chainnode", "group", group.Name, "chainnode", node.Name)
+		if err := r.removeNode(ctx, nodeSet, node.Name); err != nil {
 			return err
 		}
 	}
@@ -353,8 +360,7 @@ func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait
 	}
 }
 
-func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group string, index int) error {
-	nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, index)
+func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, nodeName string) error {
 	if err := r.maybeDeleteNode(ctx, nodeSet, nodeName); err != nil {
 		return err
 	}
@@ -656,6 +662,15 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	}
 	uid := node.GetUID()
 	return client.IgnoreNotFound(r.Delete(ctx, node, client.Preconditions{UID: &uid}))
+}
+
+// nodeSetOwnsChild reports whether a listed ChainNode belongs to nodeSet, so cleanup driven by a label
+// listing leaves a ChainNode controlled by another resource untouched.
+func nodeSetOwnsChild(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {
+	if metav1.IsControlledBy(child, nodeSet) {
+		return true
+	}
+	return metav1.GetControllerOf(child) == nil && isRecordedNodeSetChild(nodeSet, child)
 }
 
 func isRecordedNodeSetChild(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {

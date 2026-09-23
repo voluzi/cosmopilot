@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -670,4 +671,80 @@ func TestPreserveImageOverrides(t *testing.T) {
 		assert.Nil(t, desired.Spec.OverrideVersion)
 		assert.Nil(t, desired.Spec.OverrideImage)
 	})
+}
+
+// TestEnsureNodesRemovesSparseChildren covers ordinal gaps: the remaining children must be removed by
+// their listed names, whether the group is removed or scaled down, while a ChainNode controlled by
+// another resource is left alone.
+func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		groups   []appsv1.NodeGroupSpec
+		children []int
+		foreign  bool
+		wantGone []int
+		wantKept []int
+	}{
+		{name: "group removed", children: []int{2}, wantGone: []int{2}},
+		{name: "scaled to zero", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, wantGone: []int{2}},
+		{name: "scaled down across a gap", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(1)}}, children: []int{0, 2}, wantGone: []int{2}, wantKept: []int{0}},
+		{name: "group removed with a foreign child", children: []int{2}, foreign: true, wantGone: []int{2}},
+		{name: "scaled to zero with a foreign child", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, foreign: true, wantGone: []int{2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
+				Spec: appsv1.ChainNodeSetSpec{
+					Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+					Nodes:   tc.groups,
+				},
+				Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+			}
+			mkChild := func(index int, controllerUID types.UID) *appsv1.ChainNode {
+				return &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+					Name: fmt.Sprintf("set-full-%d", index), Namespace: "default",
+					UID: types.UID(fmt.Sprintf("full-%d-uid", index)),
+					Labels: map[string]string{
+						controllers.LabelChainNodeSet:      "set",
+						controllers.LabelChainNodeSetGroup: "full",
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "set",
+						UID: controllerUID, Controller: ptr.To(true),
+					}},
+				}}
+			}
+			objs := []client.Object{nodeSet}
+			if tc.foreign {
+				objs = append(objs, mkChild(7, "another-set-uid"))
+				tc.wantKept = append(tc.wantKept, 7)
+			}
+			for _, i := range tc.children {
+				objs = append(objs, mkChild(i, nodeSet.UID))
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNodeSet{}).WithObjects(objs...).Build()
+			r := &Reconciler{Client: cl, Scheme: scheme, recorder: record.NewFakeRecorder(100)}
+
+			for range 3 {
+				require.NoError(t, r.ensureNodes(context.Background(), nodeSet))
+			}
+
+			for _, i := range tc.wantGone {
+				current := &appsv1.ChainNode{}
+				err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("set-full-%d", i)}, current)
+				if err == nil {
+					assert.Falsef(t, current.DeletionTimestamp.IsZero(), "set-full-%d must be terminating", i)
+				} else {
+					require.True(t, apierrors.IsNotFound(err), err)
+				}
+			}
+			for _, i := range tc.wantKept {
+				current := &appsv1.ChainNode{}
+				require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("set-full-%d", i)}, current))
+				assert.Truef(t, current.DeletionTimestamp.IsZero(), "set-full-%d must be kept", i)
+			}
+		})
+	}
 }
