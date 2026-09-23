@@ -1950,3 +1950,39 @@ func TestSignerImportSourcePendingCreateValidatorExplicitKey(t *testing.T) {
 	done.Status.Validators = []appsv1.ChainNodeSetValidatorStatus{{Name: validatorNodeName(done, appsv1.ReservedValidatorGroupName, 0), PubKey: "pk"}}
 	require.False(t, r.signerImportSourcePending(done, done.ResolveCosmosigners()[0]), "terminal once the pubkey is recorded")
 }
+
+// TestPrepareCosmosignerImportsToleratesRecreatedInstanceZeroForServedSoftwareSigner covers a
+// software signer that already served its digest when the instance-0 validator child is recreated:
+// status.validators has no pubKey for it yet, but the preflight must not refuse, and the child must
+// stay a remote signer target instead of signing locally.
+func TestPrepareCosmosignerImportsToleratesRecreatedInstanceZeroForServedSoftwareSigner(t *testing.T) {
+	nodeSet := cosmosignerValidatorNodeSet(appsv1.CosmosignerBackend{Software: &appsv1.CosmosignerSoftwareBackend{}})
+	nodeSet.UID = types.UID("nodeset-uid")
+	nodeSet.Spec.Nodes[0].Validator.PrivateKeySecret = nil
+	nodeSet.Spec.Nodes[0].Validator.CreateValidator = &appsv1.CreateValidatorConfig{}
+	nodeSet.Status.ChainID = "test-localnet"
+	signer := resolveSingleSigner(t, nodeSet)
+	nodeSet.EnsureCosmosignerStatus(signer.Name).SigningDigest = signer.Digest()
+	key, err := cometbft.GeneratePrivKey()
+	require.NoError(t, err)
+	source := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: signer.SoftwareKeySecret, Namespace: nodeSet.Namespace},
+		Data:       map[string][]byte{privKeyFilename: key},
+	}
+	r := newValidatorTestReconciler(t, nodeSet, source)
+	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: nodeSet.CosmosignerResourceName(signer), Namespace: "default"}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), sts))
+	require.True(t, r.signerImportSourcePending(nodeSet, signer), "precondition: no pubKey recorded for the recreated child")
+
+	blocked, ready, err := r.prepareCosmosignerImports(context.Background(), nodeSet)
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.NotContains(t, blocked, signer.Name)
+	_, err = r.prepareCosmosignerRollouts(context.Background(), nodeSet, blocked)
+	require.NoError(t, err)
+
+	validator, err := r.getValidatorSpecWithBlockedSignerTargets(nodeSet, "validators", 0, nodeSet.Spec.Nodes[0].Validator, blocked, true)
+	require.NoError(t, err)
+	assert.True(t, validator.Spec.RemoteSignerTarget, "a recreated child of a served signer must not sign locally")
+}

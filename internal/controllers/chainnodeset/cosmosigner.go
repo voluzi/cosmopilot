@@ -1277,7 +1277,9 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 	}
 	blocked := blockedSignerTargets{}
 	for _, s := range nodeSet.ResolveCosmosigners() {
-		if s.Spec.UsesSoftwareBackend() && r.signerImportSourcePending(nodeSet, s) {
+		// A software signer that already served its current digest has proven its key; a recreated
+		// instance-0 child only lacks a recorded pubKey until ensureValidator refreshes it.
+		if s.Spec.UsesSoftwareBackend() && r.signerImportSourcePending(nodeSet, s) && !signerServedCurrentDigest(nodeSet, s) {
 			keyMaterial, err := r.secretKey(ctx, nodeSet.GetNamespace(), s.SoftwareKeySecret, privKeyFilename)
 			if err != nil {
 				return nil, false, err
@@ -2516,6 +2518,14 @@ func (r *Reconciler) signerImportSourcePending(nodeSet *appsv1.ChainNodeSet, s a
 		return false
 	}
 	return !pubKeyRecorded()
+}
+
+func signerServedCurrentDigest(nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner) bool {
+	if nodeSet.Status.ChainID == "" {
+		return false
+	}
+	st := nodeSet.GetCosmosignerStatus(s.Name)
+	return st != nil && st.SigningDigest != "" && st.SigningDigest == s.Digest()
 }
 
 // signerTargetInitializesGenesis reports whether the validator a signer targets initializes a new
