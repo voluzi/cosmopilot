@@ -3,6 +3,7 @@ package chainnodeset
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -84,7 +85,9 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 	}
 
 	// Remove nodes from deleted groups. Iterate the listed children rather than synthesizing names
-	// from a count, so ordinal gaps cannot leave a higher ordinal behind.
+	// from a count, so ordinal gaps cannot leave a higher ordinal behind, and try every child so one
+	// that cannot be removed yet does not hold back the others.
+	var removeErrs []error
 	for _, node := range chainNodes.Items {
 		group := node.Labels[controllers.LabelChainNodeSetGroup]
 		if _, deleted := groupList[group]; !deleted || !nodeSetOwnsChild(nodeSet, &node) {
@@ -92,8 +95,11 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 		}
 		logger.Info("removing chainnode", "group", group, "chainnode", node.Name)
 		if err := r.removeNode(ctx, nodeSet, node.Name); err != nil {
-			return err
+			removeErrs = append(removeErrs, err)
 		}
+	}
+	if err := stderrors.Join(removeErrs...); err != nil {
+		return err
 	}
 
 	// When a group is changed from a regular group to a validator group (e.g. 3 regular instances
@@ -224,15 +230,20 @@ func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context
 		desiredNames[fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group.Name, i)] = struct{}{}
 	}
 
-	// Remove every listed ChainNode outside the desired ordinals, whatever gaps precede it.
+	// Remove every listed ChainNode outside the desired ordinals, whatever gaps precede it, trying
+	// each one even if another cannot be removed yet.
+	var removeErrs []error
 	for _, node := range chainNodeList.Items {
 		if _, ok := desiredNames[node.Name]; ok || !nodeSetOwnsChild(nodeSet, &node) {
 			continue
 		}
 		logger.Info("removing chainnode", "group", group.Name, "chainnode", node.Name)
 		if err := r.removeNode(ctx, nodeSet, node.Name); err != nil {
-			return err
+			removeErrs = append(removeErrs, err)
 		}
+	}
+	if err := stderrors.Join(removeErrs...); err != nil {
+		return err
 	}
 
 	for i := 0; i < desiredSize; i++ {

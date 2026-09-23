@@ -678,18 +678,22 @@ func TestPreserveImageOverrides(t *testing.T) {
 // another resource is left alone.
 func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		groups   []appsv1.NodeGroupSpec
-		children []int
-		foreign  bool
-		wantGone []int
-		wantKept []int
+		name        string
+		groups      []appsv1.NodeGroupSpec
+		children    []int
+		terminating []int
+		foreign     bool
+		wantGone    []int
+		wantKept    []int
+		wantErr     bool
 	}{
 		{name: "group removed", children: []int{2}, wantGone: []int{2}},
 		{name: "scaled to zero", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, wantGone: []int{2}},
 		{name: "scaled down across a gap", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(1)}}, children: []int{0, 2}, wantGone: []int{2}, wantKept: []int{0}},
 		{name: "group removed with a foreign child", children: []int{2}, foreign: true, wantGone: []int{2}},
 		{name: "scaled to zero with a foreign child", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, foreign: true, wantGone: []int{2}},
+		{name: "scaled to zero past a stuck terminating ordinal", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, terminating: []int{0}, wantGone: []int{2}, wantErr: true},
+		{name: "group removed past a stuck terminating ordinal", children: []int{2}, terminating: []int{0}, wantGone: []int{2}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
@@ -724,11 +728,24 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 			for _, i := range tc.children {
 				objs = append(objs, mkChild(i, nodeSet.UID))
 			}
+			// A lower ordinal already past resource cleanup but held by another finalizer: removing it
+			// errors on every pass, which must not keep the higher ordinals alive.
+			for _, i := range tc.terminating {
+				child := mkChild(i, nodeSet.UID)
+				child.Finalizers = []string{"test.voluzi.com/hold"}
+				child.DeletionTimestamp = ptr.To(metav1.Now())
+				objs = append(objs, child)
+			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNodeSet{}).WithObjects(objs...).Build()
 			r := &Reconciler{Client: cl, Scheme: scheme, recorder: record.NewFakeRecorder(100)}
 
 			for range 3 {
-				require.NoError(t, r.ensureNodes(context.Background(), nodeSet))
+				err := r.ensureNodes(context.Background(), nodeSet)
+				if tc.wantErr {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
 			}
 
 			for _, i := range tc.wantGone {

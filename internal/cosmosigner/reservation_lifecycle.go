@@ -53,7 +53,7 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	childWorkloadUIDs := make(map[types.UID]struct{})
 	if _, ok := owner.(*appsv1.ChainNode); ok {
 		var err error
-		if signerNames, err = dropChainNodeSetSigners(ctx, reader, namespace, signerNames, childWorkloadUIDs); err != nil {
+		if signerNames, err = dropChainNodeSetSigners(ctx, reader, owner, namespace, signerNames, childWorkloadUIDs); err != nil {
 			return false, err
 		}
 	}
@@ -922,10 +922,11 @@ func reservationOwnerSignerNames(owner client.Object) []string {
 }
 
 // dropChainNodeSetSigners removes from a ChainNode's signer names any StatefulSet controlled by a
-// ChainNodeSet: a same-name ChainNodeSet's signer is never this ChainNode's, so it must neither block
-// the ChainNode's finalizer nor keep it waiting on the set's signer Pods. The StatefulSet UIDs are
-// added to skipUIDs so the Pods they control are ignored.
-func dropChainNodeSetSigners(ctx context.Context, reader client.Reader, namespace string, names []string, skipUIDs map[types.UID]struct{}) ([]string, error) {
+// ChainNodeSet and not attributed to the ChainNode: a same-name ChainNodeSet's signer is never this
+// ChainNode's, so it must neither block the ChainNode's finalizer nor keep it waiting on the set's
+// signer Pods. A StatefulSet still attributed to the ChainNode keeps blocking, whatever its controller.
+// The dropped StatefulSet UIDs are added to skipUIDs so the Pods they control are ignored.
+func dropChainNodeSetSigners(ctx context.Context, reader client.Reader, owner client.Object, namespace string, names []string, skipUIDs map[types.UID]struct{}) ([]string, error) {
 	kept := make([]string, 0, len(names))
 	for _, name := range names {
 		sts := &appsk8sv1.StatefulSet{}
@@ -936,7 +937,8 @@ func dropChainNodeSetSigners(ctx context.Context, reader client.Reader, namespac
 			kept = append(kept, name)
 			continue
 		}
-		if controller := metav1.GetControllerOf(sts); controller != nil && controller.Kind == "ChainNodeSet" &&
+		attributed := isAttributedSignerStatefulSet(sts, owner) || sts.Spec.Template.Labels["chain-node"] == owner.GetName()
+		if controller := metav1.GetControllerOf(sts); !attributed && controller != nil && controller.Kind == "ChainNodeSet" &&
 			strings.HasPrefix(controller.APIVersion, appsv1.GroupVersion.Group+"/") {
 			skipUIDs[sts.GetUID()] = struct{}{}
 			continue
