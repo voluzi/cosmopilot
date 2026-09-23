@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -62,7 +64,7 @@ func TestPprofMuxOnlyServesDiagnosticRoutes(t *testing.T) {
 
 	for _, path := range []string{
 		"/debug/pprof/", "/debug/pprof/heap", "/debug/pprof/profile",
-		"/debug/pprof/trace", "/debug/pprof/cmdline", "/debug/pprof/symbol",
+		"/debug/pprof/trace", "/debug/pprof/cmdline",
 	} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions, http.MethodPatch} {
 			t.Run(method+" "+path, func(t *testing.T) {
@@ -77,6 +79,24 @@ func TestPprofMuxOnlyServesDiagnosticRoutes(t *testing.T) {
 			})
 		}
 	}
+	for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodOptions, http.MethodPatch} {
+		t.Run(method+" /debug/pprof/symbol", func(t *testing.T) {
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, httptest.NewRequest(method, "/debug/pprof/symbol", nil))
+			if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != "GET, HEAD, POST" {
+				t.Fatalf("%s symbol = %d, Allow %q; want 405, GET, HEAD, POST", method, response.Code, response.Header().Get("Allow"))
+			}
+		})
+	}
+	t.Run("POST /debug/pprof/symbol resolves PC", func(t *testing.T) {
+		pc := reflect.ValueOf(newPprofMux).Pointer()
+		address := "0x" + strconv.FormatUint(uint64(pc), 16)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/debug/pprof/symbol", strings.NewReader(address)))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), address+" "+runtime.FuncForPC(pc).Name()) {
+			t.Fatalf("POST symbol = %d, body %q; want PC mapping to newPprofMux", response.Code, response.Body.String())
+		}
+	})
 }
 
 func TestPprofMuxCompatibility(t *testing.T) {

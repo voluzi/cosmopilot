@@ -18,15 +18,23 @@ func newPprofMux() *http.ServeMux {
 	mux.HandleFunc("/debug/pprof/", pprofGetOrHead(pprof.Index))
 	mux.HandleFunc("/debug/pprof/cmdline", pprofGetOrHead(pprof.Cmdline))
 	mux.HandleFunc("/debug/pprof/profile", pprofGetOrHead(pprof.Profile))
-	mux.HandleFunc("/debug/pprof/symbol", pprofGetOrHead(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/symbol", pprofAllowedMethods(pprof.Symbol, true))
 	mux.HandleFunc("/debug/pprof/trace", pprofGetOrHead(pprof.Trace))
 	return mux
 }
 
 func pprofGetOrHead(handler http.HandlerFunc) http.HandlerFunc {
+	return pprofAllowedMethods(handler, false)
+}
+
+func pprofAllowedMethods(handler http.HandlerFunc, allowPost bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET, HEAD")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && (!allowPost || r.Method != http.MethodPost) {
+			allowed := "GET, HEAD"
+			if allowPost {
+				allowed += ", POST"
+			}
+			w.Header().Set("Allow", allowed)
 			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 			return
 		}
