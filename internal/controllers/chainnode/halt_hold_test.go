@@ -112,6 +112,7 @@ func TestEnsurePodReleasesHoldWhenConfiguredHaltChangesOrIsRemoved(t *testing.T)
 			specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 			current, err := specReconciler.getPodSpec(ctx, node, "config-hash", credential.name)
 			require.NoError(t, err)
+			current.UID = "current-pod-uid"
 			stampNodeUtilsShutdownCredential(current, credential)
 			current.Status = corev1.PodStatus{
 				Phase: corev1.PodRunning,
@@ -206,6 +207,7 @@ func TestEnsurePodDoesNotRecreateTerminalAppAtAmbiguousHaltBoundary(t *testing.T
 	specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 	current, err := specReconciler.getPodSpec(ctx, node, "config-hash", credential.name)
 	require.NoError(t, err)
+	current.UID = "current-pod-uid"
 	stampNodeUtilsShutdownCredential(current, credential)
 	current.Status = corev1.PodStatus{
 		Phase: corev1.PodRunning,
@@ -273,6 +275,7 @@ func TestEnsurePodDoesNotRecreateTerminalAppWithExactHaltTerminationObservation(
 	specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 	current, err := specReconciler.getPodSpec(ctx, node, "config-hash", credential.name)
 	require.NoError(t, err)
+	current.UID = "current-pod-uid"
 	stampNodeUtilsShutdownCredential(current, credential)
 	current.Status = corev1.PodStatus{
 		Phase: corev1.PodRunning,

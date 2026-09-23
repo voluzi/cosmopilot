@@ -457,13 +457,12 @@ func (r *Reconciler) getPeerConfiguration(ctx context.Context, chainNode *appsv1
 }
 
 func (r *Reconciler) getChainPeers(ctx context.Context, chainNode *appsv1.ChainNode, getAnnotations ...string) (appsv1.PeerList, []map[string]string, error) {
-	// List all services with the same chain ID label
 	listOption := client.MatchingLabels{
 		controllers.LabelPeer:    controllers.StringValueTrue,
 		controllers.LabelChainID: chainNode.Status.ChainID,
 	}
 	svcList := &corev1.ServiceList{}
-	if err := r.List(ctx, svcList, listOption); err != nil {
+	if err := r.List(ctx, svcList, client.InNamespace(chainNode.Namespace), listOption); err != nil {
 		return nil, nil, err
 	}
 

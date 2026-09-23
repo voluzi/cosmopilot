@@ -92,3 +92,11 @@ func TestManagerImageFlagOverrides(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDisruptionMaxUnavailable(t *testing.T) {
+	for _, value := range []int{-1, 0} {
+		require.Error(t, validateDisruptionMaxUnavailable(value))
+	}
+	require.NoError(t, validateDisruptionMaxUnavailable(1))
+	require.NoError(t, validateDisruptionMaxUnavailable(3))
+}

@@ -98,8 +98,12 @@ the SDK marker with the application's filesystem identity.
 - **Default**: `false`
 
 ### `disruptionChecksEnabled`
-- **Description**: Enable or disable disruption checks to avoid nodes downtime during updates or maintenance.
+- **Description**: Enable or disable the operator's disruption checks during managed pod replacement.
 - **Default**: `true`
+
+### `disruptionMaxUnavailable`
+- **Description**: Maximum number of unavailable pods allowed in a disruption domain before the operator defers another ready pod's replacement. This is a global setting for all ChainNodes, including validators; it must be at least `1`. A syncing pod counts as unavailable by default; when `config.ignoreSyncing: true`, its readiness probe uses `/health`, so it may count as available.
+- **Default**: `1`
 
 ## **Pod Priority Settings**
 

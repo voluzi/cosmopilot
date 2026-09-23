@@ -666,6 +666,7 @@ func TestTokenDriftHonorsDisruptionAllowanceForHealthyCurrentPod(t *testing.T) {
 	require.NoError(t, err)
 	stampNodeUtilsShutdownCredential(desired, credential)
 	current := desired.DeepCopy()
+	current.UID = "current-pod-uid"
 	current.Annotations[controllers.AnnotationNodeUtilsShutdownTokenHash] = "old-token-hash"
 	current.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}, ContainerStatuses: []corev1.ContainerStatus{{Name: owner.Spec.App.App, Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}, InitContainerStatuses: []corev1.ContainerStatus{{Name: nodeUtilsContainerName, Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}
 	unavailablePeer := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-1", Namespace: owner.Namespace, Labels: current.Labels}, Status: corev1.PodStatus{Phase: corev1.PodPending}}
@@ -713,6 +714,7 @@ func TestEnsurePodDoesNotRecreateRunningAppWhenNodeUtilsCrashes(t *testing.T) {
 	specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 	current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", credential.name)
 	require.NoError(t, err)
+	current.UID = "current-pod-uid"
 	stampNodeUtilsShutdownCredential(current, credential)
 	current.Status = corev1.PodStatus{
 		Phase: corev1.PodRunning,
@@ -809,6 +811,7 @@ func TestEnsurePodRecreatesDriftWhenNodeUtilsIsUnavailable(t *testing.T) {
 			specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 			current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", credential.name)
 			require.NoError(t, err)
+			current.UID = "current-pod-uid"
 			stampNodeUtilsShutdownCredential(current, credential)
 			tt.mutate(current)
 			current.Status = corev1.PodStatus{
@@ -896,6 +899,7 @@ func TestEnsurePodLeavesHaltedAppUntouchedForUnknownMarkerWhenGovernanceDiscover
 			specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 			current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", credential.name)
 			require.NoError(t, err)
+			current.UID = "current-pod-uid"
 			stampNodeUtilsShutdownCredential(current, credential)
 			current.Status = corev1.PodStatus{
 				Phase: corev1.PodRunning,
@@ -977,6 +981,7 @@ func TestTokenDriftRecreatesWaitingPodBeforeNodeUtilsProbe(t *testing.T) {
 	specReconciler := &Reconciler{Client: specClient, Scheme: scheme, opts: &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"}}
 	current, err := specReconciler.getPodSpec(ctx, owner, "config-hash", oldCredential.name)
 	require.NoError(t, err)
+	current.UID = "current-pod-uid"
 	stampNodeUtilsShutdownCredential(current, oldCredential)
 	current.Status = corev1.PodStatus{
 		Phase: corev1.PodPending,

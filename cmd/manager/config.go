@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -10,6 +11,13 @@ import (
 	"github.com/voluzi/cosmopilot/v3/pkg/environ"
 	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
+
+func validateDisruptionMaxUnavailable(value int) error {
+	if value < 1 {
+		return fmt.Errorf("disruption-max-unavailable must be at least 1, got %d", value)
+	}
+	return nil
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))

@@ -1,6 +1,7 @@
 package chainnode
 
 import (
+	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -270,43 +271,54 @@ func TestNewLockManager(t *testing.T) {
 	if lm == nil {
 		t.Fatal("newLockManager() returned nil")
 	}
-	if lm.locks == nil {
-		t.Error("newLockManager() did not initialize locks map")
+	if lm.active == nil {
+		t.Error("newLockManager() did not initialize active map")
 	}
 }
 
-func TestLockManager_GetLockForLabels(t *testing.T) {
+func TestActiveDisruptionDomains(t *testing.T) {
 	lm := newLockManager()
-
-	labels1 := map[string]string{"app": "test"}
-	labels2 := map[string]string{"app": "test"}
-	labels3 := map[string]string{"app": "other"}
-
-	// Get lock for labels1
-	lock1 := lm.getLockForLabels(labels1)
-	if lock1 == nil {
-		t.Fatal("getLockForLabels() returned nil for labels1")
+	labels := map[string]string{"app": "node"}
+	release, acquired := lm.tryAcquire("alpha", labels)
+	if !acquired {
+		t.Fatal("first domain acquisition failed")
 	}
-
-	// Get lock for labels2 (same labels as labels1)
-	lock2 := lm.getLockForLabels(labels2)
-	if lock2 == nil {
-		t.Fatal("getLockForLabels() returned nil for labels2")
+	if _, acquired := lm.tryAcquire("alpha", labels); acquired {
+		t.Fatal("same namespace and domain must not acquire twice")
 	}
-
-	// Should return same lock instance for same labels
-	if lock1 != lock2 {
-		t.Error("getLockForLabels() returned different locks for same labels")
+	otherRelease, acquired := lm.tryAcquire("beta", labels)
+	if !acquired {
+		t.Fatal("same labels in another namespace must acquire")
 	}
-
-	// Get lock for different labels
-	lock3 := lm.getLockForLabels(labels3)
-	if lock3 == nil {
-		t.Fatal("getLockForLabels() returned nil for labels3")
+	otherRelease()
+	release()
+	if len(lm.active) != 0 {
+		t.Fatalf("released domains retained: %d", len(lm.active))
 	}
+	release, acquired = lm.tryAcquire("alpha", labels)
+	if !acquired {
+		t.Fatal("released domain must be reacquirable")
+	}
+	release()
+}
 
-	// Should return different lock for different labels
-	if lock1 == lock3 {
-		t.Error("getLockForLabels() returned same lock for different labels")
+func TestActiveDisruptionDomainsBeyondFiveHundred(t *testing.T) {
+	lm := newLockManager()
+	releases := make([]func(), 0, 501)
+	for i := range 501 {
+		release, acquired := lm.tryAcquire("namespace", map[string]string{"domain": fmt.Sprint(i)})
+		if !acquired {
+			t.Fatalf("domain %d failed to acquire", i)
+		}
+		releases = append(releases, release)
+	}
+	if _, acquired := lm.tryAcquire("namespace", map[string]string{"domain": "500"}); acquired {
+		t.Fatal("domain 500 must remain excluded")
+	}
+	for _, release := range releases {
+		release()
+	}
+	if len(lm.active) != 0 {
+		t.Fatalf("released domains retained: %d", len(lm.active))
 	}
 }

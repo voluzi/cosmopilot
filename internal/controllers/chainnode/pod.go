@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"maps"
 	"path"
@@ -129,6 +130,11 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	nodeUtilsTokenCurrent := !nodeUtilsShutdownTokenChanged(currentPod, pod)
 	labelsChanged := !reflect.DeepEqual(currentPod.Labels, pod.Labels)
 	configCurrent := currentPod.Annotations[controllers.AnnotationConfigHash] == configHash
+	if podSpecCurrent && nodeUtilsTokenCurrent && configCurrent {
+		if err := r.clearPodRecreationDeferred(ctx, chainNode); err != nil {
+			return err
+		}
+	}
 	generation := pod.Annotations[controllers.AnnotationChainNodeGeneration]
 	generationChanged := currentPod.Annotations[controllers.AnnotationChainNodeGeneration] != generation
 	modifiedPod := currentPod.DeepCopy()
@@ -191,6 +197,11 @@ func (r *Reconciler) ensurePod(ctx context.Context, _ *chainutils.App, chainNode
 	requiredUpgrade, err := resolveRequiredUpgrade(chainNode, upgradeStatus)
 	if err != nil {
 		return fmt.Errorf("failed to resolve required upgrade for %s: %w", chainNode.GetName(), err)
+	}
+	if requiredUpgrade != nil {
+		if err := r.clearPodRecreationDeferred(ctx, chainNode); err != nil {
+			return err
+		}
 	}
 
 	// A node pinned through .spec.overrideImage or .spec.overrideVersion must not be upgraded. The
@@ -473,6 +484,9 @@ func (r *Reconciler) recoverOngoingUpgrade(ctx context.Context, chainNode *appsv
 	if upgrade == nil {
 		return false, nil
 	}
+	if err := r.clearPodRecreationDeferred(ctx, chainNode); err != nil {
+		return true, err
+	}
 	if chainNode.HasImageOverride() {
 		required := nodeutils.RequiredUpgrade{
 			Height: upgrade.Height,
@@ -547,6 +561,9 @@ func (r *Reconciler) attestPodHealth(ctx context.Context, chainNode *appsv1.Chai
 
 func (r *Reconciler) createPod(ctx context.Context, chainNode *appsv1.ChainNode, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
+	if err := r.clearPodRecreationDeferred(ctx, chainNode); err != nil {
+		return err
+	}
 
 	if mustStop, reason := chainNode.MustStop(); mustStop {
 		logger.Info("node must be stopped. not creating pod", "pod", pod.GetName(), "reason", reason)
@@ -1300,34 +1317,46 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 			}
 		}
 
-		logger.Info("attempting to acquire lock for recreating pod", "pod", currentPod.GetName(), "labels", disruptionLabels)
-		lock := r.disruptionLocks.getLockForLabels(disruptionLabels)
-		lock.Lock()
-		defer lock.Unlock()
-		logger.Info("acquired lock for recreating pod", "pod", currentPod.GetName(), "labels", disruptionLabels)
+		release, acquired := r.disruptionLocks.tryAcquire(chainNode.Namespace, disruptionLabels)
+		if !acquired {
+			return r.setPodRecreationDeferred(ctx, chainNode, appsv1.ReasonDisruptionLockBusy,
+				"Another pod replacement is active in this disruption domain")
+		}
+		defer release()
+		freshPod, err := r.freshDisruptionTarget(ctx, currentPod)
+		if err != nil {
+			return fmt.Errorf("read pod %s before recreation: %w", currentPod.GetName(), err)
+		}
+		if freshPod == nil {
+			return r.clearPodRecreationDeferred(ctx, chainNode)
+		}
+		currentPod = freshPod
 
 		// If the pod is already unavailable, recreating it won't increase disruption
 		if isPodRunningAndReady(currentPod) {
 			logger.Info("checking pod disruption", "pod", currentPod.GetName(), "labels", disruptionLabels)
-			err := r.checkDisruptionAllowance(ctx, disruptionLabels)
+			err := r.checkDisruptionAllowance(ctx, chainNode.Namespace, disruptionLabels)
 			if err != nil {
-				logger.Info("delaying pod recreation due to disruption limits", "pod", currentPod.GetName(), "reason", err.Error())
-				return nil
+				var budget *disruptionBudgetExhaustedError
+				if stderrors.As(err, &budget) {
+					logger.Info("delaying pod recreation due to disruption limits", "pod", currentPod.GetName(), "reason", err.Error())
+					return r.setPodRecreationDeferred(ctx, chainNode, appsv1.ReasonDisruptionBudgetExhausted, err.Error())
+				}
+				return fmt.Errorf("check disruption allowance for pod %s: %w", currentPod.GetName(), err)
 			}
 		} else {
 			logger.Info("pod is already unavailable, skipping disruption check", "pod", currentPod.GetName())
 		}
 	}
-
-	logger.Info("recreating pod", "pod", currentPod.GetName())
-	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRestarting); err != nil {
-		return fmt.Errorf("failed to update phase to Restarting for %s: %w", chainNode.GetName(), err)
+	if err := r.clearPodRecreationDeferred(ctx, chainNode); err != nil {
+		return err
 	}
 
+	logger.Info("recreating pod", "pod", currentPod.GetName())
 	logger.V(1).Info("deleting pod", "pod", currentPod.GetName())
 	deletePod := currentPod.DeepCopy()
 	ph := k8s.NewPodHelper(r.ClientSet, r.RestConfig, deletePod)
-	if err := ph.Delete(ctx); err != nil {
+	if err := ph.DeleteWithUIDPrecondition(ctx); err != nil {
 		return fmt.Errorf("failed to delete pod %s for recreation: %w", currentPod.GetName(), err)
 	}
 
@@ -1341,6 +1370,9 @@ func (r *Reconciler) recreatePod(ctx context.Context, chainNode *appsv1.ChainNod
 			logger.Info("failed to stop node utils container", "pod", currentPod.GetName(), "error", err.Error())
 		}
 		return r.setNodePhase(ctx, chainNode)
+	}
+	if err := r.updatePhase(ctx, chainNode, appsv1.PhaseChainNodeRestarting); err != nil {
+		logger.Error(err, "failed to update phase to Restarting after deleting pod", "pod", currentPod.GetName())
 	}
 
 	if err := ph.WaitForPodDeleted(ctx, timeoutPodDeleted); err != nil {

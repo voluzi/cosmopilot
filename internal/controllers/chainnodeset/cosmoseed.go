@@ -344,7 +344,7 @@ func (r *Reconciler) ensureCosmoseedConfig(ctx context.Context, nodeSet *v1.Chai
 }
 
 func (r *Reconciler) getCosmoseedConfigMap(ctx context.Context, nodeSet *v1.ChainNodeSet) (string, *corev1.ConfigMap, error) {
-	peers, err := r.listChainPeers(ctx, nodeSet.Status.ChainID)
+	peers, err := r.listChainPeers(ctx, nodeSet.Namespace, nodeSet.Status.ChainID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -380,13 +380,13 @@ func (r *Reconciler) getCosmoseedConfigMap(ctx context.Context, nodeSet *v1.Chai
 	return utils.Sha256(string(b)), spec, controllerutil.SetControllerReference(nodeSet, spec, r.Scheme)
 }
 
-func (r *Reconciler) listChainPeers(ctx context.Context, chainID string) (v1.PeerList, error) {
+func (r *Reconciler) listChainPeers(ctx context.Context, namespace, chainID string) (v1.PeerList, error) {
 	listOption := client.MatchingLabels{
 		controllers.LabelChainID: chainID,
 		controllers.LabelPeer:    controllers.StringValueTrue,
 	}
 	svcList := &corev1.ServiceList{}
-	if err := r.List(ctx, svcList, listOption); err != nil {
+	if err := r.List(ctx, svcList, client.InNamespace(namespace), listOption); err != nil {
 		return nil, err
 	}
 

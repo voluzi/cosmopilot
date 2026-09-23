@@ -44,6 +44,9 @@ var (
 
 func main() {
 	flag.Parse()
+	if err := validateDisruptionMaxUnavailable(runOpts.DisruptionMaxUnavailable); err != nil {
+		log.Fatal(err)
+	}
 
 	zapOpts.Development = debugMode
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))

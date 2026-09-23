@@ -17,6 +17,7 @@ nodeSelector: {}
 debugMode: false
 probesEnabled: true
 disruptionChecksEnabled: true
+disruptionMaxUnavailable: 1
 
 nodesPodPriority: 950
 validatorPodPriority: 1050

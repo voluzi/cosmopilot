@@ -53,9 +53,13 @@ const (
 	ConditionUpgrade = "Upgrade"
 	// ConditionSnapshotExportCleanup indicates that exported snapshot data requires operator cleanup.
 	ConditionSnapshotExportCleanup = "SnapshotExportCleanup"
+	// ConditionPodRecreationDeferred indicates that disruption coordination or capacity delayed replacement.
+	ConditionPodRecreationDeferred = "PodRecreationDeferred"
 
 	// ReasonUpgradeSuccess indicates that the upgrade completed successfully.
-	ReasonUpgradeSuccess = "UpgradeSuccessful"
+	ReasonUpgradeSuccess            = "UpgradeSuccessful"
+	ReasonDisruptionLockBusy        = "DisruptionLockBusy"
+	ReasonDisruptionBudgetExhausted = "DisruptionBudgetExhausted"
 )
 
 //+kubebuilder:object:root=true

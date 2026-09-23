@@ -8,30 +8,34 @@ import (
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 )
 
-const (
-	// maxLocks defines the maximum number of locks to maintain in memory.
-	// This prevents unbounded growth in long-running operators.
-	// With typical Kubernetes deployments, this should be more than sufficient.
-	maxLocks = 500
-)
-
-// lockManager manages locks for disruption control based on label sets.
-// It implements a capacity-limited lock cache to prevent memory leaks.
-type lockManager struct {
-	locks map[string]*sync.Mutex
-	mu    sync.Mutex
+type disruptionBudgetExhaustedError struct {
+	Unavailable int
+	Maximum     int
+	Namespace   string
+	Labels      string
 }
 
-// newLockManager creates a new lock manager instance.
+func (e *disruptionBudgetExhaustedError) Error() string {
+	return fmt.Sprintf("disruption budget exhausted: %d/%d pods unavailable in namespace %q for labels %q",
+		e.Unavailable, e.Maximum, e.Namespace, e.Labels)
+}
+
+type lockManager struct {
+	active map[string]struct{}
+	mu     sync.Mutex
+}
+
 func newLockManager() *lockManager {
-	return &lockManager{
-		locks: make(map[string]*sync.Mutex),
-	}
+	return &lockManager{active: make(map[string]struct{})}
 }
 
 func generateLockKey(l map[string]string) string {
@@ -39,7 +43,7 @@ func generateLockKey(l map[string]string) string {
 	for k := range l {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys) // Sort the keys to ensure deterministic order
+	sort.Strings(keys)
 
 	var builder strings.Builder
 	for _, k := range keys {
@@ -51,38 +55,29 @@ func generateLockKey(l map[string]string) string {
 	return builder.String()
 }
 
-// getLockForLabels returns a mutex for the given label set.
-// Creates a new mutex if one doesn't exist for this label set.
-// If the maximum number of locks is reached, it returns an existing lock
-// to prevent unbounded memory growth.
-func (lm *lockManager) getLockForLabels(l map[string]string) *sync.Mutex {
-	lockKey := generateLockKey(l)
-
+func (lm *lockManager) tryAcquire(namespace string, labels map[string]string) (func(), bool) {
+	key := namespace + "\x00" + generateLockKey(labels)
 	lm.mu.Lock()
-	defer lm.mu.Unlock()
-
-	if lock, exists := lm.locks[lockKey]; exists {
-		return lock
+	if _, exists := lm.active[key]; exists {
+		lm.mu.Unlock()
+		return nil, false
 	}
-
-	// Enforce capacity limit to prevent unbounded growth
-	if len(lm.locks) >= maxLocks {
-		// Return any existing lock when at capacity
-		// This maintains concurrency control while preventing memory leaks
-		for _, existingLock := range lm.locks {
-			return existingLock
-		}
-	}
-
-	newLock := &sync.Mutex{}
-	lm.locks[lockKey] = newLock
-	return newLock
+	lm.active[key] = struct{}{}
+	lm.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			lm.mu.Lock()
+			delete(lm.active, key)
+			lm.mu.Unlock()
+		})
+	}, true
 }
 
-func (r *Reconciler) checkDisruptionAllowance(ctx context.Context, l map[string]string) error {
+func (r *Reconciler) checkDisruptionAllowance(ctx context.Context, namespace string, l map[string]string) error {
 	logger := log.FromContext(ctx)
 
-	podsList, err := r.listPodsWithLabels(ctx, l)
+	podsList, err := r.listPodsWithLabels(ctx, namespace, l)
 	if err != nil {
 		return err
 	}
@@ -90,16 +85,59 @@ func (r *Reconciler) checkDisruptionAllowance(ctx context.Context, l map[string]
 
 	logger.V(1).Info("disruption check", "unavailable", unavailable, "labels", l)
 	if unavailable >= r.opts.DisruptionMaxUnavailable {
-		return fmt.Errorf("%d pods are unavailable", unavailable)
+		return &disruptionBudgetExhaustedError{
+			Unavailable: unavailable, Maximum: r.opts.DisruptionMaxUnavailable,
+			Namespace: namespace, Labels: generateLockKey(l),
+		}
 	}
 	return nil
 }
 
-func (r *Reconciler) listPodsWithLabels(ctx context.Context, l map[string]string) (*corev1.PodList, error) {
-	podList := &corev1.PodList{}
-	return podList, r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labels.SelectorFromSet(l),
+func (r *Reconciler) freshDisruptionTarget(ctx context.Context, current *corev1.Pod) (*corev1.Pod, error) {
+	fresh := &corev1.Pod{}
+	err := r.reservationReader().Get(ctx, client.ObjectKeyFromObject(current), fresh)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if fresh.UID != current.UID {
+		return nil, nil
+	}
+	return fresh, nil
+}
+
+func (r *Reconciler) setPodRecreationDeferred(ctx context.Context, node *appsv1.ChainNode, reason, message string) error {
+	previous := apiMeta.FindStatusCondition(node.Status.Conditions, appsv1.ConditionPodRecreationDeferred)
+	transition := previous == nil || previous.Reason != reason
+	changed := apiMeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+		Type: appsv1.ConditionPodRecreationDeferred, Status: metav1.ConditionTrue,
+		Reason: reason, Message: message, ObservedGeneration: node.Generation,
 	})
+	if !changed {
+		return nil
+	}
+	if err := r.Status().Update(ctx, node); err != nil {
+		return err
+	}
+	if transition {
+		r.recorder.Event(node, corev1.EventTypeNormal, reason, message)
+	}
+	return nil
+}
+
+func (r *Reconciler) clearPodRecreationDeferred(ctx context.Context, node *appsv1.ChainNode) error {
+	if !apiMeta.RemoveStatusCondition(&node.Status.Conditions, appsv1.ConditionPodRecreationDeferred) {
+		return nil
+	}
+	return r.Status().Update(ctx, node)
+}
+
+func (r *Reconciler) listPodsWithLabels(ctx context.Context, namespace string, l map[string]string) (*corev1.PodList, error) {
+	podList := &corev1.PodList{}
+	return podList, r.reservationReader().List(ctx, podList,
+		client.InNamespace(namespace), client.MatchingLabels(l))
 }
 
 func unavailablePodCount(podList *corev1.PodList) int {
