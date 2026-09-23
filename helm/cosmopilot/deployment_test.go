@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"text/template"
@@ -120,12 +122,79 @@ func TestDeploymentPassesReleaseName(t *testing.T) {
 	}
 }
 
+func TestDeploymentDisruptionMaxUnavailable(t *testing.T) {
+	valuesSource, err := os.ReadFile("values.yaml")
+	require.NoError(t, err)
+	var values map[string]any
+	require.NoError(t, yaml.Unmarshal(valuesSource, &values))
+	assert.Equal(t, 1, values["disruptionMaxUnavailable"])
+	defaultDeployment := renderDeployment(t, "test", values, "3.0.0-beta.7")
+	require.Equal(t, "1", defaultDeployment.env["DISRUPTION_MAX_UNAVAILABLE"].Value)
+	values["disruptionMaxUnavailable"] = 3
+	overridden := renderDeployment(t, "test", values, "3.0.0-beta.7")
+	require.Equal(t, "3", overridden.env["DISRUPTION_MAX_UNAVAILABLE"].Value)
+	values["disruptionMaxUnavailable"] = "3"
+	require.Equal(t, "3", renderDeployment(t, "test", values, "3.0.0-beta.7").env["DISRUPTION_MAX_UNAVAILABLE"].Value)
+}
+
+func TestDeploymentRejectsInvalidDisruptionMaxUnavailable(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value any
+	}{
+		{name: "zero", value: 0},
+		{name: "negative", value: -1},
+		{name: "non-numeric", value: "invalid"},
+		{name: "fractional", value: 1.5},
+		{name: "missing", value: nil},
+		{name: "overflow", value: "999999999999999999999999999999"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			values := baseChartValues()
+			values["disruptionMaxUnavailable"] = tt.value
+			_, err := executeDeploymentTemplate(t, "test", values, "3.0.0-beta.7")
+			require.ErrorContains(t, err, "disruptionMaxUnavailable must be an integer of at least 1")
+		})
+	}
+}
+
 type renderedDeployment struct {
 	image string
 	env   map[string]yaml.Node
 }
 
 func renderDeployment(t *testing.T, releaseName string, values map[string]any, appVersion string) renderedDeployment {
+	t.Helper()
+	rendered, err := executeDeploymentTemplate(t, releaseName, values, appVersion)
+	require.NoError(t, err)
+
+	var deployment struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Image string `yaml:"image"`
+						Env   []struct {
+							Name  string    `yaml:"name"`
+							Value yaml.Node `yaml:"value"`
+						} `yaml:"env"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	require.NoErrorf(t, yaml.Unmarshal(rendered, &deployment), "%s", rendered)
+	require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
+
+	env := make(map[string]yaml.Node)
+	for _, variable := range deployment.Spec.Template.Spec.Containers[0].Env {
+		require.NotContains(t, env, variable.Name, "environment variable must be emitted at most once")
+		env[variable.Name] = variable.Value
+	}
+	return renderedDeployment{image: deployment.Spec.Template.Spec.Containers[0].Image, env: env}
+}
+
+func executeDeploymentTemplate(t *testing.T, releaseName string, values map[string]any, appVersion string) ([]byte, error) {
 	t.Helper()
 	templateSource, err := os.ReadFile("templates/deployment.yaml")
 	require.NoError(t, err)
@@ -139,6 +208,10 @@ func renderDeployment(t *testing.T, releaseName string, values map[string]any, a
 			return prefix + strings.ReplaceAll(value, "\n", "\n"+prefix)
 		},
 		"randAlphaNum": func(int) string { return "abcde" },
+		"toString":     func(value any) string { return fmt.Sprint(value) },
+		"regexMatch":   func(pattern, value string) bool { return regexp.MustCompile(pattern).MatchString(value) },
+		"atoi":         func(value string) int { result, _ := strconv.Atoi(value); return result },
+		"fail":         func(message string) (string, error) { return "", fmt.Errorf("%s", message) },
 		"quote":        func(value any) string { return fmt.Sprintf("%q", fmt.Sprint(value)) },
 		"ternary": func(trueValue, falseValue string, condition bool) string {
 			if condition {
@@ -160,46 +233,25 @@ func renderDeployment(t *testing.T, releaseName string, values map[string]any, a
 		"Values":  values,
 	}
 	var rendered bytes.Buffer
-	require.NoError(t, chartTemplate.Execute(&rendered, data))
-
-	var deployment struct {
-		Spec struct {
-			Template struct {
-				Spec struct {
-					Containers []struct {
-						Image string `yaml:"image"`
-						Env   []struct {
-							Name  string    `yaml:"name"`
-							Value yaml.Node `yaml:"value"`
-						} `yaml:"env"`
-					} `yaml:"containers"`
-				} `yaml:"spec"`
-			} `yaml:"template"`
-		} `yaml:"spec"`
+	if err := chartTemplate.Execute(&rendered, data); err != nil {
+		return nil, err
 	}
-	require.NoErrorf(t, yaml.Unmarshal(rendered.Bytes(), &deployment), "%s", rendered.String())
-	require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
-
-	env := make(map[string]yaml.Node)
-	for _, variable := range deployment.Spec.Template.Spec.Containers[0].Env {
-		require.NotContains(t, env, variable.Name, "environment variable must be emitted at most once")
-		env[variable.Name] = variable.Value
-	}
-	return renderedDeployment{image: deployment.Spec.Template.Spec.Containers[0].Image, env: env}
+	return rendered.Bytes(), nil
 }
 
 func baseChartValues() map[string]any {
 	return map[string]any{
-		"replicas":                1,
-		"image":                   "ghcr.io/voluzi/cosmopilot",
-		"imagePullSecrets":        []string{},
-		"webHooksEnabled":         false,
-		"nodeSelector":            map[string]string{},
-		"workerName":              "",
-		"workerCount":             10,
-		"debugMode":               false,
-		"disruptionChecksEnabled": true,
-		"probesEnabled":           false,
+		"replicas":                 1,
+		"image":                    "ghcr.io/voluzi/cosmopilot",
+		"imagePullSecrets":         []string{},
+		"webHooksEnabled":          false,
+		"nodeSelector":             map[string]string{},
+		"workerName":               "",
+		"workerCount":              10,
+		"debugMode":                false,
+		"disruptionChecksEnabled":  true,
+		"disruptionMaxUnavailable": 1,
+		"probesEnabled":            false,
 	}
 }
 

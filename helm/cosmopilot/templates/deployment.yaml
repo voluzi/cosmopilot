@@ -1,3 +1,10 @@
+{{- $disruptionMaxUnavailable := toString .Values.disruptionMaxUnavailable -}}
+{{- if not (regexMatch "^[1-9][0-9]*$" $disruptionMaxUnavailable) -}}
+{{- fail "disruptionMaxUnavailable must be an integer of at least 1" -}}
+{{- end -}}
+{{- if ne (toString (atoi $disruptionMaxUnavailable)) $disruptionMaxUnavailable -}}
+{{- fail "disruptionMaxUnavailable must be an integer of at least 1" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -99,6 +106,8 @@ spec:
               value: "true"
             - name: DISRUPTION_CHECKS_ENABLED
               value: "{{ .Values.disruptionChecksEnabled }}"
+            - name: DISRUPTION_MAX_UNAVAILABLE
+              value: "{{ .Values.disruptionMaxUnavailable }}"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
