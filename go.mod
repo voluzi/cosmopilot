@@ -5,12 +5,12 @@ go 1.26.0
 toolchain go1.27.1
 
 require (
-	cloud.google.com/go/storage v1.67.1
+	cloud.google.com/go/storage v1.68.0
 	emperror.dev/errors v0.8.1
 	github.com/BurntSushi/toml v1.6.0
 	github.com/RaveNoX/go-jsonmerge v1.0.0
 	github.com/aws/aws-sdk-go-v2 v1.47.0
-	github.com/aws/aws-sdk-go-v2/config v1.33.4
+	github.com/aws/aws-sdk-go-v2/config v1.33.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.1
 	github.com/banzaicloud/k8s-objectmatcher v1.8.0
 	github.com/c2h5oh/datasize v0.0.0-20231215233829-aa82cc1e6500
@@ -27,9 +27,9 @@ require (
 	github.com/klauspost/pgzip v1.2.6
 	github.com/kubernetes-csi/external-snapshotter/client/v6 v6.3.0
 	github.com/mitchellh/hashstructure/v2 v2.0.2
-	github.com/onsi/ginkgo/v2 v2.32.2
-	github.com/onsi/gomega v1.43.0
-	github.com/pierrec/lz4/v4 v4.1.29
+	github.com/onsi/ginkgo/v2 v2.33.0
+	github.com/onsi/gomega v1.43.1
+	github.com/pierrec/lz4/v4 v4.1.30
 	github.com/postfinance/vaultk8s v0.1.7
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.94.0
 	github.com/prometheus/client_model v0.6.3
@@ -41,16 +41,16 @@ require (
 	github.com/voluzi/cosmoseed v0.11.0
 	go.uber.org/automaxprocs v1.6.0
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
-	golang.org/x/sys v0.47.0
-	google.golang.org/api v0.297.0
-	google.golang.org/grpc v1.83.2
+	golang.org/x/sys v0.48.0
+	google.golang.org/api v0.298.0
+	google.golang.org/grpc v1.84.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.37.0
 	k8s.io/apimachinery v0.37.0
 	k8s.io/client-go v0.37.0
 	k8s.io/kube-openapi v0.0.0-20260821135717-be32def86098
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
-	sigs.k8s.io/controller-runtime v0.25.0
+	sigs.k8s.io/controller-runtime v0.25.1
 	sigs.k8s.io/gateway-api v1.6.2
 	sigs.k8s.io/kind v0.33.0
 )
@@ -74,13 +74,13 @@ require (
 	github.com/99designs/keyring v1.2.1 // indirect
 	github.com/ChainSafe/go-schnorrkel v1.0.0 // indirect
 	github.com/DataDog/zstd v1.5.6 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.33.0 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.34.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.57.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.57.0 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.20 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.4 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.5 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.3 // indirect
@@ -92,7 +92,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.50.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.1.1-0.20220910012023-760eaf8b6816 // indirect
@@ -130,7 +130,7 @@ require (
 	github.com/ethereum/go-ethereum v1.15.5 // indirect
 	github.com/evanphx/json-patch v5.7.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
-	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
 	github.com/getsentry/sentry-go v0.31.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -231,7 +231,7 @@ require (
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/spf13/viper v1.19.0 // indirect
-	github.com/spiffe/go-spiffe/v2 v2.7.0 // indirect
+	github.com/spiffe/go-spiffe/v2 v2.8.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/supranational/blst v0.3.14 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20220721030215-126854af5e6d // indirect
