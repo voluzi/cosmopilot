@@ -10,11 +10,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/c2h5oh/datasize"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1497,4 +1499,55 @@ func cleanUpNewUploadJob(
 		return fmt.Errorf("%w; clean up upload job: %v", cause, err)
 	}
 	return cause
+}
+
+// uploadContainerName is the export upload job's container, named in its pod failure policy.
+const uploadContainerName = "dataexporter"
+
+// uploadJobResources returns the configured export pod resources or, when unset, a request of
+// chunkSize × (concurrentJobs + 1) for resourceName: the exporter holds one read chunk plus one per
+// in-flight part (in memory for GCS, spooled to the container's writable layer for S3).
+func uploadJobResources(cfg *appsv1.ExportTarballConfig, resourceName corev1.ResourceName, chunkSize string, concurrentJobs int) corev1.ResourceRequirements {
+	if cfg != nil && cfg.Resources != nil {
+		return *cfg.Resources
+	}
+	size, err := datasize.ParseString(chunkSize)
+	if err != nil || concurrentJobs < 0 {
+		return corev1.ResourceRequirements{}
+	}
+	request := int64(size.Bytes()) * int64(concurrentJobs+1)
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{resourceName: *resource.NewQuantity(request, resource.BinarySI)},
+	}
+}
+
+// uploadJobPodFailurePolicy keeps evictions, preemptions and external kills of the export pod from
+// consuming the Job's only attempt, like the integrity-check Job.
+func uploadJobPodFailurePolicy() *batchv1.PodFailurePolicy {
+	return &batchv1.PodFailurePolicy{
+		Rules: []batchv1.PodFailurePolicyRule{
+			{
+				Action: batchv1.PodFailurePolicyActionCount,
+				OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+					ContainerName: ptr.To(uploadContainerName),
+					Operator:      batchv1.PodFailurePolicyOnExitCodesOpNotIn,
+					Values:        []int32{137, 143},
+				},
+			},
+			{
+				Action: batchv1.PodFailurePolicyActionIgnore,
+				OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{{
+					Type:   corev1.DisruptionTarget,
+					Status: corev1.ConditionTrue,
+				}},
+			},
+			{
+				Action: batchv1.PodFailurePolicyActionIgnore,
+				OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+					Operator: batchv1.PodFailurePolicyOnExitCodesOpIn,
+					Values:   []int32{137, 143},
+				},
+			},
+		},
+	}
 }

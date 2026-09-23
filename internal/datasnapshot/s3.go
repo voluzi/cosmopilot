@@ -104,7 +104,8 @@ func (provider *S3) uploadJob(name string) *batchv1.Job {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To[int32](0),
+			BackoffLimit:     ptr.To[int32](0),
+			PodFailurePolicy: uploadJobPodFailurePolicy(),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -120,8 +121,10 @@ func (provider *S3) uploadJob(name string) *batchv1.Job {
 						},
 					}},
 					Containers: []corev1.Container{{
-						Name:            "dataexporter",
-						Image:           provider.dataExporterImage,
+						Name:  uploadContainerName,
+						Image: provider.dataExporterImage,
+						Resources: uploadJobResources(provider.ExportConfig, corev1.ResourceEphemeralStorage,
+							provider.Config.GetChunkSize(), provider.Config.GetConcurrentJobs()),
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"s3", "upload", "data", provider.Config.Bucket, name},

@@ -131,7 +131,8 @@ func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To[int32](0),
+			BackoffLimit:     ptr.To[int32](0),
+			PodFailurePolicy: uploadJobPodFailurePolicy(),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -147,8 +148,10 @@ func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 						},
 					}}, gcs.credentialsVolume()...),
 					Containers: []corev1.Container{{
-						Name:            "dataexporter",
-						Image:           gcs.dataExporterImage,
+						Name:  uploadContainerName,
+						Image: gcs.dataExporterImage,
+						Resources: uploadJobResources(gcs.ExportConfig, corev1.ResourceMemory,
+							gcs.Config.GetChunkSize(), gcs.Config.GetConcurrentJobs()),
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
