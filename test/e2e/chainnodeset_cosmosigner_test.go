@@ -211,8 +211,14 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 				}
 			}
 			Expect(leaderUID).NotTo(BeEmpty())
-			heightBeforeFailover, err := liveHeight()
-			Expect(err).NotTo(HaveOccurred())
+			var heightBeforeFailover int64
+			Eventually(func() (int64, error) {
+				height, err := liveHeight()
+				if err == nil {
+					heightBeforeFailover = height
+				}
+				return height, err
+			}, 5*time.Minute, time.Second).Should(BeNumerically(">", 3), "capture a live baseline before deleting the signer leader")
 
 			leaderPod := &corev1.Pod{}
 			Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: leaderName}, leaderPod)).To(Succeed())
