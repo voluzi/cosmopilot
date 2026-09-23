@@ -58,6 +58,12 @@ func TestEnsureGenesisRestoresChainIDWhenMarkerIsPersisted(t *testing.T) {
 			want:        "chain-from-volume",
 		},
 		{
+			name:        "recorded chain ID wins over an edited spec chainID",
+			genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.invalid/genesis.json"), ChainID: ptr.To("chain-2"), UseDataVolume: ptr.To(true)},
+			annotations: map[string]string{controllers.AnnotationGenesisChainID: "chain-1"},
+			want:        "chain-1",
+		},
+		{
 			name:    "marker without a recorded chain ID fails closed",
 			genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.invalid/genesis.json"), UseDataVolume: ptr.To(true)},
 			wantErr: "has no recorded chain ID",
