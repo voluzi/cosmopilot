@@ -479,6 +479,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err = r.finalizeCosmoGuard(ctx, chainNode, false); err != nil {
 			return ctrl.Result{}, err
 		}
+		if !r.standaloneGuardManaged(chainNode) {
+			if err = r.updateCosmoGuardCondition(ctx, chainNode, nil); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return normalRequeueResult(chainNode), nil
 	}
 

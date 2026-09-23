@@ -225,6 +225,8 @@ type cosmoGuardReconcile struct {
 	// admits (Gateway API CRDs are optional, so the controller cannot Own HTTPRoute), so the caller
 	// requeues sooner than the reconcile period to keep the make-before-break cutover responsive.
 	routesPending bool
+	// serving is the non-sticky per-group readiness, used to report routes already on their guard.
+	serving map[string]bool
 	// states records each enabled group guard for the CosmoGuardReady condition.
 	states []controllers.GuardState
 }
@@ -243,6 +245,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 	expectedIngress := map[string]bool{}
 	expectedRoutes := map[string]bool{}
 	routesPending := false
+	servingGroups := map[string]bool{}
 	var states []controllers.GuardState
 
 	for _, group := range nodeSet.Spec.Nodes {
@@ -376,6 +379,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		routed := r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), group.GetServiceName(nodeSet))
 		flipped := serving || routed
 		ready[group.Name] = flipped
+		servingGroups[group.Name] = serving
 		states = append(states, controllers.GuardState{Name: name, Serving: serving, Routed: routed})
 		if !serving {
 			logger.Info("cosmoguard not yet serving", "group", group.Name, "cosmoguard", name, "keeping-flip", flipped)
@@ -397,6 +401,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 		expectedIngress: expectedIngress,
 		expectedRoutes:  expectedRoutes,
 		routesPending:   routesPending,
+		serving:         servingGroups,
 		states:          states,
 	}, nil
 }

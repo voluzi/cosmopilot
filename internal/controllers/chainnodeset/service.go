@@ -239,7 +239,13 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 		rolledOut := cosmoGuardRouteReady(nodeSet, groups, guards.fullyReady)
 		routed := r.serviceSelectsGuard(ctx, nodeSet.GetNamespace(), serviceName)
 		if !useInternal {
-			routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Route: true, Serving: rolledOut, Routed: routed})
+			// The full-rollout gate only holds back the first switch; a route already on its guard is
+			// filtered as long as its guards serve.
+			serving := rolledOut
+			if routed {
+				serving = cosmoGuardRouteReady(nodeSet, groups, guards.serving)
+			}
+			routeStates = append(routeStates, controllers.GuardState{Name: serviceName, Route: true, Serving: serving, Routed: routed})
 		}
 		return rolledOut || routed
 	}

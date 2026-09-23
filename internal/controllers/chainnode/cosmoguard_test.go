@@ -730,8 +730,8 @@ func markGuardServing(t *testing.T, r *Reconciler, name string) {
 }
 
 // TestStandaloneGuardReportsReadinessCondition verifies a node reached only through its guard Service
-// reports unfiltered traffic until the guard serves, recovers once it does, and drops the condition
-// when CosmoGuard is disabled. Events are recorded only on transitions.
+// reports that its traffic waits on the guard until it serves, recovers once it does, and drops the
+// condition when CosmoGuard is disabled. Events are recorded only on transitions.
 func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 	ctx := context.Background()
 	cn := guardedChainNode("node-0", false)
@@ -741,7 +741,8 @@ func TestStandaloneGuardReportsReadinessCondition(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, appsv1.ReasonCosmoGuardNotServing, cond.Reason)
-	assert.Contains(t, cond.Message, "not filtered")
+	assert.Contains(t, cond.Message, "stay on the guard", "without routes only the guard Service is guarded")
+	assert.NotContains(t, cond.Message, "not filtered")
 	events := drainEvents(r)
 	require.Len(t, events, 1)
 	assert.Contains(t, events[0], "Warning "+appsv1.ReasonCosmoGuardNotServing)

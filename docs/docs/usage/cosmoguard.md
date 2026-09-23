@@ -34,7 +34,7 @@ Earlier releases ran CosmoGuard as a sidecar container inside each node pod. Ena
 
 Cosmopilot keeps public API routes (Ingress, Gateway routes and the group/global Services) pointed at the node itself until the guard is serving, then switches them to the guard. This is deliberate: CosmoGuard is usually added to nodes that are already serving traffic, and the endpoints must keep working while the guard is being deployed.
 
-The consequence is that **until the guard serves for the first time, public API traffic reaches the node directly and is not filtered** by your rules. That also applies to a node that is created with CosmoGuard enabled, and for as long as the guard cannot start (for example a missing rules `ConfigMap`, an image pull failure or a crash loop). Once routes have switched to the guard they stay there, so a later guard outage makes the endpoints unavailable rather than unfiltered.
+The consequence is that **until the guard serves for the first time, public API traffic reaches the node directly and is not filtered** by your rules. That also applies to a node that is created with CosmoGuard enabled, and for as long as the guard cannot start (for example a rules `ConfigMap` that does not exist, an image pull failure or a crash loop). Once routes have switched to the guard they stay there, so a later guard outage makes the endpoints unavailable rather than unfiltered.
 
 Cosmopilot reports this state through the `CosmoGuardReady` condition: on the `ChainNode` for a standalone node, or for a `ChainNodeSet` child with its own individual ingress/gateway (which gets its own guard), and on the `ChainNodeSet` for group guards and the global ingress/gateway routes in front of them. A global route switches to the guard only once every guard replica is up, so it can stay unfiltered for a while after the group guard starts serving; the condition lists it separately. Cosmopilot records a Warning event when the condition turns `False` for a new reason and a Normal event when it recovers:
 
@@ -42,7 +42,7 @@ Cosmopilot reports this state through the `CosmoGuardReady` condition: on the `C
 | --- | --- | --- |
 | `True` | `CosmoGuardServing` | Every guard is serving and public API routes go through it. |
 | `False` | `CosmoGuardNotServing` | A guard is not filtering yet, or a public route has not switched to it. The message names each one and says whether its traffic still reaches the nodes directly (not filtered) or already stays on the guard. |
-| `False` | `CosmoGuardConfigMissing` | CosmoGuard is enabled without a rules `ConfigMap`, so its guard is not reconciled and traffic may not be filtered. |
+| `False` | `CosmoGuardConfigMissing` | CosmoGuard is enabled without naming a rules `ConfigMap` (only possible when CRD validation is bypassed), so its guard is not reconciled and traffic may not be filtered. |
 | `False` | `CosmoGuardBypassed` | A global route also spans a group without CosmoGuard, so it always reaches the nodes directly and is never filtered. |
 
 ```bash

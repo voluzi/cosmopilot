@@ -360,9 +360,6 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 	logger := log.FromContext(ctx)
 
 	if !r.standaloneGuardManaged(chainNode) {
-		if err := r.updateCosmoGuardCondition(ctx, chainNode, nil); err != nil {
-			return false, err
-		}
 		return r.reconcileCosmoGuardDashboard(ctx, chainNode, cosmoguard.Params{
 			Name:      chainNode.CosmoGuardName(),
 			Namespace: chainNode.GetNamespace(),
@@ -444,9 +441,10 @@ func (r *Reconciler) reportCosmoGuardReadiness(ctx context.Context, chainNode *a
 	if err != nil {
 		return err
 	}
-	state := controllers.GuardState{Name: name, Serving: serving}
+	// Without an Ingress or Gateway the guard Service is the only guarded entry point, and it always
+	// targets the guard. With one, traffic is filtered only once the node's own routes point at it.
+	state := controllers.GuardState{Name: name, Serving: serving, Routed: true}
 	if chainNode.Spec.Ingress != nil || chainNode.Spec.Gateway != nil {
-		// Traffic is filtered only once the node's own routes point at the guard.
 		state.Routed = r.standaloneRouteTargetsGuard(ctx, chainNode)
 		state.Serving = serving && state.Routed
 	}

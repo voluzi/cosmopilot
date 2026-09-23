@@ -28,7 +28,7 @@ func TestCosmoGuardCondition(t *testing.T) {
 			name:   "not serving before the first flip",
 			guards: []GuardState{{Name: "node-cg"}},
 			status: metav1.ConditionFalse, reason: appsv1.ReasonCosmoGuardNotServing,
-			contains: []string{"node-cg is not filtering traffic yet", "reach the node directly and are not filtered"},
+			contains: []string{"node-cg is not filtering traffic yet", "reach the nodes directly and are not filtered"},
 		},
 		{
 			name:   "not serving after the flip",

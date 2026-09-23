@@ -58,14 +58,14 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: generation,
 	}
-	var problems []string
+	var parts []string
 	report := func(names []string, format string) {
 		if len(names) > 0 {
-			problems = append(problems, fmt.Sprintf(format, strings.Join(names, ", ")))
+			parts = append(parts, fmt.Sprintf(format, strings.Join(names, ", ")))
 		}
 	}
 	report(missing, "CosmoGuard %s is enabled without a config ConfigMap and is not reconciled; public API traffic may not be filtered")
-	report(unflippedGuards, "CosmoGuard %s is not filtering traffic yet; public API routes reach the node directly and are not filtered until it serves them")
+	report(unflippedGuards, "CosmoGuard %s is not filtering traffic yet; public API routes reach the nodes directly and are not filtered until it serves them")
 	report(unflippedRoutes, "public route %s has not switched to its guard yet; it reaches the nodes directly and is not filtered")
 	report(stalledGuards, "CosmoGuard %s is not serving; public API routes stay on the guard")
 	report(stalledRoutes, "public route %s stays on its guard, which is not serving")
@@ -80,9 +80,9 @@ func CosmoGuardCondition(guards []GuardState, generation int64) *metav1.Conditio
 	default:
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = appsv1.ReasonCosmoGuardServing
-		problems = append(problems, "CosmoGuard is serving public API routes")
+		parts = append(parts, "CosmoGuard is serving public API routes")
 	}
-	condition.Message = strings.Join(problems, "; ")
+	condition.Message = strings.Join(parts, "; ")
 	return condition
 }
 

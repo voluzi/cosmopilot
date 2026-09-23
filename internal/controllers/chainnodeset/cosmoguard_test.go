@@ -586,3 +586,34 @@ func TestGlobalRouteSpanningUnguardedGroupIsReportedBypassed(t *testing.T) {
 	assert.Equal(t, appsv1.ReasonCosmoGuardBypassed, cond.Reason)
 	assert.Contains(t, cond.Message, nodeSet.Spec.Ingresses[0].GetName(nodeSet)+" also spans groups without CosmoGuard")
 }
+
+// TestSwitchedGlobalRouteStaysReadyDuringGuardScaleOut verifies a global route already on its guard is
+// not reported as down while a scale-out leaves some replicas not ready: the full-rollout gate only
+// holds back the first switch.
+func TestSwitchedGlobalRouteStaysReadyDuringGuardScaleOut(t *testing.T) {
+	ctx := context.Background()
+	nodeSet, group := guardedNodeSet()
+	group.Config.CosmoGuard.Replicas = ptr.To[int32](3)
+	nodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{group}
+	nodeSet.Spec.Ingresses = []appsv1.GlobalIngressConfig{{Name: "public", Groups: []string{group.Name}}}
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	route := nodeSet.Spec.Ingresses[0].GetName(nodeSet)
+	switched := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: route, Namespace: "ns"},
+		Spec:       corev1.ServiceSpec{Selector: cosmoGuardRouteSelector(route)},
+	}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, switched, r.Scheme))
+	require.NoError(t, r.Create(ctx, switched))
+
+	_, err := r.ensureCosmoGuards(ctx, nodeSet)
+	require.NoError(t, err)
+	sts := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: groupCosmoGuardName(nodeSet, group)}, sts))
+	sts.Status = k8sappsv1.StatefulSetStatus{ObservedGeneration: sts.Generation, Replicas: 3, ReadyReplicas: 2, UpdatedReplicas: 3}
+	require.NoError(t, r.Status().Update(ctx, sts))
+
+	cond := guardConditionAfterReconcile(t, r, nodeSet)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+}
