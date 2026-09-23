@@ -845,3 +845,49 @@ func TestStandaloneGuardBypassedByInternalServicesIsNotReported(t *testing.T) {
 
 	assert.Nil(t, reconcileGuardAndReport(t, r, cn))
 }
+
+// TestGatewayRouteOnGuardIsNotReadyUntilProgrammed verifies an API HTTPRoute switched to the guard is
+// reported as filtering only once its parent Gateway accepts the current generation with references
+// resolved; until then the Gateway may still serve the previous, raw backend.
+func TestGatewayRouteOnGuardIsNotReadyUntilProgrammed(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Gateway = &appsv1.GatewayConfig{Host: "example.com"}
+	route := &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-0-rpc", Namespace: "ns", Generation: 2},
+		Spec: gwapiv1.HTTPRouteSpec{
+			CommonRouteSpec: gwapiv1.CommonRouteSpec{ParentRefs: []gwapiv1.ParentReference{{Name: "public"}}},
+			Rules: []gwapiv1.HTTPRouteRule{{BackendRefs: []gwapiv1.HTTPBackendRef{{
+				BackendRef: gwapiv1.BackendRef{BackendObjectReference: gwapiv1.BackendObjectReference{Name: "node-0-cg"}},
+			}}}},
+		},
+	}
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, controllerutil.SetControllerReference(cn, route, r.Scheme))
+	require.NoError(t, r.Create(ctx, route))
+
+	require.NoError(t, ensureGuard(r, ctx, cn))
+	markGuardServing(t, r, "node-0-cg")
+	cond := reconcileGuardAndReport(t, r, cn)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status, "the Gateway has not programmed the switch yet")
+	assert.Contains(t, cond.Message, "not filtered")
+
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(route), route))
+	programmed := func(generation int64) []metav1.Condition {
+		return []metav1.Condition{
+			{Type: string(gwapiv1.RouteConditionAccepted), Status: metav1.ConditionTrue, ObservedGeneration: generation, Reason: "Accepted"},
+			{Type: string(gwapiv1.RouteConditionResolvedRefs), Status: metav1.ConditionTrue, ObservedGeneration: generation, Reason: "ResolvedRefs"},
+		}
+	}
+	route.Status.Parents = []gwapiv1.RouteParentStatus{{ParentRef: gwapiv1.ParentReference{Name: "public"}, ControllerName: "example.com/gw", Conditions: programmed(route.Generation - 1)}}
+	require.NoError(t, r.Update(ctx, route))
+	cond = reconcileGuardAndReport(t, r, cn)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status, "acceptance of an older generation does not count")
+
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(route), route))
+	route.Status.Parents[0].Conditions = programmed(route.Generation)
+	require.NoError(t, r.Update(ctx, route))
+	cond = reconcileGuardAndReport(t, r, cn)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+}

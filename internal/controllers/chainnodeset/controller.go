@@ -401,9 +401,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routeGuards...)); err != nil {
-		return ctrl.Result{}, err
-	}
 
 	if err := r.cleanupStaleCosmoGuards(ctx, nodeSet, guards.expected, guards.expectedIngress, guards.expectedRoutes); err != nil {
 		return ctrl.Result{}, err
@@ -419,6 +416,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if err := r.ensureIngresses(ctx, nodeSet, gatewayApplied); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Reported once every route is reconciled, so the condition describes the routes as they are.
+	if err := r.updateCosmoGuardCondition(ctx, nodeSet, append(guards.states, routeGuards...)); err != nil {
 		return ctrl.Result{}, err
 	}
 

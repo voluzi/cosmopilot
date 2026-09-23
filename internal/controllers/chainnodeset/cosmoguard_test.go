@@ -528,8 +528,17 @@ func TestGlobalRouteNotFilteredWhileGuardPartlyRolledOut(t *testing.T) {
 
 	sts.Status.ReadyReplicas = 2
 	require.NoError(t, r.Status().Update(ctx, sts))
+	events := r.recorder.(*record.FakeRecorder).Events
+	for len(events) > 0 {
+		<-events
+	}
 	cond = guardConditionAfterReconcile(t, r, nodeSet)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+	require.Len(t, events, 1, "recovery is recorded once")
+	assert.Contains(t, <-events, "Normal "+appsv1.ReasonCosmoGuardServing)
+
+	require.NoError(t, r.updateCosmoGuardCondition(ctx, nodeSet, nil))
+	assert.Empty(t, events, "removing the condition records no event")
 }
 
 // TestGroupGuardDownAfterFlipKeepsRoutesOnGuard verifies a group guard that stops serving after its

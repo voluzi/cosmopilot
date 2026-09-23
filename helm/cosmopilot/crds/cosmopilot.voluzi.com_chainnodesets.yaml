@@ -17432,6 +17432,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               cosmosigners:
                 description: |-
                   Cosmosigners records controller-managed state for each managed cosmosigner deployment (the

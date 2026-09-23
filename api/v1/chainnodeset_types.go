@@ -168,6 +168,8 @@ type ChainNodeSetStatus struct {
 
 	// Conditions to track state of the ChainNodeSet.
 	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// Last height read on the nodes by cosmopilot.

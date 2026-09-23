@@ -199,12 +199,18 @@ func RepointDashboardIngressPort(ctx context.Context, c client.Client, owner cli
 }
 
 func httpRouteReady(route *gwapiv1.HTTPRoute) bool {
-	if len(route.Spec.ParentRefs) == 0 {
+	return RouteProgrammed(route, route.Spec.ParentRefs, route.Status.RouteStatus)
+}
+
+// RouteProgrammed reports whether every parent a route names has accepted its current generation with
+// references resolved. Until then the data plane may still be serving the route's previous version.
+func RouteProgrammed(route metav1.Object, parentRefs []gwapiv1.ParentReference, status gwapiv1.RouteStatus) bool {
+	if len(parentRefs) == 0 {
 		return false
 	}
-	for _, desired := range route.Spec.ParentRefs {
+	for _, desired := range parentRefs {
 		ready := false
-		for _, parent := range route.Status.Parents {
+		for _, parent := range status.Parents {
 			if parentReferencesEqual(route.GetNamespace(), desired, parent.ParentRef) && routeParentReady(route.GetGeneration(), parent.Conditions) {
 				ready = true
 				break

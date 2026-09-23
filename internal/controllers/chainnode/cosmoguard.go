@@ -425,6 +425,60 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 	return r.reconcileCosmoGuardDashboard(ctx, chainNode, params)
 }
 
+// guardGatewayRoutesProgrammed reports whether every API HTTPRoute/GRPCRoute of this node that targets
+// its guard has been accepted, with references resolved, for its current generation. Ingresses carry no
+// such status, and without Gateway API CRDs there is nothing to wait for.
+func (r *Reconciler) guardGatewayRoutesProgrammed(ctx context.Context, chainNode *appsv1.ChainNode) bool {
+	guard := chainNode.CosmoGuardName()
+	dashboard := guard + "-dashboard"
+	targetsGuard := func(refs []gwapiv1.BackendRef) bool {
+		for _, ref := range refs {
+			if string(ref.Name) == guard {
+				return true
+			}
+		}
+		return false
+	}
+
+	httpRoutes := &gwapiv1.HTTPRouteList{}
+	if err := r.List(ctx, httpRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+		for i := range httpRoutes.Items {
+			rt := &httpRoutes.Items[i]
+			if !metav1.IsControlledBy(rt, chainNode) || rt.Name == dashboard || rt.Name == dashboard+"-http-redirect" {
+				continue
+			}
+			for _, rule := range rt.Spec.Rules {
+				refs := make([]gwapiv1.BackendRef, 0, len(rule.BackendRefs))
+				for _, br := range rule.BackendRefs {
+					refs = append(refs, br.BackendRef)
+				}
+				if targetsGuard(refs) && !cosmoguard.RouteProgrammed(rt, rt.Spec.ParentRefs, rt.Status.RouteStatus) {
+					return false
+				}
+			}
+		}
+	}
+	grpcRoutes := &gwapiv1.GRPCRouteList{}
+	if err := r.List(ctx, grpcRoutes, client.InNamespace(chainNode.GetNamespace())); err == nil {
+		for i := range grpcRoutes.Items {
+			rt := &grpcRoutes.Items[i]
+			if !metav1.IsControlledBy(rt, chainNode) {
+				continue
+			}
+			for _, rule := range rt.Spec.Rules {
+				refs := make([]gwapiv1.BackendRef, 0, len(rule.BackendRefs))
+				for _, br := range rule.BackendRefs {
+					refs = append(refs, br.BackendRef)
+				}
+				if targetsGuard(refs) && !cosmoguard.RouteProgrammed(rt, rt.Spec.ParentRefs, rt.Status.RouteStatus) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 // reportCosmoGuardReadiness records whether the node's standalone guard is filtering its public API
 // traffic. It runs after routing, so the condition describes the routes as they are now rather than
 // as they will be once the reconcile gets there.
@@ -445,7 +499,8 @@ func (r *Reconciler) reportCosmoGuardReadiness(ctx context.Context, chainNode *a
 	// targets the guard. With one, traffic is filtered only once the node's own routes point at it.
 	state := controllers.GuardState{Name: name, Serving: serving, Routed: true}
 	if chainNode.Spec.Ingress != nil || chainNode.Spec.Gateway != nil {
-		state.Routed = r.standaloneRouteTargetsGuard(ctx, chainNode)
+		// A Gateway keeps serving a route's previous version until its parent programs the new one.
+		state.Routed = r.standaloneRouteTargetsGuard(ctx, chainNode) && r.guardGatewayRoutesProgrammed(ctx, chainNode)
 		state.Serving = serving && state.Routed
 	}
 	return r.updateCosmoGuardCondition(ctx, chainNode, []controllers.GuardState{state})
