@@ -81,7 +81,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 				logger.Info("gateway api crds not installed, preserving existing P2P service")
 				return r.clearPublicAddressIfSet(ctx, chainNode)
 			}
-			if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p.DeepCopy(), chainNode); err != nil {
+			if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p, chainNode); err != nil {
 				return fmt.Errorf("failed to delete stale P2P service %s: %w", p2p.GetName(), err)
 			}
 
@@ -211,19 +211,25 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 			}
 		}
 	} else {
-		// Delete the P2P service and TCPRoute if they exist
-		deleted, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p.DeepCopy(), chainNode)
-		if err != nil {
-			return fmt.Errorf("failed to delete P2P service %s: %w", p2p.GetName(), err)
-		}
-		if deleted {
-			logger.Info("deleted service", "svc", p2p.GetName())
-		}
-		if err := r.cleanupTCPRoute(ctx, chainNode); err != nil {
-			return fmt.Errorf("failed to cleanup TCPRoute for %s: %w", chainNode.GetName(), err)
-		}
+		return r.cleanupP2PExposure(ctx, chainNode, p2p)
 	}
 
+	return nil
+}
+
+// cleanupP2PExposure deletes the P2P Service and TCPRoute of a node whose P2P exposure is disabled,
+// leaving same-name objects that belong to someone else in place.
+func (r *Reconciler) cleanupP2PExposure(ctx context.Context, chainNode *appsv1.ChainNode, p2p *corev1.Service) error {
+	deleted, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p, chainNode)
+	if err != nil {
+		return fmt.Errorf("failed to delete P2P service %s: %w", p2p.GetName(), err)
+	}
+	if deleted {
+		log.FromContext(ctx).Info("deleted service", "svc", p2p.GetName())
+	}
+	if err := r.cleanupTCPRoute(ctx, chainNode); err != nil {
+		return fmt.Errorf("failed to cleanup TCPRoute for %s: %w", chainNode.GetName(), err)
+	}
 	return nil
 }
 

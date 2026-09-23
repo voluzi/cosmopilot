@@ -126,3 +126,27 @@ func TestGatewayCleanupDeletesOwnedRoutes(t *testing.T) {
 	requireGone(t, r, grpc)
 	requireGone(t, r, tcp)
 }
+
+func TestDisabledExposeKeepsForeignP2PResources(t *testing.T) {
+	r, owner, foreign := routingOwnershipReconciler(t)
+	p2p := controlled(t, r, &corev1.Service{ObjectMeta: routeMeta("node-p2p")}, foreign)
+	tcp := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, nil)
+
+	desired, err := r.getP2pServiceSpec(owner)
+	require.NoError(t, err)
+	require.NoError(t, r.cleanupP2PExposure(context.Background(), owner, desired))
+	requireExists(t, r, p2p)
+	requireExists(t, r, tcp)
+}
+
+func TestDisabledExposeDeletesOwnedP2PResources(t *testing.T) {
+	r, owner, _ := routingOwnershipReconciler(t)
+	p2p := controlled(t, r, &corev1.Service{ObjectMeta: routeMeta("node-p2p")}, owner)
+	tcp := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, owner)
+
+	desired, err := r.getP2pServiceSpec(owner)
+	require.NoError(t, err)
+	require.NoError(t, r.cleanupP2PExposure(context.Background(), owner, desired))
+	requireGone(t, r, p2p)
+	requireGone(t, r, tcp)
+}

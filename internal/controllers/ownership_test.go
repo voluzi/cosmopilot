@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
 func ownershipScheme(t *testing.T) *runtime.Scheme {
@@ -23,6 +24,7 @@ func ownershipScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, gwapiv1.Install(scheme))
+	require.NoError(t, gwapiv1a2.Install(scheme))
 	return scheme
 }
 
@@ -140,25 +142,59 @@ func TestRequireSameController(t *testing.T) {
 		"has no controller owner")
 }
 
-func TestEnsureHTTPRouteRefusesForeignRoute(t *testing.T) {
+func TestEnsureRoutesRefuseForeignRoutes(t *testing.T) {
 	owner, foreign := ownershipOwners()
-	scheme := ownershipScheme(t)
-	current := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{
-		Name: "node-api", Namespace: "default", Labels: map[string]string{"app": "foreign"},
-	}}
-	require.NoError(t, controllerutil.SetControllerReference(foreign, current, scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(current).Build()
+	cases := []struct {
+		name    string
+		current client.Object
+		desired client.Object
+		ensure  func(client.Client, client.Object) error
+	}{
+		{
+			name:    "HTTPRoute",
+			current: &gwapiv1.HTTPRoute{}, desired: &gwapiv1.HTTPRoute{},
+			ensure: func(c client.Client, o client.Object) error {
+				_, err := EnsureHTTPRoute(context.Background(), c, o.(*gwapiv1.HTTPRoute))
+				return err
+			},
+		},
+		{
+			name:    "GRPCRoute",
+			current: &gwapiv1.GRPCRoute{}, desired: &gwapiv1.GRPCRoute{},
+			ensure: func(c client.Client, o client.Object) error {
+				_, err := EnsureGRPCRoute(context.Background(), c, o.(*gwapiv1.GRPCRoute))
+				return err
+			},
+		},
+		{
+			name:    "TCPRoute",
+			current: &gwapiv1a2.TCPRoute{}, desired: &gwapiv1a2.TCPRoute{},
+			ensure: func(c client.Client, o client.Object) error {
+				_, err := EnsureTCPRoute(context.Background(), c, o.(*gwapiv1a2.TCPRoute))
+				return err
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := ownershipScheme(t)
+			tc.current.SetName("node-route")
+			tc.current.SetNamespace("default")
+			tc.current.SetLabels(map[string]string{"app": "foreign"})
+			require.NoError(t, controllerutil.SetControllerReference(foreign, tc.current, scheme))
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tc.current).Build()
 
-	desired := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{
-		Name: "node-api", Namespace: "default", Labels: map[string]string{"app": "node"},
-	}}
-	require.NoError(t, controllerutil.SetControllerReference(owner, desired, scheme))
+			tc.desired.SetName("node-route")
+			tc.desired.SetNamespace("default")
+			tc.desired.SetLabels(map[string]string{"app": "node"})
+			require.NoError(t, controllerutil.SetControllerReference(owner, tc.desired, scheme))
 
-	_, err := EnsureHTTPRoute(context.Background(), c, desired)
-	require.ErrorContains(t, err, "managed by another owner")
+			require.ErrorContains(t, tc.ensure(c, tc.desired), "managed by another owner")
 
-	live := &gwapiv1.HTTPRoute{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(current), live))
-	require.Equal(t, "foreign", live.Labels["app"])
-	require.Equal(t, types.UID("foreign-uid"), metav1.GetControllerOf(live).UID)
+			live := tc.current.DeepCopyObject().(client.Object)
+			require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(tc.current), live))
+			require.Equal(t, "foreign", live.GetLabels()["app"])
+			require.Equal(t, types.UID("foreign-uid"), metav1.GetControllerOf(live).UID)
+		})
+	}
 }

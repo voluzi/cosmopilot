@@ -131,3 +131,18 @@ func TestSeedCleanupOnlyDeletesOwnedResources(t *testing.T) {
 	requireDeleted(t, r, ownedSvc)
 	requireKept(t, r, foreignSvc)
 }
+
+func TestSeedStatefulSetRefusesForeignStatefulSet(t *testing.T) {
+	r, owner, _, foreign := routingOwnershipReconciler(t)
+	current := &k8sappsv1.StatefulSet{ObjectMeta: routingObjectMeta("default", "ns-seed", map[string]string{"app": "foreign"})}
+	createControlled(t, r, current, foreign)
+
+	desired := &k8sappsv1.StatefulSet{ObjectMeta: routingObjectMeta("default", "ns-seed", map[string]string{"app": "seed"})}
+	require.NoError(t, controllerutil.SetControllerReference(owner, desired, r.Scheme))
+
+	require.ErrorContains(t, r.ensureStatefulSet(context.Background(), desired), "managed by another owner")
+	live := &k8sappsv1.StatefulSet{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(current), live))
+	require.Equal(t, "foreign", live.Labels["app"])
+	require.Equal(t, foreign.UID, metav1.GetControllerOf(live).UID)
+}

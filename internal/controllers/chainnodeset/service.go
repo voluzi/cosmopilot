@@ -344,11 +344,8 @@ func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) err
 		}
 		return err
 	}
-	if desiredOwner := metav1.GetControllerOf(svc); desiredOwner != nil {
-		currentOwner := metav1.GetControllerOf(currentSvc)
-		if currentOwner == nil || currentOwner.UID != desiredOwner.UID {
-			return fmt.Errorf("service %q is managed by another owner or is unowned; refusing to overwrite it", svc.GetName())
-		}
+	if err := controllers.RequireSameController(currentSvc, svc, "Service"); err != nil {
+		return err
 	}
 
 	patchResult, err := patch.DefaultPatchMaker.Calculate(currentSvc, svc)

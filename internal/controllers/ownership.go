@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,17 +26,20 @@ func RequireSameController(existing, desired metav1.Object, kind string) error {
 	return nil
 }
 
-// DeleteIfControlledBy deletes the object named by obj only when its live controller is owner. obj
-// needs only a name and namespace and is overwritten with the live object. A missing object, a
-// missing CRD and an object controlled by someone else are all left alone without error.
+// DeleteIfControlledBy deletes the object named by obj only when its live controller is owner. Only
+// obj's type, name and namespace are used. A missing object, a missing CRD and an object controlled
+// by someone else are all left alone without error.
 func DeleteIfControlledBy(ctx context.Context, c client.Client, obj client.Object, owner metav1.Object) (bool, error) {
-	if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+	// Read into a fresh object: some decoders keep fields absent from the response, so reading into a
+	// desired spec could leave its controller reference on an unowned live object.
+	live := reflect.New(reflect.TypeOf(obj).Elem()).Interface().(client.Object)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
 		if errors.IsNotFound(err) || IsCRDNotInstalled(err) {
 			return false, nil
 		}
 		return false, err
 	}
-	return DeleteControlledObject(ctx, c, obj, owner)
+	return DeleteControlledObject(ctx, c, live, owner)
 }
 
 // DeleteControlledObject deletes an object already read from the API (for example from a label-
@@ -43,8 +47,8 @@ func DeleteIfControlledBy(ctx context.Context, c client.Client, obj client.Objec
 // when the object was replaced by a same-name one after it was read.
 func DeleteControlledObject(ctx context.Context, c client.Client, obj client.Object, owner metav1.Object) (bool, error) {
 	if !metav1.IsControlledBy(obj, owner) {
-		log.FromContext(ctx).Info("not deleting object controlled by another owner",
-			"kind", fmt.Sprintf("%T", obj), "name", obj.GetName())
+		log.FromContext(ctx).V(1).Info("not deleting object that is not controlled by this owner",
+			"kind", reflect.TypeOf(obj).Elem().Name(), "name", obj.GetName(), "owner", owner.GetName())
 		return false, nil
 	}
 	uid := obj.GetUID()
