@@ -66,6 +66,9 @@ func (kms *KMS) DeployConfig(ctx context.Context) error {
 // UndeployConfig removes the ConfigMap and identity Secret this KMS created. Same-name objects that
 // belong to someone else are left in place, and the signing state PVC is always kept.
 func (kms *KMS) UndeployConfig(ctx context.Context) error {
+	if kms.Config.Attribution == nil {
+		return fmt.Errorf("tmKMS %q has no resource attribution configured", kms.Name)
+	}
 	var configMapErr error
 	if err := kms.deleteConfigMap(ctx); err != nil {
 		configMapErr = fmt.Errorf("delete tmKMS ConfigMap %q: %w", kms.Name, err)

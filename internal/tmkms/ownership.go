@@ -88,7 +88,7 @@ func (kms *KMS) mountedByOwnerPod(ctx context.Context, class string) (bool, erro
 func hasIdentitySecretShape(secret *corev1.Secret) bool {
 	_, hasKey := secret.Data[identityKeyName]
 	return secret.Immutable != nil && *secret.Immutable && hasKey && len(secret.Data) == 1 &&
-		len(secret.StringData) == 0 && (secret.Type == "" || secret.Type == corev1.SecretTypeOpaque)
+		(secret.Type == "" || secret.Type == corev1.SecretTypeOpaque)
 }
 
 // hasStatePVCShape matches the signing state PVC Cosmopilot has always created.
@@ -110,7 +110,7 @@ func notOwnedError(kind, name string) error {
 func (kms *KMS) notClaimedError(kind, class string) error {
 	return fmt.Errorf("tmKMS %s %q exists but cannot be proven to belong to this ChainNode; refusing to use it. "+
 		"Do not delete it if it holds this validator's TmKMS identity or signing state: if it does, %s; "+
-		"otherwise rename the ChainNode", kind, kms.Name, kms.Config.Attribution.Describe(class))
+		"otherwise rename the ChainNode (or its ChainNodeSet)", kind, kms.Name, kms.Config.Attribution.Describe(class))
 }
 
 // controlledByOwnerOrPredecessor reports whether object's controller is the owner, or an earlier owner

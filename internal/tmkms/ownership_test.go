@@ -58,7 +58,7 @@ type ownershipFixture struct {
 	deletes map[string]*metav1.Preconditions
 }
 
-func newOwnershipFixture(t *testing.T, objects ...runtime.Object) *ownershipFixture {
+func newOwnershipFixture(t *testing.T) *ownershipFixture {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -66,7 +66,7 @@ func newOwnershipFixture(t *testing.T, objects ...runtime.Object) *ownershipFixt
 	}
 	f := &ownershipFixture{
 		t:       t,
-		client:  k8sfake.NewClientset(objects...),
+		client:  k8sfake.NewClientset(),
 		scheme:  scheme,
 		owner:   &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}},
 		foreign: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "foreign-uid"}},
