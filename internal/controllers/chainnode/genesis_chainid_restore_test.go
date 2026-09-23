@@ -3,8 +3,6 @@ package chainnode
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -38,18 +36,15 @@ func downloadedGenesisPVC(name string) *corev1.PersistentVolumeClaim {
 }
 
 // TestEnsureGenesisRestoresChainIDWhenMarkerIsPersisted covers the downloaded marker being present
-// with an empty status.chainID: the chain ID must be restored without rewriting the volume (no
-// ClientSet is configured, so any helper pod would panic).
+// with an empty status.chainID: the chain ID must be restored from the spec or the marker annotation
+// without fetching or rewriting genesis (no ClientSet is configured, so any helper pod would panic).
 func TestEnsureGenesisRestoresChainIDWhenMarkerIsPersisted(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"chain_id":"chain-from-url"}`))
-	}))
-	defer server.Close()
-
 	for _, tc := range []struct {
-		name    string
-		genesis *appsv1.GenesisConfig
-		want    string
+		name        string
+		genesis     *appsv1.GenesisConfig
+		annotations map[string]string
+		want        string
+		wantErr     string
 	}{
 		{
 			name:    "container download uses spec chainID",
@@ -57,9 +52,15 @@ func TestEnsureGenesisRestoresChainIDWhenMarkerIsPersisted(t *testing.T) {
 			want:    "chain-1",
 		},
 		{
-			name:    "operator download re-reads the chain ID",
-			genesis: &appsv1.GenesisConfig{Url: ptr.To(server.URL), UseDataVolume: ptr.To(true)},
-			want:    "chain-from-url",
+			name:        "operator download uses the recorded chain ID",
+			genesis:     &appsv1.GenesisConfig{Url: ptr.To("https://example.invalid/genesis.json"), UseDataVolume: ptr.To(true)},
+			annotations: map[string]string{controllers.AnnotationGenesisChainID: "chain-from-volume"},
+			want:        "chain-from-volume",
+		},
+		{
+			name:    "marker without a recorded chain ID fails closed",
+			genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.invalid/genesis.json"), UseDataVolume: ptr.To(true)},
+			wantErr: "has no recorded chain ID",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,19 +68,41 @@ func TestEnsureGenesisRestoresChainIDWhenMarkerIsPersisted(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"},
 				Spec:       appsv1.ChainNodeSpec{Genesis: tc.genesis},
 			}
+			pvc := downloadedGenesisPVC(chainNode.Name)
+			for k, v := range tc.annotations {
+				pvc.Annotations[k] = v
+			}
 			cl := fake.NewClientBuilder().WithScheme(newGenesisRestoreScheme(t)).WithStatusSubresource(chainNode).
-				WithObjects(chainNode, downloadedGenesisPVC(chainNode.Name)).Build()
+				WithObjects(chainNode, pvc).Build()
 			r := &Reconciler{Client: cl, opts: &controllers.ControllerRunOptions{}}
 
 			current := &appsv1.ChainNode{}
 			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(chainNode), current))
-			require.NoError(t, r.ensureGenesis(t.Context(), nil, current))
+			err := r.ensureGenesis(t.Context(), nil, current)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
 
 			persisted := &appsv1.ChainNode{}
 			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(chainNode), persisted))
 			require.Equal(t, tc.want, persisted.Status.ChainID)
 		})
 	}
+}
+
+func TestMarkGenesisOnVolumeRecordsChainIDWithMarker(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default"}}
+	cl := fake.NewClientBuilder().WithScheme(newGenesisRestoreScheme(t)).WithObjects(pvc).Build()
+	r := &Reconciler{Client: cl}
+
+	require.NoError(t, r.markGenesisOnVolume(t.Context(), pvc, "chain-1"))
+
+	persisted := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pvc), persisted))
+	require.Equal(t, controllers.StringValueTrue, persisted.Annotations[controllers.AnnotationGenesisDownloaded])
+	require.Equal(t, "chain-1", persisted.Annotations[controllers.AnnotationGenesisChainID])
 }
 
 // TestEnsureGenesisRecoversFromStatusWriteFailureAfterDownload fails the status write that follows the

@@ -31,7 +31,7 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 			// The marker is persisted before status.chainID, so a failed status write leaves the chain ID
 			// empty and nothing else would ever set it.
 			if chainNode.Status.ChainID == "" {
-				return r.restoreDataVolumeChainID(ctx, chainNode)
+				return r.restoreDataVolumeChainID(ctx, chainNode, pvc)
 			}
 			// Genesis is on the data volume (always an external source). Record the digest if missing here
 			// too — this branch returns before the chainID branch below, so otherwise a data-volume node
@@ -70,32 +70,31 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 }
 
 // restoreDataVolumeChainID sets status.chainID for a node whose genesis is already on the data volume
-// but whose chain ID was never recorded. The genesis is fetched again only to read its chain ID; the
-// file on the volume is left untouched.
-func (r *Reconciler) restoreDataVolumeChainID(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	g := chainNode.Spec.Genesis
-	var genesis string
-	var err error
-	switch {
-	case g.ChainID != nil:
-		chainNode.SetEstablishedChainID(*g.ChainID)
-		return r.Status().Update(ctx, chainNode)
-	case g.Url != nil:
-		genesis, err = chainutils.RetrieveGenesisFromURL(ctx, *g.Url, g.GenesisSHA)
-	case g.FromNodeRPC != nil:
-		genesis, err = chainutils.RetrieveGenesisFromNodeRPC(ctx, g.FromNodeRPC.GetGenesisFromRPCUrl(), g.GenesisSHA)
-	default:
-		return fmt.Errorf("cannot restore chain ID: genesis has no chainID, url or fromNodeRPC")
+// but whose chain ID was never recorded. The chain ID comes from the spec (container download) or from
+// the annotation written together with the downloaded marker; the genesis is never fetched again, since
+// the source could now serve a different chain than the file on the volume.
+func (r *Reconciler) restoreDataVolumeChainID(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {
+	chainID := pvc.Annotations[controllers.AnnotationGenesisChainID]
+	if chainNode.Spec.Genesis.ChainID != nil {
+		chainID = *chainNode.Spec.Genesis.ChainID
 	}
-	if err != nil {
-		return fmt.Errorf("failed to retrieve genesis to restore chain ID: %w", err)
-	}
-	chainID, err := chainutils.ExtractChainIdFromGenesis(genesis)
-	if err != nil {
-		return fmt.Errorf("failed to extract chainID from retrieved genesis: %w", err)
+	if chainID == "" {
+		return fmt.Errorf("genesis on pvc %s/%s has no recorded chain ID; remove annotation %s from the pvc to download it again",
+			pvc.Namespace, pvc.Name, controllers.AnnotationGenesisDownloaded)
 	}
 	chainNode.SetEstablishedChainID(chainID)
 	return r.Status().Update(ctx, chainNode)
+}
+
+// markGenesisOnVolume persists the downloaded marker together with the genesis chain ID, so the chain
+// ID can be restored if the status write that follows fails.
+func (r *Reconciler) markGenesisOnVolume(ctx context.Context, pvc *corev1.PersistentVolumeClaim, chainID string) error {
+	if pvc.Annotations == nil {
+		pvc.Annotations = map[string]string{}
+	}
+	pvc.Annotations[controllers.AnnotationGenesisDownloaded] = controllers.StringValueTrue
+	pvc.Annotations[controllers.AnnotationGenesisChainID] = chainID
+	return r.Update(ctx, pvc)
 }
 
 // recordGenesisDigestIfMissing records the genesis signing fingerprint (for a node that initialized
@@ -190,11 +189,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 					chainNode.Spec.NodeSelector); err != nil {
 				return fmt.Errorf("failed to download genesis to PVC: %w", err)
 			}
-			if pvc.Annotations == nil {
-				pvc.Annotations = map[string]string{}
-			}
-			pvc.Annotations[controllers.AnnotationGenesisDownloaded] = controllers.StringValueTrue
-			if err = r.Update(ctx, pvc); err != nil {
+			if err = r.markGenesisOnVolume(ctx, pvc, *chainNode.Spec.Genesis.ChainID); err != nil {
 				return fmt.Errorf("failed to update pvc annotations: %w", err)
 			}
 			chainNode.SetEstablishedChainID(*chainNode.Spec.Genesis.ChainID)
@@ -279,11 +274,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 				chainNode.Spec.NodeSelector); err != nil {
 			return fmt.Errorf("failed to write genesis to PVC: %w", err)
 		}
-		if pvc.Annotations == nil {
-			pvc.Annotations = map[string]string{}
-		}
-		pvc.Annotations[controllers.AnnotationGenesisDownloaded] = controllers.StringValueTrue
-		if err = r.Update(ctx, pvc); err != nil {
+		if err = r.markGenesisOnVolume(ctx, pvc, chainID); err != nil {
 			return fmt.Errorf("failed to update pvc annotations after genesis write: %w", err)
 		}
 
