@@ -166,7 +166,7 @@ func startServer() error {
 		}
 	}()
 
-	return nodeUtilsServer.Start()
+	return runWithPprof(pprofAddress, port, nodeUtilsServer.Start)
 }
 
 func printHelp() {

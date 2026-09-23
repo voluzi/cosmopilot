@@ -94,6 +94,33 @@ but this requires a storage class with `allowVolumeExpansion: true`. If volumes 
 grow, verify the storage class supports expansion. See
 [Persistence & Backup](../usage/persistence-and-backup).
 
+## Profile node-utils memory or CPU
+
+Builds containing the profiling endpoint serve Go runtime profiles on
+`127.0.0.1:6666` inside the Pod. Forward that loopback port when diagnosing the
+`node-utils` sidecar:
+
+```bash
+kubectl port-forward pod/<node-pod> 6666:6666
+```
+
+Keep the port-forward running. In another terminal, collect and inspect the profiles:
+
+```bash
+curl -o heap.pb.gz http://127.0.0.1:6666/debug/pprof/heap
+curl -o cpu.pb.gz 'http://127.0.0.1:6666/debug/pprof/profile?seconds=10'
+go tool pprof -top heap.pb.gz
+go tool pprof -top cpu.pb.gz
+```
+
+These profiles describe the `node-utils` Go process, not the Cosmos process or
+total Pod memory. The port is loopback only and is not exposed by a Service or
+Ingress, but other containers in the same Pod can reach it. Profiles may contain
+sensitive process data; keep access to the Pod and port-forward controlled.
+A CPU profile or execution trace collects data only while requested;
+block and mutex sampling remain at Go's defaults. If port 6666 is occupied,
+`node-utils` logs a warning and continues without profiling.
+
 ## TMKMS / Vault issues (deprecated)
 
 - Ensure the Vault token has permission for the operations you enabled (including key
