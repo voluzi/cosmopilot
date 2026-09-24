@@ -61,7 +61,11 @@ rpc:
 :::warning[IMPORTANT]
 Provide **rules only** in your `ConfigMap`. Cosmopilot manages the upstream (node discovery), listener ports, metrics and dashboard settings through environment variables — do not set them in the file.
 
-CosmoGuard v4 **removed Redis**: a `cache.backend`, `cache.redis` or `cache.redis-sentinel` key now fails startup. For multi-replica caches CosmoGuard uses an embedded cluster; single-replica needs no cache backend at all. See the CosmoGuard [v4 migration notes](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md) for other breaking changes (WebSocket cross-origin now denied by default, CosmoGuard owns CORS, gRPC reflection is no longer auto-allowed). You can validate a file with `cosmoguard validate <file>`.
+CosmoGuard v4 **removed Redis**: a `cache.backend`, `cache.redis` or `cache.redis-sentinel` key now fails startup. For multi-replica caches CosmoGuard uses an embedded cluster; single-replica needs no cache backend at all. See the CosmoGuard [v4 migration notes](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md) for other breaking changes (WebSocket cross-origin now denied by default, CosmoGuard owns CORS, gRPC reflection is no longer auto-allowed). You can validate a file with `cosmoguard validate --config <file>`.
+:::
+
+:::warning[WebSocket connections behind an Ingress or Gateway]
+CosmoGuard limits WebSocket connections per client IP (`server.websocketLimits.maxConnectionsPerIP`, default 16). When CosmoGuard is exposed through an Ingress or Gateway, it sees the proxy's pod IP unless that proxy is listed in `server.trustedProxies`, so every client behind one proxy pod shares those 16 connections. Add your Ingress or Gateway proxy addresses to `server.trustedProxies` in the rules file (CosmoGuard then uses the client address from `X-Forwarded-For`), or raise the limit (`0` disables it).
 :::
 
 ### Step 2: Create a ConfigMap in Kubernetes
@@ -82,7 +86,7 @@ config:
       name: cosmoguard-config  # Name of the ConfigMap created in Step 2.
       key: cosmoguard.yaml     # Key within the ConfigMap containing the rules.
     replicas: 2                # Optional: number of CosmoGuard replicas (default 1). Ignored when autoscaling is enabled.
-    image: ghcr.io/voluzi/cosmoguard:4.0.3  # Optional: override the operator-wide default image.
+    image: ghcr.io/voluzi/cosmoguard:5.0.0  # Optional: override the operator-wide default image.
     resources:                 # Optional: per-pod resources (defaults shown).
       requests:
         cpu: 200m
