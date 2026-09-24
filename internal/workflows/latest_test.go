@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestIsNewestReleaseOnlyMovesLatestForTheNewestStableRelease(t *testing.T) {
@@ -78,6 +80,28 @@ func TestReleaseWorkflowsGateLatestOnTheNewestRelease(t *testing.T) {
 			if trimmed := strings.TrimSpace(line); trimmed == "latest" || trimmed == "latest-${{ env.ARCH }}" {
 				t.Errorf("%s workflow still publishes an unconditional %q tag", name, trimmed)
 			}
+		}
+	}
+
+	// Overlapping runs would decide "newest" from a stale tag list, so every release workflow is
+	// serialized and keeps all pending tags.
+	for _, name := range []string{"node-utils-docker", "node-tools-docker", "data-exporter-docker", "vault-renewer-docker", "release"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name+".yaml"))
+		if err != nil {
+			t.Fatalf("read %s workflow: %v", name, err)
+		}
+		var wf struct {
+			Concurrency struct {
+				Group            string `yaml:"group"`
+				CancelInProgress bool   `yaml:"cancel-in-progress"`
+				Queue            string `yaml:"queue"`
+			} `yaml:"concurrency"`
+		}
+		if err := yaml.Unmarshal(data, &wf); err != nil {
+			t.Fatalf("parse %s workflow: %v", name, err)
+		}
+		if c := wf.Concurrency; c.Group != "${{ github.workflow }}" || c.CancelInProgress || c.Queue != "max" {
+			t.Errorf("%s workflow concurrency = %+v, want a per-workflow group, no cancellation and queue max", name, c)
 		}
 	}
 

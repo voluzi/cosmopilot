@@ -9,9 +9,11 @@ on:
 
 permissions: {}
 
-# Queue instead of cancelling, so every published sha has a complete set of images.
+# Never cancel a run half-way, so a published sha always has a complete set of images. With the
+# default queue a burst of pushes may skip intermediate commits; the newest one is always built.
+# Manual runs from other branches get their own group and cannot displace a pending main run.
 concurrency:
-  group: edge-images
+  group: edge-images-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -133,23 +135,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # `edge-<sha>` is immutable: a re-run of the same commit keeps the manifest already published.
       - name: Create manifest list and push
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          NAME: ${{ matrix.image }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${NAME}"
+          if docker buildx imagetools inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+            echo "${IMAGE}:${TAG} already exists, keeping it"
+            exit 0
+          fi
           docker buildx imagetools create \
             --tag "${IMAGE}:${TAG}" \
             "${IMAGE}:${TAG}-amd64" \
             "${IMAGE}:${TAG}-arm64"
 
-  # Moves `edge` only after every image has its sha manifest, so `edge` never mixes commits.
+  # Moves `edge` only after every image has its sha manifest. The retags run back to back in one
+  # job with retries; a registry that stays down mid-loop can still leave `edge` mixed until a
+  # re-run or the next push, which is why deployments pin `edge-<sha>`.
   promote:
-    name: Tag ${{ matrix.image }} as edge
+    name: Tag edge images
     needs: [version, merge]
-    strategy:
-      matrix:
-        image: [ cosmopilot, node-utils, node-tools, dataexporter, vault-renewer ]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -166,6 +173,15 @@ jobs:
 
       - name: Point edge at this commit
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           TAG: ${{ needs.version.outputs.tag }}
-        run: docker buildx imagetools create --tag "${IMAGE}:edge" "${IMAGE}:${TAG}"
+        run: |
+          for name in cosmopilot node-utils node-tools dataexporter vault-renewer; do
+            IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${name}"
+            for attempt in 1 2 3; do
+              docker buildx imagetools create --tag "${IMAGE}:edge" "${IMAGE}:${TAG}" && break
+              if [ "$attempt" = 3 ]; then
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            done
+          done

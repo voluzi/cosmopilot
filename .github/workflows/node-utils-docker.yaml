@@ -5,6 +5,14 @@ on:
     tags:
       - "node-utils/*"
 
+# Release runs of this workflow never overlap, so each decides whether it is the newest release only
+# after every earlier tag has finished publishing. `queue: max` keeps every pending tag instead of
+# only the newest.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+  queue: max
+
 permissions:
   contents: read
   packages: write
