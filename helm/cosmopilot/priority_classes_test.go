@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
 )
 
 func TestPriorityClassResourcesMatchManagerReferences(t *testing.T) {

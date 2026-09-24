@@ -13,10 +13,10 @@ import (
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/voluzi/cosmopilot/v3/internal/tmkms"
-	"github.com/voluzi/cosmopilot/v3/pkg/dataexporter"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	"github.com/voluzi/cosmopilot/v4/internal/tmkms"
+	"github.com/voluzi/cosmopilot/v4/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 const (

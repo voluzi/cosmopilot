@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 func TestGetCosmoGuardImagePrecedence(t *testing.T) {

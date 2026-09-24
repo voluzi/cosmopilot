@@ -8,7 +8,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 // Framework defines the interface for test frameworks.

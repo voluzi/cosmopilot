@@ -17,9 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v4/internal/k8s"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 const (

@@ -8,8 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/tmkms"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/tmkms"
 )
 
 func TestTmkmsAttributionSurvivesRootRecreation(t *testing.T) {

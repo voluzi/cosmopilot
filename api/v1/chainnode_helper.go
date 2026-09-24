@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 const (

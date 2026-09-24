@@ -19,9 +19,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
 )
 
 func TestEnsureNodePreservesCleanupFinalizerOnSpecUpdate(t *testing.T) {

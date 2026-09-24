@@ -11,8 +11,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	cosmopilotv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
+	cosmopilotv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/pkg/nodeutils"
 )
 
 const (

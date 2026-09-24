@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
 )
 
 func TestGrpcOnlyService(t *testing.T) {

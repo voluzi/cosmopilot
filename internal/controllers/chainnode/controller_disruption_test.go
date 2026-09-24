@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

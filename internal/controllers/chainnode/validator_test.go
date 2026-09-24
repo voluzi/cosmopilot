@@ -17,7 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
 )
 
 const testValidatorPubKeyJSON = `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"oWg2ISpLF405Jcm2vXV+2v4fnjodh6aafuIdeoW+rUw="}`

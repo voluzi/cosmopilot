@@ -23,9 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 func TestCosmoGuardParamsUsePinnedDefaultImage(t *testing.T) {

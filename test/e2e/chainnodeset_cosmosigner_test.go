@@ -28,13 +28,13 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	chainnodecontroller "github.com/voluzi/cosmopilot/v3/internal/controllers/chainnode"
-	managedcosmosigner "github.com/voluzi/cosmopilot/v3/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v3/test/e2e/apps"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	chainnodecontroller "github.com/voluzi/cosmopilot/v4/internal/controllers/chainnode"
+	managedcosmosigner "github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v4/test/e2e/apps"
 )
 
 // Labelled so CI can give the cosmosigner specs a shard of their own. They are by some distance the

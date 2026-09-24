@@ -16,8 +16,8 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils/sdkcmd"
 )
 
 // TestRecoverAccountArgsRecoverOperatorAccount runs the SDK keys CLI with the generated recovery

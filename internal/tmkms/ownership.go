@@ -11,7 +11,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v4/internal/k8s"
 )
 
 // Resource classes for the durable objects this package generates. They are attribution only: no

@@ -16,11 +16,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
-	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/internal/k8s"
+	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 const (

@@ -8,7 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/voluzi/cosmopilot/v3/test/framework"
+	"github.com/voluzi/cosmopilot/v4/test/framework"
 )
 
 var (

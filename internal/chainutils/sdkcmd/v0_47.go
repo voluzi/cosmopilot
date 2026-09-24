@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
 )
 
 func init() {

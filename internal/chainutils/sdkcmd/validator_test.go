@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
 )
 
 const testValidatorPubKey = `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"oWg2ISpLF405Jcm2vXV+2v4fnjodh6aafuIdeoW+rUw="}`

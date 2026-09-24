@@ -22,10 +22,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 const (

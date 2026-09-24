@@ -9,9 +9,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 func TestGeneratedCompanionWorkloadsUsePinnedDefaultImages(t *testing.T) {

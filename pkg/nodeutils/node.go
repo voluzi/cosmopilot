@@ -17,9 +17,9 @@ import (
 	"github.com/shirou/gopsutil/process"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v3/pkg/proxy"
-	"github.com/voluzi/cosmopilot/v3/pkg/statscollector"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/pkg/proxy"
+	"github.com/voluzi/cosmopilot/v4/pkg/statscollector"
 )
 
 const (

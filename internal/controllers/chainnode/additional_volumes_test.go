@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
 )
 
 // TestEnsureAdditionalVolumesResize covers the resize paths: an equal size in other units issues no

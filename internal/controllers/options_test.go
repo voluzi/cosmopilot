@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 func TestImageGetters(t *testing.T) {

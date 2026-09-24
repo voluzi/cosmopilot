@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 func TestDefaultsArePinned(t *testing.T) {

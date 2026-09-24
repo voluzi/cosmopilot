@@ -17,12 +17,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 // cosmosignerName is the base name for a standalone ChainNode's managed signer resources.
