@@ -3,7 +3,7 @@ package images
 import (
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 // mutableTags are the tags that are moved to new builds: `latest`, and `edge`, which every push to

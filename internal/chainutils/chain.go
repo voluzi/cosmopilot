@@ -7,9 +7,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 type App struct {

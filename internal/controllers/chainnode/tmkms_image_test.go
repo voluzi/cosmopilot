@@ -7,10 +7,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/internal/tmkms"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/internal/tmkms"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
 )
 
 func TestGetTmKmsUsesDefaultAndConfiguredImages(t *testing.T) {

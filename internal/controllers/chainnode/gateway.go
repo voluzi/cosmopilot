@@ -11,9 +11,9 @@ import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
 )
 
 // GrpcOnlyService derives the Service a gRPC Ingress targets from the multi-port Service that backs

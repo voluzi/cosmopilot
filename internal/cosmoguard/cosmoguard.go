@@ -31,11 +31,11 @@ import (
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
-	"github.com/voluzi/cosmopilot/v3/pkg/utils"
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/internal/k8s"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/pkg/utils"
 )
 
 func intToStr(i int) string { return strconv.Itoa(i) }

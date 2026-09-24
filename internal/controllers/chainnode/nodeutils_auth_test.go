@@ -30,11 +30,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
-	"github.com/voluzi/cosmopilot/v3/internal/controllers"
-	"github.com/voluzi/cosmopilot/v3/internal/k8s"
-	"github.com/voluzi/cosmopilot/v3/pkg/images"
-	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
+	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	"github.com/voluzi/cosmopilot/v4/internal/k8s"
+	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v4/pkg/nodeutils"
 )
 
 const testShutdownToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
