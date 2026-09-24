@@ -33,6 +33,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 )
 
@@ -725,7 +726,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 	return corev1.Container{
 		Name:            nodeUtilsContainerName,
 		Image:           r.opts.GetNodeUtilsImage(),
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: images.PullPolicy(r.opts.GetNodeUtilsImage(), corev1.PullIfNotPresent),
 		RestartPolicy:   &sidecarRestartAlways,
 		SecurityContext: securityContext,
 		Ports: []corev1.ContainerPort{
@@ -800,7 +801,7 @@ func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.Ch
 	return corev1.Container{
 		Name:                     CosmosignerDiscoveryWaitContainerName,
 		Image:                    r.opts.GetNodeUtilsImage(),
-		ImagePullPolicy:          corev1.PullIfNotPresent,
+		ImagePullPolicy:          images.PullPolicy(r.opts.GetNodeUtilsImage(), corev1.PullIfNotPresent),
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext:          k8s.RestrictedSecurityContext(),
 		Args: []string{
@@ -1107,6 +1108,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 			{
 				Name:            "link-genesis",
 				Image:           r.opts.GetUtilityImage(),
+				ImagePullPolicy: images.PullPolicy(r.opts.GetUtilityImage(), ""),
 				Command:         []string{"/bin/sh"},
 				SecurityContext: k8s.RestrictedSecurityContext(),
 				Args: []string{

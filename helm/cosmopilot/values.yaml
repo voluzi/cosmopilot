@@ -1,4 +1,8 @@
 image: ghcr.io/voluzi/cosmopilot
+# Pull policy of the manager container. Empty keeps the Kubernetes default (IfNotPresent for a
+# version tag); set Always when tracking a moving tag such as `edge`. Companion images the manager
+# deploys already pull Always when their tag is `edge` or `latest`.
+imagePullPolicy: ""
 # Empty companion image values inherit the pinned defaults from the selected manager release.
 nodeUtilsImage: ""
 cosmoGuardImage: ""

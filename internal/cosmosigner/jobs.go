@@ -19,6 +19,7 @@ import (
 
 	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 const (
@@ -180,6 +181,7 @@ func (j JobRunner) buildPod(nameSuffix string, args []string, extraVolumes []cor
 				{
 					Name:            containerName,
 					Image:           j.Params.Image,
+					ImagePullPolicy: images.PullPolicy(j.Params.Image, ""),
 					SecurityContext: k8s.RestrictedSecurityContext(),
 					Args:            args,
 					Env:             j.Params.Backend.backendEnv(),

@@ -166,6 +166,7 @@ func (v HashicorpProvider) getContainers() []corev1.Container {
 		spec := corev1.Container{
 			Name:            "vault-token-renewer",
 			Image:           image,
+			ImagePullPolicy: images.PullPolicy(image, ""),
 			SecurityContext: k8s.RestrictedSecurityContext(),
 			Env: []corev1.EnvVar{
 				{

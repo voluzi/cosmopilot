@@ -106,3 +106,24 @@ func TestHelperPodsUseDefensivelyClonedImagePullSecrets(t *testing.T) {
 		t.Fatalf("upload pod pull secrets = %#v, want %#v", got, want)
 	}
 }
+
+func TestHashicorpProviderPullsAMovingVaultTokenRenewerImageAlways(t *testing.T) {
+	tests := []struct {
+		image string
+		want  corev1.PullPolicy
+	}{
+		{image: "", want: ""},
+		{image: "ghcr.io/voluzi/vault-renewer:edge", want: corev1.PullAlways},
+	}
+	for _, tt := range tests {
+		provider := HashicorpProvider{
+			Adapter:           &HashicorpAdapter{},
+			TokenSecret:       &corev1.SecretKeySelector{Key: "token"},
+			AutoRenewToken:    true,
+			TokenRenewerImage: tt.image,
+		}
+		if got := provider.getContainers()[0].ImagePullPolicy; got != tt.want {
+			t.Errorf("renewer %q pull policy = %q, want %q", tt.image, got, tt.want)
+		}
+	}
+}

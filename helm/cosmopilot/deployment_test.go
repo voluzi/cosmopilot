@@ -106,6 +106,14 @@ func TestManagerImageUsesAppVersionUnlessImageTagIsSet(t *testing.T) {
 	assert.Equal(t, "ghcr.io/voluzi/cosmopilot:3.1.0-custom", renderDeployment(t, "test", values, "3.0.0-beta.7").image)
 }
 
+func TestManagerImagePullPolicyIsOnlySetWhenConfigured(t *testing.T) {
+	values := defaultChartValues()
+	assert.Empty(t, renderDeployment(t, "test", values, "3.0.0-beta.7").pullPolicy)
+
+	values["imagePullPolicy"] = "Always"
+	assert.Equal(t, "Always", renderDeployment(t, "test", values, "3.0.0-beta.7").pullPolicy)
+}
+
 func TestDeploymentPassesReleaseName(t *testing.T) {
 	for _, releaseName := range []string{"cosmopilot", "audit-release"} {
 		t.Run(releaseName, func(t *testing.T) {
@@ -159,8 +167,9 @@ func TestDeploymentRejectsInvalidDisruptionMaxUnavailable(t *testing.T) {
 }
 
 type renderedDeployment struct {
-	image string
-	env   map[string]yaml.Node
+	image      string
+	pullPolicy string
+	env        map[string]yaml.Node
 }
 
 func renderDeployment(t *testing.T, releaseName string, values map[string]any, appVersion string) renderedDeployment {
@@ -173,8 +182,9 @@ func renderDeployment(t *testing.T, releaseName string, values map[string]any, a
 			Template struct {
 				Spec struct {
 					Containers []struct {
-						Image string `yaml:"image"`
-						Env   []struct {
+						Image           string `yaml:"image"`
+						ImagePullPolicy string `yaml:"imagePullPolicy"`
+						Env             []struct {
 							Name  string    `yaml:"name"`
 							Value yaml.Node `yaml:"value"`
 						} `yaml:"env"`
@@ -191,7 +201,8 @@ func renderDeployment(t *testing.T, releaseName string, values map[string]any, a
 		require.NotContains(t, env, variable.Name, "environment variable must be emitted at most once")
 		env[variable.Name] = variable.Value
 	}
-	return renderedDeployment{image: deployment.Spec.Template.Spec.Containers[0].Image, env: env}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	return renderedDeployment{image: container.Image, pullPolicy: container.ImagePullPolicy, env: env}
 }
 
 func executeDeploymentTemplate(t *testing.T, releaseName string, values map[string]any, appVersion string) ([]byte, error) {

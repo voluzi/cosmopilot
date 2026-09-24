@@ -364,3 +364,12 @@ func TestHPA(t *testing.T) {
 	assert.Equal(t, int32(2), *hpa.Spec.MinReplicas)
 	assert.Len(t, hpa.Spec.Metrics, 2)
 }
+
+func TestStatefulSet_PullPolicyFollowsTheImageTag(t *testing.T) {
+	p := baseParams()
+	p.UpstreamHost = "chain-0-internal.ns.svc.cluster.local"
+	assert.Equal(t, corev1.PullIfNotPresent, p.StatefulSet().Spec.Template.Spec.Containers[0].ImagePullPolicy)
+
+	p.Image = "ghcr.io/voluzi/cosmoguard:edge"
+	assert.Equal(t, corev1.PullAlways, p.StatefulSet().Spec.Template.Spec.Containers[0].ImagePullPolicy)
+}

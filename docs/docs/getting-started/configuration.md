@@ -28,10 +28,19 @@ $ helm show values oci://ghcr.io/voluzi/helm/cosmopilot
 - **Description**: The tag with the version to be used.
 - **Default**: The chart's application version.
 
+### `imagePullPolicy`
+- **Description**: Pull policy of the Cosmopilot manager container. Set `Always` when `imageTag` is a moving tag such as `edge`, so a restarted manager runs the newest build.
+- **Default**: `""` (the Kubernetes default, `IfNotPresent` for a version tag)
+
 The companion-image values below are optional overrides. Their Helm defaults are empty, so the
 selected manager release supplies its pinned, compatible image defaults. Upgrading the manager can
 therefore upgrade its companions as one release. Explicit values remain pinned across upgrades,
 including upgrades that use `--reuse-values`; clear or delete an old value to resume release defaults.
+
+Companion images with a moving tag (`edge` or `latest`) or no tag at all are pulled `Always`, so a
+restarted Pod runs the newest build. Every push to cosmopilot `main` publishes `edge` builds of the
+manager, `node-utils`, `node-tools`, `dataexporter` and `vault-renewer`, plus an immutable
+`edge-<short sha>` tag of each. Images with a version tag or digest keep their usual pull policy.
 
 ### `nodeUtilsImage`
 - **Description**: The container image of `node-utils` (with version tag included). This is a container deployed by `cosmopilot` as a sidecar with helper methods for calculating data size, handling upgrades, and a few more utilities.

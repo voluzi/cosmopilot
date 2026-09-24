@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 // BuildInitPod constructs the init pod spec without creating it.
@@ -92,6 +93,7 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 				{
 					Name:            "busybox",
 					Image:           a.utilityImageRef(),
+					ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 					Command:         []string{"echo"},
 					SecurityContext: k8s.RestrictedSecurityContext(),
 				},

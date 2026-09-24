@@ -109,6 +109,7 @@ func (h *PvcHelper) buildWriteFilePod(path, pc string, af *corev1.Affinity, ns m
 				{
 					Name:            "busybox",
 					Image:           h.utilityImage,
+					ImagePullPolicy: images.PullPolicy(h.utilityImage, ""),
 					Command:         []string{"/bin/sh"},
 					SecurityContext: RestrictedSecurityContext(),
 					Args: []string{
@@ -186,6 +187,7 @@ func (h *PvcHelper) buildDownloadGenesisPod(url, path string, sha *string, pc st
 				{
 					Name:            "downloader",
 					Image:           h.utilityImage,
+					ImagePullPolicy: images.PullPolicy(h.utilityImage, ""),
 					Command:         []string{"/bin/sh"},
 					SecurityContext: RestrictedSecurityContext(),
 					Args:            args,
