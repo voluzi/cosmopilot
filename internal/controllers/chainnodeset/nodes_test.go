@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -706,6 +707,12 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 				},
 				Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
 			}
+			// Status records ordinals 0..2 even where a child is already gone.
+			for i := range 3 {
+				nodeSet.Status.Nodes = append(nodeSet.Status.Nodes, appsv1.ChainNodeSetNodeStatus{
+					Name: fmt.Sprintf("set-full-%d", i), UID: types.UID(fmt.Sprintf("full-%d-uid", i)), Group: "full",
+				})
+			}
 			mkChild := func(index int, controllerUID types.UID) *appsv1.ChainNode {
 				return &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 					Name: fmt.Sprintf("set-full-%d", index), Namespace: "default",
@@ -756,6 +763,15 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 				} else {
 					require.True(t, apierrors.IsNotFound(err), err)
 				}
+			}
+			var statusNames []string
+			for _, node := range nodeSet.Status.Nodes {
+				statusNames = append(statusNames, node.Name)
+			}
+			for i := range 3 {
+				name := fmt.Sprintf("set-full-%d", i)
+				kept := slices.Contains(tc.wantKept, i) || slices.Contains(tc.terminating, i)
+				assert.Equalf(t, kept, slices.Contains(statusNames, name), "status entry for %s", name)
 			}
 			for _, i := range tc.wantKept {
 				current := &appsv1.ChainNode{}

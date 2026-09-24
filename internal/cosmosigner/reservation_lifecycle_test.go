@@ -1187,13 +1187,23 @@ func TestFinalizeConsensusKeySigningPathsIgnoresSameNameChainNodeSetSigner(t *te
 		name           string
 		controllerKind string
 		podLabels      map[string]string
+		replicaLabels  map[string]string
 		wantDone       bool
+		wantWaiting    bool
 	}{
 		{name: "same-name ChainNodeSet signer", controllerKind: "ChainNodeSet", wantDone: true},
+		{
+			name: "set signer inheriting a chain-node label from the set", controllerKind: "ChainNodeSet", wantDone: true,
+			podLabels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "a", "chain-node": "a"},
+		},
 		{name: "signer controlled by another ChainNode", controllerKind: "ChainNode"},
 		{
 			name: "signer attributed to the ChainNode under a ChainNodeSet controller", controllerKind: "ChainNodeSet",
 			podLabels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "chain-node": "a"},
+		},
+		{
+			name: "old replica still attributed to the ChainNode", controllerKind: "ChainNodeSet", wantWaiting: true,
+			replicaLabels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "chain-node": "a"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1214,9 +1224,13 @@ func TestFinalizeConsensusKeySigningPathsIgnoresSameNameChainNodeSetSigner(t *te
 				},
 				Spec: appsk8sv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels}}},
 			}
+			replicaLabels := tc.replicaLabels
+			if replicaLabels == nil {
+				replicaLabels = map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "a"}
+			}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Name: "a-signer-0", Namespace: owner.Namespace, UID: "pod-uid",
-				Labels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "a"},
+				Labels: replicaLabels,
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: "apps/v1", Kind: "StatefulSet", Name: sts.Name, UID: sts.UID, Controller: ptr.To(true),
 				}},
@@ -1228,6 +1242,10 @@ func TestFinalizeConsensusKeySigningPathsIgnoresSameNameChainNodeSetSigner(t *te
 				if tc.wantDone {
 					if err != nil || !done {
 						t.Fatalf("finalizer must not be blocked by a same-name ChainNodeSet signer, done=%v err=%v", done, err)
+					}
+				} else if tc.wantWaiting {
+					if err != nil || done {
+						t.Fatalf("a replica attributed to the ChainNode must keep finalization pending, done=%v err=%v", done, err)
 					}
 				} else if err == nil || !strings.Contains(err.Error(), "not controlled by") {
 					t.Fatalf("a signer not provably foreign must stay blocking, done=%v err=%v", done, err)

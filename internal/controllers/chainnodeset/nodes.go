@@ -6,6 +6,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -98,6 +99,15 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 			removeErrs = append(removeErrs, err)
 		}
 	}
+	// A child that is already gone is not listed, so drop its status entry here.
+	specGroups := map[string]struct{}{validatorGroupName: {}}
+	for _, group := range nodeSet.Spec.Nodes {
+		specGroups[group.Name] = struct{}{}
+	}
+	pruneAbsentNodeStatus(nodeSet, chainNodes.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
+		_, inSpec := specGroups[status.Group]
+		return !inSpec
+	})
 	if err := stderrors.Join(removeErrs...); err != nil {
 		return err
 	}
@@ -242,6 +252,10 @@ func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context
 			removeErrs = append(removeErrs, err)
 		}
 	}
+	pruneAbsentNodeStatus(nodeSet, chainNodeList.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
+		_, desired := desiredNames[status.Name]
+		return status.Group == group.Name && !desired
+	})
 	if err := stderrors.Join(removeErrs...); err != nil {
 		return err
 	}
@@ -673,6 +687,17 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	}
 	uid := node.GetUID()
 	return client.IgnoreNotFound(r.Delete(ctx, node, client.Preconditions{UID: &uid}))
+}
+
+// pruneAbsentNodeStatus deletes the status entries selected by stale whose ChainNode is not listed. A
+// listed child keeps its entry: its removal (or the refusal to remove it) decides.
+func pruneAbsentNodeStatus(nodeSet *appsv1.ChainNodeSet, listed []appsv1.ChainNode, stale func(appsv1.ChainNodeSetNodeStatus) bool) {
+	for _, status := range slices.Clone(nodeSet.Status.Nodes) {
+		if !stale(status) || slices.ContainsFunc(listed, func(node appsv1.ChainNode) bool { return node.Name == status.Name }) {
+			continue
+		}
+		DeleteNodeStatus(nodeSet, status.Name)
+	}
 }
 
 // nodeSetOwnsChild reports whether a listed ChainNode belongs to nodeSet, so cleanup driven by a label
