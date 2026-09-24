@@ -83,6 +83,10 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 		}
 	}
 
+	if err = r.cleanupGrpcServices(ctx, nodeSet, gatewayApplied); err != nil {
+		return err
+	}
+
 	// Migration cleanup: delete any legacy group-scoped ingresses from before group-level
 	// ingresses were removed. These are identified by the scopeGroup label.
 	groupIngresses, err := r.listChainNodeSetIngresses(ctx, nodeSet, controllers.LabelScope, scopeGroup)
@@ -310,7 +314,7 @@ func (r *Reconciler) getGrpcGlobalIngressSpec(nodeSet *appsv1.ChainNodeSet, glob
 								PathType: &pathType,
 								Backend: v1.IngressBackend{
 									Service: &v1.IngressServiceBackend{
-										Name: globalIngress.GetServiceName(nodeSet),
+										Name: globalIngress.GetGrpcName(nodeSet),
 										Port: v1.ServiceBackendPort{
 											Number: chainutils.GrpcPort,
 										},

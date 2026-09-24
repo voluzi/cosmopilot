@@ -3,6 +3,7 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/cosmoguard"
 )
 
 func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
@@ -164,10 +166,10 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 
 // ownedByNodeSetOrChild reports whether obj is a resource this nodeSet is responsible for: controlled
 // directly by the nodeSet (group/global/guard/cosmoseed/validator Services, global/dashboard Ingresses)
-// or by one of this nodeSet's child ChainNodes (its per-child main/-internal/-p2p/-cg/-cg-peer Services
-// and <child>/<child>-grpc Ingresses). childUIDs is the UID set of the ChainNodes this nodeSet controls;
-// matching the controller ref by UID rather than Kind ensures an unrelated ChainNode's identically-named
-// resource in the same namespace can't make a brand-new collision look pre-existing.
+// or by one of this nodeSet's child ChainNodes (its per-child main/-internal/-p2p/-grpc/-cg/-cg-peer
+// Services and <child>/<child>-grpc Ingresses). childUIDs is the UID set of the ChainNodes this nodeSet
+// controls; matching the controller ref by UID rather than Kind ensures an unrelated ChainNode's
+// identically-named resource in the same namespace can't make a brand-new collision look pre-existing.
 func ownedByNodeSetOrChild(obj metav1.Object, nodeSet *appsv1.ChainNodeSet, childUIDs map[types.UID]struct{}) bool {
 	if metav1.IsControlledBy(obj, nodeSet) {
 		return true
@@ -249,39 +251,61 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, ingress := range nodeSet.Spec.Ingresses {
-		svc, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(ingress.Groups, ingress.GetName(nodeSet)))
+		global, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(ingress.Groups, ingress.GetName(nodeSet)))
 		if err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		internal, err := r.getGlobalInternalServiceSpec(nodeSet, ingress)
+		if err != nil {
 			return err
 		}
 
-		svc, err = r.getGlobalInternalServiceSpec(nodeSet, ingress)
-		if err != nil {
+		// The gRPC Ingress targets a gRPC-only Service. Derive it from the backend's rendered spec
+		// (ensure overwrites its argument with the pre-update read), so it follows a CosmoGuard flip in
+		// the same pass. ensureIngresses removes it.
+		backend := global
+		if ingress.UseInternal() {
+			backend = internal
+		}
+		backend = backend.DeepCopy()
+
+		if err = ensure(global, scopeGlobal); err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		if err = ensure(internal, scopeGlobal); err != nil {
 			return err
+		}
+		if ingress.EnableGRPC && !ingress.CreateServicesOnly() {
+			if err = r.ensureGrpcService(ctx, nodeSet, ingress, backend); err != nil {
+				return err
+			}
 		}
 	}
 
 	for _, gw := range nodeSet.Spec.GatewayRoutes {
 		// The gateway's global Service is "<set>-global-<name>" (gw.GetName is the "-gw" route name,
 		// NOT the Service), so the sticky check must look up the actual Service.
-		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)))
+		global, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)))
 		if err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		internal, err := r.getGlobalGatewayInternalServiceSpec(nodeSet, gw)
+		if err != nil {
 			return err
 		}
+		backend := global
+		if gw.UseInternal() {
+			backend = internal
+		}
+		backend = backend.DeepCopy()
 
-		svc, err = r.getGlobalGatewayInternalServiceSpec(nodeSet, gw)
-		if err != nil {
+		if err = ensure(global, scopeGlobal); err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		if err = ensure(internal, scopeGlobal); err != nil {
+			return err
+		}
+		if err = r.refreshPreservedGrpcService(ctx, nodeSet, fmt.Sprintf("%s-global-%s-grpc", nodeSet.GetName(), gw.Name), backend); err != nil {
 			return err
 		}
 	}
@@ -330,6 +354,86 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	return nil
+}
+
+func (r *Reconciler) ensureGrpcService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, ingress appsv1.GlobalIngressConfig, backend *corev1.Service) error {
+	svc, err := controllers.GrpcOnlyService(backend, ingress.GetGrpcName(nodeSet), WithChainNodeSetLabels(nodeSet, map[string]string{
+		controllers.LabelChainNodeSet:  nodeSet.GetName(),
+		controllers.LabelGlobalIngress: ingress.Name,
+		controllers.LabelScope:         scopeGlobalGrpc,
+	}), ingress.GetGrpcServiceAnnotations())
+	if err != nil {
+		return err
+	}
+	// Another Service of this nodeSet (e.g. of a route named "<route>-grpc", grandfathered past the
+	// webhook's name claim) may own this name. Refuse to take it over rather than rewrite it back and
+	// forth every reconcile. Unowned and foreign Services are refused by ApplyOwned.
+	live := &corev1.Service{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(svc), live)
+	if err == nil && metav1.IsControlledBy(live, nodeSet) && live.Labels[controllers.LabelScope] != scopeGlobalGrpc {
+		return fmt.Errorf("service %q already backs another route; rename the route %q or %q-grpc", svc.GetName(), ingress.Name, ingress.Name)
+	}
+	if client.IgnoreNotFound(err) != nil {
+		return err
+	}
+	// ApplyOwned (unlike ensureService) tracks the last-applied state, so it also drops the Traefik
+	// annotation when the ingress class changes.
+	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
+}
+
+// refreshPreservedGrpcService keeps the gRPC-only Service of an ingress route that is migrating to a
+// same-named gateway route in step with its backend. ensureIngresses preserves the old gRPC Ingress
+// until the gateway routes apply, and without this its Service would miss a CosmoGuard flip meanwhile.
+func (r *Reconciler) refreshPreservedGrpcService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string, backend *corev1.Service) error {
+	live := &corev1.Service{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, live); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if live.Labels[controllers.LabelScope] != scopeGlobalGrpc || !metav1.IsControlledBy(live, nodeSet) {
+		return nil
+	}
+	annotations := maps.Clone(live.Annotations)
+	delete(annotations, patch.LastAppliedConfig)
+	svc, err := controllers.GrpcOnlyService(backend, name, live.Labels, annotations)
+	if err != nil {
+		return err
+	}
+	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
+}
+
+// cleanupGrpcServices deletes the gRPC-only Services no route needs any more: the route is gone, has
+// gRPC off, or is services-only. One migrating to a same-named gateway route is kept until the gateway
+// routes apply, like its gRPC Ingress. Keyed on the route label, so it also catches a Service whose
+// Ingress was deleted out of band.
+func (r *Reconciler) cleanupGrpcServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, gatewayApplied bool) error {
+	services, err := r.listChainNodeSetServices(ctx, nodeSet, controllers.LabelScope, scopeGlobalGrpc)
+	if err != nil {
+		return err
+	}
+	for _, svc := range services.Items {
+		route := svc.Labels[controllers.LabelGlobalIngress]
+		if grpcRouteWanted(nodeSet, route) ||
+			(!gatewayApplied && !ContainsGlobalIngress(nodeSet.Spec.Ingresses, route, false) && ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, route)) {
+			continue
+		}
+		deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
+		if err != nil {
+			return err
+		}
+		if deleted {
+			log.FromContext(ctx).Info("deleted service", "svc", svc.GetName())
+		}
+	}
+	return nil
+}
+
+func grpcRouteWanted(nodeSet *appsv1.ChainNodeSet, route string) bool {
+	for _, ingress := range nodeSet.Spec.Ingresses {
+		if ingress.Name == route {
+			return ingress.EnableGRPC && !ingress.CreateServicesOnly()
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {

@@ -45,7 +45,7 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 	}
 
 	if !metav1.IsControlledBy(existing, owner) {
-		return fmt.Errorf("cosmoguard resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
+		return fmt.Errorf("resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
 	}
 
 	// When autoscaling owns .spec.replicas we submit a nil Replicas. A full Update would reset the

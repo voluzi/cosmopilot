@@ -112,10 +112,12 @@ func (r *Reconciler) gatewayRoutesTargetGuard(ctx context.Context, chainNode *ap
 }
 
 // ingressRoutesTargetGuard reports whether the node's base "<node>" or gRPC-only "<node>-grpc" Ingress
-// points at its guard Service. A gRPC-only Ingress lives in the separate "<node>-grpc" Ingress
+// points at its guard. A gRPC-only Ingress lives in the separate "<node>-grpc" Ingress
 // (getGrpcIngressSpec); the base Ingress can carry no guard backend at all in that case, so inspect both.
+// The gRPC Ingress reaches the guard through the gRPC-only Service, which mirrors the guard Service's
+// selector; Ingresses rendered before that Service existed point at the guard Service directly.
 func (r *Reconciler) ingressRoutesTargetGuard(ctx context.Context, chainNode *appsv1.ChainNode, guard string) bool {
-	for _, name := range []string{chainNode.GetName(), fmt.Sprintf("%s-grpc", chainNode.GetName())} {
+	for _, name := range []string{chainNode.GetName(), grpcName(chainNode)} {
 		ing := &networkingv1.Ingress{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: name}, ing); err != nil {
 			continue
@@ -125,13 +127,28 @@ func (r *Reconciler) ingressRoutesTargetGuard(ctx context.Context, chainNode *ap
 				continue
 			}
 			for _, p := range rule.HTTP.Paths {
-				if p.Backend.Service != nil && p.Backend.Service.Name == guard {
+				if p.Backend.Service == nil {
+					continue
+				}
+				if p.Backend.Service.Name == guard || r.grpcServiceSelectsGuard(ctx, chainNode, p.Backend.Service.Name) {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// grpcServiceSelectsGuard reports whether name is this node's gRPC-only Service and it selects guard pods.
+func (r *Reconciler) grpcServiceSelectsGuard(ctx context.Context, chainNode *appsv1.ChainNode, name string) bool {
+	if name != grpcName(chainNode) {
+		return false
+	}
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: name}, svc); err != nil {
+		return false
+	}
+	return metav1.IsControlledBy(svc, chainNode) && cosmoguard.SelectsGuard(svc.Spec.Selector)
 }
 
 // ensureCosmoGuardSecret creates the olric gossip encryption Secret for a standalone guard if it

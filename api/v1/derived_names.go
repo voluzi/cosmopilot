@@ -45,7 +45,7 @@ func validateDerivedNameLengths(base, subject string, f nameFeatures) error {
 // names operator-wide. A CR whose own name ends in one collides with a resource that a *different* CR
 // derives (e.g. a CR named `foo-cg` collides with the CosmoGuard Service that `foo` derives), so the
 // two owners fight over the shared name. Every entry maps to a real derived resource:
-//   - node/group Services: -internal, -p2p, -grpc
+//   - node/group Services: -internal, -p2p, -grpc (the gRPC-only Service behind the gRPC Ingress)
 //   - secrets: -tls, -priv-key, -account, -cg-cluster
 //   - configmaps / one-shot pods: -upgrades, -init-data, -config-generator, -genesis-init, -create-validator
 //   - tmkms: -tmkms, -tmkms-generate-identity, -tmkms-vault-upload

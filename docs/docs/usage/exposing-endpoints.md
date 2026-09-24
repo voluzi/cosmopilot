@@ -110,6 +110,12 @@ Each `API` endpoint is exposed as a subdomain of the configured `host` as follow
 - EVM RPC Websocket is available at `evm-rpc-ws.<host>`.
 :::
 
+:::info[gRPC]
+gRPC is served over HTTP/2 only, so it gets its own `<name>-grpc` Ingress backed by a gRPC-only Service of the same name. The ingress controller needs to know it must reach that backend over HTTP/2:
+- `nginx` reads it from the Ingress, which gets `nginx.ingress.kubernetes.io/backend-protocol: GRPC` unless `grpcAnnotations` is set.
+- Traefik reads it from the Service, which gets `traefik.ingress.kubernetes.io/service.serversscheme: h2c` when the ingress class contains `traefik`.
+:::
+
 ### Recommended Approach
 
 For flexibility and better scalability, it is recommended to use `.spec.ingresses` to configure API endpoints instead of per-group ingress configurations.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +17,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/cosmoguard"
 )
 
 func (r *Reconciler) ensureIngresses(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -37,7 +39,7 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, chainNode *appsv1.Chai
 		return err
 	}
 
-	grpcIngress, err := r.getGrpcIngressSpec(chainNode, apiSvcName)
+	grpcIngress, err := r.getGrpcIngressSpec(chainNode)
 	if err != nil {
 		return err
 	}
@@ -46,25 +48,53 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, chainNode *appsv1.Chai
 		if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, grpcIngress, chainNode); err != nil {
 			return err
 		}
-	} else {
-		if err = r.ensureIngress(ctx, grpcIngress); err != nil {
-			return err
-		}
+		return r.deleteGrpcService(ctx, chainNode)
 	}
 
-	return nil
+	// The gRPC Service must exist before the Ingress targets it.
+	if err = r.ensureGrpcService(ctx, chainNode, apiSvcName); err != nil {
+		return err
+	}
+	return r.ensureIngress(ctx, grpcIngress)
 }
 
-// deleteOwnedIngresses removes the API and gRPC Ingresses of this ChainNode, leaving same-name
-// Ingresses that belong to someone else in place.
+// ensureGrpcService applies the gRPC-only Service the gRPC Ingress targets. It mirrors the pods and
+// target port of apiSvcName, so it follows the same internal/CosmoGuard routing as the other routes.
+func (r *Reconciler) ensureGrpcService(ctx context.Context, chainNode *appsv1.ChainNode, apiSvcName string) error {
+	backend := &corev1.Service{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: apiSvcName}, backend); err != nil {
+		return fmt.Errorf("failed to get gRPC backend service %s: %w", apiSvcName, err)
+	}
+	svc, err := controllers.GrpcOnlyService(backend, grpcName(chainNode), WithChainNodeLabels(chainNode), chainNode.GetGrpcServiceAnnotations())
+	if err != nil {
+		return err
+	}
+	// ApplyOwned tracks the last-applied state, so fields the backend drops (publishNotReadyAddresses
+	// after useInternalServices is reverted, the Traefik annotation after a class change) are removed too.
+	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, svc)
+}
+
+func (r *Reconciler) deleteGrpcService(ctx context.Context, chainNode *appsv1.ChainNode) error {
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: grpcName(chainNode), Namespace: chainNode.GetNamespace()}}
+	_, err := controllers.DeleteIfControlledBy(ctx, r.Client, svc, chainNode)
+	return err
+}
+
+// grpcName names both the gRPC Ingress and the gRPC-only Service behind it.
+func grpcName(chainNode *appsv1.ChainNode) string {
+	return fmt.Sprintf("%s-grpc", chainNode.GetName())
+}
+
+// deleteOwnedIngresses removes the API and gRPC Ingresses of this ChainNode and the gRPC-only
+// Service, leaving same-name objects that belong to someone else in place.
 func (r *Reconciler) deleteOwnedIngresses(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	for _, name := range []string{chainNode.GetName(), fmt.Sprintf("%s-grpc", chainNode.GetName())} {
+	for _, name := range []string{chainNode.GetName(), grpcName(chainNode)} {
 		ingress := &v1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: chainNode.GetNamespace()}}
 		if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, ingress, chainNode); err != nil {
 			return err
 		}
 	}
-	return nil
+	return r.deleteGrpcService(ctx, chainNode)
 }
 
 func (r *Reconciler) ensureIngress(ctx context.Context, ingress *v1.Ingress) error {
@@ -247,11 +277,11 @@ func (r *Reconciler) getIngressSpec(chainNode *appsv1.ChainNode, apiSvcName stri
 	return ingress, controllerutil.SetControllerReference(chainNode, ingress, r.Scheme)
 }
 
-func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode, apiSvcName string) (*v1.Ingress, error) {
+func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode) (*v1.Ingress, error) {
 	pathType := v1.PathTypeImplementationSpecific
 	ingress := &v1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        fmt.Sprintf("%s-grpc", chainNode.GetName()),
+			Name:        grpcName(chainNode),
 			Namespace:   chainNode.GetNamespace(),
 			Labels:      WithChainNodeLabels(chainNode),
 			Annotations: chainNode.GetGrpcAnnotations(),
@@ -267,7 +297,7 @@ func (r *Reconciler) getGrpcIngressSpec(chainNode *appsv1.ChainNode, apiSvcName 
 								PathType: &pathType,
 								Backend: v1.IngressBackend{
 									Service: &v1.IngressServiceBackend{
-										Name: apiSvcName,
+										Name: grpcName(chainNode),
 										Port: v1.ServiceBackendPort{
 											Number: chainutils.GrpcPort,
 										},
