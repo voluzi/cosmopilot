@@ -2033,6 +2033,9 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "Vault certificate", v.CertificateSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "Vault claim token", v.ClaimTokenSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
 		return cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
 			Address:           v.Address,
 			KeyName:           v.KeyName,
@@ -2041,12 +2044,17 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			Namespace:         ptr.Deref(v.Namespace, ""),
 			TokenSecret:       v.TokenSecret,
 			CertificateSecret: v.CertificateSecret,
+			BindingMount:      ptr.Deref(v.BindingMount, ""),
+			ClaimTokenSecret:  v.ClaimTokenSecret,
 		}}, nil
 
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
 		// The GCP credentials Secret (when set — omitted for Workload Identity) is mounted at startup.
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "GCP credentials", g.CredentialsSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "GCP claim credentials", g.ClaimCredentialsSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
 		// A managed import serves the version this controller recorded after verifying it — never a
@@ -2076,9 +2084,10 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			}
 		}
 		return cosmosigner.Backend{GCP: &cosmosigner.GcpBackend{
-			KeyVersion:        g.ResolvedKeyVersion(importedKeyVersion),
-			CredentialsSecret: g.CredentialsSecret,
-			Import:            gcpImportParams(g.Import),
+			KeyVersion:             g.ResolvedKeyVersion(importedKeyVersion),
+			CredentialsSecret:      g.CredentialsSecret,
+			ClaimCredentialsSecret: g.ClaimCredentialsSecret,
+			Import:                 gcpImportParams(g.Import),
 		}}, nil
 	}
 	return cosmosigner.Backend{}, fmt.Errorf("cosmosigner has no backend configured")

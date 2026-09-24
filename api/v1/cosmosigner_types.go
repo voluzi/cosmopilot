@@ -60,8 +60,9 @@ type Cosmosigner struct {
 
 	// Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
 	// image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-	// defaulting to `ghcr.io/voluzi/cosmosigner:0.2.1`). Set this to pin or override the image for
-	// this specific signer only.
+	// defaulting to `ghcr.io/voluzi/cosmosigner:3.0.0`). Set this to pin or override the image for
+	// this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is
+	// unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes.
 	// +optional
 	Image *string `json:"image,omitempty"`
 
@@ -167,6 +168,18 @@ type CosmosignerVaultBackend struct {
 	// +optional
 	Namespace *string `json:"namespace,omitempty"`
 
+	// BindingMount is the Vault KV v2 mount holding the record that binds this key to one signer
+	// cluster (cosmosigner 3.x). Defaults to cosmosigner's own default, `cosmosigner`. The mount must
+	// exist with automatic version expiry disabled (`delete_version_after=0s`).
+	// +optional
+	BindingMount *string `json:"bindingMount,omitempty"`
+
+	// ClaimTokenSecret optionally references a Vault token used only to write the key's cluster
+	// binding the first time a signer cluster starts (cosmosigner 3.x). When unset, the runtime token
+	// from tokenSecret must also be allowed to create that record.
+	// +optional
+	ClaimTokenSecret *corev1.SecretKeySelector `json:"claimTokenSecret,omitempty"`
+
 	// UploadGenerated indicates that the controller should generate a consensus key locally and
 	// import it into Vault. Defaults to `false`. It is set to `true` automatically when this
 	// validator initializes a new genesis. This should not be used in production.
@@ -195,6 +208,13 @@ type CosmosignerGcpKmsBackend struct {
 	// unset, Workload Identity / Application Default Credentials are used.
 	// +optional
 	CredentialsSecret *corev1.SecretKeySelector `json:"credentialsSecret,omitempty"`
+
+	// ClaimCredentialsSecret optionally references a Google service account JSON key used only to
+	// label the CryptoKey with the signer cluster that owns it, the first time a signer cluster
+	// starts (cosmosigner 3.x). When unset, the runtime identity also needs
+	// `cloudkms.cryptoKeys.update` on the CryptoKey.
+	// +optional
+	ClaimCredentialsSecret *corev1.SecretKeySelector `json:"claimCredentialsSecret,omitempty"`
 }
 
 // CosmosignerGcpKmsImport describes the Cloud KMS destination of a controller-managed BYOK import.

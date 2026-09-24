@@ -828,6 +828,9 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "Vault certificate", v.CertificateSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "Vault claim token", v.ClaimTokenSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
 		return cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
 			Address:           v.Address,
 			KeyName:           v.KeyName,
@@ -836,10 +839,15 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 			Namespace:         ptr.Deref(v.Namespace, ""),
 			TokenSecret:       v.TokenSecret,
 			CertificateSecret: v.CertificateSecret,
+			BindingMount:      ptr.Deref(v.BindingMount, ""),
+			ClaimTokenSecret:  v.ClaimTokenSecret,
 		}}, nil
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "GCP credentials", g.CredentialsSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "GCP claim credentials", g.ClaimCredentialsSecret); err != nil {
 			return cosmosigner.Backend{}, err
 		}
 		importedKeyVersion := chainNode.Status.CosmosignerImportedKeyVersion
@@ -862,9 +870,10 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 			// A managed import has NO key version until the import resolves one and records it in
 			// controller-owned status; a guessed "/cryptoKeyVersions/1" would point the validator at
 			// whatever version happened to be created first. A pre-provisioned backend keeps its own.
-			KeyVersion:        g.ResolvedKeyVersion(importedKeyVersion),
-			Import:            gcpImportParams(g.Import),
-			CredentialsSecret: g.CredentialsSecret,
+			KeyVersion:             g.ResolvedKeyVersion(importedKeyVersion),
+			Import:                 gcpImportParams(g.Import),
+			CredentialsSecret:      g.CredentialsSecret,
+			ClaimCredentialsSecret: g.ClaimCredentialsSecret,
 		}}, nil
 	default:
 		secretName := r.cosmosignerSoftwareSecretName(chainNode)

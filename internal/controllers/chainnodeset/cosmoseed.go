@@ -2,9 +2,11 @@ package chainnodeset
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"path"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -65,18 +67,7 @@ func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeS
 		}
 	}
 
-	// Filter out empty entries — when the Gateway has not yet been assigned an address,
-	// publicAddresses[i] is empty and would otherwise produce a malformed EXTERNAL_ADDRESS
-	// like ",," in the StatefulSet env var, forcing a redundant rollout once the Gateway
-	// is ready.
-	knownPublicAddresses := make([]string, 0, len(publicAddresses))
-	for _, addr := range publicAddresses {
-		if addr != "" {
-			knownPublicAddresses = append(knownPublicAddresses, addr)
-		}
-	}
-
-	ss, err := r.getStatefulSet(nodeSet, configHash, RemoveIdFromFullAddresses(knownPublicAddresses))
+	ss, err := r.getStatefulSet(nodeSet, configHash, seedExternalAddresses(publicAddresses))
 	if err != nil {
 		return err
 	}
@@ -348,7 +339,7 @@ func (r *Reconciler) getCosmoseedConfigMap(ctx context.Context, nodeSet *v1.Chai
 		}
 	}
 
-	cfg, err := nodeSet.Spec.Cosmoseed.GetCosmoseedConfig(nodeSet.Status.ChainID, peers.ExcludeSeeds().Append(publicPeers).String())
+	cfg, err := nodeSet.Spec.Cosmoseed.GetCosmoseedConfig(nodeSet.Status.ChainID, dialableSeedPeers(peers.ExcludeSeeds().Append(publicPeers)).String())
 	if err != nil {
 		return "", nil, err
 	}
@@ -366,6 +357,23 @@ func (r *Reconciler) getCosmoseedConfigMap(ctx context.Context, nodeSet *v1.Chai
 		Data: map[string]string{cosmoseedConfigFileName: string(b)},
 	}
 	return utils.Sha256(string(b)), spec, controllerutil.SetControllerReference(nodeSet, spec, r.Scheme)
+}
+
+// dialableSeedPeers drops peers cosmoseed could not dial: a node ID that is not 20 hex-encoded
+// bytes (e.g. the empty ID of a node that has not reported one yet), an empty host or an
+// out-of-range port. Cosmoseed 0.12 validates every configured seed and refuses to start on the
+// first malformed one, so a single half-initialised node would otherwise take every seed down.
+func dialableSeedPeers(peers v1.PeerList) v1.PeerList {
+	dialable := make(v1.PeerList, 0, len(peers))
+	for _, peer := range peers {
+		id, err := hex.DecodeString(peer.ID)
+		port := peer.GetPort()
+		if err != nil || len(id) != 20 || strings.TrimSpace(peer.Address) == "" || port < 1 || port > 65535 {
+			continue
+		}
+		dialable = append(dialable, peer)
+	}
+	return dialable
 }
 
 func (r *Reconciler) listChainPeers(ctx context.Context, namespace, chainID string) (v1.PeerList, error) {
@@ -404,6 +412,18 @@ func (r *Reconciler) listChainPeers(ctx context.Context, namespace, chainID stri
 	})
 
 	return peers, nil
+}
+
+// seedExternalAddresses returns the host:port each seed advertises, indexed by pod ordinal, or nil
+// until every seed has a public address. Cosmoseed picks its entry from EXTERNAL_ADDRESS by ordinal
+// and, since 0.12, refuses to start on a missing or empty entry, so a partial list (a Gateway still
+// waiting for an address) would crash-loop the later seeds and hand earlier ones a neighbour's
+// address. Advertising nothing until the list is complete costs the same single rollout.
+func seedExternalAddresses(publicAddresses []string) []string {
+	if len(publicAddresses) == 0 || slices.Contains(publicAddresses, "") {
+		return nil
+	}
+	return RemoveIdFromFullAddresses(publicAddresses)
 }
 
 func (r *Reconciler) getStatefulSet(nodeSet *v1.ChainNodeSet, configHash string, publicAddresses []string) (*appsv1.StatefulSet, error) {
