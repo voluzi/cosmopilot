@@ -2,7 +2,7 @@
 
 [CosmoGuard](https://github.com/voluzi/cosmoguard) is a lightweight firewall designed specifically for protecting Cosmos nodes. With CosmoGuard you can control access at the API endpoint level, cache responses for performance, rate-limit clients, and limit WebSocket connections for better resource management.
 
-`Cosmopilot` integrates with CosmoGuard **v4** and deploys it as a **standalone clustered StatefulSet** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
+`Cosmopilot` integrates with CosmoGuard **v5** and deploys it as a **standalone clustered StatefulSet** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
 
 ## Topology
 
@@ -60,6 +60,8 @@ rpc:
 
 :::warning[IMPORTANT]
 Provide **rules only** in your `ConfigMap`. Cosmopilot manages the upstream (node discovery), listener ports, metrics and dashboard settings through environment variables — do not set them in the file.
+
+CosmoGuard v5 **validates rules strictly**: unknown keys are rejected, every rule and section `default` must use `action: allow` or `action: deny`, and every `rateLimit` block needs a positive `rate`. A rules file that CosmoGuard v4 accepted can fail startup under v5, so validate it before upgrading. While the replicas roll from v4 to v5, the dashboard's cluster panels can show partial data; proxy traffic is unaffected.
 
 CosmoGuard v4 **removed Redis**: a `cache.backend`, `cache.redis` or `cache.redis-sentinel` key now fails startup. For multi-replica caches CosmoGuard uses an embedded cluster; single-replica needs no cache backend at all. See the CosmoGuard [v4 migration notes](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md) for other breaking changes (WebSocket cross-origin now denied by default, CosmoGuard owns CORS, gRPC reflection is no longer auto-allowed). You can validate a file with `cosmoguard validate --config <file>`.
 :::
@@ -186,7 +188,7 @@ installed, it preserves an existing dashboard Ingress instead of removing the wo
 
 Refer to the [CosmoGuard repo](https://github.com/voluzi/cosmoguard) for detailed information on creating custom rules. A few tips:
 
-- **Match expressively:** v4 supports an expressive `match` tree (`all`/`any`/`none` + `path`/`method`/`query`/`header`/`sourceIP`) with glob values.
+- **Match expressively:** CosmoGuard supports an expressive `match` tree (`all`/`any`/`none` + `path`/`method`/`query`/`header`/`sourceIP`) with glob values.
 - **Prioritize Rules:** lower `priority` numbers match first.
 - **Enable Caching:** cache frequently requested endpoints to reduce node load.
 
