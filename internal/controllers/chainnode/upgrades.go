@@ -117,17 +117,14 @@ func (r *Reconciler) cancelRemovedManualUpgrades(ctx context.Context, chainNode 
 		}
 		// A ChainNodeSet child's spec also carries history propagated from the set's status, so the
 		// removal is judged against the user's own spec.
+		// Only a manual entry keeps it: replacing it with a forceOnChain entry at the same height
+		// withdraws the manual stop, and the governance entry takes its place once this one is cancelled.
 		manual, err := r.userConfiguredUpgrade(ctx, chainNode, u.Height, false, "")
 		if err != nil {
 			log.FromContext(ctx).Error(err, "not cancelling removed manual upgrades: could not read the user spec")
 			return
 		}
-		forced, err := r.upgradeForcedOnChain(ctx, chainNode, u.Height, "")
-		if err != nil {
-			log.FromContext(ctx).Error(err, "not cancelling removed manual upgrades: could not read the user spec")
-			return
-		}
-		if manual || forced {
+		if manual {
 			continue
 		}
 		if u.Status == appsv1.UpgradeScheduled && !liveHeightChecked {

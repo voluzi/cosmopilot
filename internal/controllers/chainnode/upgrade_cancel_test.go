@@ -472,3 +472,23 @@ func TestMergeGovUpgradesForcedIntentMatchesThePlanName(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureUpgradesReplacesManualEntryWithForcedGovernanceEntry covers a manual upgrade replaced in the
+// spec by a forceOnChain entry at the same height: the manual stop is withdrawn and the governance entry
+// takes over.
+func TestEnsureUpgradesReplacesManualEntryWithForcedGovernanceEntry(t *testing.T) {
+	node := upgradeCancelNode(50, manualUpgrade(100, appsv1.UpgradeScheduled))
+	node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Name: "v2", Image: "app:v2-gov", ForceOnChain: ptr.To(true)}}
+	r, _ := newUpgradeCancelReconciler(t, node)
+	reportLiveHeight(t, r, node, 50)
+
+	require.NoError(t, r.ensureUpgrades(context.Background(), node, false))
+	assert.Equal(t, appsv1.UpgradeCancelled, upgradeStatusAt(t, node, 100).Status, "the manual stop is withdrawn")
+
+	require.NoError(t, r.ensureUpgrades(context.Background(), node, false))
+	got := upgradeStatusAt(t, node, 100)
+	assert.Equal(t, appsv1.UpgradeScheduled, got.Status)
+	assert.Equal(t, appsv1.OnChainUpgrade, got.Source)
+	assert.Equal(t, "app:v2-gov", got.Image)
+	require.Len(t, node.Status.Upgrades, 1)
+}
