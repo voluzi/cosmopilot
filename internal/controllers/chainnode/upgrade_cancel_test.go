@@ -416,3 +416,16 @@ func TestApplyUpgradeStatusIgnoresPropagatedImageForCancelledPlan(t *testing.T) 
 	assert.Equal(t, appsv1.UpgradeScheduled, got.Status)
 	assert.Equal(t, "app:new", got.Image)
 }
+
+// TestResolveRequiredUpgradeRecoversCancelledPlanWithoutDiscovery covers a plan cancelled while
+// discovery was on and proposed again after discovery was turned off: the chain's marker is honoured.
+func TestResolveRequiredUpgradeRecoversCancelledPlanWithoutDiscovery(t *testing.T) {
+	node := upgradeCancelNode(99, govUpgrade(100, "v2", appsv1.UpgradeCancelled))
+	node.Spec.App.CheckGovUpgrades = ptr.To(false)
+	required := nodeutils.RequiredUpgrade{Height: 100, Name: "v2", Image: "app:new", Source: nodeutils.OnChainUpgrade}
+
+	got, err := resolveRequiredUpgrade(node, nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(99)), RequiredUpgrade: &required})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, int64(100), got.Height)
+}

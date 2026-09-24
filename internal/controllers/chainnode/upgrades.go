@@ -515,8 +515,9 @@ func governanceMarkerRecoveryAllowed(chainNode *appsv1.ChainNode, required nodeu
 		if upgrade.Height != required.Height || upgrade.Source != appsv1.OnChainUpgrade {
 			continue
 		}
+		// A cancelled plan the chain now requires again was known too; its entry is replaced by the marker.
 		if upgrade.Status == appsv1.UpgradeScheduled || upgrade.Status == appsv1.UpgradeImageMissing ||
-			upgrade.Status == appsv1.UpgradeOnGoing {
+			upgrade.Status == appsv1.UpgradeOnGoing || upgrade.Status == appsv1.UpgradeCancelled {
 			return true
 		}
 	}
