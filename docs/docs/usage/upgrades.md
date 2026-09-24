@@ -102,6 +102,10 @@ A removal is ignored, with an `UpgradeCancelIgnored` warning event, once the nod
 height just before the upgrade or the upgrade is already ongoing: at that point the node may already
 be stopping for it. Governance upgrades cannot be cancelled from the spec.
 
+Keep completed manual upgrades in `.spec.app.upgrades` if the node may later be restored from a
+snapshot below their height: a restore schedules them again so they are replayed, and an entry that is
+no longer in the spec would then be cancelled instead.
+
 ### Handling Governance Upgrades Without Images
 
 If a governance upgrade does not include the required container image, you can manually add the upgrade and ensure it aligns with the governance proposal. In this case, set the `forceOnChain` field to `true`. This instructs `Cosmopilot` to treat the manual entry as part of the governance process.

@@ -267,35 +267,67 @@ func TestRecordRequiredGovernanceUpgradeReplacesCancelledPlan(t *testing.T) {
 	assert.Equal(t, "app:new", updated[0].Image, "the withdrawn plan's image must not be applied")
 }
 
+// nodeUtilsPod is the node Pod after node-utils stopped the app one block before an upgrade: the app
+// container has terminated, the node-utils sidecar still runs.
+func nodeUtilsPod(node *appsv1.ChainNode) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace},
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: nodeUtilsContainerName, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "app", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+			}},
+		},
+	}
+}
+
 func TestEnsureUpgradesChecksLiveHeightBeforeCancelling(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		withPod    bool
 		client     upgradeStatusClient
 		wantStatus appsv1.UpgradePhase
 		wantEvent  string
 	}{
 		{
-			name:       "node already stopped one block before",
+			name: "node-utils stopped the app one block before", withPod: true,
 			client:     staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(99))}},
 			wantStatus: appsv1.UpgradeScheduled, wantEvent: appsv1.ReasonUpgradeCancelIgnored,
 		},
 		{
-			name:       "height unavailable",
+			name: "height unavailable", withPod: true,
 			client:     failingUpgradeStatusClient{err: errors.New("node-utils unavailable")},
 			wantStatus: appsv1.UpgradeScheduled,
 		},
 		{
-			name:       "node well before the upgrade",
+			name: "node well before the upgrade", withPod: true,
 			client:     staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(60))}},
+			wantStatus: appsv1.UpgradeCancelled, wantEvent: appsv1.ReasonUpgradeCancelled,
+		},
+		{
+			name: "node-utils has not observed a height yet", withPod: true,
+			client:     staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{}},
+			wantStatus: appsv1.UpgradeScheduled,
+		},
+		{
+			name:       "no pod: the persisted height applies",
+			client:     failingUpgradeStatusClient{err: errors.New("must not be called")},
 			wantStatus: appsv1.UpgradeCancelled, wantEvent: appsv1.ReasonUpgradeCancelled,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := upgradeCancelNode(50, manualUpgrade(100, appsv1.UpgradeScheduled))
-			r, recorder := newUpgradeCancelReconciler(t, node)
+			objs := []client.Object{node}
+			if tc.withPod {
+				objs = append(objs, nodeUtilsPod(node))
+			}
+			r, recorder := newUpgradeCancelReconciler(t, objs...)
 			r.upgradeClientFactory = func(string) upgradeStatusClient { return tc.client }
 
-			require.NoError(t, r.ensureUpgrades(context.Background(), node, true))
+			// The app container is terminated, so the pod does not count as running.
+			require.NoError(t, r.ensureUpgrades(context.Background(), node, false))
 			assert.Equal(t, tc.wantStatus, upgradeStatusAt(t, node, 100).Status)
 			events := drainEvents(recorder)
 			if tc.wantEvent == "" {
@@ -346,4 +378,41 @@ func TestChainNodeSetChildKeepsManualCancellationAgainstPropagatedHistory(t *tes
 			assert.Equal(t, tc.wantStatus, upgradeStatusAt(t, child, 100).Status)
 		})
 	}
+}
+
+// TestChainNodeSetChildCancelsDespitePropagatedHistory covers a sibling that completed the upgrade
+// before this child processed the removal: the completed history reaches the child's spec, but the
+// set's own spec no longer lists the upgrade, so the child still cancels it.
+func TestChainNodeSetChildCancelsDespitePropagatedHistory(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	child := upgradeCancelNode(50, manualUpgrade(100, appsv1.UpgradeScheduled))
+	child.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "set", UID: "set-uid", Controller: ptr.To(true),
+	}}
+	child.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}}
+	r, _ := newUpgradeCancelReconciler(t, nodeSet, child)
+
+	require.NoError(t, r.ensureUpgrades(context.Background(), child, false))
+	assert.Equal(t, appsv1.UpgradeCancelled, upgradeStatusAt(t, child, 100).Status)
+}
+
+// TestApplyUpgradeStatusIgnoresPropagatedImageForCancelledPlan covers a plan proposed again at a
+// cancelled height and recovered from the SDK marker on a child: the child's propagated forceOnChain
+// entry still carries the withdrawn image, so the marker's image must win.
+func TestApplyUpgradeStatusIgnoresPropagatedImageForCancelledPlan(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	child := upgradeCancelNode(99, appsv1.Upgrade{Height: 100, Name: "v2", Image: "app:old", Status: appsv1.UpgradeCancelled, Source: appsv1.OnChainUpgrade})
+	child.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "set", UID: "set-uid", Controller: ptr.To(true),
+	}}
+	child.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Name: "v2", Image: "app:old", ForceOnChain: ptr.To(true)}}
+	r, _ := newUpgradeCancelReconciler(t, nodeSet, child)
+
+	require.NoError(t, r.applyUpgradeStatus(context.Background(), child, nodeutils.UpgradeStatus{
+		LatestHeight:    ptr.To(int64(99)),
+		RequiredUpgrade: &nodeutils.RequiredUpgrade{Height: 100, Name: "v2", Image: "app:new", Source: nodeutils.OnChainUpgrade},
+	}))
+	got := upgradeStatusAt(t, child, 100)
+	assert.Equal(t, appsv1.UpgradeScheduled, got.Status)
+	assert.Equal(t, "app:new", got.Image)
 }
