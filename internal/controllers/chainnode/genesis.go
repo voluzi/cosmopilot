@@ -71,11 +71,12 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 
 // restoreDataVolumeChainID sets status.chainID for a node whose genesis is already on the data volume
 // but whose chain ID was never recorded. The chain ID comes from the annotation written together with the
-// downloaded marker, or from the spec for a volume marked before that annotation existed (container
-// download only). The genesis is never fetched again: the source could now serve another chain.
+// downloaded marker, or, for a volume marked before that annotation existed, from the spec when the
+// genesis came from a container download of spec.genesis.url, which uses that chain ID. The genesis
+// is never fetched again: the source could now serve another chain.
 func (r *Reconciler) restoreDataVolumeChainID(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {
 	chainID := pvc.Annotations[controllers.AnnotationGenesisChainID]
-	if chainID == "" && chainNode.Spec.Genesis.ChainID != nil {
+	if chainID == "" && chainNode.Spec.Genesis.ShouldDownloadUsingContainer() && chainNode.Spec.Genesis.Url != nil {
 		chainID = *chainNode.Spec.Genesis.ChainID
 	}
 	if chainID == "" {

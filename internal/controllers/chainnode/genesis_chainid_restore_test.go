@@ -64,6 +64,13 @@ func TestEnsureGenesisRestoresChainIDWhenMarkerIsPersisted(t *testing.T) {
 			want:        "chain-1",
 		},
 		{
+			name: "legacy RPC download does not trust the spec chainID",
+			genesis: &appsv1.GenesisConfig{
+				FromNodeRPC: &appsv1.FromNodeRPCConfig{Hostname: "node.example"}, ChainID: ptr.To("chain-b"), UseDataVolume: ptr.To(true),
+			},
+			wantErr: "has no recorded chain ID",
+		},
+		{
 			name:    "marker without a recorded chain ID fails closed",
 			genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.invalid/genesis.json"), UseDataVolume: ptr.To(true)},
 			wantErr: "has no recorded chain ID",
