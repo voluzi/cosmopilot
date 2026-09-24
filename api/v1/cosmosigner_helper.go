@@ -624,6 +624,12 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 		if cs := c.Backend.Vault.CertificateSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
 			return fmt.Errorf("%s.backend.vault.certificateSecret.name and .key are required when set", path)
 		}
+		if cs := c.Backend.Vault.ClaimTokenSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
+			return fmt.Errorf("%s.backend.vault.claimTokenSecret.name and .key are required when set", path)
+		}
+		if m := c.Backend.Vault.BindingMount; m != nil && strings.TrimSpace(*m) == "" {
+			return fmt.Errorf("%s.backend.vault.bindingMount must not be empty when set", path)
+		}
 	case c.Backend.GcpKMS != nil:
 		g := c.Backend.GcpKMS
 		// A managed import CREATES the crypto key version, so it cannot be declared alongside one that
@@ -661,6 +667,9 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 		}
 		if cs := g.CredentialsSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
 			return fmt.Errorf("%s.backend.gcpKms.credentialsSecret.name and .key are required when set", path)
+		}
+		if cs := g.ClaimCredentialsSecret; cs != nil && (cs.Name == "" || cs.Key == "") {
+			return fmt.Errorf("%s.backend.gcpKms.claimCredentialsSecret.name and .key are required when set", path)
 		}
 	}
 
