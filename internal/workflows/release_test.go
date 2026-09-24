@@ -170,6 +170,10 @@ func TestReleaseWorkflowUsesLeastPrivilegePermissions(t *testing.T) {
 		"merge": {
 			"packages": "write",
 		},
+		"chart": {
+			"contents": "read",
+			"packages": "write",
+		},
 		"release": {
 			"contents": "write",
 		},
@@ -204,6 +208,7 @@ func TestReleaseCheckoutsDoNotPersistCredentials(t *testing.T) {
 		step string
 	}{
 		{job: "build", step: "Checkout"},
+		{job: "chart", step: "Checkout repository"},
 		{job: "release", step: "Checkout repository"},
 	}
 
@@ -315,7 +320,7 @@ func expectedReleaseNotesHeader() string {
 
 **Install / upgrade with Helm (from OCI)**
 %s
-helm install cosmopilot oci://ghcr.io/voluzi/helm/cosmopilot
+helm install cosmopilot oci://ghcr.io/voluzi/helm/cosmopilot --version 3.2.1
 %s
 
 **Changelog**

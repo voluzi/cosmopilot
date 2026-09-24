@@ -132,9 +132,47 @@ jobs:
             "${image}:${{ needs.version.outputs.version }}-amd64" \
             "${image}:${{ needs.version.outputs.version }}-arm64"
 
+  chart:
+    name: Publish Helm Chart
+    needs: [version, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Github Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | helm registry login -u "$GITHUB_REPOSITORY_OWNER" --password-stdin ghcr.io
+
+      # The chart is versioned with the release tag, and its appVersion (the default manager image
+      # tag) is the same version.
+      - name: Package Chart
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: make helm.package VERSION="$TAG"
+
+      - name: Push Chart
+        env:
+          VER: ${{ needs.version.outputs.version }}
+        run: helm push "build/cosmopilot-${VER}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/helm"
+
+      - name: Logout
+        if: always()
+        run: helm registry logout ghcr.io
+
   release:
     name: Create GitHub Release with image digests
-    needs: [version, merge]
+    needs: [version, merge, chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -201,7 +239,7 @@ jobs:
 
           **Install / upgrade with Helm (from OCI)**
           \`\`\`bash
-          helm install cosmopilot oci://ghcr.io/${OWNER_LC}/helm/cosmopilot
+          helm install cosmopilot oci://ghcr.io/${OWNER_LC}/helm/cosmopilot --version ${VER}
           \`\`\`
 
           **Changelog**

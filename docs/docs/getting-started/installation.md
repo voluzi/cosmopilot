@@ -43,6 +43,9 @@ $ helm install \
 
 ## Installation Options
 
+Chart versions match Cosmopilot versions: chart `X.Y.Z` installs Cosmopilot `X.Y.Z` by default. Pass
+`--version X.Y.Z` to install a specific release; set `imageTag` only to run a different manager image.
+
 A full list of available Helm values is available [here](https://github.com/voluzi/cosmopilot/blob/main/helm/cosmopilot/values.yaml).
 For other advanced configurations please refer to the [Configuration](../getting-started/configuration) page.
 
