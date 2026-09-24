@@ -15,7 +15,16 @@ jobs:
       version: ${{ steps.extract.outputs.version }}
       tag: ${{ steps.extract.outputs.tag }}
       image: ${{ steps.extract.outputs.image }}
+      latest: ${{ steps.latest.outputs.latest }}
+    permissions:
+      contents: read
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Extract version from tag
         id: extract
         run: |
@@ -24,6 +33,15 @@ jobs:
           echo "version=$VERSION_WITHOUT_V" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG_REF" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # Only the newest stable release is marked latest, never a prerelease or a backport.
+      - name: Decide whether to mark latest
+        id: latest
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+        run: |
+          LATEST="$(.github/scripts/is-newest-release.sh "" "$VERSION")"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build and Push Cosmopilot Images
@@ -252,3 +270,4 @@ jobs:
         with:
           body_path: ${{ steps.notes.outputs.body_path }}
           prerelease: ${{ contains(needs.version.outputs.tag, '-rc') || contains(needs.version.outputs.tag, '-beta') || contains(needs.version.outputs.tag, '-alpha') }}
+          make_latest: ${{ needs.version.outputs.latest }}
