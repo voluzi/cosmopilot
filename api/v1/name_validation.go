@@ -14,7 +14,7 @@ import (
 // and internal/tmkms). An additional volume with one of these names would collide with it.
 var reservedPodVolumeNames = []string{
 	"app-empty-dir", "data", "config-empty-dir", "config", "node-key", "upgrades-config", "genesis", "priv-key",
-	"vault-token", "vault-ca-cert", "tmkms-identity", "tmkms-data",
+	"vault-token", "vault-ca-cert", "tmkms-identity", "tmkms-config", "tmkms-data",
 }
 
 // validateDNS1123Label rejects a user-supplied name that becomes (part of) a Kubernetes object,

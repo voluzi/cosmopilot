@@ -332,29 +332,47 @@ func TestWebhookObjectSelectorQuotesWorkerName(t *testing.T) {
 	source, err := os.ReadFile("templates/webhooks/manifests.yaml")
 	require.NoError(t, err)
 	manifest, err := template.New("manifests.yaml").Funcs(template.FuncMap{
-		"include": func(string, any) (string, error) { return "", nil },
-		"indent":  func(int, string) string { return "" },
-		"quote":   func(value any) string { return fmt.Sprintf("%q", fmt.Sprint(value)) },
+		"include":  func(string, any) (string, error) { return "", nil },
+		"indent":   func(int, string) string { return "" },
+		"quote":    func(value any) string { return fmt.Sprintf("%q", fmt.Sprint(value)) },
+		"toString": func(value any) string { return fmt.Sprint(value) },
+		"kindIs":   func(kind string, value any) bool { return kind == "invalid" && value == nil },
 	}).Parse(string(source))
 	require.NoError(t, err)
 
-	var rendered bytes.Buffer
-	require.NoError(t, manifest.Execute(&rendered, map[string]any{
-		"Release": map[string]any{"Name": "test", "Namespace": "default"},
-		"Values":  map[string]any{"webHooksEnabled": true, "workerName": "1"},
-	}))
-	var config struct {
-		Webhooks []struct {
-			ObjectSelector struct {
-				MatchLabels map[string]yaml.Node `yaml:"matchLabels"`
-			} `yaml:"objectSelector"`
-		} `yaml:"webhooks"`
-	}
-	require.NoError(t, yaml.Unmarshal(rendered.Bytes(), &config))
-	require.NotEmpty(t, config.Webhooks)
-	for _, webhook := range config.Webhooks {
-		label := webhook.ObjectSelector.MatchLabels["worker-name"]
-		assert.Equal(t, "1", label.Value)
-		assert.Equal(t, "!!str", label.Tag)
+	for _, tc := range []struct {
+		workerName any
+		want       string
+	}{
+		{workerName: "1", want: "1"},
+		{workerName: 0, want: "0"},
+		{workerName: "", want: ""},
+		{workerName: nil, want: ""},
+	} {
+		var rendered bytes.Buffer
+		require.NoError(t, manifest.Execute(&rendered, map[string]any{
+			"Release": map[string]any{"Name": "test", "Namespace": "default"},
+			"Values":  map[string]any{"webHooksEnabled": true, "workerName": tc.workerName},
+		}))
+		var config struct {
+			Webhooks []struct {
+				ObjectSelector struct {
+					MatchLabels      map[string]yaml.Node `yaml:"matchLabels"`
+					MatchExpressions []any                `yaml:"matchExpressions"`
+				} `yaml:"objectSelector"`
+			} `yaml:"webhooks"`
+		}
+		require.NoError(t, yaml.Unmarshal(rendered.Bytes(), &config))
+		require.NotEmpty(t, config.Webhooks)
+		for _, webhook := range config.Webhooks {
+			if tc.want == "" {
+				assert.Empty(t, webhook.ObjectSelector.MatchLabels)
+				assert.NotEmpty(t, webhook.ObjectSelector.MatchExpressions)
+				continue
+			}
+			label := webhook.ObjectSelector.MatchLabels["worker-name"]
+			assert.Equal(t, tc.want, label.Value, "workerName %v", tc.workerName)
+			assert.Equal(t, "!!str", label.Tag)
+		}
 	}
 }

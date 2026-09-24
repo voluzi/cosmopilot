@@ -41,6 +41,13 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: "collides with a built-in pod volume",
 		},
 		{
+			name: "additional volume named like a TmKMS volume",
+			mutate: func(c *ChainNode) {
+				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "tmkms-config", Size: "1Gi", Path: "/extra"}}}
+			},
+			wantErr: "collides with a built-in pod volume",
+		},
+		{
 			name: "additional volume with an invalid name",
 			mutate: func(c *ChainNode) {
 				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "Extra_Vol", Size: "1Gi", Path: "/extra"}}}
