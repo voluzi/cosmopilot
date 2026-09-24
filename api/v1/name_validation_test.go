@@ -48,6 +48,13 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: "collides with a built-in pod volume",
 		},
 		{
+			name: "additional volume named like a data-init volume",
+			mutate: func(c *ChainNode) {
+				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "temp", Size: "1Gi", Path: "/extra"}}}
+			},
+			wantErr: "collides with a built-in pod volume",
+		},
+		{
 			name: "additional volume with an invalid name",
 			mutate: func(c *ChainNode) {
 				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "Extra_Vol", Size: "1Gi", Path: "/extra"}}}
@@ -159,6 +166,17 @@ func TestChainNodeSetValidateRejectsInvalidNames(t *testing.T) {
 				}}}
 			},
 			wantErr: ".spec.nodes[0].validator.persistence.additionalVolumes[0].name",
+		},
+		{
+			name: "validator group ignores its unused group-level persistence and config",
+			mutate: func(s *ChainNodeSet) {
+				s.Spec.Nodes = []NodeGroupSpec{{
+					Name:        "validators",
+					Validator:   &NodeSetValidatorConfig{},
+					Persistence: &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "data", Size: "1Gi", Path: "/x"}}},
+					Config:      &Config{Sidecars: []SidecarSpec{{Name: "Side Car"}}},
+				}}
+			},
 		},
 		{
 			name: "global ingress name",

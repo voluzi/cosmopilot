@@ -209,9 +209,26 @@ func executeDeploymentTemplate(t *testing.T, releaseName string, values map[stri
 			return out.String(), err
 		},
 		"trimSuffix": func(suffix, value string) string { return strings.TrimSuffix(value, suffix) },
-		"splitList":  func(sep, value string) []string { return strings.Split(value, sep) },
-		"first":      func(list []string) string { return list[0] },
-		"last":       func(list []string) string { return list[len(list)-1] },
+		"dict":       func() map[string]any { return map[string]any{} },
+		"default": func(fallback, value any) any {
+			if value == nil {
+				return fallback
+			}
+			return value
+		},
+		"omit": func(values map[string]any, keys ...string) map[string]any {
+			out := map[string]any{}
+			for k, v := range values {
+				out[k] = v
+			}
+			for _, k := range keys {
+				delete(out, k)
+			}
+			return out
+		},
+		"splitList": func(sep, value string) []string { return strings.Split(value, sep) },
+		"first":     func(list []string) string { return list[0] },
+		"last":      func(list []string) string { return list[len(list)-1] },
 		"indent": func(spaces int, value string) string {
 			prefix := strings.Repeat(" ", spaces)
 			return prefix + strings.ReplaceAll(value, "\n", "\n"+prefix)
@@ -284,7 +301,7 @@ func imageValues(value any) map[string]any {
 
 func TestDeploymentRendersUserLabelsOutsideTheSelector(t *testing.T) {
 	values := defaultChartValues()
-	values["labels"] = map[string]any{"team": "infra", "tier": "ops"}
+	values["labels"] = map[string]any{"team": "infra", "tier": "ops", "app.kubernetes.io/name": "custom"}
 	rendered, err := executeDeploymentTemplate(t, "test", values, "3.0.0-beta.7")
 	require.NoError(t, err)
 
@@ -315,6 +332,7 @@ func TestDeploymentRendersUserLabelsOutsideTheSelector(t *testing.T) {
 		assert.Equal(t, "infra", labels["team"])
 		assert.Equal(t, "ops", labels["tier"])
 		assert.Equal(t, "test", labels["app.kubernetes.io/instance"])
+		assert.Equal(t, "cosmopilot", labels["app.kubernetes.io/name"], "a user label must not override a selector label")
 	}
 }
 

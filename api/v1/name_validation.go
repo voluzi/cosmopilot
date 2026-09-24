@@ -10,11 +10,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// reservedPodVolumeNames are the node Pod's built-in volume names (internal/controllers/chainnode/pod.go
-// and internal/tmkms). An additional volume with one of these names would collide with it.
+// reservedPodVolumeNames are the built-in volume names of the pods that mount additional volumes
+// (internal/controllers/chainnode/pod.go, internal/tmkms, internal/chainutils/data.go). An additional
+// volume with one of these names would collide with it.
 var reservedPodVolumeNames = []string{
 	"app-empty-dir", "data", "config-empty-dir", "config", "node-key", "upgrades-config", "genesis", "priv-key",
 	"vault-token", "vault-ca-cert", "tmkms-identity", "tmkms-config", "tmkms-data",
+	// Data-init pod (internal/chainutils/data.go), which also mounts the additional volumes.
+	"home", "temp",
 }
 
 // validateDNS1123Label rejects a user-supplied name that becomes (part of) a Kubernetes object,
@@ -159,11 +162,15 @@ func validateNodeSetGroupNames(i int, group NodeGroupSpec, oldGroups map[string]
 			oldValidatorPersistence = old.Validator.Persistence
 		}
 	}
-	if err := validateAdditionalVolumes(path+".persistence", group.Persistence, oldPersistence); err != nil {
-		return err
-	}
-	if err := validateSidecarNames(path+".config", group.Config); err != nil {
-		return err
+	// A validator group ignores its group-level persistence and config (its .validator ones apply), so
+	// only a regular group's are checked.
+	if group.Validator == nil {
+		if err := validateAdditionalVolumes(path+".persistence", group.Persistence, oldPersistence); err != nil {
+			return err
+		}
+		if err := validateSidecarNames(path+".config", group.Config); err != nil {
+			return err
+		}
 	}
 	if v := group.Validator; v != nil {
 		if err := validateAdditionalVolumes(path+".validator.persistence", v.Persistence, oldValidatorPersistence); err != nil {

@@ -22,7 +22,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- define "cosmopilot.labels" }}
 {{- include "cosmopilot.selectorLabels" . }}
-{{- with .Values.labels }}
+{{- with omit (.Values.labels | default dict) "app.kubernetes.io/name" "helm.sh/chart" "app.kubernetes.io/managed-by" "app.kubernetes.io/instance" }}
 {{ toYaml . | trimSuffix "\n" }}
 {{- end }}
 {{- end }}
