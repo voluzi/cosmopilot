@@ -3,6 +3,7 @@ package chainnodeset
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -165,10 +166,10 @@ func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nod
 
 // ownedByNodeSetOrChild reports whether obj is a resource this nodeSet is responsible for: controlled
 // directly by the nodeSet (group/global/guard/cosmoseed/validator Services, global/dashboard Ingresses)
-// or by one of this nodeSet's child ChainNodes (its per-child main/-internal/-p2p/-cg/-cg-peer Services
-// and <child>/<child>-grpc Ingresses). childUIDs is the UID set of the ChainNodes this nodeSet controls;
-// matching the controller ref by UID rather than Kind ensures an unrelated ChainNode's identically-named
-// resource in the same namespace can't make a brand-new collision look pre-existing.
+// or by one of this nodeSet's child ChainNodes (its per-child main/-internal/-p2p/-grpc/-cg/-cg-peer
+// Services and <child>/<child>-grpc Ingresses). childUIDs is the UID set of the ChainNodes this nodeSet
+// controls; matching the controller ref by UID rather than Kind ensures an unrelated ChainNode's
+// identically-named resource in the same namespace can't make a brand-new collision look pre-existing.
 func ownedByNodeSetOrChild(obj metav1.Object, nodeSet *appsv1.ChainNodeSet, childUIDs map[types.UID]struct{}) bool {
 	if metav1.IsControlledBy(obj, nodeSet) {
 		return true
@@ -284,19 +285,27 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	for _, gw := range nodeSet.Spec.GatewayRoutes {
 		// The gateway's global Service is "<set>-global-<name>" (gw.GetName is the "-gw" route name,
 		// NOT the Service), so the sticky check must look up the actual Service.
-		svc, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)))
+		global, err := r.getGlobalGatewayServiceSpec(nodeSet, gw, routeFlip(gw.Groups, fmt.Sprintf("%s-global-%s", nodeSet.GetName(), gw.Name)))
 		if err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		internal, err := r.getGlobalGatewayInternalServiceSpec(nodeSet, gw)
+		if err != nil {
 			return err
 		}
+		backend := global
+		if gw.UseInternal() {
+			backend = internal
+		}
+		backend = backend.DeepCopy()
 
-		svc, err = r.getGlobalGatewayInternalServiceSpec(nodeSet, gw)
-		if err != nil {
+		if err = ensure(global, scopeGlobal); err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		if err = ensure(internal, scopeGlobal); err != nil {
+			return err
+		}
+		if err = r.refreshPreservedGrpcService(ctx, nodeSet, fmt.Sprintf("%s-global-%s-grpc", nodeSet.GetName(), gw.Name), backend); err != nil {
 			return err
 		}
 	}
@@ -358,6 +367,26 @@ func (r *Reconciler) ensureGrpcService(ctx context.Context, nodeSet *appsv1.Chai
 	}
 	// ApplyOwned (unlike ensureService) tracks the last-applied state, so it also drops the Traefik
 	// annotation when the ingress class changes.
+	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
+}
+
+// refreshPreservedGrpcService keeps the gRPC-only Service of an ingress route that is migrating to a
+// same-named gateway route in step with its backend. ensureIngresses preserves the old gRPC Ingress
+// until the gateway routes apply, and without this its Service would miss a CosmoGuard flip meanwhile.
+func (r *Reconciler) refreshPreservedGrpcService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string, backend *corev1.Service) error {
+	live := &corev1.Service{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, live); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if live.Labels[controllers.LabelScope] != scopeGlobalGrpc || !metav1.IsControlledBy(live, nodeSet) {
+		return nil
+	}
+	annotations := maps.Clone(live.Annotations)
+	delete(annotations, patch.LastAppliedConfig)
+	svc, err := controllers.GrpcOnlyService(backend, name, live.Labels, annotations)
+	if err != nil {
+		return err
+	}
 	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
 }
 

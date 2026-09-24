@@ -6,9 +6,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -228,7 +232,6 @@ func TestStickyFlipViaGrpcOnlyService(t *testing.T) {
 	// The gRPC-only Service selects the guard -> sticky keeps routes on the guard.
 	r := cosmoGuardTestReconciler(t, guardIngress("node-0-grpc", "node-0-grpc"), grpcSvc(cosmoguard.InstanceLabels("node-0-cg")))
 	assert.Equal(t, "node-0-cg", r.apiServiceName(ctx, cn))
-	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, true))
 
 	// The gRPC-only Service selects the raw node -> no flip.
 	r = cosmoGuardTestReconciler(t, guardIngress("node-0-grpc", "node-0-grpc"), grpcSvc(map[string]string{"app": "node-0"}))
@@ -264,4 +267,113 @@ func TestGatewayGrpcRouteUnchanged(t *testing.T) {
 
 	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-grpc"}, &corev1.Service{})
 	assert.True(t, client.IgnoreNotFound(err) == nil && err != nil, "gateway path must not create a gRPC-only Service")
+}
+
+// TestFinalizeDefersUndeployWhileGrpcServiceSelectsGuard verifies a disabled guard is kept while the
+// gRPC Ingress still reaches it through the gRPC-only Service, and torn down once that Service no
+// longer selects guard pods.
+func TestFinalizeDefersUndeployWhileGrpcServiceSelectsGuard(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, ensureGuard(r, ctx, cn))
+
+	cn.Spec.Config.CosmoGuard.Enable = false
+	grpcSvc := apiBackend("node-0-grpc", cosmoguard.InstanceLabels("node-0-cg"), controllers.CosmoGuardGrpcPort, false)
+	require.NoError(t, controllerutil.SetControllerReference(cn, grpcSvc, r.Scheme))
+	require.NoError(t, r.Create(ctx, grpcSvc))
+	require.NoError(t, r.Create(ctx, guardIngress("node-0-grpc", "node-0-grpc")))
+
+	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, true))
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{}),
+		"guard must survive while the gRPC-only Service still selects it")
+
+	grpcSvc.Spec.Selector = map[string]string{"app": "node-0"}
+	require.NoError(t, r.Update(ctx, grpcSvc))
+	require.NoError(t, r.finalizeCosmoGuard(ctx, cn, true))
+	err := r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}, &k8sappsv1.StatefulSet{})
+	assert.Error(t, err, "guard torn down once the gRPC-only Service no longer selects it")
+}
+
+// routesUnavailableClient reports the Gateway API CRDs as missing for the API route kinds.
+type routesUnavailableClient struct {
+	client.Client
+}
+
+func routeKindMissing(obj runtime.Object) error {
+	switch obj.(type) {
+	case *gwapiv1.HTTPRoute, *gwapiv1.HTTPRouteList, *gwapiv1.GRPCRoute, *gwapiv1.GRPCRouteList:
+		return &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: gwapiv1.GroupVersion.Group, Kind: "GRPCRoute"}}
+	}
+	return nil
+}
+
+func (c routesUnavailableClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := routeKindMissing(obj); err != nil {
+		return err
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c routesUnavailableClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := routeKindMissing(list); err != nil {
+		return err
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func (c routesUnavailableClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if err := routeKindMissing(obj); err != nil {
+		return err
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+// TestSwitchToGatewayRemovesGrpcService verifies moving from Ingress to Gateway API removes the gRPC
+// Ingress and its gRPC-only Service once the routes apply, and keeps both while they cannot.
+func TestSwitchToGatewayRemovesGrpcService(t *testing.T) {
+	ctx := context.Background()
+	backend := apiBackend("node-0", map[string]string{"app": "node-0"}, chainutils.GrpcPort, false)
+	grpcSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "node-0-grpc", Namespace: "ns"}}
+	grpcIng := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "node-0-grpc", Namespace: "ns"}}
+	toGateway := func(cn *appsv1.ChainNode) {
+		cn.Spec.Ingress = nil
+		cn.Spec.Gateway = &appsv1.GatewayConfig{Host: "example.com", EnableGRPC: true}
+	}
+
+	t.Run("routes applied", func(t *testing.T) {
+		cn := grpcChainNode(nil)
+		r := cosmoGuardTestReconciler(t, cn, backend.DeepCopy())
+		require.NoError(t, r.ensureIngresses(ctx, cn))
+		requireExists(t, r, grpcSvc.DeepCopy())
+
+		toGateway(cn)
+		require.NoError(t, r.ensureGatewayRoutes(ctx, cn))
+		requireGone(t, r, grpcSvc.DeepCopy())
+		requireGone(t, r, grpcIng.DeepCopy())
+	})
+
+	t.Run("gateway API missing", func(t *testing.T) {
+		cn := grpcChainNode(nil)
+		r := cosmoGuardTestReconciler(t, cn, backend.DeepCopy())
+		require.NoError(t, r.ensureIngresses(ctx, cn))
+
+		toGateway(cn)
+		r.Client = routesUnavailableClient{Client: r.Client}
+		require.NoError(t, r.ensureGatewayRoutes(ctx, cn))
+		requireExists(t, r, grpcSvc.DeepCopy())
+		requireExists(t, r, grpcIng.DeepCopy())
+	})
+}
+
+func TestGrpcServiceSteadyStateNoChurn(t *testing.T) {
+	ctx := context.Background()
+	for _, class := range []*string{nil, ptr.To("traefik")} {
+		cn := grpcChainNode(class)
+		r := cosmoGuardTestReconciler(t, cn, apiBackend("node-0", map[string]string{"app": "node-0"}, chainutils.GrpcPort, false))
+		require.NoError(t, r.ensureIngresses(ctx, cn))
+		before := getService(t, r, "node-0-grpc").ResourceVersion
+		require.NoError(t, r.ensureIngresses(ctx, cn))
+		assert.Equal(t, before, getService(t, r, "node-0-grpc").ResourceVersion)
+	}
 }

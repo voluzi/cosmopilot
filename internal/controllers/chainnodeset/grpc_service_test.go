@@ -18,6 +18,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/cosmoguard"
 )
 
 func grpcNodeSet(class *string) *appsv1.ChainNodeSet {
@@ -222,4 +223,28 @@ func TestGlobalGrpcServiceKeptWhileGatewayMigrationPending(t *testing.T) {
 	require.NoError(t, r.List(context.Background(), routes, client.InNamespace("ns")))
 	require.Len(t, routes.Items, 1)
 	assert.Equal(t, gwapiv1.ObjectName("chain-global-public"), routes.Items[0].Spec.Rules[0].BackendRefs[0].Name)
+}
+
+// TestPreservedGrpcServiceFollowsGuardFlip verifies that while a route migrates to a same-named
+// gateway route that cannot apply, the preserved gRPC Ingress's Service still follows a CosmoGuard
+// flip of the backend and keeps its Traefik annotation.
+func TestPreservedGrpcServiceFollowsGuardFlip(t *testing.T) {
+	nodeSet := grpcNodeSet(ptr.To("traefik"))
+	r := newValidatorTestReconciler(t, nodeSet)
+	reconcileRouting(t, r, nodeSet, cosmoGuardReconcile{}, true)
+
+	nodeSet.Spec.Ingresses = nil
+	nodeSet.Spec.GatewayRoutes = []appsv1.GlobalGatewayConfig{{
+		Name: "public", Groups: []string{"fullnodes"}, Host: "example.com", EnableGRPC: true,
+		Gateway: appsv1.GatewayRef{Name: "external"},
+	}}
+	reconcileRouting(t, r, nodeSet, cosmoGuardReconcile{fullyReady: map[string]bool{"fullnodes": true}}, false)
+
+	backend := svcByName(t, r, "chain-global-public")
+	require.True(t, cosmoguard.SelectsGuard(backend.Spec.Selector), "backend must have flipped")
+	svc := svcByName(t, r, "chain-global-public-grpc")
+	assert.Equal(t, backend.Spec.Selector, svc.Spec.Selector)
+	assert.Equal(t, intstr.FromInt32(controllers.CosmoGuardGrpcPort), svc.Spec.Ports[0].TargetPort)
+	assert.Equal(t, "h2c", svc.Annotations[appsv1.TraefikServersSchemeAnnotation])
+	assert.Equal(t, scopeGlobalGrpc, svc.Labels[controllers.LabelScope])
 }
