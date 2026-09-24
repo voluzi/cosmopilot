@@ -24,8 +24,11 @@ import (
 // any signing configuration or validator pod is reconciled. ChainNodeSet signer targets are claimed
 // by their parent signer preflight and must not create a second child-owned claim.
 func (r *Reconciler) ensureValidatorConsensusKeyReservation(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if !chainNode.IsValidator() || chainNode.Status.ChainID == "" || chainNode.Spec.Cosmosigner != nil || chainNode.Spec.RemoteSignerTarget {
+	if !chainNode.IsValidator() || chainNode.Spec.Cosmosigner != nil || chainNode.Spec.RemoteSignerTarget {
 		return false, nil
+	}
+	if chainNode.Status.ChainID == "" {
+		return false, fmt.Errorf("cannot reserve the validator consensus key: chain ID is not established")
 	}
 
 	publicKey, verifiedIdentity, err := r.validatorConsensusPublicKey(ctx, chainNode)

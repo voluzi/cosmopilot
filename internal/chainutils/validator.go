@@ -82,6 +82,7 @@ func parseCreateValidatorBroadcastResult(output string) (*createValidatorBroadca
 
 func (a *App) buildCreateValidatorPod(
 	pubKey string,
+	hdPath string,
 	nodeInfo *NodeInfo,
 	params *Params,
 	node string,
@@ -145,7 +146,7 @@ func (a *App) buildCreateValidatorPod(
 					Image:           a.image,
 					ImagePullPolicy: a.pullPolicy,
 					Command:         []string{a.binary},
-					Args:            a.cmd.RecoverAccountArgs(defaultAccountName),
+					Args:            a.cmd.RecoverAccountArgs(defaultAccountName, hdPath),
 					Env:             a.appEnv(),
 					Stdin:           true,
 					StdinOnce:       true,
@@ -192,7 +193,7 @@ func (a *App) CreateValidator(
 	params *Params,
 	node string,
 ) (string, error) {
-	pod, err := a.buildCreateValidatorPod(pubKey, nodeInfo, params, node)
+	pod, err := a.buildCreateValidatorPod(pubKey, account.HDPath, nodeInfo, params, node)
 	if err != nil {
 		return "", err
 	}

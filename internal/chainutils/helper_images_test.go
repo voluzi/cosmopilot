@@ -72,7 +72,7 @@ func TestGeneratedHelperPodsUseVersionedImages(t *testing.T) {
 	})
 	require.NoError(t, err)
 	validatorPod, err := app.buildCreateValidatorPod(
-		validValidatorPubKey, &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657",
+		validValidatorPubKey, "", &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657",
 	)
 	require.NoError(t, err)
 
@@ -139,7 +139,7 @@ func TestAppPodsCopyImagePullSecrets(t *testing.T) {
 	params := &Params{ChainID: "chain", Assets: []string{"10stake"}, StakeAmount: "1stake", GasPrices: "0.01stake"}
 	initPod, err := app.BuildInitPod(pvc, nil)
 	require.NoError(t, err)
-	validatorPod, err := app.buildCreateValidatorPod(validValidatorPubKey, &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657")
+	validatorPod, err := app.buildCreateValidatorPod(validValidatorPubKey, "", &NodeInfo{Moniker: "validator"}, params, "tcp://node:26657")
 	require.NoError(t, err)
 	pods := map[string]*corev1.Pod{
 		"config":    app.buildConfigGeneratorPod(),

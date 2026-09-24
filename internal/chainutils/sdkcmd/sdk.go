@@ -31,8 +31,9 @@ type SDK interface {
 	// InitArgs returns arguments for initializing a new chain with the given moniker and chain ID.
 	InitArgs(moniker, chainID string) []string
 
-	// RecoverAccountArgs returns arguments for recovering an account from a mnemonic.
-	RecoverAccountArgs(account string) []string
+	// RecoverAccountArgs returns arguments for recovering an account from a mnemonic. A non-empty
+	// hdPath is passed as --hd-path so the CLI derives the same key as the operator.
+	RecoverAccountArgs(account, hdPath string) []string
 
 	// AddGenesisAccountArgs returns arguments for adding an account with assets to the genesis file.
 	AddGenesisAccountArgs(account string, assets []string) []string

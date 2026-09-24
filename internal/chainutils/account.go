@@ -14,6 +14,8 @@ type Account struct {
 	Mnemonic         string
 	Address          string
 	ValidatorAddress string
+	// HDPath is the derivation path the addresses were derived with.
+	HDPath string
 }
 
 func CreateAccount(accPrefix, valPrefix, hdPath string) (*Account, error) {
@@ -48,6 +50,7 @@ func CreateAccount(accPrefix, valPrefix, hdPath string) (*Account, error) {
 		Mnemonic:         mnemonic,
 		Address:          accBech32,
 		ValidatorAddress: valBech32,
+		HDPath:           hdPath,
 	}, nil
 }
 
@@ -73,6 +76,7 @@ func AccountFromMnemonic(mnemonic, accPrefix, valPrefix, hdPath string) (*Accoun
 		Mnemonic:         mnemonic,
 		Address:          accBech32,
 		ValidatorAddress: valBech32,
+		HDPath:           hdPath,
 	}, nil
 }
 

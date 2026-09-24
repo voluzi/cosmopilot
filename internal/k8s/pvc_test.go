@@ -72,3 +72,21 @@ func TestPvcHelperBuildDownloadGenesisPodUsesDefaultImageAndSecrets(t *testing.T
 	assert.Equal(t, RestrictedPodSecurityContext(), pod.Spec.SecurityContext)
 	assert.Equal(t, RestrictedSecurityContext(), container.SecurityContext)
 }
+
+func TestBuildGenesisDownloadCommandDetectsCompressionFromURLPath(t *testing.T) {
+	for url, want := range map[string]string{
+		"https://example.org/genesis.json":                                              "plain",
+		"https://example.org/genesis.json?token=abc":                                    "plain",
+		"https://example.org/genesis.json.gz":                                           "gzip",
+		"https://example.org/GENESIS.JSON.GZ":                                           "gzip",
+		"https://example.org/genesis.json.gz?token=abc":                                 "gzip",
+		"https://example.org/genesis.json.gz#frag":                                      "gzip",
+		"https://bucket.s3.amazonaws.com/g.json.gz?X-Amz-Signature=a&X-Amz-Expires=300": "gzip",
+		"https://example.org/genesis.json.zst":                                          "zstd",
+		"https://example.org/genesis.json.zst?token=abc":                                "zstd",
+		"https://example.org/download?file=genesis.json.gz":                             "plain",
+	} {
+		args := buildGenesisDownloadCommand(url, "/pvc/genesis.json", nil)
+		require.Equal(t, []string{"-c", genesisDownloadScript, "genesis-download", url, "/pvc/genesis.json", want, "0", ""}, args, url)
+	}
+}

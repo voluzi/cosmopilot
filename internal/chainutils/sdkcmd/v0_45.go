@@ -32,13 +32,14 @@ func (sdk *v0_45) InitArgs(moniker, chainID string) []string {
 	)
 }
 
-func (sdk *v0_45) RecoverAccountArgs(account string) []string {
-	return append(
-		[]string{"keys", "add", account, "--recover",
-			"--keyring-backend", "test",
-		},
-		sdk.options.GlobalArgs...,
-	)
+func (sdk *v0_45) RecoverAccountArgs(account, hdPath string) []string {
+	args := []string{"keys", "add", account, "--recover",
+		"--keyring-backend", "test",
+	}
+	if hdPath != "" {
+		args = append(args, "--hd-path", hdPath)
+	}
+	return append(args, sdk.options.GlobalArgs...)
 }
 
 func (sdk *v0_45) AddGenesisAccountArgs(account string, assets []string) []string {

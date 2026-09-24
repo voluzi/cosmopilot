@@ -106,6 +106,7 @@ func TestBuildCreateValidatorPodPropagatesAppEnvToBothChainCLIContainers(t *test
 
 	pod, err := app.buildCreateValidatorPod(
 		"pubkey",
+		"",
 		&NodeInfo{Moniker: "validator"},
 		&Params{ChainID: "chain", StakeAmount: "1stake"},
 		"tcp://node:26657",

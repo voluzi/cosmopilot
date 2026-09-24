@@ -28,6 +28,11 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 			return fmt.Errorf("pvc not found for chainnode %s/%s", chainNode.Namespace, chainNode.Name)
 		}
 		if v, ok := pvc.Annotations[controllers.AnnotationGenesisDownloaded]; ok && v == controllers.StringValueTrue {
+			// The marker is persisted before status.chainID, so a failed status write leaves the chain ID
+			// empty and nothing else would ever set it.
+			if chainNode.Status.ChainID == "" {
+				return r.restoreDataVolumeChainID(ctx, chainNode, pvc)
+			}
 			// Genesis is on the data volume (always an external source). Record the digest if missing here
 			// too — this branch returns before the chainID branch below, so otherwise a data-volume node
 			// would keep an empty digest and could later be converted to an init validator (see no-webhook
@@ -62,6 +67,35 @@ func (r *Reconciler) ensureGenesis(ctx context.Context, app *chainutils.App, cha
 		return nil
 	}
 	return r.getGenesis(ctx, app, chainNode)
+}
+
+// restoreDataVolumeChainID sets status.chainID for a node whose genesis is already on the data volume
+// but whose chain ID was never recorded. The chain ID comes from the annotation written together with the
+// downloaded marker, or, for a volume marked before that annotation existed, from the spec when the
+// genesis came from a container download of spec.genesis.url, which uses that chain ID. The genesis
+// is never fetched again: the source could now serve another chain.
+func (r *Reconciler) restoreDataVolumeChainID(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) error {
+	chainID := pvc.Annotations[controllers.AnnotationGenesisChainID]
+	if chainID == "" && chainNode.Spec.Genesis.ShouldDownloadUsingContainer() && chainNode.Spec.Genesis.Url != nil {
+		chainID = *chainNode.Spec.Genesis.ChainID
+	}
+	if chainID == "" {
+		return fmt.Errorf("genesis on pvc %s/%s has no recorded chain ID; remove annotation %s from the pvc to download it again",
+			pvc.Namespace, pvc.Name, controllers.AnnotationGenesisDownloaded)
+	}
+	chainNode.SetEstablishedChainID(chainID)
+	return r.Status().Update(ctx, chainNode)
+}
+
+// markGenesisOnVolume persists the downloaded marker together with the genesis chain ID, so the chain
+// ID can be restored if the status write that follows fails.
+func (r *Reconciler) markGenesisOnVolume(ctx context.Context, pvc *corev1.PersistentVolumeClaim, chainID string) error {
+	if pvc.Annotations == nil {
+		pvc.Annotations = map[string]string{}
+	}
+	pvc.Annotations[controllers.AnnotationGenesisDownloaded] = controllers.StringValueTrue
+	pvc.Annotations[controllers.AnnotationGenesisChainID] = chainID
+	return r.Update(ctx, pvc)
 }
 
 // recordGenesisDigestIfMissing records the genesis signing fingerprint (for a node that initialized
@@ -156,11 +190,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 					chainNode.Spec.NodeSelector); err != nil {
 				return fmt.Errorf("failed to download genesis to PVC: %w", err)
 			}
-			if pvc.Annotations == nil {
-				pvc.Annotations = map[string]string{}
-			}
-			pvc.Annotations[controllers.AnnotationGenesisDownloaded] = controllers.StringValueTrue
-			if err = r.Update(ctx, pvc); err != nil {
+			if err = r.markGenesisOnVolume(ctx, pvc, *chainNode.Spec.Genesis.ChainID); err != nil {
 				return fmt.Errorf("failed to update pvc annotations: %w", err)
 			}
 			chainNode.SetEstablishedChainID(*chainNode.Spec.Genesis.ChainID)
@@ -245,11 +275,7 @@ func (r *Reconciler) getGenesis(ctx context.Context, app *chainutils.App, chainN
 				chainNode.Spec.NodeSelector); err != nil {
 			return fmt.Errorf("failed to write genesis to PVC: %w", err)
 		}
-		if pvc.Annotations == nil {
-			pvc.Annotations = map[string]string{}
-		}
-		pvc.Annotations[controllers.AnnotationGenesisDownloaded] = controllers.StringValueTrue
-		if err = r.Update(ctx, pvc); err != nil {
+		if err = r.markGenesisOnVolume(ctx, pvc, chainID); err != nil {
 			return fmt.Errorf("failed to update pvc annotations after genesis write: %w", err)
 		}
 
