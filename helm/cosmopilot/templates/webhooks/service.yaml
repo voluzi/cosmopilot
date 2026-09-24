@@ -11,5 +11,5 @@ spec:
     - port: 443
       targetPort: 9443
   selector:
-    {{- include "cosmopilot.labels" . | indent 4 }}
+    {{- include "cosmopilot.selectorLabels" . | indent 4 }}
 {{- end }}

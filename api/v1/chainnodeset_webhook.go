@@ -269,6 +269,10 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, fmt.Errorf(".spec.validator.config.cosmoGuard is not supported on the legacy singleton validator; define the validator as a .spec.nodes group with cosmoGuard enabled instead")
 	}
 
+	if err := nodeSet.validateNames(old); err != nil {
+		return nil, err
+	}
+
 	// Index the previous groups (on update) so we can detect disallowed changes such as scaling
 	// up a genesis-initializing validator group after genesis has been created.
 	oldGroups := map[string]NodeGroupSpec{}
@@ -299,6 +303,9 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			return nil, fmt.Errorf(".spec.nodes[%d].name %q duplicates .spec.nodes[%d].name", i, group.Name, prev)
 		}
 		seenGroupNames[group.Name] = i
+		if err := validateNodeSetGroupNames(i, group, oldGroups); err != nil {
+			return nil, err
+		}
 
 		// The CosmoGuard dashboard port must not collide with a port the guard Service already exposes.
 		if err := group.GetServiceConfig().ValidateCosmoGuardDashboard(nodeSet.GetNamespace()); err != nil {

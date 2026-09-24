@@ -614,16 +614,26 @@ func (r *Reconciler) ensureAdditionalVolumes(ctx context.Context, chainNode *app
 			if err != nil {
 				return fmt.Errorf("failed to attribute PVC %s: %w", volumeName, err)
 			}
-			mustUpdate := metadataChanged
-			if pvc.Spec.Resources.Requests[corev1.ResourceStorage] != specSize {
-				logger.Info("updating pvc", "name", volumeName, "old-size", pvc.Spec.Resources.Requests[corev1.ResourceStorage], "new-size", volume.Size)
-				pvc.Spec.Resources.Requests[corev1.ResourceStorage] = specSize
-				mustUpdate = true
-			}
-			if mustUpdate {
+			if metadataChanged {
 				if err = r.Update(ctx, pvc); err != nil {
 					return fmt.Errorf("failed to update PVC %s: %w", volumeName, err)
 				}
+			}
+			switch pvc.Spec.Resources.Requests.Storage().Cmp(specSize) {
+			case -1:
+				logger.Info("updating pvc", "name", volumeName, "old-size", pvc.Spec.Resources.Requests.Storage(), "new-size", volume.Size)
+				pvc.Spec.Resources.Requests[corev1.ResourceStorage] = specSize
+				if err = r.Update(ctx, pvc); err != nil {
+					// A rejected resize (for example a StorageClass without volume expansion) must not
+					// hold back the rest of the reconcile.
+					logger.Error(err, "failed to resize pvc", "name", volumeName)
+					r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonPvcResizeSkipped,
+						"Failed to resize volume %s to %s: %v", volume.Name, volume.Size, err)
+				}
+			case 1:
+				// Kubernetes rejects shrinking a PVC; retrying would fail every reconcile.
+				r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonPvcResizeSkipped,
+					"Not shrinking volume %s from %v to %s: PVCs cannot be shrunk", volume.Name, pvc.Spec.Resources.Requests.Storage(), volume.Size)
 			}
 		}
 	}

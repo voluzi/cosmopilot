@@ -22,7 +22,7 @@ webhooks:
     objectSelector:
     {{- if .Values.workerName }}
       matchLabels:
-        worker-name: {{ .Values.workerName }}
+        worker-name: {{ .Values.workerName | quote }}
     {{- else }}
       matchExpressions:
         - key: worker-name
@@ -51,7 +51,7 @@ webhooks:
     objectSelector:
     {{- if .Values.workerName }}
       matchLabels:
-        worker-name: {{ .Values.workerName }}
+        worker-name: {{ .Values.workerName | quote }}
     {{- else }}
       matchExpressions:
         - key: worker-name
