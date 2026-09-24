@@ -118,12 +118,18 @@ func (gcs *GCS) serviceAccountName() string {
 	return *gcs.Config.ServiceAccountName
 }
 
-// defaultUploadRequests requests the memory the exporter holds: one read chunk plus one per in-flight part.
+// defaultUploadRequests requests the memory the exporter holds: one read chunk plus one per in-flight
+// part, and each part upload's copy buffer.
 func (gcs *GCS) defaultUploadRequests() corev1.ResourceList {
 	requests := corev1.ResourceList{}
-	if memory, ok := uploadRequest(gcs.Config.GetChunkSize(), gcs.Config.GetConcurrentJobs()+1); ok {
-		requests[corev1.ResourceMemory] = memory
+	chunks, ok := uploadRequest(gcs.Config.GetChunkSize(), gcs.Config.GetConcurrentJobs()+1)
+	if !ok {
+		return requests
 	}
+	if buffers, ok := uploadRequest(gcs.Config.GetBufferSize(), gcs.Config.GetConcurrentJobs()); ok {
+		chunks.Add(buffers)
+	}
+	requests[corev1.ResourceMemory] = chunks
 	return requests
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/c2h5oh/datasize"
@@ -26,16 +27,35 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// TestGcsUploadChunksStopsAfterFirstPartFailure fails every part upload and checks the exporter stops
-// reading the archive instead of consuming and uploading all of it.
+// TestGcsUploadChunksStopsAfterFirstPartFailure fails the first part upload while a second one is in
+// flight: the in-flight upload must be aborted and the archive must not be read any further.
 func TestGcsUploadChunksStopsAfterFirstPartFailure(t *testing.T) {
-	var uploads atomic.Int64
+	var requests, aborted atomic.Int64
+	secondArrived := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		uploads.Add(1)
+		if requests.Add(1) == 1 {
+			// Fail the first part only once a second part is in flight.
+			select {
+			case <-secondArrived:
+			case <-time.After(5 * time.Second):
+			}
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":403,"message":"forbidden"}}`))
+			return
+		}
+		// The server only notices a client abort once the request body has been read.
 		_, _ = io.Copy(io.Discard, r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"error":{"code":403,"message":"forbidden"}}`))
+		if requests.Load() == 2 {
+			close(secondArrived)
+		}
+		select {
+		case <-r.Context().Done():
+			aborted.Add(1)
+		case <-time.After(5 * time.Second):
+			w.WriteHeader(http.StatusOK)
+		}
 	}))
 	defer server.Close()
 
@@ -52,9 +72,10 @@ func TestGcsUploadChunksStopsAfterFirstPartFailure(t *testing.T) {
 	opts.BufferSize = chunkSize
 	opts.ConcurrentJobs = 2
 
+	start := time.Now()
 	err = gcs.uploadChunks(context.Background(), reader, "bucket", "object", totalSize, totalSize, opts)
 	require.ErrorContains(t, err, "upload failed")
+	require.Less(t, time.Since(start), 4*time.Second, "the in-flight upload must not run to completion")
+	require.Equal(t, int64(1), aborted.Load(), "the in-flight part upload must be cancelled")
 	require.Less(t, reader.read.Load(), int64(totalSize.Bytes())/2, "the archive must not be fully consumed after a part fails")
-	require.Positive(t, uploads.Load(), "the fake server must receive the part uploads")
-	require.Less(t, uploads.Load(), int64(20))
 }

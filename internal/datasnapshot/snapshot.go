@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -1516,7 +1517,7 @@ func uploadJobResources(cfg *appsv1.ExportTarballConfig, defaults corev1.Resourc
 // uploadRequest returns size × multiplier as a quantity, or false when size cannot be parsed.
 func uploadRequest(size string, multiplier int) (resource.Quantity, bool) {
 	parsed, err := datasize.ParseString(size)
-	if err != nil || multiplier < 1 {
+	if err != nil || multiplier < 1 || parsed.Bytes() > uint64(math.MaxInt64)/uint64(multiplier) {
 		return resource.Quantity{}, false
 	}
 	return *resource.NewQuantity(int64(parsed.Bytes())*int64(multiplier), resource.BinarySI), true

@@ -159,6 +159,10 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("error reading chunk: %v", err)
 		}
+		if firstUploadErr() != nil {
+			<-semaphore
+			break // A part failed while this chunk was read: do not upload it.
+		}
 		bytesArchived.Add(uint64(n))
 		if n == 0 {
 			break // Done reading

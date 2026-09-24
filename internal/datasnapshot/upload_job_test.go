@@ -35,10 +35,10 @@ func requireUploadJobHardening(t *testing.T, job *batchv1.Job, wantRequests core
 
 func TestUploadJobsRequestResourcesAndIgnoreDisruptions(t *testing.T) {
 	gcs := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{
-		Bucket: "snapshots", ChunkSize: ptr.To("100MB"), ConcurrentJobs: ptr.To(3),
+		Bucket: "snapshots", ChunkSize: ptr.To("100MB"), BufferSize: ptr.To("10MB"), ConcurrentJobs: ptr.To(3),
 	}})
 	requireUploadJobHardening(t, gcs.uploadJob("snapshot"), corev1.ResourceList{
-		corev1.ResourceMemory: *resource.NewQuantity(int64(4*100*datasize.MB), resource.BinarySI),
+		corev1.ResourceMemory: *resource.NewQuantity(int64(4*100*datasize.MB+3*10*datasize.MB), resource.BinarySI),
 	})
 
 	s3 := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
@@ -70,4 +70,12 @@ func TestDeletionJobFromUploadDropsExportResources(t *testing.T) {
 	deletion, err := deletionJobFromUpload(upload, gcs.Owner, gcsExporter, SnapshotJobIdentity{})
 	require.NoError(t, err)
 	assert.Empty(t, deletion.Spec.Template.Spec.Containers[0].Resources)
+}
+
+func TestUploadRequestRejectsOverflow(t *testing.T) {
+	_, ok := uploadRequest("8EB", 2)
+	assert.False(t, ok)
+	quantity, ok := uploadRequest("1GB", 3)
+	require.True(t, ok)
+	assert.Equal(t, int64(3*datasize.GB), quantity.Value())
 }
