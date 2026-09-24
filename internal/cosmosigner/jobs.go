@@ -142,16 +142,16 @@ func (b Backend) importArgs() []string {
 // validator's account mnemonic in a shared Secret) that the import pod has no business reading.
 func importSourceMount(sourceSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
 	return []corev1.Volume{{
-			Name: importSourceVolume,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: sourceSecret,
-					Items:      []corev1.KeyToPath{{Key: "priv_validator_key.json", Path: "priv_validator_key.json"}},
-				},
+		Name: importSourceVolume,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: sourceSecret,
+				Items:      []corev1.KeyToPath{{Key: "priv_validator_key.json", Path: "priv_validator_key.json"}},
 			},
-		}}, []corev1.VolumeMount{
-			{Name: importSourceVolume, ReadOnly: true, MountPath: importSourceDir},
-		}
+		},
+	}}, []corev1.VolumeMount{
+		{Name: importSourceVolume, ReadOnly: true, MountPath: importSourceDir},
+	}
 }
 
 // buildPod renders a one-shot cosmosigner pod. It is pure so the rendered command line, mounts and
