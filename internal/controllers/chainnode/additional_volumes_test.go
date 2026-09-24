@@ -71,12 +71,15 @@ func TestEnsureAdditionalVolumesResize(t *testing.T) {
 			pvc := &corev1.PersistentVolumeClaim{}
 			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: node.Namespace, Name: "node-extra"}, pvc))
 			assert.Zero(t, pvc.Spec.Resources.Requests.Storage().Cmp(resource.MustParse(tc.wantSize)))
-			select {
-			case event := <-recorder.Events:
-				assert.True(t, tc.wantEvent, "unexpected event %q", event)
-				assert.Contains(t, event, appsv1.ReasonPvcResizeSkipped)
-			default:
-				assert.False(t, tc.wantEvent, "expected a %s event", appsv1.ReasonPvcResizeSkipped)
+			var events []string
+			for len(recorder.Events) > 0 {
+				events = append(events, <-recorder.Events)
+			}
+			if tc.wantEvent {
+				require.Len(t, events, 1, "expected exactly one %s event", appsv1.ReasonPvcResizeSkipped)
+				assert.Contains(t, events[0], appsv1.ReasonPvcResizeSkipped)
+			} else {
+				assert.Empty(t, events)
 			}
 		})
 	}

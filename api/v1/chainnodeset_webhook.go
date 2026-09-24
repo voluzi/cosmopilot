@@ -269,7 +269,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, fmt.Errorf(".spec.validator.config.cosmoGuard is not supported on the legacy singleton validator; define the validator as a .spec.nodes group with cosmoGuard enabled instead")
 	}
 
-	if err := nodeSet.validateNames(old); err != nil {
+	if err := nodeSet.validateNames(); err != nil {
 		return nil, err
 	}
 
@@ -303,7 +303,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			return nil, fmt.Errorf(".spec.nodes[%d].name %q duplicates .spec.nodes[%d].name", i, group.Name, prev)
 		}
 		seenGroupNames[group.Name] = i
-		if err := validateNodeSetGroupNames(i, group, oldGroups); err != nil {
+		if err := validateNodeSetGroupNames(i, group); err != nil {
 			return nil, err
 		}
 

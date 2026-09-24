@@ -93,11 +93,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	}
 
 	// Names below become container, volume or object names; genesis durations reach genesis.json.
-	var oldPersistence *Persistence
-	if old != nil {
-		oldPersistence = old.Spec.Persistence
-	}
-	if err := validateAdditionalVolumes(".spec.persistence", chainNode.Spec.Persistence, oldPersistence); err != nil {
+	if err := validateAdditionalVolumes(".spec.persistence", chainNode.Spec.Persistence); err != nil {
 		return nil, err
 	}
 	if err := validateAppBinaryName(".spec.app.app", chainNode.Spec.App.App); err != nil {

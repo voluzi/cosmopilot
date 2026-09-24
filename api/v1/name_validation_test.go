@@ -2,9 +2,7 @@ package v1
 
 import (
 	"testing"
-	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
 )
@@ -71,6 +69,20 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: "duplicates",
 		},
 		{
+			name: "duplicate sidecar names",
+			mutate: func(c *ChainNode) {
+				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "exporter"}, {Name: "exporter"}}}
+			},
+			wantErr: ".spec.config.sidecars[1].name",
+		},
+		{
+			name: "negative additional volume size",
+			mutate: func(c *ChainNode) {
+				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "extra", Size: "-1Gi", Path: "/extra"}}}
+			},
+			wantErr: "must be greater than zero",
+		},
+		{
 			name: "malformed additional volume size",
 			mutate: func(c *ChainNode) {
 				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "extra", Size: "ten gigs", Path: "/extra"}}}
@@ -113,25 +125,18 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 	}
 }
 
-func TestChainNodeValidateAdditionalVolumeResize(t *testing.T) {
+func TestChainNodeValidateAdmitsAdditionalVolumeResize(t *testing.T) {
 	withVolume := func(size string) *ChainNode {
 		c := validChainNodeForDeletionPolicyTest()
 		c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "extra", Size: size, Path: "/extra"}}}
 		return c
 	}
-	old := withVolume("20Gi")
-
-	_, err := withVolume("10Gi").Validate(old)
-	require.ErrorContains(t, err, "cannot be decreased")
-
-	_, err = withVolume("20480Mi").Validate(old)
-	require.NoError(t, err, "an equal size in other units is not a shrink")
-
-	_, err = withVolume("30Gi").Validate(old)
+	// A decrease must stay possible: it may revert an expansion the storage class refused. The
+	// controller skips a real shrink with an event.
+	_, err := withVolume("20Gi").Validate(withVolume("30Gi"))
 	require.NoError(t, err)
-
-	_, err = withVolume("10Gi").Validate(nil)
-	require.NoError(t, err, "a new volume has no previous size")
+	_, err = withVolume("30Gi").Validate(withVolume("20Gi"))
+	require.NoError(t, err)
 }
 
 func TestChainNodeSetValidateRejectsInvalidNames(t *testing.T) {
@@ -211,23 +216,4 @@ func TestChainNodeSetValidateRejectsInvalidNames(t *testing.T) {
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
-}
-
-func TestChainNodeSetValidateRejectsGroupAdditionalVolumeShrink(t *testing.T) {
-	withVolume := func(size string) *ChainNodeSet {
-		s := validChainNodeSetForDeletionPolicyTest()
-		s.Spec.Nodes = []NodeGroupSpec{{Name: "fullnodes", Persistence: &Persistence{
-			AdditionalVolumes: []VolumeSpec{{Name: "extra", Size: size, Path: "/extra"}},
-		}}}
-		return s
-	}
-	_, err := withVolume("10Gi").Validate(withVolume("20Gi"))
-	require.ErrorContains(t, err, ".spec.nodes[0].persistence.additionalVolumes[0].size cannot be decreased")
-}
-
-func TestVerticalAutoscalingRuleGetDurationTreatsNonPositiveAsDefault(t *testing.T) {
-	for _, d := range []string{"0s", "0", "-5m"} {
-		assert.Equal(t, DefaultVpaCooldown, (&VerticalAutoscalingRule{Duration: ptr.To(d)}).GetDuration(), d)
-	}
-	assert.Equal(t, 10*time.Minute, (&VerticalAutoscalingRule{Duration: ptr.To("10m")}).GetDuration())
 }

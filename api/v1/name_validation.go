@@ -29,19 +29,12 @@ func validateDNS1123Label(path, value string) error {
 	return nil
 }
 
-// validateAdditionalVolumes checks names (DNS-1123, unique, not a built-in volume), sizes, and that
-// no existing volume shrinks, which Kubernetes rejects on every reconcile.
-func validateAdditionalVolumes(path string, persistence, oldPersistence *Persistence) error {
+// validateAdditionalVolumes checks names (DNS-1123, unique, not a built-in volume) and sizes. A smaller
+// size is not rejected: the webhook cannot see the claim, and an expansion the storage class refused
+// must stay revertible; the controller skips a shrink with an event.
+func validateAdditionalVolumes(path string, persistence *Persistence) error {
 	if persistence == nil {
 		return nil
-	}
-	oldSizes := map[string]resource.Quantity{}
-	if oldPersistence != nil {
-		for _, v := range oldPersistence.AdditionalVolumes {
-			if size, err := resource.ParseQuantity(v.Size); err == nil {
-				oldSizes[v.Name] = size
-			}
-		}
 	}
 	seen := make(map[string]int, len(persistence.AdditionalVolumes))
 	for i, v := range persistence.AdditionalVolumes {
@@ -60,8 +53,8 @@ func validateAdditionalVolumes(path string, persistence, oldPersistence *Persist
 		if err != nil {
 			return fmt.Errorf("bad format for %s.size: %v", p, err)
 		}
-		if oldSize, ok := oldSizes[v.Name]; ok && size.Cmp(oldSize) < 0 {
-			return fmt.Errorf("%s.size cannot be decreased from %s to %s: volumes cannot be shrunk", p, oldSize.String(), v.Size)
+		if size.Sign() <= 0 {
+			return fmt.Errorf("%s.size must be greater than zero", p)
 		}
 	}
 	return nil
@@ -80,10 +73,16 @@ func validateSidecarNames(path string, config *Config) error {
 	if config == nil {
 		return nil
 	}
+	seen := make(map[string]int, len(config.Sidecars))
 	for i, sidecar := range config.Sidecars {
-		if err := validateDNS1123Label(fmt.Sprintf("%s.sidecars[%d].name", path, i), sidecar.Name); err != nil {
+		p := fmt.Sprintf("%s.sidecars[%d].name", path, i)
+		if err := validateDNS1123Label(p, sidecar.Name); err != nil {
 			return err
 		}
+		if prev, ok := seen[sidecar.Name]; ok {
+			return fmt.Errorf("%s %q duplicates %s.sidecars[%d].name", p, sidecar.Name, path, prev)
+		}
+		seen[sidecar.Name] = i
 	}
 	return nil
 }
@@ -115,7 +114,7 @@ func validateGenesisDurations(path string, init *GenesisInitConfig) error {
 
 // validateNames checks the ChainNodeSet-level names that become object or container names, the legacy
 // validator's volumes and sidecars, and genesis durations.
-func (nodeSet *ChainNodeSet) validateNames(old *ChainNodeSet) error {
+func (nodeSet *ChainNodeSet) validateNames() error {
 	if err := validateAppBinaryName(".spec.app.app", nodeSet.Spec.App.App); err != nil {
 		return err
 	}
@@ -130,11 +129,7 @@ func (nodeSet *ChainNodeSet) validateNames(old *ChainNodeSet) error {
 		}
 	}
 	if v := nodeSet.Spec.Validator; v != nil {
-		var oldPersistence *Persistence
-		if old != nil && old.Spec.Validator != nil {
-			oldPersistence = old.Spec.Validator.Persistence
-		}
-		if err := validateAdditionalVolumes(".spec.validator.persistence", v.Persistence, oldPersistence); err != nil {
+		if err := validateAdditionalVolumes(".spec.validator.persistence", v.Persistence); err != nil {
 			return err
 		}
 		if err := validateSidecarNames(".spec.validator.config", v.Config); err != nil {
@@ -149,23 +144,15 @@ func (nodeSet *ChainNodeSet) validateNames(old *ChainNodeSet) error {
 
 // validateNodeSetGroupNames checks a group's name (part of every child ChainNode and Service name) and
 // the volumes, sidecars and genesis durations of the group and its validator.
-func validateNodeSetGroupNames(i int, group NodeGroupSpec, oldGroups map[string]NodeGroupSpec) error {
+func validateNodeSetGroupNames(i int, group NodeGroupSpec) error {
 	path := fmt.Sprintf(".spec.nodes[%d]", i)
 	if err := validateDNS1123Label(path+".name", group.Name); err != nil {
 		return err
 	}
-	old, hasOld := oldGroups[group.Name]
-	var oldPersistence, oldValidatorPersistence *Persistence
-	if hasOld {
-		oldPersistence = old.Persistence
-		if old.Validator != nil {
-			oldValidatorPersistence = old.Validator.Persistence
-		}
-	}
 	// A validator group ignores its group-level persistence and config (its .validator ones apply), so
 	// only a regular group's are checked.
 	if group.Validator == nil {
-		if err := validateAdditionalVolumes(path+".persistence", group.Persistence, oldPersistence); err != nil {
+		if err := validateAdditionalVolumes(path+".persistence", group.Persistence); err != nil {
 			return err
 		}
 		if err := validateSidecarNames(path+".config", group.Config); err != nil {
@@ -173,7 +160,7 @@ func validateNodeSetGroupNames(i int, group NodeGroupSpec, oldGroups map[string]
 		}
 	}
 	if v := group.Validator; v != nil {
-		if err := validateAdditionalVolumes(path+".validator.persistence", v.Persistence, oldValidatorPersistence); err != nil {
+		if err := validateAdditionalVolumes(path+".validator.persistence", v.Persistence); err != nil {
 			return err
 		}
 		if err := validateSidecarNames(path+".validator.config", v.Config); err != nil {
