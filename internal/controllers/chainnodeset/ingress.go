@@ -47,9 +47,6 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 				}, nodeSet); err != nil {
 					return err
 				}
-				if err = r.deleteGrpcService(ctx, nodeSet, globalIngress.GetGrpcName(nodeSet)); err != nil {
-					return err
-				}
 			} else {
 				if err = r.ensureIngress(ctx, grpcIngress); err != nil {
 					return err
@@ -77,11 +74,6 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 			logger.Info("preserving ingress; replacement gateway route not applied", "ingress", ing.GetName())
 			continue
 		}
-		// Remove a stale gRPC Ingress's gRPC-only Service first: the stale Ingress is what finds it on a
-		// retry. The API Ingress has no such Service.
-		if err = r.deleteGrpcService(ctx, nodeSet, ing.GetName()); err != nil {
-			return err
-		}
 		deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &ing, nodeSet)
 		if err != nil {
 			return err
@@ -89,6 +81,10 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 		if deleted {
 			logger.Info("deleted ingress", "ingress", ing.GetName())
 		}
+	}
+
+	if err = r.cleanupGrpcServices(ctx, nodeSet, gatewayApplied); err != nil {
+		return err
 	}
 
 	// Migration cleanup: delete any legacy group-scoped ingresses from before group-level

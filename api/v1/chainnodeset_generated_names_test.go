@@ -673,6 +673,18 @@ func TestValidateGrpcOnlyServiceNameCollisions(t *testing.T) {
 	require.NoError(t, routeVsGateway(false, nil).validateServiceNameCollisions(nil))
 	require.NoError(t, routeVsGateway(true, ptr.To(true)).validateServiceNameCollisions(nil))
 
+	// A services-only route "x-grpc" creates no Ingress but does own Service "<set>-global-x-grpc".
+	routeVsServicesOnly := &ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
+		Spec: ChainNodeSetSpec{Ingresses: []GlobalIngressConfig{
+			{Name: "x", EnableGRPC: true},
+			{Name: "x-grpc", ServicesOnly: ptr.To(true)},
+		}},
+	}
+	err = routeVsServicesOnly.validateServiceNameCollisions(nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cs-global-x-grpc")
+
 	childVsGroup := func(grpc bool) *ChainNodeSet {
 		return &ChainNodeSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "cs"},

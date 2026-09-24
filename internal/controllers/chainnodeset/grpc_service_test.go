@@ -248,3 +248,33 @@ func TestPreservedGrpcServiceFollowsGuardFlip(t *testing.T) {
 	assert.Equal(t, "h2c", svc.Annotations[appsv1.TraefikServersSchemeAnnotation])
 	assert.Equal(t, scopeGlobalGrpc, svc.Labels[controllers.LabelScope])
 }
+
+// TestGlobalGrpcServiceRefusesToTakeOverRouteService verifies a grandfathered spec whose route "x-grpc"
+// already owns Service "<set>-global-x-grpc" fails loudly instead of rewriting it every reconcile.
+func TestGlobalGrpcServiceRefusesToTakeOverRouteService(t *testing.T) {
+	nodeSet := grpcNodeSet(ptr.To("traefik"))
+	nodeSet.Spec.Ingresses = append([]appsv1.GlobalIngressConfig{{
+		Name: "public-grpc", Groups: []string{"fullnodes"}, Host: "other.example.com", ServicesOnly: ptr.To(true),
+	}}, nodeSet.Spec.Ingresses...)
+	r := newValidatorTestReconciler(t, nodeSet)
+
+	err := r.ensureServices(context.Background(), nodeSet, cosmoGuardReconcile{})
+	require.ErrorContains(t, err, "chain-global-public-grpc")
+	svc := svcByName(t, r, "chain-global-public-grpc")
+	assert.Equal(t, scopeGlobal, svc.Labels[controllers.LabelScope])
+	assert.NotContains(t, svc.Annotations, appsv1.TraefikServersSchemeAnnotation)
+	assert.Greater(t, len(svc.Spec.Ports), 1)
+}
+
+// TestGlobalGrpcServiceRemovedAfterIngressDeletedOutOfBand verifies the gRPC-only Service is cleaned up
+// by its route label even when its Ingress is already gone.
+func TestGlobalGrpcServiceRemovedAfterIngressDeletedOutOfBand(t *testing.T) {
+	nodeSet := grpcNodeSet(nil)
+	r := newValidatorTestReconciler(t, nodeSet)
+	reconcileRouting(t, r, nodeSet, cosmoGuardReconcile{}, true)
+
+	require.NoError(t, r.Delete(context.Background(), ingressByName(t, r, "chain-global-public-grpc")))
+	nodeSet.Spec.Ingresses = nil
+	reconcileRouting(t, r, nodeSet, cosmoGuardReconcile{}, true)
+	requireNoService(t, r, "chain-global-public-grpc")
+}

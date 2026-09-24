@@ -365,6 +365,16 @@ func (r *Reconciler) ensureGrpcService(ctx context.Context, nodeSet *appsv1.Chai
 	if err != nil {
 		return err
 	}
+	// A route named "<route>-grpc" (grandfathered past the webhook's name claim) owns a global Service
+	// under this name. Refuse to take it over rather than rewrite it back and forth every reconcile.
+	live := &corev1.Service{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(svc), live)
+	if err == nil && live.Labels[controllers.LabelScope] != scopeGlobalGrpc {
+		return fmt.Errorf("service %q already backs another route; rename the route %q or %q-grpc", svc.GetName(), ingress.Name, ingress.Name)
+	}
+	if client.IgnoreNotFound(err) != nil {
+		return err
+	}
 	// ApplyOwned (unlike ensureService) tracks the last-applied state, so it also drops the Traefik
 	// annotation when the ingress class changes.
 	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
@@ -390,21 +400,39 @@ func (r *Reconciler) refreshPreservedGrpcService(ctx context.Context, nodeSet *a
 	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
 }
 
-// deleteGrpcService removes the gRPC-only Service named name. The scope check keeps it from ever
-// deleting a global API Service that happens to share the name.
-func (r *Reconciler) deleteGrpcService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
-	svc := &corev1.Service{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, svc); err != nil {
-		return client.IgnoreNotFound(err)
+// cleanupGrpcServices deletes the gRPC-only Services no route needs any more: the route is gone, has
+// gRPC off, or is services-only. One migrating to a same-named gateway route is kept until the gateway
+// routes apply, like its gRPC Ingress. Keyed on the route label, so it also catches a Service whose
+// Ingress was deleted out of band.
+func (r *Reconciler) cleanupGrpcServices(ctx context.Context, nodeSet *appsv1.ChainNodeSet, gatewayApplied bool) error {
+	services, err := r.listChainNodeSetServices(ctx, nodeSet, controllers.LabelScope, scopeGlobalGrpc)
+	if err != nil {
+		return err
 	}
-	if svc.Labels[controllers.LabelScope] != scopeGlobalGrpc {
-		return nil
+	for _, svc := range services.Items {
+		route := svc.Labels[controllers.LabelGlobalIngress]
+		if grpcRouteWanted(nodeSet, route) ||
+			(!gatewayApplied && !ContainsGlobalIngress(nodeSet.Spec.Ingresses, route, false) && ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, route)) {
+			continue
+		}
+		deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &svc, nodeSet)
+		if err != nil {
+			return err
+		}
+		if deleted {
+			log.FromContext(ctx).Info("deleted service", "svc", svc.GetName())
+		}
 	}
-	deleted, err := controllers.DeleteControlledObject(ctx, r.Client, svc, nodeSet)
-	if deleted {
-		log.FromContext(ctx).Info("deleted service", "svc", name)
+	return nil
+}
+
+func grpcRouteWanted(nodeSet *appsv1.ChainNodeSet, route string) bool {
+	for _, ingress := range nodeSet.Spec.Ingresses {
+		if ingress.Name == route {
+			return ingress.EnableGRPC && !ingress.CreateServicesOnly()
+		}
 	}
-	return err
+	return false
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {
