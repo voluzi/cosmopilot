@@ -683,6 +683,8 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 		groups      []appsv1.NodeGroupSpec
 		children    []int
 		terminating []int
+		drifted     []int
+		replaced    []int
 		foreign     bool
 		wantGone    []int
 		wantKept    []int
@@ -695,6 +697,8 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 		{name: "scaled to zero with a foreign child", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, foreign: true, wantGone: []int{2}},
 		{name: "scaled to zero past a stuck terminating ordinal", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, terminating: []int{0}, wantGone: []int{2}, wantErr: true},
 		{name: "group removed past a stuck terminating ordinal", children: []int{2}, terminating: []int{0}, wantGone: []int{2}, wantErr: true},
+		{name: "unlisted child keeps its status entry", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, drifted: []int{1}, wantKept: []int{1}},
+		{name: "recorded name reused by another object", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, replaced: []int{1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
@@ -743,10 +747,26 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 				child.DeletionTimestamp = ptr.To(metav1.Now())
 				objs = append(objs, child)
 			}
+			// A child whose labels no longer select it (not listed), and an unrelated object that reuses
+			// a recorded name.
+			for _, i := range tc.drifted {
+				child := mkChild(i, nodeSet.UID)
+				child.Labels = nil
+				objs = append(objs, child)
+			}
+			for _, i := range tc.replaced {
+				child := mkChild(i, "another-set-uid")
+				child.Labels = nil
+				child.UID = types.UID(fmt.Sprintf("other-%d-uid", i))
+				objs = append(objs, child)
+			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNodeSet{}).WithObjects(objs...).Build()
 			r := &Reconciler{Client: cl, Scheme: scheme, recorder: record.NewFakeRecorder(100)}
 
+			// Each reconcile starts from the persisted object, as in production.
 			for range 3 {
+				nodeSet = &appsv1.ChainNodeSet{}
+				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "set"}, nodeSet))
 				err := r.ensureNodes(context.Background(), nodeSet)
 				if tc.wantErr {
 					require.Error(t, err)
@@ -754,6 +774,8 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 					require.NoError(t, err)
 				}
 			}
+			nodeSet = &appsv1.ChainNodeSet{}
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "set"}, nodeSet))
 
 			for _, i := range tc.wantGone {
 				current := &appsv1.ChainNode{}
@@ -773,7 +795,7 @@ func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
 				kept := slices.Contains(tc.wantKept, i) || slices.Contains(tc.terminating, i)
 				assert.Equalf(t, kept, slices.Contains(statusNames, name), "status entry for %s", name)
 			}
-			for _, i := range tc.wantKept {
+			for _, i := range append(tc.wantKept, tc.replaced...) {
 				current := &appsv1.ChainNode{}
 				require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("set-full-%d", i)}, current))
 				assert.Truef(t, current.DeletionTimestamp.IsZero(), "set-full-%d must be kept", i)

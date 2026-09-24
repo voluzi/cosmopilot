@@ -76,7 +76,7 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 	for _, group := range nodeSet.Spec.Nodes {
 		if group.Validator == nil {
 			if err := r.ensureNodeGroupWithBlockedSignerTargets(ctx, nodeSet, group, blocked); err != nil {
-				return err
+				return r.persistNodeStatusOnError(ctx, nodeSet, nodeSetCopy, err)
 			}
 		} else {
 			validatorGroups[group.Name] = struct{}{}
@@ -104,12 +104,14 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 	for _, group := range nodeSet.Spec.Nodes {
 		specGroups[group.Name] = struct{}{}
 	}
-	pruneAbsentNodeStatus(nodeSet, chainNodes.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
+	if err := r.pruneAbsentNodeStatus(ctx, nodeSet, chainNodes.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
 		_, inSpec := specGroups[status.Group]
 		return !inSpec
-	})
+	}); err != nil {
+		removeErrs = append(removeErrs, err)
+	}
 	if err := stderrors.Join(removeErrs...); err != nil {
-		return err
+		return r.persistNodeStatusOnError(ctx, nodeSet, nodeSetCopy, err)
 	}
 
 	// When a group is changed from a regular group to a validator group (e.g. 3 regular instances
@@ -252,10 +254,12 @@ func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context
 			removeErrs = append(removeErrs, err)
 		}
 	}
-	pruneAbsentNodeStatus(nodeSet, chainNodeList.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
+	if err := r.pruneAbsentNodeStatus(ctx, nodeSet, chainNodeList.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
 		_, desired := desiredNames[status.Name]
 		return status.Group == group.Name && !desired
-	})
+	}); err != nil {
+		removeErrs = append(removeErrs, err)
+	}
 	if err := stderrors.Join(removeErrs...); err != nil {
 		return err
 	}
@@ -689,15 +693,41 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	return client.IgnoreNotFound(r.Delete(ctx, node, client.Preconditions{UID: &uid}))
 }
 
-// pruneAbsentNodeStatus deletes the status entries selected by stale whose ChainNode is not listed. A
-// listed child keeps its entry: its removal (or the refusal to remove it) decides.
-func pruneAbsentNodeStatus(nodeSet *appsv1.ChainNodeSet, listed []appsv1.ChainNode, stale func(appsv1.ChainNodeSetNodeStatus) bool) {
+// pruneAbsentNodeStatus deletes the status entries selected by stale whose ChainNode is gone. A listing
+// is selected by user-mutable labels, so an entry whose child is not listed is only dropped once a
+// direct read finds no object with that name, or a different object (another UID). A child that still
+// exists keeps its entry: its removal, or the refusal to remove it, decides.
+func (r *Reconciler) pruneAbsentNodeStatus(ctx context.Context, nodeSet *appsv1.ChainNodeSet, listed []appsv1.ChainNode, stale func(appsv1.ChainNodeSetNodeStatus) bool) error {
 	for _, status := range slices.Clone(nodeSet.Status.Nodes) {
-		if !stale(status) || slices.ContainsFunc(listed, func(node appsv1.ChainNode) bool { return node.Name == status.Name }) {
+		if !stale(status) || slices.ContainsFunc(listed, func(node appsv1.ChainNode) bool {
+			return node.Name == status.Name && (status.UID == "" || node.UID == status.UID)
+		}) {
+			continue
+		}
+		current := &appsv1.ChainNode{}
+		err := r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: status.Name}, current)
+		switch {
+		case errors.IsNotFound(err):
+		case err != nil:
+			return err
+		case status.UID == "" || current.UID == status.UID:
 			continue
 		}
 		DeleteNodeStatus(nodeSet, status.Name)
 	}
+	return nil
+}
+
+// persistNodeStatusOnError writes node status changes, such as the entries of children already removed,
+// that returning err would otherwise drop.
+func (r *Reconciler) persistNodeStatusOnError(ctx context.Context, nodeSet, before *appsv1.ChainNodeSet, err error) error {
+	if reflect.DeepEqual(nodeSet.Status.Nodes, before.Status.Nodes) {
+		return err
+	}
+	if updateErr := r.Status().Update(ctx, nodeSet); updateErr != nil {
+		return stderrors.Join(err, updateErr)
+	}
+	return err
 }
 
 // nodeSetOwnsChild reports whether a listed ChainNode belongs to nodeSet, so cleanup driven by a label
