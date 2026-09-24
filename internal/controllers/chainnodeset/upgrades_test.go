@@ -387,3 +387,21 @@ func TestAddOrUpdateUpgradeDoesNotOverwriteExistingImage(t *testing.T) {
 		t.Errorf("AddOrUpdateUpgrade() image = %q, want existing image", got[0].Image)
 	}
 }
+
+func TestAggregateChildUpgradesCancelledOnlyWhenEveryChildAgrees(t *testing.T) {
+	child := func(status appsv1.UpgradePhase) appsv1.ChainNode {
+		return appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
+			Height: 100, Name: "v2", Image: "repo/app:v2", Source: appsv1.OnChainUpgrade, Status: status,
+		}}}}
+	}
+	cancelled, scheduled := child(appsv1.UpgradeCancelled), child(appsv1.UpgradeScheduled)
+
+	for _, nodes := range [][]appsv1.ChainNode{{cancelled, scheduled}, {scheduled, cancelled}} {
+		upgrades := aggregateChildUpgrades(nodes)
+		require.Len(t, upgrades, 1)
+		assert.Equal(t, appsv1.UpgradeScheduled, upgrades[0].Status)
+	}
+	upgrades := aggregateChildUpgrades([]appsv1.ChainNode{cancelled, cancelled})
+	require.Len(t, upgrades, 1)
+	assert.Equal(t, appsv1.UpgradeCancelled, upgrades[0].Status)
+}

@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -245,10 +246,65 @@ func TestChainNodeSetChildGovernanceCancellation(t *testing.T) {
 	}
 }
 
+// TestResolveRequiredUpgradeLegacySignalIgnoresCancelledUpgrade covers a pre-#177 sidecar that latched
+// an upgrade cancelled before it saw the new config: nothing is selected, and no error stops the Pod
+// from being replaced.
 func TestResolveRequiredUpgradeLegacySignalIgnoresCancelledUpgrade(t *testing.T) {
 	node := upgradeCancelNode(99, govUpgrade(100, "v2", appsv1.UpgradeCancelled))
-	_, err := resolveRequiredUpgrade(node, nodeutils.UpgradeStatus{LegacyUpgradeRequired: true, LatestHeight: ptr.To(int64(99))})
-	require.ErrorContains(t, err, "no pending upgrade is eligible")
+	required, err := resolveRequiredUpgrade(node, nodeutils.UpgradeStatus{LegacyUpgradeRequired: true, LatestHeight: ptr.To(int64(99))})
+	require.NoError(t, err)
+	assert.Nil(t, required)
+}
+
+func TestRecordRequiredGovernanceUpgradeReplacesCancelledPlan(t *testing.T) {
+	upgrades := []appsv1.Upgrade{{Height: 100, Name: "v2", Image: "app:old", Status: appsv1.UpgradeCancelled, Source: appsv1.OnChainUpgrade}}
+	updated, changed := recordRequiredGovernanceUpgrade(upgrades, nodeutils.RequiredUpgrade{
+		Height: 100, Name: "v2", Image: "app:new", Source: nodeutils.OnChainUpgrade,
+	}, false)
+	require.True(t, changed)
+	require.Len(t, updated, 1)
+	assert.Equal(t, appsv1.UpgradeScheduled, updated[0].Status)
+	assert.Equal(t, "app:new", updated[0].Image, "the withdrawn plan's image must not be applied")
+}
+
+func TestEnsureUpgradesChecksLiveHeightBeforeCancelling(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		client     upgradeStatusClient
+		wantStatus appsv1.UpgradePhase
+		wantEvent  string
+	}{
+		{
+			name:       "node already stopped one block before",
+			client:     staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(99))}},
+			wantStatus: appsv1.UpgradeScheduled, wantEvent: appsv1.ReasonUpgradeCancelIgnored,
+		},
+		{
+			name:       "height unavailable",
+			client:     failingUpgradeStatusClient{err: errors.New("node-utils unavailable")},
+			wantStatus: appsv1.UpgradeScheduled,
+		},
+		{
+			name:       "node well before the upgrade",
+			client:     staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(60))}},
+			wantStatus: appsv1.UpgradeCancelled, wantEvent: appsv1.ReasonUpgradeCancelled,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := upgradeCancelNode(50, manualUpgrade(100, appsv1.UpgradeScheduled))
+			r, recorder := newUpgradeCancelReconciler(t, node)
+			r.upgradeClientFactory = func(string) upgradeStatusClient { return tc.client }
+
+			require.NoError(t, r.ensureUpgrades(context.Background(), node, true))
+			assert.Equal(t, tc.wantStatus, upgradeStatusAt(t, node, 100).Status)
+			events := drainEvents(recorder)
+			if tc.wantEvent == "" {
+				assert.Empty(t, events)
+			} else {
+				assert.Contains(t, events, tc.wantEvent)
+			}
+		})
+	}
 }
 
 func TestMergeGovUpgradesSchedulesPlanAtCancelledManualHeight(t *testing.T) {
@@ -260,4 +316,34 @@ func TestMergeGovUpgradesSchedulesPlanAtCancelledManualHeight(t *testing.T) {
 	assert.Equal(t, appsv1.UpgradeScheduled, got.Status)
 	assert.Equal(t, appsv1.OnChainUpgrade, got.Source)
 	require.Len(t, node.Status.Upgrades, 1)
+}
+
+// TestChainNodeSetChildKeepsManualCancellationAgainstPropagatedHistory covers a sibling that completed
+// the upgrade before it was removed: its history reaches every child's spec, but only the set's own
+// spec can bring the cancelled entry back.
+func TestChainNodeSetChildKeepsManualCancellationAgainstPropagatedHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setListsIt bool
+		wantStatus appsv1.UpgradePhase
+	}{
+		{name: "only propagated history", wantStatus: appsv1.UpgradeCancelled},
+		{name: "added back to the set spec", setListsIt: true, wantStatus: appsv1.UpgradeScheduled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+			if tc.setListsIt {
+				nodeSet.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}}
+			}
+			child := upgradeCancelNode(50, manualUpgrade(100, appsv1.UpgradeCancelled))
+			child.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "set", UID: "set-uid", Controller: ptr.To(true),
+			}}
+			child.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}}
+			r, _ := newUpgradeCancelReconciler(t, nodeSet, child)
+
+			require.NoError(t, r.ensureUpgrades(context.Background(), child, false))
+			assert.Equal(t, tc.wantStatus, upgradeStatusAt(t, child, 100).Status)
+		})
+	}
 }

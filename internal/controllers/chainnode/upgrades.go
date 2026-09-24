@@ -55,18 +55,14 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 			u.Status = appsv1.UpgradeSkipped
 		}
 		if hasCancelledUpgrade(chainNode.Status.Upgrades, u.Height) {
-			// Only the user brings a cancelled upgrade back: a manual spec entry, or a forceOnChain entry
-			// in the user's own spec. A ChainNodeSet child also carries governance entries propagated
-			// from the set's status, which must not undo a cancellation.
-			revive := u.Source == appsv1.ManualUpgrade
-			if !revive {
-				forced, err := r.upgradeForcedOnChain(ctx, chainNode, u.Height)
-				if err != nil {
-					return err
-				}
-				revive = forced
+			// Only the user brings a cancelled upgrade back by listing it in their own spec. A
+			// ChainNodeSet child's spec also carries entries propagated from the set's status, which
+			// must not undo a cancellation.
+			configured, err := r.userConfiguredUpgrade(ctx, chainNode, u.Height, upgrade.ForceGovUpgrade())
+			if err != nil {
+				return err
 			}
-			if !revive {
+			if !configured {
 				continue
 			}
 			chainNode.Status.Upgrades = dropCancelledUpgrade(chainNode.Status.Upgrades, u.Height)
@@ -86,7 +82,7 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 		}
 	}
 
-	r.cancelRemovedManualUpgrades(chainNode)
+	r.cancelRemovedManualUpgrades(ctx, chainNode, nodePodRunning)
 
 	// Sort upgrades by height
 	sort.Slice(chainNode.Status.Upgrades, func(i, j int) bool {
@@ -107,11 +103,27 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 // cancelRemovedManualUpgrades marks a scheduled manual upgrade that is no longer in the spec as
 // cancelled. The removal is ignored, with a warning, once the node is at the height before the upgrade
 // or the upgrade is ongoing, because node-utils may already be acting on it.
-func (r *Reconciler) cancelRemovedManualUpgrades(chainNode *appsv1.ChainNode) {
+func (r *Reconciler) cancelRemovedManualUpgrades(ctx context.Context, chainNode *appsv1.ChainNode, nodePodRunning bool) {
+	// The persisted height can trail the node, which node-utils may already have stopped one block
+	// before the upgrade. Read the live height before cancelling anything; if it cannot be read,
+	// cancel nothing this time.
+	latestHeight := chainNode.Status.LatestHeight
+	liveHeightChecked := !nodePodRunning
 	for i := range chainNode.Status.Upgrades {
 		u := &chainNode.Status.Upgrades[i]
 		if u.Source != appsv1.ManualUpgrade || specHasUpgradeAt(chainNode, u.Height) {
 			continue
+		}
+		if u.Status == appsv1.UpgradeScheduled && !liveHeightChecked {
+			status, err := r.getUpgradeStatus(ctx, chainNode)
+			if err != nil {
+				log.FromContext(ctx).Error(err, "not cancelling removed manual upgrades: could not read the node height")
+				return
+			}
+			if status.LatestHeight != nil && *status.LatestHeight > latestHeight {
+				latestHeight = *status.LatestHeight
+			}
+			liveHeightChecked = true
 		}
 		switch {
 		case u.Status == appsv1.UpgradeOnGoing:
@@ -119,10 +131,10 @@ func (r *Reconciler) cancelRemovedManualUpgrades(chainNode *appsv1.ChainNode) {
 				"Manual upgrade at height %d was removed from spec but is already ongoing; it will not be cancelled", u.Height)
 		case u.Status != appsv1.UpgradeScheduled:
 			continue
-		case chainNode.Status.LatestHeight >= u.Height-1:
+		case latestHeight >= u.Height-1:
 			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonUpgradeCancelIgnored,
 				"Manual upgrade at height %d was removed from spec but the node is already at height %d; it will not be cancelled",
-				u.Height, chainNode.Status.LatestHeight)
+				u.Height, latestHeight)
 		default:
 			u.Status = appsv1.UpgradeCancelled
 			r.recorder.Eventf(chainNode, corev1.EventTypeNormal, appsv1.ReasonUpgradeCancelled,
@@ -187,10 +199,16 @@ func (r *Reconciler) retireStaleGovUpgrades(ctx context.Context, chainNode *apps
 	return nil
 }
 
-// upgradeForcedOnChain reports whether the user configured a forceOnChain upgrade at height. A
-// ChainNodeSet child's spec also carries governance entries propagated from the set's status, so for
-// a child only the set's own spec expresses user intent.
+// upgradeForcedOnChain reports whether the user configured a forceOnChain upgrade at height.
 func (r *Reconciler) upgradeForcedOnChain(ctx context.Context, chainNode *appsv1.ChainNode, height int64) (bool, error) {
+	return r.userConfiguredUpgrade(ctx, chainNode, height, true)
+}
+
+// userConfiguredUpgrade reports whether the user's own spec lists an upgrade at height, forced on-chain
+// or manual as requested. A ChainNodeSet child's spec also carries entries propagated from the set's
+// status, so for a child only the set's own spec expresses user intent. If the set cannot be found the
+// entry is treated as configured, which keeps it.
+func (r *Reconciler) userConfiguredUpgrade(ctx context.Context, chainNode *appsv1.ChainNode, height int64, forceOnChain bool) (bool, error) {
 	upgrades := chainNode.Spec.App.Upgrades
 	if owner := metav1.GetControllerOf(chainNode); owner != nil && chainNode.IsControlledByChainNodeSet() {
 		nodeSet := &appsv1.ChainNodeSet{}
@@ -203,7 +221,7 @@ func (r *Reconciler) upgradeForcedOnChain(ctx context.Context, chainNode *appsv1
 		upgrades = nodeSet.Spec.App.Upgrades
 	}
 	for _, upgrade := range upgrades {
-		if upgrade.Height == height && upgrade.ForceGovUpgrade() {
+		if upgrade.Height == height && upgrade.ForceGovUpgrade() == forceOnChain {
 			return true, nil
 		}
 	}
@@ -336,7 +354,8 @@ func recordRequiredGovernanceUpgrade(
 			existing.Status == appsv1.UpgradeOnGoing {
 			return upgrades, false
 		}
-		if existing.Name != required.Name || existing.Name == "" {
+		// The chain requires a plan at a cancelled height: take the marker's plan, not the withdrawn one.
+		if existing.Name != required.Name || existing.Name == "" || existing.Status == appsv1.UpgradeCancelled {
 			upgrades[i] = incoming
 			return upgrades, true
 		}
@@ -388,8 +407,12 @@ func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.Upgrad
 	}
 
 	var selected *appsv1.Upgrade
+	cancelledEligible := false
 	for i := range chainNode.Status.Upgrades {
 		upgrade := &chainNode.Status.Upgrades[i]
+		if upgrade.Height <= maxEligibleHeight && upgrade.Status == appsv1.UpgradeCancelled {
+			cancelledEligible = true
+		}
 		if upgrade.Height > maxEligibleHeight ||
 			(upgrade.Status != appsv1.UpgradeScheduled && upgrade.Status != appsv1.UpgradeOnGoing) {
 			continue
@@ -397,6 +420,11 @@ func resolveRequiredUpgrade(chainNode *appsv1.ChainNode, status nodeutils.Upgrad
 		if selected == nil || upgrade.Height < selected.Height {
 			selected = upgrade
 		}
+	}
+	if selected == nil && cancelledEligible {
+		// A legacy sidecar latched an upgrade that was cancelled before it saw the new config. Nothing is
+		// applied; replacing the Pod (with the current sidecar) clears the latch.
+		return nil, nil
 	}
 	if selected == nil {
 		return nil, fmt.Errorf("legacy node-utils requires an upgrade at height %d but no pending upgrade is eligible", *status.LatestHeight)

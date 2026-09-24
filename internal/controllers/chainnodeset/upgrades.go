@@ -117,6 +117,15 @@ func aggregateChildUpgrades(nodes []appsv1.ChainNode) []appsv1.Upgrade {
 func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []appsv1.Upgrade {
 	for i, u := range upgrades {
 		if u.Height == upgrade.Height {
+			// A cancellation only shows when every child agrees: children list in no fixed order, and
+			// a lagging child that still has the entry scheduled must not make the aggregate flip.
+			if upgrade.Status == appsv1.UpgradeCancelled {
+				return upgrades
+			}
+			if u.Status == appsv1.UpgradeCancelled {
+				upgrades[i] = upgrade
+				return upgrades
+			}
 			if u.Source == appsv1.OnChainUpgrade && upgrade.Source == appsv1.OnChainUpgrade &&
 				u.Name != "" && upgrade.Name != "" && u.Name != upgrade.Name &&
 				(u.Status == appsv1.UpgradeScheduled || u.Status == appsv1.UpgradeImageMissing) &&
