@@ -794,6 +794,10 @@ func (r *Reconciler) tarballProviderForExport(
 	if err != nil {
 		return nil, err
 	}
+	// Pod resources are not part of the recorded destination; the current spec applies.
+	if p := chainNode.Spec.Persistence; p != nil && p.Snapshots != nil && p.Snapshots.ExportTarball != nil {
+		cfg.Resources = p.Snapshots.ExportTarball.Resources
+	}
 	return r.tarballProviderForConfig(chainNode, cfg)
 }
 

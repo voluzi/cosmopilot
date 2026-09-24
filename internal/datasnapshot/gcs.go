@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
+	"google.golang.org/api/googleapi"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -118,6 +120,23 @@ func (gcs *GCS) serviceAccountName() string {
 	return *gcs.Config.ServiceAccountName
 }
 
+// defaultUploadRequests requests the memory the exporter holds: one read chunk plus one per in-flight
+// part, and for each part upload its copy buffer and the storage writer's upload buffer.
+func (gcs *GCS) defaultUploadRequests() corev1.ResourceList {
+	requests := corev1.ResourceList{}
+	jobs := gcs.Config.GetConcurrentJobs()
+	chunks, ok := uploadRequest(gcs.Config.GetChunkSize(), jobs+1)
+	if !ok {
+		return requests
+	}
+	if buffers, ok := uploadRequest(gcs.Config.GetBufferSize(), jobs); ok {
+		chunks.Add(buffers)
+	}
+	chunks.Add(*resource.NewQuantity(int64(googleapi.DefaultUploadChunkSize)*int64(jobs), resource.BinarySI))
+	requests[corev1.ResourceMemory] = chunks
+	return requests
+}
+
 func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -131,7 +150,8 @@ func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: ptr.To[int32](0),
+			BackoffLimit:     ptr.To[int32](0),
+			PodFailurePolicy: uploadJobPodFailurePolicy(),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -147,8 +167,9 @@ func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 						},
 					}}, gcs.credentialsVolume()...),
 					Containers: []corev1.Container{{
-						Name:            "dataexporter",
+						Name:            uploadContainerName,
 						Image:           gcs.dataExporterImage,
+						Resources:       uploadJobResources(gcs.ExportConfig, gcs.defaultUploadRequests()),
 						ImagePullPolicy: corev1.PullAlways,
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},

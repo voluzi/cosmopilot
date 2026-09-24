@@ -5,16 +5,19 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/c2h5oh/datasize"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -887,6 +890,7 @@ func deletionJobFromUpload(
 	name := snapshotNameFromJob(upload)
 	container.Args = []string{provider, typeDelete, container.Args[3], name}
 	container.WorkingDir = "/app"
+	container.Resources = corev1.ResourceRequirements{}
 	container.VolumeMounts = slices.DeleteFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
 		return mount.Name == "data"
 	})
@@ -1497,4 +1501,38 @@ func cleanUpNewUploadJob(
 		return fmt.Errorf("%w; clean up upload job: %v", cause, err)
 	}
 	return cause
+}
+
+// uploadContainerName is the export upload job's container.
+const uploadContainerName = "dataexporter"
+
+// uploadJobResources returns the configured export pod resources, or the given default requests.
+func uploadJobResources(cfg *appsv1.ExportTarballConfig, defaults corev1.ResourceList) corev1.ResourceRequirements {
+	if cfg != nil && cfg.Resources != nil {
+		return *cfg.Resources
+	}
+	return corev1.ResourceRequirements{Requests: defaults}
+}
+
+// uploadRequest returns size × multiplier as a quantity, or false when size cannot be parsed.
+func uploadRequest(size string, multiplier int) (resource.Quantity, bool) {
+	parsed, err := datasize.ParseString(size)
+	if err != nil || multiplier < 1 || parsed.Bytes() > uint64(math.MaxInt64)/uint64(multiplier) {
+		return resource.Quantity{}, false
+	}
+	return *resource.NewQuantity(int64(parsed.Bytes())*int64(multiplier), resource.BinarySI), true
+}
+
+// uploadJobPodFailurePolicy keeps evictions, preemptions and drains of the export pod from consuming the
+// Job's only attempt. Other failures, OOM kills included, still count.
+func uploadJobPodFailurePolicy() *batchv1.PodFailurePolicy {
+	return &batchv1.PodFailurePolicy{
+		Rules: []batchv1.PodFailurePolicyRule{{
+			Action: batchv1.PodFailurePolicyActionIgnore,
+			OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{{
+				Type:   corev1.DisruptionTarget,
+				Status: corev1.ConditionTrue,
+			}},
+		}},
+	}
 }

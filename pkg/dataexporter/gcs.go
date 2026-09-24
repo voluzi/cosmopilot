@@ -132,10 +132,24 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, opts.ConcurrentJobs)
 	buf := make([]byte, opts.ChunkSize)
-	var uploadErr atomic.Value // stores first upload error
+	// Part uploads use their own context so the first failure cancels the ones in flight. The first
+	// error is kept under a mutex: cancelled uploads fail with errors of other concrete types.
+	uploadCtx, cancelUploads := context.WithCancel(ctx)
+	defer cancelUploads()
+	var errMu sync.Mutex
+	var uploadErr error
+	firstUploadErr := func() error {
+		errMu.Lock()
+		defer errMu.Unlock()
+		return uploadErr
+	}
 
 	for {
 		semaphore <- struct{}{}
+		if firstUploadErr() != nil {
+			<-semaphore
+			break // A part failed: stop reading the archive.
+		}
 
 		log.WithFields(map[string]interface{}{
 			"part-index": partIndex,
@@ -144,6 +158,10 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 		n, err := io.ReadFull(reader, buf)
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("error reading chunk: %v", err)
+		}
+		if firstUploadErr() != nil {
+			<-semaphore
+			break // A part failed while this chunk was read: do not upload it.
 		}
 		bytesArchived.Add(uint64(n))
 		if n == 0 {
@@ -169,14 +187,19 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 				"part": partName,
 				"size": datasize.ByteSize(len(partData)).HumanReadable(),
 			}).Debug("starting part upload")
-			if err := gcs.uploadToGCS(ctx,
+			if err := gcs.uploadToGCS(uploadCtx,
 				bucket,
 				partName,
 				newReaderWithBytesCounter(bytes.NewReader(partData), &bytesUploaded),
 				opts.BufferSize.Bytes(),
 			); err != nil {
 				log.Errorf("failed to upload part %s: %v", partName, err)
-				uploadErr.CompareAndSwap(nil, err) // store first error
+				errMu.Lock()
+				if uploadErr == nil {
+					uploadErr = err
+					cancelUploads()
+				}
+				errMu.Unlock()
 			}
 			log.WithFields(map[string]interface{}{
 				"part": partName,
@@ -193,8 +216,8 @@ func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, buck
 	wg.Wait()
 
 	// Check if any upload failed
-	if err := uploadErr.Load(); err != nil {
-		return fmt.Errorf("upload failed: %w", err.(error))
+	if err := firstUploadErr(); err != nil {
+		return fmt.Errorf("upload failed: %w", err)
 	}
 
 	return gcs.composeParts(ctx, bucket, partNames, objectName, estimatedArchiveSize, opts)
