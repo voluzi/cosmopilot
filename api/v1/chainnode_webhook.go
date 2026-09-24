@@ -99,7 +99,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	if err := validateAppBinaryName(".spec.app.app", chainNode.Spec.App.App); err != nil {
 		return nil, err
 	}
-	if err := validateSidecarNames(".spec.config", chainNode.Spec.Config); err != nil {
+	if err := validateSidecarNames(".spec.config", chainNode.Spec.Config, chainNode.Spec.App.App); err != nil {
 		return nil, err
 	}
 	if chainNode.Spec.Validator != nil {

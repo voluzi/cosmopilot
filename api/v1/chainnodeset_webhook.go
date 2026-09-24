@@ -303,7 +303,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			return nil, fmt.Errorf(".spec.nodes[%d].name %q duplicates .spec.nodes[%d].name", i, group.Name, prev)
 		}
 		seenGroupNames[group.Name] = i
-		if err := validateNodeSetGroupNames(i, group); err != nil {
+		if err := validateNodeSetGroupNames(i, group, nodeSet.Spec.App.App); err != nil {
 			return nil, err
 		}
 

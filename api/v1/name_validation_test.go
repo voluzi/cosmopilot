@@ -69,6 +69,20 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: "duplicates",
 		},
 		{
+			name: "sidecar named like a built-in container",
+			mutate: func(c *ChainNode) {
+				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "node-utils"}}}
+			},
+			wantErr: "collides with a built-in pod container",
+		},
+		{
+			name: "sidecar named like the app container",
+			mutate: func(c *ChainNode) {
+				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "chaind"}}}
+			},
+			wantErr: "collides with a built-in pod container",
+		},
+		{
 			name: "duplicate sidecar names",
 			mutate: func(c *ChainNode) {
 				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "exporter"}, {Name: "exporter"}}}

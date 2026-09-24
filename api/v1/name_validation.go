@@ -69,7 +69,14 @@ func validateAppBinaryName(path, app string) error {
 	return validateDNS1123Label(path, app)
 }
 
-func validateSidecarNames(path string, config *Config) error {
+// reservedPodContainerNames are the node Pod's built-in container names (internal/controllers/chainnode
+// and internal/tmkms); the app container is named after .spec.app.app. A sidecar with one of these names
+// would collide with it.
+var reservedPodContainerNames = []string{
+	"node-utils", "wait-cosmosigner-discovery", "link-genesis", "tmkms", "vault-token-renewer",
+}
+
+func validateSidecarNames(path string, config *Config, appName string) error {
 	if config == nil {
 		return nil
 	}
@@ -78,6 +85,9 @@ func validateSidecarNames(path string, config *Config) error {
 		p := fmt.Sprintf("%s.sidecars[%d].name", path, i)
 		if err := validateDNS1123Label(p, sidecar.Name); err != nil {
 			return err
+		}
+		if sidecar.Name == appName || slices.Contains(reservedPodContainerNames, sidecar.Name) {
+			return fmt.Errorf("%s %q collides with a built-in pod container", p, sidecar.Name)
 		}
 		if prev, ok := seen[sidecar.Name]; ok {
 			return fmt.Errorf("%s %q duplicates %s.sidecars[%d].name", p, sidecar.Name, path, prev)
@@ -132,7 +142,7 @@ func (nodeSet *ChainNodeSet) validateNames() error {
 		if err := validateAdditionalVolumes(".spec.validator.persistence", v.Persistence); err != nil {
 			return err
 		}
-		if err := validateSidecarNames(".spec.validator.config", v.Config); err != nil {
+		if err := validateSidecarNames(".spec.validator.config", v.Config, nodeSet.Spec.App.App); err != nil {
 			return err
 		}
 		if err := validateGenesisDurations(".spec.validator.init", v.Init); err != nil {
@@ -144,7 +154,7 @@ func (nodeSet *ChainNodeSet) validateNames() error {
 
 // validateNodeSetGroupNames checks a group's name (part of every child ChainNode and Service name) and
 // the volumes, sidecars and genesis durations of the group and its validator.
-func validateNodeSetGroupNames(i int, group NodeGroupSpec) error {
+func validateNodeSetGroupNames(i int, group NodeGroupSpec, appName string) error {
 	path := fmt.Sprintf(".spec.nodes[%d]", i)
 	if err := validateDNS1123Label(path+".name", group.Name); err != nil {
 		return err
@@ -155,7 +165,7 @@ func validateNodeSetGroupNames(i int, group NodeGroupSpec) error {
 		if err := validateAdditionalVolumes(path+".persistence", group.Persistence); err != nil {
 			return err
 		}
-		if err := validateSidecarNames(path+".config", group.Config); err != nil {
+		if err := validateSidecarNames(path+".config", group.Config, appName); err != nil {
 			return err
 		}
 	}
@@ -163,7 +173,7 @@ func validateNodeSetGroupNames(i int, group NodeGroupSpec) error {
 		if err := validateAdditionalVolumes(path+".validator.persistence", v.Persistence); err != nil {
 			return err
 		}
-		if err := validateSidecarNames(path+".validator.config", v.Config); err != nil {
+		if err := validateSidecarNames(path+".validator.config", v.Config, appName); err != nil {
 			return err
 		}
 		if err := validateGenesisDurations(path+".validator.init", v.Init); err != nil {
