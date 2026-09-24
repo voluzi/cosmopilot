@@ -254,8 +254,10 @@ after the old token fails lookup, but TLS CA and other client configuration are 
 startup; use a new Secret name when those values rotate so Cosmopilot performs break-before-make.
 
 `keyVersion` is pinned into every public-key lookup and signing request. Rotating the Vault Transit
-key therefore does not silently change the validator identity on restart. Deliberately moving to a
-new version is a managed signer migration and must match the key the chain expects.
+key therefore does not silently change the validator identity on restart. Moving an existing signer
+to another version of the same `keyName` is rejected, because Cosmosigner 3.x binds the whole key to
+the signer cluster that first used it (see [Key ownership](#key-ownership-cosmosigner-3x)): new key
+material needs a new `keyName`, and must match the key the chain expects.
 
 :::note[Genesis init implies `uploadGenerated`]
 When the signer targets a validator that initializes a new genesis (`validator.init`),
@@ -389,13 +391,19 @@ in the signer logs.
 A signer whose Raft state is discarded (a different-key migration, or deleting and recreating the
 signer) starts a **new** cluster. If it points at a Vault key name or Cloud KMS CryptoKey that an
 earlier cluster already recorded, it is refused: use a new key name or CryptoKey for new key material,
-and never reuse one after its Raft state has been removed.
+and never reuse one after its Raft state has been removed. Admission rejects the common case, moving
+a signer to another `keyVersion` of the same Vault key or CryptoKey. For the same reason every signer
+needs its own Vault key or CryptoKey, including signers on different chains: only the first signer
+cluster to start can use it.
 
 Upgrading an existing signer from Cosmosigner 0.2.x to 3.x keeps its Raft state, so it records its
 existing cluster and keeps signing. Before upgrading the operator, create the Vault KV mount or grant
 the Cloud KMS permissions above: the new default image replaces running signers through the usual
-break-before-make migration. Going back to 0.2.x afterwards is unsupported, because 0.2.x cannot read
-the state 3.x writes.
+break-before-make migration. A signer whose permissions are missing keeps restarting and recovers by
+itself once they are granted, but its validator does not sign meanwhile. To upgrade signer by
+signer, pin `.spec.cosmosigner.image` to your current 0.2.x image before upgrading the operator, then
+remove the pin one signer at a time. Going back to 0.2.x after a signer has run 3.x is unsupported,
+because 0.2.x cannot read the state 3.x writes.
 
 ## High availability
 

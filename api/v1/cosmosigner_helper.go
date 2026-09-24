@@ -815,6 +815,37 @@ func (nodeSet *ChainNodeSet) ValidatorGroupResolvesSigningIdentity(group string,
 	return identity != "" && nodeSet.validatorGroupSigningIdentity(group, cfg) == identity
 }
 
+// keyResource is the Vault Transit key or Cloud KMS CryptoKey the signer's key version belongs to:
+// cosmosigner 3.x binds the whole resource, not a version, to the signer cluster that first used it.
+// Empty for the software backend.
+func (c *Cosmosigner) keyResource() string {
+	switch {
+	case c.UsesVaultBackend():
+		v := c.Backend.Vault
+		return strings.Join([]string{"vault", v.Address, ptr.Deref(v.Namespace, ""), v.GetVaultMount(), v.KeyName}, "\x00")
+	case c.GcpImportsKey():
+		return "gcpkms\x00" + c.Backend.GcpKMS.Import.CryptoKeyName()
+	case c.UsesGcpKmsBackend():
+		cryptoKey, _, _ := strings.Cut(c.Backend.GcpKMS.KeyVersion, "/cryptoKeyVersions/")
+		return "gcpkms\x00" + cryptoKey
+	}
+	return ""
+}
+
+// validateCosmosignerKeyVersionChange rejects moving a signer to another version of the same Vault
+// key or Cloud KMS CryptoKey. That migration resets the signer's Raft state, and cosmosigner 3.x
+// refuses the new cluster because the key is still bound to the old one.
+func validateCosmosignerKeyVersionChange(path string, oldC, newC *Cosmosigner) error {
+	if oldC == nil || newC == nil {
+		return nil
+	}
+	if resource := oldC.keyResource(); resource == "" || resource != newC.keyResource() ||
+		oldC.effectiveSigningIdentity("") == newC.effectiveSigningIdentity("") {
+		return nil
+	}
+	return fmt.Errorf("%s: moving to another version of the same Vault key or Cloud KMS CryptoKey is not supported, because cosmosigner binds the whole key to the signer cluster that first used it; use a new Vault keyName or Cloud KMS CryptoKey for new key material", path)
+}
+
 // validateCosmosignerReplicasImmutable rejects a change to the signer replica count. Scaling the
 // embedded raft cluster is not a plain Kubernetes scale: the membership recorded in the existing
 // per-pod raft state is not updated by rendering a new bootstrap list, so scaling down can lose

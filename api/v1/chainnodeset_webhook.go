@@ -1459,6 +1459,9 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			if err := validateCosmosignerStateStorageImmutable(path, os.Spec, ns.Spec); err != nil {
 				return err
 			}
+			if err := validateCosmosignerKeyVersionChange(path+".backend", os.Spec, ns.Spec); err != nil {
+				return err
+			}
 			if old.Status.ChainID != "" && os.Digest() != ns.Digest() {
 				st := old.GetCosmosignerStatus(os.Name)
 				if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
