@@ -15,7 +15,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      {{- include "cosmopilot.labels" . | indent 6 }}
+      {{- include "cosmopilot.selectorLabels" . | indent 6 }}
   replicas: {{ .Values.replicas }}
   template:
     metadata:
@@ -95,7 +95,7 @@ spec:
             - name: RELEASE_NAME
               value: {{ .Release.Name | quote }}
             - name: WORKER_NAME
-              value: {{ .Values.workerName }}
+              value: {{ .Values.workerName | quote }}
             - name: WORKER_COUNT
               value: "{{ .Values.workerCount }}"
             - name: DISABLE_WEBHOOKS

@@ -20,9 +20,9 @@ webhooks:
     admissionReviewVersions: ["v1"]
     name: vchainnode.kb.io
     objectSelector:
-    {{- if .Values.workerName }}
+    {{- if and (not (kindIs "invalid" .Values.workerName)) (ne (toString .Values.workerName) "") }}
       matchLabels:
-        worker-name: {{ .Values.workerName }}
+        worker-name: {{ .Values.workerName | quote }}
     {{- else }}
       matchExpressions:
         - key: worker-name
@@ -49,9 +49,9 @@ webhooks:
     admissionReviewVersions: ["v1"]
     name: vchainnodeset.kb.io
     objectSelector:
-    {{- if .Values.workerName }}
+    {{- if and (not (kindIs "invalid" .Values.workerName)) (ne (toString .Values.workerName) "") }}
       matchLabels:
-        worker-name: {{ .Values.workerName }}
+        worker-name: {{ .Values.workerName | quote }}
     {{- else }}
       matchExpressions:
         - key: worker-name

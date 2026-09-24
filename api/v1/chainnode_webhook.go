@@ -92,6 +92,22 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		return nil, fmt.Errorf("bad format for .spec.size: %v", err)
 	}
 
+	// Names below become container, volume or object names; genesis durations reach genesis.json.
+	if err := validateAdditionalVolumes(".spec.persistence", chainNode.Spec.Persistence); err != nil {
+		return nil, err
+	}
+	if err := validateAppBinaryName(".spec.app.app", chainNode.Spec.App.App); err != nil {
+		return nil, err
+	}
+	if err := validateSidecarNames(".spec.config", chainNode.Spec.Config, chainNode.Spec.App.App); err != nil {
+		return nil, err
+	}
+	if chainNode.Spec.Validator != nil {
+		if err := validateGenesisDurations(".spec.validator.init", chainNode.Spec.Validator.Init); err != nil {
+			return nil, err
+		}
+	}
+
 	// Reject a node name whose derived resource names would exceed the 63-character DNS label limit
 	// (and then fail every reconcile). Enforced on create and update since Validate runs on both.
 	if err := validateDerivedNameLengths(chainNode.GetName(), "ChainNode name", nameFeatures{

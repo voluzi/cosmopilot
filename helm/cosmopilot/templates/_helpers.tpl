@@ -13,10 +13,16 @@
 {{- end }}
 {{- end }}
 
-{{- define "cosmopilot.labels" }}
+{{- define "cosmopilot.selectorLabels" }}
 app.kubernetes.io/name: {{ .Chart.Name }}
 helm.sh/chart: {{ .Chart.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-{{- if .Values.labels }}{{ toYaml .Values.labels}}{{- end }}
+{{- end }}
+
+{{- define "cosmopilot.labels" }}
+{{- include "cosmopilot.selectorLabels" . }}
+{{- with omit (.Values.labels | default dict) "app.kubernetes.io/name" "helm.sh/chart" "app.kubernetes.io/managed-by" "app.kubernetes.io/instance" }}
+{{ toYaml . | trimSuffix "\n" }}
+{{- end }}
 {{- end }}

@@ -14,6 +14,7 @@ import (
 const (
 	ReasonPvcResized                       = "PvcResized"
 	ReasonPvcMaxReached                    = "PvcMaxSizeReached"
+	ReasonPvcResizeSkipped                 = "PvcResizeSkipped"
 	ReasonDataInitialized                  = "DataInitialized"
 	ReasonDataInitStarted                  = "DataInitStarted"
 	ReasonDataInitFailed                   = "DataInitFailed"

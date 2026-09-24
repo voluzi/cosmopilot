@@ -198,11 +198,37 @@ func executeDeploymentTemplate(t *testing.T, releaseName string, values map[stri
 	t.Helper()
 	templateSource, err := os.ReadFile("templates/deployment.yaml")
 	require.NoError(t, err)
+	helpersSource, err := os.ReadFile("templates/_helpers.tpl")
+	require.NoError(t, err)
 
-	chartTemplate, err := template.New("deployment.yaml").Funcs(template.FuncMap{
-		"include": func(string, any) string {
-			return "\napp.kubernetes.io/name: cosmopilot\napp.kubernetes.io/instance: test"
+	var chartTemplate *template.Template
+	chartTemplate, err = template.New("deployment.yaml").Funcs(template.FuncMap{
+		"include": func(name string, data any) (string, error) {
+			var out bytes.Buffer
+			err := chartTemplate.ExecuteTemplate(&out, name, data)
+			return out.String(), err
 		},
+		"trimSuffix": func(suffix, value string) string { return strings.TrimSuffix(value, suffix) },
+		"dict":       func() map[string]any { return map[string]any{} },
+		"default": func(fallback, value any) any {
+			if value == nil {
+				return fallback
+			}
+			return value
+		},
+		"omit": func(values map[string]any, keys ...string) map[string]any {
+			out := map[string]any{}
+			for k, v := range values {
+				out[k] = v
+			}
+			for _, k := range keys {
+				delete(out, k)
+			}
+			return out
+		},
+		"splitList": func(sep, value string) []string { return strings.Split(value, sep) },
+		"first":     func(list []string) string { return list[0] },
+		"last":      func(list []string) string { return list[len(list)-1] },
 		"indent": func(spaces int, value string) string {
 			prefix := strings.Repeat(" ", spaces)
 			return prefix + strings.ReplaceAll(value, "\n", "\n"+prefix)
@@ -226,10 +252,12 @@ func executeDeploymentTemplate(t *testing.T, releaseName string, values map[stri
 		},
 	}).Parse(string(templateSource))
 	require.NoError(t, err)
+	_, err = chartTemplate.New("_helpers.tpl").Parse(string(helpersSource))
+	require.NoError(t, err)
 
 	data := map[string]any{
-		"Release": map[string]any{"Name": releaseName, "Namespace": "default"},
-		"Chart":   map[string]any{"AppVersion": appVersion},
+		"Release": map[string]any{"Name": releaseName, "Namespace": "default", "Service": "Helm"},
+		"Chart":   map[string]any{"Name": "cosmopilot", "AppVersion": appVersion},
 		"Values":  values,
 	}
 	var rendered bytes.Buffer
@@ -269,4 +297,100 @@ func imageValues(value any) map[string]any {
 		values[key] = value
 	}
 	return values
+}
+
+func TestDeploymentRendersUserLabelsOutsideTheSelector(t *testing.T) {
+	values := defaultChartValues()
+	values["labels"] = map[string]any{"team": "infra", "tier": "ops", "app.kubernetes.io/name": "custom"}
+	rendered, err := executeDeploymentTemplate(t, "test", values, "3.0.0-beta.7")
+	require.NoError(t, err)
+
+	var deployment struct {
+		Metadata struct {
+			Labels map[string]string `yaml:"labels"`
+		} `yaml:"metadata"`
+		Spec struct {
+			Selector struct {
+				MatchLabels map[string]string `yaml:"matchLabels"`
+			} `yaml:"selector"`
+			Template struct {
+				Metadata struct {
+					Labels map[string]string `yaml:"labels"`
+				} `yaml:"metadata"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	require.NoErrorf(t, yaml.Unmarshal(rendered, &deployment), "%s", rendered)
+	selector := map[string]string{
+		"app.kubernetes.io/name":       "cosmopilot",
+		"helm.sh/chart":                "cosmopilot",
+		"app.kubernetes.io/managed-by": "Helm",
+		"app.kubernetes.io/instance":   "test",
+	}
+	assert.Equal(t, selector, deployment.Spec.Selector.MatchLabels, "user labels must stay out of the immutable selector")
+	for _, labels := range []map[string]string{deployment.Metadata.Labels, deployment.Spec.Template.Metadata.Labels} {
+		assert.Equal(t, "infra", labels["team"])
+		assert.Equal(t, "ops", labels["tier"])
+		assert.Equal(t, "test", labels["app.kubernetes.io/instance"])
+		assert.Equal(t, "cosmopilot", labels["app.kubernetes.io/name"], "a user label must not override a selector label")
+	}
+}
+
+func TestDeploymentQuotesWorkerName(t *testing.T) {
+	for _, name := range []string{"1", "true", "worker-a"} {
+		values := defaultChartValues()
+		values["workerName"] = name
+		env := renderDeployment(t, "test", values, "3.0.0-beta.7").env
+		assert.Equal(t, name, env["WORKER_NAME"].Value)
+		assert.Equal(t, "!!str", env["WORKER_NAME"].Tag, name)
+	}
+}
+
+func TestWebhookObjectSelectorQuotesWorkerName(t *testing.T) {
+	source, err := os.ReadFile("templates/webhooks/manifests.yaml")
+	require.NoError(t, err)
+	manifest, err := template.New("manifests.yaml").Funcs(template.FuncMap{
+		"include":  func(string, any) (string, error) { return "", nil },
+		"indent":   func(int, string) string { return "" },
+		"quote":    func(value any) string { return fmt.Sprintf("%q", fmt.Sprint(value)) },
+		"toString": func(value any) string { return fmt.Sprint(value) },
+		"kindIs":   func(kind string, value any) bool { return kind == "invalid" && value == nil },
+	}).Parse(string(source))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		workerName any
+		want       string
+	}{
+		{workerName: "1", want: "1"},
+		{workerName: 0, want: "0"},
+		{workerName: "", want: ""},
+		{workerName: nil, want: ""},
+	} {
+		var rendered bytes.Buffer
+		require.NoError(t, manifest.Execute(&rendered, map[string]any{
+			"Release": map[string]any{"Name": "test", "Namespace": "default"},
+			"Values":  map[string]any{"webHooksEnabled": true, "workerName": tc.workerName},
+		}))
+		var config struct {
+			Webhooks []struct {
+				ObjectSelector struct {
+					MatchLabels      map[string]yaml.Node `yaml:"matchLabels"`
+					MatchExpressions []any                `yaml:"matchExpressions"`
+				} `yaml:"objectSelector"`
+			} `yaml:"webhooks"`
+		}
+		require.NoError(t, yaml.Unmarshal(rendered.Bytes(), &config))
+		require.NotEmpty(t, config.Webhooks)
+		for _, webhook := range config.Webhooks {
+			if tc.want == "" {
+				assert.Empty(t, webhook.ObjectSelector.MatchLabels)
+				assert.NotEmpty(t, webhook.ObjectSelector.MatchExpressions)
+				continue
+			}
+			label := webhook.ObjectSelector.MatchLabels["worker-name"]
+			assert.Equal(t, tc.want, label.Value, "workerName %v", tc.workerName)
+			assert.Equal(t, "!!str", label.Tag)
+		}
+	}
 }

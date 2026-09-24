@@ -1314,7 +1314,8 @@ func (vpam *VerticalAutoscalingMetricConfig) GetOOMRecoveryWindow() time.Duratio
 
 func (vpar *VerticalAutoscalingRule) GetDuration() time.Duration {
 	if vpar != nil && vpar.Duration != nil {
-		if d, err := strfmt.ParseDuration(*vpar.Duration); err == nil {
+		// A zero window makes the stats client omit the average and read cumulative CPU seconds.
+		if d, err := strfmt.ParseDuration(*vpar.Duration); err == nil && d > 0 {
 			return d
 		}
 	}
