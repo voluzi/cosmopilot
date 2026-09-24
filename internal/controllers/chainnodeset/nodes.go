@@ -3,8 +3,10 @@ package chainnodeset
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -74,7 +76,7 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 	for _, group := range nodeSet.Spec.Nodes {
 		if group.Validator == nil {
 			if err := r.ensureNodeGroupWithBlockedSignerTargets(ctx, nodeSet, group, blocked); err != nil {
-				return err
+				return r.persistNodeStatusOnError(ctx, nodeSet, nodeSetCopy, err)
 			}
 		} else {
 			validatorGroups[group.Name] = struct{}{}
@@ -83,15 +85,33 @@ func (r *Reconciler) ensureNodesWithBlockedSignerTargets(ctx context.Context, no
 		delete(groupList, group.Name)
 	}
 
-	// Remove nodes from deleted groups
-	for group, count := range groupList {
-		for i := 0; i < count; i++ {
-			nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, i)
-			logger.Info("removing chainnode", "group", group, "chainnode", nodeName)
-			if err := r.removeNode(ctx, nodeSet, group, i); err != nil {
-				return err
-			}
+	// Remove nodes from deleted groups. Iterate the listed children rather than synthesizing names
+	// from a count, so ordinal gaps cannot leave a higher ordinal behind, and try every child so one
+	// that cannot be removed yet does not hold back the others.
+	var removeErrs []error
+	for _, node := range chainNodes.Items {
+		group := node.Labels[controllers.LabelChainNodeSetGroup]
+		if _, deleted := groupList[group]; !deleted || !nodeSetOwnsChild(nodeSet, &node) {
+			continue
 		}
+		logger.Info("removing chainnode", "group", group, "chainnode", node.Name)
+		if err := r.removeNode(ctx, nodeSet, node.Name); err != nil {
+			removeErrs = append(removeErrs, err)
+		}
+	}
+	// A child that is already gone is not listed, so drop its status entry here.
+	specGroups := map[string]struct{}{validatorGroupName: {}}
+	for _, group := range nodeSet.Spec.Nodes {
+		specGroups[group.Name] = struct{}{}
+	}
+	if err := r.pruneAbsentNodeStatus(ctx, nodeSet, chainNodes.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
+		_, inSpec := specGroups[status.Group]
+		return !inSpec
+	}); err != nil {
+		removeErrs = append(removeErrs, err)
+	}
+	if err := stderrors.Join(removeErrs...); err != nil {
+		return r.persistNodeStatusOnError(ctx, nodeSet, nodeSetCopy, err)
 	}
 
 	// When a group is changed from a regular group to a validator group (e.g. 3 regular instances
@@ -216,16 +236,32 @@ func (r *Reconciler) ensureNodeGroupWithBlockedSignerTargets(ctx context.Context
 		return err
 	}
 
-	currentSize := len(chainNodeList.Items)
 	desiredSize := group.GetInstances()
+	desiredNames := make(map[string]struct{}, desiredSize)
+	for i := 0; i < desiredSize; i++ {
+		desiredNames[fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group.Name, i)] = struct{}{}
+	}
 
-	// Remove ChainNodes if necessary
-	for i := currentSize - 1; i >= desiredSize; i-- {
-		nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group.Name, i)
-		logger.Info("removing chainnode", "group", group.Name, "chainnode", nodeName)
-		if err := r.removeNode(ctx, nodeSet, group.Name, i); err != nil {
-			return err
+	// Remove every listed ChainNode outside the desired ordinals, whatever gaps precede it, trying
+	// each one even if another cannot be removed yet.
+	var removeErrs []error
+	for _, node := range chainNodeList.Items {
+		if _, ok := desiredNames[node.Name]; ok || !nodeSetOwnsChild(nodeSet, &node) {
+			continue
 		}
+		logger.Info("removing chainnode", "group", group.Name, "chainnode", node.Name)
+		if err := r.removeNode(ctx, nodeSet, node.Name); err != nil {
+			removeErrs = append(removeErrs, err)
+		}
+	}
+	if err := r.pruneAbsentNodeStatus(ctx, nodeSet, chainNodeList.Items, func(status appsv1.ChainNodeSetNodeStatus) bool {
+		_, desired := desiredNames[status.Name]
+		return status.Group == group.Name && !desired
+	}); err != nil {
+		removeErrs = append(removeErrs, err)
+	}
+	if err := stderrors.Join(removeErrs...); err != nil {
+		return err
 	}
 
 	for i := 0; i < desiredSize; i++ {
@@ -353,8 +389,7 @@ func (r *Reconciler) waitForChainNode(node *appsv1.ChainNode, wait chainNodeWait
 	}
 }
 
-func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, group string, index int) error {
-	nodeName := fmt.Sprintf("%s-%s-%d", nodeSet.GetName(), group, index)
+func (r *Reconciler) removeNode(ctx context.Context, nodeSet *appsv1.ChainNodeSet, nodeName string) error {
 	if err := r.maybeDeleteNode(ctx, nodeSet, nodeName); err != nil {
 		return err
 	}
@@ -656,6 +691,52 @@ func (r *Reconciler) deleteNodeWithCleanupFinalizer(ctx context.Context, nodeSet
 	}
 	uid := node.GetUID()
 	return client.IgnoreNotFound(r.Delete(ctx, node, client.Preconditions{UID: &uid}))
+}
+
+// pruneAbsentNodeStatus deletes the status entries selected by stale whose ChainNode is gone. A listing
+// is selected by user-mutable labels, so an entry whose child is not listed is only dropped once a
+// direct read finds no object with that name, or a different object (another UID). A child that still
+// exists keeps its entry: its removal, or the refusal to remove it, decides.
+func (r *Reconciler) pruneAbsentNodeStatus(ctx context.Context, nodeSet *appsv1.ChainNodeSet, listed []appsv1.ChainNode, stale func(appsv1.ChainNodeSetNodeStatus) bool) error {
+	for _, status := range slices.Clone(nodeSet.Status.Nodes) {
+		if !stale(status) || slices.ContainsFunc(listed, func(node appsv1.ChainNode) bool {
+			return node.Name == status.Name && (status.UID == "" || node.UID == status.UID)
+		}) {
+			continue
+		}
+		current := &appsv1.ChainNode{}
+		err := r.uncachedReader().Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: status.Name}, current)
+		switch {
+		case errors.IsNotFound(err):
+		case err != nil:
+			return err
+		case status.UID == "" || current.UID == status.UID:
+			continue
+		}
+		DeleteNodeStatus(nodeSet, status.Name)
+	}
+	return nil
+}
+
+// persistNodeStatusOnError writes node status changes, such as the entries of children already removed,
+// that returning err would otherwise drop.
+func (r *Reconciler) persistNodeStatusOnError(ctx context.Context, nodeSet, before *appsv1.ChainNodeSet, err error) error {
+	if reflect.DeepEqual(nodeSet.Status.Nodes, before.Status.Nodes) {
+		return err
+	}
+	if updateErr := r.Status().Update(ctx, nodeSet); updateErr != nil {
+		return stderrors.Join(err, updateErr)
+	}
+	return err
+}
+
+// nodeSetOwnsChild reports whether a listed ChainNode belongs to nodeSet, so cleanup driven by a label
+// listing leaves a ChainNode controlled by another resource untouched.
+func nodeSetOwnsChild(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {
+	if metav1.IsControlledBy(child, nodeSet) {
+		return true
+	}
+	return metav1.GetControllerOf(child) == nil && isRecordedNodeSetChild(nodeSet, child)
 }
 
 func isRecordedNodeSetChild(nodeSet *appsv1.ChainNodeSet, child *appsv1.ChainNode) bool {

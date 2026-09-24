@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -670,4 +672,134 @@ func TestPreserveImageOverrides(t *testing.T) {
 		assert.Nil(t, desired.Spec.OverrideVersion)
 		assert.Nil(t, desired.Spec.OverrideImage)
 	})
+}
+
+// TestEnsureNodesRemovesSparseChildren covers ordinal gaps: the remaining children must be removed by
+// their listed names, whether the group is removed or scaled down, while a ChainNode controlled by
+// another resource is left alone.
+func TestEnsureNodesRemovesSparseChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		groups      []appsv1.NodeGroupSpec
+		children    []int
+		terminating []int
+		drifted     []int
+		replaced    []int
+		foreign     bool
+		wantGone    []int
+		wantKept    []int
+		wantErr     bool
+	}{
+		{name: "group removed", children: []int{2}, wantGone: []int{2}},
+		{name: "scaled to zero", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, wantGone: []int{2}},
+		{name: "scaled down across a gap", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(1)}}, children: []int{0, 2}, wantGone: []int{2}, wantKept: []int{0}},
+		{name: "group removed with a foreign child", children: []int{2}, foreign: true, wantGone: []int{2}},
+		{name: "scaled to zero with a foreign child", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, foreign: true, wantGone: []int{2}},
+		{name: "scaled to zero past a stuck terminating ordinal", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, children: []int{2}, terminating: []int{0}, wantGone: []int{2}, wantErr: true},
+		{name: "group removed past a stuck terminating ordinal", children: []int{2}, terminating: []int{0}, wantGone: []int{2}, wantErr: true},
+		{name: "unlisted child keeps its status entry", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, drifted: []int{1}, wantKept: []int{1}},
+		{name: "recorded name reused by another object", groups: []appsv1.NodeGroupSpec{{Name: "full", Instances: ptr.To(0)}}, replaced: []int{1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: types.UID("set-uid")},
+				Spec: appsv1.ChainNodeSetSpec{
+					Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+					Nodes:   tc.groups,
+				},
+				Status: appsv1.ChainNodeSetStatus{ChainID: "test-chain"},
+			}
+			// Status records ordinals 0..2 even where a child is already gone.
+			for i := range 3 {
+				nodeSet.Status.Nodes = append(nodeSet.Status.Nodes, appsv1.ChainNodeSetNodeStatus{
+					Name: fmt.Sprintf("set-full-%d", i), UID: types.UID(fmt.Sprintf("full-%d-uid", i)), Group: "full",
+				})
+			}
+			mkChild := func(index int, controllerUID types.UID) *appsv1.ChainNode {
+				return &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+					Name: fmt.Sprintf("set-full-%d", index), Namespace: "default",
+					UID: types.UID(fmt.Sprintf("full-%d-uid", index)),
+					Labels: map[string]string{
+						controllers.LabelChainNodeSet:      "set",
+						controllers.LabelChainNodeSetGroup: "full",
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "set",
+						UID: controllerUID, Controller: ptr.To(true),
+					}},
+				}}
+			}
+			objs := []client.Object{nodeSet}
+			if tc.foreign {
+				objs = append(objs, mkChild(7, "another-set-uid"))
+				tc.wantKept = append(tc.wantKept, 7)
+			}
+			for _, i := range tc.children {
+				objs = append(objs, mkChild(i, nodeSet.UID))
+			}
+			// A lower ordinal already past resource cleanup but held by another finalizer: removing it
+			// errors on every pass, which must not keep the higher ordinals alive.
+			for _, i := range tc.terminating {
+				child := mkChild(i, nodeSet.UID)
+				child.Finalizers = []string{"test.voluzi.com/hold"}
+				child.DeletionTimestamp = ptr.To(metav1.Now())
+				objs = append(objs, child)
+			}
+			// A child whose labels no longer select it (not listed), and an unrelated object that reuses
+			// a recorded name.
+			for _, i := range tc.drifted {
+				child := mkChild(i, nodeSet.UID)
+				child.Labels = nil
+				objs = append(objs, child)
+			}
+			for _, i := range tc.replaced {
+				child := mkChild(i, "another-set-uid")
+				child.Labels = nil
+				child.UID = types.UID(fmt.Sprintf("other-%d-uid", i))
+				objs = append(objs, child)
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNodeSet{}).WithObjects(objs...).Build()
+			r := &Reconciler{Client: cl, Scheme: scheme, recorder: record.NewFakeRecorder(100)}
+
+			// Each reconcile starts from the persisted object, as in production.
+			for range 3 {
+				nodeSet = &appsv1.ChainNodeSet{}
+				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "set"}, nodeSet))
+				err := r.ensureNodes(context.Background(), nodeSet)
+				if tc.wantErr {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+			nodeSet = &appsv1.ChainNodeSet{}
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "set"}, nodeSet))
+
+			for _, i := range tc.wantGone {
+				current := &appsv1.ChainNode{}
+				err := r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("set-full-%d", i)}, current)
+				if err == nil {
+					assert.Falsef(t, current.DeletionTimestamp.IsZero(), "set-full-%d must be terminating", i)
+				} else {
+					require.True(t, apierrors.IsNotFound(err), err)
+				}
+			}
+			var statusNames []string
+			for _, node := range nodeSet.Status.Nodes {
+				statusNames = append(statusNames, node.Name)
+			}
+			for i := range 3 {
+				name := fmt.Sprintf("set-full-%d", i)
+				kept := slices.Contains(tc.wantKept, i) || slices.Contains(tc.terminating, i)
+				assert.Equalf(t, kept, slices.Contains(statusNames, name), "status entry for %s", name)
+			}
+			for _, i := range append(tc.wantKept, tc.replaced...) {
+				current := &appsv1.ChainNode{}
+				require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("set-full-%d", i)}, current))
+				assert.Truef(t, current.DeletionTimestamp.IsZero(), "set-full-%d must be kept", i)
+			}
+		})
+	}
 }

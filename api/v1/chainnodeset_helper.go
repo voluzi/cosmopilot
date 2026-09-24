@@ -271,7 +271,7 @@ func (group *NodeGroupSpec) GetPdbMinAvailable() int {
 	if group.PDB != nil && group.PDB.MinAvailable != nil {
 		return *group.PDB.MinAvailable
 	}
-	return group.GetInstances() - 1
+	return max(group.GetInstances()-1, 0)
 }
 
 func (group *NodeGroupSpec) GetSnapshotNodeIndex() int {

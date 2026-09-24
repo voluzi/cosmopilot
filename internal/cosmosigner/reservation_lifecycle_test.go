@@ -1177,3 +1177,86 @@ func (c *reservationLifecycleTrackingClient) Get(ctx context.Context, key client
 	}
 	return err
 }
+
+// TestFinalizeConsensusKeySigningPathsIgnoresSameNameChainNodeSetSigner covers a local-key ChainNode
+// sharing its name with a ChainNodeSet that runs a signer: the set's <name>-signer StatefulSet and its
+// Pods are not the ChainNode's, so its finalizer must complete and leave them untouched. The same
+// StatefulSet controlled by another ChainNode stays blocking.
+func TestFinalizeConsensusKeySigningPathsIgnoresSameNameChainNodeSetSigner(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		controllerKind string
+		podLabels      map[string]string
+		replicaLabels  map[string]string
+		wantDone       bool
+		wantWaiting    bool
+	}{
+		{name: "same-name ChainNodeSet signer", controllerKind: "ChainNodeSet", wantDone: true},
+		{
+			name: "set signer inheriting a chain-node label from the set", controllerKind: "ChainNodeSet", wantDone: true,
+			podLabels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "a", "chain-node": "a"},
+		},
+		{name: "signer controlled by another ChainNode", controllerKind: "ChainNode"},
+		{
+			name: "signer attributed to the ChainNode under a ChainNodeSet controller", controllerKind: "ChainNodeSet",
+			podLabels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "chain-node": "a"},
+		},
+		{
+			name: "old replica still attributed to the ChainNode", controllerKind: "ChainNodeSet", wantWaiting: true,
+			replicaLabels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "chain-node": "a"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := reservationLifecycleScheme(t)
+			owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "default", UID: "chainnode-uid"}}
+			podLabels := tc.podLabels
+			if podLabels == nil {
+				podLabels = map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "a"}
+			}
+			sts := &appsk8sv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "a-signer", Namespace: owner.Namespace, UID: "sts-uid",
+					Labels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "a"},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: appsv1.GroupVersion.String(), Kind: tc.controllerKind, Name: "a",
+						UID: "other-root-uid", Controller: ptr.To(true),
+					}},
+				},
+				Spec: appsk8sv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels}}},
+			}
+			replicaLabels := tc.replicaLabels
+			if replicaLabels == nil {
+				replicaLabels = map[string]string{"app.kubernetes.io/name": "cosmosigner", "nodeset": "a"}
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "a-signer-0", Namespace: owner.Namespace, UID: "pod-uid",
+				Labels: replicaLabels,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "apps/v1", Kind: "StatefulSet", Name: sts.Name, UID: sts.UID, Controller: ptr.To(true),
+				}},
+			}}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, sts, pod).Build()
+
+			for range 3 {
+				done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
+				if tc.wantDone {
+					if err != nil || !done {
+						t.Fatalf("finalizer must not be blocked by a same-name ChainNodeSet signer, done=%v err=%v", done, err)
+					}
+				} else if tc.wantWaiting {
+					if err != nil || done {
+						t.Fatalf("a replica attributed to the ChainNode must keep finalization pending, done=%v err=%v", done, err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "not controlled by") {
+					t.Fatalf("a signer not provably foreign must stay blocking, done=%v err=%v", done, err)
+				}
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(sts), &appsk8sv1.StatefulSet{}); err != nil {
+				t.Fatalf("foreign signer StatefulSet must remain: %v", err)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
+				t.Fatalf("foreign signer Pod must remain: %v", err)
+			}
+		})
+	}
+}

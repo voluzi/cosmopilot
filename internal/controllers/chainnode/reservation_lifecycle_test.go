@@ -565,3 +565,46 @@ func reservationLifecycleScheme(t *testing.T) *runtime.Scheme {
 }
 
 const reservationLifecyclePublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+func TestFinalizeConsensusKeyReservationOwnerIgnoresSameNameChainNodeSetSigner(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{appsv1.AddToScheme, corev1.AddToScheme, appsk8sv1.AddToScheme, batchv1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+		Name: "a", Namespace: "default", UID: "chainnode-uid",
+		Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+	}}
+	reservation := &appsv1.ConsensusKeyReservation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: cosmosigner.ConsensusKeyReservationName("chain-1", reservationLifecyclePublicKey), UID: "ckr-uid",
+		},
+		Spec: appsv1.ConsensusKeyReservationSpec{
+			ChainID: "chain-1", PublicKey: reservationLifecyclePublicKey,
+			OwnerUID: owner.UID, OwnerKind: "ChainNode", Namespace: owner.Namespace,
+			OwnerName: owner.Name, Claim: owner.Name,
+		},
+	}
+	setSigner := &appsk8sv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "a-signer", Namespace: owner.Namespace, UID: "sts-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "a",
+			UID: "nodeset-uid", Controller: ptr.To(true),
+		}},
+	}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, reservation, setSigner).Build()
+	r := &Reconciler{Client: c, APIReader: c, recorder: record.NewFakeRecorder(10)}
+
+	done, err := r.finalizeConsensusKeyReservationOwner(context.Background(), owner)
+	if err != nil || !done {
+		t.Fatalf("a same-name ChainNodeSet signer must not block ChainNode deletion, done=%v err=%v", done, err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("reservation must be released: %v", err)
+	}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(setSigner), &appsk8sv1.StatefulSet{}); err != nil {
+		t.Fatalf("the ChainNodeSet signer must remain: %v", err)
+	}
+}

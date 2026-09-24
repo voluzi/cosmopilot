@@ -51,6 +51,13 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	signerNames := reservationOwnerSignerNames(owner)
 	childControllerUIDs := make(map[types.UID]struct{})
 	childWorkloadUIDs := make(map[types.UID]struct{})
+	foreignSignerUIDs := make(map[types.UID]struct{})
+	if _, ok := owner.(*appsv1.ChainNode); ok {
+		var err error
+		if signerNames, err = dropChainNodeSetSigners(ctx, reader, owner, namespace, signerNames, foreignSignerUIDs); err != nil {
+			return false, err
+		}
+	}
 	if _, ok := owner.(*appsv1.ChainNodeSet); ok {
 		children := &appsv1.ChainNodeList{}
 		if err := reader.List(ctx, children, client.InNamespace(namespace)); err != nil {
@@ -122,7 +129,8 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	podNames := make([]string, 0)
 	for i := range ownedPods.Items {
 		pod := &ownedPods.Items[i]
-		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) {
+		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) ||
+			(controlledByAnyUID(pod, foreignSignerUIDs) && !labelsAttributeToChainNode(pod.GetLabels(), owner)) {
 			continue
 		}
 		if jobName, ok := managedSigningOneShotPodJobName(pod.GetName()); ok &&
@@ -166,7 +174,8 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) {
+		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) ||
+			(controlledByAnyUID(pod, foreignSignerUIDs) && !labelsAttributeToChainNode(pod.GetLabels(), owner)) {
 			continue
 		}
 		if signerPodBelongsToRoot(pod, owner) || podMatchesSignerNames(pod, signerNames) {
@@ -913,6 +922,40 @@ func reservationOwnerSignerNames(owner client.Object) []string {
 	default:
 		return nil
 	}
+}
+
+// labelsAttributeToChainNode reports whether signer labels name the ChainNode owner. A ChainNodeSet signer
+// carries a nodeset label, which wins over a chain-node label inherited from the set's own labels.
+func labelsAttributeToChainNode(labels map[string]string, owner client.Object) bool {
+	return labels["chain-node"] == owner.GetName() && labels["nodeset"] == ""
+}
+
+// dropChainNodeSetSigners removes from a ChainNode's signer names any StatefulSet controlled by a
+// ChainNodeSet and not attributed to the ChainNode: a same-name ChainNodeSet's signer is never this
+// ChainNode's, so it must neither block the ChainNode's finalizer nor keep it waiting on the set's
+// signer Pods. A StatefulSet still attributed to the ChainNode keeps blocking, whatever its controller.
+// The dropped StatefulSet UIDs are added to skipUIDs so the Pods they control are ignored, except a
+// replica whose own labels still name the ChainNode (an OnDelete StatefulSet keeps old replicas).
+func dropChainNodeSetSigners(ctx context.Context, reader client.Reader, owner client.Object, namespace string, names []string, skipUIDs map[types.UID]struct{}) ([]string, error) {
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		sts := &appsk8sv1.StatefulSet{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, sts); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return nil, err
+			}
+			kept = append(kept, name)
+			continue
+		}
+		attributed := isAttributedSignerStatefulSet(sts, owner) || labelsAttributeToChainNode(sts.Spec.Template.Labels, owner)
+		if controller := metav1.GetControllerOf(sts); !attributed && controller != nil && controller.Kind == "ChainNodeSet" &&
+			strings.HasPrefix(controller.APIVersion, appsv1.GroupVersion.Group+"/") {
+			skipUIDs[sts.GetUID()] = struct{}{}
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept, nil
 }
 
 func podMatchesSignerNames(pod *corev1.Pod, signerNames []string) bool {
