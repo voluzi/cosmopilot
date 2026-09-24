@@ -31,6 +31,16 @@ func newUpgradeCancelReconciler(t *testing.T, objs ...client.Object) (*Reconcile
 	return &Reconciler{Client: c, Scheme: scheme, recorder: recorder}, recorder
 }
 
+// reportLiveHeight gives node a running node-utils sidecar reporting height, which cancelling a removed
+// manual upgrade requires.
+func reportLiveHeight(t *testing.T, r *Reconciler, node *appsv1.ChainNode, height int64) {
+	t.Helper()
+	require.NoError(t, r.Create(context.Background(), nodeUtilsPod(node)))
+	r.upgradeClientFactory = func(string) upgradeStatusClient {
+		return staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{LatestHeight: ptr.To(height)}}
+	}
+}
+
 func upgradeCancelNode(latest int64, upgrades ...appsv1.Upgrade) *appsv1.ChainNode {
 	return &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
@@ -85,6 +95,7 @@ func TestEnsureUpgradesCancelsRemovedManualUpgrade(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			node := upgradeCancelNode(tc.latest, manualUpgrade(100, tc.status))
 			r, recorder := newUpgradeCancelReconciler(t, node)
+			reportLiveHeight(t, r, node, tc.latest)
 
 			require.NoError(t, r.ensureUpgrades(context.Background(), node, false))
 
@@ -145,6 +156,7 @@ func TestChainNodeSetChildCancelsManualUpgradeRemovedFromTheSet(t *testing.T) {
 	assert.Equal(t, int64(30), child.Spec.App.Upgrades[0].Height)
 
 	r, _ := newUpgradeCancelReconciler(t, nodeSet, child)
+	reportLiveHeight(t, r, child, 50)
 	require.NoError(t, r.ensureUpgrades(context.Background(), child, false))
 	assert.Equal(t, appsv1.UpgradeCancelled, upgradeStatusAt(t, child, 100).Status)
 }
@@ -312,9 +324,9 @@ func TestEnsureUpgradesChecksLiveHeightBeforeCancelling(t *testing.T) {
 			wantStatus: appsv1.UpgradeScheduled,
 		},
 		{
-			name:       "no pod: the persisted height applies",
-			client:     failingUpgradeStatusClient{err: errors.New("must not be called")},
-			wantStatus: appsv1.UpgradeCancelled, wantEvent: appsv1.ReasonUpgradeCancelled,
+			name:       "no pod: the height is unknown",
+			client:     staticUpgradeStatusClient{status: nodeutils.UpgradeStatus{LatestHeight: ptr.To(int64(60))}},
+			wantStatus: appsv1.UpgradeScheduled,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -391,6 +403,7 @@ func TestChainNodeSetChildCancelsDespitePropagatedHistory(t *testing.T) {
 	}}
 	child.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}}
 	r, _ := newUpgradeCancelReconciler(t, nodeSet, child)
+	reportLiveHeight(t, r, child, 50)
 
 	require.NoError(t, r.ensureUpgrades(context.Background(), child, false))
 	assert.Equal(t, appsv1.UpgradeCancelled, upgradeStatusAt(t, child, 100).Status)
@@ -428,4 +441,34 @@ func TestResolveRequiredUpgradeRecoversCancelledPlanWithoutDiscovery(t *testing.
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, int64(100), got.Height)
+}
+
+func TestResolveRequiredUpgradeLegacySignalOnlyClearedByCancellationAtTheBoundary(t *testing.T) {
+	node := upgradeCancelNode(199,
+		govUpgrade(100, "v2", appsv1.UpgradeCancelled),
+		appsv1.Upgrade{Height: 200, Name: "v3", Status: appsv1.UpgradeImageMissing, Source: appsv1.OnChainUpgrade},
+	)
+	_, err := resolveRequiredUpgrade(node, nodeutils.UpgradeStatus{LegacyUpgradeRequired: true, LatestHeight: ptr.To(int64(199))})
+	require.ErrorContains(t, err, "no pending upgrade is eligible", "an older cancellation must not hide the halt at 200")
+}
+
+func TestMergeGovUpgradesForcedIntentMatchesThePlanName(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		forcedName string
+		wantStatus appsv1.UpgradePhase
+	}{
+		{name: "forced entry names another plan", forcedName: "v2", wantStatus: appsv1.UpgradeCancelled},
+		{name: "forced entry names this plan", forcedName: "v2-fixed", wantStatus: appsv1.UpgradeScheduled},
+		{name: "unnamed forced entry", wantStatus: appsv1.UpgradeScheduled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := upgradeCancelNode(50, govUpgrade(100, "v2-fixed", appsv1.UpgradeScheduled))
+			node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Name: tc.forcedName, Image: "app:v2", ForceOnChain: ptr.To(true)}}
+			r, _ := newUpgradeCancelReconciler(t, node)
+
+			require.NoError(t, r.mergeGovUpgrades(context.Background(), node, nil))
+			assert.Equal(t, tc.wantStatus, upgradeStatusAt(t, node, 100).Status)
+		})
+	}
 }

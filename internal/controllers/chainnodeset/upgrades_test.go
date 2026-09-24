@@ -405,3 +405,30 @@ func TestAggregateChildUpgradesCancelledOnlyWhenEveryChildAgrees(t *testing.T) {
 	require.Len(t, upgrades, 1)
 	assert.Equal(t, appsv1.UpgradeCancelled, upgrades[0].Status)
 }
+
+func TestAggregateChildUpgradesCancelledEntries(t *testing.T) {
+	child := func(name string, status appsv1.UpgradePhase) appsv1.ChainNode {
+		return appsv1.ChainNode{Status: appsv1.ChainNodeStatus{Upgrades: []appsv1.Upgrade{{
+			Height: 100, Name: name, Image: "repo/app:" + name, Source: appsv1.OnChainUpgrade, Status: status,
+		}}}}
+	}
+	// A child that skipped the upgrade still counts as done, whatever the order.
+	for _, nodes := range [][]appsv1.ChainNode{
+		{child("v2", appsv1.UpgradeCancelled), child("v2", appsv1.UpgradeSkipped)},
+		{child("v2", appsv1.UpgradeSkipped), child("v2", appsv1.UpgradeCancelled)},
+	} {
+		upgrades := aggregateChildUpgrades(nodes)
+		require.Len(t, upgrades, 1)
+		assert.Equal(t, appsv1.UpgradeCompleted, upgrades[0].Status)
+	}
+	// A cancelled plan does not conflict with the plan that replaced it at the same height.
+	for _, nodes := range [][]appsv1.ChainNode{
+		{child("v2", appsv1.UpgradeCancelled), child("v2-fixed", appsv1.UpgradeScheduled)},
+		{child("v2-fixed", appsv1.UpgradeScheduled), child("v2", appsv1.UpgradeCancelled)},
+	} {
+		upgrades := aggregateChildUpgrades(nodes)
+		require.Len(t, upgrades, 1)
+		assert.Equal(t, appsv1.UpgradeScheduled, upgrades[0].Status)
+		assert.Equal(t, "v2-fixed", upgrades[0].Name)
+	}
+}

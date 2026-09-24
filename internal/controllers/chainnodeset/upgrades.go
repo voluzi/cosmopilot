@@ -70,7 +70,9 @@ func aggregateChildUpgrades(nodes []appsv1.ChainNode) []appsv1.Upgrade {
 	planNames := make(map[int64]map[string]struct{})
 	for _, node := range nodes {
 		for _, upgrade := range node.Status.Upgrades {
-			if upgrade.Source != appsv1.OnChainUpgrade || upgrade.Status == appsv1.UpgradeConflict {
+			// A cancelled plan is no longer pending, so it cannot conflict with its replacement.
+			if upgrade.Source != appsv1.OnChainUpgrade || upgrade.Status == appsv1.UpgradeConflict ||
+				upgrade.Status == appsv1.UpgradeCancelled {
 				continue
 			}
 			if upgrade.Name == "" {
@@ -119,11 +121,19 @@ func AddOrUpdateUpgrade(upgrades []appsv1.Upgrade, upgrade appsv1.Upgrade) []app
 		if u.Height == upgrade.Height {
 			// A cancellation only shows when every child agrees: children list in no fixed order, and
 			// a lagging child that still has the entry scheduled must not make the aggregate flip.
+			// Merging still applies the rule below, in either order: a child that skipped the upgrade
+			// counts as done.
 			if upgrade.Status == appsv1.UpgradeCancelled {
+				if u.Status == appsv1.UpgradeSkipped {
+					upgrades[i].Status = appsv1.UpgradeCompleted
+				}
 				return upgrades
 			}
 			if u.Status == appsv1.UpgradeCancelled {
 				upgrades[i] = upgrade
+				if upgrade.Status == appsv1.UpgradeSkipped {
+					upgrades[i].Status = appsv1.UpgradeCompleted
+				}
 				return upgrades
 			}
 			if u.Source == appsv1.OnChainUpgrade && upgrade.Source == appsv1.OnChainUpgrade &&

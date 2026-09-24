@@ -100,7 +100,8 @@ entry back schedules it again.
 
 A removal is ignored, with an `UpgradeCancelIgnored` warning event, once the node has reached the
 height just before the upgrade or the upgrade is already ongoing: at that point the node may already
-be stopping for it. Governance upgrades cannot be cancelled from the spec.
+be stopping for it. While the node's current height cannot be read (its Pod or node-utils is not
+running), the cancellation waits. Governance upgrades cannot be cancelled from the spec.
 
 Keep completed manual upgrades in `.spec.app.upgrades` if the node may later be restored from a
 snapshot below their height: a restore schedules them again so they are replayed, and an entry that is
