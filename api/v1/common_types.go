@@ -61,6 +61,9 @@ const (
 	ReasonUpgradeFailed                    = "UpgradeFailed"
 	ReasonUpgradeMissingData               = "UpgradeMissingData"
 	ReasonUpgradeSkippedByOverride         = "UpgradeSkippedByOverride"
+	ReasonUpgradeCancelled                 = "UpgradeCancelled"
+	ReasonUpgradeCancelIgnored             = "UpgradeCancelIgnored"
+	ReasonUpgradeRetired                   = "UpgradeRetired"
 	ReasonCreateValidatorFailure           = "FailedCreateValidator"
 	ReasonCreateValidatorSuccess           = "CreateValidatorSuccess"
 	ReasonInvalid                          = "Invalid"
@@ -1360,6 +1363,11 @@ const (
 	// Note: successfully finished means the container was restarted with the
 	// new image. Application issues after the upgrade won't be detected.
 	UpgradeCompleted UpgradePhase = "completed"
+
+	// UpgradeCancelled indicates that the upgrade was withdrawn before it started: a manual upgrade
+	// removed from the spec, or a governance plan the chain no longer schedules. It is scheduled
+	// again if the spec or the chain brings it back.
+	UpgradeCancelled UpgradePhase = "cancelled"
 
 	// UpgradeSkipped indicates that cosmopilot will not perform the upgrade
 	// because it is in the past.

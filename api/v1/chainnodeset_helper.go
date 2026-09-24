@@ -166,7 +166,11 @@ func (nodeSet *ChainNodeSet) GetAppSpecWithUpgrades() AppSpec {
 	spec := nodeSet.Spec.App.DeepCopy()
 
 	for _, u := range nodeSet.Status.Upgrades {
-		if u.Status == UpgradeConflict {
+		// A pending manual entry comes from the set's own spec, so one removed from it must not be
+		// re-created on the children from status; only finished manual history is propagated. A
+		// cancelled entry is never propagated.
+		if u.Status == UpgradeConflict || u.Status == UpgradeCancelled ||
+			(u.Source != OnChainUpgrade && u.Status != UpgradeCompleted && u.Status != UpgradeSkipped) {
 			continue
 		}
 		upgradeSpec := UpgradeSpec{
