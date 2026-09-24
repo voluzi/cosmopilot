@@ -87,7 +87,6 @@ func TestBuildGenesisDownloadCommandDetectsCompressionFromURLPath(t *testing.T) 
 		"https://example.org/download?file=genesis.json.gz":                             "plain",
 	} {
 		args := buildGenesisDownloadCommand(url, "/pvc/genesis.json", nil)
-		require.Equal(t, url, args[3], url)
-		assert.Equal(t, want, args[5], url)
+		require.Equal(t, []string{"-c", genesisDownloadScript, "genesis-download", url, "/pvc/genesis.json", want, "0", ""}, args, url)
 	}
 }
