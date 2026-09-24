@@ -30,7 +30,15 @@ func GrpcOnlyService(backend *corev1.Service, name string, labels, annotations m
 				Type:                     corev1.ServiceTypeClusterIP,
 				Selector:                 maps.Clone(backend.Spec.Selector),
 				PublishNotReadyAddresses: backend.Spec.PublishNotReadyAddresses,
-				Ports:                    []corev1.ServicePort{port},
+				// Only the fields meaningful on a ClusterIP port: a NodePort copied from a
+				// NodePort/LoadBalancer backend would be rejected.
+				Ports: []corev1.ServicePort{{
+					Name:        port.Name,
+					Protocol:    port.Protocol,
+					AppProtocol: port.AppProtocol,
+					Port:        port.Port,
+					TargetPort:  port.TargetPort,
+				}},
 			},
 		}, nil
 	}

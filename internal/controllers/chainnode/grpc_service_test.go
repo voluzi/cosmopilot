@@ -377,3 +377,30 @@ func TestGrpcServiceSteadyStateNoChurn(t *testing.T) {
 		assert.Equal(t, before, getService(t, r, "node-0-grpc").ResourceVersion)
 	}
 }
+
+// TestGrpcOnlyRouteStaysOnGuardAcrossRollout verifies a gRPC-only node keeps routing through its guard
+// over several reconciles while the guard is not serving (e.g. mid-rollout): the gRPC-only Service is
+// copied from the guard Service, so it keeps selecting guard pods and keeps the flip sticky.
+func TestGrpcOnlyRouteStaysOnGuardAcrossRollout(t *testing.T) {
+	ctx := context.Background()
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Ingress = &appsv1.IngressConfig{Host: "example.com", EnableGRPC: true, IngressClass: ptr.To("traefik")}
+	guard := servingGuard("node-0-cg")
+	r := cosmoGuardTestReconciler(t, cn, guard,
+		apiBackend("node-0", map[string]string{"app": "node-0"}, chainutils.GrpcPort, false),
+		apiBackend("node-0-cg", cosmoguard.InstanceLabels("node-0-cg"), controllers.CosmoGuardGrpcPort, false))
+	require.NoError(t, r.ensureIngresses(ctx, cn))
+
+	// The guard rolls and stops serving.
+	guard.Status.ReadyReplicas = 0
+	require.NoError(t, r.Status().Update(ctx, guard))
+	serving, err := cosmoguard.IsServing(ctx, r.Client, "ns", "node-0-cg")
+	require.NoError(t, err)
+	require.False(t, serving)
+	for pass := 0; pass < 3; pass++ {
+		require.NoError(t, r.ensureIngresses(ctx, cn))
+		svc := getService(t, r, "node-0-grpc")
+		require.Equal(t, cosmoguard.InstanceLabels("node-0-cg"), svc.Spec.Selector, "pass %d", pass)
+		require.Equal(t, intstr.FromInt32(controllers.CosmoGuardGrpcPort), svc.Spec.Ports[0].TargetPort, "pass %d", pass)
+	}
+}

@@ -38,6 +38,12 @@ func TestGrpcOnlyService(t *testing.T) {
 	assert.True(t, svc.Spec.PublishNotReadyAddresses)
 	assert.Equal(t, []corev1.ServicePort{grpc}, svc.Spec.Ports)
 
+	// A node port allocated on a NodePort/LoadBalancer backend is not carried over.
+	backend.Spec.Ports[1].NodePort = 30090
+	svc, err = GrpcOnlyService(backend, "node-grpc", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []corev1.ServicePort{grpc}, svc.Spec.Ports)
+
 	backend.Spec.Ports = backend.Spec.Ports[:1]
 	_, err = GrpcOnlyService(backend, "node-grpc", nil, nil)
 	require.Error(t, err)
