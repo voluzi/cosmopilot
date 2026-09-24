@@ -15,6 +15,13 @@ import (
 // ingress controllers that take the backend scheme from Service annotations (Traefik) can be told to
 // speak h2c without also switching RPC/LCD, which only speak HTTP/1.1.
 func GrpcOnlyService(backend *corev1.Service, name string, labels, annotations map[string]string) (*corev1.Service, error) {
+	// Empty maps read back as nil; keep them nil so a no-op reconcile compares equal.
+	if len(labels) == 0 {
+		labels = nil
+	}
+	if len(annotations) == 0 {
+		annotations = nil
+	}
 	for _, port := range backend.Spec.Ports {
 		if port.Port != chainutils.GrpcPort {
 			continue

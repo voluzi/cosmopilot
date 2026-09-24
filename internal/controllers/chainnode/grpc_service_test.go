@@ -77,7 +77,7 @@ func TestGrpcIngressTargetsGrpcOnlyServiceWithH2CForTraefik(t *testing.T) {
 	require.NoError(t, r.ensureIngresses(ctx, cn))
 
 	svc := getService(t, r, "node-0-grpc")
-	assert.Equal(t, map[string]string{appsv1.TraefikServersSchemeAnnotation: "h2c"}, svc.Annotations)
+	assert.Equal(t, "h2c", svc.Annotations[appsv1.TraefikServersSchemeAnnotation])
 	assert.Equal(t, selector, svc.Spec.Selector)
 	require.Len(t, svc.Spec.Ports, 1)
 	assert.Equal(t, int32(chainutils.GrpcPort), svc.Spec.Ports[0].Port)
@@ -112,7 +112,7 @@ func TestGrpcIngressNginxBehaviourUnchanged(t *testing.T) {
 		assert.Equal(t, int32(chainutils.GrpcPort), ingressBackend(ing).Port.Number)
 
 		svc := getService(t, r, "node-0-grpc")
-		assert.Empty(t, svc.Annotations)
+		assert.NotContains(t, svc.Annotations, appsv1.TraefikServersSchemeAnnotation)
 		assert.Equal(t, selector, svc.Spec.Selector)
 		assert.Equal(t, intstr.FromInt32(chainutils.GrpcPort), svc.Spec.Ports[0].TargetPort)
 	}
@@ -137,6 +137,12 @@ func TestGrpcServiceMirrorsInternalBackend(t *testing.T) {
 	svc := getService(t, r, "node-0-grpc")
 	assert.Equal(t, selector, svc.Spec.Selector)
 	assert.True(t, svc.Spec.PublishNotReadyAddresses)
+
+	// Reverting useInternalServices moves gRPC back to ready endpoints only.
+	cn.Spec.Ingress.UseInternalServices = nil
+	require.NoError(t, r.Create(ctx, apiBackend("node-0", selector, chainutils.GrpcPort, false)))
+	require.NoError(t, r.ensureIngresses(ctx, cn))
+	assert.False(t, getService(t, r, "node-0-grpc").Spec.PublishNotReadyAddresses)
 }
 
 func TestGrpcServiceMirrorsServingGuard(t *testing.T) {

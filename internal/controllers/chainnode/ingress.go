@@ -17,6 +17,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/cosmoguard"
 )
 
 func (r *Reconciler) ensureIngresses(ctx context.Context, chainNode *appsv1.ChainNode) error {
@@ -68,10 +69,9 @@ func (r *Reconciler) ensureGrpcService(ctx context.Context, chainNode *appsv1.Ch
 	if err != nil {
 		return err
 	}
-	if err = controllerutil.SetControllerReference(chainNode, svc, r.Scheme); err != nil {
-		return err
-	}
-	return r.ensureService(ctx, svc)
+	// ApplyOwned tracks the last-applied state, so fields the backend drops (publishNotReadyAddresses
+	// after useInternalServices is reverted, the Traefik annotation after a class change) are removed too.
+	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, svc)
 }
 
 func (r *Reconciler) deleteGrpcService(ctx context.Context, chainNode *appsv1.ChainNode) error {

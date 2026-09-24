@@ -369,7 +369,7 @@ func (r *Reconciler) ensureGrpcService(ctx context.Context, nodeSet *appsv1.Chai
 	// under this name. Refuse to take it over rather than rewrite it back and forth every reconcile.
 	live := &corev1.Service{}
 	err = r.Get(ctx, client.ObjectKeyFromObject(svc), live)
-	if err == nil && live.Labels[controllers.LabelScope] != scopeGlobalGrpc {
+	if err == nil && live.Labels[controllers.LabelScope] == scopeGlobal {
 		return fmt.Errorf("service %q already backs another route; rename the route %q or %q-grpc", svc.GetName(), ingress.Name, ingress.Name)
 	}
 	if client.IgnoreNotFound(err) != nil {
