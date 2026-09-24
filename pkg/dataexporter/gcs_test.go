@@ -76,6 +76,8 @@ func TestGcsUploadChunksStopsAfterFirstPartFailure(t *testing.T) {
 	err = gcs.uploadChunks(context.Background(), reader, "bucket", "object", totalSize, totalSize, opts)
 	require.ErrorContains(t, err, "upload failed")
 	require.Less(t, time.Since(start), 4*time.Second, "the in-flight upload must not run to completion")
-	require.Equal(t, int64(1), aborted.Load(), "the in-flight part upload must be cancelled")
+	// The server handler records the abort asynchronously, after the client has already returned.
+	require.Eventually(t, func() bool { return aborted.Load() == 1 }, 3*time.Second, 10*time.Millisecond,
+		"the in-flight part upload must be cancelled")
 	require.Less(t, reader.read.Load(), int64(totalSize.Bytes())/2, "the archive must not be fully consumed after a part fails")
 }

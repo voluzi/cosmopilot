@@ -795,7 +795,7 @@ ExportTarballConfig holds config options for tarball upload.
 | compression | Compression applied to the tar archive. Defaults to `gzip` for compatibility with existing exports. | *TarballCompression | false |
 | gcs | Configuration to upload tarballs to a GCS bucket. | *[GcsExportConfig](#gcsexportconfig) | false |
 | s3 | Configuration to upload tarballs to Amazon S3 or an S3-compatible object store. | *[S3ExportConfig](#s3exportconfig) | false |
-| resources | Compute resources for the export upload job pod. When unset, the pod requests chunkSize × (concurrentJobs + 1) + bufferSize × concurrentJobs of memory for GCS; for S3 it requests chunkSize × (concurrentJobs + 1) of ephemeral storage for the part spool, plus bufferSize of memory. | *corev1.ResourceRequirements | false |
+| resources | Compute resources for the export upload job pod. When unset, the pod requests chunkSize × (concurrentJobs + 1) + (bufferSize + 16Mi) × concurrentJobs of memory for GCS; for S3 it requests chunkSize × (concurrentJobs + 1) of ephemeral storage for the part spool, plus 2 × bufferSize of memory. | *corev1.ResourceRequirements | false |
 
 [Back to Custom Resources](#custom-resources)
 

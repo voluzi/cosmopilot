@@ -38,7 +38,7 @@ func TestUploadJobsRequestResourcesAndIgnoreDisruptions(t *testing.T) {
 		Bucket: "snapshots", ChunkSize: ptr.To("100MB"), BufferSize: ptr.To("10MB"), ConcurrentJobs: ptr.To(3),
 	}})
 	requireUploadJobHardening(t, gcs.uploadJob("snapshot"), corev1.ResourceList{
-		corev1.ResourceMemory: *resource.NewQuantity(int64(4*100*datasize.MB+3*10*datasize.MB), resource.BinarySI),
+		corev1.ResourceMemory: *resource.NewQuantity(int64(4*100*datasize.MB+3*10*datasize.MB+3*16*datasize.MB), resource.BinarySI),
 	})
 
 	s3 := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
@@ -46,7 +46,7 @@ func TestUploadJobsRequestResourcesAndIgnoreDisruptions(t *testing.T) {
 	}})
 	requireUploadJobHardening(t, s3.uploadJob("snapshot"), corev1.ResourceList{
 		corev1.ResourceEphemeralStorage: *resource.NewQuantity(int64(3*64*datasize.MB), resource.BinarySI),
-		corev1.ResourceMemory:           *resource.NewQuantity(int64(16*datasize.MB), resource.BinarySI),
+		corev1.ResourceMemory:           *resource.NewQuantity(int64(2*16*datasize.MB), resource.BinarySI),
 	})
 }
 

@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
+	"google.golang.org/api/googleapi"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -119,16 +121,18 @@ func (gcs *GCS) serviceAccountName() string {
 }
 
 // defaultUploadRequests requests the memory the exporter holds: one read chunk plus one per in-flight
-// part, and each part upload's copy buffer.
+// part, and for each part upload its copy buffer and the storage writer's upload buffer.
 func (gcs *GCS) defaultUploadRequests() corev1.ResourceList {
 	requests := corev1.ResourceList{}
-	chunks, ok := uploadRequest(gcs.Config.GetChunkSize(), gcs.Config.GetConcurrentJobs()+1)
+	jobs := gcs.Config.GetConcurrentJobs()
+	chunks, ok := uploadRequest(gcs.Config.GetChunkSize(), jobs+1)
 	if !ok {
 		return requests
 	}
-	if buffers, ok := uploadRequest(gcs.Config.GetBufferSize(), gcs.Config.GetConcurrentJobs()); ok {
+	if buffers, ok := uploadRequest(gcs.Config.GetBufferSize(), jobs); ok {
 		chunks.Add(buffers)
 	}
+	chunks.Add(*resource.NewQuantity(int64(googleapi.DefaultUploadChunkSize)*int64(jobs), resource.BinarySI))
 	requests[corev1.ResourceMemory] = chunks
 	return requests
 }

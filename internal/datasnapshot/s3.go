@@ -92,13 +92,14 @@ func (provider *S3) uploadEnv() []corev1.EnvVar {
 }
 
 // defaultUploadRequests requests ephemeral storage for the parts spooled to the container's writable
-// layer (one read chunk plus one per in-flight part) and memory for the spool buffer.
+// layer (one read chunk plus one per in-flight part) and memory for the spool buffer and, when the
+// archive is split, the split reader's buffer of the same size.
 func (provider *S3) defaultUploadRequests() corev1.ResourceList {
 	requests := corev1.ResourceList{}
 	if storage, ok := uploadRequest(provider.Config.GetChunkSize(), provider.Config.GetConcurrentJobs()+1); ok {
 		requests[corev1.ResourceEphemeralStorage] = storage
 	}
-	if memory, ok := uploadRequest(provider.Config.GetBufferSize(), 1); ok {
+	if memory, ok := uploadRequest(provider.Config.GetBufferSize(), 2); ok {
 		requests[corev1.ResourceMemory] = memory
 	}
 	return requests
