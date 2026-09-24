@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 
 	upgradetypes "github.com/cosmos/cosmos-sdk/x/upgrade/types"
@@ -33,10 +34,8 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 		govUpgrades, err := r.getGovUpgrades(ctx, chainNode)
 		if err != nil {
 			logger.Error(err, "could not retrieve upgrade plans")
-		} else {
-			for _, upgrade := range govUpgrades {
-				chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, upgrade)
-			}
+		} else if err := r.mergeGovUpgrades(ctx, chainNode, govUpgrades); err != nil {
+			return err
 		}
 	}
 
@@ -55,6 +54,23 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 		if isHistoricalBootstrapUpgrade(chainNode, nodePodRunning, upgrade.Height) {
 			u.Status = appsv1.UpgradeSkipped
 		}
+		if hasCancelledUpgrade(chainNode.Status.Upgrades, u.Height) {
+			// Only the user brings a cancelled upgrade back: a manual spec entry, or a forceOnChain entry
+			// in the user's own spec. A ChainNodeSet child also carries governance entries propagated
+			// from the set's status, which must not undo a cancellation.
+			revive := u.Source == appsv1.ManualUpgrade
+			if !revive {
+				forced, err := r.upgradeForcedOnChain(ctx, chainNode, u.Height)
+				if err != nil {
+					return err
+				}
+				revive = forced
+			}
+			if !revive {
+				continue
+			}
+			chainNode.Status.Upgrades = dropCancelledUpgrade(chainNode.Status.Upgrades, u.Height)
+		}
 
 		chainNode.Status.Upgrades = AddOrUpdateConfiguredUpgrade(
 			chainNode.Status.Upgrades,
@@ -70,6 +86,8 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 		}
 	}
 
+	r.cancelRemovedManualUpgrades(chainNode)
+
 	// Sort upgrades by height
 	sort.Slice(chainNode.Status.Upgrades, func(i, j int) bool {
 		return chainNode.Status.Upgrades[i].Height < chainNode.Status.Upgrades[j].Height
@@ -84,6 +102,112 @@ func (r *Reconciler) ensureUpgrades(ctx context.Context, chainNode *appsv1.Chain
 		return r.Status().Update(ctx, chainNode)
 	}
 	return nil
+}
+
+// cancelRemovedManualUpgrades marks a scheduled manual upgrade that is no longer in the spec as
+// cancelled. The removal is ignored, with a warning, once the node is at the height before the upgrade
+// or the upgrade is ongoing, because node-utils may already be acting on it.
+func (r *Reconciler) cancelRemovedManualUpgrades(chainNode *appsv1.ChainNode) {
+	for i := range chainNode.Status.Upgrades {
+		u := &chainNode.Status.Upgrades[i]
+		if u.Source != appsv1.ManualUpgrade || specHasUpgradeAt(chainNode, u.Height) {
+			continue
+		}
+		switch {
+		case u.Status == appsv1.UpgradeOnGoing:
+			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonUpgradeCancelIgnored,
+				"Manual upgrade at height %d was removed from spec but is already ongoing; it will not be cancelled", u.Height)
+		case u.Status != appsv1.UpgradeScheduled:
+			continue
+		case chainNode.Status.LatestHeight >= u.Height-1:
+			r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonUpgradeCancelIgnored,
+				"Manual upgrade at height %d was removed from spec but the node is already at height %d; it will not be cancelled",
+				u.Height, chainNode.Status.LatestHeight)
+		default:
+			u.Status = appsv1.UpgradeCancelled
+			r.recorder.Eventf(chainNode, corev1.EventTypeNormal, appsv1.ReasonUpgradeCancelled,
+				"Manual upgrade at height %d was removed from spec and has been cancelled", u.Height)
+		}
+	}
+}
+
+func hasCancelledUpgrade(upgrades []appsv1.Upgrade, height int64) bool {
+	return slices.ContainsFunc(upgrades, func(u appsv1.Upgrade) bool {
+		return u.Height == height && u.Status == appsv1.UpgradeCancelled
+	})
+}
+
+func dropCancelledUpgrade(upgrades []appsv1.Upgrade, height int64) []appsv1.Upgrade {
+	return slices.DeleteFunc(upgrades, func(u appsv1.Upgrade) bool {
+		return u.Height == height && u.Status == appsv1.UpgradeCancelled
+	})
+}
+
+func specHasUpgradeAt(chainNode *appsv1.ChainNode, height int64) bool {
+	for _, upgrade := range chainNode.Spec.App.Upgrades {
+		if upgrade.Height == height {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeGovUpgrades records the plans the chain reported. A plan scheduled again at a cancelled height
+// brings that entry back; a pending governance entry the chain no longer schedules is cancelled.
+func (r *Reconciler) mergeGovUpgrades(ctx context.Context, chainNode *appsv1.ChainNode, plans []appsv1.Upgrade) error {
+	for _, upgrade := range plans {
+		chainNode.Status.Upgrades = dropCancelledUpgrade(chainNode.Status.Upgrades, upgrade.Height)
+		chainNode.Status.Upgrades = AddOrUpdateUpgrade(chainNode.Status.Upgrades, upgrade)
+	}
+	return r.retireStaleGovUpgrades(ctx, chainNode, plans)
+}
+
+// retireStaleGovUpgrades marks a pending governance upgrade above the current height as cancelled when
+// the chain, queried successfully, no longer schedules a plan at that height. An entry the user forced
+// on-chain in the spec (of this node, or of its ChainNodeSet) is kept.
+func (r *Reconciler) retireStaleGovUpgrades(ctx context.Context, chainNode *appsv1.ChainNode, plans []appsv1.Upgrade) error {
+	for i := range chainNode.Status.Upgrades {
+		u := &chainNode.Status.Upgrades[i]
+		if u.Source != appsv1.OnChainUpgrade || u.Height <= chainNode.Status.LatestHeight ||
+			(u.Status != appsv1.UpgradeScheduled && u.Status != appsv1.UpgradeImageMissing) ||
+			slices.ContainsFunc(plans, func(p appsv1.Upgrade) bool { return p.Height == u.Height }) {
+			continue
+		}
+		forced, err := r.upgradeForcedOnChain(ctx, chainNode, u.Height)
+		if err != nil {
+			return err
+		}
+		if forced {
+			continue
+		}
+		u.Status = appsv1.UpgradeCancelled
+		r.recorder.Eventf(chainNode, corev1.EventTypeNormal, appsv1.ReasonUpgradeRetired,
+			"Governance upgrade %q at height %d is no longer scheduled on chain; cancelled", u.Name, u.Height)
+	}
+	return nil
+}
+
+// upgradeForcedOnChain reports whether the user configured a forceOnChain upgrade at height. A
+// ChainNodeSet child's spec also carries governance entries propagated from the set's status, so for
+// a child only the set's own spec expresses user intent.
+func (r *Reconciler) upgradeForcedOnChain(ctx context.Context, chainNode *appsv1.ChainNode, height int64) (bool, error) {
+	upgrades := chainNode.Spec.App.Upgrades
+	if owner := metav1.GetControllerOf(chainNode); owner != nil && chainNode.IsControlledByChainNodeSet() {
+		nodeSet := &appsv1.ChainNodeSet{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.GetNamespace(), Name: owner.Name}, nodeSet); err != nil {
+			if errors.IsNotFound(err) {
+				return true, nil
+			}
+			return false, err
+		}
+		upgrades = nodeSet.Spec.App.Upgrades
+	}
+	for _, upgrade := range upgrades {
+		if upgrade.Height == height && upgrade.ForceGovUpgrade() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func isHistoricalBootstrapUpgrade(chainNode *appsv1.ChainNode, nodePodRunning bool, height int64) bool {

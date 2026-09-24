@@ -53,6 +53,11 @@ For full automation, ensure that the governance proposal includes the **containe
    and malformed markers are ignored; terminal halt recovery also requires evidence from a Pod that
    was configured for that same halt target.
 
+If a later query shows that the chain no longer schedules a plan above the node's height (the plan
+was cancelled, or proposed again at another height), the entry is marked `cancelled` and an
+`UpgradeRetired` event is recorded. A plan proposed again at that height schedules it again. An
+entry you configured with `forceOnChain` is never cancelled this way.
+
 Because the SDK marker is stored on the data volume, governance upgrade detection survives sidecar
 and Pod restarts. If RPC is temporarily unavailable, the marker can recover the target and its
 `binaries.docker` image without inventing a committed height; without an image, the upgrade remains
@@ -85,6 +90,17 @@ app:
   - height: 3000
     image: yourimage:yourtag
 ```
+
+### Cancelling a Manual Upgrade
+
+To withdraw a scheduled manual upgrade, remove its entry from `.spec.app.upgrades` (on a
+ChainNodeSet, from the ChainNodeSet's spec). Its `.status.upgrades` entry becomes `cancelled`, the
+node is no longer stopped at that height, and an `UpgradeCancelled` event is recorded. Adding the
+entry back schedules it again.
+
+A removal is ignored, with an `UpgradeCancelIgnored` warning event, once the node has reached the
+height just before the upgrade or the upgrade is already ongoing: at that point the node may already
+be stopping for it. Governance upgrades cannot be cancelled from the spec.
 
 ### Handling Governance Upgrades Without Images
 

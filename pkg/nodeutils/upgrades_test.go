@@ -62,3 +62,17 @@ func TestUpgradeCheckerWatchesConfigMapSymlinkReplacement(t *testing.T) {
 	cancel()
 	require.NoError(t, <-done)
 }
+
+// TestMatchesGovernanceUpgradeRequiresCancelledEntry locks in that a cancelled on-chain entry does not
+// suppress the chain's own upgrade marker: a plan proposed again at that height must still be applied.
+func TestMatchesGovernanceUpgradeRequiresCancelledEntry(t *testing.T) {
+	info := sdkUpgradeInfo{Name: "v2", Height: 100}
+	cancelled := UpgradesConfig{Upgrades: []Upgrade{{Height: 100, Name: "v2", Status: "cancelled", Source: OnChainUpgrade}}}
+	if !matchesGovernanceUpgrade(cancelled, info) {
+		t.Fatal("a cancelled entry must not suppress the chain's upgrade marker")
+	}
+	skipped := UpgradesConfig{Upgrades: []Upgrade{{Height: 100, Name: "v2", Status: UpgradeSkipped, Source: OnChainUpgrade}}}
+	if matchesGovernanceUpgrade(skipped, info) {
+		t.Fatal("a skipped entry suppresses the marker")
+	}
+}
