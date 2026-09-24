@@ -365,11 +365,12 @@ func (r *Reconciler) ensureGrpcService(ctx context.Context, nodeSet *appsv1.Chai
 	if err != nil {
 		return err
 	}
-	// A route named "<route>-grpc" (grandfathered past the webhook's name claim) owns a global Service
-	// under this name. Refuse to take it over rather than rewrite it back and forth every reconcile.
+	// Another Service of this nodeSet (e.g. of a route named "<route>-grpc", grandfathered past the
+	// webhook's name claim) may own this name. Refuse to take it over rather than rewrite it back and
+	// forth every reconcile. Unowned and foreign Services are refused by ApplyOwned.
 	live := &corev1.Service{}
 	err = r.Get(ctx, client.ObjectKeyFromObject(svc), live)
-	if err == nil && live.Labels[controllers.LabelScope] == scopeGlobal {
+	if err == nil && metav1.IsControlledBy(live, nodeSet) && live.Labels[controllers.LabelScope] != scopeGlobalGrpc {
 		return fmt.Errorf("service %q already backs another route; rename the route %q or %q-grpc", svc.GetName(), ingress.Name, ingress.Name)
 	}
 	if client.IgnoreNotFound(err) != nil {
