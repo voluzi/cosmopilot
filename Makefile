@@ -6,9 +6,6 @@ NODE_UTILS_NAME    ?= ghcr.io/voluzi/node-utils
 NODE_UTILS_VERSION ?= $(shell git describe --tags --match 'node-utils/*' --abbrev=0)
 NODE_UTILS_IMG 	   ?= $(NODE_UTILS_NAME):$(NODE_UTILS_VERSION:node-utils/v%=%)
 
-HELM_CHART_LATEST_TAG ?= $(shell git describe --tags --match 'chart/*' --abbrev=0)
-HELM_CHART_VERSION = $(HELM_CHART_LATEST_TAG:chart/v%=%)
-
 BUILDDIR ?= $(CURDIR)/build
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
@@ -147,7 +144,7 @@ test.e2e: manifests generate fmt vet kind kubectl helm ginkgo ## Run e2e tests w
 
 .PHONY: test.e2e.release
 test.e2e.release: CLUSTER_NAME?=cosmopilot-e2e
-test.e2e.release: CHART_VERSION?=$(HELM_CHART_VERSION)
+test.e2e.release: CHART_VERSION?=$(VERSION:v%=%)
 test.e2e.release: REUSE_CLUSTER?=true
 test.e2e.release: FOCUS?=
 test.e2e.release: SKIP?=
@@ -191,8 +188,8 @@ docker-build-nodeutils: ## Build node-utils docker image.
 	$(DOCKER_BUILD) -t $(NODE_UTILS_IMG) -f Dockerfile.utils .
 
 .PHONY: helm.package
-helm.package: manifests helm $(BUILDDIR)/ ## Package helm chart. Final package name is cosmopilot-<<VERSION>>.tgz
-	@$(HELM) package helm/cosmopilot --version $(HELM_CHART_VERSION:v%=%) --app-version $(VERSION:v%=%) -d $(BUILDDIR)
+helm.package: manifests helm $(BUILDDIR)/ ## Package helm chart. Chart version and appVersion are both VERSION: cosmopilot-<<VERSION>>.tgz
+	@$(HELM) package helm/cosmopilot --version $(VERSION:v%=%) --app-version $(VERSION:v%=%) -d $(BUILDDIR)
 
 ##@ Run
 

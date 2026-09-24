@@ -1,6 +1,7 @@
 apiVersion: v2
 name: cosmopilot
-# version and appVersion are placeholders: `make helm.package` overrides both from git tags
-# (--version from the chart/v* tag, --app-version from the cosmopilot v* tag) at release time.
+# version and appVersion are placeholders: at release time `make helm.package` sets both to the
+# version of the cosmopilot v* tag, so each release publishes the chart with the same version as the
+# app, and the chart deploys that app version by default.
 version: 0.0.0
 appVersion: 0.0.0
