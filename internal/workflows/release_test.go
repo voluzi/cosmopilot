@@ -162,7 +162,9 @@ func TestReleaseWorkflowUsesLeastPrivilegePermissions(t *testing.T) {
 
 	wf := loadReleaseWorkflow(t)
 	want := map[string]map[string]string{
-		"version": nil,
+		"version": {
+			"contents": "read",
+		},
 		"build": {
 			"contents": "read",
 			"packages": "write",

@@ -5,6 +5,14 @@ on:
     tags:
       - "vault-renewer/*"
 
+# Release runs of this workflow never overlap, so each decides whether it is the newest release only
+# after every earlier tag has finished publishing. `queue: max` keeps every pending tag instead of
+# only the newest.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+  queue: max
+
 permissions:
   contents: read
   packages: write
@@ -15,13 +23,29 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.extract.outputs.version }}
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Extract version from tag
         id: extract
         run: |
           TAG_REF="${GITHUB_REF#refs/tags/vault-renewer/}"
           VERSION_WITHOUT_V="${TAG_REF#v}"
           echo "version=$VERSION_WITHOUT_V" >> "$GITHUB_OUTPUT"
+
+      # Only the newest stable release moves `latest`, never a prerelease or a backport.
+      - name: Decide whether to move latest
+        id: latest
+        env:
+          VERSION: ${{ steps.extract.outputs.version }}
+        run: |
+          LATEST="$(.github/scripts/is-newest-release.sh vault-renewer/ "$VERSION")"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
   build:
     name: Build and Push Vault Token Renewer Images
     needs:
@@ -84,7 +108,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/vault-renewer
           tags: |
             ${{ needs.version.outputs.version }}-${{ env.ARCH }}
-            latest-${{ env.ARCH }}
+            type=raw,value=latest-${{ env.ARCH }},enable=${{ needs.version.outputs.latest }}
 
       - name: Build and push by digest
         id: build
@@ -92,7 +116,7 @@ jobs:
         with:
           file: Dockerfile.vaultRenewer
           push: true
-          platforms: ${{ matrix.platform }}
+          platforms: ${{ matrix.build.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
 
@@ -120,7 +144,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/vault-renewer
           tags: |
             ${{ needs.version.outputs.version }}
-            latest
+            type=raw,value=latest,enable=${{ needs.version.outputs.latest }}
 
       - name: Create manifest list and push
         run: |

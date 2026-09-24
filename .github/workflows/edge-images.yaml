@@ -1,0 +1,187 @@
+name: Build Edge Images
+
+# Pushes to main publish all images as `edge` (moving) and `edge-<short sha>` (immutable).
+# Deploy the sha tag: a node that already has `edge` cached will not pull it again.
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions: {}
+
+# Never cancel a run half-way, so a published sha always has a complete set of images. With the
+# default queue a burst of pushes may skip intermediate commits; the newest one is always built.
+# Manual runs from other branches get their own group and cannot displace a pending main run.
+concurrency:
+  group: edge-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Compute Edge Tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.extract.outputs.tag }}
+    steps:
+      - name: Compute tag from commit
+        id: extract
+        run: echo "tag=edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.image.name }} (${{ matrix.build.platform }})
+    needs: [version]
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: cosmopilot
+            file: Dockerfile
+          - name: node-utils
+            file: Dockerfile.utils
+          - name: node-tools
+            file: Dockerfile.tools
+          - name: dataexporter
+            file: Dockerfile.dataExporter
+          - name: vault-renewer
+            file: Dockerfile.vaultRenewer
+        build:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.build.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare env vars
+        run: |
+          ARCH=$(echo "${{ matrix.build.platform }}" | cut -d '/' -f 2)
+          echo "ARCH=$ARCH" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR container register
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Dockerfile.tools has no Go build, so node-tools skips the Go cache.
+      - name: Go Cache for Docker Build
+        if: matrix.image.name != 'node-tools'
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            go-build
+            go-pkg-mod
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.image.name }}-edge-docker-${{ hashFiles('go.sum') }}
+
+      - name: Inject cache
+        if: matrix.image.name != 'node-tools'
+        uses: reproducible-containers/buildkit-cache-dance@v3.4.0
+        with:
+          cache-map: |
+            {
+              "go-build": "/root/.cache/go-build",
+              "go-pkg-mod": "/go/pkg/mod"
+            }
+          skip-extraction: ${{ steps.cache.outputs.cache-hit }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}
+          tags: ${{ needs.version.outputs.tag }}-${{ env.ARCH }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          file: ${{ matrix.image.file }}
+          push: true
+          platforms: ${{ matrix.build.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+
+  merge:
+    name: Create Multi-arch ${{ matrix.image }} Image
+    needs: [version, build]
+    # A manual dispatch from another branch builds its images but never publishes an edge tag.
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ cosmopilot, node-utils, node-tools, dataexporter, vault-renewer ]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `edge-<sha>` is immutable: a re-run of the same commit keeps the manifest already published.
+      - name: Create manifest list and push
+        env:
+          NAME: ${{ matrix.image }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${NAME}"
+          if docker buildx imagetools inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+            echo "${IMAGE}:${TAG} already exists, keeping it"
+            exit 0
+          fi
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${TAG}" \
+            "${IMAGE}:${TAG}-amd64" \
+            "${IMAGE}:${TAG}-arm64"
+
+  # Moves `edge` only after every image has its sha manifest. The retags run back to back in one
+  # job with retries; a registry that stays down mid-loop can still leave `edge` mixed until a
+  # re-run or the next push, which is why deployments pin `edge-<sha>`.
+  promote:
+    name: Tag edge images
+    needs: [version, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Point edge at this commit
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          for name in cosmopilot node-utils node-tools dataexporter vault-renewer; do
+            IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${name}"
+            for attempt in 1 2 3; do
+              docker buildx imagetools create --tag "${IMAGE}:edge" "${IMAGE}:${TAG}" && break
+              if [ "$attempt" = 3 ]; then
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            done
+          done
