@@ -66,6 +66,9 @@ func validateAppBinaryName(path, app string) error {
 	if app == "" {
 		return nil
 	}
+	if slices.Contains(reservedPodContainerNames, app) {
+		return fmt.Errorf("%s %q collides with a built-in pod container", path, app)
+	}
 	return validateDNS1123Label(path, app)
 }
 
@@ -115,8 +118,12 @@ func validateGenesisDurations(path string, init *GenesisInitConfig) error {
 		if d.value == nil {
 			continue
 		}
-		if _, err := time.ParseDuration(*d.value); err != nil {
+		duration, err := time.ParseDuration(*d.value)
+		if err != nil {
 			return fmt.Errorf("%s.%s %q must be a Go duration such as \"504h\": %v", path, d.field, *d.value, err)
+		}
+		if duration <= 0 {
+			return fmt.Errorf("%s.%s %q must be greater than zero", path, d.field, *d.value)
 		}
 	}
 	return nil

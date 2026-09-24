@@ -20,6 +20,21 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: ".spec.app.app",
 		},
 		{
+			name:    "app binary named like a built-in container",
+			mutate:  func(c *ChainNode) { c.Spec.App.App = "tmkms" },
+			wantErr: "collides with a built-in pod container",
+		},
+		{
+			name: "zero genesis duration",
+			mutate: func(c *ChainNode) {
+				c.Spec.Genesis = nil
+				c.Spec.Validator = &ValidatorConfig{Init: &GenesisInitConfig{
+					ChainID: "chain-1", Assets: []string{"1stake"}, StakeAmount: "1stake", VotingPeriod: ptr.To("0s"),
+				}}
+			},
+			wantErr: "must be greater than zero",
+		},
+		{
 			name:    "uppercase app binary",
 			mutate:  func(c *ChainNode) { c.Spec.App.App = "Gaiad" },
 			wantErr: ".spec.app.app",
