@@ -49,3 +49,21 @@ func TestGetLastUpgradeImageOnNodeSet(t *testing.T) {
 	assert.Equal(t, "registry.ops.allora.run/bryn-test/allorad:986-test", nodeSet.GetLastUpgradeImage())
 	assert.Equal(t, "986-test", nodeSet.GetLastUpgradeVersion())
 }
+
+func TestGrpcServiceAnnotations(t *testing.T) {
+	h2c := map[string]string{TraefikServersSchemeAnnotation: "h2c"}
+	for class, want := range map[string]map[string]string{
+		"traefik":          h2c,
+		"traefik-internal": h2c,
+		"nginx":            nil,
+		"haproxy":          nil,
+	} {
+		gi := &GlobalIngressConfig{IngressClass: ptr.To(class)}
+		assert.Equal(t, want, gi.GetGrpcServiceAnnotations(), class)
+		cn := &ChainNode{Spec: ChainNodeSpec{Ingress: &IngressConfig{IngressClass: ptr.To(class)}}}
+		assert.Equal(t, want, cn.GetGrpcServiceAnnotations(), class)
+	}
+	// The default class is nginx, which reads the protocol from the Ingress instead.
+	assert.Nil(t, (&GlobalIngressConfig{}).GetGrpcServiceAnnotations())
+	assert.Nil(t, (&ChainNode{Spec: ChainNodeSpec{Ingress: &IngressConfig{}}}).GetGrpcServiceAnnotations())
+}

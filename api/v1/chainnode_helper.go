@@ -602,6 +602,11 @@ func (chainNode *ChainNode) GetGrpcAnnotations() map[string]string {
 	return nil
 }
 
+// GetGrpcServiceAnnotations returns the annotations for the gRPC-only Service behind the gRPC Ingress.
+func (chainNode *ChainNode) GetGrpcServiceAnnotations() map[string]string {
+	return grpcServiceAnnotations(chainNode.GetIngressClass())
+}
+
 func (chainNode *ChainNode) UseInternal() bool {
 	if chainNode.Spec.Ingress != nil && chainNode.Spec.Ingress.UseInternalServices != nil {
 		return *chainNode.Spec.Ingress.UseInternalServices

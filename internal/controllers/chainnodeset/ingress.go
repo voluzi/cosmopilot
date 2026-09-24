@@ -47,6 +47,9 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 				}, nodeSet); err != nil {
 					return err
 				}
+				if err = r.deleteGrpcService(ctx, nodeSet, globalIngress.GetGrpcName(nodeSet)); err != nil {
+					return err
+				}
 			} else {
 				if err = r.ensureIngress(ctx, grpcIngress); err != nil {
 					return err
@@ -73,6 +76,11 @@ func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainN
 		if hasLabel && !gatewayApplied && ContainsGlobalGateway(nodeSet.Spec.GatewayRoutes, name) {
 			logger.Info("preserving ingress; replacement gateway route not applied", "ingress", ing.GetName())
 			continue
+		}
+		// Remove a stale gRPC Ingress's gRPC-only Service first: the stale Ingress is what finds it on a
+		// retry. The API Ingress has no such Service.
+		if err = r.deleteGrpcService(ctx, nodeSet, ing.GetName()); err != nil {
+			return err
 		}
 		deleted, err := controllers.DeleteControlledObject(ctx, r.Client, &ing, nodeSet)
 		if err != nil {
@@ -310,7 +318,7 @@ func (r *Reconciler) getGrpcGlobalIngressSpec(nodeSet *appsv1.ChainNodeSet, glob
 								PathType: &pathType,
 								Backend: v1.IngressBackend{
 									Service: &v1.IngressServiceBackend{
-										Name: globalIngress.GetServiceName(nodeSet),
+										Name: globalIngress.GetGrpcName(nodeSet),
 										Port: v1.ServiceBackendPort{
 											Number: chainutils.GrpcPort,
 										},

@@ -22,6 +22,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v3/api/v1"
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
+	"github.com/voluzi/cosmopilot/v3/internal/cosmoguard"
 )
 
 func (r *Reconciler) initializeLegacySignerServiceNames(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
@@ -249,20 +250,34 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	for _, ingress := range nodeSet.Spec.Ingresses {
-		svc, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(ingress.Groups, ingress.GetName(nodeSet)))
+		global, err := r.getGlobalServiceSpec(nodeSet, ingress, routeFlip(ingress.Groups, ingress.GetName(nodeSet)))
 		if err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		internal, err := r.getGlobalInternalServiceSpec(nodeSet, ingress)
+		if err != nil {
 			return err
 		}
 
-		svc, err = r.getGlobalInternalServiceSpec(nodeSet, ingress)
-		if err != nil {
+		// The gRPC Ingress targets a gRPC-only Service. Derive it from the backend's rendered spec
+		// (ensure overwrites its argument with the pre-update read), so it follows a CosmoGuard flip in
+		// the same pass. ensureIngresses removes it.
+		backend := global
+		if ingress.UseInternal() {
+			backend = internal
+		}
+		backend = backend.DeepCopy()
+
+		if err = ensure(global, scopeGlobal); err != nil {
 			return err
 		}
-		if err = ensure(svc, scopeGlobal); err != nil {
+		if err = ensure(internal, scopeGlobal); err != nil {
 			return err
+		}
+		if ingress.EnableGRPC && !ingress.CreateServicesOnly() {
+			if err = r.ensureGrpcService(ctx, nodeSet, ingress, backend); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -330,6 +345,37 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 	}
 
 	return nil
+}
+
+func (r *Reconciler) ensureGrpcService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, ingress appsv1.GlobalIngressConfig, backend *corev1.Service) error {
+	svc, err := controllers.GrpcOnlyService(backend, ingress.GetGrpcName(nodeSet), WithChainNodeSetLabels(nodeSet, map[string]string{
+		controllers.LabelChainNodeSet:  nodeSet.GetName(),
+		controllers.LabelGlobalIngress: ingress.Name,
+		controllers.LabelScope:         scopeGlobalGrpc,
+	}), ingress.GetGrpcServiceAnnotations())
+	if err != nil {
+		return err
+	}
+	// ApplyOwned (unlike ensureService) tracks the last-applied state, so it also drops the Traefik
+	// annotation when the ingress class changes.
+	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
+}
+
+// deleteGrpcService removes the gRPC-only Service named name. The scope check keeps it from ever
+// deleting a global API Service that happens to share the name.
+func (r *Reconciler) deleteGrpcService(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) error {
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, svc); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if svc.Labels[controllers.LabelScope] != scopeGlobalGrpc {
+		return nil
+	}
+	deleted, err := controllers.DeleteControlledObject(ctx, r.Client, svc, nodeSet)
+	if deleted {
+		log.FromContext(ctx).Info("deleted service", "svc", name)
+	}
+	return err
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {

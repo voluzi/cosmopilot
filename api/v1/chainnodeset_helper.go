@@ -27,6 +27,9 @@ const (
 	// DefaultIngressClass is the default ingress class name.
 	DefaultIngressClass = "nginx"
 
+	// TraefikServersSchemeAnnotation sets the scheme Traefik uses to reach a Service's backends.
+	TraefikServersSchemeAnnotation = "traefik.ingress.kubernetes.io/service.serversscheme"
+
 	// ReservedValidatorGroupName is the group name reserved for the legacy
 	// singleton .spec.validator. It cannot be used as a node group name.
 	ReservedValidatorGroupName = "validator"
@@ -538,6 +541,20 @@ func (gi *GlobalIngressConfig) GetGrpcAnnotations() map[string]string {
 		}
 	}
 
+	return nil
+}
+
+// GetGrpcServiceAnnotations returns the annotations for the gRPC-only Service behind the gRPC Ingress.
+func (gi *GlobalIngressConfig) GetGrpcServiceAnnotations() map[string]string {
+	return grpcServiceAnnotations(gi.GetIngressClass())
+}
+
+// grpcServiceAnnotations tells ingress controllers that read the backend protocol from the Service
+// (Traefik) to reach gRPC over h2c. nginx takes it from the Ingress instead (see GetGrpcAnnotations).
+func grpcServiceAnnotations(ingressClass string) map[string]string {
+	if strings.Contains(ingressClass, "traefik") {
+		return map[string]string{TraefikServersSchemeAnnotation: "h2c"}
+	}
 	return nil
 }
 

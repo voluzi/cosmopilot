@@ -1199,11 +1199,17 @@ func (nodeSet *ChainNodeSet) eachDerivedServiceName(fn func(name, owner string))
 		// the child at reconcile under the same owner.
 		childGuard := g.GetServiceConfig().CosmoGuardEnabled() &&
 			(g.IndividualIngresses != nil || g.IndividualGatewayRoutes != nil)
+		// A child exposing gRPC through its individual ingress backs the "<child>-grpc" Ingress with a
+		// gRPC-only Service of the same name.
+		childGrpc := g.IndividualIngresses != nil && g.IndividualIngresses.EnableGRPC
 		for j := 0; j < g.GetInstances(); j++ {
 			child := fmt.Sprintf("%s-%d", base, j)
 			fn(child, owner)
 			fn(child+"-internal", owner)
 			fn(child+"-p2p", owner)
+			if childGrpc {
+				fn(child+"-grpc", owner)
+			}
 			if childGuard {
 				fn(child+"-cg", owner)
 				fn(child+"-cg-peer", owner)
@@ -1243,6 +1249,10 @@ func (nodeSet *ChainNodeSet) eachDerivedServiceName(fn func(name, owner string))
 		base := ing.GetName(nodeSet)
 		fn(base, owner)
 		fn(base+"-internal", owner)
+		// The gRPC Ingress is backed by a gRPC-only Service named like the Ingress.
+		if ing.EnableGRPC && !ing.CreateServicesOnly() {
+			fn(ing.GetGrpcName(nodeSet), owner)
+		}
 	}
 	for i := range nodeSet.Spec.GatewayRoutes {
 		gw := &nodeSet.Spec.GatewayRoutes[i]

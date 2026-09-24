@@ -13,6 +13,9 @@ const (
 	scopeGlobal     = "global"
 	scopeGroup      = "group"
 	scopeCosmoGuard = "cosmoguard"
+	// scopeGlobalGrpc marks the gRPC-only Service behind a global gRPC Ingress. It is kept out of
+	// scopeGlobal so the global Service sweep leaves it to ensureIngresses.
+	scopeGlobalGrpc = "global-grpc"
 
 	// cosmoGuardRouteLabelPrefix namespaces the per-route labels stamped on CosmoGuard pods so a
 	// global ingress/gateway Service can select the guard pods of the groups it targets without
