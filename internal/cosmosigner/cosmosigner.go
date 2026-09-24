@@ -217,6 +217,24 @@ func (p Params) BuildConfig() *Config {
 	return cfg
 }
 
+// raftSecurityEnv makes the Raft transport and bootstrap choices explicit, as cosmosigner 3.x
+// requires. Like clusterBindingEnv these are environment variables so 0.2.x images, which reject
+// unknown config keys, keep starting.
+//
+// Without raftTLSSecret the transport is plain TCP: always acceptable for a single replica, whose
+// Raft port has no peers and is closed by the NetworkPolicy, and allowed for several replicas only
+// through unsafeAllowInsecureRaft, which admission enforces.
+func (p Params) raftSecurityEnv() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	if p.RaftTLSSecret == nil {
+		env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_RAFT_INSECURE", Value: "true"})
+	}
+	if p.Replicas <= 1 {
+		env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_RAFT_SINGLE_NODE", Value: "true"})
+	}
+	return env
+}
+
 // ConfigYAML renders the cosmosigner config.yaml. Callers render once per reconcile and pass the
 // result to ConfigMap and StatefulSet, so the ConfigMap contents and the pod-template ROLLME hash
 // always come from the same render.
@@ -398,6 +416,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 	}
 	volumes = append(volumes, p.Backend.volumes()...)
+	volumes = append(volumes, p.Backend.claimVolumes()...)
 
 	volumeMounts := []corev1.VolumeMount{
 		{Name: dataVolumeName, MountPath: dataMountPath},
@@ -412,6 +431,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		}
 	}
 	volumeMounts = append(volumeMounts, p.Backend.volumeMounts()...)
+	volumeMounts = append(volumeMounts, p.Backend.claimVolumeMounts()...)
 
 	if p.RaftTLSSecret != nil {
 		volumes = append(volumes, corev1.Volume{
@@ -472,6 +492,9 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 			TimeoutSeconds:   5,
 		},
 	}
+
+	signer.Env = append(signer.Env, p.raftSecurityEnv()...)
+	signer.Env = append(signer.Env, p.Backend.clusterBindingEnv()...)
 
 	claim := corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{

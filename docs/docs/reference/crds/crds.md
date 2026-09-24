@@ -1280,7 +1280,7 @@ Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
 | ----- | ----------- | ------ | -------- |
 | nodeGroups | NodeGroups is the list of node group names (.spec.nodes[].name) the signer will connect to and sign for. Only valid on a ChainNodeSet. When empty, the configured validator group is targeted by default. Every targeted node listens for the signer and shares the single consensus identity held by the configured backend. | []string | false |
 | replicas | Replicas is the number of signer instances to run. Must be an odd number so the embedded raft cluster can form a quorum. Defaults to `1` (a single-instance signer with no HA). | *int32 | false |
-| image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:0.2.1`). Set this to pin or override the image for this specific signer only. | *string | false |
+| image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:3.0.0`). Set this to pin or override the image for this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes. | *string | false |
 | backend | Backend selects and configures where the consensus key material lives and how signing is performed. Exactly one backend must be configured. | [CosmosignerBackend](#cosmosignerbackend) | true |
 | stateStorageSize | StateStorageSize is the size of the per-replica PVC used for the raft double-sign protection state and the persisted connection key. Defaults to `1Gi`. | *string | false |
 | storageClassName | StorageClassName is the storage class for the per-replica state PVC. Defaults to the cluster default storage class when unset. | *string | false |
@@ -1313,6 +1313,7 @@ CosmosignerGcpKmsBackend configures the Google Cloud KMS signing backend. Exactl
 | keyVersion | KeyVersion is the full resource name of a pre-provisioned KMS crypto key version used for signing (e.g. `projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1`). Mutually exclusive with import. | string | false |
 | import | Import requests a one-shot, controller-managed import of the targeted validator's existing consensus key into Cloud KMS (BYOK). The resulting crypto key version does not exist until the import completes, so it is recorded in status rather than configured here. Mutually exclusive with keyVersion. | *[CosmosignerGcpKmsImport](#cosmosignergcpkmsimport) | false |
 | credentialsSecret | CredentialsSecret references a secret containing a Google service account JSON key. When unset, Workload Identity / Application Default Credentials are used. | *corev1.SecretKeySelector | false |
+| claimCredentialsSecret | ClaimCredentialsSecret optionally references a Google service account JSON key used only to label the CryptoKey with the signer cluster that owns it, the first time a signer cluster starts (cosmosigner 3.x). When unset, the runtime identity also needs `cloudkms.cryptoKeys.update` on the CryptoKey. | *corev1.SecretKeySelector | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -1393,6 +1394,8 @@ CosmosignerVaultBackend configures the HashiCorp Vault Transit signing backend.
 | tokenSecret | TokenSecret references the secret containing the Vault token used to authenticate. | *corev1.SecretKeySelector | true |
 | certificateSecret | CertificateSecret references the secret containing the CA certificate of the Vault cluster. | *corev1.SecretKeySelector | false |
 | namespace | Namespace is the Vault namespace (Vault Enterprise), when applicable. | *string | false |
+| bindingMount | BindingMount is the Vault KV v2 mount holding the record that binds this key to one signer cluster (cosmosigner 3.x). Defaults to cosmosigner's own default, `cosmosigner`. The mount must exist with automatic version expiry disabled (`delete_version_after=0s`). | *string | false |
+| claimTokenSecret | ClaimTokenSecret optionally references a Vault token used only to write the key's cluster binding the first time a signer cluster starts (cosmosigner 3.x). When unset, the runtime token from tokenSecret must also be allowed to create that record. | *corev1.SecretKeySelector | false |
 | uploadGenerated | UploadGenerated indicates that the controller should generate a consensus key locally and import it into Vault. Defaults to `false`. It is set to `true` automatically when this validator initializes a new genesis. This should not be used in production. | bool | false |
 
 [Back to Custom Resources](#custom-resources)

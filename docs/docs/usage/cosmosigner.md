@@ -215,6 +215,33 @@ cosmosigner:
       #                          # false, but is implied when the target initializes a new genesis.
 ```
 
+Cosmosigner 3.x also records which signer cluster owns the key (see
+[Key ownership](#key-ownership-cosmosigner-3x)). Create the registry once, as a KV v2 mount with
+automatic version expiry disabled, and give the signer's token the matching policy:
+
+```sh
+vault secrets enable -path=cosmosigner -version=2 kv
+vault write cosmosigner/config delete_version_after=0s
+```
+
+```hcl
+path "transit/keys/my-validator"             { capabilities = ["read"] }
+path "transit/sign/my-validator"             { capabilities = ["update"] }
+path "cosmosigner/data/cluster-bindings/*"     { capabilities = ["create", "update", "read"] }
+path "cosmosigner/metadata/cluster-bindings/*" { capabilities = ["read"] }
+```
+
+`create` and `update` on `cluster-bindings` are needed only to write the record the first time a
+signer cluster starts. To keep them off the running signer, grant the runtime token only `read` there
+and set `claimTokenSecret` to a separate token that has them; it is mounted into the signer but used
+for that single write. Set `bindingMount` when the registry lives at a path other than `cosmosigner`.
+Neither permission reaches Transit key administration: the signer cannot delete or export the key.
+
+```yaml
+      bindingMount: cosmosigner                                    # optional
+      claimTokenSecret: { name: vault-cosmosigner-claim, key: token }  # optional
+```
+
 Cosmosigner renews renewable and periodic Vault tokens itself at half their current TTL. No
 `vault-token-renewer` sidecar is deployed for this backend. Startup rejects a finite non-renewable
 token because it cannot remain valid for a long-running validator; use a renewable or periodic token
@@ -227,8 +254,10 @@ after the old token fails lookup, but TLS CA and other client configuration are 
 startup; use a new Secret name when those values rotate so Cosmopilot performs break-before-make.
 
 `keyVersion` is pinned into every public-key lookup and signing request. Rotating the Vault Transit
-key therefore does not silently change the validator identity on restart. Deliberately moving to a
-new version is a managed signer migration and must match the key the chain expects.
+key therefore does not silently change the validator identity on restart. Moving an existing signer
+to another version of the same `keyName` is rejected, because Cosmosigner 3.x binds the whole key to
+the signer cluster that first used it (see [Key ownership](#key-ownership-cosmosigner-3x)): new key
+material needs a new `keyName`, and must match the key the chain expects.
 
 :::note[Genesis init implies `uploadGenerated`]
 When the signer targets a validator that initializes a new genesis (`validator.init`),
@@ -310,6 +339,19 @@ the Google service account that has `cloudkms.signerVerifier` on the key — the
 service account is usually not bound.
 :::
 
+With Cosmosigner 3.x the signer's Google service account also needs, on the CryptoKey,
+`cloudkms.cryptoKeys.get` (to read which signer cluster owns the key) and `cloudkms.cryptoKeys.update`
+(to label an unowned key the first time a signer cluster starts; see
+[Key ownership](#key-ownership-cosmosigner-3x)). Grant them through a custom role rather than
+`roles/cloudkms.admin`. `cryptoKeys.update` changes CryptoKey metadata such as labels; it cannot
+destroy or disable key versions. To keep it off the running signer, grant the runtime identity only
+`cryptoKeys.get` and set `claimCredentialsSecret` to a service account key that has `update`; it is
+used only for that label write.
+
+```yaml
+      claimCredentialsSecret: { name: gcp-kms-claim, key: credentials.json }   # optional
+```
+
 ### Software (testing)
 
 ```yaml
@@ -320,6 +362,10 @@ cosmosigner:
                                                  # is used); required for a sentry-mode signer
 ```
 
+The key Secret is mounted read-only, so the software backend keeps its ownership marker (see
+[Key ownership](#key-ownership-cosmosigner-3x)) on each replica's state PVC, next to the Raft history
+it names.
+
 :::warning[Sentry-mode software keys are never minted]
 For a sentry-mode signer (no validator targeted) the referenced secret must already exist and hold a
 consensus key that is registered on-chain — list it in `validator.init.genesisValidators` so it is
@@ -327,6 +373,37 @@ created **before** genesis, or provision it yourself for an externally-registere
 refuses to mint a fresh key here: the signer only ever deploys after genesis is fixed, so a minted
 key could never be in the validator set.
 :::
+
+### Key ownership (Cosmosigner 3.x)
+
+Cosmosigner 3.x binds each key to one signer cluster: the first time a signer cluster starts it
+records its Raft cluster ID with the key (a Vault KV record, a label on the Cloud KMS CryptoKey, or a
+marker file for the software backend), and afterwards it refuses to sign with a key recorded for a
+different cluster. This stops a second, independent signer cluster from ever signing with the same
+key.
+
+`Cosmopilot` lets the signer write that record itself (`COSMOSIGNER_CLAIM_IF_UNCLAIMED`), because it
+already guarantees the precondition: a consensus key is reserved for one signer, and every migration
+stops the old signer before the new one starts. A key already recorded for another cluster is never
+reassigned; the signer fails to start instead, and the migration stays in `RollingOut` with that error
+in the signer logs.
+
+A signer whose Raft state is discarded (a different-key migration, or deleting and recreating the
+signer) starts a **new** cluster. If it points at a Vault key name or Cloud KMS CryptoKey that an
+earlier cluster already recorded, it is refused: use a new key name or CryptoKey for new key material,
+and never reuse one after its Raft state has been removed. Admission rejects the common case, moving
+a signer to another `keyVersion` of the same Vault key or CryptoKey. For the same reason every signer
+needs its own Vault key or CryptoKey, including signers on different chains: only the first signer
+cluster to start can use it.
+
+Upgrading an existing signer from Cosmosigner 0.2.x to 3.x keeps its Raft state, so it records its
+existing cluster and keeps signing. Before upgrading the operator, create the Vault KV mount or grant
+the Cloud KMS permissions above: the new default image replaces running signers through the usual
+break-before-make migration. A signer whose permissions are missing keeps restarting and recovers by
+itself once they are granted, but its validator does not sign meanwhile. To upgrade signer by
+signer, pin `.spec.cosmosigner.image` to your current 0.2.x image before upgrading the operator, then
+remove the pin one signer at a time. Going back to 0.2.x after a signer has run 3.x is unsupported,
+because 0.2.x cannot read the state 3.x writes.
 
 ## High availability
 
@@ -459,7 +536,7 @@ Both are retried and clear on their own. Cosmosigner re-resolves its targets as 
 drops, rather than only on its reconcile interval, so a node replaced with a new pod IP is picked up in
 about a second and the pair normally converges within a few seconds.
 
-That behavior needs **Cosmosigner 0.2.1 or newer**, which is the default `cosmosignerImage`. If you
+That behavior needs **Cosmosigner 0.2.1 or newer** (the default `cosmosignerImage` is 3.0.0). If you
 have pinned `.spec.cosmosigner.image` to 0.2.0 or earlier, re-resolution happens only on the fixed
 interval, so a node that churns during rendezvous can restart several times and take a few minutes to
 settle. The rollout is healthy either way; only how long it looks unsettled differs.

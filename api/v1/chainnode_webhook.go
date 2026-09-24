@@ -261,6 +261,9 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		if err := validateCosmosignerReplicasImmutable(old.Spec.Cosmosigner, chainNode.Spec.Cosmosigner); err != nil {
 			return nil, err
 		}
+		if err := validateCosmosignerKeyVersionChange(".spec.cosmosigner.backend", old.Spec.Cosmosigner, chainNode.Spec.Cosmosigner); err != nil {
+			return nil, err
+		}
 		// The spec-diff helper above no-ops when the signer was removed in an earlier update
 		// (old.Spec.Cosmosigner is nil). While the previous signer's teardown is still in flight the
 		// controller has not yet cleared the recorded replica count and PVC template, and its raft PVCs

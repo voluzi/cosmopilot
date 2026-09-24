@@ -165,6 +165,13 @@ path "transit/verify/*" {
 path "transit/export/signing-key/*" {
   capabilities = ["read"]
 }
+# Cosmosigner 3.x key-ownership registry: signers claim an unclaimed key at startup.
+path "cosmosigner/data/cluster-bindings/*" {
+  capabilities = ["create", "update", "read"]
+}
+path "cosmosigner/metadata/cluster-bindings/*" {
+  capabilities = ["read"]
+}
 `
 
 // vaultInitResponse represents the JSON response from vault operator init
@@ -381,6 +388,16 @@ func (f *KindFramework) configureVaultTransit(rootToken string) error {
 	// Enable Transit engine using VAULT_TOKEN env var (ignore error if already enabled)
 	_, _ = f.PodExec(VaultNamespace, podName, "vault",
 		"sh", "-c", fmt.Sprintf("VAULT_TOKEN=%s vault secrets enable -tls-skip-verify transit", rootToken))
+
+	// Cosmosigner 3.x records which signer cluster owns each key in a KV v2 registry that must never
+	// expire its records (ignore the enable error if the mount already exists; the config write is
+	// idempotent and must succeed).
+	_, _ = f.PodExec(VaultNamespace, podName, "vault",
+		"sh", "-c", fmt.Sprintf("VAULT_TOKEN=%s vault secrets enable -tls-skip-verify -path=cosmosigner -version=2 kv", rootToken))
+	if _, err := f.PodExec(VaultNamespace, podName, "vault",
+		"sh", "-c", fmt.Sprintf("VAULT_TOKEN=%s vault write -tls-skip-verify cosmosigner/config delete_version_after=0s", rootToken)); err != nil {
+		return fmt.Errorf("failed to configure the cosmosigner binding registry: %w", err)
+	}
 
 	return nil
 }

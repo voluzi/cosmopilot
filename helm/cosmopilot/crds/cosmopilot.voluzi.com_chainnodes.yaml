@@ -2853,6 +2853,34 @@ spec:
                         description: GcpKMS uses a non-exportable EC_SIGN_ED25519
                           key in Google Cloud KMS.
                         properties:
+                          claimCredentialsSecret:
+                            description: |-
+                              ClaimCredentialsSecret optionally references a Google service account JSON key used only to
+                              label the CryptoKey with the signer cluster that owns it, the first time a signer cluster
+                              starts (cosmosigner 3.x). When unset, the runtime identity also needs
+                              `cloudkms.cryptoKeys.update` on the CryptoKey.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
                           credentialsSecret:
                             description: |-
                               CredentialsSecret references a secret containing a Google service account JSON key. When
@@ -2953,9 +2981,42 @@ spec:
                             description: Address is the full address of the Vault
                               cluster (e.g. `https://vault:8200`).
                             type: string
+                          bindingMount:
+                            description: |-
+                              BindingMount is the Vault KV v2 mount holding the record that binds this key to one signer
+                              cluster (cosmosigner 3.x). Defaults to cosmosigner's own default, `cosmosigner`. The mount must
+                              exist with automatic version expiry disabled (`delete_version_after=0s`).
+                            type: string
                           certificateSecret:
                             description: CertificateSecret references the secret containing
                               the CA certificate of the Vault cluster.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          claimTokenSecret:
+                            description: |-
+                              ClaimTokenSecret optionally references a Vault token used only to write the key's cluster
+                              binding the first time a signer cluster starts (cosmosigner 3.x). When unset, the runtime token
+                              from tokenSecret must also be allowed to create that record.
                             properties:
                               key:
                                 description: The key of the secret to select from.  Must
@@ -3041,8 +3102,9 @@ spec:
                     description: |-
                       Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
                       image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-                      defaulting to `ghcr.io/voluzi/cosmosigner:0.2.1`). Set this to pin or override the image for
-                      this specific signer only.
+                      defaulting to `ghcr.io/voluzi/cosmosigner:3.0.0`). Set this to pin or override the image for
+                      this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is
+                      unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes.
                     type: string
                   logLevel:
                     description: LogLevel is the log level for the signer. Defaults
