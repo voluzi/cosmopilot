@@ -506,7 +506,8 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), replicas, usesImportPod, usesPubkeyPod, requireRetainedState); err != nil {
 		return cosmosigner.Params{}, err
 	}
-	recovering := chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == ""
+	recovering := (chainNode.IsValidator() && chainNode.Status.CosmosignerPublicKey == "") ||
+		(chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == "")
 	publicKey := ""
 	if recovering {
 		recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, chainNode, params)
@@ -533,14 +534,14 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 		if recorded := chainNode.Status.PubKey; recorded != "" {
 			onChain := cosmosigner.CanonicalSDKPublicKey(recorded)
 			if onChain == "" {
-				return cosmosigner.Params{}, r.quiesceManagedCosmosigner(ctx, chainNode, params.Name, fmt.Errorf("cosmosigner cannot verify the on-chain validator public key recorded in status"))
+				return cosmosigner.Params{}, r.refuseValidatorSignerPublicKey(ctx, chainNode, params.Name, publicKey, fmt.Errorf("cosmosigner cannot verify the on-chain validator public key recorded in status"))
 			}
 			if publicKey != onChain {
-				return cosmosigner.Params{}, r.quiesceManagedCosmosigner(ctx, chainNode, params.Name, fmt.Errorf("cosmosigner public key does not match the on-chain validator public key recorded in status; Cosmopilot does not rotate validator consensus keys"))
+				return cosmosigner.Params{}, r.refuseValidatorSignerPublicKey(ctx, chainNode, params.Name, publicKey, fmt.Errorf("cosmosigner public key does not match the on-chain validator public key recorded in status; Cosmopilot does not rotate validator consensus keys"))
 			}
 		}
 		if applied := chainNode.Status.CosmosignerPublicKey; applied != "" && publicKey != applied {
-			return cosmosigner.Params{}, r.quiesceManagedCosmosigner(ctx, chainNode, params.Name, fmt.Errorf("cosmosigner cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history"))
+			return cosmosigner.Params{}, r.refuseValidatorSignerPublicKey(ctx, chainNode, params.Name, publicKey, fmt.Errorf("cosmosigner cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history"))
 		}
 	}
 	if err := r.ensureConsensusKeyReservation(ctx, chainNode, chainNode.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
@@ -558,6 +559,29 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	}
 	params.ExpectedPublicKey = publicKey
 	return params, nil
+}
+
+// refuseValidatorSignerPublicKey rejects a validator signer whose desired public key failed verification.
+// The running signer is left untouched when it is still pinned to a different recorded key that matches
+// the on-chain validator key (or none is recorded yet): the refusal then concerns only the desired spec,
+// and stopping the signer would take a healthy validator offline for a change that is never applied.
+// Any other signer (unknown or unverifiable applied key) is quiesced as before.
+func (r *Reconciler) refuseValidatorSignerPublicKey(ctx context.Context, chainNode *appsv1.ChainNode, name, rejected string, cause error) error {
+	if chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == "" {
+		return r.quiesceManagedCosmosigner(ctx, chainNode, name, cause)
+	}
+	applied := chainNode.Status.CosmosignerPublicKey
+	if applied == "" || applied == rejected {
+		return r.quiesceManagedCosmosigner(ctx, chainNode, name, cause)
+	}
+	if recorded := chainNode.Status.PubKey; recorded != "" && cosmosigner.CanonicalSDKPublicKey(recorded) != applied {
+		return r.quiesceManagedCosmosigner(ctx, chainNode, name, cause)
+	}
+	if r.recorder != nil {
+		r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid,
+			"refusing cosmosigner signing identity change; the running signer keeps its recorded key: %v", cause)
+	}
+	return cause
 }
 
 func (r *Reconciler) quiesceManagedCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode, name string, cause error) error {

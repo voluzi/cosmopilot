@@ -304,7 +304,7 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName, replicas, usesImportPod, usesPubkeyPod, requireRetainedState); err != nil {
 			return err
 		}
-		if signerStatusNeedsRecovery(st) {
+		if signerStatusNeedsRecovery(st) || (s.TargetsValidator() && st.PublicKey == "") {
 			recoveredPublicKey, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return r.quiesceCosmosigners(ctx, nodeSet, err, resourceName)
@@ -428,11 +428,11 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		}
 		if s.TargetsValidator() {
 			if err := r.validateValidatorSignerPublicKey(ctx, nodeSet, s, publicKey, legacyNodeNames); err != nil {
-				return nil, r.quiesceCosmosigners(ctx, nodeSet, err, params.Name)
+				return nil, r.refuseValidatorSignerPublicKey(ctx, nodeSet, s, publicKey, legacyNodeNames, params.Name, err)
 			}
 			if st := nodeSet.GetCosmosignerStatus(s.Name); st != nil && st.PublicKey != "" && publicKey != st.PublicKey {
 				err := fmt.Errorf("cosmosigner %q cannot change a validator public key after rollout because the replacement would not inherit its slash-protection history", s.Name)
-				return nil, r.quiesceCosmosigners(ctx, nodeSet, err, params.Name)
+				return nil, r.refuseValidatorSignerPublicKey(ctx, nodeSet, s, publicKey, legacyNodeNames, params.Name, err)
 			}
 		}
 		if err := r.ensureConsensusKeyReservation(ctx, nodeSet, nodeSet.Status.ChainID, publicKey, cosmosigner.ReservationHolder{
@@ -466,6 +466,24 @@ func (r *Reconciler) quiesceCosmosigners(ctx context.Context, nodeSet *appsv1.Ch
 		if _, err := cosmosigner.ScaleDown(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName); err != nil {
 			cause = fmt.Errorf("%w; failed to scale down cosmosigner %q: %v", cause, resourceName, err)
 		}
+	}
+	return cause
+}
+
+// refuseValidatorSignerPublicKey rejects a validator signer whose desired public key failed verification.
+// The running signer is left untouched when it is still pinned to a different recorded key that passes
+// the same on-chain checks: the refusal then concerns only the desired spec, and stopping the signer
+// would take a healthy validator offline for a change that is never applied. Any other signer (unknown
+// or unverifiable applied key) is quiesced as before.
+func (r *Reconciler) refuseValidatorSignerPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, rejected string, legacyNodeNames []string, resourceName string, cause error) error {
+	st := nodeSet.GetCosmosignerStatus(signer.Name)
+	if validatorSignerStatusNeedsRecovery(st) || st.PublicKey == rejected ||
+		r.validateValidatorSignerPublicKey(ctx, nodeSet, signer, st.PublicKey, legacyNodeNames) != nil {
+		return r.quiesceCosmosigners(ctx, nodeSet, cause, resourceName)
+	}
+	if r.recorder != nil {
+		r.recorder.Eventf(nodeSet, corev1.EventTypeWarning, appsv1.ReasonInvalid,
+			"refusing cosmosigner %q signing identity change; the running signer keeps its recorded key: %v", signer.Name, cause)
 	}
 	return cause
 }
@@ -619,6 +637,10 @@ func validatorNodeNameMatchesGroup(nodeSet *appsv1.ChainNodeSet, group, name str
 
 func signerStatusNeedsRecovery(st *appsv1.CosmosignerStatus) bool {
 	return st == nil || (st.AppliedDigest == "" && st.SigningDigest == "")
+}
+
+func validatorSignerStatusNeedsRecovery(st *appsv1.CosmosignerStatus) bool {
+	return signerStatusNeedsRecovery(st) || st.PublicKey == ""
 }
 
 func (r *Reconciler) validateTrackedSignerStatefulSets(ctx context.Context, nodeSet *appsv1.ChainNodeSet, desired []appsv1.ResolvedSigner) error {

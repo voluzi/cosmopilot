@@ -643,7 +643,9 @@ old path can still sign can create independent double-sign state for the same va
 Cosmopilot does not submit an on-chain consensus-key rotation. Once validator status or a serving
 signer records the validator public key, a managed Cosmosigner migration must resolve to that same
 key. Perform consensus-key rotation through the chain's supported governance/validator procedure,
-not by changing the managed signer backend.
+not by changing the managed signer backend. A backend change that resolves to a different key is
+refused before anything is torn down: the running signer keeps signing with its recorded key, and the
+refusal is reported as a reconcile error and a `Warning` event until the change is reverted.
 :::
 
 :::warning[Slash-protection state at implementation boundaries]
