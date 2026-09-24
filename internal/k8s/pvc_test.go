@@ -90,3 +90,21 @@ func TestBuildGenesisDownloadCommandDetectsCompressionFromURLPath(t *testing.T) 
 		require.Equal(t, []string{"-c", genesisDownloadScript, "genesis-download", url, "/pvc/genesis.json", want, "0", ""}, args, url)
 	}
 }
+
+func TestPvcHelperPodsPullAMovingUtilityImageAlways(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"}}
+	sha := "abc"
+	tests := []struct {
+		image string
+		want  corev1.PullPolicy
+	}{
+		{image: "registry.example.com:5000/tools:custom", want: ""},
+		{image: "registry.example.com:5000/tools:edge", want: corev1.PullAlways},
+	}
+	for _, tt := range tests {
+		helper := NewPvcHelper(nil, nil, pvc, tt.image, nil)
+		assert.Equal(t, tt.want, helper.buildWriteFilePod("file", "", nil, nil).Spec.Containers[0].ImagePullPolicy, tt.image)
+		download := helper.buildDownloadGenesisPod("https://example.com/genesis.json", "config/genesis.json", &sha, "", nil, nil)
+		assert.Equal(t, tt.want, download.Spec.Containers[0].ImagePullPolicy, tt.image)
+	}
+}

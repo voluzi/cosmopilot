@@ -51,3 +51,19 @@ func TestPublicKeyFromSecret(t *testing.T) {
 		t.Fatalf("PublicKeyFromSecret() = %q, want %q", got, parsed.PubKey.Value)
 	}
 }
+
+func TestJobPodPullPolicyFollowsTheImageTag(t *testing.T) {
+	tests := []struct {
+		image string
+		want  corev1.PullPolicy
+	}{
+		{image: "ghcr.io/voluzi/cosmosigner:0.2.1", want: ""},
+		{image: "ghcr.io/voluzi/cosmosigner:edge", want: corev1.PullAlways},
+	}
+	for _, tt := range tests {
+		j := JobRunner{Params: Params{Name: "signer", Namespace: "ns", Image: tt.image}}
+		if got := j.buildPod("pubkey", nil, nil, nil, 60).Spec.Containers[0].ImagePullPolicy; got != tt.want {
+			t.Errorf("%s: ImagePullPolicy = %q, want %q", tt.image, got, tt.want)
+		}
+	}
+}

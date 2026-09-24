@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 func (a *App) buildConfigGeneratorPod() *corev1.Pod {
@@ -69,6 +70,7 @@ func (a *App) buildConfigGeneratorPod() *corev1.Pod {
 				{
 					Name:            "busybox",
 					Image:           a.utilityImageRef(),
+					ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 					Command:         []string{"cat"},
 					Stdin:           true,
 					VolumeMounts:    []corev1.VolumeMount{configVolumeMount},

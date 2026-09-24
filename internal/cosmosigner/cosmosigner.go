@@ -19,6 +19,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
 	"github.com/voluzi/cosmopilot/v3/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -427,6 +428,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 	signer := corev1.Container{
 		Name:            containerName,
 		Image:           p.Image,
+		ImagePullPolicy: images.PullPolicy(p.Image, ""),
 		SecurityContext: k8s.RestrictedSecurityContext(),
 		Args: []string{
 			"start", "--config", configMountPath + "/" + configFileName,

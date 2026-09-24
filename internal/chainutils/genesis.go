@@ -18,6 +18,7 @@ import (
 
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -194,6 +195,7 @@ func (a *App) buildGenesisPod(
 				{
 					Name:            "load-priv-key",
 					Image:           a.utilityImageRef(),
+					ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 					Command:         []string{"/bin/sh"},
 					Args:            []string{"-c", "cp /secrets/priv_validator_key.json /home/app/config/priv_validator_key.json"},
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount, privKeyVolumeMount},
@@ -226,6 +228,7 @@ func (a *App) buildGenesisPod(
 				{
 					Name:            "busybox",
 					Image:           a.utilityImageRef(),
+					ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 					Command:         []string{"cat"},
 					Stdin:           true,
 					VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -241,6 +244,7 @@ func (a *App) buildGenesisPod(
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "set-unbonding-time",
 			Image:           a.utilityImageRef(),
+			ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 			Command:         []string{"sh", "-c"},
 			Args:            []string{a.cmd.GenesisSetUnbondingTimeCmd(params.UnbondingTime, filepath.Join(defaultHome, defaultGenesisFile))},
 			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -251,6 +255,7 @@ func (a *App) buildGenesisPod(
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "set-voting-period",
 			Image:           a.utilityImageRef(),
+			ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 			Command:         []string{"sh", "-c"},
 			Args:            []string{a.cmd.GenesisSetVotingPeriodCmd(params.VotingPeriod, filepath.Join(defaultHome, defaultGenesisFile))},
 			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -261,6 +266,7 @@ func (a *App) buildGenesisPod(
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "set-expedited-voting-period",
 			Image:           a.utilityImageRef(),
+			ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 			Command:         []string{"sh", "-c"},
 			Args:            []string{cmd},
 			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},
@@ -344,6 +350,7 @@ func (a *App) buildGenesisPod(
 			corev1.Container{
 				Name:            fmt.Sprintf("load-priv-key-%d", idx),
 				Image:           a.utilityImageRef(),
+				ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 				Command:         []string{"/bin/sh"},
 				Args:            []string{"-c", fmt.Sprintf("cp %s/priv_validator_key.json /home/app/config/priv_validator_key.json", privKeyMount.MountPath)},
 				VolumeMounts:    []corev1.VolumeMount{dataVolumeMount, privKeyMount},

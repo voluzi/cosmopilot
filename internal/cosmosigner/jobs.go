@@ -19,6 +19,7 @@ import (
 
 	"github.com/voluzi/cosmopilot/v3/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 const (
@@ -141,16 +142,16 @@ func (b Backend) importArgs() []string {
 // validator's account mnemonic in a shared Secret) that the import pod has no business reading.
 func importSourceMount(sourceSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
 	return []corev1.Volume{{
-			Name: importSourceVolume,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: sourceSecret,
-					Items:      []corev1.KeyToPath{{Key: "priv_validator_key.json", Path: "priv_validator_key.json"}},
-				},
+		Name: importSourceVolume,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: sourceSecret,
+				Items:      []corev1.KeyToPath{{Key: "priv_validator_key.json", Path: "priv_validator_key.json"}},
 			},
-		}}, []corev1.VolumeMount{
-			{Name: importSourceVolume, ReadOnly: true, MountPath: importSourceDir},
-		}
+		},
+	}}, []corev1.VolumeMount{
+		{Name: importSourceVolume, ReadOnly: true, MountPath: importSourceDir},
+	}
 }
 
 // buildPod renders a one-shot cosmosigner pod. It is pure so the rendered command line, mounts and
@@ -180,6 +181,7 @@ func (j JobRunner) buildPod(nameSuffix string, args []string, extraVolumes []cor
 				{
 					Name:            containerName,
 					Image:           j.Params.Image,
+					ImagePullPolicy: images.PullPolicy(j.Params.Image, ""),
 					SecurityContext: k8s.RestrictedSecurityContext(),
 					Args:            args,
 					Env:             j.Params.Backend.backendEnv(),

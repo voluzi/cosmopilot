@@ -320,3 +320,14 @@ func mustStatefulSet(t *testing.T, p Params) *appsv1.StatefulSet {
 	}
 	return sts
 }
+
+func TestStatefulSetPullPolicyFollowsTheImageTag(t *testing.T) {
+	p := testParams()
+	if got := mustStatefulSet(t, p).Spec.Template.Spec.Containers[0].ImagePullPolicy; got != "" {
+		t.Errorf("pinned image pull policy = %q, want unset", got)
+	}
+	p.Image = "ghcr.io/voluzi/cosmosigner:edge"
+	if got := mustStatefulSet(t, p).Spec.Template.Spec.Containers[0].ImagePullPolicy; got != corev1.PullAlways {
+		t.Errorf("edge image pull policy = %q, want Always", got)
+	}
+}

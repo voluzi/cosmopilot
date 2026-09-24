@@ -18,6 +18,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # `go fmt` (not a bare `gofmt`) so the go.mod toolchain formats. The make targets below
+      # reformat in place, so without this check an unformatted file never fails CI.
+      - name: Check formatting
+        run: |
+          go fmt ./...
+          git diff --exit-code
+
       - name: Run Unit Tests
         run: make test.unit
 

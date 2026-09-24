@@ -46,6 +46,51 @@ func assertPodImagesVersioned(t *testing.T, pod *corev1.Pod) {
 
 func TestGeneratedHelperPodsUseVersionedImages(t *testing.T) {
 	app := newHelperImageTestApp(t)
+	pods, utilityContainers := buildHelperTestPods(t, app)
+
+	for name, pod := range pods {
+		t.Run(name, func(t *testing.T) {
+			assertPodImagesVersioned(t, pod)
+			containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
+			containers = append(containers, pod.Spec.Containers...)
+			for _, containerName := range utilityContainers[name] {
+				container := requireContainer(t, containers, containerName)
+				assert.Equal(t, images.DefaultUtilityImage, container.Image)
+				assert.Empty(t, container.ImagePullPolicy, "a pinned utility image keeps the unset pull policy")
+			}
+		})
+	}
+}
+
+// Every utility container is pulled Always when the utility image moves, and only those: app-image
+// containers keep the app's pull policy.
+func TestGeneratedHelperPodsPullAMovingUtilityImageAlways(t *testing.T) {
+	app := newHelperImageTestApp(t)
+	WithUtilityImage("registry.example.com/tools:edge")(app)
+	pods, utilityContainers := buildHelperTestPods(t, app)
+
+	for name, pod := range pods {
+		t.Run(name, func(t *testing.T) {
+			utility := map[string]bool{}
+			for _, containerName := range utilityContainers[name] {
+				utility[containerName] = true
+			}
+			containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
+			containers = append(containers, pod.Spec.Containers...)
+			for _, container := range containers {
+				if utility[container.Name] {
+					assert.Equal(t, corev1.PullAlways, container.ImagePullPolicy, container.Name)
+				} else {
+					assert.NotEqual(t, "registry.example.com/tools:edge", container.Image, container.Name)
+					assert.NotEqual(t, corev1.PullAlways, container.ImagePullPolicy, container.Name)
+				}
+			}
+		})
+	}
+}
+
+func buildHelperTestPods(t *testing.T, app *App) (map[string]*corev1.Pod, map[string][]string) {
+	t.Helper()
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "node-data"}}
 	params := &Params{
 		ChainID:                 "chain",
@@ -95,17 +140,7 @@ func TestGeneratedHelperPodsUseVersionedImages(t *testing.T) {
 		"genesis":   {"load-priv-key", "busybox", "set-unbonding-time", "set-voting-period", "set-expedited-voting-period", "load-priv-key-1"},
 		"validator": {"write-validator-json"},
 	}
-
-	for name, pod := range pods {
-		t.Run(name, func(t *testing.T) {
-			assertPodImagesVersioned(t, pod)
-			containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
-			containers = append(containers, pod.Spec.Containers...)
-			for _, containerName := range utilityContainers[name] {
-				assert.Equal(t, images.DefaultUtilityImage, requireContainer(t, containers, containerName).Image)
-			}
-		})
-	}
+	return pods, utilityContainers
 }
 
 func TestUtilityImageOptionSupportsDefaultTagAndDigestOverrides(t *testing.T) {

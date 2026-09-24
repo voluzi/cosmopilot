@@ -101,6 +101,17 @@ func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testin
 	job.Spec.Template.Spec.InitContainers[1].Env[1].ValueFrom.SecretKeyRef.Name = "mutated"
 	assert.Equal(t, "app-secret", chainNode.Spec.Config.Env[1].ValueFrom.SecretKeyRef.Name)
 	assert.Empty(t, job.Spec.Template.Spec.Containers[0].Env)
+	assert.Empty(t, job.Spec.Template.Spec.InitContainers[0].ImagePullPolicy)
+
+	// A moving utility image is pulled Always by both helper containers.
+	require.NoError(t, clientSet.BatchV1().Jobs("default").Delete(context.Background(), "snapshot-ichk", metav1.DeleteOptions{}))
+	require.NoError(t, clientSet.CoreV1().PersistentVolumeClaims("default").Delete(context.Background(), "snapshot-ichk", metav1.DeleteOptions{}))
+	reconciler.opts.UtilityImage = "registry.example.com:5000/tools:edge"
+	require.NoError(t, reconciler.startSnapshotIntegrityCheck(context.Background(), chainNode, snapshot))
+	job, err = clientSet.BatchV1().Jobs("default").Get(context.Background(), "snapshot-ichk", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, corev1.PullAlways, job.Spec.Template.Spec.InitContainers[0].ImagePullPolicy)
+	assert.Equal(t, corev1.PullAlways, job.Spec.Template.Spec.Containers[0].ImagePullPolicy)
 }
 
 func TestStartSnapshotIntegrityCheckAllowsNilConfig(t *testing.T) {

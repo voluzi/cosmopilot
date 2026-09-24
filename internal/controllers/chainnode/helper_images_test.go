@@ -46,9 +46,19 @@ func TestGetPodSpecUsesUtilityImageForDataVolumeGenesisLink(t *testing.T) {
 	require.NoError(t, err)
 	link := requireNamedContainer(t, pod.Spec.InitContainers, "link-genesis")
 	assert.Equal(t, "registry.example.com:5000/tools:custom", link.Image)
+	assert.Empty(t, link.ImagePullPolicy, "a pinned utility image keeps the unset pull policy")
 	assert.Equal(t, []string{"/bin/sh"}, link.Command)
 	assert.Equal(t, []string{"-c", "ln -s /home/app/data/genesis.json /home/app/config/genesis.json"}, link.Args)
 	assert.Equal(t, chainNode.Spec.Config.ImagePullSecrets, pod.Spec.ImagePullSecrets)
+
+	// Moving companion images are pulled Always; the app container keeps its own policy.
+	reconciler.opts.NodeUtilsImage = "registry.example.com/node-utils:edge"
+	reconciler.opts.UtilityImage = "registry.example.com/tools:edge"
+	pod, err = reconciler.getPodSpec(context.Background(), chainNode, "config-hash", "shutdown-secret")
+	require.NoError(t, err)
+	assert.Equal(t, corev1.PullAlways, requireNamedContainer(t, pod.Spec.InitContainers, "link-genesis").ImagePullPolicy)
+	assert.Equal(t, corev1.PullAlways, requireNamedContainer(t, pod.Spec.InitContainers, nodeUtilsContainerName).ImagePullPolicy)
+	assert.Equal(t, chainNode.GetAppImagePullPolicy(), pod.Spec.Containers[0].ImagePullPolicy)
 }
 
 func requireNamedContainer(t *testing.T, containers []corev1.Container, name string) corev1.Container {

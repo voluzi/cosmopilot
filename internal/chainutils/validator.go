@@ -19,6 +19,7 @@ import (
 
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils/sdkcmd"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 )
 
 type createValidatorResultReader interface {
@@ -176,6 +177,7 @@ func (a *App) buildCreateValidatorPod(
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
 			Name:            "write-validator-json",
 			Image:           a.utilityImageRef(),
+			ImagePullPolicy: images.PullPolicy(a.utilityImageRef(), ""),
 			Command:         []string{"/bin/sh", "-c"},
 			Args:            []string{`printf '%s' "$1" | base64 -d > "$2"`, "write-validator-json", base64.StdEncoding.EncodeToString(command.ValidatorJSON), validatorFile},
 			VolumeMounts:    []corev1.VolumeMount{dataVolumeMount},

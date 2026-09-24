@@ -34,6 +34,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
 
@@ -369,7 +370,7 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 	container := corev1.Container{
 		Name:            containerName,
 		Image:           p.Image,
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: images.PullPolicy(p.Image, corev1.PullIfNotPresent),
 		SecurityContext: securityContext(),
 		Args:            []string{"--config", configMountPath + "/" + p.ConfigMap.Key},
 		Env:             p.env(),

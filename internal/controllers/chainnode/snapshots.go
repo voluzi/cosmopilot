@@ -26,6 +26,7 @@ import (
 	"github.com/voluzi/cosmopilot/v3/internal/controllers"
 	"github.com/voluzi/cosmopilot/v3/internal/datasnapshot"
 	"github.com/voluzi/cosmopilot/v3/internal/k8s"
+	"github.com/voluzi/cosmopilot/v3/pkg/images"
 	"github.com/voluzi/cosmopilot/v3/pkg/nodeutils"
 	"github.com/voluzi/cosmopilot/v3/pkg/utils"
 )
@@ -1925,6 +1926,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 						{
 							Name:            "init-config",
 							Image:           r.opts.GetUtilityImage(),
+							ImagePullPolicy: images.PullPolicy(r.opts.GetUtilityImage(), ""),
 							Command:         []string{"sh"},
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args: []string{
@@ -1983,6 +1985,7 @@ func (r *Reconciler) startSnapshotIntegrityCheck(ctx context.Context, chainNode 
 						{
 							Name:            "start-checker",
 							Image:           r.opts.GetUtilityImage(),
+							ImagePullPolicy: images.PullPolicy(r.opts.GetUtilityImage(), ""),
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Command:         []string{"sh"},
 							Args: []string{

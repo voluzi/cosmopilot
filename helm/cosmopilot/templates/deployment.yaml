@@ -47,6 +47,9 @@ spec:
       containers:
         - name: manager
           image: {{ .Values.image }}:{{- if .Values.imageTag }}{{ .Values.imageTag }}{{- else }}{{ .Chart.AppVersion }}{{ end }}
+          {{- with .Values.imagePullPolicy }}
+          imagePullPolicy: {{ . }}
+          {{- end }}
           {{- if .Values.webHooksEnabled }}
           ports:
             - name: webhook-server
