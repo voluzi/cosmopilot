@@ -329,8 +329,9 @@ request an import. Cosmopilot mounts only `priv_validator_key.json` into the one
 uses the signer's ServiceAccount, image pull secrets, restricted security context, and either
 Workload Identity/ADC or `credentialsSecret`.
 
-The import Pod runs as the signer's service account, so that identity also needs these permissions
-while importing:
+The import Pod authenticates like the signer: as the Google service account in `credentialsSecret`
+when it is set, otherwise as the Google service account bound to the signer's Kubernetes service
+account (Workload Identity/ADC). That identity also needs these permissions while importing:
 
 | When | Scope | Permissions |
 | --- | --- | --- |
@@ -338,7 +339,7 @@ while importing:
 | Always | Key ring, or the ImportJob if it already exists | `cloudkms.importJobs.get`, `cloudkms.importJobs.useToImport` |
 | Named ImportJob does not exist | Key ring | `cloudkms.importJobs.create` |
 | CryptoKey must be created | Key ring | `cloudkms.keyRings.get`, `cloudkms.cryptoKeys.create`, plus the CryptoKey permissions above |
-| Key ring must be created | Project | `cloudkms.keyRings.create` (locations cannot hold IAM grants) |
+| Key ring must be created | Project | `cloudkms.keyRings.create`, plus every permission above at project scope, since the key ring and key do not exist yet to hold the grants (locations cannot hold IAM grants). Simpler: pre-create the key ring and grant the narrower scopes |
 
 Cosmosigner reads the key first and creates only what is missing. An existing key must use
 `ASYMMETRIC_SIGN` with `EC_SIGN_ED25519` at the requested protection level. The default
