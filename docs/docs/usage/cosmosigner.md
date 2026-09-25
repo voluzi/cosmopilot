@@ -227,9 +227,17 @@ vault write cosmosigner/config delete_version_after=0s
 ```hcl
 path "transit/keys/my-validator"             { capabilities = ["read"] }
 path "transit/sign/my-validator"             { capabilities = ["update"] }
+path "auth/token/lookup-self"                 { capabilities = ["read"] }
+path "auth/token/renew-self"                  { capabilities = ["update"] }
+path "sys/capabilities-self"                  { capabilities = ["update"] } # optional
 path "cosmosigner/data/cluster-bindings/*"     { capabilities = ["create", "update", "read"] }
 path "cosmosigner/metadata/cluster-bindings/*" { capabilities = ["read"] }
 ```
+
+These three self-service paths are part of Vault's built-in `default` policy, so list them explicitly
+only when the token is created with `-no-default-policy`, as in the TmKMS guide. `lookup-self` is
+required: without it the signer refuses to start because it cannot keep the token alive.
+`capabilities-self` is optional; when denied, Cosmosigner falls back to a sign probe.
 
 `create` and `update` on `cluster-bindings` are needed only to write the record the first time a
 signer cluster starts. To keep them off the running signer, grant the runtime token only `read` there
@@ -320,6 +328,23 @@ genesis, uses `createValidator`, or names an existing `privateKeySecret`; sentry
 request an import. Cosmopilot mounts only `priv_validator_key.json` into the one-shot import Pod and
 uses the signer's ServiceAccount, image pull secrets, restricted security context, and either
 Workload Identity/ADC or `credentialsSecret`.
+
+The import Pod runs as the signer's service account, so that identity also needs these permissions
+while importing:
+
+| When | Scope | Permissions |
+| --- | --- | --- |
+| Import into an existing CryptoKey | CryptoKey | `cloudkms.cryptoKeys.get`, `cloudkms.cryptoKeyVersions.create`, `cloudkms.cryptoKeyVersions.get`, `cloudkms.cryptoKeyVersions.viewPublicKey` |
+| Always | Key ring, or the ImportJob if it already exists | `cloudkms.importJobs.get`, `cloudkms.importJobs.useToImport` |
+| Named ImportJob does not exist | Key ring | `cloudkms.importJobs.create` |
+| CryptoKey must be created | Key ring | `cloudkms.keyRings.get`, `cloudkms.cryptoKeys.create`, plus the CryptoKey permissions above |
+| Key ring must be created | Project | `cloudkms.keyRings.create` (locations cannot hold IAM grants) |
+
+Cosmosigner reads the key first and creates only what is missing. An existing key must use
+`ASYMMETRIC_SIGN` with `EC_SIGN_ED25519` at the requested protection level. The default
+`<key>-import` ImportJob expires after three days, so a new job name is usually needed. Use a custom
+role for these import-only permissions, then remove it after the signer has rolled out with the
+recorded version.
 
 The import is break-before-make. Cosmopilot quiesces an existing signer, runs the import once, records
 the exact `cryptoKeyVersion` returned by Cosmosigner, and then reads that same version back until its
@@ -456,6 +481,13 @@ To migrate, remove the `.spec.validator.tmKMS` block and add an equivalent `.spe
 with `backend.vault.keyName` set to the same key. No key material is moved. `Cosmopilot` removes the
 `TmKMS` sidecars and deploys the signer `StatefulSet`; the node keeps listening on the same privval
 address.
+
+A TmKMS token reused as-is lacks the cluster-binding registry permissions. First create the KV v2
+registry mount described in [Vault Transit](#vault-transit), then add
+`cosmosigner/data/cluster-bindings/*` with `create`, `update`, and `read` (or grant it `read` and use a
+separate `claimTokenSecret` for `create` and `update`) and
+`cosmosigner/metadata/cluster-bindings/*` with `read`. Its existing `lookup-self` and `renew-self`
+grants carry over.
 
 ## Updating and migrating a signer
 
