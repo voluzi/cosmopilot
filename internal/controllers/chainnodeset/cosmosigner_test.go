@@ -716,53 +716,80 @@ func TestReconcileCosmosignerMigrationsDoNotRecordUnreadyLiveLifecycle(t *testin
 }
 
 func TestPrepareCosmosignerParamsRejectsDifferentRecordedValidatorPublicKey(t *testing.T) {
-	key, err := cometbft.GeneratePrivKey()
-	require.NoError(t, err)
-	parsed, err := cometbft.LoadPrivKey(key)
-	require.NoError(t, err)
-	nodeSet := &appsv1.ChainNodeSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
-		Spec: appsv1.ChainNodeSetSpec{
-			Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Nodes: []appsv1.NodeGroupSpec{{
-				Name: "validators", Instances: ptr.To(1),
-				Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
-				Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
-					Software: &appsv1.CosmosignerSoftwareBackend{},
-				}},
-			}},
-		},
-		Status: appsv1.ChainNodeSetStatus{
-			ChainID: "test-1",
-			Cosmosigners: []appsv1.CosmosignerStatus{{
-				Name: "test-nodeset-validators-signer", AppliedDigest: "rolled-out",
-				PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-			}},
-			Validators: []appsv1.ChainNodeSetValidatorStatus{{
-				Name: "test-nodeset-validators-0", Group: "validators",
-				PubKey: `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`,
-			}},
-		},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: nodeSet.Namespace},
-		Data:       map[string][]byte{privKeyFilename: key},
-	}
-	one := int32(1)
-	sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-signer", Namespace: nodeSet.Namespace}, Spec: k8sappsv1.StatefulSetSpec{
-		Replicas: &one, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: cosmosigner.InstanceLabels("test-nodeset-validators-signer")}},
+	const onChainKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	onChainValidator := []appsv1.ChainNodeSetValidatorStatus{{
+		Name: "test-nodeset-validators-0", Group: "validators",
+		PubKey: `{"@type":"/cosmos.crypto.ed25519.PubKey","key":"` + onChainKey + `"}`,
 	}}
-	require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
-	r := newValidatorTestReconciler(t, nodeSet, secret, sts)
+	cases := []struct {
+		name         string
+		appliedKey   string
+		validators   []appsv1.ChainNodeSetValidatorStatus
+		wantErr      string
+		wantReplicas int32
+	}{
+		{
+			// A refused desired key must not stop a signer still serving the verified on-chain key.
+			name: "desired key mismatches on-chain key", appliedKey: onChainKey, validators: onChainValidator,
+			wantErr: "on-chain validator public key", wantReplicas: 1,
+		},
+		{
+			name: "desired key differs from applied key", appliedKey: onChainKey,
+			wantErr: "cannot change a validator public key after rollout", wantReplicas: 1,
+		},
+		{
+			// The live signer is itself serving a key that does not match the chain.
+			name: "applied key mismatches on-chain key", appliedKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=", validators: onChainValidator,
+			wantErr: "on-chain validator public key", wantReplicas: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, err := cometbft.GeneratePrivKey()
+			require.NoError(t, err)
+			parsed, err := cometbft.LoadPrivKey(key)
+			require.NoError(t, err)
+			nodeSet := &appsv1.ChainNodeSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset", Namespace: "default", UID: "nodeset-uid"},
+				Spec: appsv1.ChainNodeSetSpec{
+					Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+					Nodes: []appsv1.NodeGroupSpec{{
+						Name: "validators", Instances: ptr.To(1),
+						Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
+						Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+							Software: &appsv1.CosmosignerSoftwareBackend{},
+						}},
+					}},
+				},
+				Status: appsv1.ChainNodeSetStatus{
+					ChainID: "test-1",
+					Cosmosigners: []appsv1.CosmosignerStatus{{
+						Name: "test-nodeset-validators-signer", AppliedDigest: "rolled-out", PublicKey: tc.appliedKey,
+					}},
+					Validators: tc.validators,
+				},
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: nodeSet.Namespace},
+				Data:       map[string][]byte{privKeyFilename: key},
+			}
+			one := int32(1)
+			sts := &k8sappsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "test-nodeset-validators-signer", Namespace: nodeSet.Namespace}, Spec: k8sappsv1.StatefulSetSpec{
+				Replicas: &one, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: cosmosigner.InstanceLabels("test-nodeset-validators-signer")}},
+			}}
+			require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
+			r := newValidatorTestReconciler(t, nodeSet, secret, sts)
 
-	_, err = r.prepareCosmosignerParams(context.Background(), nodeSet)
-	require.ErrorContains(t, err, "on-chain validator public key")
-	reservation := &appsv1.ConsensusKeyReservation{}
-	getErr := r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation)
-	require.True(t, apierrors.IsNotFound(getErr), "a rejected signer key must not leave an immutable reservation: %v", getErr)
-	freshSTS := &k8sappsv1.StatefulSet{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sts), freshSTS))
-	require.Zero(t, ptr.Deref(freshSTS.Spec.Replicas, 1), "an established signer with a mismatched validator key must be quiesced")
+			_, err = r.prepareCosmosignerParams(context.Background(), nodeSet)
+			require.ErrorContains(t, err, tc.wantErr)
+			reservation := &appsv1.ConsensusKeyReservation{}
+			getErr := r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", parsed.PubKey.Value)}, reservation)
+			require.True(t, apierrors.IsNotFound(getErr), "a rejected signer key must not leave an immutable reservation: %v", getErr)
+			freshSTS := &k8sappsv1.StatefulSet{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sts), freshSTS))
+			require.Equal(t, tc.wantReplicas, ptr.Deref(freshSTS.Spec.Replicas, -1))
+		})
+	}
 }
 
 func TestPrepareCosmosignerParamsAllowsMultiInstanceValidatorEndpointsWithSharedKey(t *testing.T) {
@@ -949,6 +976,15 @@ func TestPrepareCosmosignerParamsRejectsStaleOwnedChildValidatorKeyMismatch(t *t
 }
 
 func TestPrepareCosmosignerParamsQuiescesRecoveredSignerOnChildKeyMismatch(t *testing.T) {
+	requireRecoveredSignerQuiescedOnChildKeyMismatch(t, false)
+}
+
+func TestPrepareCosmosignerParamsQuiescesRecoveredSignerWithStaleStatusOnChildKeyMismatch(t *testing.T) {
+	requireRecoveredSignerQuiescedOnChildKeyMismatch(t, true)
+}
+
+func requireRecoveredSignerQuiescedOnChildKeyMismatch(t *testing.T, staleStatus bool) {
+	t.Helper()
 	desiredKey, err := cometbft.GeneratePrivKey()
 	require.NoError(t, err)
 	desiredParsed, err := cometbft.LoadPrivKey(desiredKey)
@@ -970,6 +1006,9 @@ func TestPrepareCosmosignerParamsQuiescesRecoveredSignerOnChildKeyMismatch(t *te
 		Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"},
 	}
 	signer := resolveSingleSigner(t, nodeSet)
+	if staleStatus {
+		nodeSet.EnsureCosmosignerStatus(signer.Name).PublicKey = desiredParsed.PubKey.Value
+	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator-key", Namespace: nodeSet.Namespace},
 		Data:       map[string][]byte{privKeyFilename: desiredKey},
