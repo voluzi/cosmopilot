@@ -264,11 +264,6 @@ func legacyPerInstanceCosmosignerGroup(nodeSet *appsv1.ChainNodeSet) (string, bo
 // validator key-generation flow that has not run yet) are NOT failures.
 func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	desired := nodeSet.ResolveCosmosigners()
-	for _, s := range desired {
-		if err := cosmosigner.RequireSupportedImage(s.Spec.GetImage(r.opts.GetCosmosignerImage())); err != nil {
-			return err
-		}
-	}
 	if err := r.validateTrackedSignerStatefulSets(ctx, nodeSet, desired); err != nil {
 		return err
 	}
