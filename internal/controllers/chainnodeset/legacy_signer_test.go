@@ -1,6 +1,7 @@
 package chainnodeset
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -58,31 +60,41 @@ func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 				}})
 			}
 			recorder := record.NewFakeRecorder(10)
+			backing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(objects...).Build()
 			r := &Reconciler{
-				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(objects...).Build(),
+				Client: backing, APIReader: backing,
 				Scheme: scheme, recorder: recorder, opts: &controllers.ControllerRunOptions{},
 			}
-			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-			if tc.cacheMissing {
-				r.Client = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(objects[:3]...).Build()
-			} else if tc.childMissing {
-				r.Client = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(nodeSet, objects[2]).Build()
+			if tc.cacheMissing || tc.childMissing {
+				cachedObjects := objects[:3]
+				if tc.childMissing {
+					cachedObjects = []client.Object{nodeSet, objects[2]}
+				}
+				cache := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cachedObjects...).Build()
+				r.Client = interceptor.NewClient(backing, interceptor.Funcs{
+					Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						return cache.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, _ client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						return cache.List(ctx, list, opts...)
+					},
+				})
 			}
 			beforeSet := &appsv1.ChainNodeSet{}
 			beforeChild := &appsv1.ChainNode{}
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(nodeSet), beforeSet))
+			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(nodeSet), beforeSet))
 			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(child), beforeChild))
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(nodeSet)})
 			currentSet := &appsv1.ChainNodeSet{}
 			currentChild := &appsv1.ChainNode{}
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(nodeSet), currentSet))
+			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(nodeSet), currentSet))
 			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(child), currentChild))
 			if tc.artifact != "" {
 				assert.Equal(t, beforeSet.ObjectMeta, currentSet.ObjectMeta)
 				assert.Equal(t, beforeSet.Status, currentSet.Status)
 				assert.Equal(t, beforeChild, currentChild)
 				secrets := &corev1.SecretList{}
-				require.NoError(t, r.List(ctx, secrets, client.InNamespace(nodeSet.Namespace)))
+				require.NoError(t, r.APIReader.List(ctx, secrets, client.InNamespace(nodeSet.Namespace)))
 				assert.Empty(t, secrets.Items)
 				require.ErrorContains(t, err, tc.artifact)
 				select {

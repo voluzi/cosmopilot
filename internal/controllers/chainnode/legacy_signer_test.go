@@ -1,6 +1,7 @@
 package chainnode
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -80,24 +82,32 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 				objects = append(objects, cm)
 			}
 			recorder := record.NewFakeRecorder(10)
+			backing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(objects...).Build()
 			r := &Reconciler{
-				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(objects...).Build(),
+				Client: backing, APIReader: backing,
 				Scheme: scheme, recorder: recorder, opts: &controllers.ControllerRunOptions{},
 			}
-			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 			if tc.cacheMissing {
-				r.Client = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(objects[:2]...).Build()
+				cache := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects[:2]...).Build()
+				r.Client = interceptor.NewClient(backing, interceptor.Funcs{
+					Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						return cache.Get(ctx, key, obj, opts...)
+					},
+					List: func(ctx context.Context, _ client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						return cache.List(ctx, list, opts...)
+					},
+				})
 			}
 			before := &appsv1.ChainNode{}
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(node), before))
+			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), before))
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)})
 			current := &appsv1.ChainNode{}
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(node), current))
+			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), current))
 			if tc.artifact != "" {
 				assert.Equal(t, before.ObjectMeta, current.ObjectMeta)
 				assert.Equal(t, before.Status, current.Status, "refusal must leave status untouched")
 				secrets := &corev1.SecretList{}
-				require.NoError(t, r.List(ctx, secrets, client.InNamespace(node.Namespace)))
+				require.NoError(t, r.APIReader.List(ctx, secrets, client.InNamespace(node.Namespace)))
 				assert.Empty(t, secrets.Items, "refusal must not create node or consensus keys")
 				require.ErrorContains(t, err, tc.artifact)
 				for _, remedy := range []string{"migrate to cosmosigner on Cosmopilot 4.x", "delete the stale validator-tmkms ConfigMap"} {
