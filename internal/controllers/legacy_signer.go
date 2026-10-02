@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -35,8 +36,12 @@ func RefuseLegacyTmKMS(ctx context.Context, reader client.Reader, recorder recor
 		if !errors.IsNotFound(err) {
 			return err
 		}
-	} else if metav1.IsControlledBy(config, chainNode) {
-		artifacts = append(artifacts, fmt.Sprintf("owned ConfigMap %s/%s", config.Namespace, config.Name))
+	} else if owner := metav1.GetControllerOf(config); owner != nil {
+		// A predecessor's ConfigMap can still identify a live signing path after restore or recreation.
+		groupVersion, err := schema.ParseGroupVersion(owner.APIVersion)
+		if err == nil && groupVersion.Group == appsv1.GroupVersion.Group && owner.Kind == "ChainNode" && owner.Name == chainNode.Name {
+			artifacts = append(artifacts, fmt.Sprintf("owned ConfigMap %s/%s", config.Namespace, config.Name))
+		}
 	}
 	if len(artifacts) == 0 {
 		return nil

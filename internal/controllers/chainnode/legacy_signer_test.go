@@ -24,12 +24,22 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 		name               string
 		pod, config, owned bool
 		finalized          bool
+		cacheMissing       bool
+		configOwner        *metav1.OwnerReference
 		artifact           string
 	}{
 		{name: "pod", pod: true, artifact: "tmkms container in Pod default/validator"},
 		{name: "owned config without pod", config: true, owned: true, artifact: "owned ConfigMap default/validator-tmkms"},
 		{name: "refused before key generation", pod: true, finalized: true, artifact: "tmkms container in Pod default/validator"},
 		{name: "unowned config", config: true},
+		{name: "pod absent from cache", pod: true, cacheMissing: true, artifact: "tmkms container in Pod default/validator"},
+		{name: "config absent from cache", config: true, owned: true, cacheMissing: true, artifact: "owned ConfigMap default/validator-tmkms"},
+		{name: "predecessor config", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: "validator", UID: "old-node-uid", Controller: ptr.To(true)}, artifact: "owned ConfigMap default/validator-tmkms"},
+		{name: "other api version in same group", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.Group + "/v1alpha1", Kind: "ChainNode", Name: "validator", UID: "old-node-uid", Controller: ptr.To(true)}, artifact: "owned ConfigMap default/validator-tmkms"},
+		{name: "foreign group", config: true, configOwner: &metav1.OwnerReference{APIVersion: "other.example/v1", Kind: "ChainNode", Name: "validator", UID: "node-uid", Controller: ptr.To(true)}},
+		{name: "foreign kind", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "validator", UID: "node-uid", Controller: ptr.To(true)}},
+		{name: "foreign name", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: "other", UID: "node-uid", Controller: ptr.To(true)}},
+		{name: "non-controller reference", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: "validator", UID: "node-uid"}},
 		{name: "migrated"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,12 +74,19 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 				if tc.owned {
 					cm.OwnerReferences = owner
 				}
+				if tc.configOwner != nil {
+					cm.OwnerReferences = []metav1.OwnerReference{*tc.configOwner}
+				}
 				objects = append(objects, cm)
 			}
 			recorder := record.NewFakeRecorder(10)
 			r := &Reconciler{
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(objects...).Build(),
 				Scheme: scheme, recorder: recorder, opts: &controllers.ControllerRunOptions{},
+			}
+			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			if tc.cacheMissing {
+				r.Client = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(objects[:2]...).Build()
 			}
 			before := &appsv1.ChainNode{}
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(node), before))
@@ -99,7 +116,7 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 			}
 			if tc.pod {
 				remaining := &corev1.Pod{}
-				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(node), remaining), "refusal must preserve the running pod")
+				require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(node), remaining), "refusal must preserve the running pod")
 				assert.Equal(t, "tmkms", remaining.Spec.Containers[1].Name)
 			}
 		})

@@ -20,14 +20,19 @@ import (
 
 func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		pod      bool
-		config   bool
-		owned    bool
-		artifact string
+		name         string
+		pod          bool
+		config       bool
+		owned        bool
+		artifact     string
+		cacheMissing bool
+		childMissing bool
 	}{
 		{name: "child pod", pod: true, owned: true, artifact: "tmkms container in Pod default/chain-validator"},
 		{name: "child config", config: true, owned: true, artifact: "owned ConfigMap default/chain-validator-tmkms"},
+		{name: "child pod absent from cache", pod: true, owned: true, cacheMissing: true, artifact: "tmkms container in Pod default/chain-validator"},
+		{name: "child config absent from cache", config: true, owned: true, cacheMissing: true, artifact: "owned ConfigMap default/chain-validator-tmkms"},
+		{name: "child absent from cache", pod: true, owned: true, childMissing: true, artifact: "tmkms container in Pod default/chain-validator"},
 		{name: "unowned child", pod: true},
 		{name: "migrated child", owned: true},
 	} {
@@ -57,15 +62,21 @@ func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(objects...).Build(),
 				Scheme: scheme, recorder: recorder, opts: &controllers.ControllerRunOptions{},
 			}
+			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			if tc.cacheMissing {
+				r.Client = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(objects[:3]...).Build()
+			} else if tc.childMissing {
+				r.Client = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(nodeSet, objects[2]).Build()
+			}
 			beforeSet := &appsv1.ChainNodeSet{}
 			beforeChild := &appsv1.ChainNode{}
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(nodeSet), beforeSet))
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), beforeChild))
+			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(child), beforeChild))
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(nodeSet)})
 			currentSet := &appsv1.ChainNodeSet{}
 			currentChild := &appsv1.ChainNode{}
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(nodeSet), currentSet))
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), currentChild))
+			require.NoError(t, r.APIReader.Get(ctx, client.ObjectKeyFromObject(child), currentChild))
 			if tc.artifact != "" {
 				assert.Equal(t, beforeSet.ObjectMeta, currentSet.ObjectMeta)
 				assert.Equal(t, beforeSet.Status, currentSet.Status)

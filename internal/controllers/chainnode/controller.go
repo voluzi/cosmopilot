@@ -245,7 +245,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		logger.V(1).Info("namespace is being terminated, skipping reconcile")
 		return ctrl.Result{}, nil
 	}
-	if err := controllers.RefuseLegacyTmKMS(ctx, r.Client, r.recorder, chainNode); err != nil {
+	if err := controllers.RefuseLegacyTmKMS(ctx, r.reservationReader(), r.recorder, chainNode); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.validateNodeUtilsRunIdentity(chainNode); err != nil {

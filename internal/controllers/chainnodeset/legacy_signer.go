@@ -12,7 +12,7 @@ import (
 
 func (r *Reconciler) refuseLegacyTmKMS(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	nodes := &appsv1.ChainNodeList{}
-	if err := r.List(ctx, nodes, client.InNamespace(nodeSet.Namespace)); err != nil {
+	if err := r.uncachedReader().List(ctx, nodes, client.InNamespace(nodeSet.Namespace)); err != nil {
 		return err
 	}
 	for i := range nodes.Items {
@@ -20,7 +20,7 @@ func (r *Reconciler) refuseLegacyTmKMS(ctx context.Context, nodeSet *appsv1.Chai
 		if !metav1.IsControlledBy(node, nodeSet) || !node.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if err := controllers.RefuseLegacyTmKMS(ctx, r.Client, r.recorder, node); err != nil {
+		if err := controllers.RefuseLegacyTmKMS(ctx, r.uncachedReader(), r.recorder, node); err != nil {
 			return err
 		}
 	}
