@@ -11,9 +11,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
@@ -53,6 +56,38 @@ func ReadLifecycleDigest(ctx context.Context, c client.Client, namespace, name s
 	}
 	digest := sts.Annotations[LifecycleDigestAnnotation]
 	return digest, digest != "", nil
+}
+
+// EnsurePodDisruptionBudget skips foreign coverage and unavailable policy permissions so an
+// optional drain guard cannot block signing. Overlapping PDBs make the eviction API refuse drains.
+func EnsurePodDisruptionBudget(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, pdb *policyv1.PodDisruptionBudget) (bool, error) {
+	pdbs := &policyv1.PodDisruptionBudgetList{}
+	if err := c.List(ctx, pdbs, client.InNamespace(pdb.Namespace)); err != nil {
+		if errors.IsForbidden(err) || meta.IsNoMatchError(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	for i := range pdbs.Items {
+		existing := &pdbs.Items[i]
+		if metav1.IsControlledBy(existing, owner) {
+			continue
+		}
+		selector, err := metav1.LabelSelectorAsSelector(existing.Spec.Selector)
+		if err != nil {
+			return false, err
+		}
+		if existing.Name == pdb.Name || selector.Matches(labels.Set(InstanceLabels(pdb.Name))) {
+			return true, nil
+		}
+	}
+	if err := ApplyOwned(ctx, c, scheme, owner, pdb); err != nil {
+		if errors.IsForbidden(err) || meta.IsNoMatchError(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // PreflightDeployable reports (as an error) whether the signer named `name` can be deployed by owner,
@@ -631,6 +666,7 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: namespace}},
+		&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		networkPolicyObject(namespace, name),
 		networkPolicyObject(namespace, name+discoveryServiceSuffix),
 	}
@@ -694,6 +730,15 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 		} else if !errors.IsNotFound(err) {
 			return false, err
 		}
+	}
+
+	pdb := &policyv1.PodDisruptionBudget{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, pdb); err == nil {
+		if metav1.IsControlledBy(pdb, owner) {
+			return false, nil
+		}
+	} else if !errors.IsNotFound(err) {
+		return false, err
 	}
 
 	sts := &appsv1.StatefulSet{}

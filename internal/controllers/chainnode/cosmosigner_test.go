@@ -10,6 +10,7 @@ import (
 	k8sappsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1183,6 +1184,7 @@ func TestUndeployCosmosignerClearsPartialStatusAfterTeardown(t *testing.T) {
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build()
 	r := &Reconciler{Client: cl, Scheme: scheme}
 

@@ -465,6 +465,12 @@ Multi-replica signers require `raftTLSSecret`, containing `tls.crt`, `tls.key`, 
 membership and state replication use mutual TLS. `unsafeAllowInsecureRaft: true` is an explicit opt-out
 for isolated test networks only and cannot be combined with `raftTLSSecret`.
 
+Every managed signer has a PodDisruptionBudget named after its StatefulSet, with
+`maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow` (Kubernetes 1.27+).
+A single-replica signer can therefore be evicted during a drain. An overlapping user-managed PDB
+or unavailable policy API/permissions makes the operator skip its PDB and emit a warning event.
+PDBs only gate voluntary evictions; they do not block managed signer migrations.
+
 ### Raft TLS Secret
 
 Provision the Secret in the same namespace before applying a multi-replica signer. The certificate

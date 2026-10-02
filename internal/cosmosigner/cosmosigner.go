@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -170,6 +171,11 @@ func InstanceLabels(name string) map[string]string {
 		labelAppName:  appNameCosmosigner,
 		labelInstance: name,
 	}
+}
+
+// HasSignerLabels identifies resources whose lifecycle belongs to a managed signer.
+func HasSignerLabels(labels map[string]string) bool {
+	return labels[labelAppName] == appNameCosmosigner
 }
 
 // podLabels merges the caller labels with the immutable selector labels.
@@ -387,6 +393,18 @@ func (p Params) NetworkPolicy() *networkingv1.NetworkPolicy {
 				From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: p.selectorLabels()}}},
 				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &protocol, Port: ptr.To(intstr.FromInt32(raftPort))}},
 			}},
+		},
+	}
+}
+
+// PodDisruptionBudget allows one voluntary disruption, including for a single-replica signer.
+func (p Params) PodDisruptionBudget() *policyv1.PodDisruptionBudget {
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: p.Name, Namespace: p.Namespace, Labels: p.podLabels()},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable:             ptr.To(intstr.FromInt32(1)),
+			Selector:                   &metav1.LabelSelector{MatchLabels: p.selectorLabels()},
+			UnhealthyPodEvictionPolicy: ptr.To(policyv1.AlwaysAllow),
 		},
 	}
 }

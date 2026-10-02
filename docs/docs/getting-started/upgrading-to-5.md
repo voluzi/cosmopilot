@@ -62,6 +62,10 @@ pod template and triggers a break-before-make migration: all replicas stop once,
 is deleted and recreated, and PVCs and Raft state are retained. This is a full signer stop per
 validator. Signers with a per-signer image override are unaffected by the default image bump.
 
+Remove hand-made PDBs covering managed signer pods to let Cosmopilot create the default signer
+PDB (`maxUnavailable: 1`). The operator skips its PDB when a foreign PDB already covers those pods
+to avoid overlapping budgets that prevent eviction.
+
 ## 3. Verify NetworkPolicy enforcement
 
 Your CNI must enforce NetworkPolicy and support `endPort`. The new target-node policy allows TCP

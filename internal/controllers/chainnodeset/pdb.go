@@ -18,6 +18,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
 )
 
 const (
@@ -151,7 +152,7 @@ func (r *Reconciler) deleteStalePodDisruptionBudgets(
 		if _, desired := desiredNames[pdb.GetName()]; desired {
 			continue
 		}
-		if pdb.GetLabels()[controllers.LabelScope] == scopeCosmoGuard {
+		if pdb.GetLabels()[controllers.LabelScope] == scopeCosmoGuard || cosmosigner.HasSignerLabels(pdb.GetLabels()) {
 			continue
 		}
 		if !metav1.IsControlledBy(pdb, nodeSet) && !isLegacyNodeSetPDB(nodeSet, pdb) {
