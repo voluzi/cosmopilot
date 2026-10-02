@@ -1311,15 +1311,16 @@ func TestFinalizeConsensusKeySigningPathsPreservesLegacyTmKMSHelpers(t *testing.
 				owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
 				meta := metav1.ObjectMeta{Name: owner.Name + marker, Namespace: owner.Namespace, UID: "helper-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name, UID: owner.UID, Controller: ptr.To(true)}}}
 				var path client.Object = &corev1.Pod{ObjectMeta: meta}
-				if artifact == "owned pod with foreign labels" {
+				switch artifact {
+				case "owned pod with foreign labels":
 					path.SetLabels(map[string]string{"chain-node": "other"})
-				} else if artifact == "name containing another helper marker" {
+				case "name containing another helper marker":
 					owner.Name = "validator-import-copy"
 					path.SetName(owner.Name + marker)
 					path.GetOwnerReferences()[0].Name = owner.Name
-				} else if artifact == "job" {
+				case "job":
 					path = &batchv1.Job{ObjectMeta: meta}
-				} else if artifact == "generated pod" {
+				case "generated pod":
 					path.SetName(meta.Name + "-generated")
 					path.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: meta.Name, UID: "deleted-job-uid", Controller: ptr.To(true)}})
 				}
