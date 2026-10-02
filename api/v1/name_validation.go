@@ -66,7 +66,7 @@ func validateAppBinaryName(path, app string) error {
 		return nil
 	}
 	if slices.Contains(reservedPodContainerNames, app) {
-		return fmt.Errorf("%s %q collides with a built-in pod container", path, app)
+		return fmt.Errorf("%s %q is reserved for the node Pod", path, app)
 	}
 	return validateDNS1123Label(path, app)
 }
@@ -90,7 +90,7 @@ func validateSidecarNames(path string, config *Config, appName string) error {
 			return err
 		}
 		if sidecar.Name == appName || slices.Contains(reservedPodContainerNames, sidecar.Name) {
-			return fmt.Errorf("%s %q collides with a built-in pod container", p, sidecar.Name)
+			return fmt.Errorf("%s %q is reserved for the node Pod", p, sidecar.Name)
 		}
 		if prev, ok := seen[sidecar.Name]; ok {
 			return fmt.Errorf("%s %q duplicates %s.sidecars[%d].name", p, sidecar.Name, path, prev)

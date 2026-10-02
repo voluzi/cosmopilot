@@ -82,39 +82,48 @@ func (g *LegacySignerGuard) RefuseLegacyTmKMSChildren(ctx context.Context, reade
 		return nil
 	}
 	nodes := &appsv1.ChainNodeList{}
-	pods := &corev1.PodList{}
-	configs := &corev1.ConfigMapList{}
-	identities := &corev1.SecretList{}
-	for _, list := range []client.ObjectList{nodes, pods, configs, identities} {
-		if err := reader.List(ctx, list, client.InNamespace(nodeSet.Namespace)); err != nil {
-			return err
-		}
+	if err := reader.List(ctx, nodes, client.InNamespace(nodeSet.Namespace)); err != nil {
+		return err
 	}
-	podsByName := make(map[string]*corev1.Pod, len(pods.Items))
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		podsByName[pod.Name] = pod
-	}
-	configsByName := make(map[string]*corev1.ConfigMap, len(configs.Items))
-	for i := range configs.Items {
-		config := &configs.Items[i]
-		configsByName[config.Name] = config
-	}
-	identitiesByName := make(map[string]*corev1.Secret, len(identities.Items))
-	for i := range identities.Items {
-		identity := &identities.Items[i]
-		identitiesByName[identity.Name] = identity
-	}
+	var pending []*appsv1.ChainNode
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
-		if !metav1.IsControlledBy(node, nodeSet) || !node.DeletionTimestamp.IsZero() || g.hasPassed(node.UID) {
-			continue
+		if metav1.IsControlledBy(node, nodeSet) && node.DeletionTimestamp.IsZero() && !g.hasPassed(node.UID) {
+			pending = append(pending, node)
 		}
-		artifactName := node.Name + "-tmkms"
-		if err := refuseLegacyTmKMSArtifacts(recorder, node, podsByName[node.Name], configsByName[artifactName], identitiesByName[artifactName]); err != nil {
-			return err
+	}
+	if len(pending) > 0 {
+		// One snapshot per kind keeps the cost constant however many children are pending.
+		pods := &corev1.PodList{}
+		configs := &corev1.ConfigMapList{}
+		identities := &corev1.SecretList{}
+		for _, list := range []client.ObjectList{pods, configs, identities} {
+			if err := reader.List(ctx, list, client.InNamespace(nodeSet.Namespace)); err != nil {
+				return err
+			}
 		}
-		g.remember(node.UID)
+		podsByName := make(map[string]*corev1.Pod, len(pods.Items))
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			podsByName[pod.Name] = pod
+		}
+		configsByName := make(map[string]*corev1.ConfigMap, len(configs.Items))
+		for i := range configs.Items {
+			config := &configs.Items[i]
+			configsByName[config.Name] = config
+		}
+		identitiesByName := make(map[string]*corev1.Secret, len(identities.Items))
+		for i := range identities.Items {
+			identity := &identities.Items[i]
+			identitiesByName[identity.Name] = identity
+		}
+		for _, node := range pending {
+			artifactName := node.Name + "-tmkms"
+			if err := refuseLegacyTmKMSArtifacts(recorder, node, podsByName[node.Name], configsByName[artifactName], identitiesByName[artifactName]); err != nil {
+				return err
+			}
+			g.remember(node.UID)
+		}
 	}
 	g.remember(nodeSet.UID)
 	return nil
