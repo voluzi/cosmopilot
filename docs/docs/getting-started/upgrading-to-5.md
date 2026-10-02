@@ -24,7 +24,7 @@ The guard recognizes its root attribution or the exact unstamped legacy Secret s
 keys, and status untouched. A ChainNodeSet is also refused before reconciliation when an owned
 child has any of these artifacts. Do not delete these artifacts to bypass an unfinished migration;
 finish the migration on 4.x first. A Pod with a `tmkms` container must be retired by completing
-that migration or deliberately deleted by the operator. Deleting its ConfigMap alone does not
+that migration or deleted manually. Deleting its ConfigMap alone does not
 retire the Pod. If the node already migrated to Cosmosigner and only a stale `<name>-tmkms`
 ConfigMap or identity Secret remains, verify that Cosmosigner is signing with the existing
 validator public key, then delete the stale ConfigMap or identity Secret.

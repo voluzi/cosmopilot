@@ -19,12 +19,16 @@ import (
 
 // LegacySignerGuard shares authoritative passes between the node and set controllers.
 // Cosmopilot 5 cannot create tmKMS artifacts, so a clean pass is final for that UID's lifetime.
+// The lock covers only the record: holding it across the API reads would stall every worker of
+// both controllers behind one slow read, and a duplicate check of the same UID is harmless.
 type LegacySignerGuard struct {
 	mu     sync.Mutex
 	passed map[types.UID]struct{}
 }
 
 func (g *LegacySignerGuard) hasPassed(uid types.UID) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	_, passed := g.passed[uid]
 	return uid != "" && passed
 }
@@ -33,6 +37,8 @@ func (g *LegacySignerGuard) remember(uid types.UID) {
 	if uid == "" {
 		return
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.passed == nil {
 		g.passed = make(map[types.UID]struct{})
 	}
@@ -44,8 +50,6 @@ func (g *LegacySignerGuard) RefuseLegacyTmKMS(ctx context.Context, reader client
 	if reader == nil {
 		return fmt.Errorf("legacy tmKMS guard requires an authoritative APIReader")
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.hasPassed(chainNode.UID) {
 		return nil
 	}
@@ -74,8 +78,6 @@ func (g *LegacySignerGuard) RefuseLegacyTmKMSChildren(ctx context.Context, reade
 	if reader == nil {
 		return fmt.Errorf("legacy tmKMS guard requires an authoritative APIReader")
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.hasPassed(nodeSet.UID) {
 		return nil
 	}
@@ -124,7 +126,7 @@ func refuseLegacyTmKMSArtifacts(recorder record.EventRecorder, chainNode *appsv1
 		for _, container := range pod.Spec.Containers {
 			if container.Name == "tmkms" {
 				artifacts = append(artifacts, fmt.Sprintf("tmkms container in Pod %s/%s", pod.Namespace, pod.Name))
-				remedies = append(remedies, "the Pod must be retired by completing the migration on Cosmopilot 4.x or deliberately deleted by the operator")
+				remedies = append(remedies, "the Pod must be retired by completing the migration on Cosmopilot 4.x or deleted manually")
 				break
 			}
 		}

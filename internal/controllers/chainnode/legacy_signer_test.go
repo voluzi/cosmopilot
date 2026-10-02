@@ -142,7 +142,7 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 				switch {
 				case tc.pod:
 					assert.Contains(t, err.Error(), "Pod must be retired")
-					assert.Contains(t, err.Error(), "deliberately deleted by the operator")
+					assert.Contains(t, err.Error(), "deleted manually")
 					assert.NotContains(t, err.Error(), "delete the stale validator-tmkms ConfigMap")
 				case tc.secret:
 					assert.Contains(t, err.Error(), "stale validator-tmkms identity Secret")
