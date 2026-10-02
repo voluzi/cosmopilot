@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 )
 
 func TestReconcileRefusesLegacyTmKMS(t *testing.T) {

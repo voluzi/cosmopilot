@@ -7,9 +7,9 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/pkg/environ"
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/pkg/environ"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 func validateDisruptionMaxUnavailable(value int) error {

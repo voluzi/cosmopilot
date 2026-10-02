@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 )
 
 func (r *Reconciler) refuseLegacyTmKMS(ctx context.Context, chainNode *appsv1.ChainNode) error {

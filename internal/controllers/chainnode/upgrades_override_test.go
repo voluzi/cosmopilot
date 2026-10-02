@@ -13,9 +13,9 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/pkg/nodeutils"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/pkg/nodeutils"
 )
 
 func pinnedNodeAtUpgradeHeight() *appsv1.ChainNode {

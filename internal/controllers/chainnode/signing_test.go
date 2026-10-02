@@ -13,9 +13,9 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
 )
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

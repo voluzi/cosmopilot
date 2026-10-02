@@ -14,9 +14,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 )
 
 func (r *Reconciler) ensureIngresses(ctx context.Context, nodeSet *appsv1.ChainNodeSet, gatewayApplied bool) error {

@@ -9,10 +9,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
-	"github.com/voluzi/cosmopilot/v4/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
 func newHelperImageTestApp(t *testing.T) *App {

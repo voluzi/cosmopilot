@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/nodeutils"
+	"github.com/voluzi/cosmopilot/v5/pkg/nodeutils"
 )
 
 // testCommands fails the test if the node-utils server is ever started. Standalone subcommands run

@@ -18,8 +18,8 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/pkg/dataexporter"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
 )
 
 func TestS3CreateSnapshotAuthAndStorageOptions(t *testing.T) {

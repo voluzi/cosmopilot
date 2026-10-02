@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/dataexporter"
-	"github.com/voluzi/cosmopilot/v4/pkg/environ"
+	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v5/pkg/environ"
 )
 
 var (

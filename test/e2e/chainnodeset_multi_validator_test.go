@@ -11,9 +11,9 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v4/test/e2e/apps"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v5/test/e2e/apps"
 )
 
 var _ = Describe("ChainNodeSet Multi-Validator Genesis", func() {

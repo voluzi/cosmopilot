@@ -6,8 +6,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/version"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
-	"github.com/voluzi/cosmopilot/v4/pkg/utils"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
 func RequireSupportedImage(image string) error {
