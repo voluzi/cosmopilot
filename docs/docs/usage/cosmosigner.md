@@ -503,8 +503,11 @@ Required anti-affinity across nodes leaves replicas Pending when the cluster has
 replicas, including a single-node cluster. Preferred anti-affinity permits co-location on fewer
 nodes. Changing either scheduling field on a running signer uses the same break-before-make
 migration as an image or resource change: all replicas stop and restart once, retaining their PVCs
-and Raft state. With both fields unset, this feature does not change the lifecycle digest or restart
-existing signers on operator upgrade.
+and Raft state. A wrong or unsatisfiable scheduling value can keep the whole signer down, not just
+one pod, because the change is a full-stop migration. Admission rejects invalid label and selector
+syntax, but Kubernetes still validates the remaining affinity rules and the scheduler determines
+whether placement is possible. With both fields unset, this feature does not change the lifecycle
+digest or restart existing signers on operator upgrade.
 
 ### Raft TLS Secret
 
