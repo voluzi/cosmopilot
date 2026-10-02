@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,9 +77,17 @@ func TestWaitForSignerIgnoresConnectionWithoutData(t *testing.T) {
 }
 
 func TestWaitForSignerTimesOutWithDNSDiagnostics(t *testing.T) {
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	resolver := &sequenceDNSResolver{errors: []error{errors.New("DNS unavailable")}}
-	err := runWaitForSignerCommand(context.Background(), resolver,
-		[]string{"0", "signer-privval.default.svc", "10.0.0.2", "20ms"}, time.Millisecond)
+	err = runWaitForSignerCommand(context.Background(), resolver,
+		[]string{port, "signer-privval.default.svc", "10.0.0.2", "20ms"}, time.Millisecond)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want timeout, got %v", err)
 	}
@@ -112,5 +121,18 @@ func TestWaitForSignerCancellationClosesIdleConnection(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("idle connection blocked cancellation")
+	}
+}
+
+func TestWaitForSignerRejectsInvalidPort(t *testing.T) {
+	for _, port := range []string{"-1", "0", "65536", "invalid"} {
+		t.Run(port, func(t *testing.T) {
+			resolver := &sequenceDNSResolver{errors: []error{errors.New("DNS unavailable")}}
+			err := runWaitForSignerCommand(t.Context(), resolver,
+				[]string{port, "signer-privval.default.svc", "10.0.0.2", "20ms"}, time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), "invalid signer port") {
+				t.Fatalf("want invalid port rejection, got %v", err)
+			}
+		})
 	}
 }

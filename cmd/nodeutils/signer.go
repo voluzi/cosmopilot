@@ -21,7 +21,7 @@ func runWaitForSignerCommand(ctx context.Context, resolver dnsResolver, args []s
 		return fmt.Errorf("usage: node-utils wait-for-signer <port> <hostname> <ip-address> <timeout>")
 	}
 	port, err := strconv.Atoi(args[0])
-	if err != nil || port < 0 || port > 65535 {
+	if err != nil || port < 1 || port > 65535 {
 		return fmt.Errorf("invalid signer port %q", args[0])
 	}
 	if net.ParseIP(args[2]) == nil {
