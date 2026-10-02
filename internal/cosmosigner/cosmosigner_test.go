@@ -180,8 +180,8 @@ func TestStatefulSetShape(t *testing.T) {
 	if !hasNodeID || !hasAdvertise || !hasRollme {
 		t.Fatalf("missing expected env vars: nodeID=%v advertise=%v rollme=%v", hasNodeID, hasAdvertise, hasRollme)
 	}
-	if c.LivenessProbe == nil || c.LivenessProbe.TCPSocket == nil {
-		t.Fatalf("expected TCP liveness probe")
+	if c.LivenessProbe == nil || c.LivenessProbe.HTTPGet == nil {
+		t.Fatalf("expected HTTP liveness probe")
 	}
 }
 

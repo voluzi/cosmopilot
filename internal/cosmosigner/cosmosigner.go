@@ -180,6 +180,7 @@ func (p Params) podLabels() map[string]string {
 // BuildConfig assembles the cosmosigner config for the given replica count.
 func (p Params) BuildConfig() *Config {
 	cfg := &Config{
+		HTTPAddr:          httpListenAddr,
 		ChainID:           p.ChainID,
 		ExpectedPublicKey: p.ExpectedPublicKey,
 		NodeService:       p.nodeServiceEndpoint(),
@@ -489,6 +490,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 			},
 			// node_id is the pod name; advertise resolves to this pod's stable raft DNS. Both
 			// override the config file (env has higher precedence in cosmosigner).
+			{Name: "COSMOSIGNER_HTTP_ADDR", Value: httpListenAddr},
 			{Name: "COSMOSIGNER_RAFT_NODE_ID", Value: "$(POD_NAME)"},
 			{Name: "COSMOSIGNER_RAFT_ADVERTISE", Value: fmt.Sprintf("$(POD_NAME).%s:%d", p.raftServiceDNS(), raftPort)},
 			// Force a rollout when the rendered config changes.
@@ -496,14 +498,13 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 		Ports: []corev1.ContainerPort{
 			{Name: raftPortName, ContainerPort: raftPort, Protocol: corev1.ProtocolTCP},
+			{Name: httpPortName, ContainerPort: httpPort, Protocol: corev1.ProtocolTCP},
 		},
 		VolumeMounts: volumeMounts,
 		Resources:    p.Resources,
-		// cosmosigner exposes no HTTP health endpoint, so probes are TCP against the raft
-		// transport, which listens regardless of leadership.
 		StartupProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(raftPort)},
+				HTTPGet: &corev1.HTTPGetAction{Path: "/livez", Port: intstr.FromString(httpPortName)},
 			},
 			FailureThreshold: 60,
 			PeriodSeconds:    5,
@@ -511,10 +512,16 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(raftPort)},
+				HTTPGet: &corev1.HTTPGetAction{Path: "/livez", Port: intstr.FromString(httpPortName)},
 			},
 			FailureThreshold: 3,
 			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString(httpPortName)}},
+			FailureThreshold: 3,
+			PeriodSeconds:    5,
 			TimeoutSeconds:   5,
 		},
 	}

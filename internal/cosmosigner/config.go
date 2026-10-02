@@ -22,8 +22,11 @@ const (
 	configFileName  = "config.yaml"
 
 	// raftPort is the port used by the inter-replica raft transport.
-	raftPort     = 7070
-	raftPortName = "raft"
+	raftPort       = 7070
+	raftPortName   = "raft"
+	httpPort       = 8080
+	httpPortName   = "http"
+	httpListenAddr = "0.0.0.0:8080"
 
 	// raftBindAddr is the address the raft transport listens on inside the pod.
 	raftBindAddr = "0.0.0.0:7070"
@@ -49,6 +52,7 @@ const (
 // a config.yaml ConfigMap. Per-pod fields (node_id, advertise) are intentionally omitted here and
 // supplied via environment variables, which take precedence over the file.
 type Config struct {
+	HTTPAddr          string        `yaml:"http_addr"`
 	ChainID           string        `yaml:"chain_id"`
 	ExpectedPublicKey string        `yaml:"expected_public_key"`
 	NodeService       string        `yaml:"node_service,omitempty"`
