@@ -87,14 +87,6 @@ spec:
             - name: UTILITY_IMAGE
               value: {{ .Values.utilityImage | quote }}
             {{- end }}
-            {{- if .Values.tmkmsImage }}
-            - name: TMKMS_IMAGE
-              value: {{ .Values.tmkmsImage | quote }}
-            {{- end }}
-            {{- if .Values.vaultTokenRenewerImage }}
-            - name: VAULT_TOKEN_RENEWER_IMAGE
-              value: {{ .Values.vaultTokenRenewerImage | quote }}
-            {{- end }}
             - name: RELEASE_NAME
               value: {{ .Release.Name | quote }}
             - name: WORKER_NAME

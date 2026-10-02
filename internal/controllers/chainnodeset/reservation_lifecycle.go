@@ -347,7 +347,7 @@ func managedClaimOneShotName(name, claim string) bool {
 		return false
 	}
 	for _, marker := range []string{
-		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
+		"-import", "-pubkey",
 	} {
 		if strings.HasSuffix(name, marker) || strings.Contains(name, marker+"-") {
 			return true

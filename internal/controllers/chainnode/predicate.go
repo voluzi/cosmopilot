@@ -17,7 +17,7 @@ type GenerationChangedPredicate struct {
 }
 
 var temporaryPodSuffixes = []string{
-	"config-generator", "data-init", "init-data", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity",
+	"config-generator", "data-init", "init-data", "genesis-init",
 	"write-file", "create-validator", "signer-pubkey", "signer-import",
 }
 

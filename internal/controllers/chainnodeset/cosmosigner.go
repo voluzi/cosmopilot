@@ -127,7 +127,7 @@ func (r *Reconciler) initCosmosignerReplacementNames(ctx context.Context, nodeSe
 }
 
 // reconcileSignerTeardown removes managed signers no longer produced by ResolveCosmosigners. A signer
-// with no replacement must be fully torn down before children can return to local/tmKMS signing. A
+// with no replacement must be fully torn down before children can return to local signing. A
 // replacement inherits the stable resource name only after its migration has removed the StatefulSet
 // and verified every pod is gone; the old status entry can then be dropped without deleting retained
 // resources needed for recreation.
@@ -1165,35 +1165,6 @@ func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSe
 			return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has zero instances and therefore no live fallback signing path", st.Name, st.ServingGroup)
 		}
 
-		if cfg.TmKMS != nil {
-			hashicorp := cfg.TmKMS.Provider.Hashicorp
-			if hashicorp == nil {
-				return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has no supported tmKMS provider configured", st.Name, st.ServingGroup)
-			}
-			if strings.TrimSpace(hashicorp.Address) == "" || strings.TrimSpace(hashicorp.Key) == "" {
-				return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q tmKMS Hashicorp address and key are required", st.Name, st.ServingGroup)
-			}
-			if hashicorp.SkipCertificateVerify {
-				return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q tmKMS Vault TLS verification must be enabled for authenticated fallback preflight", st.Name, st.ServingGroup)
-			}
-			if err := r.requireTmKMSSecret(ctx, nodeSet.GetNamespace(), "tmKMS Vault token", hashicorp.TokenSecret); err != nil {
-				return fmt.Errorf("cosmosigner %q cannot be removed: %w", st.Name, err)
-			}
-			if hashicorp.CertificateSecret != nil {
-				if err := r.requireTmKMSSecret(ctx, nodeSet.GetNamespace(), "tmKMS Vault certificate", hashicorp.CertificateSecret); err != nil {
-					return fmt.Errorf("cosmosigner %q cannot be removed: %w", st.Name, err)
-				}
-			}
-			publicKey, err := r.fallbackTmKMSPublicKey(ctx, nodeSet, st, hashicorp, cfg.Config.GetServiceAccountName())
-			if err != nil {
-				return fmt.Errorf("cosmosigner %q cannot be removed: %w", st.Name, err)
-			}
-			if err := requireMatchingRemovedSignerPublicKey(st, publicKey); err != nil {
-				return err
-			}
-			return independentRemovedSignerFallbackStateError(st)
-		}
-
 		validator := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 			Name:      validatorNodeName(nodeSet, st.ServingGroup, 0),
 			Namespace: nodeSet.GetNamespace(),
@@ -1219,36 +1190,7 @@ func (r *Reconciler) preflightRemovedSignerFallbacks(ctx context.Context, nodeSe
 }
 
 func independentRemovedSignerFallbackStateError(st *appsv1.CosmosignerStatus) error {
-	return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has independent local/tmKMS slash-protection state that cannot be proven synchronized with the managed signer; migrate to another managed signer or implement an explicit quiesce-and-state-transfer handoff", st.Name, st.ServingGroup)
-}
-
-func (r *Reconciler) fallbackTmKMSPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, st *appsv1.CosmosignerStatus, hashicorp *appsv1.TmKmsHashicorpProvider, serviceAccountName string) (string, error) {
-	clientSet := r.cosmosignerKubernetesClient()
-	if clientSet == nil {
-		return "", fmt.Errorf("fallback public-key preflight requires a Kubernetes clientset")
-	}
-	image := r.opts.GetCosmosignerImage()
-	runner := cosmosigner.JobRunner{
-		Client: clientSet,
-		Scheme: r.Scheme,
-		Owner:  nodeSet,
-		Params: cosmosigner.Params{
-			Name:               appsv1.CosmosignerStatusResourceName(st),
-			Namespace:          nodeSet.GetNamespace(),
-			Image:              image,
-			ServiceAccountName: serviceAccountName,
-			Backend: cosmosigner.Backend{Vault: &cosmosigner.VaultBackend{
-				Address:               hashicorp.Address,
-				KeyName:               hashicorp.Key,
-				KeyVersion:            1,
-				Mount:                 appsv1.DefaultCosmosignerVaultMount,
-				TokenSecret:           hashicorp.TokenSecret,
-				CertificateSecret:     hashicorp.CertificateSecret,
-				SkipCertificateVerify: hashicorp.SkipCertificateVerify,
-			}},
-		},
-	}
-	return runner.PublicKey(ctx)
+	return fmt.Errorf("cosmosigner %q cannot be removed: validator group %q has independent local slash-protection state that cannot be proven synchronized with the managed signer; migrate to another managed signer or implement an explicit quiesce-and-state-transfer handoff", st.Name, st.ServingGroup)
 }
 
 func requireMatchingRemovedSignerPublicKey(st *appsv1.CosmosignerStatus, fallback string) error {
@@ -1269,20 +1211,6 @@ func sortedTargetGroups(s appsv1.ResolvedSigner) []string {
 	groups := append([]string(nil), s.TargetGroups...)
 	sort.Strings(groups)
 	return groups
-}
-
-func (r *Reconciler) requireTmKMSSecret(ctx context.Context, namespace, purpose string, selector *corev1.SecretKeySelector) error {
-	if selector == nil || selector.Name == "" || selector.Key == "" {
-		return fmt.Errorf("%s secret selector must set both name and key", purpose)
-	}
-	data, err := r.secretKey(ctx, namespace, selector.Name, selector.Key)
-	if err != nil {
-		return fmt.Errorf("read %s secret %q: %w", purpose, selector.Name, err)
-	}
-	if len(data) == 0 {
-		return fmt.Errorf("%s secret %q is missing required key %q", purpose, selector.Name, selector.Key)
-	}
-	return nil
 }
 
 type blockedSignerTargets map[string]struct{}
@@ -1364,11 +1292,6 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 		} else if st != nil && cosmosignerImportComplete(s.Spec, st.KeyImported, st.ImportedKeyVersion, s.SoftwareKeySecret, keyMaterial) {
 			continue
 		}
-		if adopted, err := r.adoptTmKMSVaultImport(ctx, nodeSet, s, keyMaterial); err != nil {
-			return nil, false, err
-		} else if adopted {
-			continue
-		}
 
 		params, ok := prepared[s.Name]
 		if !ok {
@@ -1393,52 +1316,6 @@ func (r *Reconciler) prepareCosmosignerImports(ctx context.Context, nodeSet *app
 		}
 	}
 	return blocked, true, nil
-}
-
-// adoptTmKMSVaultImport recognizes a break-before-make migration from a legacy tmKMS HashiCorp
-// sidecar to a managed Vault cosmosigner over the exact same Transit key. tmKMS already uploaded the
-// validator's local key and records that fact on the generated child. Adoption is allowed only while
-// the source Secret is retained, because the Vault key is read back and compared to that source before
-// the durable import record is written; without the source, identity continuity cannot be proven.
-func (r *Reconciler) adoptTmKMSVaultImport(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, keyMaterial []byte) (bool, error) {
-	if !s.Spec.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) || len(keyMaterial) == 0 || s.ValidatorGroup == "" {
-		return false, nil
-	}
-	child := &appsv1.ChainNode{}
-	name := validatorNodeName(nodeSet, s.ValidatorGroup, 0)
-	if err := r.Get(ctx, client.ObjectKey{Namespace: nodeSet.GetNamespace(), Name: name}, child); err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if !metav1.IsControlledBy(child, nodeSet) ||
-		child.Annotations[controllers.AnnotationVaultKeyUploaded] != controllers.StringValueTrue ||
-		!child.ValidatorResolvesSigningIdentity(s.Identity()) ||
-		child.Spec.Validator == nil || child.Spec.Validator.TmKMS == nil ||
-		child.Spec.Validator.TmKMS.Provider.Hashicorp == nil {
-		return false, nil
-	}
-	h := child.Spec.Validator.TmKMS.Provider.Hashicorp
-	expected, err := cosmosigner.PublicKeyFromSecret(ctx, r.Client, nodeSet.GetNamespace(), s.SoftwareKeySecret)
-	if err != nil {
-		return false, err
-	}
-	actual, err := r.fallbackTmKMSPublicKey(ctx, nodeSet, nodeSet.EnsureCosmosignerStatus(s.Name), h, s.Spec.GetServiceAccountName())
-	if err != nil {
-		return false, fmt.Errorf("cosmosigner %q could not verify the tmKMS-uploaded Vault key before adoption: %w", s.Name, err)
-	}
-	if actual != expected {
-		return false, fmt.Errorf("cosmosigner %q cannot adopt tmKMS Vault key: backend public key does not match source secret %q", s.Name, s.SoftwareKeySecret)
-	}
-	st := nodeSet.EnsureCosmosignerStatus(s.Name)
-	st.KeyImported = s.Spec.Backend.Vault.ImportFingerprint(s.SoftwareKeySecret, keyMaterial)
-	if err := r.Status().Update(ctx, nodeSet); err != nil {
-		return false, err
-	}
-	r.recorder.Event(nodeSet, corev1.EventTypeNormal, appsv1.ReasonNodeKeyImported,
-		fmt.Sprintf("Cosmosigner %q adopted tmKMS-uploaded Vault key %q from child %q", s.Name, h.Key, child.Name))
-	return true, nil
 }
 
 func (r *Reconciler) ownedSignerStatefulSetExists(ctx context.Context, nodeSet *appsv1.ChainNodeSet, name string) (bool, error) {
@@ -2128,7 +2005,7 @@ func (r *Reconciler) maybeImportCosmosignerKey(ctx context.Context, nodeSet *app
 		return r.maybeImportCosmosignerKeyToGcp(ctx, nodeSet, s, params)
 	}
 	// uploadGenerated is auto-defaulted for genesis-init targets (their consensus key is always
-	// generated locally, so it must be imported), matching the documented tmKMS-parity behavior.
+	// generated locally, so it must be imported), requiring verification of the imported key.
 	if !c.VaultUploadsGenerated(signerTargetInitializesGenesis(nodeSet, s)) {
 		return false, false, nil
 	}

@@ -7,8 +7,6 @@ var deterministicChainNodePodSuffixes = [...]string{
 	"-write-file",
 	"-download-genesis",
 	"-create-validator",
-	"-tmkms-generate-identity",
-	"-tmkms-vault-upload",
 }
 
 // IsDeterministicChainNodePodName reports whether podName is the main ChainNode pod or one of the

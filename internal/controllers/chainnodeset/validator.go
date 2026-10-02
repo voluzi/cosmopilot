@@ -446,7 +446,6 @@ func (r *Reconciler) getValidatorSpecWithBlockedSignerTargets(nodeSet *appsv1.Ch
 				PrivateKeySecret: cfg.PrivateKeySecret,
 				Info:             cfg.Info,
 				Init:             cfg.Init,
-				TmKMS:            cfg.TmKMS,
 				CreateValidator:  cfg.CreateValidator,
 				AccountHDPath:    cfg.AccountHDPath,
 				AccountPrefix:    cfg.AccountPrefix,

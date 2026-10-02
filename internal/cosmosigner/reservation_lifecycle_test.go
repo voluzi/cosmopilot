@@ -183,7 +183,7 @@ func TestCleanupManagedSigningPathWaitsForOrphanedJobPod(t *testing.T) {
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 		Name: "validator", Namespace: "default", UID: "owner-uid",
 	}}
-	jobName := owner.Name + "-tmkms-vault-upload"
+	jobName := owner.Name + "-import"
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: jobName + "-generated", Namespace: owner.Namespace, UID: "pod-uid",
 	}}
@@ -315,7 +315,7 @@ func TestFinalizeConsensusKeySigningPathsLeavesChildOneShotPodToChainNodeSetClea
 		}},
 	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: child.Name + "-tmkms-vault-upload", Namespace: owner.Namespace, UID: "pod-uid",
+		Name: child.Name + "-import", Namespace: owner.Namespace, UID: "pod-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: child.Name,
 			UID: child.UID, Controller: ptr.To(true),
@@ -802,14 +802,14 @@ func TestEnsureConsensusKeyReservationReportsBlockedStaleRecoveryWhileManagedJob
 		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 	}}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: "validator-tmkms-vault-upload", Namespace: holder.Namespace, UID: "job-uid",
+		Name: "validator-import", Namespace: holder.Namespace, UID: "job-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: holder.Name,
 			UID: "old-owner-uid", Controller: ptr.To(true),
 		}},
 	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "validator-tmkms-vault-upload-pod", Namespace: holder.Namespace,
+		Name: "validator-import-pod", Namespace: holder.Namespace,
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name,
 			UID: job.UID, Controller: ptr.To(true),
@@ -845,10 +845,10 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForOrphanedManagedJobPod(t *
 		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "validator-tmkms-vault-upload-r4ndm", Namespace: holder.Namespace,
+		Name: "validator-import-r4ndm", Namespace: holder.Namespace,
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job",
-			Name: "validator-tmkms-vault-upload", UID: "deleted-job-uid", Controller: ptr.To(true),
+			Name: "validator-import", UID: "deleted-job-uid", Controller: ptr.To(true),
 		}},
 	}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
@@ -878,7 +878,7 @@ func TestEnsureConsensusKeyReservationBlocksRecoveryForExactManagedOneShotPod(t 
 	currentOwner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
 		Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer},
 	}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms-vault-upload", Namespace: holder.Namespace, UID: "pod-uid"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "validator-import", Namespace: holder.Namespace, UID: "pod-uid"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		reservationLifecycleNamespace(holder.Namespace), currentOwner, stale, pod,
 	).Build()
@@ -932,7 +932,7 @@ func TestEnsureConsensusKeyReservationRefusesMalformedStaleReservation(t *testin
 func TestFinalizeConsensusKeySigningPathsBlocksForeignManagedJob(t *testing.T) {
 	scheme := reservationLifecycleScheme(t)
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "validator-tmkms-vault-upload", Namespace: owner.Namespace, UID: "foreign-job-uid"}}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "validator-import", Namespace: owner.Namespace, UID: "foreign-job-uid"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, job).Build()
 
 	done, err := FinalizeConsensusKeySigningPaths(context.Background(), c, c, owner, owner.Namespace)
@@ -950,14 +950,14 @@ func TestCleanupManagedSigningPathDeletesJobBeforeWaitingForPod(t *testing.T) {
 		Name: "validator", Namespace: "default", UID: "owner-uid",
 	}}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: "validator-tmkms-generate-identity", Namespace: owner.Namespace, UID: "job-uid",
+		Name: "validator-pubkey", Namespace: owner.Namespace, UID: "job-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name,
 			UID: owner.UID, Controller: ptr.To(true),
 		}},
 	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "validator-tmkms-generate-identity-pod", Namespace: owner.Namespace, UID: "pod-uid",
+		Name: "validator-pubkey-pod", Namespace: owner.Namespace, UID: "pod-uid",
 		Finalizers: []string{"test.voluzi.com/hold"},
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name,
@@ -1013,7 +1013,7 @@ func TestCleanupManagedSigningPathBlocksPodFromPreviousJobUID(t *testing.T) {
 		Name: "validator", Namespace: "default", UID: "owner-uid",
 	}}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: "validator-tmkms-vault-upload", Namespace: owner.Namespace, UID: "current-job-uid",
+		Name: "validator-import", Namespace: owner.Namespace, UID: "current-job-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name,
 			UID: owner.UID, Controller: ptr.To(true),
@@ -1046,12 +1046,12 @@ func TestCleanupManagedSigningPathBlocksPodFromPreviousJobUID(t *testing.T) {
 }
 
 func TestManagedSigningOneShotPodJobNameUsesLastMarker(t *testing.T) {
-	name := "validator-import-copy-tmkms-vault-upload-generated"
+	name := "validator-import-copy-import-generated"
 	got, ok := managedSigningOneShotPodJobName(name)
 	if !ok {
 		t.Fatalf("expected %q to be recognized as a generated managed Job pod", name)
 	}
-	want := "validator-import-copy-tmkms-vault-upload"
+	want := "validator-import-copy-import"
 	if got != want {
 		t.Fatalf("managed Job name = %q, want %q", got, want)
 	}

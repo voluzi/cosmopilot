@@ -254,7 +254,7 @@ func TestReconcileConsensusKeyReservationClaimsBlocksGeneratedOneShotPod(t *test
 	claim := "nodes-old-validator"
 	stale := nodeSetReservation(nodeSet, "stale", "stale-uid", nodeSetReservationLifecycleOtherPublicKey, claim)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: claim + "-tmkms-vault-upload-generated", Namespace: nodeSet.Namespace, UID: "pod-uid",
+		Name: claim + "-cosmosigner-import-generated", Namespace: nodeSet.Namespace, UID: "pod-uid",
 	}}
 	r := newValidatorTestReconciler(t, nodeSet, stale, pod)
 	r.APIReader = r.Client

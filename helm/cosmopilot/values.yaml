@@ -10,8 +10,6 @@ cosmoseedImage: ""
 cosmosignerImage: ""
 dataExporterImage: ""
 utilityImage: ""
-tmkmsImage: ""
-vaultTokenRenewerImage: ""
 replicas: 1
 imagePullSecrets: []
 workerCount: 10

@@ -248,7 +248,7 @@ func TestFinalizeConsensusKeyReservationOwnerWaitsForManagedJobPod(t *testing.T)
 		},
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: owner.Name + "-tmkms-vault-upload", Namespace: owner.Namespace, UID: "job-uid",
+		Name: owner.Name + "-cosmosigner-import", Namespace: owner.Namespace, UID: "job-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name,
 			UID: owner.UID, Controller: ptr.To(true),
@@ -337,7 +337,7 @@ func TestEnsureConsensusKeyReservationEmitsBlockedStaleRecoveryEvent(t *testing.
 		},
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: owner.Name + "-tmkms-vault-upload", Namespace: owner.Namespace, UID: "job-uid",
+		Name: owner.Name + "-cosmosigner-import", Namespace: owner.Namespace, UID: "job-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name,
 			UID: "old-owner-uid", Controller: ptr.To(true),

@@ -1148,14 +1148,6 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 	}
 
 	switch {
-	case chainNode.UsesTmKms():
-		_, kms, err := r.getTmkms(chainNode)
-		if err != nil {
-			return nil, err
-		}
-		pod.Spec.Volumes = append(pod.Spec.Volumes, kms.GetVolumes()...)
-		pod.Spec.Containers = append(pod.Spec.Containers, kms.GetContainersSpec()...)
-
 	case chainNode.IsSignerTarget():
 		// Block signing is handled by an external cosmosigner deployment that dials this node's
 		// priv-validator address. No local key is mounted and no signer sidecar is injected.

@@ -362,16 +362,14 @@ func sortedUnique(values []string) []string {
 }
 
 func isManagedSigningOneShotName(name string) bool {
-	return strings.HasSuffix(name, "-tmkms-generate-identity") ||
-		strings.HasSuffix(name, "-tmkms-vault-upload") ||
-		strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
+	return strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
 }
 
 func managedSigningOneShotPodJobName(name string) (string, bool) {
 	lastIndex := -1
 	jobName := ""
 	for _, marker := range []string{
-		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
+		"-import", "-pubkey",
 	} {
 		if index := strings.LastIndex(name, marker+"-"); index > lastIndex {
 			lastIndex = index

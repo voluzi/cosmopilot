@@ -68,16 +68,6 @@ func init() {
 		"utility image to be used by operator-owned helper containers.",
 	)
 
-	flag.StringVar(&runOpts.TmKmsImage, "tmkms-image",
-		environ.GetString("TMKMS_IMAGE", images.DefaultTmKmsImage),
-		"tmkms image to be used by validators configured with TmKMS.",
-	)
-
-	flag.StringVar(&runOpts.VaultTokenRenewerImage, "vault-token-renewer-image",
-		environ.GetString("VAULT_TOKEN_RENEWER_IMAGE", images.DefaultVaultTokenRenewerImage),
-		"vault token renewer image to be used with TmKMS automatic token renewal.",
-	)
-
 	flag.StringVar(&runOpts.WorkerName, "worker-name",
 		environ.GetString("WORKER_NAME", ""),
 		"name of the worker, passed in label `worker-name`. Used for limiting resources processed by this operator instance.",

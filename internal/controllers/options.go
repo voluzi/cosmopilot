@@ -19,8 +19,6 @@ type ControllerRunOptions struct {
 	CosmosignerImage         string
 	DataExporterImage        string
 	UtilityImage             string
-	TmKmsImage               string
-	VaultTokenRenewerImage   string
 	ReleaseName              string
 	DisruptionCheckEnabled   bool
 	DisruptionMaxUnavailable int
@@ -91,20 +89,6 @@ func (opts *ControllerRunOptions) GetCosmosignerImage() string {
 		return images.DefaultCosmosignerImage
 	}
 	return opts.CosmosignerImage
-}
-
-func (opts *ControllerRunOptions) GetTmKmsImage() string {
-	if opts == nil || opts.TmKmsImage == "" {
-		return images.DefaultTmKmsImage
-	}
-	return opts.TmKmsImage
-}
-
-func (opts *ControllerRunOptions) GetVaultTokenRenewerImage() string {
-	if opts == nil || opts.VaultTokenRenewerImage == "" {
-		return images.DefaultVaultTokenRenewerImage
-	}
-	return opts.VaultTokenRenewerImage
 }
 
 func (opts *ControllerRunOptions) GetDefaultPriorityClassName() string {

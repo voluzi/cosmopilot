@@ -456,20 +456,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err = r.ensurePod(ctx, app, chainNode, configHash); err != nil {
 		return ctrl.Result{}, err
 	}
-	// Keep tmKMS assets while the live pod still references them; disruption protection may defer
-	// replacement even when ensurePod returns successfully.
-	if chainNode.IsSignerTarget() {
-		cleanupSafe, err := r.canCleanupTmKMSConfig(ctx, chainNode)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if cleanupSafe {
-			logger.V(1).Info("cleanup tmKMS config after signing transition")
-			if err = r.ensureTmKMSConfig(ctx, chainNode); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-	}
 
 	// If the node was set to stop, we will stop here as the pod is not running.
 	if chainNode.Status.Phase == appsv1.PhaseChainNodeStopped {

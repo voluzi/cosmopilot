@@ -2,9 +2,6 @@ package chainnode
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,8 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1305,85 +1300,6 @@ func TestPreflightCosmosignerFallbackRequiresMatchingLocalPublicKey(t *testing.T
 	require.ErrorContains(t, err, "slash-protection state")
 }
 
-func TestPreflightCosmosignerFallbackAlwaysVerifiesTmKMSPublicKey(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: "https://vault:8200",
-				Key:     "fallback-key",
-				TokenSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
-					Key:                  "token",
-				},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{
-			CosmosignerPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-		},
-	}
-	chainNode.Status.CosmosignerServingIdentity = chainNode.EffectiveSigningIdentity()
-	require.True(t, chainNode.ValidatorResolvesSigningIdentity(chainNode.Status.CosmosignerServingIdentity))
-	token := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("vault-token")},
-	}
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	var createdPod string
-	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		statusCode := http.StatusNotFound
-		body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
-		if req.Method == http.MethodPost {
-			data, readErr := io.ReadAll(req.Body)
-			require.NoError(t, readErr)
-			createdPod = string(data)
-			statusCode = http.StatusInternalServerError
-			body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","message":"forced pubkey failure","code":500}`
-		}
-		return &http.Response{
-			StatusCode: statusCode,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Request:    req,
-		}, nil
-	})
-	clientSet, err := kubernetes.NewForConfig(&rest.Config{
-		Host: "https://kubernetes.invalid", ContentConfig: rest.ContentConfig{ContentType: "application/json"}, Transport: transport,
-	})
-	require.NoError(t, err)
-	r := &Reconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(token).Build(),
-		Scheme: scheme, ClientSet: clientSet,
-	}
-
-	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.NotContains(t, createdPod, "VAULT_SKIP_VERIFY")
-	require.Contains(t, createdPod, `"--vault-key-version","1"`)
-}
-
-func TestPreflightCosmosignerFallbackRejectsUnverifiedVaultTLS(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: "https://vault:8200", Key: "fallback-key", SkipCertificateVerify: true,
-				TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"}, Key: "token"},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
-	}
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
-
-	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.ErrorContains(t, err, "TLS verification")
-}
-
 func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {
 	vault := &appsv1.CosmosignerVaultBackend{
 		Address: "https://vault:8200", KeyName: "validator-key", UploadGenerated: true,
@@ -1414,50 +1330,6 @@ func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {
 	require.Contains(t, err.Error(), "validator-key")
 }
 
-func TestPreflightCosmosignerFallbackRequiresTmKMSSecrets(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: "https://vault:8200",
-				Key:     "validator-key",
-				TokenSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
-					Key:                  "token",
-				},
-				CertificateSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-ca"},
-					Key:                  "ca.crt",
-				},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
-	}
-	chainNode.Status.CosmosignerServingIdentity = chainNode.EffectiveSigningIdentity()
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := &Reconciler{Client: client, Scheme: scheme}
-
-	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "tmKMS Vault token")
-	require.NoError(t, client.Create(context.Background(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: chainNode.Namespace},
-		Data:       map[string][]byte{"token": []byte("token")},
-	}))
-	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "tmKMS Vault certificate")
-	require.NoError(t, client.Create(context.Background(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-ca", Namespace: chainNode.Namespace},
-		Data:       map[string][]byte{"ca.crt": []byte("certificate")},
-	}))
-	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.ErrorContains(t, err, "Kubernetes clientset")
-}
-
 func TestPreflightCosmosignerFallbackUsesRecordedServingIdentity(t *testing.T) {
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
@@ -1474,29 +1346,6 @@ func TestPreflightCosmosignerFallbackUsesRecordedServingIdentity(t *testing.T) {
 	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validator-key")
-}
-
-func TestPreflightCosmosignerFallbackRequiresTmKMSTarget(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				TokenSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
-					Key:                  "token",
-				},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
-	}
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
-
-	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "address and key")
 }
 
 func TestCosmosignerBackendRejectsMalformedSoftwareKey(t *testing.T) {

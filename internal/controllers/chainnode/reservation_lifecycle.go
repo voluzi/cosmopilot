@@ -33,7 +33,7 @@ func (r *Reconciler) prepareConsensusKeyReservationOwner(ctx context.Context, ch
 	}
 
 	needsFinalizer := chainNode.IsValidator() || chainNode.Spec.Cosmosigner != nil ||
-		chainNode.Status.CosmosignerPublicKey != "" || chainNode.Status.TmKMSReservationIdentity != ""
+		chainNode.Status.CosmosignerPublicKey != ""
 	if !needsFinalizer {
 		needsFinalizer, err = cosmosigner.HasConsensusKeyReservationsForOwner(ctx, r.reservationReader(), root)
 		if err != nil {
@@ -198,8 +198,6 @@ func standaloneManagedSigningOneShotPodName(name string, chainNode *appsv1.Chain
 
 func standaloneManagedSigningOneShotNames(chainNode *appsv1.ChainNode) []string {
 	return []string{
-		chainNode.GetName() + "-tmkms-generate-identity",
-		chainNode.GetName() + "-tmkms-vault-upload",
 		cosmosignerName(chainNode) + "-import",
 		cosmosignerName(chainNode) + "-pubkey",
 	}
