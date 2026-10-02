@@ -151,6 +151,24 @@ func TestLegacySignerGuardListsOncePerSet(t *testing.T) {
 	}
 }
 
+func TestLegacySignerGuardSkipsSnapshotsWhenChildrenAlreadyPassed(t *testing.T) {
+	set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "chain", Namespace: "default", UID: "set-uid"}}
+	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: set.Namespace, UID: "child-uid",
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: set.Name, UID: set.UID, Controller: ptr.To(true)}},
+	}}
+	var lists atomic.Int32
+	c := fake.NewClientBuilder().WithScheme(legacySignerScheme(t)).WithObjects(set, child).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			lists.Add(1)
+			return c.List(ctx, list, opts...)
+		},
+	}).Build()
+	guard := &LegacySignerGuard{}
+	require.NoError(t, guard.RefuseLegacyTmKMS(t.Context(), c, nil, child))
+	require.NoError(t, guard.RefuseLegacyTmKMSChildren(t.Context(), c, nil, set))
+	require.EqualValues(t, 1, lists.Load(), "only the child inventory is listed when every child already passed")
+}
+
 func TestLegacySignerGuardDoesNotRecordRefusedSet(t *testing.T) {
 	set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "chain", Namespace: "default", UID: "set-uid"}}
 	child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: set.Namespace, UID: "child-uid",
