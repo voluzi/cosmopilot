@@ -88,6 +88,9 @@ type ChainNodeSetSpec struct {
 	// +optional
 	Cosmoseed *CosmoseedConfig `json:"cosmoseed,omitempty"`
 
+	// Cosmosigner deploys a managed remote signer for one or more node groups
+	// (or the validator group by default). Targeted nodes listen for the signer instead of mounting a local key.
+	// +optional
 	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
 }
 
@@ -300,6 +303,12 @@ type ChainNodeSetValidatorStatus struct {
 	// +optional
 	Init bool `json:"init,omitempty"`
 
+	// SigningKeyDigest is a controller-internal fingerprint of a genesis validator's signing
+	// material (resolved private-key secret, init chain ID and genesis validator list).
+	// It detects disallowed post-genesis changes to the immutable genesis validator set
+	// when validating webhooks are disabled and no previous spec is available to compare.
+	// Set only for genesis (init) validators; not meant to be set by hand.
+	// +optional
 	SigningKeyDigest string `json:"signingKeyDigest,omitempty"`
 }
 

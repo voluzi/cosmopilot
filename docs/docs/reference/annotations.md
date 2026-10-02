@@ -18,7 +18,6 @@ snapshot-export cleanup acknowledgement described below.
 | `cosmopilot.voluzi.com/data-height` | Node / PVC | Block height of the data currently on disk. |
 | `cosmopilot.voluzi.com/data-initialized` | Node | Marks that the data volume has been initialized. |
 | `cosmopilot.voluzi.com/genesis-downloaded` | Node | Marks that the genesis file has been retrieved. |
-| `cosmopilot.voluzi.com/vault-key-uploaded` | Node | Marks that the consensus key has been uploaded to Vault. |
 | `cosmopilot.voluzi.com/config-hash` | Pod | Hash of the rendered configuration; a change triggers a controlled Pod restart. |
 | `cosmopilot.voluzi.com/pod-spec-hash` | Pod | Hash of the desired Pod spec, used to detect drift. |
 | `cosmopilot.voluzi.com/snapshotting-pvc` | Node | A PVC snapshot is currently in progress. |

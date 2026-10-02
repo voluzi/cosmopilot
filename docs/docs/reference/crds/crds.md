@@ -251,7 +251,7 @@ ChainNodeSetSpec defines the desired state of ChainNode.
 | ingresses | List of ingresses to create for this ChainNodeSet. This allows to create ingresses targeting multiple groups of nodes. | [][GlobalIngressConfig](#globalingressconfig) | false |
 | gatewayRoutes | List of Gateway API route configs for this ChainNodeSet. This allows to create HTTPRoute/GRPCRoute resources targeting multiple groups of nodes. | [][GlobalGatewayConfig](#globalgatewayconfig) | false |
 | cosmoseed | Allows deploying seed nodes using Cosmoseed. | *[CosmoseedConfig](#cosmoseedconfig) | false |
-| cosmosigner |  | *[Cosmosigner](#cosmosigner) | false |
+| cosmosigner | Cosmosigner deploys a managed remote signer for one or more node groups (or the validator group by default). Targeted nodes listen for the signer instead of mounting a local key. | *[Cosmosigner](#cosmosigner) | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -301,7 +301,7 @@ ChainNodeSetValidatorStatus contains information about a validator running on th
 | status | Current validator status. | ValidatorStatus | false |
 | pubKey | Public key of the validator. | string | false |
 | init | Init indicates this validator initialized the chain genesis and is therefore part of the immutable genesis validator set. Controller-managed; recorded for every instance of a genesis-initializing validator group (and the legacy singleton .spec.validator.init). | bool | false |
-| signingKeyDigest |  | string | false |
+| signingKeyDigest | SigningKeyDigest is a controller-internal fingerprint of a genesis validator's signing material (resolved private-key secret, init chain ID and genesis validator list). It detects disallowed post-genesis changes to the immutable genesis validator set when validating webhooks are disabled and no previous spec is available to compare. Set only for genesis (init) validators; not meant to be set by hand. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 

@@ -459,8 +459,9 @@ because 0.2.x cannot read the state 3.x writes.
 
 Set `replicas` to an odd number (3 tolerates 1 failure, 5 tolerates 2). Each replica runs an embedded
 raft node and keeps its own state PVC. Only the raft leader dials the nodes and signs; on leader loss
-another replica takes over. There is no HTTP health endpoint, so `Cosmopilot` uses a TCP probe against
-the raft port.
+another replica takes over. `Cosmopilot` uses HTTP startup and liveness probes on `/livez` and
+a readiness probe on `/readyz`. Followers pass readiness too; it does not assert leadership or quorum.
+See [HTTP health probes](#http-health-probes).
 
 Multi-replica signers require `raftTLSSecret`, containing `tls.crt`, `tls.key`, and `ca.crt`, so Raft
 membership and state replication use mutual TLS. `unsafeAllowInsecureRaft: true` is an explicit opt-out
