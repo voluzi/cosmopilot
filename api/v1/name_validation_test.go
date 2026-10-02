@@ -91,6 +91,13 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: "collides with a built-in pod container",
 		},
 		{
+			name: "sidecar named like a legacy signer",
+			mutate: func(c *ChainNode) {
+				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "tmkms"}}}
+			},
+			wantErr: "collides with a built-in pod container",
+		},
+		{
 			name: "sidecar named like the app container",
 			mutate: func(c *ChainNode) {
 				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "chaind"}}}

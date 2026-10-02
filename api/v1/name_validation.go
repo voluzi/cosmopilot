@@ -71,10 +71,12 @@ func validateAppBinaryName(path, app string) error {
 	return validateDNS1123Label(path, app)
 }
 
-// reservedPodContainerNames are the node Pod's built-in container names (internal/controllers/chainnode ); the app container is named after .spec.app.app. A sidecar with one of these names
-// would collide with it.
+// reservedPodContainerNames are the node Pod's built-in container names; the app container is named
+// after .spec.app.app. A sidecar with one of these names would collide with it.
 var reservedPodContainerNames = []string{
 	"node-utils", "wait-cosmosigner-discovery", "link-genesis",
+	// The legacy signer guard treats this name as a signing artifact and would refuse reconciliation.
+	"tmkms",
 }
 
 func validateSidecarNames(path string, config *Config, appName string) error {
