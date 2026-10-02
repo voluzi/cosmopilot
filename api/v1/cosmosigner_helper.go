@@ -567,10 +567,6 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 		return nil
 	}
 
-	if err := c.validateScheduling(path); err != nil {
-		return err
-	}
-
 	// Exactly one backend must be configured.
 	backends := 0
 	if c.Backend.Software != nil {
