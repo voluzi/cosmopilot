@@ -52,10 +52,15 @@ or update them to compatible images:
 - **node-utils 4.0.0 or newer** supplies the `wait-for-signer` init command.
 - **Cosmosigner 3.1.0 or newer** supplies HTTP health endpoints and bounded redial.
 
-The release defaults use these versions. Image overrides are not version-checked, so check any
+The release defaults use node-utils 4.0.0 and Cosmosigner 3.1.1. Image overrides are not version-checked, so check any
 `cosmosignerImage` or `.spec.cosmosigner.image` override before upgrading. With a Cosmosigner build
 older than 3.1.0, `/livez` never answers, the signer never becomes live, and the validator does not
 sign until the image is corrected.
+
+For existing managed signers using the default image, upgrading the operator changes the signer
+pod template and triggers a break-before-make migration: all replicas stop once, the StatefulSet
+is deleted and recreated, and PVCs and Raft state are retained. This is a full signer stop per
+validator. Signers with a per-signer image override are unaffected by the default image bump.
 
 ## 3. Verify NetworkPolicy enforcement
 
