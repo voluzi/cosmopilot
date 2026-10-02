@@ -60,7 +60,9 @@ sign until the image is corrected.
 For existing managed signers using the default image, upgrading the operator changes the signer
 pod template and triggers a break-before-make migration: all replicas stop once, the StatefulSet
 is deleted and recreated, and PVCs and Raft state are retained. This is a full signer stop per
-validator. Signers with a per-signer image override are unaffected by the default image bump.
+validator. A per-signer image override avoids the restart caused by this default image bump.
+It does not avoid the one-time managed-signer migration required by the 4.x to 5.0.0 lifecycle
+upgrade described below.
 
 Remove hand-made PDBs covering managed signer pods to let Cosmopilot create the default signer
 PDB (`maxUnavailable: 1`). The operator skips its PDB when a foreign PDB already covers those pods
@@ -82,7 +84,7 @@ from the target chart before upgrading the controller. Replace `<target-chart-ve
 chart release for Cosmopilot 5.0.0 and `<release>` with your existing release name:
 
 ```shell
-helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-chart-version> | kubectl apply -f -
+helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-chart-version> | kubectl apply --server-side --force-conflicts -f -
 helm upgrade <release> oci://ghcr.io/voluzi/helm/cosmopilot --version <target-chart-version> -f values.yaml
 ```
 

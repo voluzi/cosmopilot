@@ -662,7 +662,7 @@ on `helm upgrade`. Existing installations must apply the CRDs from the target ch
 the controller:
 
 ```shell
-helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply -f -
+helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply --server-side --force-conflicts -f -
 ```
 
 Confirm `consensuskeyreservations.cosmopilot.voluzi.com` exists before starting the new controller.
