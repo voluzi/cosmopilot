@@ -73,7 +73,9 @@ func EnsurePodDisruptionBudget(ctx context.Context, c client.Client, scheme *run
 		}
 		selector, err := metav1.LabelSelectorAsSelector(existing.Spec.Selector)
 		if err != nil {
-			return "", err
+			// Someone else's malformed budget must not stop this signer from reconciling.
+			nameCollision = nameCollision || existing.Name == pdb.Name
+			continue
 		}
 		if selector.Matches(labels.Set(pdb.Labels)) {
 			return fmt.Sprintf("signer pods are covered by foreign PodDisruptionBudget %q", existing.Name), nil
