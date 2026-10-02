@@ -123,6 +123,9 @@ func TestRecoveredSigningPublicKeyRequiresMatchingArgAndConfig(t *testing.T) {
 		{name: "duplicate argument", mutate: func(sts *appsv1.StatefulSet) {
 			sts.Spec.Template.Spec.Containers[0].Args = append(sts.Spec.Template.Spec.Containers[0].Args, "--expected-public-key", reservationTestPublicKey)
 		}, err: "live signing identity is not pinned by exactly one expected-public-key argument"},
+		{name: "argument without a value", mutate: func(sts *appsv1.StatefulSet) {
+			sts.Spec.Template.Spec.Containers[0].Args = append(sts.Spec.Template.Spec.Containers[0].Args, "--expected-public-key")
+		}, err: "live signing identity argument has no value"},
 		{name: "different argument", mutate: func(sts *appsv1.StatefulSet) {
 			args := sts.Spec.Template.Spec.Containers[0].Args
 			for i, arg := range args {

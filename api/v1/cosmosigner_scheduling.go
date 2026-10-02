@@ -7,6 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -64,6 +65,11 @@ func (c *Cosmosigner) validateScheduling(path string) error {
 		errs = append(errs, metavalidation.ValidateLabelSelector(term.LabelSelector, opts, path.Child("labelSelector")).ToAggregate())
 		errs = append(errs, metavalidation.ValidateLabelSelector(term.NamespaceSelector, opts, path.Child("namespaceSelector")).ToAggregate())
 		errs = append(errs, metavalidation.ValidateLabelName(term.TopologyKey, path.Child("topologyKey")).ToAggregate())
+		for i, namespace := range term.Namespaces {
+			for _, msg := range validation.IsDNS1123Label(namespace) {
+				errs = append(errs, field.Invalid(path.Child("namespaces").Index(i), namespace, msg))
+			}
+		}
 		for i, key := range term.MatchLabelKeys {
 			errs = append(errs, metavalidation.ValidateLabelName(key, path.Child("matchLabelKeys").Index(i)).ToAggregate())
 		}

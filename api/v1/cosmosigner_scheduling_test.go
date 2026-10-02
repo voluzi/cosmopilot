@@ -75,6 +75,9 @@ func TestWebhooksValidateCosmosignerScheduling(t *testing.T) {
 			a.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0].Weight = 101
 			return a
 		}(), field: "affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].weight"},
+		{name: "invalid pod anti-affinity namespace", affinity: podAffinity(true, false, corev1.PodAffinityTerm{
+			TopologyKey: "kubernetes.io/hostname", Namespaces: []string{"Bad_Name"},
+		}), field: "affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].namespaces[0]"},
 		{name: "empty node field key", affinity: nodeFieldAffinity(corev1.NodeSelectorRequirement{Operator: corev1.NodeSelectorOpIn, Values: []string{"node-a"}}), field: "matchFields[0].key"},
 	}
 	for _, anti := range []bool{false, true} {
