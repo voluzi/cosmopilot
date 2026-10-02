@@ -15,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
@@ -57,40 +56,6 @@ func ReadLifecycleDigest(ctx context.Context, c client.Client, namespace, name s
 	return digest, digest != "", nil
 }
 
-// EnsurePodDisruptionBudget returns a skip reason when a foreign PDB covers signer pods or takes
-// the budget name. The rendered PDB labels carry the full pod label set; overlapping budgets make
-// the eviction API refuse drains. Policy API and permission errors must remain visible.
-func EnsurePodDisruptionBudget(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, pdb *policyv1.PodDisruptionBudget) (string, error) {
-	pdbs := &policyv1.PodDisruptionBudgetList{}
-	if err := c.List(ctx, pdbs, client.InNamespace(pdb.Namespace)); err != nil {
-		return "", err
-	}
-	nameCollision := false
-	for i := range pdbs.Items {
-		existing := &pdbs.Items[i]
-		if metav1.IsControlledBy(existing, owner) {
-			continue
-		}
-		selector, err := metav1.LabelSelectorAsSelector(existing.Spec.Selector)
-		if err != nil {
-			// Someone else's malformed budget must not stop this signer from reconciling.
-			nameCollision = nameCollision || existing.Name == pdb.Name
-			continue
-		}
-		if selector.Matches(labels.Set(pdb.Labels)) {
-			return fmt.Sprintf("signer pods are covered by foreign PodDisruptionBudget %q", existing.Name), nil
-		}
-		nameCollision = nameCollision || existing.Name == pdb.Name
-	}
-	if nameCollision {
-		return fmt.Sprintf("foreign PodDisruptionBudget %q takes the budget name but does not cover signer pods; signer is left without a budget", pdb.Name), nil
-	}
-	if err := ApplyOwned(ctx, c, scheme, owner, pdb); err != nil {
-		return "", err
-	}
-	return "", nil
-}
-
 // PreflightDeployable reports (as an error) whether the signer named `name` can be deployed by owner,
 // running the SAME blocking checks its deployment performs — a name-collision refusal on EVERY object
 // the deployment creates/updates (each is applied with ApplyOwned, which refuses to overwrite an object
@@ -119,6 +84,7 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		obj  client.Object
 	}{
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
+		{"PodDisruptionBudget", &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
 		{"NetworkPolicy", networkPolicyObject(namespace, name)},
 		{"target NetworkPolicy", networkPolicyObject(namespace, name+discoveryServiceSuffix)},
 	}

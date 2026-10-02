@@ -64,9 +64,10 @@ validator. A per-signer image override avoids the restart caused by this default
 It does not avoid the one-time managed-signer migration required by the 4.x to 5.0.0 lifecycle
 upgrade described below.
 
-Remove hand-made PDBs covering managed signer pods to let Cosmopilot create the default signer
-PDB (`maxUnavailable: 1`). The operator skips its PDB when a foreign PDB already covers those pods
-to avoid overlapping budgets that prevent eviction.
+Cosmopilot manages one PodDisruptionBudget per signer (`maxUnavailable: 1`); a second budget
+selecting the same pods makes Kubernetes refuse their evictions, blocking drains of their nodes
+until that second budget is removed. A budget with the signer's name that is not owned by Cosmopilot
+blocks the signer's reconcile like any other name collision.
 
 ## 3. Verify NetworkPolicy enforcement
 

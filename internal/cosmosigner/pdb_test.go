@@ -59,53 +59,35 @@ func TestPodDisruptionBudgetShape(t *testing.T) {
 	}
 }
 
-func TestEnsurePodDisruptionBudgetSkipsForeignOverlap(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		selector *metav1.LabelSelector
-		skipped  bool
-	}{
-		{"mychain-signer", &metav1.LabelSelector{MatchLabels: map[string]string{"other": "pods"}}, true},
-		{"external", &metav1.LabelSelector{MatchLabels: InstanceLabels("mychain-signer")}, true},
-		{"mixed", &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/instance": "mychain-signer", "chain-node-set": "mychain"}}, true},
-		{"expression", &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "app.kubernetes.io/name", Operator: metav1.LabelSelectorOpIn, Values: []string{"cosmosigner"}}}}, true},
-		{"unrelated", &metav1.LabelSelector{MatchLabels: InstanceLabels("other-signer")}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			scheme := lockScheme(t)
-			owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"}}
-			foreign := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: "default"}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: tc.selector}}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
-			reason, err := EnsurePodDisruptionBudget(ctx, c, scheme, owner, testParams().PodDisruptionBudget())
-			require.NoError(t, err)
-			require.Equal(t, tc.skipped, reason != "")
-			if tc.skipped {
-				require.Contains(t, reason, `foreign PodDisruptionBudget "`+tc.name+`"`)
-				if tc.name == "mychain-signer" {
-					require.Contains(t, reason, "signer is left without a budget")
-				} else {
-					require.Contains(t, reason, "signer pods are covered")
-				}
-			}
-			live := &policyv1.PodDisruptionBudget{}
-			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(foreign), live))
-			require.Empty(t, live.OwnerReferences)
-			require.Equal(t, foreign.Spec, live.Spec)
-			if tc.skipped && tc.name != "mychain-signer" {
-				require.True(t, apierrors.IsNotFound(c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "mychain-signer"}, &policyv1.PodDisruptionBudget{})))
-			}
-			if !tc.skipped {
-				require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "mychain-signer"}, live))
-				require.True(t, metav1.IsControlledBy(live, owner))
-				desired := testParams().PodDisruptionBudget()
-				desired.Spec.MaxUnavailable = ptr.To(intstr.FromInt32(2))
-				reason, err = EnsurePodDisruptionBudget(ctx, c, scheme, owner, desired)
-				require.NoError(t, err)
-				require.Empty(t, reason)
-				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(desired), live))
-				require.Equal(t, intstr.FromInt32(2), *live.Spec.MaxUnavailable)
-			}
-		})
-	}
+func TestApplyOwnedPodDisruptionBudget(t *testing.T) {
+	ctx := context.Background()
+	scheme := lockScheme(t)
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	desired := testParams().PodDisruptionBudget()
+	require.NoError(t, ApplyOwned(ctx, c, scheme, owner, desired))
+	live := &policyv1.PodDisruptionBudget{}
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(desired), live))
+	require.True(t, metav1.IsControlledBy(live, owner))
+	require.Equal(t, intstr.FromInt32(1), *live.Spec.MaxUnavailable)
+
+	desired = testParams().PodDisruptionBudget()
+	desired.Spec.MaxUnavailable = ptr.To(intstr.FromInt32(2))
+	require.NoError(t, ApplyOwned(ctx, c, scheme, owner, desired))
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(desired), live))
+	require.Equal(t, intstr.FromInt32(2), *live.Spec.MaxUnavailable)
+}
+
+func TestApplyOwnedRefusesForeignPodDisruptionBudget(t *testing.T) {
+	ctx := context.Background()
+	scheme := lockScheme(t)
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"}}
+	pdb := testParams().PodDisruptionBudget()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pdb).Build()
+	require.EqualError(t, ApplyOwned(ctx, c, scheme, owner, testParams().PodDisruptionBudget()),
+		`cosmosigner resource "mychain-signer" is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision`)
+	live := &policyv1.PodDisruptionBudget{}
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(pdb), live))
+	require.Empty(t, live.OwnerReferences)
+	require.Equal(t, pdb.Spec, live.Spec)
 }

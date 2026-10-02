@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -977,6 +978,8 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		want string
 	}{
 		{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: foreign}}, "ConfigMap"},
+		{&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: foreign}}, "PodDisruptionBudget"},
+		{&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}, "PodDisruptionBudget"},
 		{func() client.Object {
 			obj := networkPolicyObject(ns, name+discoveryServiceSuffix)
 			obj.SetOwnerReferences(foreign)
@@ -1059,6 +1062,7 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 	// Our own objects: allowed.
 	mine := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
+		&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}},
 		&corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}},
 			Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},

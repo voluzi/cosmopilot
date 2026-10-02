@@ -204,6 +204,7 @@ func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
 		Scheme: scheme,
@@ -311,6 +312,7 @@ func TestPreflightCosmosignerQuiescesSentrySignerOnReservationConflict(t *testin
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, batchv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 	r := &Reconciler{
@@ -350,6 +352,7 @@ func TestPreflightCosmosignerRejectsDifferentRecordedValidatorPublicKey(t *testi
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
 		Scheme: scheme, opts: &controllers.ControllerRunOptions{},
@@ -421,6 +424,7 @@ func TestPreflightCosmosignerLeavesHealthySignerRunningOnRejectedKey(t *testing.
 			require.NoError(t, appsv1.AddToScheme(scheme))
 			require.NoError(t, corev1.AddToScheme(scheme))
 			require.NoError(t, k8sappsv1.AddToScheme(scheme))
+			require.NoError(t, policyv1.AddToScheme(scheme))
 			require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 			r := &Reconciler{
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, sts, pvc).Build(),
@@ -465,6 +469,7 @@ func TestPreflightCosmosignerQuiescesRecoveredSignerWithStaleStatusOnKeyMismatch
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 	params, err := r.cosmosignerParams(context.Background(), chainNode)
 	require.NoError(t, err)
@@ -527,6 +532,7 @@ func TestPreflightCosmosignerRecoversMissingPublicKeyBeforeReservation(t *testin
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, reservation).Build(), Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 	params, err := r.cosmosignerParams(context.Background(), chainNode)
 	require.NoError(t, err)
@@ -892,6 +898,7 @@ func TestReconcileSigningConfigsValidatesMigrationSourceBeforeQuiescing(t *testi
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&appsv1.ChainNode{}, &k8sappsv1.StatefulSet{}).
@@ -1050,6 +1057,7 @@ func requireRecoveredStandaloneIdentityMismatchRejected(t *testing.T, currentVal
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, liveConfigMap, scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, liveStatefulSet, scheme))
 	token := &corev1.Secret{
