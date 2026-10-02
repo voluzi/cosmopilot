@@ -681,14 +681,8 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 			Name:  "LOG_LEVEL",
 			Value: chainNode.Spec.Config.GetNodeUtilsLogLevel(),
 		},
-		{
-			Name:  "TMKMS_PROXY",
-			Value: strconv.FormatBool(chainNode.IsSignerTarget()),
-		},
 	}
-	if signerDNS := signerPeerDNS(chainNode); signerDNS != "" {
-		env = append(env, corev1.EnvVar{Name: "SIGNER_PEER_DNS", Value: signerDNS})
-	}
+
 	env = append(env,
 		corev1.EnvVar{
 			Name:  "NODE_BINARY_NAME",
@@ -789,14 +783,6 @@ func effectiveRunIdentity(app *corev1.SecurityContext, pod *corev1.PodSecurityCo
 	return *runAsUser, *runAsGroup, nil
 }
 
-func signerPeerDNS(chainNode *appsv1.ChainNode) string {
-	name, ok := cosmosignerTargetLabelValue(chainNode)
-	if !ok {
-		return ""
-	}
-	return cosmosigner.SignerServiceDNS(name, chainNode.GetNamespace())
-}
-
 func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.ChainNode, signerName string) corev1.Container {
 	return corev1.Container{
 		Name:                     CosmosignerDiscoveryWaitContainerName,
@@ -805,7 +791,8 @@ func (r *Reconciler) buildCosmosignerDiscoveryInitContainer(chainNode *appsv1.Ch
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext:          k8s.RestrictedSecurityContext(),
 		Args: []string{
-			"wait-for-dns",
+			"wait-for-signer",
+			strconv.Itoa(chainutils.PrivValPort),
 			cosmosigner.DiscoveryServiceDNS(signerName, chainNode.GetNamespace()),
 			"$(POD_IP)",
 			cosmosignerDiscoveryWaitTimeout.String(),
@@ -1052,8 +1039,7 @@ func (r *Reconciler) getPodSpec(ctx context.Context, chainNode *appsv1.ChainNode
 		}
 	}
 	if hasCosmosignerTarget {
-		// The headless Service publishes not-ready addresses, so this waits only for endpoint
-		// discovery and does not hide a signer outage behind an init-container readiness gate.
+		// Wait for the signer to reach this pod before the app starts its pubkey request.
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers,
 			r.buildCosmosignerDiscoveryInitContainer(chainNode, cosmosignerTarget))
 	}

@@ -84,6 +84,7 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 	}{
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
 		{"NetworkPolicy", networkPolicyObject(namespace, name)},
+		{"target NetworkPolicy", networkPolicyObject(namespace, name+discoveryServiceSuffix)},
 	}
 	if usesPubkeyPod {
 		named = append(named, struct {
@@ -631,6 +632,7 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: namespace}},
 		networkPolicyObject(namespace, name),
+		networkPolicyObject(namespace, name+discoveryServiceSuffix),
 	}
 	for _, obj := range objects {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
@@ -683,13 +685,15 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 			return false, err
 		}
 	}
-	policy := networkPolicyObject(namespace, name)
-	if err := c.Get(ctx, client.ObjectKeyFromObject(policy), policy); err == nil {
-		if metav1.IsControlledBy(policy, owner) {
-			return false, nil
+	for _, policyName := range []string{name, name + discoveryServiceSuffix} {
+		policy := networkPolicyObject(namespace, policyName)
+		if err := c.Get(ctx, client.ObjectKeyFromObject(policy), policy); err == nil {
+			if metav1.IsControlledBy(policy, owner) {
+				return false, nil
+			}
+		} else if !errors.IsNotFound(err) {
+			return false, err
 		}
-	} else if !errors.IsNotFound(err) {
-		return false, err
 	}
 
 	sts := &appsv1.StatefulSet{}

@@ -26,8 +26,6 @@ var (
 	upgradesConfig            string
 	blockThreshold            time.Duration
 	logLevel                  string
-	enableTmkmsProxy          bool
-	signerPeerDNS             string
 	nodeBinaryName            string
 	haltHeight                int64
 	shutdownToken             string
@@ -36,7 +34,7 @@ var (
 
 // subcommands are the standalone entry points this binary implements. They run in containers that
 // mount none of the server's runtime configuration, so they must never reach startServer.
-var subcommands = []string{"help", "mock", "wait-for-dns", "wait-for-signer"}
+var subcommands = []string{"help", "mock", "wait-for-signer"}
 
 // mockCommandArity is the single command contract used before mock dispatch. Keeping command
 // recognition and exact arity together prevents validation from drifting from execution.
@@ -49,7 +47,6 @@ var mockCommandArity = map[string]int{
 // commands are the entry points run dispatches to. Tests replace them to assert which one a given
 // argument list selects.
 type commands struct {
-	waitForDNS    func([]string) error
 	waitForSigner func([]string) error
 	mock          func([]string)
 	serve         func() error
@@ -57,7 +54,6 @@ type commands struct {
 
 func defaultCommands() commands {
 	return commands{
-		waitForDNS:    handleWaitForDNSCommand,
 		waitForSigner: handleWaitForSignerCommand,
 		mock:          handleMockCommand,
 		serve:         startServer,
@@ -92,8 +88,6 @@ func run(args []string, cmds commands) error {
 			return nil
 		case "wait-for-signer":
 			return cmds.waitForSigner(args[1:])
-		case "wait-for-dns":
-			return cmds.waitForDNS(args[1:])
 		default:
 			return fmt.Errorf("unknown subcommand %q: this node-utils build implements %s",
 				args[0], strings.Join(subcommands, ", "))
@@ -151,8 +145,6 @@ func startServer() error {
 		nodeutils.WithBlockThreshold(blockThreshold),
 		nodeutils.WithDataPath(dataPath),
 		nodeutils.WithUpgradesConfig(upgradesConfig),
-		nodeutils.WithTmkmsProxy(enableTmkmsProxy),
-		nodeutils.WithSignerPeerDNS(signerPeerDNS),
 		nodeutils.WithHaltHeight(haltHeight),
 		nodeutils.WithMockMode(mockMode),
 		nodeutils.WithShutdownToken(shutdownToken),
@@ -179,8 +171,6 @@ func printHelp() {
 Usage:
   node-utils [flags]           Start the node-utils server
   node-utils mock <command>    Control mock mode (use from kubectl exec)
-  node-utils wait-for-dns <hostname> <ip-address> <timeout>
-                               Wait until DNS publishes an address
   node-utils wait-for-signer <port> <hostname> <ip-address> <timeout>
                                Wait for an inbound signer connection
   node-utils help              Show this help

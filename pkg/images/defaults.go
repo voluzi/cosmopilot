@@ -2,7 +2,7 @@
 package images
 
 const (
-	DefaultNodeUtilsImage    = "ghcr.io/voluzi/node-utils:3.0.0"
+	DefaultNodeUtilsImage    = "ghcr.io/voluzi/node-utils:4.0.0"
 	DefaultCosmoseedImage    = "ghcr.io/voluzi/cosmoseed:0.12.0"
 	DefaultCosmoGuardImage   = "ghcr.io/voluzi/cosmoguard:5.0.0"
 	DefaultCosmosignerImage  = "ghcr.io/voluzi/cosmosigner:3.0.0"

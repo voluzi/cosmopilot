@@ -283,6 +283,9 @@ func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode 
 	if err := r.applyCosmosignerObject(ctx, chainNode, params.NetworkPolicy()); err != nil {
 		return false, err
 	}
+	if err := r.applyCosmosignerObject(ctx, chainNode, params.TargetNetworkPolicy()); err != nil {
+		return false, err
+	}
 
 	// Do not roll out the signer until the node's key import into the backend is durably COMPLETE (for
 	// GCP KMS: the created version verified, not merely a succeeded import pod); an already-running

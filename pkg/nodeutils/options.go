@@ -26,8 +26,6 @@ func defaultOptions() *Options {
 		Port:                   DefaultPort,
 		BlockThreshold:         0,
 		UpgradesConfig:         DefaultUpgradesConfig,
-		TmkmsProxy:             false,
-		SignerPeerDNS:          "",
 		HaltHeight:             0,
 		TerminationMessagePath: DefaultTerminationMessagePath,
 	}
@@ -39,8 +37,6 @@ type Options struct {
 	DataPath                  string
 	BlockThreshold            time.Duration
 	UpgradesConfig            string
-	TmkmsProxy                bool
-	SignerPeerDNS             string
 	HaltHeight                int64
 	TerminationMessagePath    string
 	MockMode                  bool
@@ -77,18 +73,6 @@ func WithUpgradesConfig(path string) Option {
 func WithBlockThreshold(n time.Duration) Option {
 	return func(opts *Options) {
 		opts.BlockThreshold = n
-	}
-}
-
-func WithTmkmsProxy(enable bool) Option {
-	return func(opts *Options) {
-		opts.TmkmsProxy = enable
-	}
-}
-
-func WithSignerPeerDNS(hostname string) Option {
-	return func(opts *Options) {
-		opts.SignerPeerDNS = hostname
 	}
 }
 

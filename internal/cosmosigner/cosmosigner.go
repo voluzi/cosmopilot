@@ -390,6 +390,32 @@ func (p Params) NetworkPolicy() *networkingv1.NetworkPolicy {
 	}
 }
 
+// TargetNetworkPolicy restricts privval to signer pods while preserving all other ingress.
+func (p Params) TargetNetworkPolicy() *networkingv1.NetworkPolicy {
+	tcp, udp, sctp := corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: p.Name + discoveryServiceSuffix, Namespace: p.Namespace, Labels: p.Labels},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: p.TargetSelector},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: p.selectorLabels()}}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt(chainutils.PrivValPort))}},
+				},
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(chainutils.PrivValPort - 1))},
+						{Protocol: &tcp, Port: ptr.To(intstr.FromInt(chainutils.PrivValPort + 1)), EndPort: ptr.To(int32(65535))},
+						{Protocol: &udp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(65535))},
+						{Protocol: &sctp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(65535))},
+					},
+				},
+			},
+		},
+	}
+}
+
 // StatefulSet builds the signer StatefulSet. configYAML is the rendered config (from ConfigYAML),
 // hashed into the pod template so a config change rolls the signer.
 func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {

@@ -369,8 +369,8 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 			Name: name, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(owner)},
 		}}
 	}
-	policy := func(owner metav1.Object) client.Object {
-		obj := networkPolicyObject(ns, name)
+	policy := func(owner metav1.Object, suffix string) client.Object {
+		obj := networkPolicyObject(ns, name+suffix)
 		obj.SetOwnerReferences([]metav1.OwnerReference{ownerRef(owner)})
 		return obj
 	}
@@ -390,8 +390,10 @@ func TestIsTornDownOwnerScoping(t *testing.T) {
 		{"foreign statefulset only → torn down", []client.Object{ownedSTS(other)}, true},
 		{"our import pod present → not torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(me)}}}}, false},
 		{"foreign import pod only → torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: []metav1.OwnerReference{ownerRef(other)}}}}, true},
-		{"our network policy present → not torn down", []client.Object{policy(me)}, false},
-		{"foreign network policy only → torn down", []client.Object{policy(other)}, true},
+		{"our target policy present → not torn down", []client.Object{policy(me, discoveryServiceSuffix)}, false},
+		{"foreign target policy only → torn down", []client.Object{policy(other, discoveryServiceSuffix)}, true},
+		{"our network policy present → not torn down", []client.Object{policy(me, "")}, false},
+		{"foreign network policy only → torn down", []client.Object{policy(other, "")}, true},
 		{"signer replica pod present → not torn down", []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: ns}}}, false},
 		{"our lingering pvc → not torn down", []client.Object{pvc("me-uid")}, false},
 		{"foreign pvc only → torn down", []client.Object{pvc("other-uid")}, true},
@@ -975,6 +977,11 @@ func TestPreflightDeployableRefusesForeignObjects(t *testing.T) {
 		want string
 	}{
 		{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: foreign}}, "ConfigMap"},
+		{func() client.Object {
+			obj := networkPolicyObject(ns, name+discoveryServiceSuffix)
+			obj.SetOwnerReferences(foreign)
+			return obj
+		}(), "target NetworkPolicy"},
 		{&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, OwnerReferences: foreign}}, "raft Service"},
 		{&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: ns, OwnerReferences: foreign}}, "discovery Service"},
 		{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name + "-" + importJobSuffix, Namespace: ns, OwnerReferences: foreign}}, "import pod"},

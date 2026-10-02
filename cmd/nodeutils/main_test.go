@@ -1,14 +1,10 @@
 package main
 
 import (
-	"context"
-	"net"
-	"net/http"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/voluzi/cosmopilot/v4/pkg/nodeutils"
 )
@@ -19,11 +15,8 @@ import (
 func testCommands(t *testing.T) commands {
 	t.Helper()
 	return commands{
-		waitForDNS: func([]string) error {
-			t.Fatal("run() dispatched wait-for-dns unexpectedly")
-			return nil
-		},
-		mock: func([]string) { t.Fatal("run() dispatched the mock command unexpectedly") },
+		waitForSigner: func([]string) error { t.Fatal("unexpected wait-for-signer dispatch"); return nil },
+		mock:          func([]string) { t.Fatal("run() dispatched the mock command unexpectedly") },
 		serve: func() error {
 			t.Fatalf("run() reached node-utils server startup, which requires %s", nodeutils.DefaultUpgradesConfig)
 			return nil
@@ -31,40 +24,13 @@ func testCommands(t *testing.T) commands {
 	}
 }
 
-// requireNoServerConfiguration asserts the premise the wait-for-dns tests rely on: the default
+// requireNoServerConfiguration asserts the premise the wait-for-signer tests rely on: the default
 // upgrades config the server would load is genuinely absent, exactly as it is in the generated
 // discovery gate container.
 func requireNoServerConfiguration(t *testing.T) {
 	t.Helper()
 	if _, err := os.Stat(nodeutils.DefaultUpgradesConfig); err == nil {
 		t.Skipf("%s exists in this environment; cannot assert the no-config guarantee", nodeutils.DefaultUpgradesConfig)
-	}
-}
-
-func TestRunWaitForDNSRunsWithoutServerConfiguration(t *testing.T) {
-	requireNoServerConfiguration(t)
-
-	var forwarded []string
-	cmds := testCommands(t)
-	cmds.waitForDNS = func(args []string) error {
-		forwarded = append([]string(nil), args...)
-		// The command is dispatched directly without touching server configuration. Simulate the
-		// authenticated signer confirmation that releases the gate.
-		return runWaitForDNSCommand(
-			context.Background(),
-			&sequenceDNSResolver{responses: [][]net.IPAddr{{{IP: net.ParseIP("10.0.0.2")}}}},
-			&sequenceHTTPDoer{statuses: []int{http.StatusOK}},
-			args,
-			time.Millisecond,
-		)
-	}
-
-	if err := run([]string{"wait-for-dns", "signer-privval.default.svc", "10.0.0.2", "25s"}, cmds); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"signer-privval.default.svc", "10.0.0.2", "25s"}
-	if !reflect.DeepEqual(forwarded, want) {
-		t.Fatalf("wait-for-dns arguments = %q, want %q", forwarded, want)
 	}
 }
 
@@ -77,7 +43,7 @@ func TestRunRejectsUnknownSubcommand(t *testing.T) {
 		args []string
 	}{
 		{name: "subcommand from a newer operator", args: []string{"wait-for-future-signer", "signer-privval.default.svc", "10.0.0.2", "25s"}},
-		{name: "misspelled subcommand", args: []string{"wait-for-dnss", "signer-privval.default.svc", "10.0.0.2", "25s"}},
+		{name: "misspelled subcommand", args: []string{"wait-for-signers", "signer-privval.default.svc", "10.0.0.2", "25s"}},
 		{name: "bare argument", args: []string{"serve"}},
 	}
 
@@ -96,6 +62,23 @@ func TestRunRejectsUnknownSubcommand(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunWaitForSignerRunsWithoutServerConfiguration(t *testing.T) {
+	requireNoServerConfiguration(t)
+	args := []string{"26659", "signer-privval.default.svc", "10.0.0.2", "25s"}
+	var forwarded []string
+	cmds := testCommands(t)
+	cmds.waitForSigner = func(args []string) error {
+		forwarded = append([]string(nil), args...)
+		return nil
+	}
+	if err := run(append([]string{"wait-for-signer"}, args...), cmds); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(forwarded, args) {
+		t.Fatalf("wait-for-signer arguments = %q, want %q", forwarded, args)
 	}
 }
 
@@ -149,7 +132,7 @@ func TestRunStartsServerWithoutSubcommand(t *testing.T) {
 	}{
 		{name: "no arguments"},
 		{name: "flags only", args: []string{"-log-level", "debug"}},
-		{name: "long flags only", args: []string{"--tmkms-proxy=true"}},
+		{name: "long flags only", args: []string{"--log-level=debug"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			started := false
@@ -173,8 +156,8 @@ func TestRejectPositionalArgs(t *testing.T) {
 	if err := rejectPositionalArgs(nil); err != nil {
 		t.Fatalf("rejectPositionalArgs(nil) = %v, want nil", err)
 	}
-	err := rejectPositionalArgs([]string{"wait-for-dns", "signer-privval.default.svc"})
-	if err == nil || !strings.Contains(err.Error(), "wait-for-dns") {
+	err := rejectPositionalArgs([]string{"wait-for-signer", "signer-privval.default.svc"})
+	if err == nil || !strings.Contains(err.Error(), "wait-for-signer") {
 		t.Fatalf("rejectPositionalArgs() error = %v, want it to name the leftover argument", err)
 	}
 }

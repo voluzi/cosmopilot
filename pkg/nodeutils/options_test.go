@@ -23,9 +23,6 @@ func TestDefaultOptions(t *testing.T) {
 	if opts.BlockThreshold != 0 {
 		t.Errorf("expected BlockThreshold 0, got %v", opts.BlockThreshold)
 	}
-	if opts.TmkmsProxy != false {
-		t.Errorf("expected TmkmsProxy false, got %v", opts.TmkmsProxy)
-	}
 	if opts.HaltHeight != 0 {
 		t.Errorf("expected HaltHeight 0, got %v", opts.HaltHeight)
 	}
@@ -82,15 +79,6 @@ func TestWithBlockThreshold(t *testing.T) {
 	}
 }
 
-func TestWithTmkmsProxy(t *testing.T) {
-	opts := defaultOptions()
-	WithTmkmsProxy(true)(opts)
-
-	if opts.TmkmsProxy != true {
-		t.Errorf("expected TmkmsProxy true, got %v", opts.TmkmsProxy)
-	}
-}
-
 func TestWithHaltHeight(t *testing.T) {
 	opts := defaultOptions()
 	WithHaltHeight(100000)(opts)
@@ -127,7 +115,6 @@ func TestMultipleOptions(t *testing.T) {
 	WithPort(8080)(opts)
 	WithDataPath("/data")(opts)
 	WithHaltHeight(50000)(opts)
-	WithTmkmsProxy(true)(opts)
 
 	if opts.Host != "10.0.0.1" {
 		t.Errorf("expected Host 10.0.0.1, got %s", opts.Host)
@@ -140,8 +127,5 @@ func TestMultipleOptions(t *testing.T) {
 	}
 	if opts.HaltHeight != 50000 {
 		t.Errorf("expected HaltHeight 50000, got %d", opts.HaltHeight)
-	}
-	if opts.TmkmsProxy != true {
-		t.Errorf("expected TmkmsProxy true, got %v", opts.TmkmsProxy)
 	}
 }

@@ -1,7 +1,10 @@
 package chainnode
 
 import (
+	"fmt"
 	"strings"
+
+	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
 
 	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
 )
@@ -16,8 +19,7 @@ func GetKeyFormatter(chainNode *appsv1.ChainNode) *KeyFormatter {
 
 type KeyFormatter struct {
 	IsValidator bool
-	// UseRemoteSigner is true when block signing happens outside the node process (TmKMS sidecar
-	// or an external cosmosigner deployment). In that case the node must listen for the signer on
+	// UseRemoteSigner is true when block signing happens outside the node process through cosmosigner. In that case the node must listen for the signer on
 	// its priv_validator_laddr.
 	UseRemoteSigner bool
 	UseDashes       bool
@@ -50,11 +52,11 @@ func (kf *KeyFormatter) GetBaseConfigToml() map[string]interface{} {
 		cfg[kf.P2P()].(map[string]interface{})[kf.Pex()] = false
 	}
 
-	// A node signed by an external remote signer (TmKMS or cosmosigner) listens for it on the
+	// A node signed by an external remote signer (cosmosigner) listens for it on the
 	// priv-validator address. This applies both to validator nodes and to non-validator group
 	// nodes acting as cosmosigner signing endpoints (sentry mode).
 	if kf.UseRemoteSigner {
-		cfg[kf.PrivValidatorLaddr()] = "tcp://0.0.0.0:5555"
+		cfg[kf.PrivValidatorLaddr()] = fmt.Sprintf("tcp://0.0.0.0:%d", chainutils.PrivValPort)
 	}
 
 	return cfg

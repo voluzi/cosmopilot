@@ -27,8 +27,6 @@ func (s *NodeUtils) registerRoutes() {
 	s.router.HandleFunc("/latest_height", s.latestHeight).Methods(http.MethodGet)
 	s.router.HandleFunc("/must_upgrade", s.mustUpgrade).Methods(http.MethodGet)
 	s.router.HandleFunc("/upgrade_status", s.upgradeStatus).Methods(http.MethodGet)
-	s.router.HandleFunc("/tmkms_active", s.tmkmsConnectionActive).Methods(http.MethodGet)
-	s.router.HandleFunc("/signer_discovered", s.signerDiscoveredStatus).Methods(http.MethodGet)
 	s.router.HandleFunc("/snapshots", s.listSnapshots).Methods(http.MethodGet)
 	s.router.HandleFunc("/shutdown", s.shutdownServer).Methods(http.MethodPost)
 	s.router.HandleFunc("/stats", s.stats).Methods(http.MethodGet)
@@ -177,27 +175,6 @@ func (s *NodeUtils) mustUpgrade(w http.ResponseWriter, r *http.Request) {
 
 func (s *NodeUtils) upgradeStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.upgradeMonitor.Status())
-}
-
-func (s *NodeUtils) tmkmsConnectionActive(w http.ResponseWriter, r *http.Request) {
-	log.WithField("tmkms-active", s.tmkmsActive.Load()).Info("checked if tmkms is active")
-	if s.tmkmsActive.Load() {
-		w.WriteHeader(http.StatusOK)
-	} else {
-		w.WriteHeader(http.StatusNotAcceptable)
-	}
-	_, _ = w.Write([]byte(strconv.FormatBool(s.tmkmsActive.Load())))
-}
-
-func (s *NodeUtils) signerDiscoveredStatus(w http.ResponseWriter, _ *http.Request) {
-	discovered := s.signerDiscovered.Load()
-	log.WithField("signer-discovered", discovered).Info("checked if remote signer discovered this target")
-	if discovered {
-		w.WriteHeader(http.StatusOK)
-	} else {
-		w.WriteHeader(http.StatusNotAcceptable)
-	}
-	_, _ = w.Write([]byte(strconv.FormatBool(discovered)))
 }
 
 func (s *NodeUtils) shutdownServer(w http.ResponseWriter, r *http.Request) {
