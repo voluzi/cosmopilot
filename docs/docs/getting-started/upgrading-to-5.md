@@ -18,8 +18,23 @@ implementations does not transfer tmKMS slash-protection history into Cosmosigne
 The 5.0.0 CRDs remove `validator.tmKMS`, node-group `validator.tmKMS`, and the legacy reservation
 status field. Kubernetes prunes these fields. To prevent a former tmKMS validator from accidentally
 signing with a retained local key, the new controller refuses reconciliation with a Warning event
-when a live `tmkms` container or an owned `<name>-tmkms` ConfigMap remains. It leaves the node Pod
-alone. Do not bypass this guard by deleting the artifacts; finish the migration on 4.x first.
+when a live `tmkms` container or an owned `<name>-tmkms` ConfigMap remains. It leaves the node Pod,
+keys, and status untouched. A ChainNodeSet is also refused before reconciliation when an owned
+child has either artifact. Do not delete these artifacts to bypass an unfinished migration;
+finish the migration on 4.x first. If the node already migrated to Cosmosigner and only a stale
+`<name>-tmkms` ConfigMap remains, verify that Cosmosigner is signing with the existing validator
+public key, then delete that stale ConfigMap.
+
+If both artifacts are already gone and no Cosmosigner is configured, the guard cannot fire. After
+CRD pruning, the former tmKMS validator is treated as a local-key validator: it would sign from a
+retained `<name>-priv-key` Secret, or get a new consensus key generated if none exists. A retained
+key does not carry tmKMS's slash-protection history, and a new key does not match the validator's
+on-chain identity. Before upgrading in this case, check the original 4.x signing configuration or
+saved manifests, identify the consensus public key registered on-chain, and verify which backend
+holds that key and its signing history. Keep the validator stopped and preserve its key and signing
+state while restoring or completing the migration to Cosmosigner on 4.x. Upgrade only after
+independently confirming Cosmosigner is signing with the same public key; absence of the artifacts
+is not proof that migration completed.
 
 ## 2. Update image overrides and Helm values
 
@@ -35,8 +50,11 @@ or update them to compatible images:
 
 The release defaults use these versions. Cosmosigner semantic version tags older than 3.1.0 are
 refused in preflight before replacing a running signer. Moving tags and digest-only references
-cannot be version-checked locally; verify their contents before upgrading. For immutable images,
-a version tag plus digest also permits the version check.
+cannot be version-checked locally and are allowed so unreleased builds can be tested; verify their
+contents before upgrading. If an `edge`, `latest`, or digest-only reference actually contains a
+build older than 3.1.0, `/livez` never answers, the signer never becomes live, and the validator does
+not sign until the image is corrected. For immutable images, a version tag plus digest also permits
+the version check.
 
 ## 3. Verify NetworkPolicy enforcement
 
@@ -63,15 +81,24 @@ to finish before making further signer configuration changes.
 
 ## 5. Observe the rollout
 
-Expect each signer-target Pod to be recreated once and each managed signer to perform one
-break-before-make migration. Existing same-key Raft PVCs retain the high-water mark. There may be
-brief missed blocks; rehearse this upgrade before applying it to production validators.
+Expect every ChainNode Pod to be recreated, including full nodes without a signer: the node-utils
+image bump and removal of the `TMKMS_PROXY` environment variable change every Pod's spec hash.
+With disruption checks enabled, replacements are serialized by disruption locks within their
+disruption domains. Each managed signer performs one break-before-make migration. Existing same-key
+Raft PVCs retain the high-water mark. There may be brief missed blocks; rehearse this upgrade before
+applying it to production validators.
 
 The target's final `wait-cosmosigner-discovery` init container now listens on TCP 26659. It reads at
 least one byte from a signer connection, closes it, and exits. The app binds the same port and the
 signer redials directly. The node-utils sidecar continues its other duties. A gate that cannot
 confirm a connection within 25 seconds fails with DNS diagnostics, and the controller recreates
 the node Pod.
+
+During a ChainNodeSet signer migration, a child Pod can be recreated while its parent-managed
+signer is still quiesced. With no signer available to connect, the 25-second gate fails, the Pod
+goes `Failed`, and the controller recreates it. This cycle can repeat until the signer is back.
+These repeated child Pod failures and recreations are expected migration churn; observe the
+parent's signer migration progress before treating them as a separate fault.
 
 Signer startup and liveness probes use HTTP `/livez`; readiness uses `/readyz` on port 8080. Followers
 pass readiness after backend and preflight initialization too. No Service exposes this HTTP port.

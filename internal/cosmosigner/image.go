@@ -14,7 +14,7 @@ func RequireSupportedImage(image string) error {
 	_, tag := utils.SplitImageRef(strings.SplitN(image, "@", 2)[0])
 	v, err := version.ParseSemantic(tag)
 	if err != nil {
-		// Moving tags and digest-only references cannot establish a release version locally.
+		// Allow unverifiable tags and digest-only references so unreleased builds can be tested.
 		return nil
 	}
 	minimum := version.MustParseSemantic(images.MinimumCosmosignerVersion)

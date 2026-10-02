@@ -19,7 +19,10 @@ then the pinned default supplied by the selected manager release. See
 [Configuration](../getting-started/configuration.md#cosmosignerimage). Cosmopilot's
 managed signing path requires Cosmosigner 3.1.0 or newer for HTTP health endpoints and bounded
 redial. Older semantic version tags are refused before a running signer is replaced. For moving tags
-or digest-only references, verify the image provides these features. For production validators, use
+such as `edge` or `latest`, or digest-only references, the version check is skipped so unreleased
+builds can be tested; verify the image provides these features. If such a reference actually
+contains a build older than 3.1.0, `/livez` never answers, the signer never becomes live, and the
+validator does not sign until the image is corrected. For production validators, use
 an immutable image digest rather than a mutable tag so a rescheduled replica cannot pick up different code without a managed migration.
 :::
 
