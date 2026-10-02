@@ -169,6 +169,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
+	if err := r.refuseLegacyTmKMS(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	cleanupFinalizerAdded := false
 	for _, finalizer := range []string{resourcecleanup.Finalizer, podDisruptionBudgetFinalizer} {
 		if controllerutil.ContainsFinalizer(nodeSet, finalizer) {

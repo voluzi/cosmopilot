@@ -529,9 +529,6 @@ func standaloneCosmosignerReservationClaim(chainNode *appsv1.ChainNode) string {
 }
 
 func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if err := r.refuseLegacyTmKMS(ctx, chainNode); err != nil {
-		return false, err
-	}
 	if err := r.preflightSignerTargetImage(ctx, chainNode); err != nil {
 		return false, err
 	}
