@@ -65,8 +65,8 @@ type Cosmosigner struct {
 	// +optional
 	Image *string `json:"image,omitempty"`
 
-	// NodeSelector restricts signer pods to nodes with matching labels. It is independent of node
-	// scheduling. Changing it on a running signer restarts all replicas through a managed migration.
+	// NodeSelector restricts signer pods to nodes with matching labels. It is independent of the
+	// scheduling of the nodes the signer targets. Changing it on a running signer restarts all replicas through a managed migration.
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 

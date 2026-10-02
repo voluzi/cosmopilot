@@ -23,6 +23,11 @@ func (c *Cosmosigner) validateScheduling(path string) error {
 		corev1.NodeSelectorOpExists: selection.Exists, corev1.NodeSelectorOpDoesNotExist: selection.DoesNotExist,
 		corev1.NodeSelectorOpGt: selection.GreaterThan, corev1.NodeSelectorOpLt: selection.LessThan,
 	}
+	validateWeight := func(weight int32, path *field.Path) {
+		if weight < 1 || weight > 100 {
+			errs = append(errs, field.Invalid(path, weight, "must be in the range 1-100"))
+		}
+	}
 	validateNodeTerm := func(term corev1.NodeSelectorTerm, path *field.Path) {
 		for i, req := range term.MatchExpressions {
 			rp := path.Child("matchExpressions").Index(i)
@@ -49,7 +54,9 @@ func (c *Cosmosigner) validateScheduling(path string) error {
 			}
 		}
 		for i, term := range a.PreferredDuringSchedulingIgnoredDuringExecution {
-			validateNodeTerm(term.Preference, ap.Child("preferredDuringSchedulingIgnoredDuringExecution").Index(i).Child("preference"))
+			tp := ap.Child("preferredDuringSchedulingIgnoredDuringExecution").Index(i)
+			validateWeight(term.Weight, tp.Child("weight"))
+			validateNodeTerm(term.Preference, tp.Child("preference"))
 		}
 	}
 	validatePodTerm := func(term corev1.PodAffinityTerm, path *field.Path) {
@@ -85,7 +92,9 @@ func (c *Cosmosigner) validateScheduling(path string) error {
 			validatePodTerm(term, ap.Child("requiredDuringSchedulingIgnoredDuringExecution").Index(i))
 		}
 		for i, term := range a.preferred {
-			validatePodTerm(term.PodAffinityTerm, ap.Child("preferredDuringSchedulingIgnoredDuringExecution").Index(i).Child("podAffinityTerm"))
+			tp := ap.Child("preferredDuringSchedulingIgnoredDuringExecution").Index(i)
+			validateWeight(term.Weight, tp.Child("weight"))
+			validatePodTerm(term.PodAffinityTerm, tp.Child("podAffinityTerm"))
 		}
 	}
 	return utilerrors.NewAggregate(errs)

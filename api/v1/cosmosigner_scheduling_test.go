@@ -65,6 +65,16 @@ func TestWebhooksValidateCosmosignerScheduling(t *testing.T) {
 		{name: "invalid numeric node affinity", affinity: nodeAffinity(true, corev1.NodeSelectorRequirement{Key: "generation", Operator: corev1.NodeSelectorOpGt, Values: []string{"two"}}), field: "matchExpressions[0].values"},
 		{name: "valid node field selector", affinity: nodeFieldAffinity(corev1.NodeSelectorRequirement{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"node-a"}})},
 		{name: "invalid node field operator", affinity: nodeFieldAffinity(corev1.NodeSelectorRequirement{Key: "metadata.name", Operator: "Unknown"}), field: "matchFields[0].operator"},
+		{name: "node affinity weight out of range", affinity: func() *corev1.Affinity {
+			a := nodeAffinity(true, corev1.NodeSelectorRequirement{Key: "pool", Operator: corev1.NodeSelectorOpExists})
+			a.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0].Weight = 0
+			return a
+		}(), field: "affinity.nodeAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].weight"},
+		{name: "pod anti-affinity weight out of range", affinity: func() *corev1.Affinity {
+			a := podAffinity(true, true, corev1.PodAffinityTerm{TopologyKey: "kubernetes.io/hostname"})
+			a.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution[0].Weight = 101
+			return a
+		}(), field: "affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].weight"},
 		{name: "empty node field key", affinity: nodeFieldAffinity(corev1.NodeSelectorRequirement{Operator: corev1.NodeSelectorOpIn, Values: []string{"node-a"}}), field: "matchFields[0].key"},
 	}
 	for _, anti := range []bool{false, true} {

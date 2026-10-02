@@ -108,7 +108,10 @@ func liveSigningConfig(ctx context.Context, c client.Reader, owner client.Object
 			if arg != "--expected-public-key" {
 				continue
 			}
-			if i+1 >= len(container.Args) || container.Args[i+1] != liveConfig.ExpectedPublicKey {
+			if i+1 >= len(container.Args) {
+				return nil, nil, fmt.Errorf("cosmosigner %q live signing identity argument has no value", name)
+			}
+			if container.Args[i+1] != liveConfig.ExpectedPublicKey {
 				return nil, nil, fmt.Errorf("cosmosigner %q live signing identity argument does not match its ConfigMap", name)
 			}
 			pinned++
