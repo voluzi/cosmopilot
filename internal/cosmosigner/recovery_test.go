@@ -116,8 +116,13 @@ func TestRecoveredSigningPublicKeyRequiresMatchingArgAndConfig(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*appsv1.StatefulSet)
+		err    string
 	}{
-		{name: "missing argument", mutate: func(sts *appsv1.StatefulSet) { sts.Spec.Template.Spec.Containers[0].Args = []string{"run"} }},
+		{name: "coherent runtime pin", mutate: func(sts *appsv1.StatefulSet) {}},
+		{name: "missing argument", mutate: func(sts *appsv1.StatefulSet) { sts.Spec.Template.Spec.Containers[0].Args = []string{"run"} }, err: "live signing identity is not pinned by exactly one expected-public-key argument"},
+		{name: "duplicate argument", mutate: func(sts *appsv1.StatefulSet) {
+			sts.Spec.Template.Spec.Containers[0].Args = append(sts.Spec.Template.Spec.Containers[0].Args, "--expected-public-key", reservationTestPublicKey)
+		}, err: "live signing identity is not pinned by exactly one expected-public-key argument"},
 		{name: "different argument", mutate: func(sts *appsv1.StatefulSet) {
 			args := sts.Spec.Template.Spec.Containers[0].Args
 			for i, arg := range args {
@@ -125,10 +130,10 @@ func TestRecoveredSigningPublicKeyRequiresMatchingArgAndConfig(t *testing.T) {
 					args[i+1] = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA="
 				}
 			}
-		}},
+		}, err: "live signing identity argument does not match its ConfigMap"},
 		{name: "retained state lost", mutate: func(sts *appsv1.StatefulSet) {
 			sts.Annotations = map[string]string{retainedStateLostAnnotation: "true"}
-		}},
+		}, err: "retained state is lost; refusing to trust its live signing identity"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			owner := fakeOwner("owner", types.UID("owner-uid"))
@@ -143,8 +148,16 @@ func TestRecoveredSigningPublicKeyRequiresMatchingArgAndConfig(t *testing.T) {
 			sts.OwnerReferences = []metav1.OwnerReference{ownerRef(owner)}
 			tc.mutate(sts)
 			c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(cm, sts).Build()
-			_, _, err = RecoveredSigningPublicKey(context.Background(), c, owner, params)
-			require.Error(t, err)
+			publicKey, live, err := RecoveredSigningPublicKey(context.Background(), c, owner, params)
+			if tc.err == "" {
+				require.NoError(t, err)
+				require.True(t, live)
+				require.Equal(t, reservationTestPublicKey, publicKey)
+			} else {
+				require.EqualError(t, err, `cosmosigner "mychain-signer" `+tc.err)
+				require.False(t, live)
+				require.Empty(t, publicKey)
+			}
 		})
 	}
 }

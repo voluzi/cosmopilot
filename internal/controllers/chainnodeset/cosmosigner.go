@@ -257,11 +257,11 @@ func legacyPerInstanceCosmosignerGroup(nodeSet *appsv1.ChainNodeSet) (string, bo
 }
 
 // preflightCosmosigners fails the reconcile when any desired signer cannot be deployed, so children
-// are not switched to a remote signer that will never come up. It is READ-ONLY (resolves params and
-// reads Secrets; never applies resources). It runs before ensureValidator/ensureNodes stamp
-// RemoteSignerTarget on the child ChainNodes, so a bad signer spec leaves the validators on their
-// existing local signing path instead of dropping the local key. Genuinely-pending states (a
-// validator key-generation flow that has not run yet) are NOT failures.
+// are not switched to a remote signer that will never come up. It resolves params and reads Secrets;
+// recovery may create a ConsensusKeyReservation to protect a verified live signer. It runs before
+// ensureValidator/ensureNodes stamp RemoteSignerTarget on the child ChainNodes, so a bad signer spec
+// leaves the validators on their existing local signing path instead of dropping the local key.
+// Genuinely-pending states (a validator key-generation flow that has not run yet) are NOT failures.
 func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.ChainNodeSet) error {
 	desired := nodeSet.ResolveCosmosigners()
 	if err := r.validateTrackedSignerStatefulSets(ctx, nodeSet, desired); err != nil {
