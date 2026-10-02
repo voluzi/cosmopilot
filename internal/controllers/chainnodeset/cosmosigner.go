@@ -307,7 +307,7 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		if signerStatusNeedsRecovery(st) || (s.TargetsValidator() && st.PublicKey == "") {
 			recoveredPublicKey, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
-				return r.quiesceCosmosigners(ctx, nodeSet, err, resourceName)
+				return r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, resourceName, err)
 			}
 			recordedRecovery := st != nil && st.Replicas != nil && st.StateStorageSize != ""
 			if live || recordedRecovery {
@@ -405,7 +405,7 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		if signerStatusNeedsRecovery(st) {
 			recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
-				return nil, r.quiesceCosmosigners(ctx, nodeSet, err, params.Name)
+				return nil, r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, params.Name, err)
 			}
 			if live {
 				publicKey = recovered
@@ -451,6 +451,38 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		prepared[s.Name] = params
 	}
 	return prepared, nil
+}
+
+// refuseRecoveredCosmosignerIdentity needs positive on-chain evidence: absence of validator status
+// is not proof that a recovered signer is safe to keep serving.
+func (r *Reconciler) refuseRecoveredCosmosignerIdentity(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, resourceName string, cause error) error {
+	st := nodeSet.GetCosmosignerStatus(signer.Name)
+	if !stderrors.Is(cause, cosmosigner.ErrRecoveredIdentityMismatch) || !signer.TargetsValidator() || (st != nil && st.Migration != nil) {
+		return r.quiesceCosmosigners(ctx, nodeSet, cause, resourceName)
+	}
+	live, found, err := cosmosigner.LiveSigningPublicKey(ctx, r.uncachedReader(), nodeSet, nodeSet.Namespace, resourceName)
+	if err != nil || !found {
+		return r.quiesceCosmosigners(ctx, nodeSet, cause, resourceName)
+	}
+	legacyNodeNames, err := r.nodeSetCosmosignerLegacyNodeNames(ctx, nodeSet, signer)
+	if err != nil {
+		return r.quiesceCosmosigners(ctx, nodeSet, cause, resourceName)
+	}
+	verified, err := r.validatorSignerPublicKeyEvidence(ctx, nodeSet, signer, live, legacyNodeNames)
+	if err != nil || !verified {
+		return r.quiesceCosmosigners(ctx, nodeSet, cause, resourceName)
+	}
+	if err := r.ensureConsensusKeyReservation(ctx, nodeSet, nodeSet.Status.ChainID, live, cosmosigner.ReservationHolder{
+		UID: nodeSet.GetUID(), Kind: "ChainNodeSet", Namespace: nodeSet.GetNamespace(), Name: nodeSet.GetName(),
+		Claim:             nodeSetCosmosignerReservationClaim(nodeSet, signer),
+		LegacyStatusNames: nodeSetCosmosignerLegacyStatusNames(nodeSet, nodeSet.ResolveCosmosigners(), signer), LegacyNodeNames: legacyNodeNames,
+	}); err != nil {
+		return r.quiesceCosmosigners(ctx, nodeSet, fmt.Errorf("%w; reserving the recovered live key: %w", cause, err), resourceName)
+	}
+	if r.recorder != nil {
+		r.recorder.Eventf(nodeSet, corev1.EventTypeWarning, appsv1.ReasonInvalid, "refusing cosmosigner %q signing identity change; the running signer keeps its verified on-chain key: %v", signer.Name, cause)
+	}
+	return cause
 }
 
 func (r *Reconciler) quiesceCosmosigners(ctx context.Context, nodeSet *appsv1.ChainNodeSet, cause error, resourceNames ...string) error {
@@ -501,17 +533,24 @@ func nodeSetCosmosignerConflictResourceNames(nodeSet *appsv1.ChainNodeSet, desir
 }
 
 func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, publicKey string, legacyNodeNames []string) error {
+	_, err := r.validatorSignerPublicKeyEvidence(ctx, nodeSet, signer, publicKey, legacyNodeNames)
+	return err
+}
+
+func (r *Reconciler) validatorSignerPublicKeyEvidence(ctx context.Context, nodeSet *appsv1.ChainNodeSet, signer appsv1.ResolvedSigner, publicKey string, legacyNodeNames []string) (bool, error) {
+	verified := false
 	for _, validator := range nodeSet.Status.Validators {
 		if validator.Group != signer.ValidatorGroup || validator.PubKey == "" {
 			continue
 		}
 		onChain := cosmosigner.CanonicalSDKPublicKey(validator.PubKey)
 		if onChain == "" {
-			return fmt.Errorf("cosmosigner %q cannot verify the on-chain validator public key recorded for group %q", signer.Name, signer.ValidatorGroup)
+			return false, fmt.Errorf("cosmosigner %q cannot verify the on-chain validator public key recorded for group %q", signer.Name, signer.ValidatorGroup)
 		}
 		if publicKey != onChain {
-			return fmt.Errorf("cosmosigner %q public key does not match the on-chain validator public key recorded for group %q; Cosmopilot does not rotate validator consensus keys", signer.Name, signer.ValidatorGroup)
+			return false, fmt.Errorf("cosmosigner %q public key does not match the on-chain validator public key recorded for group %q; Cosmopilot does not rotate validator consensus keys", signer.Name, signer.ValidatorGroup)
 		}
+		verified = true
 	}
 
 	seenChildren := map[string]struct{}{}
@@ -526,6 +565,7 @@ func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeS
 		if publicKey != onChain {
 			return fmt.Errorf("cosmosigner %q public key does not match the on-chain validator public key recorded by owned child ChainNode %q; Cosmopilot does not rotate validator consensus keys", signer.Name, child.GetName())
 		}
+		verified = true
 		return nil
 	}
 
@@ -535,11 +575,11 @@ func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeS
 			if errors.IsNotFound(err) {
 				continue
 			}
-			return err
+			return false, err
 		}
 		seenChildren[child.GetName()] = struct{}{}
 		if err := validateChild(child); err != nil {
-			return err
+			return false, err
 		}
 	}
 
@@ -548,7 +588,7 @@ func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeS
 		controllers.LabelChainNodeSet:      nodeSet.GetName(),
 		controllers.LabelChainNodeSetGroup: signer.ValidatorGroup,
 	}); err != nil {
-		return err
+		return false, err
 	}
 	for i := range children.Items {
 		child := &children.Items[i]
@@ -556,10 +596,10 @@ func (r *Reconciler) validateValidatorSignerPublicKey(ctx context.Context, nodeS
 			continue
 		}
 		if err := validateChild(child); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return verified, nil
 }
 
 func nodeSetCosmosignerLegacyStatusNames(nodeSet *appsv1.ChainNodeSet, desired []appsv1.ResolvedSigner, signer appsv1.ResolvedSigner) []string {

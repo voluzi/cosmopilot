@@ -446,7 +446,7 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	if recovering {
 		recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, chainNode, params)
 		if err != nil {
-			return cosmosigner.Params{}, r.quiesceManagedCosmosigner(ctx, chainNode, params.Name, err)
+			return cosmosigner.Params{}, r.refuseRecoveredCosmosignerIdentity(ctx, chainNode, params.Name, err)
 		}
 		if live {
 			publicKey = recovered
@@ -493,6 +493,27 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	}
 	params.ExpectedPublicKey = publicKey
 	return params, nil
+}
+
+// refuseRecoveredCosmosignerIdentity preserves availability only for a live validator key whose
+// runtime pin and exclusive reservation remain provable. The rejected spec is never applied.
+func (r *Reconciler) refuseRecoveredCosmosignerIdentity(ctx context.Context, chainNode *appsv1.ChainNode, name string, cause error) error {
+	if stderrors.Is(cause, cosmosigner.ErrRecoveredIdentityMismatch) && chainNode.IsValidator() && chainNode.Status.CosmosignerMigration == nil {
+		live, found, err := cosmosigner.LiveSigningPublicKey(ctx, r.reservationReader(), chainNode, chainNode.Namespace, name)
+		if err == nil && found && live == cosmosigner.CanonicalSDKPublicKey(chainNode.Status.PubKey) {
+			if err := r.ensureConsensusKeyReservation(ctx, chainNode, chainNode.Status.ChainID, live, cosmosigner.ReservationHolder{
+				UID: chainNode.GetUID(), Kind: "ChainNode", Namespace: chainNode.GetNamespace(), Name: chainNode.GetName(), Claim: standaloneCosmosignerReservationClaim(chainNode),
+			}); err == nil {
+				if r.recorder != nil {
+					r.recorder.Eventf(chainNode, corev1.EventTypeWarning, appsv1.ReasonInvalid, "refusing cosmosigner signing identity change; the running signer keeps its verified on-chain key: %v", cause)
+				}
+				return cause
+			} else {
+				cause = fmt.Errorf("%w; reserving the recovered live key: %w", cause, err)
+			}
+		}
+	}
+	return r.quiesceManagedCosmosigner(ctx, chainNode, name, cause)
 }
 
 // refuseValidatorSignerPublicKey rejects a validator signer whose desired public key failed verification.
