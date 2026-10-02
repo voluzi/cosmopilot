@@ -141,6 +141,10 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 		}
 		if isLegacyTmKMSOneShotName(helperName) && (managedSigningOneShotBelongsToRoot(helperName, pod.GetLabels(), owner) ||
 			metav1.IsControlledBy(pod, owner) || controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs)) {
+			// Terminal Pods cannot sign and must not hold their owner behind its finalizer.
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
 			return false, fmt.Errorf("legacy tmKMS Pod %s/%s must be removed before reservation release", pod.GetNamespace(), pod.GetName())
 		}
 		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) ||

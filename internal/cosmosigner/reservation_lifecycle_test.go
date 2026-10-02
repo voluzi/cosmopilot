@@ -1336,3 +1336,33 @@ func TestFinalizeConsensusKeySigningPathsPreservesLegacyTmKMSHelpers(t *testing.
 		}
 	}
 }
+
+func TestFinalizeChainNodeSetPreservesChildLegacyTmKMSHelpers(t *testing.T) {
+	for _, marker := range []string{"-tmkms-generate-identity", "-tmkms-vault-upload"} {
+		for _, artifact := range []string{"pod", "job"} {
+			t.Run(marker+artifact, func(t *testing.T) {
+				scheme := reservationLifecycleScheme(t)
+				owner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "chain", Namespace: "default", UID: "set-uid"}}
+				child := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+					Name: "validator", Namespace: owner.Namespace, UID: "child-uid",
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: owner.Name, UID: owner.UID, Controller: ptr.To(true)}},
+				}}
+				meta := metav1.ObjectMeta{Name: child.Name + marker, Namespace: owner.Namespace, UID: "helper-uid",
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: child.Name, UID: child.UID, Controller: ptr.To(true)}},
+				}
+				var helper client.Object = &corev1.Pod{ObjectMeta: meta, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+				if artifact == "job" {
+					helper = &batchv1.Job{ObjectMeta: meta}
+				}
+				c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, child, helper).Build()
+				done, err := FinalizeConsensusKeySigningPaths(t.Context(), c, c, owner, owner.Namespace)
+				if done || err == nil || !strings.Contains(err.Error(), helper.GetName()) {
+					t.Fatalf("child-owned legacy helper must block finalization: done=%v err=%v", done, err)
+				}
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(helper), helper); err != nil {
+					t.Fatalf("child-owned helper must be preserved: %v", err)
+				}
+			})
+		}
+	}
+}
