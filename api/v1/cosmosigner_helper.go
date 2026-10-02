@@ -815,6 +815,9 @@ func validateCosmosignerKeyVersionChange(path string, oldC, newC *Cosmosigner) e
 		oldC.effectiveSigningIdentity("") == newC.effectiveSigningIdentity("") {
 		return nil
 	}
+	if oldC.UsesGcpKmsBackend() && newC.UsesGcpKmsBackend() && oldC.GcpImportsKey() != newC.GcpImportsKey() {
+		return fmt.Errorf("%s: switching between gcpKms.import and gcpKms.keyVersion for the same Cloud KMS CryptoKey is not supported, even when keyVersion is the imported version; keep the managed import configuration for this signer", path)
+	}
 	return fmt.Errorf("%s: moving to another version of the same Vault key or Cloud KMS CryptoKey is not supported, because cosmosigner binds the whole key to the signer cluster that first used it; use a new Vault keyName or Cloud KMS CryptoKey for new key material", path)
 }
 

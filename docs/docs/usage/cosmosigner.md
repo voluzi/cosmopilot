@@ -376,6 +376,10 @@ after accepting it; a successful import Pod alone is therefore **not** completio
 Secret and all out-of-cluster backups until the import is verified and the signer has rolled out with
 the recorded version. A mismatched key is a hard error and never retargets the validator.
 
+Keep the `gcpKms.import` configuration after verification. Replacing it with `gcpKms.keyVersion`
+for the same CryptoKey is not supported, even for the version recorded in status; this changes the
+managed import identity and key-discovery path rather than acting as a configuration no-op.
+
 If an ImportJob expires before the import completes, choose a new `importJob` name. Changing the job
 does not change the destination consensus identity; changing `project`, `location`, `keyRing`, or
 `key` selects a different destination and is handled as a managed signer migration.
