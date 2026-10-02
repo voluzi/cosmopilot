@@ -397,9 +397,6 @@ func validateRecordedCosmosignerLocks(chainNode *appsv1.ChainNode) error {
 }
 
 func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1.ChainNode) (cosmosigner.Params, error) {
-	if err := cosmosigner.RequireSupportedImage(chainNode.Spec.Cosmosigner.GetImage(r.opts.GetCosmosignerImage())); err != nil {
-		return cosmosigner.Params{}, err
-	}
 	// Preflight deployability BEFORE the immutable raft/PVC locks are recorded, so a signer that
 	// cannot deploy yet (a missing/incomplete raft-TLS Secret, or a missing backend auth/software Secret
 	// resolved inside cosmosignerParams) fails WITHOUT first trapping the operator into the
@@ -529,9 +526,6 @@ func standaloneCosmosignerReservationClaim(chainNode *appsv1.ChainNode) string {
 }
 
 func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
-	if err := r.preflightSignerTargetImage(ctx, chainNode); err != nil {
-		return false, err
-	}
 	if recorded, err := r.ensureValidatorConsensusKeyReservation(ctx, chainNode); err != nil {
 		return false, err
 	} else if recorded {
@@ -587,27 +581,6 @@ func (r *Reconciler) reconcileSigningConfigs(ctx context.Context, chainNode *app
 	}
 	claimsReconciled, err := r.reconcileConsensusKeyReservationClaims(ctx, chainNode)
 	return !claimsReconciled, err
-}
-
-func (r *Reconciler) preflightSignerTargetImage(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	if !chainNode.Spec.RemoteSignerTarget {
-		return nil
-	}
-	owner := metav1.GetControllerOf(chainNode)
-	if owner == nil || owner.Kind != "ChainNodeSet" {
-		return nil
-	}
-	parent := &appsv1.ChainNodeSet{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.Namespace, Name: owner.Name}, parent); err != nil {
-		return err
-	}
-	// Child controllers run independently and must not replace pods while parent preflight is blocked.
-	for _, signer := range parent.ResolveCosmosigners() {
-		if parent.CosmosignerResourceName(signer) == chainNode.Labels[controllers.LabelCosmosignerTarget] {
-			return cosmosigner.RequireSupportedImage(signer.Spec.GetImage(r.opts.GetCosmosignerImage()))
-		}
-	}
-	return nil
 }
 
 func (r *Reconciler) reconcileCosmosignerMigration(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (bool, error) {

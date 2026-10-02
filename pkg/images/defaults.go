@@ -2,11 +2,10 @@
 package images
 
 const (
-	MinimumCosmosignerVersion = "3.1.0"
-	DefaultNodeUtilsImage     = "ghcr.io/voluzi/node-utils:4.0.0"
-	DefaultCosmoseedImage     = "ghcr.io/voluzi/cosmoseed:0.12.0"
-	DefaultCosmoGuardImage    = "ghcr.io/voluzi/cosmoguard:5.0.0"
-	DefaultCosmosignerImage   = "ghcr.io/voluzi/cosmosigner:" + MinimumCosmosignerVersion
-	DefaultUtilityImage       = "ghcr.io/voluzi/node-tools:1.4.3"
-	DefaultDataExporterImage  = "ghcr.io/voluzi/dataexporter:2.0.2"
+	DefaultNodeUtilsImage    = "ghcr.io/voluzi/node-utils:4.0.0"
+	DefaultCosmoseedImage    = "ghcr.io/voluzi/cosmoseed:0.12.0"
+	DefaultCosmoGuardImage   = "ghcr.io/voluzi/cosmoguard:5.0.0"
+	DefaultCosmosignerImage  = "ghcr.io/voluzi/cosmosigner:3.1.0"
+	DefaultUtilityImage      = "ghcr.io/voluzi/node-tools:1.4.3"
+	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.0.2"
 )

@@ -67,8 +67,8 @@ the SDK marker with the application's filesystem identity.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
 Cosmopilot 5.0.0 defaults to Cosmosigner 3.1.0 and requires its HTTP health endpoints and bounded
-redial. A semantic version tag older than 3.1.0 is refused before replacing a running signer.
-For moving tags or digest-only references, verify that the image contains these features.
+redial. The image is not version-checked: with an older build `/livez` never answers, the signer
+never becomes live, and the validator does not sign until the image is corrected.
 
 ### `dataExporterImage`
 - **Description**: The container image of Data Exporter (with version tag included) used by snapshot tarball upload and deletion Jobs.
