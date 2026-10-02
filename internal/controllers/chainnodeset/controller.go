@@ -31,6 +31,7 @@ import (
 
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
+	legacySignerGuard controllers.LegacySignerGuard
 	client.Client
 	APIReader  client.Reader
 	ClientSet  *kubernetes.Clientset

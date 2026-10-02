@@ -25,6 +25,7 @@ func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 		name         string
 		pod          bool
 		config       bool
+		secret       bool
 		owned        bool
 		artifact     string
 		cacheMissing bool
@@ -35,6 +36,7 @@ func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 		{name: "child pod absent from cache", pod: true, owned: true, cacheMissing: true, artifact: "tmkms container in Pod default/chain-validator"},
 		{name: "child config absent from cache", config: true, owned: true, cacheMissing: true, artifact: "owned ConfigMap default/chain-validator-tmkms"},
 		{name: "child absent from cache", pod: true, owned: true, childMissing: true, artifact: "tmkms container in Pod default/chain-validator"},
+		{name: "child identity secret", secret: true, owned: true, artifact: "identity Secret default/chain-validator-tmkms"},
 		{name: "unowned child", pod: true},
 		{name: "migrated child", owned: true},
 	} {
@@ -58,6 +60,11 @@ func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 					Name: child.Name + "-tmkms", Namespace: child.Namespace,
 					OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: child.Name, UID: child.UID, Controller: ptr.To(true)}},
 				}})
+			}
+			if tc.secret {
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: child.Name + "-tmkms", Namespace: child.Namespace}, Immutable: ptr.To(true), Data: map[string][]byte{"kms-identity.key": []byte("identity")}}
+				resourcecleanup.Stamp(secret, resourcecleanup.RootOwnerFor(child), "tmkmsIdentity")
+				objects = append(objects, secret)
 			}
 			recorder := record.NewFakeRecorder(10)
 			backing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(nodeSet, child).WithObjects(objects...).Build()
@@ -95,7 +102,11 @@ func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 				assert.Equal(t, beforeChild, currentChild)
 				secrets := &corev1.SecretList{}
 				require.NoError(t, r.APIReader.List(ctx, secrets, client.InNamespace(nodeSet.Namespace)))
-				assert.Empty(t, secrets.Items)
+				if tc.secret {
+					assert.Len(t, secrets.Items, 1)
+				} else {
+					assert.Empty(t, secrets.Items)
+				}
 				require.ErrorContains(t, err, tc.artifact)
 				select {
 				case event := <-recorder.Events:
@@ -110,4 +121,16 @@ func TestReconcileRefusesLegacyTmKMSChild(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcileRequiresAuthoritativeLegacySignerReader(t *testing.T) {
+	set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "chain", Namespace: "default", UID: "set-uid"}}
+	c := fake.NewClientBuilder().WithScheme(nodeSetCleanupScheme(t)).WithObjects(set, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: set.Namespace}}).Build()
+	r := &Reconciler{Client: c, opts: &controllers.ControllerRunOptions{}}
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(set)})
+	require.ErrorContains(t, err, "legacy tmKMS guard requires an authoritative APIReader")
+	fresh := &appsv1.ChainNodeSet{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(set), fresh))
+	assert.Empty(t, fresh.Finalizers)
+	assert.Equal(t, set.Status, fresh.Status)
 }

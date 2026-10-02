@@ -12,20 +12,24 @@ and grant the token the Cosmosigner cluster-binding registry permissions. Wait f
 roll out and confirm blocks are being signed with the existing validator public key.
 
 Before continuing, confirm that every migrated node Pod has no `tmkms` container and that its owned
-`<name>-tmkms` ConfigMap has been removed. Preserve the old signing state for recovery: switching
+`<name>-tmkms` ConfigMap and tmKMS identity Secret have been removed. Preserve the old signing state for recovery: switching
 implementations does not transfer tmKMS slash-protection history into Cosmosigner's Raft store.
 
 The 5.0.0 CRDs remove `validator.tmKMS`, node-group `validator.tmKMS`, and the legacy reservation
 status field. Kubernetes prunes these fields. To prevent a former tmKMS validator from accidentally
 signing with a retained local key, the new controller refuses reconciliation with a Warning event
-when a live `tmkms` container or an owned `<name>-tmkms` ConfigMap remains. It leaves the node Pod,
+when a `tmkms` container, an owned `<name>-tmkms` ConfigMap, or a recognized `<name>-tmkms`
+identity Secret remains. The identity Secret has no owner reference and survives owner deletion.
+The guard recognizes its root attribution or the exact unstamped legacy Secret shape. It leaves the node Pod,
 keys, and status untouched. A ChainNodeSet is also refused before reconciliation when an owned
-child has either artifact. Do not delete these artifacts to bypass an unfinished migration;
-finish the migration on 4.x first. If the node already migrated to Cosmosigner and only a stale
-`<name>-tmkms` ConfigMap remains, verify that Cosmosigner is signing with the existing validator
-public key, then delete that stale ConfigMap.
+child has any of these artifacts. Do not delete these artifacts to bypass an unfinished migration;
+finish the migration on 4.x first. A Pod with a `tmkms` container must be retired by completing
+that migration or deliberately deleted by the operator. Deleting its ConfigMap alone does not
+retire the Pod. If the node already migrated to Cosmosigner and only a stale `<name>-tmkms`
+ConfigMap or identity Secret remains, verify that Cosmosigner is signing with the existing
+validator public key, then delete the stale ConfigMap or identity Secret.
 
-If both artifacts are already gone and no Cosmosigner is configured, the guard cannot fire. After
+If all three artifacts are already gone and no Cosmosigner is configured, the guard cannot fire. After
 CRD pruning, the former tmKMS validator is treated as a local-key validator: it would sign from a
 retained `<name>-priv-key` Secret, or get a new consensus key generated if none exists. A retained
 key does not carry tmKMS's slash-protection history, and a new key does not match the validator's

@@ -32,7 +32,7 @@ func TestReconcileInstallsResourceCleanupFinalizerBeforeGeneratingChildren(t *te
 	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, namespace).Build()
-	r := &Reconciler{Client: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(nodeSet)})
 	require.NoError(t, err)

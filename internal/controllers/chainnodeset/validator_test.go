@@ -56,10 +56,11 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 		Build()
 
 	return &Reconciler{
-		Client:   cl,
-		Scheme:   scheme,
-		recorder: record.NewFakeRecorder(100),
-		opts:     &controllers.ControllerRunOptions{},
+		Client:    cl,
+		APIReader: cl,
+		Scheme:    scheme,
+		recorder:  record.NewFakeRecorder(100),
+		opts:      &controllers.ControllerRunOptions{},
 	}
 }
 

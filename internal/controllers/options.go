@@ -10,6 +10,7 @@ import (
 const LabelWorkerName = "worker-name"
 
 type ControllerRunOptions struct {
+	LegacySignerGuard        LegacySignerGuard
 	WorkerCount              int
 	WorkerName               string
 	NodeUtilsImage           string

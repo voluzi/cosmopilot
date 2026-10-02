@@ -25,6 +25,10 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
 		pod, config, owned bool
+		secret             bool
+		secretForeign      bool
+		secretLegacy       bool
+		secretUnrelated    bool
 		finalized          bool
 		cacheMissing       bool
 		configOwner        *metav1.OwnerReference
@@ -42,6 +46,11 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 		{name: "foreign kind", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "validator", UID: "node-uid", Controller: ptr.To(true)}},
 		{name: "foreign name", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: "other", UID: "node-uid", Controller: ptr.To(true)}},
 		{name: "non-controller reference", config: true, configOwner: &metav1.OwnerReference{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: "validator", UID: "node-uid"}},
+		{name: "identity secret after predecessor garbage collection", secret: true, artifact: "identity Secret default/validator-tmkms"},
+		{name: "identity secret absent from cache", secret: true, cacheMissing: true, artifact: "identity Secret default/validator-tmkms"},
+		{name: "unstamped legacy identity secret", secret: true, secretLegacy: true, artifact: "identity Secret default/validator-tmkms"},
+		{name: "unrelated same-name secret", secret: true, secretLegacy: true, secretUnrelated: true},
+		{name: "foreign identity secret", secret: true, secretForeign: true},
 		{name: "migrated"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,6 +90,21 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 				}
 				objects = append(objects, cm)
 			}
+			if tc.secret {
+				secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-tmkms", Namespace: node.Namespace}, Immutable: ptr.To(true), Data: map[string][]byte{"kms-identity.key": []byte("identity")}}
+				resourcecleanup.Stamp(secret, resourcecleanup.RootOwnerFor(node), "tmkmsIdentity")
+				secret.Annotations[resourcecleanup.AnnotationRootOwnerUID] = "old-node-uid"
+				if tc.secretLegacy {
+					secret.Annotations = nil
+				}
+				if tc.secretUnrelated {
+					secret.Data = map[string][]byte{"unrelated": []byte("value")}
+				}
+				if tc.secretForeign {
+					secret.Annotations[resourcecleanup.AnnotationRootOwnerName] = "other"
+				}
+				objects = append(objects, secret)
+			}
 			recorder := record.NewFakeRecorder(10)
 			backing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(node).WithObjects(objects...).Build()
 			r := &Reconciler{
@@ -108,10 +132,22 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 				assert.Equal(t, before.Status, current.Status, "refusal must leave status untouched")
 				secrets := &corev1.SecretList{}
 				require.NoError(t, r.APIReader.List(ctx, secrets, client.InNamespace(node.Namespace)))
-				assert.Empty(t, secrets.Items, "refusal must not create node or consensus keys")
+				if tc.secret {
+					assert.Len(t, secrets.Items, 1, "refusal must preserve only the existing identity secret")
+				} else {
+					assert.Empty(t, secrets.Items, "refusal must not create node or consensus keys")
+				}
 				require.ErrorContains(t, err, tc.artifact)
-				for _, remedy := range []string{"migrate to cosmosigner on Cosmopilot 4.x", "delete the stale validator-tmkms ConfigMap"} {
-					assert.Contains(t, err.Error(), remedy)
+				assert.Contains(t, err.Error(), "migrate to cosmosigner on Cosmopilot 4.x")
+				switch {
+				case tc.pod:
+					assert.Contains(t, err.Error(), "Pod must be retired")
+					assert.Contains(t, err.Error(), "deliberately deleted by the operator")
+					assert.NotContains(t, err.Error(), "delete the stale validator-tmkms ConfigMap")
+				case tc.secret:
+					assert.Contains(t, err.Error(), "stale validator-tmkms identity Secret")
+				default:
+					assert.Contains(t, err.Error(), "delete the stale validator-tmkms ConfigMap")
 				}
 				select {
 				case event := <-recorder.Events:
@@ -131,4 +167,16 @@ func TestReconcileRefusesLegacyTmKMS(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcileRequiresAuthoritativeLegacySignerReader(t *testing.T) {
+	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "node-uid"}}
+	c := fake.NewClientBuilder().WithScheme(resourceCleanupScheme(t)).WithObjects(node, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: node.Namespace}}).Build()
+	r := &Reconciler{Client: c, opts: &controllers.ControllerRunOptions{}}
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)})
+	require.ErrorContains(t, err, "legacy tmKMS guard requires an authoritative APIReader")
+	fresh := &appsv1.ChainNode{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(node), fresh))
+	assert.Empty(t, fresh.Finalizers)
+	assert.Equal(t, node.Status, fresh.Status)
 }

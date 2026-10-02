@@ -30,7 +30,7 @@ func TestReconcileInstallsResourceCleanupFinalizerBeforeDurableCreation(t *testi
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"}}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, namespace).Build()
-	r := &Reconciler{Client: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)})
 	require.NoError(t, err)
