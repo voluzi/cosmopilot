@@ -107,7 +107,8 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	oneShotNames := make([]string, 0)
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
-		if isLegacyTmKMSOneShotName(job.GetName()) && managedSigningOneShotBelongsToRoot(job.GetName(), job.GetLabels(), owner) {
+		if isLegacyTmKMSOneShotName(job.GetName()) && (managedSigningOneShotBelongsToRoot(job.GetName(), job.GetLabels(), owner) ||
+			metav1.IsControlledBy(job, owner) || controlledByAnyUID(job, childControllerUIDs)) {
 			return false, fmt.Errorf("legacy tmKMS Job %s/%s must be removed before reservation release", job.GetNamespace(), job.GetName())
 		}
 		if controlledByAnyUID(job, childControllerUIDs) {
@@ -133,10 +134,13 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	for i := range ownedPods.Items {
 		pod := &ownedPods.Items[i]
 		helperName := pod.GetName()
-		if jobName, ok := managedSigningOneShotPodJobName(helperName); ok {
-			helperName = jobName
+		if !isManagedSigningOneShotName(helperName) {
+			if jobName, ok := managedSigningOneShotPodJobName(helperName); ok {
+				helperName = jobName
+			}
 		}
-		if isLegacyTmKMSOneShotName(helperName) && managedSigningOneShotBelongsToRoot(helperName, pod.GetLabels(), owner) {
+		if isLegacyTmKMSOneShotName(helperName) && (managedSigningOneShotBelongsToRoot(helperName, pod.GetLabels(), owner) ||
+			metav1.IsControlledBy(pod, owner) || controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs)) {
 			return false, fmt.Errorf("legacy tmKMS Pod %s/%s must be removed before reservation release", pod.GetNamespace(), pod.GetName())
 		}
 		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) ||

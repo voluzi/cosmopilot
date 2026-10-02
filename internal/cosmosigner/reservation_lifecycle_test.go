@@ -1305,13 +1305,19 @@ func TestEnsureConsensusKeyReservationBlocksLegacyTmKMSHelpers(t *testing.T) {
 
 func TestFinalizeConsensusKeySigningPathsPreservesLegacyTmKMSHelpers(t *testing.T) {
 	for _, marker := range []string{"-tmkms-generate-identity", "-tmkms-vault-upload"} {
-		for _, artifact := range []string{"job", "direct pod", "generated pod"} {
+		for _, artifact := range []string{"job", "direct pod", "generated pod", "owned pod with foreign labels", "name containing another helper marker"} {
 			t.Run(marker+artifact, func(t *testing.T) {
 				scheme := reservationLifecycleScheme(t)
 				owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
 				meta := metav1.ObjectMeta{Name: owner.Name + marker, Namespace: owner.Namespace, UID: "helper-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name, UID: owner.UID, Controller: ptr.To(true)}}}
 				var path client.Object = &corev1.Pod{ObjectMeta: meta}
-				if artifact == "job" {
+				if artifact == "owned pod with foreign labels" {
+					path.SetLabels(map[string]string{"chain-node": "other"})
+				} else if artifact == "name containing another helper marker" {
+					owner.Name = "validator-import-copy"
+					path.SetName(owner.Name + marker)
+					path.GetOwnerReferences()[0].Name = owner.Name
+				} else if artifact == "job" {
 					path = &batchv1.Job{ObjectMeta: meta}
 				} else if artifact == "generated pod" {
 					path.SetName(meta.Name + "-generated")
