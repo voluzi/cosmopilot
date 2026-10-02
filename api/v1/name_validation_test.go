@@ -21,8 +21,8 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 		},
 		{
 			name:    "app binary named like a built-in container",
-			mutate:  func(c *ChainNode) { c.Spec.App.App = "tmkms" },
-			wantErr: "collides with a built-in pod container",
+			mutate:  func(c *ChainNode) { c.Spec.App.App = "node-utils" },
+			wantErr: "is reserved for the node Pod",
 		},
 		{
 			name: "zero genesis duration",
@@ -54,9 +54,9 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: "collides with a built-in pod volume",
 		},
 		{
-			name: "additional volume named like a TmKMS volume",
+			name: "additional volume named like a config volume",
 			mutate: func(c *ChainNode) {
-				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "tmkms-config", Size: "1Gi", Path: "/extra"}}}
+				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "config", Size: "1Gi", Path: "/extra"}}}
 			},
 			wantErr: "collides with a built-in pod volume",
 		},
@@ -88,14 +88,21 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			mutate: func(c *ChainNode) {
 				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "node-utils"}}}
 			},
-			wantErr: "collides with a built-in pod container",
+			wantErr: "is reserved for the node Pod",
+		},
+		{
+			name: "sidecar named like a legacy signer",
+			mutate: func(c *ChainNode) {
+				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "tmkms"}}}
+			},
+			wantErr: "is reserved for the node Pod",
 		},
 		{
 			name: "sidecar named like the app container",
 			mutate: func(c *ChainNode) {
 				c.Spec.Config = &Config{Sidecars: []SidecarSpec{{Name: "chaind"}}}
 			},
-			wantErr: "collides with a built-in pod container",
+			wantErr: "is reserved for the node Pod",
 		},
 		{
 			name: "duplicate sidecar names",

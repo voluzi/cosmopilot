@@ -7,7 +7,7 @@ The options below (existing key, create-validator, genesis init) apply to a sing
 ## Existing Consensus Key
 
 :::warning[Important]
-Storing mnemonics and private keys in Kubernetes secrets may not be secure and is recommended only for testnets. For production networks, consider using [TmKMS](../usage/tmkms) for enhanced security.
+Storing mnemonics and private keys in Kubernetes secrets may not be secure and is recommended only for testnets. For production networks, use [Cosmosigner](./cosmosigner.md) with HashiCorp Vault or Google Cloud KMS.
 :::
 
 If a consensus key is already defined in the genesis file as a validator, you can configure the node as follows:
@@ -123,7 +123,7 @@ nodes:
 
 ### Things to know
 
-- **Per-instance keys are mandatory.** A multi-instance validator group cannot set a shared `privateKeySecret`, `tmKMS`, or account secret — that would make every instance sign with the same key (double-signing). Single-instance validator groups may use them, just like `.spec.validator`.
+- **Per-instance keys are mandatory.** A multi-instance validator group cannot set a shared `privateKeySecret` or account secret — that would make every instance sign with the same key (double-signing). Single-instance validator groups may use them, just like `.spec.validator`.
 - **`validator` is a reserved group name** (it backs the legacy `.spec.validator`). Use any other name for your groups.
 - **Genesis (`init`) validator groups are immutable after the genesis is created** — you cannot add, remove, scale, or change their keys. Use a `createValidator` group to grow a running validator set.
 - **A `cosmosigner` collapses the group to one validator.** A signer holds a single consensus identity, so a group it targets is ONE validator whose instances are redundant signing endpoints — `instances: 3` means three validators without a signer and one with it. Cosmopilot warns at admission when a genesis-initializing group is affected, since the resulting genesis validator set cannot be changed afterwards. See [High-availability validators](../usage/cosmosigner#high-availability-validators-multiple-instances-one-identity).

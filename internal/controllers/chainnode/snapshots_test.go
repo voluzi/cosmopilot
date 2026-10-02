@@ -32,10 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/datasnapshot"
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 func TestStartSnapshotIntegrityCheckPropagatesAppEnvOnlyToAppContainer(t *testing.T) {

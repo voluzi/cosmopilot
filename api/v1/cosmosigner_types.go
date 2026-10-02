@@ -34,11 +34,10 @@ const (
 )
 
 // Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
-// (github.com/voluzi/cosmosigner). Unlike TmKMS, which runs as a sidecar in the validator
-// pod, cosmosigner runs as a separate StatefulSet that dials the targeted nodes'
-// priv_validator_laddr over the network. This allows any group of nodes to act as the
-// signing endpoint for a single consensus identity (horcrux-style fan-out), and enables
-// raft-based high availability across multiple signer replicas.
+// (github.com/voluzi/cosmosigner). Cosmosigner runs as a separate StatefulSet that dials
+// the targeted nodes' priv_validator_laddr over the network. This allows any group of nodes
+// to act as the signing endpoint for a single consensus identity (horcrux-style fan-out),
+// and enables raft-based high availability across multiple signer replicas.
 //
 // On a ChainNodeSet, .nodeGroups selects which node groups the signer connects to; when it
 // is empty and a validator is configured, the validator group is targeted by default. On a
@@ -60,7 +59,7 @@ type Cosmosigner struct {
 
 	// Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
 	// image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-	// defaulting to `ghcr.io/voluzi/cosmosigner:3.0.0`). Set this to pin or override the image for
+	// defaulting to `ghcr.io/voluzi/cosmosigner:3.1.0`). Set this to pin or override the image for
 	// this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is
 	// unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes.
 	// +optional

@@ -135,13 +135,19 @@ when the profiling listener starts,
 If the node-utils primary API is configured on port 6666, that API keeps the port;
 `node-utils` logs a warning and disables profiling.
 
-## TMKMS / Vault issues (deprecated)
+## Cosmosigner startup and Vault issues
 
-- Ensure the Vault token has permission for the operations you enabled (including key
-  upload when `uploadGenerated` is set).
-- For legacy TMKMS deployments using renewable or periodic tokens, `autoRenewToken` enables the
-  deprecated `vault-token-renewer` sidecar. Migrate to [Cosmosigner](../usage/cosmosigner), which
-  renews Vault tokens internally. See [TMKMS](../usage/tmkms).
+- Check the signer startup, liveness (`/livez`), and readiness (`/readyz`) probes on HTTP port 8080.
+  Readiness includes backend and preflight initialization; followers are ready too.
+- Ensure the Vault token has the [required permissions](../usage/cosmosigner#vault-transit),
+  including cluster-binding registry access. Cosmosigner renews renewable and periodic tokens itself.
+- If `wait-cosmosigner-discovery` times out after 25 seconds, inspect its logs for DNS diagnostics,
+  the discovery Service endpoints, the signer leader logs, and NetworkPolicy enforcement on TCP 26659.
+  A bare TCP connection does not release the gate; it must receive data from the signer.
+- Repeated `can't get pubkey` exits after the gate passes require investigation. Verify Cosmosigner
+  3.1.0 or newer and node-utils 4.0.0 or newer, including any image overrides.
+- A legacy signing-path refusal requires completing the migration on 4.x; follow the
+  [5.0.0 upgrade guide](../getting-started/upgrading-to-5).
 
 ## Leader election / multiple managers
 

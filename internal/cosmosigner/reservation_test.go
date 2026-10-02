@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 )
 
 const reservationTestPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
@@ -157,7 +157,7 @@ func TestEnsureConsensusKeyReservationAllowsGeneratedValidatorChildAfterSignerRo
 		UID: "nodeset-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "nodes-validator",
 	}
 
-	// TmKMS era: the generated child claims its key under the root it is controlled by.
+	// The generated child claims its key under the root it is controlled by.
 	requireReservation(t, c, c, "chain-1", reservationTestPublicKey, holder)
 
 	// The top-level Cosmosigner rolls out over the same Vault key and the root records it against the

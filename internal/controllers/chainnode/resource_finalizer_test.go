@@ -16,10 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
 func TestReconcileInstallsResourceCleanupFinalizerBeforeDurableCreation(t *testing.T) {
@@ -30,7 +30,7 @@ func TestReconcileInstallsResourceCleanupFinalizerBeforeDurableCreation(t *testi
 	node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"}}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node, namespace).Build()
-	r := &Reconciler{Client: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
+	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)})
 	require.NoError(t, err)

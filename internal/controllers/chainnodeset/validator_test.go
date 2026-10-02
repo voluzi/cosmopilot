@@ -24,9 +24,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
 func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler {
@@ -56,10 +56,11 @@ func newValidatorTestReconciler(t *testing.T, objs ...client.Object) *Reconciler
 		Build()
 
 	return &Reconciler{
-		Client:   cl,
-		Scheme:   scheme,
-		recorder: record.NewFakeRecorder(100),
-		opts:     &controllers.ControllerRunOptions{},
+		Client:    cl,
+		APIReader: cl,
+		Scheme:    scheme,
+		recorder:  record.NewFakeRecorder(100),
+		opts:      &controllers.ControllerRunOptions{},
 	}
 }
 
@@ -829,11 +830,8 @@ func TestEnsureValidatorRefreshesGenesisDigestForManagedMigration(t *testing.T) 
 		StakeAmount: "900000stake",
 	}
 	oldCfg := &appsv1.NodeSetValidatorConfig{
-		Init: init.DeepCopy(),
-		TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-			Address: vaultAddress,
-			Key:     vaultKey,
-		}}},
+		Init:             init.DeepCopy(),
+		PrivateKeySecret: ptr.To("previous-validator-key"),
 	}
 
 	for _, tc := range []struct {

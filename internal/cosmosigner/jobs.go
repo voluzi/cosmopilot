@@ -17,9 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/voluzi/cosmopilot/v4/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v4/internal/k8s"
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v5/internal/k8s"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 const (
@@ -54,7 +54,7 @@ func jobWaitTimeout(deadlineSeconds int64) time.Duration {
 }
 
 // JobRunner runs the one-shot cosmosigner key-management pods (pubkey, import). It needs the
-// clientset for pod log scraping, mirroring the TmKMS identity/upload pattern.
+// clientset for pod log scraping, mirroring the signer key-discovery/import pattern.
 type JobRunner struct {
 	Client kubernetes.Interface
 	Scheme *runtime.Scheme

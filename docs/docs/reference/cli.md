@@ -28,8 +28,6 @@ admission webhook server.
 | `-cosmosigner-image` | `COSMOSIGNER_IMAGE` | Pinned manager-release default | Default image for managed Cosmosigner deployments; a per-resource image overrides it. |
 | `-dataexporter-image` | `DATA_EXPORTER_IMAGE` | Pinned manager-release default | Data exporter image used by snapshot upload and deletion Jobs. |
 | `-utility-image` | `UTILITY_IMAGE` | Pinned manager-release default | Utility image used by operator-owned helper containers. |
-| `-tmkms-image` | `TMKMS_IMAGE` | Pinned manager-release default | TmKMS sidecar and helper image for legacy TmKMS configurations. |
-| `-vault-token-renewer-image` | `VAULT_TOKEN_RENEWER_IMAGE` | Pinned manager-release default | Vault token renewer sidecar image for legacy TmKMS automatic renewal. |
 | `-worker-name` | `WORKER_NAME` | `""` | Name of this worker (set as the `worker-name` label). Used to shard which resources this instance reconciles. |
 | `-worker-count` | `WORKER_COUNT` | `1` | Maximum number of concurrent reconciles. |
 | `-disable-webhooks` | `DISABLE_WEBHOOKS` | `false` | Disable admission webhooks. |
@@ -66,10 +64,21 @@ The helper sidecar that runs in every node Pod and exposes an internal HTTP API
 | `-block-threshold` | `BLOCK_THRESHOLD` | `0` (disabled) | Time to wait for a new block before the node is considered unhealthy. |
 | `-upgrades-config` | `UPGRADES_CONFIG` | `/config/upgrades.json` | File containing the upgrades configuration. |
 | `-log-level` | `LOG_LEVEL` | `info` | Log level. |
-| `-tmkms-proxy` | `TMKMS_PROXY` | `false` | Enable the TMKMS proxy. |
 | `-node-binary-name` | `NODE_BINARY_NAME` | `""` | Name of the node application binary. |
 | `-halt-height` | `HALT_HEIGHT` | `0` (disabled) | Height at which the node will be halted. |
 | `-mock-mode` | `MOCK_MODE` | `false` | Enable mock mode (returns configurable stats instead of real process stats). For E2E testing only. |
+
+### `node-utils wait-for-signer`
+
+The operator runs this command as a target node's final init container:
+
+```bash
+node-utils wait-for-signer <port> <discovery-hostname> <pod-ip> <timeout>
+```
+
+It listens on the privval port until a connection sends at least one byte, closes the connection,
+and exits so the app can bind the same port. Bare TCP connections do not release the gate.
+The operator supplies port `26659` and timeout `25s`; DNS observations accompany timeout errors.
 
 ### `node-utils mock`
 
@@ -133,11 +142,3 @@ roles.
 
 The `s3 upload` flags match `gcs upload`, except its default `--chunk-size` is
 `64MB`. The `s3 delete` command supports `--concurrent-jobs`.
-
-## vault-token-renewer (deprecated)
-
-This deprecated sidecar keeps a HashiCorp Vault token renewed for legacy TMKMS
-configurations when `autoRenewToken` is enabled. It remains available during the TMKMS
-deprecation period for compatibility and should not be used by new deployments. Migrate to
-[Cosmosigner](../usage/cosmosigner), which manages Vault token renewal internally. You do not run
-or configure the sidecar manually.

@@ -16,8 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
 )
 
 func (r *Reconciler) prepareConsensusKeyReservationOwner(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
@@ -33,7 +33,7 @@ func (r *Reconciler) prepareConsensusKeyReservationOwner(ctx context.Context, ch
 	}
 
 	needsFinalizer := chainNode.IsValidator() || chainNode.Spec.Cosmosigner != nil ||
-		chainNode.Status.CosmosignerPublicKey != "" || chainNode.Status.TmKMSReservationIdentity != ""
+		chainNode.Status.CosmosignerPublicKey != ""
 	if !needsFinalizer {
 		needsFinalizer, err = cosmosigner.HasConsensusKeyReservationsForOwner(ctx, r.reservationReader(), root)
 		if err != nil {
@@ -196,6 +196,7 @@ func standaloneManagedSigningOneShotPodName(name string, chainNode *appsv1.Chain
 	return false
 }
 
+// Legacy tmKMS helpers must block claim retirement until an upgraded cluster is quiescent.
 func standaloneManagedSigningOneShotNames(chainNode *appsv1.ChainNode) []string {
 	return []string{
 		chainNode.GetName() + "-tmkms-generate-identity",

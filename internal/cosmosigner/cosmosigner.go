@@ -16,11 +16,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v4/internal/k8s"
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
-	"github.com/voluzi/cosmopilot/v4/pkg/utils"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v5/internal/k8s"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
 const (
@@ -180,6 +180,7 @@ func (p Params) podLabels() map[string]string {
 // BuildConfig assembles the cosmosigner config for the given replica count.
 func (p Params) BuildConfig() *Config {
 	cfg := &Config{
+		HTTPAddr:          httpListenAddr,
 		ChainID:           p.ChainID,
 		ExpectedPublicKey: p.ExpectedPublicKey,
 		NodeService:       p.nodeServiceEndpoint(),
@@ -390,6 +391,32 @@ func (p Params) NetworkPolicy() *networkingv1.NetworkPolicy {
 	}
 }
 
+// TargetNetworkPolicy restricts privval to signer pods while preserving all other ingress.
+func (p Params) TargetNetworkPolicy() *networkingv1.NetworkPolicy {
+	tcp, udp, sctp := corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: p.Name + discoveryServiceSuffix, Namespace: p.Namespace, Labels: p.Labels},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: p.TargetSelector},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: p.selectorLabels()}}},
+					Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: ptr.To(intstr.FromInt(chainutils.PrivValPort))}},
+				},
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(chainutils.PrivValPort - 1))},
+						{Protocol: &tcp, Port: ptr.To(intstr.FromInt(chainutils.PrivValPort + 1)), EndPort: ptr.To(int32(65535))},
+						{Protocol: &udp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(65535))},
+						{Protocol: &sctp, Port: ptr.To(intstr.FromInt32(1)), EndPort: ptr.To(int32(65535))},
+					},
+				},
+			},
+		},
+	}
+}
+
 // StatefulSet builds the signer StatefulSet. configYAML is the rendered config (from ConfigYAML),
 // hashed into the pod template so a config change rolls the signer.
 func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
@@ -463,6 +490,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 			},
 			// node_id is the pod name; advertise resolves to this pod's stable raft DNS. Both
 			// override the config file (env has higher precedence in cosmosigner).
+			{Name: "COSMOSIGNER_HTTP_ADDR", Value: httpListenAddr},
 			{Name: "COSMOSIGNER_RAFT_NODE_ID", Value: "$(POD_NAME)"},
 			{Name: "COSMOSIGNER_RAFT_ADVERTISE", Value: fmt.Sprintf("$(POD_NAME).%s:%d", p.raftServiceDNS(), raftPort)},
 			// Force a rollout when the rendered config changes.
@@ -470,14 +498,13 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 		Ports: []corev1.ContainerPort{
 			{Name: raftPortName, ContainerPort: raftPort, Protocol: corev1.ProtocolTCP},
+			{Name: httpPortName, ContainerPort: httpPort, Protocol: corev1.ProtocolTCP},
 		},
 		VolumeMounts: volumeMounts,
 		Resources:    p.Resources,
-		// cosmosigner exposes no HTTP health endpoint, so probes are TCP against the raft
-		// transport, which listens regardless of leadership.
 		StartupProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(raftPort)},
+				HTTPGet: &corev1.HTTPGetAction{Path: "/livez", Port: intstr.FromString(httpPortName)},
 			},
 			FailureThreshold: 60,
 			PeriodSeconds:    5,
@@ -485,10 +512,16 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(raftPort)},
+				HTTPGet: &corev1.HTTPGetAction{Path: "/livez", Port: intstr.FromString(httpPortName)},
 			},
 			FailureThreshold: 3,
 			PeriodSeconds:    10,
+			TimeoutSeconds:   5,
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromString(httpPortName)}},
+			FailureThreshold: 3,
+			PeriodSeconds:    5,
 			TimeoutSeconds:   5,
 		},
 	}

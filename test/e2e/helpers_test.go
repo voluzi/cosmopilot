@@ -16,8 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/test/framework"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/test/framework"
 )
 
 // RandString generates a random string of the specified length
@@ -204,27 +204,6 @@ func CopyVaultSecretsToNamespace(namespace string) (tokenSecretName, caSecretNam
 	Expect(err).NotTo(HaveOccurred())
 
 	return tokenSecretName, caSecretName
-}
-
-// WaitForTmkmsContainerRunning waits for the TMKMS container to be ready in the ChainNode pod
-func WaitForTmkmsContainerRunning(chainNode *appsv1.ChainNode) {
-	Eventually(func() bool {
-		pod := &corev1.Pod{}
-		if err := Framework().Client().Get(Framework().Context(), client.ObjectKey{
-			Namespace: chainNode.Namespace,
-			Name:      chainNode.Name,
-		}, pod); err != nil {
-			return false
-		}
-
-		// Check if tmkms container exists and is ready
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Name == "tmkms" {
-				return cs.Ready
-			}
-		}
-		return false
-	}).Should(BeTrue())
 }
 
 // DescribeChainNode renders the parts of a ChainNode's status that explain why it stopped making

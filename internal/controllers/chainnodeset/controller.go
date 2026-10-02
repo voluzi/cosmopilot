@@ -21,16 +21,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
+	legacySignerGuard controllers.LegacySignerGuard
 	client.Client
 	APIReader  client.Reader
 	ClientSet  *kubernetes.Clientset
@@ -169,6 +170,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
+	if err := r.refuseLegacyTmKMS(ctx, nodeSet); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	cleanupFinalizerAdded := false
 	for _, finalizer := range []string{resourcecleanup.Finalizer, podDisruptionBudgetFinalizer} {
 		if controllerutil.ContainsFinalizer(nodeSet, finalizer) {
@@ -286,7 +291,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Tear down any managed signer the spec no longer desires before children are reconciled, and wait
-	// for completion: a child switching back to its local/tmKMS signing path while old signer pods are
+	// for completion: a child switching back to its local signing path while old signer pods are
 	// still terminating would put two signers on the same consensus key.
 	if tornDown, err := r.reconcileSignerTeardown(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err

@@ -19,10 +19,10 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	managedcosmosigner "github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v4/test/e2e/apps"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	managedcosmosigner "github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v5/test/e2e/apps"
 )
 
 var _ = Describe("Deletion policy", func() {
@@ -698,7 +698,7 @@ func reservationOwnerReleasable(record reservationRecord) bool {
 // signingSurface describes what must be gone before a reservation may be released: the pods that
 // sign for its claims, and the Service endpoints still routing to them.
 //
-// The specs here run plain validators with no cosmosigner and no TmKMS, so there is no signer
+// The specs here run plain validators with no cosmosigner, so there is no signer
 // StatefulSet and no signer-target or cosmosigner replica pod to find. Mirroring the controller's
 // label and StatefulSet-name predicates would therefore only ever match the claim pods this already
 // tracks by name, so the surface is kept to what is actually load-bearing.
@@ -733,7 +733,7 @@ type signingPodOwner struct {
 // narrows the fallback teardown gate back toward the claim pod alone, which is the gap this list
 // exists to close.
 var chainNodeTemporaryPodSuffixes = []string{
-	"config-generator", "data-init", "init-data", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity",
+	"config-generator", "data-init", "init-data", "genesis-init",
 	"write-file", "create-validator", "signer-pubkey", "signer-import",
 }
 

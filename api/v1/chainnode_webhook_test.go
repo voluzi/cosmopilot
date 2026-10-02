@@ -10,22 +10,6 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func TestChainNodeValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
-	chainNode := &ChainNode{Spec: ChainNodeSpec{
-		Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-		Validator: &ValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-			Address: "https://vault:8200",
-			Key:     "validator-key",
-		}}}},
-	}}
-
-	warnings, err := chainNode.Validate(nil)
-	require.NoError(t, err)
-	require.Equal(t, []string{
-		".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
-	}, []string(warnings))
-}
-
 func TestConfigValidateNodeUtilsRunIdentity(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -107,24 +91,6 @@ func TestChainNodeAdmissionRejectsImageDefinedRunIdentity(t *testing.T) {
 	require.ErrorContains(t, err, "runAsUser")
 	_, err = node.ValidateCreate(t.Context(), node)
 	require.ErrorContains(t, err, "runAsUser")
-}
-
-func TestChainNodeValidateWarnsWhenDeprecatedVaultTokenRenewerIsConfigured(t *testing.T) {
-	chainNode := &ChainNode{Spec: ChainNodeSpec{
-		Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-		Validator: &ValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-			Address:        "https://vault:8200",
-			Key:            "validator-key",
-			AutoRenewToken: true,
-		}}}},
-	}}
-
-	warnings, err := chainNode.Validate(nil)
-	require.NoError(t, err)
-	require.Equal(t, []string{
-		".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
-		".spec.validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.cosmosigner, which renews Vault tokens internally",
-	}, []string(warnings))
 }
 
 // TestChainNodeValidateGenesisValidators verifies that a standalone ChainNode rejects duplicate
@@ -316,58 +282,34 @@ func TestChainNodeValidateRejectsInitChangeAfterCreation(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestChainNodeValidateAllowsSignerMigrationOnGeneratedValidator covers the ChainNodeSet-generated
-// validator child: it never carries .spec.cosmosigner (the signer belongs to its parent) and is marked
-// with .spec.remoteSignerTarget instead. Dropping its tmKMS sidecar for that managed signer changes the
-// signing key choice, which must be admitted for the same reason it is on a standalone ChainNode — while
-// the non-signing genesis configuration stays immutable.
+// A generated validator's signer marker permits a key transition while its genesis stays immutable.
 func TestChainNodeValidateAllowsSignerMigrationOnGeneratedValidator(t *testing.T) {
-	init := func() *GenesisInitConfig {
-		return &GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1unibi"}, StakeAmount: "1unibi"}
+	old := &ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "cns-validator", OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: GroupVersion.String(), Kind: "ChainNodeSet", Name: "cns", UID: "nodeset-uid", Controller: ptr.To(true),
+		}}},
+		Spec: ChainNodeSpec{Validator: &ValidatorConfig{
+			PrivateKeySecret: ptr.To("local-key"),
+			Init:             &GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1unibi"}, StakeAmount: "1unibi"},
+		}},
+		Status: ChainNodeStatus{ChainID: "test-localnet"},
 	}
-	// .spec.remoteSignerTarget is only accepted on a generated child, so the fixture carries the
-	// controller owner reference the ChainNodeSet controller sets.
-	ownedByNodeSet := []metav1.OwnerReference{{
-		APIVersion: GroupVersion.String(), Kind: "ChainNodeSet", Name: "cns",
-		UID: "11111111-1111-1111-1111-111111111111", Controller: ptr.To(true),
-	}}
-	tmkmsChild := func() *ChainNode {
-		return &ChainNode{
-			ObjectMeta: metav1.ObjectMeta{Name: "cns-validator", OwnerReferences: ownedByNodeSet},
-			Spec: ChainNodeSpec{Validator: &ValidatorConfig{
-				Init: init(),
-				TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-					Address:     "https://vault:8200",
-					Key:         "myval",
-					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-				}}},
-			}},
-			Status: ChainNodeStatus{ChainID: "test-localnet"},
-		}
-	}
-
-	// tmKMS sidecar -> parent-owned cosmosigner: the child drops TmKMS and gains the target marker.
-	migrated := tmkmsChild()
+	migrated := old.DeepCopy()
 	migrated.Status = ChainNodeStatus{}
-	migrated.Spec.Validator.TmKMS = nil
+	migrated.Spec.Validator.PrivateKeySecret = nil
 	migrated.Spec.RemoteSignerTarget = true
-	_, err := migrated.Validate(tmkmsChild())
-	assert.NoError(t, err)
+	_, err := migrated.Validate(old)
+	require.NoError(t, err)
 
-	// The relaxation is scoped to the signing key: genesis configuration stays immutable.
 	changedStake := migrated.DeepCopy()
 	changedStake.Spec.Validator.Init.StakeAmount = "2unibi"
-	_, err = changedStake.Validate(tmkmsChild())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "immutable after genesis")
+	_, err = changedStake.Validate(old)
+	require.ErrorContains(t, err, "immutable after genesis")
 
-	// Without either signer marker the signing key stays immutable: dropping tmKMS for a local key is
-	// still rejected, so this does not become a blanket escape hatch.
 	local := migrated.DeepCopy()
 	local.Spec.RemoteSignerTarget = false
-	_, err = local.Validate(tmkmsChild())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "immutable after genesis")
+	_, err = local.Validate(old)
+	require.ErrorContains(t, err, "immutable after genesis")
 }
 
 // TestChainNodeValidateRejectsInitChangeNoWebhook verifies the no-webhook reconcile path (Validate with

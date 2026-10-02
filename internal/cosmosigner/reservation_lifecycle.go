@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 )
 
 // ReservationOwnerFinalizer keeps a controller root available until its signing paths are gone and
@@ -107,6 +107,10 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	oneShotNames := make([]string, 0)
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
+		if isLegacyTmKMSOneShotName(job.GetName()) && (managedSigningOneShotBelongsToRoot(job.GetName(), job.GetLabels(), owner) ||
+			metav1.IsControlledBy(job, owner) || controlledByAnyUID(job, childControllerUIDs)) {
+			return false, fmt.Errorf("legacy tmKMS Job %s/%s must be removed before reservation release", job.GetNamespace(), job.GetName())
+		}
 		if controlledByAnyUID(job, childControllerUIDs) {
 			if job.GetUID() != "" {
 				childWorkloadUIDs[job.GetUID()] = struct{}{}
@@ -129,6 +133,20 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	podNames := make([]string, 0)
 	for i := range ownedPods.Items {
 		pod := &ownedPods.Items[i]
+		helperName := pod.GetName()
+		if !isManagedSigningOneShotName(helperName) {
+			if jobName, ok := managedSigningOneShotPodJobName(helperName); ok {
+				helperName = jobName
+			}
+		}
+		if isLegacyTmKMSOneShotName(helperName) && (managedSigningOneShotBelongsToRoot(helperName, pod.GetLabels(), owner) ||
+			metav1.IsControlledBy(pod, owner) || controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs)) {
+			// Terminal Pods cannot sign and must not hold their owner behind its finalizer.
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			return false, fmt.Errorf("legacy tmKMS Pod %s/%s must be removed before reservation release", pod.GetNamespace(), pod.GetName())
+		}
 		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) ||
 			(controlledByAnyUID(pod, foreignSignerUIDs) && !labelsAttributeToChainNode(pod.GetLabels(), owner)) {
 			continue
@@ -361,10 +379,13 @@ func sortedUnique(values []string) []string {
 	return result
 }
 
+// Legacy tmKMS helpers still block key reuse after upgrades, even though tmKMS is unsupported.
+func isLegacyTmKMSOneShotName(name string) bool {
+	return strings.HasSuffix(name, "-tmkms-generate-identity") || strings.HasSuffix(name, "-tmkms-vault-upload")
+}
+
 func isManagedSigningOneShotName(name string) bool {
-	return strings.HasSuffix(name, "-tmkms-generate-identity") ||
-		strings.HasSuffix(name, "-tmkms-vault-upload") ||
-		strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
+	return isLegacyTmKMSOneShotName(name) || strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
 }
 
 func managedSigningOneShotPodJobName(name string) (string, bool) {

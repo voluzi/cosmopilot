@@ -16,14 +16,12 @@ import (
 )
 
 var imageOverrideEnvNames = map[string]string{
-	"nodeUtilsImage":         "NODE_UTILS_IMAGE",
-	"cosmoGuardImage":        "COSMOGUARD_IMAGE",
-	"cosmoseedImage":         "COSMOSEED_IMAGE",
-	"cosmosignerImage":       "COSMOSIGNER_IMAGE",
-	"dataExporterImage":      "DATA_EXPORTER_IMAGE",
-	"utilityImage":           "UTILITY_IMAGE",
-	"tmkmsImage":             "TMKMS_IMAGE",
-	"vaultTokenRenewerImage": "VAULT_TOKEN_RENEWER_IMAGE",
+	"nodeUtilsImage":    "NODE_UTILS_IMAGE",
+	"cosmoGuardImage":   "COSMOGUARD_IMAGE",
+	"cosmoseedImage":    "COSMOSEED_IMAGE",
+	"cosmosignerImage":  "COSMOSIGNER_IMAGE",
+	"dataExporterImage": "DATA_EXPORTER_IMAGE",
+	"utilityImage":      "UTILITY_IMAGE",
 }
 
 func TestCompanionImageValuesAreOptionalOverrides(t *testing.T) {

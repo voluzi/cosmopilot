@@ -19,7 +19,7 @@ func TestIsNewestReleaseOnlyMovesLatestForTheNewestStableRelease(t *testing.T) {
 	for _, tag := range []string{
 		"v3.1.0", "v3.2.0", "v3.2.1", "v3.10.0-rc.1", "v2.9.9",
 		"node-utils/v2.9.3", "node-utils/v3.0.0-beta.2", "node-utils/v3.0.0", "node-utils/v10.0.0-beta.1",
-		"node-tools/v1.4.3", "node-tools/v1.10.0", "chart/v9.9.9", "vault-renewer/v1.0.1",
+		"node-tools/v1.4.3", "node-tools/v1.10.0", "chart/v9.9.9",
 	} {
 		git(t, repo, "tag", tag)
 	}
@@ -38,7 +38,6 @@ func TestIsNewestReleaseOnlyMovesLatestForTheNewestStableRelease(t *testing.T) {
 		{prefix: "node-utils/", version: "2.9.3", want: "false"},
 		{prefix: "node-tools/", version: "1.10.0", want: "true"}, // numeric, not lexical, order
 		{prefix: "node-tools/", version: "1.4.3", want: "false"},
-		{prefix: "vault-renewer/", version: "1.0.1", want: "true"},
 	}
 
 	script, err := filepath.Abs(filepath.Join("..", "..", ".github", "scripts", "is-newest-release.sh"))
@@ -61,7 +60,7 @@ func TestIsNewestReleaseOnlyMovesLatestForTheNewestStableRelease(t *testing.T) {
 func TestReleaseWorkflowsGateLatestOnTheNewestRelease(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"node-utils", "node-tools", "data-exporter", "vault-renewer"} {
+	for _, name := range []string{"node-utils", "node-tools", "data-exporter"} {
 		data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name+"-docker.yaml"))
 		if err != nil {
 			t.Fatalf("read %s workflow: %v", name, err)
@@ -85,7 +84,7 @@ func TestReleaseWorkflowsGateLatestOnTheNewestRelease(t *testing.T) {
 
 	// Overlapping runs would decide "newest" from a stale tag list, so every release workflow is
 	// serialized and keeps all pending tags.
-	for _, name := range []string{"node-utils-docker", "node-tools-docker", "data-exporter-docker", "vault-renewer-docker", "release"} {
+	for _, name := range []string{"node-utils-docker", "node-tools-docker", "data-exporter-docker", "release"} {
 		data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name+".yaml"))
 		if err != nil {
 			t.Fatalf("read %s workflow: %v", name, err)

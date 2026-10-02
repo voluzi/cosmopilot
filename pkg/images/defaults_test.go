@@ -5,19 +5,17 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/utils"
+	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
 func TestDefaultsArePinned(t *testing.T) {
 	defaults := map[string]string{
-		"node-utils":          DefaultNodeUtilsImage,
-		"cosmoseed":           DefaultCosmoseedImage,
-		"cosmoguard":          DefaultCosmoGuardImage,
-		"cosmosigner":         DefaultCosmosignerImage,
-		"utility":             DefaultUtilityImage,
-		"data-exporter":       DefaultDataExporterImage,
-		"tmkms":               DefaultTmKmsImage,
-		"vault-token-renewer": DefaultVaultTokenRenewerImage,
+		"node-utils":    DefaultNodeUtilsImage,
+		"cosmoseed":     DefaultCosmoseedImage,
+		"cosmoguard":    DefaultCosmoGuardImage,
+		"cosmosigner":   DefaultCosmosignerImage,
+		"utility":       DefaultUtilityImage,
+		"data-exporter": DefaultDataExporterImage,
 	}
 
 	for name, image := range defaults {

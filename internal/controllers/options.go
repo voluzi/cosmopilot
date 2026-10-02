@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 const LabelWorkerName = "worker-name"
 
 type ControllerRunOptions struct {
+	LegacySignerGuard        LegacySignerGuard
 	WorkerCount              int
 	WorkerName               string
 	NodeUtilsImage           string
@@ -19,8 +20,6 @@ type ControllerRunOptions struct {
 	CosmosignerImage         string
 	DataExporterImage        string
 	UtilityImage             string
-	TmKmsImage               string
-	VaultTokenRenewerImage   string
 	ReleaseName              string
 	DisruptionCheckEnabled   bool
 	DisruptionMaxUnavailable int
@@ -91,20 +90,6 @@ func (opts *ControllerRunOptions) GetCosmosignerImage() string {
 		return images.DefaultCosmosignerImage
 	}
 	return opts.CosmosignerImage
-}
-
-func (opts *ControllerRunOptions) GetTmKmsImage() string {
-	if opts == nil || opts.TmKmsImage == "" {
-		return images.DefaultTmKmsImage
-	}
-	return opts.TmKmsImage
-}
-
-func (opts *ControllerRunOptions) GetVaultTokenRenewerImage() string {
-	if opts == nil || opts.VaultTokenRenewerImage == "" {
-		return images.DefaultVaultTokenRenewerImage
-	}
-	return opts.VaultTokenRenewerImage
 }
 
 func (opts *ControllerRunOptions) GetDefaultPriorityClassName() string {

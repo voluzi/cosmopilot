@@ -97,3 +97,14 @@ func TestValidateReservedStatefulChildName(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateReservedLegacyTmKMSHelperNames(t *testing.T) {
+	for _, name := range []string{"a-tmkms-generate-identity", "a-tmkms-vault-upload"} {
+		if err := ValidateReservedResourceName(name, true); err == nil {
+			t.Fatalf("legacy helper name %q must be rejected on create", name)
+		}
+		if err := ValidateReservedResourceName(name, false); err != nil {
+			t.Fatalf("existing name must remain valid on update: %v", err)
+		}
+	}
+}

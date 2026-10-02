@@ -2,9 +2,6 @@ package chainnode
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,17 +15,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
 )
 
 func TestReconcileCosmosignerMigrationWaitsForTerminatingPod(t *testing.T) {
@@ -1305,85 +1300,6 @@ func TestPreflightCosmosignerFallbackRequiresMatchingLocalPublicKey(t *testing.T
 	require.ErrorContains(t, err, "slash-protection state")
 }
 
-func TestPreflightCosmosignerFallbackAlwaysVerifiesTmKMSPublicKey(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: "https://vault:8200",
-				Key:     "fallback-key",
-				TokenSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
-					Key:                  "token",
-				},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{
-			CosmosignerPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-		},
-	}
-	chainNode.Status.CosmosignerServingIdentity = chainNode.EffectiveSigningIdentity()
-	require.True(t, chainNode.ValidatorResolvesSigningIdentity(chainNode.Status.CosmosignerServingIdentity))
-	token := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: "default"},
-		Data:       map[string][]byte{"token": []byte("vault-token")},
-	}
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	var createdPod string
-	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		statusCode := http.StatusNotFound
-		body := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}`
-		if req.Method == http.MethodPost {
-			data, readErr := io.ReadAll(req.Body)
-			require.NoError(t, readErr)
-			createdPod = string(data)
-			statusCode = http.StatusInternalServerError
-			body = `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","message":"forced pubkey failure","code":500}`
-		}
-		return &http.Response{
-			StatusCode: statusCode,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Request:    req,
-		}, nil
-	})
-	clientSet, err := kubernetes.NewForConfig(&rest.Config{
-		Host: "https://kubernetes.invalid", ContentConfig: rest.ContentConfig{ContentType: "application/json"}, Transport: transport,
-	})
-	require.NoError(t, err)
-	r := &Reconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(token).Build(),
-		Scheme: scheme, ClientSet: clientSet,
-	}
-
-	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.NotContains(t, createdPod, "VAULT_SKIP_VERIFY")
-	require.Contains(t, createdPod, `"--vault-key-version","1"`)
-}
-
-func TestPreflightCosmosignerFallbackRejectsUnverifiedVaultTLS(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: "https://vault:8200", Key: "fallback-key", SkipCertificateVerify: true,
-				TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"}, Key: "token"},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
-	}
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
-
-	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.ErrorContains(t, err, "TLS verification")
-}
-
 func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {
 	vault := &appsv1.CosmosignerVaultBackend{
 		Address: "https://vault:8200", KeyName: "validator-key", UploadGenerated: true,
@@ -1414,50 +1330,6 @@ func TestCosmosignerPublicKeyUsesVaultAfterImportedSourceRemoval(t *testing.T) {
 	require.Contains(t, err.Error(), "validator-key")
 }
 
-func TestPreflightCosmosignerFallbackRequiresTmKMSSecrets(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: "https://vault:8200",
-				Key:     "validator-key",
-				TokenSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
-					Key:                  "token",
-				},
-				CertificateSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-ca"},
-					Key:                  "ca.crt",
-				},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
-	}
-	chainNode.Status.CosmosignerServingIdentity = chainNode.EffectiveSigningIdentity()
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := &Reconciler{Client: client, Scheme: scheme}
-
-	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "tmKMS Vault token")
-	require.NoError(t, client.Create(context.Background(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-token", Namespace: chainNode.Namespace},
-		Data:       map[string][]byte{"token": []byte("token")},
-	}))
-	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "tmKMS Vault certificate")
-	require.NoError(t, client.Create(context.Background(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "tmkms-ca", Namespace: chainNode.Namespace},
-		Data:       map[string][]byte{"ca.crt": []byte("certificate")},
-	}))
-	err = r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.ErrorContains(t, err, "Kubernetes clientset")
-}
-
 func TestPreflightCosmosignerFallbackUsesRecordedServingIdentity(t *testing.T) {
 	chainNode := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
@@ -1474,29 +1346,6 @@ func TestPreflightCosmosignerFallbackUsesRecordedServingIdentity(t *testing.T) {
 	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validator-key")
-}
-
-func TestPreflightCosmosignerFallbackRequiresTmKMSTarget(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
-		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				TokenSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "tmkms-token"},
-					Key:                  "token",
-				},
-			},
-		}}}},
-		Status: appsv1.ChainNodeStatus{CosmosignerValidatorTargeted: ptr.To(true)},
-	}
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, corev1.AddToScheme(scheme))
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
-
-	err := r.preflightCosmosignerFallback(context.Background(), chainNode)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "address and key")
 }
 
 func TestCosmosignerBackendRejectsMalformedSoftwareKey(t *testing.T) {
@@ -1660,7 +1509,7 @@ func TestStandaloneTargetPodLabel(t *testing.T) {
 	}
 }
 
-func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
+func TestRemoteSignerTargetPodWaitsForSignerConnection(t *testing.T) {
 	const (
 		namespace      = "default"
 		nodeUtilsImage = "node-utils:test"
@@ -1742,9 +1591,9 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 				return
 			}
 
-			require.NotNil(t, gate, "remote-signer target must wait for discovery publication")
+			require.NotNil(t, gate, "remote-signer target must wait for a signer connection")
 			assert.Equal(t, nodeUtilsImage, gate.Image)
-			assert.Equal(t, []string{"wait-for-dns", tc.wantDNSName, "$(POD_IP)", "25s"}, gate.Args)
+			assert.Equal(t, []string{"wait-for-signer", "26659", tc.wantDNSName, "$(POD_IP)", "25s"}, gate.Args)
 			assert.Equal(t, corev1.TerminationMessageFallbackToLogsOnError, gate.TerminationMessagePolicy)
 			assert.Equal(t, resource.MustParse("10m"), gate.Resources.Requests[corev1.ResourceCPU])
 			assert.Equal(t, resource.MustParse("16Mi"), gate.Resources.Requests[corev1.ResourceMemory])
@@ -1773,7 +1622,7 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 			require.NotNil(t, gate.Env[0].ValueFrom.FieldRef)
 			assert.Equal(t, "status.podIP", gate.Env[0].ValueFrom.FieldRef.FieldPath)
 
-			// The gate is a narrow probe: `node-utils wait-for-dns` reads no server configuration, so
+			// The gate is a narrow probe: `node-utils wait-for-signer` reads no server configuration, so
 			// it must keep mounting nothing. Mounting the config volume here would be the wrong fix
 			// for the missing /config/upgrades.json this container used to fail on.
 			assert.Empty(t, gate.VolumeMounts, "the discovery gate must not mount runtime configuration")
@@ -1790,96 +1639,14 @@ func TestRemoteSignerTargetPodWaitsForDiscoveryPublication(t *testing.T) {
 			}
 			require.NotEqual(t, -1, nodeUtilsIndex, "the node-utils sidecar must be present")
 			assert.Greater(t, gateIndex, nodeUtilsIndex,
-				"the gate must start after the node-utils sidecar, which is the only thing that can confirm an inbound signer connection")
+				"the gate must start after the node-utils sidecar")
 			assert.Equal(t, len(pod.Spec.InitContainers)-1, gateIndex,
-				"the gate must be the last init container, so the app starts only once discovery is published")
-		})
-	}
-}
-
-func TestNodeUtilsSignerPeerDNSRendering(t *testing.T) {
-	const namespace = "default"
-	tests := []struct {
-		name    string
-		node    *appsv1.ChainNode
-		wantDNS string
-	}{
-		{
-			name: "standalone Cosmosigner target",
-			node: &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: namespace},
-				Spec:       appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{}},
-			},
-			wantDNS: "solo-signer.default.svc",
-		},
-		{
-			name: "ChainNodeSet Cosmosigner target",
-			node: &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "mychain-sentries-0",
-					Namespace: namespace,
-					Labels: map[string]string{
-						controllers.LabelChainNodeSet:      "mychain",
-						controllers.LabelCosmosignerTarget: "mychain-sentries-signer",
-					},
-				},
-				Spec: appsv1.ChainNodeSpec{RemoteSignerTarget: true},
-			},
-			wantDNS: "mychain-sentries-signer.default.svc",
-		},
-		{
-			name: "ordinary node",
-			node: &appsv1.ChainNode{
-				ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: namespace},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			genesisConfigMap := "genesis"
-			tt.node.Spec.Genesis = &appsv1.GenesisConfig{ConfigMap: &genesisConfigMap}
-			tt.node.Spec.App = appsv1.AppSpec{Image: "chain", App: "chaind"}
-			tt.node.Status = appsv1.ChainNodeStatus{ChainID: "test-1", NodeID: "node-id"}
-
-			scheme := runtime.NewScheme()
-			require.NoError(t, appsv1.AddToScheme(scheme))
-			require.NoError(t, corev1.AddToScheme(scheme))
-			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: tt.node.Name, Namespace: namespace}}
-			r := &Reconciler{
-				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(config).Build(),
-				Scheme: scheme,
-				opts:   &controllers.ControllerRunOptions{NodeUtilsImage: "node-utils:test"},
-			}
-
-			pod, err := r.getPodSpec(context.Background(), tt.node, "config-hash", "test-shutdown-secret")
-			require.NoError(t, err)
-			var nodeUtils *corev1.Container
-			for i := range pod.Spec.InitContainers {
-				if pod.Spec.InitContainers[i].Name == nodeUtilsContainerName {
-					nodeUtils = &pod.Spec.InitContainers[i]
-					break
+				"the gate must be the last init container")
+			for _, init := range pod.Spec.InitContainers {
+				for _, env := range init.Env {
+					assert.NotContains(t, []string{"TMKMS_PROXY", "SIGNER_PEER_DNS"}, env.Name)
 				}
 			}
-			require.NotNil(t, nodeUtils)
-			require.NotNil(t, nodeUtils.RestartPolicy)
-			assert.Equal(t, corev1.ContainerRestartPolicyAlways, *nodeUtils.RestartPolicy)
-
-			var signerDNS string
-			var signerDNSSet bool
-			for _, env := range nodeUtils.Env {
-				if env.Name == "SIGNER_PEER_DNS" {
-					signerDNS = env.Value
-					signerDNSSet = true
-					break
-				}
-			}
-			if tt.wantDNS == "" {
-				assert.False(t, signerDNSSet, "ordinary nodes must not set SIGNER_PEER_DNS")
-				return
-			}
-			assert.True(t, signerDNSSet, "Cosmosigner targets must set SIGNER_PEER_DNS")
-			assert.Equal(t, tt.wantDNS, signerDNS)
 		})
 	}
 }

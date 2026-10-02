@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/environ"
-	"github.com/voluzi/cosmopilot/v4/pkg/nodeutils"
+	"github.com/voluzi/cosmopilot/v5/pkg/environ"
+	"github.com/voluzi/cosmopilot/v5/pkg/nodeutils"
 )
 
 var mockMode bool
@@ -41,16 +41,6 @@ func init() {
 	flag.StringVar(&logLevel, "log-level",
 		environ.GetString("LOG_LEVEL", "info"),
 		"log level",
-	)
-
-	flag.BoolVar(&enableTmkmsProxy, "tmkms-proxy",
-		environ.GetBool("TMKMS_PROXY", false),
-		"enable tmkms proxy",
-	)
-
-	flag.StringVar(&signerPeerDNS, "signer-peer-dns",
-		environ.GetString("SIGNER_PEER_DNS", ""),
-		"DNS name whose addresses are trusted to release the remote-signer startup gate",
 	)
 
 	flag.StringVar(&nodeBinaryName, "node-binary-name",

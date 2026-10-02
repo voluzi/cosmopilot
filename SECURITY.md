@@ -34,8 +34,9 @@ depend on. A few notes on how it is designed and how to run it safely:
 - **Key management:** consensus and account keys are stored in Kubernetes Secrets.
   For validators, prefer [Cosmosigner](docs/docs/usage/cosmosigner.md) with its
   HashiCorp Vault backend and a pre-provisioned Transit key so private keys never live
-  next to the node. TMKMS and its `vault-token-renewer` sidecar are deprecated and retained
-  only for legacy configurations.
+  next to the node. Signer-target nodes require a CNI that enforces NetworkPolicy with
+  `endPort` support to restrict TCP 26659 to their signer pods. See the
+  [5.0.0 upgrade guide](docs/docs/getting-started/upgrading-to-5.md) before upgrading.
 - **RBAC:** the operator runs with the minimum cluster permissions it needs, defined in
   the Helm chart's RBAC templates.
 - **Exposing endpoints:** only expose node APIs (RPC, LCD, gRPC, EVM) that you intend

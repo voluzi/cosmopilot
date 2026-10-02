@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 func TestImageGetters(t *testing.T) {
@@ -23,8 +23,6 @@ func TestImageGetters(t *testing.T) {
 		{name: "cosmosigner", defaultImg: images.DefaultCosmosignerImage, getter: (*ControllerRunOptions).GetCosmosignerImage, configured: func(image string) *ControllerRunOptions { return &ControllerRunOptions{CosmosignerImage: image} }},
 		{name: "data-exporter", defaultImg: images.DefaultDataExporterImage, getter: (*ControllerRunOptions).GetDataExporterImage, configured: func(image string) *ControllerRunOptions { return &ControllerRunOptions{DataExporterImage: image} }},
 		{name: "utility", defaultImg: images.DefaultUtilityImage, getter: (*ControllerRunOptions).GetUtilityImage, configured: func(image string) *ControllerRunOptions { return &ControllerRunOptions{UtilityImage: image} }},
-		{name: "tmkms", defaultImg: images.DefaultTmKmsImage, getter: (*ControllerRunOptions).GetTmKmsImage, configured: func(image string) *ControllerRunOptions { return &ControllerRunOptions{TmKmsImage: image} }},
-		{name: "vault-token-renewer", defaultImg: images.DefaultVaultTokenRenewerImage, getter: (*ControllerRunOptions).GetVaultTokenRenewerImage, configured: func(image string) *ControllerRunOptions { return &ControllerRunOptions{VaultTokenRenewerImage: image} }},
 	}
 
 	for _, tt := range tests {

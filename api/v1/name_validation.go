@@ -11,11 +11,10 @@ import (
 )
 
 // reservedPodVolumeNames are the built-in volume names of the pods that mount additional volumes
-// (internal/controllers/chainnode/pod.go, internal/tmkms, internal/chainutils/data.go). An additional
+// (internal/controllers/chainnode/pod.go, internal/chainutils/data.go). An additional
 // volume with one of these names would collide with it.
 var reservedPodVolumeNames = []string{
 	"app-empty-dir", "data", "config-empty-dir", "config", "node-key", "upgrades-config", "genesis", "priv-key",
-	"vault-token", "vault-ca-cert", "tmkms-identity", "tmkms-config", "tmkms-data",
 	// Data-init pod (internal/chainutils/data.go), which also mounts the additional volumes.
 	"home", "temp",
 }
@@ -67,16 +66,17 @@ func validateAppBinaryName(path, app string) error {
 		return nil
 	}
 	if slices.Contains(reservedPodContainerNames, app) {
-		return fmt.Errorf("%s %q collides with a built-in pod container", path, app)
+		return fmt.Errorf("%s %q is reserved for the node Pod", path, app)
 	}
 	return validateDNS1123Label(path, app)
 }
 
-// reservedPodContainerNames are the node Pod's built-in container names (internal/controllers/chainnode
-// and internal/tmkms); the app container is named after .spec.app.app. A sidecar with one of these names
-// would collide with it.
+// reservedPodContainerNames are the node Pod's built-in container names; the app container is named
+// after .spec.app.app. A sidecar with one of these names would collide with it.
 var reservedPodContainerNames = []string{
-	"node-utils", "wait-cosmosigner-discovery", "link-genesis", "tmkms", "vault-token-renewer",
+	"node-utils", "wait-cosmosigner-discovery", "link-genesis",
+	// The legacy signer guard treats this name as a signing artifact and would refuse reconciliation.
+	"tmkms",
 }
 
 func validateSidecarNames(path string, config *Config, appName string) error {
@@ -90,7 +90,7 @@ func validateSidecarNames(path string, config *Config, appName string) error {
 			return err
 		}
 		if sidecar.Name == appName || slices.Contains(reservedPodContainerNames, sidecar.Name) {
-			return fmt.Errorf("%s %q collides with a built-in pod container", p, sidecar.Name)
+			return fmt.Errorf("%s %q is reserved for the node Pod", p, sidecar.Name)
 		}
 		if prev, ok := seen[sidecar.Name]; ok {
 			return fmt.Errorf("%s %q duplicates %s.sidecars[%d].name", p, sidecar.Name, path, prev)

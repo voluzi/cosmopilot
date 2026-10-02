@@ -88,9 +88,8 @@ type ChainNodeSetSpec struct {
 	// +optional
 	Cosmoseed *CosmoseedConfig `json:"cosmoseed,omitempty"`
 
-	// Cosmosigner deploys a managed cosmosigner remote signer that signs for one or more node
-	// groups (or the validator group by default). Targeted nodes listen for the signer instead of
-	// mounting a local key or running TmKMS.
+	// Cosmosigner deploys a managed remote signer for one or more node groups
+	// (or the validator group by default). Targeted nodes listen for the signer instead of mounting a local key.
 	// +optional
 	Cosmosigner *Cosmosigner `json:"cosmosigner,omitempty"`
 }
@@ -305,10 +304,10 @@ type ChainNodeSetValidatorStatus struct {
 	Init bool `json:"init,omitempty"`
 
 	// SigningKeyDigest is a controller-internal fingerprint of a genesis validator's signing
-	// material (resolved private-key secret, tmKMS identity, init chainID and genesis validator
-	// list). It is used to detect disallowed post-genesis changes to the immutable genesis
-	// validator set when the validating webhooks are disabled and no previous spec is available to
-	// diff against. Set only for genesis (init) validators; not meant to be set by hand.
+	// material (resolved private-key secret, init chain ID and genesis validator list).
+	// It detects disallowed post-genesis changes to the immutable genesis validator set
+	// when validating webhooks are disabled and no previous spec is available to compare.
+	// Set only for genesis (init) validators; not meant to be set by hand.
 	// +optional
 	SigningKeyDigest string `json:"signingKeyDigest,omitempty"`
 }
@@ -349,13 +348,6 @@ type NodeSetValidatorConfig struct {
 	// If specified, the pod's scheduling constraints.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
-
-	// TmKMS configuration for signing commits for this validator.
-	// When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.
-	//
-	// Deprecated: use the corresponding Cosmosigner field instead. TmKMS will be removed in a future version.
-	// +optional
-	TmKMS *TmKMS `json:"tmKMS,omitempty"`
 
 	// Configures this node to find a state-sync snapshot on the network and restore from it.
 	// This is disabled by default.

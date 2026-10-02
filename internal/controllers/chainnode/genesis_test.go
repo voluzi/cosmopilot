@@ -12,8 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 )
 
 func TestRecordGenesisDigestRefreshesForManagedSignerMigration(t *testing.T) {
@@ -24,10 +24,8 @@ func TestRecordGenesisDigestRefreshesForManagedSignerMigration(t *testing.T) {
 	original := &appsv1.ChainNode{
 		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"},
 		Spec: appsv1.ChainNodeSpec{Validator: &appsv1.ValidatorConfig{
-			Init: &appsv1.GenesisInitConfig{ChainID: "chain-1", Assets: []string{"1stake"}, StakeAmount: "1stake"},
-			TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: "https://vault:8200", Key: "validator-key", TokenSecret: tokenSecret,
-			}}},
+			PrivateKeySecret: ptr.To("previous-validator-key"),
+			Init:             &appsv1.GenesisInitConfig{ChainID: "chain-1", Assets: []string{"1stake"}, StakeAmount: "1stake"},
 		}},
 		Status: appsv1.ChainNodeStatus{ChainID: "chain-1"},
 	}
@@ -46,7 +44,7 @@ func TestRecordGenesisDigestRefreshesForManagedSignerMigration(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			chainNode := original.DeepCopy()
-			chainNode.Spec.Validator.TmKMS = nil
+			chainNode.Spec.Validator.PrivateKeySecret = nil
 			chainNode.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{Vault: &appsv1.CosmosignerVaultBackend{
 				Address: "https://vault:8200", KeyName: "validator-key", TokenSecret: tokenSecret,
 			}}}

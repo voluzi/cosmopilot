@@ -7,9 +7,9 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/pkg/environ"
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/pkg/environ"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 func validateDisruptionMaxUnavailable(value int) error {
@@ -66,16 +66,6 @@ func init() {
 	flag.StringVar(&runOpts.UtilityImage, "utility-image",
 		environ.GetString("UTILITY_IMAGE", images.DefaultUtilityImage),
 		"utility image to be used by operator-owned helper containers.",
-	)
-
-	flag.StringVar(&runOpts.TmKmsImage, "tmkms-image",
-		environ.GetString("TMKMS_IMAGE", images.DefaultTmKmsImage),
-		"tmkms image to be used by validators configured with TmKMS.",
-	)
-
-	flag.StringVar(&runOpts.VaultTokenRenewerImage, "vault-token-renewer-image",
-		environ.GetString("VAULT_TOKEN_RENEWER_IMAGE", images.DefaultVaultTokenRenewerImage),
-		"vault token renewer image to be used with TmKMS automatic token renewal.",
 	)
 
 	flag.StringVar(&runOpts.WorkerName, "worker-name",

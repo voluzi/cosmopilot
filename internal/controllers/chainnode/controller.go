@@ -21,14 +21,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v4/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v4/internal/datasnapshot"
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v4/pkg/nodeutils"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v5/pkg/nodeutils"
 )
 
 // StatsClientFactory is a function that creates a StatsClient for a given host.
@@ -80,6 +80,7 @@ func (r *Reconciler) SetStatsClientFactory(factory StatsClientFactory) {
 
 // Reconciler reconciles a ChainNode object
 type Reconciler struct {
+	legacySignerGuard controllers.LegacySignerGuard
 	client.Client
 	APIReader         client.Reader
 	ClientSet         *kubernetes.Clientset
@@ -244,6 +245,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		logger.V(1).Info("namespace is being terminated, skipping reconcile")
 		return ctrl.Result{}, nil
+	}
+	guard := &r.legacySignerGuard
+	if r.opts != nil {
+		guard = &r.opts.LegacySignerGuard
+	}
+	if err := guard.RefuseLegacyTmKMS(ctx, r.APIReader, r.recorder, chainNode); err != nil {
+		return ctrl.Result{}, err
 	}
 	if err := r.validateNodeUtilsRunIdentity(chainNode); err != nil {
 		logger.Error(err, "spec is invalid")
@@ -455,20 +463,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	logger.V(1).Info("ensure pod")
 	if err = r.ensurePod(ctx, app, chainNode, configHash); err != nil {
 		return ctrl.Result{}, err
-	}
-	// Keep tmKMS assets while the live pod still references them; disruption protection may defer
-	// replacement even when ensurePod returns successfully.
-	if chainNode.IsSignerTarget() {
-		cleanupSafe, err := r.canCleanupTmKMSConfig(ctx, chainNode)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if cleanupSafe {
-			logger.V(1).Info("cleanup tmKMS config after signing transition")
-			if err = r.ensureTmKMSConfig(ctx, chainNode); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
 	}
 
 	// If the node was set to stop, we will stop here as the pod is not running.

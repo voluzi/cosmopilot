@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
 func testParams() Params {
@@ -180,8 +180,8 @@ func TestStatefulSetShape(t *testing.T) {
 	if !hasNodeID || !hasAdvertise || !hasRollme {
 		t.Fatalf("missing expected env vars: nodeID=%v advertise=%v rollme=%v", hasNodeID, hasAdvertise, hasRollme)
 	}
-	if c.LivenessProbe == nil || c.LivenessProbe.TCPSocket == nil {
-		t.Fatalf("expected TCP liveness probe")
+	if c.LivenessProbe == nil || c.LivenessProbe.HTTPGet == nil {
+		t.Fatalf("expected HTTP liveness probe")
 	}
 }
 

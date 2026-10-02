@@ -8,7 +8,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 )
 
 var _ = Describe("Cosmosigner Webhook Validation", func() {
@@ -112,40 +112,6 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 			nil,
 		)
 		Expect(Framework().Client().Create(Framework().Context(), cs)).To(Succeed())
-	})
-
-	It("rejects a signer and tmKMS on the same targeted validator", func() {
-		cs := newNodeSet(
-			&appsv1.Cosmosigner{Backend: vaultBackend()},
-			[]appsv1.NodeGroupSpec{{Name: "fullnodes"}},
-			&appsv1.NodeSetValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address:     "https://vault:8200",
-				Key:         "myval",
-				TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-			}}}},
-		)
-		err := Framework().Client().Create(Framework().Context(), cs)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
-	})
-
-	It("rejects a standalone ChainNode with both cosmosigner and tmKMS", func() {
-		cn := &appsv1.ChainNode{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
-			Spec: appsv1.ChainNodeSpec{
-				App:     DefaultChainNodeTestApp,
-				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
-				Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-					Address:     "https://vault:8200",
-					Key:         "myval",
-					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-				}}}},
-				Cosmosigner: &appsv1.Cosmosigner{Backend: vaultBackend()},
-			},
-		}
-		err := Framework().Client().Create(Framework().Context(), cn)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
 	})
 
 	It("rejects targeting more than one validator group", func() {
@@ -308,24 +274,6 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		err = Framework().Client().Create(Framework().Context(), gateway)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("standalone ChainNode cosmosigner Service"))
-	})
-
-	It("rejects two validators using the same Vault key via tmKMS and cosmosigner", func() {
-		cs := newNodeSet(
-			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: vaultBackend()},
-			[]appsv1.NodeGroupSpec{
-				{Name: "fullnodes"},
-				{Name: "val", Validator: &appsv1.NodeSetValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-					Address:     "https://vault:8200",
-					Key:         "myval", // same key the cosmosigner vaultBackend() uses
-					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-				}}}}},
-			},
-			nil,
-		)
-		err := Framework().Client().Create(Framework().Context(), cs)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("same Vault signing key"))
 	})
 
 	It("rejects a standalone software signer on a non-validator node without a key", func() {
@@ -574,43 +522,6 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}).Should(ContainSubstring("validator cannot be removed"))
 	})
 
-	It("allows a same-key migration from tmKMS to cosmosigner after the chain is established", func() {
-		// A validator signing via tmKMS on the same Vault key it later uses through cosmosigner is a
-		// supported migration: the effective key is unchanged, so it must be accepted.
-		cn := &appsv1.ChainNode{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
-			Spec: appsv1.ChainNodeSpec{
-				App:     DefaultChainNodeTestApp,
-				Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")},
-				Validator: &appsv1.ValidatorConfig{TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-					Address:     "https://vault:8200",
-					Key:         "myval",
-					TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-				}}}},
-			},
-		}
-		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
-		Eventually(func() error {
-			fresh := &appsv1.ChainNode{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
-				return err
-			}
-			fresh.Status.ChainID = "test-chain-1"
-			return Framework().Client().Status().Update(Framework().Context(), fresh)
-		}).Should(Succeed())
-
-		// Switch to cosmosigner pointing at the same Vault transit key (default mount, no namespace).
-		Eventually(func() error {
-			fresh := &appsv1.ChainNode{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
-				return err
-			}
-			fresh.Spec.Validator.TmKMS = nil
-			fresh.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: vaultBackend()} // keyName "myval", same address
-			return Framework().Client().Update(Framework().Context(), fresh)
-		}).Should(Succeed())
-	})
-
 	It("rejects a sentry software key that collides with another validator's key", func() {
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Backend: appsv1.CosmosignerBackend{
@@ -706,46 +617,6 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 			return Framework().Client().Update(Framework().Context(), fresh)
 		}).Should(Succeed())
 	})
-
-	It("allows an init validator to migrate tmKMS to cosmosigner on the same key", func() {
-		cn := &appsv1.ChainNode{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name},
-			Spec: appsv1.ChainNodeSpec{
-				App: DefaultChainNodeTestApp,
-				Validator: &appsv1.ValidatorConfig{
-					Init: &appsv1.GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"10000000unibi"}, StakeAmount: "1000000unibi"},
-					TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-						Address:     "https://vault:8200",
-						Key:         "myval",
-						TokenSecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-					}}},
-				},
-			},
-		}
-		Expect(Framework().Client().Create(Framework().Context(), cn)).To(Succeed())
-		Eventually(func() error {
-			fresh := &appsv1.ChainNode{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
-				return err
-			}
-			fresh.Status.ChainID = "test-localnet"
-			return Framework().Client().Status().Update(Framework().Context(), fresh)
-		}).Should(Succeed())
-		Eventually(func() error {
-			fresh := &appsv1.ChainNode{}
-			if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(cn), fresh); err != nil {
-				return err
-			}
-			fresh.Spec.Validator.TmKMS = nil
-			fresh.Spec.Cosmosigner = &appsv1.Cosmosigner{Backend: vaultBackend()} // same Vault key "myval", uploadGenerated=false
-			return Framework().Client().Update(Framework().Context(), fresh)
-		}).Should(Succeed())
-	})
-
-	// NOTE: the nodeset init-validator same-key migration (tmKMS→cosmosigner) is covered by a unit
-	// test on Validate directly (api/v1/cosmosigner_webhook_unit_test.go): creating a live init
-	// ChainNodeSet in envtest blocks a reconcile worker for minutes (its validator can never run
-	// here), starving the other specs.
 
 	It("rejects a standalone ChainNode with the reserved -signer name suffix", func() {
 		cn := &appsv1.ChainNode{

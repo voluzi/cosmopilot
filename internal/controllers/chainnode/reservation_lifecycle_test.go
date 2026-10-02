@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	appsk8sv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -20,8 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
 )
 
 func TestPrepareConsensusKeyReservationOwnerFinalizesChainNodeSetRoot(t *testing.T) {
@@ -248,7 +250,7 @@ func TestFinalizeConsensusKeyReservationOwnerWaitsForManagedJobPod(t *testing.T)
 		},
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: owner.Name + "-tmkms-vault-upload", Namespace: owner.Namespace, UID: "job-uid",
+		Name: owner.Name + "-cosmosigner-import", Namespace: owner.Namespace, UID: "job-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name,
 			UID: owner.UID, Controller: ptr.To(true),
@@ -337,7 +339,7 @@ func TestEnsureConsensusKeyReservationEmitsBlockedStaleRecoveryEvent(t *testing.
 		},
 	}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: owner.Name + "-tmkms-vault-upload", Namespace: owner.Namespace, UID: "job-uid",
+		Name: owner.Name + "-cosmosigner-import", Namespace: owner.Namespace, UID: "job-uid",
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name,
 			UID: "old-owner-uid", Controller: ptr.To(true),
@@ -512,6 +514,23 @@ func TestReconcileConsensusKeyReservationClaimsBlocksUnsafeStandaloneSigningPath
 		},
 	}
 
+	for _, marker := range []string{"-tmkms-generate-identity", "-tmkms-vault-upload"} {
+		tests = append(tests,
+			struct {
+				name   string
+				object func(*appsv1.ChainNode) client.Object
+			}{name: marker + " Job", object: func(owner *appsv1.ChainNode) client.Object {
+				return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: owner.Name + marker, Namespace: owner.Namespace, UID: "job-uid"}}
+			}},
+			struct {
+				name   string
+				object func(*appsv1.ChainNode) client.Object
+			}{name: marker + " generated Pod", object: func(owner *appsv1.ChainNode) client.Object {
+				return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: owner.Name + marker + "-generated", Namespace: owner.Namespace, UID: "pod-uid"}}
+			}},
+		)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := reservationLifecycleScheme(t)
@@ -606,5 +625,37 @@ func TestFinalizeConsensusKeyReservationOwnerIgnoresSameNameChainNodeSetSigner(t
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(setSigner), &appsk8sv1.StatefulSet{}); err != nil {
 		t.Fatalf("the ChainNodeSet signer must remain: %v", err)
+	}
+}
+
+func TestDeletingOwnerWithTerminalLegacyTmKMSHelper(t *testing.T) {
+	for _, marker := range []string{"-tmkms-generate-identity", "-tmkms-vault-upload"} {
+		for _, phase := range []corev1.PodPhase{corev1.PodSucceeded, corev1.PodFailed} {
+			t.Run(marker+string(phase), func(t *testing.T) {
+				scheme := reservationLifecycleScheme(t)
+				owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{
+					Name: "validator", Namespace: "default", UID: "owner-uid",
+					Finalizers: []string{cosmosigner.ReservationOwnerFinalizer},
+				}}
+				helper := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: owner.Name + marker, Namespace: owner.Namespace, UID: "helper-uid",
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name, UID: owner.UID, Controller: ptr.To(true)}},
+				}, Status: corev1.PodStatus{Phase: phase}}
+				reservation := &appsv1.ConsensusKeyReservation{
+					ObjectMeta: metav1.ObjectMeta{Name: cosmosigner.ConsensusKeyReservationName("chain-1", reservationLifecyclePublicKey), UID: "reservation-uid"},
+					Spec: appsv1.ConsensusKeyReservationSpec{ChainID: "chain-1", PublicKey: reservationLifecyclePublicKey,
+						OwnerUID: owner.UID, OwnerKind: "ChainNode", Namespace: owner.Namespace, OwnerName: owner.Name, Claim: owner.Name},
+				}
+				c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, helper, reservation).Build()
+				require.NoError(t, c.Delete(t.Context(), owner))
+				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(owner), owner))
+				r := &Reconciler{Client: c, APIReader: c, recorder: record.NewFakeRecorder(10)}
+				done, err := r.finalizeConsensusKeyReservationOwner(t.Context(), owner)
+				require.NoError(t, err)
+				require.True(t, done)
+				require.True(t, apierrors.IsNotFound(c.Get(t.Context(), client.ObjectKeyFromObject(owner), &appsv1.ChainNode{})), "owner deletion must complete")
+				require.True(t, apierrors.IsNotFound(c.Get(t.Context(), client.ObjectKeyFromObject(reservation), &appsv1.ConsensusKeyReservation{})), "reservation must be released")
+			})
+		}
 	}
 }

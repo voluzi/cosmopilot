@@ -8,8 +8,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 )
 
 type GenerationChangedPredicate struct {
@@ -17,7 +17,7 @@ type GenerationChangedPredicate struct {
 }
 
 var temporaryPodSuffixes = []string{
-	"config-generator", "data-init", "init-data", "genesis-init", "tmkms-vault-upload", "tmkms-generate-identity",
+	"config-generator", "data-init", "init-data", "genesis-init",
 	"write-file", "create-validator", "signer-pubkey", "signer-import",
 }
 

@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/cosmosigner"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
 )
 
 func (r *Reconciler) prepareConsensusKeyReservationOwner(ctx context.Context, nodeSet *appsv1.ChainNodeSet) (bool, error) {
@@ -342,6 +342,7 @@ func deterministicNodeSetSignerResourceName(name, nodeSetName string) bool {
 	return strings.HasPrefix(name, nodeSetName+"-") && strings.HasSuffix(name, "-signer")
 }
 
+// Legacy tmKMS helpers must block claim retirement until an upgraded cluster is quiescent.
 func managedClaimOneShotName(name, claim string) bool {
 	if !strings.HasPrefix(name, claim+"-") {
 		return false

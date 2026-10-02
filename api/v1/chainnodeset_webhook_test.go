@@ -45,67 +45,6 @@ func TestChainNodeSetValidateRejectsCosmoGuardOnLegacyValidator(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestChainNodeSetValidateWarnsWhenTmKMSIsConfigured(t *testing.T) {
-	tmkms := func(key string) *TmKMS {
-		return &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-			Address: "https://vault:8200",
-			Key:     key,
-		}}}
-	}
-
-	t.Run("legacy validator", func(t *testing.T) {
-		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
-			Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Validator: &NodeSetValidatorConfig{TmKMS: tmkms("legacy-key")},
-		}}
-		warnings, err := nodeSet.Validate(nil)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
-		}, []string(warnings))
-	})
-
-	t.Run("validator group", func(t *testing.T) {
-		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
-			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Nodes: []NodeGroupSpec{{
-				Name:      "validators",
-				Instances: ptr.To(1),
-				Validator: &NodeSetValidatorConfig{TmKMS: tmkms("group-key")},
-			}},
-		}}
-		warnings, err := nodeSet.Validate(nil)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			".spec.nodes[0].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[0].cosmosigner",
-		}, []string(warnings))
-	})
-
-	t.Run("deprecated vault token renewer", func(t *testing.T) {
-		tmkmsConfig := tmkms("legacy-key")
-		tmkmsConfig.Provider.Hashicorp.AutoRenewToken = true
-		groupTmKMSConfig := tmkms("group-key")
-		groupTmKMSConfig.Provider.Hashicorp.AutoRenewToken = true
-		nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
-			Genesis:   &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Validator: &NodeSetValidatorConfig{TmKMS: tmkmsConfig},
-			Nodes: []NodeGroupSpec{{
-				Name:      "validators",
-				Instances: ptr.To(1),
-				Validator: &NodeSetValidatorConfig{TmKMS: groupTmKMSConfig},
-			}},
-		}}
-		warnings, err := nodeSet.Validate(nil)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
-			".spec.validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.cosmosigner, which renews Vault tokens internally",
-			".spec.nodes[0].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[0].cosmosigner",
-			".spec.nodes[0].validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.nodes[0].cosmosigner, which renews Vault tokens internally",
-		}, []string(warnings))
-	})
-}
-
 func TestChainNodeSetValidateGenesis(t *testing.T) {
 	initConfig := &GenesisInitConfig{
 		ChainID:     "test-localnet",
@@ -492,41 +431,11 @@ func TestChainNodeSetValidateGenesisSetImmutableAfterCreation(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestChainNodeSetValidateMultiInstanceValidatorRejectsSharedTmKMS verifies a shared tmKMS config
-// is rejected for a multi-instance validator group, since every instance would sign with the same
-// external consensus key.
-func TestChainNodeSetValidateMultiInstanceValidatorRejectsSharedTmKMS(t *testing.T) {
-	nodeSet := &ChainNodeSet{
-		Spec: ChainNodeSetSpec{
-			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Nodes: []NodeGroupSpec{{
-				Name:      "validators",
-				Instances: ptr.To(2),
-				Validator: &NodeSetValidatorConfig{TmKMS: &TmKMS{}},
-			}},
-		},
-	}
-	_, err := nodeSet.Validate(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tmKMS cannot be set when the validator group has multiple instances")
-
-	// A single-instance group may use tmKMS.
-	nodeSet.Spec.Nodes[0].Instances = ptr.To(1)
-	_, err = nodeSet.Validate(nil)
-	assert.NoError(t, err)
-}
-
 // TestChainNodeSetValidateRejectsDuplicateSigningKeys verifies that two running validators may not
 // reference the same explicit signing material — across validator groups and between the legacy
 // .spec.validator and a group. Validators without explicit signing material (they get generated
 // keys) and validators in zero-instance groups (they do not run) are not rejected.
 func TestChainNodeSetValidateRejectsDuplicateSigningKeys(t *testing.T) {
-	hashicorp := func(key string) *TmKMS {
-		return &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-			Address: "https://vault.example.com:8200",
-			Key:     key,
-		}}}
-	}
 
 	tests := []struct {
 		name        string
@@ -554,35 +463,10 @@ func TestChainNodeSetValidateRejectsDuplicateSigningKeys(t *testing.T) {
 			errContains: "privateKeySecret",
 		},
 		{
-			name: "two single-instance groups sharing a tmKMS key are rejected",
-			nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("same-key")}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("same-key")}},
-			},
-			wantErr:     true,
-			errContains: "tmKMS references the same signing key",
-		},
-		{
 			name: "distinct privateKeySecrets are allowed",
 			nodes: []NodeGroupSpec{
 				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("key-a")}},
 				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("key-b")}},
-			},
-			wantErr: false,
-		},
-		{
-			name: "distinct tmKMS keys are allowed",
-			nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("key-a")}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("key-b")}},
-			},
-			wantErr: false,
-		},
-		{
-			name: "incomplete tmKMS hashicorp providers are ignored",
-			nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{}}}}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{}}}}},
 			},
 			wantErr: false,
 		},
@@ -628,133 +512,6 @@ func TestChainNodeSetValidateRejectsDuplicateSigningKeys(t *testing.T) {
 			},
 		}
 		assert.NoError(t, nodeSet.validateUniqueSigningKeys())
-	})
-}
-
-// TestChainNodeSetValidateTmKMSSkipsDefaultPrivKey verifies that a validator using an external TmKMS
-// signer does not reserve its local priv-key secret name — default OR explicit — when it never mounts
-// that secret (no init, no uploaded create-validator key), so another validator may use that name. The
-// TmKMS signing key identity is still registered, and the priv-key secret IS reserved when the
-// validator actually uses/uploads a local key (init or create-validator with uploadGenerated).
-func TestChainNodeSetValidateTmKMSSkipsDefaultPrivKey(t *testing.T) {
-	hashicorp := func(key string) *TmKMS {
-		return &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-			Address: "https://vault.example.com:8200",
-			Key:     key,
-		}}}
-	}
-
-	t.Run("group TmKMS default priv-key is free for another validator", func(t *testing.T) {
-		// Group "a" uses TmKMS with no privateKeySecret: its default ns-a-0-priv-key must not be
-		// reserved, so group "b" may name it explicitly.
-		nodeSet := &ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
-			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("key-a")}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("ns-a-0-priv-key")}},
-			}},
-		}
-		assert.NoError(t, nodeSet.validateUniqueSigningKeys())
-	})
-
-	t.Run("legacy singleton TmKMS default priv-key is free for another validator", func(t *testing.T) {
-		// The legacy singleton uses TmKMS with no privateKeySecret: its default ns-validator-priv-key
-		// must not be reserved, so a group may name it explicitly.
-		nodeSet := &ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
-			Spec: ChainNodeSetSpec{
-				Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("key-a")},
-				Nodes: []NodeGroupSpec{
-					{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("ns-validator-priv-key")}},
-				},
-			},
-		}
-		assert.NoError(t, nodeSet.validateUniqueSigningKeys())
-	})
-
-	t.Run("TmKMS signing key is still registered", func(t *testing.T) {
-		// Even though the default priv-key is skipped, the TmKMS key identity must still be tracked, so
-		// two TmKMS validators sharing a signing key are rejected.
-		nodeSet := &ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
-			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("shared")}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("shared")}},
-			}},
-		}
-		err := nodeSet.validateUniqueSigningKeys()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "tmKMS references the same signing key")
-	})
-
-	t.Run("unused privateKeySecret on a pure TmKMS validator is not reserved", func(t *testing.T) {
-		// Group "a" signs through TmKMS with no init and no uploaded create-validator key, so its
-		// privateKeySecret is never mounted and must not be reserved — group "b" may use that name.
-		nodeSet := &ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
-			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: hashicorp("key-a"), PrivateKeySecret: ptr.To("shared")}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("shared")}},
-			}},
-		}
-		assert.NoError(t, nodeSet.validateUniqueSigningKeys())
-	})
-
-	t.Run("privateKeySecret is reserved when the TmKMS validator uploads its generated key", func(t *testing.T) {
-		// With create-validator + Hashicorp uploadGenerated, the controller creates and uploads the local
-		// key, so its privateKeySecret is the real consensus key and must be reserved: a collision rejects.
-		upload := hashicorp("key-a")
-		upload.Provider.Hashicorp.UploadGenerated = true
-		nodeSet := &ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
-			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{TmKMS: upload, CreateValidator: &CreateValidatorConfig{}, PrivateKeySecret: ptr.To("shared")}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("shared")}},
-			}},
-		}
-		err := nodeSet.validateUniqueSigningKeys()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "privateKeySecret")
-	})
-
-	t.Run("TmKMS init validator reserves its default priv-key (RequiresPrivKey creates and uploads it)", func(t *testing.T) {
-		initConfig := &GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1u"}, StakeAmount: "1u"}
-		// An init TmKMS validator still creates and uploads the local priv-key via RequiresPrivKey,
-		// so its default ns-a-0-priv-key MUST be reserved and must conflict with a validator that
-		// explicitly names that secret.
-		nodeSet := &ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
-			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{Init: initConfig, TmKMS: hashicorp("vault-key")}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("ns-a-0-priv-key")}},
-			}},
-		}
-		err := nodeSet.validateUniqueSigningKeys()
-		require.Error(t, err, "init TmKMS validator must reserve its default priv-key")
-		assert.Contains(t, err.Error(), "ns-a-0-priv-key")
-	})
-
-	t.Run("TmKMS create-validator uploadGenerated reserves its default priv-key", func(t *testing.T) {
-		// A create-validator TmKMS validator with uploadGenerated creates the local default
-		// priv-key and uploads it to Vault, so the default ns-a-0-priv-key is real signing
-		// material and must conflict with another validator naming it explicitly.
-		nodeSet := &ChainNodeSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "ns"},
-			Spec: ChainNodeSetSpec{Nodes: []NodeGroupSpec{
-				{Name: "a", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{
-					CreateValidator: &CreateValidatorConfig{},
-					TmKMS: &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-						Address:         "https://vault.example.com:8200",
-						Key:             "vault-key",
-						UploadGenerated: true,
-					}}},
-				}},
-				{Name: "b", Instances: ptr.To(1), Validator: &NodeSetValidatorConfig{PrivateKeySecret: ptr.To("ns-a-0-priv-key")}},
-			}},
-		}
-		err := nodeSet.validateUniqueSigningKeys()
-		require.Error(t, err, "uploadGenerated TmKMS create-validator must reserve its default priv-key")
-		assert.Contains(t, err.Error(), "ns-a-0-priv-key")
 	})
 }
 
@@ -850,61 +607,6 @@ func TestChainNodeSetValidateReservesMigratedLocalKeySecret(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "privateKeySecret")
 	})
-}
-
-func TestChainNodeSetValidateRejectsCreateValidatorTmKMSWithoutUploadedKey(t *testing.T) {
-	tmkms := &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-		Address: "https://vault.example.com:8200",
-		Key:     "validator-key",
-	}}}
-
-	mk := func(v *NodeSetValidatorConfig) *ChainNodeSet {
-		return &ChainNodeSet{Spec: ChainNodeSetSpec{
-			Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
-			Nodes: []NodeGroupSpec{{
-				Name:      "validators",
-				Instances: ptr.To(1),
-				Validator: v,
-			}},
-		}}
-	}
-
-	_, err := mk(&NodeSetValidatorConfig{
-		CreateValidator: &CreateValidatorConfig{},
-		TmKMS:           tmkms,
-	}).Validate(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requires hashicorp.uploadGenerated=true")
-
-	// Uploading the generated key to the KMS makes the registered create-validator pubkey match the
-	// key the pod signs with.
-	withUpload := tmkms.DeepCopy()
-	withUpload.Provider.Hashicorp.UploadGenerated = true
-	_, err = mk(&NodeSetValidatorConfig{
-		CreateValidator: &CreateValidatorConfig{},
-		TmKMS:           withUpload,
-	}).Validate(nil)
-	assert.NoError(t, err)
-
-	// An explicit privateKeySecret does NOT exempt the requirement: the pod still signs through the
-	// KMS sidecar and never mounts the secret, so without uploadGenerated the registered (local)
-	// pubkey would not match the KMS signing key.
-	_, err = mk(&NodeSetValidatorConfig{
-		CreateValidator:  &CreateValidatorConfig{},
-		TmKMS:            tmkms,
-		PrivateKeySecret: ptr.To("explicit-priv-key"),
-	}).Validate(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requires hashicorp.uploadGenerated=true")
-
-	// privateKeySecret together with uploadGenerated=true is accepted: that local key is uploaded to
-	// the KMS, so the registered pubkey matches the signing key.
-	_, err = mk(&NodeSetValidatorConfig{
-		CreateValidator:  &CreateValidatorConfig{},
-		TmKMS:            withUpload,
-		PrivateKeySecret: ptr.To("explicit-priv-key"),
-	}).Validate(nil)
-	assert.NoError(t, err)
 }
 
 // TestChainNodeSetValidateAllowsNonInitValidatorAfterGenesis verifies that, once a chain is running
@@ -1940,23 +1642,6 @@ func TestChainNodeSetValidateWarnsOnMisplacedValidatorGroupFields(t *testing.T) 
 		require.Equal(t, []string{
 			".spec.nodes[0].ignoreGroupOnDisruptionChecks has no effect on a validator group",
 			".spec.nodes[0].inheritValidatorGasPrice has no effect on a validator group",
-		}, []string(warnings))
-	})
-
-	t.Run("reported after tmKMS deprecation warnings", func(t *testing.T) {
-		nodeSet := nodeSetWith(NodeGroupSpec{
-			Name:      "validators",
-			Instances: ptr.To(1),
-			Validator: &NodeSetValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{
-				Hashicorp: &TmKmsHashicorpProvider{Address: "https://vault:8200", Key: "group-key"},
-			}}},
-			PDB: &PdbConfig{Enabled: true},
-		})
-		warnings, err := nodeSet.Validate(nil)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			".spec.nodes[0].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[0].cosmosigner",
-			".spec.nodes[0].pdb is ignored because this group has a validator block; set .spec.nodes[0].validator.pdb instead",
 		}, []string(warnings))
 	})
 

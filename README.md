@@ -38,9 +38,9 @@ It automates tasks like node deployment, upgrades, disk-resize, api exposure, ba
     - Automatically configures state-sync between nodes.
     - Simplifies restoring nodes from state-sync snapshots.
 
-- **TMKMS Integration**:
-    - Securely manages private keys using TMKMS.
-    - Supports HashiCorp Vault as the key provider.
+- **Cosmosigner Integration**:
+    - Remote signing with Raft high availability and double-sign protection.
+    - Supports HashiCorp Vault, Google Cloud KMS, and software keys.
 
 - **Governance Upgrade Automation**:
     - Monitors for governance upgrades with detailed Docker image info.
@@ -54,6 +54,8 @@ It automates tasks like node deployment, upgrades, disk-resize, api exposure, ba
 Full documentation, including installation guides, configuration examples, and advanced features, is available at:
 
 📖 [Cosmopilot Documentation](https://cosmopilot.voluzi.com)
+
+Before upgrading from 4.x, follow the [5.0.0 upgrade guide](docs/docs/getting-started/upgrading-to-5.md).
 
 ---
 

@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 type managerImageFlagTest struct {
@@ -28,8 +28,6 @@ func managerImageFlagTests() []managerImageFlagTest {
 		{name: "cosmosigner-image", env: "COSMOSIGNER_IMAGE", want: images.DefaultCosmosignerImage, configured: func() string { return runOpts.CosmosignerImage }},
 		{name: "dataexporter-image", env: "DATA_EXPORTER_IMAGE", want: images.DefaultDataExporterImage, configured: func() string { return runOpts.DataExporterImage }},
 		{name: "utility-image", env: "UTILITY_IMAGE", want: images.DefaultUtilityImage, configured: func() string { return runOpts.UtilityImage }},
-		{name: "tmkms-image", env: "TMKMS_IMAGE", want: images.DefaultTmKmsImage, configured: func() string { return runOpts.TmKmsImage }},
-		{name: "vault-token-renewer-image", env: "VAULT_TOKEN_RENEWER_IMAGE", want: images.DefaultVaultTokenRenewerImage, configured: func() string { return runOpts.VaultTokenRenewerImage }},
 	}
 }
 

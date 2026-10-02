@@ -24,7 +24,6 @@ const (
 	AnnotationDataInitialized                      = "cosmopilot.voluzi.com/data-initialized"
 	AnnotationGenesisDownloaded                    = "cosmopilot.voluzi.com/genesis-downloaded"
 	AnnotationGenesisChainID                       = "cosmopilot.voluzi.com/genesis-chain-id"
-	AnnotationVaultKeyUploaded                     = "cosmopilot.voluzi.com/vault-key-uploaded"
 	AnnotationPvcSnapshotInProgress                = "cosmopilot.voluzi.com/snapshotting-pvc"
 	AnnotationStopNodeSnapshotHeight               = "cosmopilot.voluzi.com/stop-node-snapshot-height"
 	AnnotationLastPvcSnapshot                      = "cosmopilot.voluzi.com/last-pvc-snapshot"

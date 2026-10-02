@@ -5,7 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 // TestCosmosignerGetImagePrecedence verifies the image resolution order: an explicit per-CR
@@ -64,27 +64,14 @@ func TestVaultUploadsGeneratedAutoDefaultsForInitTargets(t *testing.T) {
 	}
 }
 
-func TestVaultVersionOneMatchesTmKMSIdentity(t *testing.T) {
-	token := &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"}
-	tmkms := &ChainNode{
-		Spec: ChainNodeSpec{Validator: &ValidatorConfig{TmKMS: &TmKMS{Provider: TmKmsProvider{
-			Hashicorp: &TmKmsHashicorpProvider{Address: "https://vault:8200", Key: "validator", TokenSecret: token},
-		}}}},
-	}
-	versionOne := 1
-	managed := &ChainNode{Spec: ChainNodeSpec{Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
-		Vault: &CosmosignerVaultBackend{
-			Address: "https://vault:8200", KeyName: "validator", KeyVersion: &versionOne, TokenSecret: token,
-		},
+func TestVaultPinnedKeyVersionsHaveDistinctSigningIdentities(t *testing.T) {
+	versionOne, versionTwo := 1, 2
+	node := &ChainNode{Spec: ChainNodeSpec{Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+		Vault: &CosmosignerVaultBackend{Address: "https://vault:8200", KeyName: "validator", KeyVersion: &versionOne},
 	}}}}
-
-	if got, want := managed.EffectiveSigningIdentity(), tmkms.EffectiveSigningIdentity(); got != want {
-		t.Fatalf("Vault version 1 must preserve the tmKMS signing identity: got %q want %q", got, want)
-	}
-
-	versionTwo := 2
-	managed.Spec.Cosmosigner.Backend.Vault.KeyVersion = &versionTwo
-	if managed.EffectiveSigningIdentity() == tmkms.EffectiveSigningIdentity() {
-		t.Fatal("a different pinned Vault version must remain a distinct managed signing identity")
+	firstIdentity := node.EffectiveSigningIdentity()
+	node.Spec.Cosmosigner.Backend.Vault.KeyVersion = &versionTwo
+	if firstIdentity == "" || node.EffectiveSigningIdentity() == firstIdentity {
+		t.Fatal("different pinned Vault key versions must have distinct signing identities")
 	}
 }

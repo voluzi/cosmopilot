@@ -41,27 +41,16 @@ func validateDerivedNameLengths(base, subject string, f nameFeatures) error {
 	return nil
 }
 
-// reservedNameSuffixes are the tokens cosmopilot appends to a CR's metadata.name to derive resource
-// names operator-wide. A CR whose own name ends in one collides with a resource that a *different* CR
-// derives (e.g. a CR named `foo-cg` collides with the CosmoGuard Service that `foo` derives), so the
-// two owners fight over the shared name. Every entry maps to a real derived resource:
-//   - node/group Services: -internal, -p2p, -grpc (the gRPC-only Service behind the gRPC Ingress)
-//   - secrets: -tls, -priv-key, -account, -cg-cluster
-//   - configmaps / one-shot pods: -upgrades, -init-data, -config-generator, -genesis-init, -create-validator
-//   - tmkms: -tmkms, -tmkms-generate-identity, -tmkms-vault-upload
-//   - CosmoGuard: -cg, -cg-peer, -cg-cluster, -cg-dashboard, -cg-upstream
-//   - cosmosigner: -signer, -signer-privval, -signer-import, -signer-pubkey
-//   - cosmoseed: -seed, -seed-headless, -cosmoseed (node-key Secret + config ConfigMap)
-//   - legacy .spec.validator: -validator (its child ChainNode "<set>-validator" and Services)
 var reservedNameSuffixes = []string{
 	"-internal", "-p2p", "-grpc",
 	"-tls", "-priv-key", "-account",
 	"-upgrades", "-init-data", "-config-generator", "-genesis-init", "-create-validator",
-	"-tmkms", "-tmkms-generate-identity", "-tmkms-vault-upload",
 	"-cg", "-cg-peer", "-cg-cluster", "-cg-dashboard", "-cg-upstream",
 	"-signer", "-signer-privval", "-signer-import", "-signer-pubkey",
 	"-seed", "-seed-headless", "-cosmoseed",
 	"-validator",
+	// Claim retirement identifies legacy helpers by name, so node names must not collide.
+	"-tmkms-generate-identity", "-tmkms-vault-upload",
 }
 
 // ValidateReservedResourceName rejects creating a ChainNode whose name ends in a suffix cosmopilot

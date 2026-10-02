@@ -13,10 +13,9 @@ import (
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/voluzi/cosmopilot/v4/internal/tmkms"
-	"github.com/voluzi/cosmopilot/v4/pkg/dataexporter"
-	"github.com/voluzi/cosmopilot/v4/pkg/images"
-	"github.com/voluzi/cosmopilot/v4/pkg/utils"
+	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
 const (
@@ -775,49 +774,6 @@ func (exp *ExposeConfig) GetGatewayPort() int32 {
 		return *exp.Gateway.Port
 	}
 	return 26656
-}
-
-// TmKMS helper methods
-
-func (kms *TmKMS) GetKeyFormat() *TmKmsKeyFormat {
-	if kms.KeyFormat != nil {
-		return kms.KeyFormat
-	}
-	return &TmKmsKeyFormat{
-		Type:               tmkms.DefaultKeyType,
-		AccountKeyPrefix:   tmkms.DefaultAccountPrefix,
-		ConsensusKeyPrefix: tmkms.DefaultConsensusPrefix,
-	}
-}
-
-func (kms *TmKMS) GetProtocolVersion() tmkms.ProtocolVersion {
-	if kms.ValidatorProtocol != nil {
-		return *kms.ValidatorProtocol
-	}
-	return tmkms.ProtocolVersionV0_34
-}
-
-func (kms *TmKMS) ShouldPersistState() bool {
-	if kms != nil && kms.PersistState != nil {
-		return *kms.PersistState
-	}
-	return true
-}
-
-func (kms *TmKMS) GetResources() corev1.ResourceRequirements {
-	if kms != nil && kms.Resources != nil {
-		return *kms.Resources
-	}
-	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(tmkms.DefaultTmkmsCpu),
-			corev1.ResourceMemory: resource.MustParse(tmkms.DefaultTmkmsMemory),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(tmkms.DefaultTmkmsCpu),
-			corev1.ResourceMemory: resource.MustParse(tmkms.DefaultTmkmsMemory),
-		},
-	}
 }
 
 // StateSync methods

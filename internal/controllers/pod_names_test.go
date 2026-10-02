@@ -16,8 +16,6 @@ func TestIsDeterministicChainNodePodName(t *testing.T) {
 		nodeName + "-write-file",
 		nodeName + "-download-genesis",
 		nodeName + "-create-validator",
-		nodeName + "-tmkms-generate-identity",
-		nodeName + "-tmkms-vault-upload",
 	} {
 		assert.True(t, IsDeterministicChainNodePodName(podName, nodeName), podName)
 	}

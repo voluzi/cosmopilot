@@ -6,8 +6,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-
-	"github.com/voluzi/cosmopilot/v4/internal/tmkms"
 )
 
 // Reasons for events.
@@ -869,86 +867,6 @@ type ExposeGatewayConfig struct {
 	// +optional
 	// +default=26656
 	Port *int32 `json:"port,omitempty"`
-}
-
-// TmKMS allows configuring tmkms for signing for this validator node instead of
-// using plaintext private key file.
-type TmKMS struct {
-	// Signing provider to be used by tmkms. Currently only `vault` is supported.
-	Provider TmKmsProvider `json:"provider"`
-
-	// Format and type of key for chain.
-	// Defaults to `{"type": "bech32", "account_key_prefix": "cosmospub", "consensus_key_prefix": "cosmosvalconspub"}`.
-	// +optional
-	// +default={"type": "bech32", "account_key_prefix": "cosmospub", "consensus_key_prefix": "cosmosvalconspub"}
-	KeyFormat *TmKmsKeyFormat `json:"keyFormat,omitempty"`
-
-	// Tendermint's protocol version to be used.
-	// Valid options are:
-	// - `v0.34` (default)
-	// - `v0.33`
-	// - `legacy`
-	// +optional
-	// +default="v0.34"
-	ValidatorProtocol *tmkms.ProtocolVersion `json:"validatorProtocol,omitempty"`
-
-	// Whether to persist "priv_validator_state.json" file on a PVC. Defaults to `true`.
-	// +optional
-	PersistState *bool `json:"persistState,omitempty"`
-
-	// Compute Resources for tmkms container.
-	// +optional
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-}
-
-// TmKmsKeyFormat represents key format for tmKMS.
-type TmKmsKeyFormat struct {
-	// Type specifies the key format type.
-	Type string `json:"type"`
-
-	// AccountKeyPrefix is the prefix used for account keys.
-	AccountKeyPrefix string `json:"account_key_prefix"`
-
-	// ConsensusKeyPrefix is the prefix used for consensus keys.
-	ConsensusKeyPrefix string `json:"consensus_key_prefix"`
-}
-
-// TmKmsProvider allows configuring providers for tmKMS. Note that only one should be configured.
-type TmKmsProvider struct {
-	// Hashicorp provider.
-	// +optional
-	Hashicorp *TmKmsHashicorpProvider `json:"hashicorp,omitempty"`
-}
-
-// TmKmsHashicorpProvider holds `hashicorp` provider specific configurations.
-type TmKmsHashicorpProvider struct {
-	// Full address of the Vault cluster.
-	Address string `json:"address"`
-
-	// Key to be used by this validator.
-	Key string `json:"key"`
-
-	// Secret containing the CA certificate of the Vault cluster.
-	// +optional
-	CertificateSecret *corev1.SecretKeySelector `json:"certificateSecret,omitempty"`
-
-	// Secret containing the token to be used.
-	TokenSecret *corev1.SecretKeySelector `json:"tokenSecret"`
-
-	// UploadGenerated indicates if the controller should upload the generated private key to vault.
-	// Defaults to `false`. Will be set to `true` if this validator is initializing a new genesis.
-	// This should not be used in production.
-	// +optional
-	UploadGenerated bool `json:"uploadGenerated,omitempty"`
-
-	// Deprecated: AutoRenewToken deploys vault-token-renewer for legacy tmKMS configurations and
-	// defaults to `false`. Cosmosigner renews Vault tokens internally and does not use this sidecar.
-	// +optional
-	AutoRenewToken bool `json:"autoRenewToken,omitempty"`
-
-	// Whether to skip certificate verification. Defaults to `false`.
-	// +optional
-	SkipCertificateVerify bool `json:"skipCertificateVerify,omitempty"`
 }
 
 // StateSyncConfig holds configurations for enabling state-sync snapshots on a node.

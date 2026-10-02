@@ -15,11 +15,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v4/api/v1"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers/chainnode"
-	"github.com/voluzi/cosmopilot/v4/internal/controllers/chainnodeset"
-	"github.com/voluzi/cosmopilot/v4/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers/chainnode"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers/chainnodeset"
+	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
 func TestLeaderElectionIDIncludesReleaseName(t *testing.T) {
