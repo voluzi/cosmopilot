@@ -76,7 +76,7 @@ func TestRunRejectsUnknownSubcommand(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "subcommand from a newer operator", args: []string{"wait-for-signer", "signer-privval.default.svc", "10.0.0.2", "25s"}},
+		{name: "subcommand from a newer operator", args: []string{"wait-for-future-signer", "signer-privval.default.svc", "10.0.0.2", "25s"}},
 		{name: "misspelled subcommand", args: []string{"wait-for-dnss", "signer-privval.default.svc", "10.0.0.2", "25s"}},
 		{name: "bare argument", args: []string{"serve"}},
 	}
