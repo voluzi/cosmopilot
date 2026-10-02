@@ -42,8 +42,6 @@ jobs:
             file: Dockerfile.tools
           - name: dataexporter
             file: Dockerfile.dataExporter
-          - name: vault-renewer
-            file: Dockerfile.vaultRenewer
         build:
           - platform: linux/amd64
             runner: ubuntu-24.04
@@ -120,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [ cosmopilot, node-utils, node-tools, dataexporter, vault-renewer ]
+        image: [ cosmopilot, node-utils, node-tools, dataexporter ]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -175,7 +173,7 @@ jobs:
         env:
           TAG: ${{ needs.version.outputs.tag }}
         run: |
-          for name in cosmopilot node-utils node-tools dataexporter vault-renewer; do
+          for name in cosmopilot node-utils node-tools dataexporter; do
             IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${name}"
             for attempt in 1 2 3; do
               docker buildx imagetools create --tag "${IMAGE}:edge" "${IMAGE}:${TAG}" && break
