@@ -65,8 +65,7 @@ operator uses to drive and observe the node, including:
 - reporting data directory size (used for auto-resize decisions);
 - reporting the latest block height and whether the node is state-syncing;
 - detecting when a governance upgrade height has been reached;
-- gracefully shutting the node down for snapshots;
-- proxying the TMKMS connection when enabled.
+- gracefully shutting the node down for snapshots.
 
 This API is internal to the operator and is not meant to be consumed directly. See
 [Monitoring & Observability](../usage/monitoring) for the node metrics you _can_ scrape.
@@ -86,12 +85,17 @@ For dedicated seed nodes, `Cosmopilot` can deploy
 [Cosmoseed](https://github.com/voluzi/cosmoseed) (image `ghcr.io/voluzi/cosmoseed`),
 a lightweight seed-only implementation. See [Cosmoseed](../usage/cosmoseed).
 
-### TMKMS & vault-token-renewer (deprecated, optional)
+### Cosmosigner (optional)
 
-For legacy validators configured with deprecated [TMKMS](../usage/tmkms), a TMKMS container is
-added to the validator Pod. If `autoRenewToken` is enabled, the deprecated
-`vault-token-renewer` sidecar keeps the Vault token renewed. New deployments should use
-[Cosmosigner](../usage/cosmosigner), which renews Vault tokens internally.
+[Cosmosigner](../usage/cosmosigner) runs in a separate Raft StatefulSet and dials each target node's
+privval listener on TCP 26659. A target NetworkPolicy allows that port only from the associated
+signer pods and preserves ingress on every other TCP port and all UDP/SCTP ports. The CNI must
+enforce NetworkPolicy and support `endPort`.
+
+The target's final init container listens on the same privval port, reads the first byte from a
+signer connection, then closes it and exits. The app starts its listener and the signer redials
+directly. The node-utils sidecar continues its other duties. Signer HTTP probes use `/livez` and
+`/readyz` on port 8080; no Service exposes that port.
 
 ### dataexporter (job)
 
@@ -118,8 +122,7 @@ has fine-grained control over its lifecycle. A typical Pod contains:
 
 - **`app`** — the chain binary itself (your node image).
 - **`node-utils`** — the helper sidecar (always present).
-- **`tmkms`** — deprecated remote signer for legacy validators.
-- **`vault-token-renewer`** — deprecated Vault token renewer for legacy TMKMS configurations.
+- **`wait-cosmosigner-discovery`** — the final init container for remote signer targets.
 
 Init containers handle one-time setup (data initialization, genesis retrieval, key
 provisioning) before the node starts.

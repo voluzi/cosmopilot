@@ -9,23 +9,23 @@ your consensus key off the validator node and signs blocks over the network, wit
 - **Node fan-out** — one signer identity can sign for a whole group of nodes (sentry-style), each of
   which acts as a signing endpoint.
 
-Unlike [`TmKMS`](./tmkms.md), which runs as a sidecar inside the validator pod, `Cosmosigner` runs as a
-separate `StatefulSet` that **dials** the targeted nodes' privval address. `Cosmopilot` deploys and
-wires everything for you.
+`Cosmosigner` runs as a separate `StatefulSet` that **dials** the targeted nodes' privval address
+on TCP 26659. `Cosmopilot` deploys and wires everything for you.
 
 :::tip[Image]
 The signer image resolves in this order: `.spec.cosmosigner.image`, a nonempty operator-wide
 `cosmosignerImage` Helm value (the `-cosmosigner-image` / `COSMOSIGNER_IMAGE` operator setting),
 then the pinned default supplied by the selected manager release. See
 [Configuration](../getting-started/configuration.md#cosmosignerimage). Cosmopilot's
-managed signing path requires Cosmosigner 0.2.0 or newer for Vault key-version pinning and startup
-public-key verification. For production validators, use an immutable image digest rather than a
-mutable tag so a rescheduled replica cannot pick up different code without a managed migration.
+managed signing path requires Cosmosigner 3.1.0 or newer for HTTP health endpoints and bounded
+redial. Older semantic version tags are refused before a running signer is replaced. For moving tags
+or digest-only references, verify the image provides these features. For production validators, use
+an immutable image digest rather than a mutable tag so a rescheduled replica cannot pick up different code without a managed migration.
 :::
 
 :::warning[node-utils compatibility]
-Use node-utils 3.0.0 or newer with this Cosmopilot release. It includes both Cosmosigner discovery
-gating and the polling-based upgrade coordination used by node Pods without a trace FIFO.
+Use node-utils 4.0.0 or newer with this Cosmopilot release. It includes the `wait-for-signer` startup
+gate and the polling-based upgrade coordination used by node Pods without a trace FIFO.
 :::
 
 ## How it works
@@ -37,12 +37,34 @@ gating and the polling-based upgrade coordination used by node Pods without a tr
 - a headless `Service` (`<name>-signer`) that gives each replica stable DNS for raft peering;
 - a headless discovery `Service` (`<name>-signer-privval`) that selects the targeted node pods — the
   signer resolves it to find and dial every target;
-- a `ConfigMap` with the rendered `config.yaml`.
+- a `ConfigMap` with the rendered `config.yaml`;
+- NetworkPolicies for signer Raft traffic and target-node privval traffic.
 
-Targeted nodes are configured with `priv_validator_laddr` so they listen for the signer, and their
-local key is **not** mounted. The discovery service publishes not-ready addresses on purpose: a node
-with a remote signer blocks at startup until the signer dials in, so gating discovery on readiness
-would deadlock.
+Targeted nodes listen directly with `priv_validator_laddr = "tcp://0.0.0.0:26659"`, and their local
+key is **not** mounted. The discovery Service publishes not-ready addresses so the signer can reach
+nodes while their startup gate is waiting.
+
+The final `wait-cosmosigner-discovery` init container listens on 26659, reads at least one byte from
+a signer connection, closes it and exits. The app then binds the same port and the signer redials.
+A bare TCP connect does not release the gate. The gate times out after 25 seconds with DNS
+observations in its error; the controller recreates a failed node Pod.
+
+### NetworkPolicy requirement
+
+The target policy allows TCP 26659 only from this signer's pods in the same namespace. It explicitly
+allows all other TCP ports and all UDP/SCTP ports from anywhere, preserving P2P, RPC, and other
+node ingress. The CNI must enforce NetworkPolicy with `endPort` support: otherwise TCP 26659 is
+open cluster-wide. Privval's SecretConnection does not authenticate the signer, so this policy is
+the access control. Other policies selecting the node are additive; ensure they do not also allow
+unrestricted ingress to 26659.
+
+### HTTP health probes
+
+Cosmopilot sets `http_addr` and `COSMOSIGNER_HTTP_ADDR` to `0.0.0.0:8080`. Startup and liveness probes
+use `/livez`, which answers while HTTP is serving without touching the backend or Raft. Readiness
+uses `/readyz`, which passes once the Raft store, binding, and backend preflight are initialized and
+fails during shutdown. Followers pass readiness too; readiness does not assert leadership or quorum.
+There is no Service for the HTTP port; kubelet probes connect to the Pod directly.
 
 ## Targeting
 
@@ -235,7 +257,7 @@ path "cosmosigner/metadata/cluster-bindings/*" { capabilities = ["read"] }
 ```
 
 These three self-service paths are part of Vault's built-in `default` policy, so list them explicitly
-only when the token is created with `-no-default-policy`, as in the TmKMS guide. `lookup-self` is
+only when the token is created with `-no-default-policy`. `lookup-self` is
 required: without it the signer refuses to start because it cannot keep the token alive.
 `capabilities-self` is optional; when denied, Cosmosigner falls back to a sign probe.
 
@@ -250,9 +272,8 @@ Neither permission reaches Transit key administration: the signer cannot delete 
       claimTokenSecret: { name: vault-cosmosigner-claim, key: token }  # optional
 ```
 
-Cosmosigner renews renewable and periodic Vault tokens itself at half their current TTL. No
-`vault-token-renewer` sidecar is deployed for this backend. Startup rejects a finite non-renewable
-token because it cannot remain valid for a long-running validator; use a renewable or periodic token
+Cosmosigner renews renewable and periodic Vault tokens itself at half their current TTL. Startup
+rejects a finite non-renewable token because it cannot remain valid for a long-running validator; use a renewable or periodic token
 with permission to renew itself. Non-expiring tokens are accepted; Cosmosigner still polls token
 metadata so Secret-backed token replacement is detected, but it sends no renewal request.
 
@@ -475,13 +496,17 @@ spec:
 The resulting Secret must contain `tls.crt`, `tls.key`, and `ca.crt`; use a CA-backed issuer that
 populates the CA chain. Adjust the namespace and signer name to match the managed resources.
 
-## Migrating from TmKMS
+## Migrating from TmKMS on 4.x
+
+Complete this migration while still running Cosmopilot **4.x**, before applying the 5.0.0 CRDs or
+operator. See the [5.0.0 upgrade guide](../getting-started/upgrading-to-5.md).
 
 `Cosmosigner`'s Vault backend can point at the **same transit key** a `TmKMS` validator already uses.
 To migrate, remove the `.spec.validator.tmKMS` block and add an equivalent `.spec.cosmosigner` block
 with `backend.vault.keyName` set to the same key. No key material is moved. `Cosmopilot` removes the
-`TmKMS` sidecars and deploys the signer `StatefulSet`; the node keeps listening on the same privval
-address.
+`TmKMS` sidecars and deploys the signer `StatefulSet`. Wait until signing resumes, no node Pod has
+a `tmkms` container, and no owned `<name>-tmkms` ConfigMap remains. Version 5.0.0 refuses either
+legacy artifact instead of falling back to local-key signing.
 
 A TmKMS token reused as-is lacks the cluster-binding registry permissions. First create the KV v2
 registry mount described in [Vault Transit](#vault-transit), then add
@@ -551,28 +576,18 @@ Normal  CosmosignerRetargeting  waiting for 2 target pod(s) to pick up their new
                                 label: cp-nodes-validators-0, cp-nodes-validators-1
 ```
 
-During the same window the targeted nodes themselves restart while they wait for the signer to dial
-in. A node that logs `can't get pubkey: endpoint connection timed out` and restarts before the signer
-is up is expected: the node and signer rendezvous by retrying, and the pair converges once both are
-running.
+During this window the targeted nodes wait in `wait-cosmosigner-discovery` until a signer reaches
+them. If the signer remains unavailable for 25 seconds, the gate fails with DNS diagnostics and the
+controller recreates the Pod. The app starts after the gate receives signer data.
 
 ### What a first rollout looks like
 
-A fresh deploy shows a similar pattern, for a different reason. Nodes and their signer start at the
-same time and find each other by retrying, so before they converge you will typically see:
-
-- the node restart once or twice with `can't get pubkey: endpoint connection timed out` — it blocks on
-  its remote signer at startup and exits if the signer has not dialed in yet;
-- the signer log `resolve target nodes … no such host` until the targeted pods have DNS records.
-
-Both are retried and clear on their own. Cosmosigner re-resolves its targets as soon as a connection
-drops, rather than only on its reconcile interval, so a node replaced with a new pod IP is picked up in
-about a second and the pair normally converges within a few seconds.
-
-That behavior needs **Cosmosigner 0.2.1 or newer** (the default `cosmosignerImage` is 3.0.0). If you
-have pinned `.spec.cosmosigner.image` to 0.2.0 or earlier, re-resolution happens only on the fixed
-interval, so a node that churns during rendezvous can restart several times and take a few minutes to
-settle. The rollout is healthy either way; only how long it looks unsettled differs.
+Nodes and their signer start together. Nodes wait in their final startup gate while the signer may
+log `resolve target nodes … no such host` until discovery DNS records appear. Once the signer reaches
+the gate, it closes the connection, the app binds its privval port, and the signer redials directly.
+Cosmosigner 3.1.0 bounds redial so late listeners and replaced node IPs can converge. Repeated
+`can't get pubkey` app exits after the gate passes indicate a problem to investigate, rather than
+normal startup behaviour.
 
 **A genesis-initializing validator group additionally shows one pod recreation:** create → `Error` →
 recreate. This is deliberate and is the safety mechanism working, not a defect. Such a validator
@@ -592,8 +607,8 @@ recreation.
 Before importing a key, retargeting nodes, or creating signer pods, Cosmopilot atomically creates a
 cluster-scoped `ConsensusKeyReservation` keyed by chain ID and canonical public key. A different
 `ChainNode` or `ChainNodeSet` root cannot claim that same chain/key pair, even if it would use separate
-Raft state. Independent claims inside one `ChainNodeSet` are also rejected, while a local, TmKMS, and
-Cosmosigner migration for the same logical validator shares one claim. This closes the cross-resource
+Raft state. Independent claims inside one `ChainNodeSet` are also rejected, while a local-to-Cosmosigner
+migration for the same logical validator shares one claim. This closes the cross-resource
 and same-root double-sign windows during migrations and upgrades.
 
 Helm installs files from a chart's `crds/` directory on first install, but does not upgrade or add them
@@ -611,11 +626,11 @@ already-running validators may remain online until the CRD is installed.
 Do not change a validator signing configuration while old and new Cosmopilot controller versions are
 running together during a rolling operator upgrade. Reservations are atomic among reservation-aware
 controllers, but an older controller does not consult them. Apply the CRD, finish the controller
-rollout, and only then begin a local/TmKMS/Cosmosigner migration.
+rollout, and only then begin a local-to-Cosmosigner migration.
 
 Reservations are released automatically by a dedicated finalizer on the owning `ChainNode` or
 `ChainNodeSet`. Cosmopilot first prevents the retired claim from being recreated, requests deletion
-of its managed local-validator, TmKMS, and Cosmosigner workloads, and waits until the relevant
+of its managed local-validator and Cosmosigner workloads, and waits until the relevant
 `ChainNode`, Pod, Job, and StatefulSet objects are absent. It then deletes only reservations whose
 immutable owner UID and claim match, using the reservation object's UID as a deletion precondition.
 Retained key Secrets, node-data PVCs, and Cosmosigner raft PVCs are inert state and do not by
@@ -653,10 +668,10 @@ reservation is held elsewhere: those conflicts still stop every signer that may 
 :::warning[Slash-protection state at implementation boundaries]
 Break-before-make prevents two signing implementations from running concurrently, and Cosmosigner
 retains its Raft high-water mark across same-key Cosmosigner upgrades. It cannot import historical
-`priv_validator_state.json` from a local validator or TmKMS. Before the first migration into
+`priv_validator_state.json` from a local validator. Before the first migration into
 Cosmosigner, stop the old path cleanly, ensure the validator data cannot roll back below the last
 signed height, and retain the old signing state for incident recovery. A public-key match alone does
 not transfer slash-protection history, so Cosmopilot refuses to remove a validator-serving
-Cosmosigner back to an independent local or TmKMS engine. That handoff requires a future explicit
+Cosmosigner back to an independent local engine. That handoff requires a future explicit
 quiesce, slash-state transfer, and verification protocol.
 :::

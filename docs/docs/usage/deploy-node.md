@@ -85,12 +85,12 @@ When you create a [ChainNode](../reference/crds#chainnode), `Cosmopilot` automat
   - A service dedicated to peer-to-peer (P2P) traffic.
 - **Secrets**:
   - Secrets are created only when necessary and may include:
-    - **Private Consensus Key**: Generated for validators (not created if [TmKMS is being used](../usage/tmkms)). If TmKMS is in use, an additional secret with the KMS identity is created.
+    - **Private Consensus Key**: Generated when a validator needs a local key for bootstrap or signing. A [Cosmosigner](./cosmosigner.md) target does not mount the consensus private key into its node container.
     - **Account Mnemonic**: Used with validators for starting a new network or submitting `create-validator` transaction.
 - **Service Monitors**: A `ServiceMonitor` is created to enable Prometheus to scrape metrics from the node.
 
 :::warning[Important]
-Storing mnemonics and private keys in Kubernetes secrets may not be secure and is recommended only for testnets. For production networks, consider using [TmKMS](../usage/tmkms) for enhanced security.
+Storing mnemonics and private keys in Kubernetes secrets may not be secure and is recommended only for testnets. For production networks, use [Cosmosigner](./cosmosigner.md) with HashiCorp Vault or Google Cloud KMS.
 :::
 
 ## Accessing Node Endpoints

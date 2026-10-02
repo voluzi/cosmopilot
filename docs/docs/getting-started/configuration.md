@@ -39,7 +39,7 @@ including upgrades that use `--reuse-values`; clear or delete an old value to re
 
 Companion images with a moving tag (`edge` or `latest`) or no tag at all are pulled `Always`, so a
 restarted Pod runs the newest build. Every push to cosmopilot `main` publishes `edge` builds of the
-manager, `node-utils`, `node-tools`, `dataexporter` and `vault-renewer`, plus an immutable
+manager, `node-utils`, `node-tools` and `dataexporter`, plus an immutable
 `edge-<short sha>` tag of each. Images with a version tag or digest keep their usual pull policy.
 
 ### `nodeUtilsImage`
@@ -47,9 +47,9 @@ manager, `node-utils`, `node-tools`, `dataexporter` and `vault-renewer`, plus an
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
 :::warning[node-utils compatibility]
-If you override or pin `nodeUtilsImage`, use node-utils 3.0.0 or newer. This version provides the
-polling and SDK marker-based upgrade coordination required by Pods that do not use a trace FIFO.
-The same release also validates custom app and Pod security contexts: when both are supplied, their
+If you override or pin `nodeUtilsImage`, use node-utils 4.0.0 or newer. This version provides the
+`wait-for-signer` startup gate as well as polling and SDK marker-based upgrade coordination.
+When both custom app and Pod security contexts are supplied, their
 effective combination must set numeric `runAsUser` and `runAsGroup` values so node-utils can read
 the SDK marker with the application's filesystem identity.
 :::
@@ -66,20 +66,16 @@ the SDK marker with the application's filesystem identity.
 - **Description**: The default container image of [Cosmosigner](https://github.com/voluzi/cosmosigner) (with version tag included), used when deploying managed remote signers. Can be overridden per-signer with `.spec.cosmosigner.image`.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
+Cosmopilot 5.0.0 defaults to Cosmosigner 3.1.0 and requires its HTTP health endpoints and bounded
+redial. A semantic version tag older than 3.1.0 is refused before replacing a running signer.
+For moving tags or digest-only references, verify that the image contains these features.
+
 ### `dataExporterImage`
 - **Description**: The container image of Data Exporter (with version tag included) used by snapshot tarball upload and deletion Jobs.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `utilityImage`
 - **Description**: Versioned utility image used by operator-owned helper containers for genesis, configuration, PVC, and snapshot integrity operations. Overrides may use a tag or digest and must provide the commands used by these helpers, including standard file utilities, `jq`, `wget`, `gunzip`, `zstd`, `pidof`, and `nc`.
-- **Default**: `""` (inherits the pinned default from the selected manager release)
-
-### `tmkmsImage`
-- **Description**: TmKMS image used by the deprecated TmKMS validator sidecar and its identity/upload helper Pods.
-- **Default**: `""` (inherits the pinned default from the selected manager release)
-
-### `vaultTokenRenewerImage`
-- **Description**: Image for the deprecated Vault token-renewer sidecar used only when a legacy TmKMS configuration enables `autoRenewToken`.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `imagePullSecrets`
