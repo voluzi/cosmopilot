@@ -756,20 +756,10 @@ func (chainNode *ChainNode) CosmosignerSigningDigest() string {
 	return utils.Sha256(preimage)
 }
 
-// EffectiveSigningIdentity returns a normalized fingerprint of the consensus key this ChainNode
-// signs with, across every signing path (local key, tmKMS, cosmosigner). Equivalent keys compare
-// equal — e.g. the same Vault Transit key referenced through tmKMS or cosmosigner — so a same-key
-// migration is not flagged as a change while a real key change is. Empty when the node neither
-// validates nor hosts a signer.
 func (chainNode *ChainNode) EffectiveSigningIdentity() string {
 	switch {
 	case chainNode.Spec.Cosmosigner != nil:
 		return chainNode.CosmosignerSigningIdentity()
-	case chainNode.UsesTmKms():
-		if id, ok := tmkmsNormalizedVaultKey(chainNode.Spec.Validator.TmKMS); ok {
-			return id
-		}
-		return "tmkms\x00unconfigured"
 	case chainNode.IsValidator():
 		return localKeySigningIdentity(chainNode.Spec.Validator.GetPrivKeySecretName(chainNode))
 	default:
@@ -777,40 +767,22 @@ func (chainNode *ChainNode) EffectiveSigningIdentity() string {
 	}
 }
 
-// ValidatorResolvesSigningIdentity reports whether the standalone node's validator resolves the
-// given effective signing identity through its OWN signing path (local key or tmKMS) — i.e. ignoring
-// any .spec.cosmosigner. See the ChainNodeSet counterpart for the rationale.
 func (chainNode *ChainNode) ValidatorResolvesSigningIdentity(identity string) bool {
 	if identity == "" || chainNode.Spec.Validator == nil {
 		return false
 	}
-	if id, ok := tmkmsNormalizedVaultKey(chainNode.Spec.Validator.TmKMS); ok {
-		return id == identity
-	}
-	if chainNode.UsesTmKms() {
-		return identity == "tmkms\x00unconfigured"
-	}
+
 	return localKeySigningIdentity(chainNode.Spec.Validator.GetPrivKeySecretName(chainNode)) == identity
 }
 
-// validatorGroupSigningIdentity returns the effective own-path (local key or tmKMS) consensus-key
-// fingerprint of a validator group's representative (instance 0), or the legacy singleton, ignoring
-// any cosmosigner.
 func (nodeSet *ChainNodeSet) validatorGroupSigningIdentity(group string, cfg *NodeSetValidatorConfig) string {
 	if cfg == nil {
 		return ""
 	}
-	if id, ok := tmkmsNormalizedVaultKey(cfg.TmKMS); ok {
-		return id
-	}
-	if cfg.TmKMS != nil {
-		return "tmkms\x00unconfigured"
-	}
+
 	return localKeySigningIdentity(nodeSet.validatorKeySecret(group))
 }
 
-// ValidatorGroupResolvesSigningIdentity reports whether a validator group's own local/tmKMS path
-// points at the recorded signer identity.
 func (nodeSet *ChainNodeSet) ValidatorGroupResolvesSigningIdentity(group string, cfg *NodeSetValidatorConfig, identity string) bool {
 	return identity != "" && nodeSet.validatorGroupSigningIdentity(group, cfg) == identity
 }

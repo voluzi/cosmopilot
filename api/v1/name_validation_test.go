@@ -21,7 +21,7 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 		},
 		{
 			name:    "app binary named like a built-in container",
-			mutate:  func(c *ChainNode) { c.Spec.App.App = "tmkms" },
+			mutate:  func(c *ChainNode) { c.Spec.App.App = "node-utils" },
 			wantErr: "collides with a built-in pod container",
 		},
 		{
@@ -54,9 +54,9 @@ func TestChainNodeValidateRejectsInvalidNamesAndDurations(t *testing.T) {
 			wantErr: "collides with a built-in pod volume",
 		},
 		{
-			name: "additional volume named like a TmKMS volume",
+			name: "additional volume named like a config volume",
 			mutate: func(c *ChainNode) {
-				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "tmkms-config", Size: "1Gi", Path: "/extra"}}}
+				c.Spec.Persistence = &Persistence{AdditionalVolumes: []VolumeSpec{{Name: "config", Size: "1Gi", Path: "/extra"}}}
 			},
 			wantErr: "collides with a built-in pod volume",
 		},

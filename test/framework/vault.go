@@ -15,8 +15,8 @@ const (
 	// VaultNamespace is the namespace where Vault is deployed
 	VaultNamespace = "vault-system"
 
-	// VaultTokenSecretName is the name of the secret containing the Vault token for TMKMS
-	VaultTokenSecretName = "vault-tmkms-token"
+	// VaultTokenSecretName is the name of the secret containing the Vault token for cosmosigner
+	VaultTokenSecretName = "vault-cosmosigner-token"
 
 	// VaultCASecretName is the name of the secret containing the Vault CA certificate
 	VaultCASecretName = "vault-tls"
@@ -142,8 +142,8 @@ spec:
         emptyDir: {}
 `
 
-// tmkmsPolicy is the Vault policy for TMKMS operations
-const tmkmsPolicy = `
+// cosmosignerPolicy is the Vault policy for cosmosigner operations
+const cosmosignerPolicy = `
 path "auth/token/lookup-self" {
   capabilities = ["read"]
 }
@@ -187,7 +187,7 @@ type vaultTokenCreateResponse struct {
 	} `json:"auth"`
 }
 
-// installVault installs and configures HashiCorp Vault for TMKMS testing
+// installVault installs and configures HashiCorp Vault for cosmosigner testing
 func (f *KindFramework) installVault() error {
 	log := logf.Log.WithName("kind-framework")
 
@@ -238,10 +238,10 @@ func (f *KindFramework) installVault() error {
 		return fmt.Errorf("failed to configure vault transit: %w", err)
 	}
 
-	// Create TMKMS policy and token
-	log.Info("Creating TMKMS policy and token")
-	if err := f.createTmkmsToken(rootToken); err != nil {
-		return fmt.Errorf("failed to create tmkms token: %w", err)
+	// Create cosmosigner policy and token
+	log.Info("Creating cosmosigner policy and token")
+	if err := f.createcosmosignerToken(rootToken); err != nil {
+		return fmt.Errorf("failed to create cosmosigner token: %w", err)
 	}
 
 	log.Info("Vault installation complete")
@@ -402,8 +402,8 @@ func (f *KindFramework) configureVaultTransit(rootToken string) error {
 	return nil
 }
 
-// createTmkmsToken creates the TMKMS policy and generates a token
-func (f *KindFramework) createTmkmsToken(rootToken string) error {
+// createcosmosignerToken creates the cosmosigner policy and generates a token
+func (f *KindFramework) createcosmosignerToken(rootToken string) error {
 	podName, err := f.getVaultPodName()
 	if err != nil {
 		return err
@@ -417,14 +417,14 @@ func (f *KindFramework) createTmkmsToken(rootToken string) error {
 	// `'policy' parameter not supplied or empty`, taking the suite down before a single spec ran.
 	// A heredoc on stdin shares nothing, so concurrent callers cannot interfere.
 	policyCmd := fmt.Sprintf(`export VAULT_TOKEN=%s
-vault policy write -tls-skip-verify tmkms - << 'EOF'
+vault policy write -tls-skip-verify cosmosigner - << 'EOF'
 %s
-EOF`, rootToken, strings.TrimSpace(tmkmsPolicy))
+EOF`, rootToken, strings.TrimSpace(cosmosignerPolicy))
 
 	_, err = f.PodExec(VaultNamespace, podName, "vault",
 		"sh", "-c", policyCmd)
 	if err != nil {
-		return fmt.Errorf("failed to create tmkms policy: %w", err)
+		return fmt.Errorf("failed to create cosmosigner policy: %w", err)
 	}
 
 	// Check if token secret already exists with valid data
@@ -437,9 +437,9 @@ EOF`, rootToken, strings.TrimSpace(tmkmsPolicy))
 
 	// Create token with policy using VAULT_TOKEN env var
 	tokenOut, err := f.PodExec(VaultNamespace, podName, "vault",
-		"sh", "-c", fmt.Sprintf("VAULT_TOKEN=%s vault token create -tls-skip-verify -policy=tmkms -format=json", rootToken))
+		"sh", "-c", fmt.Sprintf("VAULT_TOKEN=%s vault token create -tls-skip-verify -policy=cosmosigner -format=json", rootToken))
 	if err != nil {
-		return fmt.Errorf("failed to create tmkms token: %w", err)
+		return fmt.Errorf("failed to create cosmosigner token: %w", err)
 	}
 
 	var tokenResp vaultTokenCreateResponse
@@ -447,7 +447,7 @@ EOF`, rootToken, strings.TrimSpace(tmkmsPolicy))
 		return fmt.Errorf("failed to parse token response: %w", err)
 	}
 
-	tmkmsToken := tokenResp.Auth.ClientToken
+	cosmosignerToken := tokenResp.Auth.ClientToken
 
 	// Store token in a secret (create or update)
 	secret := &corev1.Secret{
@@ -456,7 +456,7 @@ EOF`, rootToken, strings.TrimSpace(tmkmsPolicy))
 			Namespace: VaultNamespace,
 		},
 		StringData: map[string]string{
-			"token":      tmkmsToken,
+			"token":      cosmosignerToken,
 			"root-token": rootToken, // Store root token for debugging/reuse
 		},
 	}

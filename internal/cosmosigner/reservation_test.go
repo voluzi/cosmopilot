@@ -157,7 +157,7 @@ func TestEnsureConsensusKeyReservationAllowsGeneratedValidatorChildAfterSignerRo
 		UID: "nodeset-uid", Kind: "ChainNodeSet", Namespace: "default", Name: "nodes", Claim: "nodes-validator",
 	}
 
-	// TmKMS era: the generated child claims its key under the root it is controlled by.
+	// The generated child claims its key under the root it is controlled by.
 	requireReservation(t, c, c, "chain-1", reservationTestPublicKey, holder)
 
 	// The top-level Cosmosigner rolls out over the same Vault key and the root records it against the

@@ -108,7 +108,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 
 	// Process 1 installed cert-manager, the CSI driver, ingress-nginx and Vault in the phase above.
 	// The flags are still passed through, because specs read them to decide whether a dependency is
-	// there at all — the TMKMS and cosmosigner specs skip themselves when Vault is not. ConnectOnly is
+	// there at all — the cosmosigner specs skip themselves when Vault is not. ConnectOnly is
 	// what stops this process installing any of it a second time: redundant work that also had every
 	// process racing to write the same policy into the one Vault pod, which intermittently failed the
 	// suite before a single spec had run.

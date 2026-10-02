@@ -829,11 +829,8 @@ func TestEnsureValidatorRefreshesGenesisDigestForManagedMigration(t *testing.T) 
 		StakeAmount: "900000stake",
 	}
 	oldCfg := &appsv1.NodeSetValidatorConfig{
-		Init: init.DeepCopy(),
-		TmKMS: &appsv1.TmKMS{Provider: appsv1.TmKmsProvider{Hashicorp: &appsv1.TmKmsHashicorpProvider{
-			Address: vaultAddress,
-			Key:     vaultKey,
-		}}},
+		Init:             init.DeepCopy(),
+		PrivateKeySecret: ptr.To("previous-validator-key"),
 	}
 
 	for _, tc := range []struct {

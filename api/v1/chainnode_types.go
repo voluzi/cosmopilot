@@ -285,12 +285,6 @@ type ChainNodeStatus struct {
 	// +optional
 	PubKey string `json:"pubKey,omitempty"`
 
-	// TmKMSReservationIdentity records the effective tmKMS signing identity whose public key was
-	// verified against PubKey before its consensus-key reservation was created. An unchanged identity
-	// can reuse the canonical recorded public key without launching another key-discovery pod.
-	// +optional
-	TmKMSReservationIdentity string `json:"tmKMSReservationIdentity,omitempty"`
-
 	// Indicates the current status of validator if this node is one.
 	// +optional
 	ValidatorStatus ValidatorStatus `json:"validatorStatus,omitempty"`
@@ -396,13 +390,6 @@ type ValidatorConfig struct {
 	// Specifies configs and initialization commands for creating a new genesis.
 	// +optional
 	Init *GenesisInitConfig `json:"init,omitempty"`
-
-	// TmKMS configuration for signing commits for this validator.
-	// When configured, .spec.validator.privateKeySecret will not be mounted on the validator node.
-	//
-	// Deprecated: use .spec.cosmosigner instead. TmKMS will be removed in a future version.
-	// +optional
-	TmKMS *TmKMS `json:"tmKMS,omitempty"`
 
 	// Indicates that cosmopilot should run create-validator tx to make this node a validator.
 	// +optional

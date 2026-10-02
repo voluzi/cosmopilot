@@ -54,7 +54,7 @@ func jobWaitTimeout(deadlineSeconds int64) time.Duration {
 }
 
 // JobRunner runs the one-shot cosmosigner key-management pods (pubkey, import). It needs the
-// clientset for pod log scraping, mirroring the TmKMS identity/upload pattern.
+// clientset for pod log scraping, mirroring the signer key-discovery/import pattern.
 type JobRunner struct {
 	Client kubernetes.Interface
 	Scheme *runtime.Scheme

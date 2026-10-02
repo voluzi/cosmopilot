@@ -121,11 +121,6 @@ func TestHasLegacyPerInstanceCosmosignerStatusIgnoresModernNumericGroup(t *testi
 	assert.False(t, nodeSet.HasLegacyPerInstanceCosmosignerStatus("foo"), "a removed modern sentry must not masquerade as a legacy per-instance validator signer")
 }
 
-// TestResolveCosmosignersMultiInstanceValidatorGroup verifies a multi-instance validator group with
-// a cosmosigner is ONE validator: the webhook accepts it, it resolves to a single signer targeting
-// the whole group (one consensus identity, N redundant signing endpoints), and an explicit
-// privateKeySecret names that single identity. tmKMS on a multi-instance group stays rejected (a
-// per-pod sidecar would make every instance sign independently with the same key).
 func TestResolveCosmosignersMultiInstanceValidatorGroup(t *testing.T) {
 	nodeSet := &ChainNodeSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "cs"},
@@ -167,19 +162,6 @@ func TestResolveCosmosignersMultiInstanceValidatorGroup(t *testing.T) {
 	_, err = noSigner.Validate(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "privateKeySecret cannot be set when the validator group has multiple instances")
-
-	// tmKMS on a multi-instance validator group stays rejected.
-	tmkms := nodeSet.DeepCopy()
-	tmkms.Spec.Nodes[0].Cosmosigner = nil
-	tmkms.Spec.Nodes[0].Validator.TmKMS = &TmKMS{Provider: TmKmsProvider{Hashicorp: &TmKmsHashicorpProvider{
-		Address: "https://vault:8200",
-		Key:     "k",
-		TokenSecret: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "vault-token"}, Key: "token"},
-	}}}
-	_, err = tmkms.Validate(nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tmKMS cannot be set when the validator group has multiple instances")
 
 	// A multi-instance SENTRY group with a cosmosigner stays valid too (one signer, whole group).
 	sentry := nodeSet.DeepCopy()

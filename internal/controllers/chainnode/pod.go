@@ -683,7 +683,7 @@ func (r *Reconciler) buildNodeUtilsInitContainer(chainNode *appsv1.ChainNode, sh
 		},
 		{
 			Name:  "TMKMS_PROXY",
-			Value: strconv.FormatBool(chainNode.UsesRemoteSigner()),
+			Value: strconv.FormatBool(chainNode.IsSignerTarget()),
 		},
 	}
 	if signerDNS := signerPeerDNS(chainNode); signerDNS != "" {

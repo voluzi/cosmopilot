@@ -61,19 +61,6 @@ func (chainNode *ChainNode) ValidateDelete(_ context.Context, obj *ChainNode) (w
 	return nil, nil
 }
 
-func (chainNode *ChainNode) tmKMSDeprecationWarnings() admission.Warnings {
-	if chainNode.Spec.Validator == nil || chainNode.Spec.Validator.TmKMS == nil {
-		return nil
-	}
-	warnings := admission.Warnings{
-		".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner",
-	}
-	if hashicorp := chainNode.Spec.Validator.TmKMS.Provider.Hashicorp; hashicorp != nil && hashicorp.AutoRenewToken {
-		warnings = append(warnings, ".spec.validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.cosmosigner, which renews Vault tokens internally")
-	}
-	return warnings
-}
-
 func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error) {
 	if err := chainNode.Spec.Config.ValidateNodeUtilsRunIdentity(".spec.config"); err != nil {
 		return nil, err
@@ -169,10 +156,6 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		if err := c.Validate(".spec.cosmosigner", false); err != nil {
 			return nil, err
 		}
-		// A node cannot both sign through a TmKMS sidecar and a cosmosigner deployment.
-		if chainNode.UsesTmKms() {
-			return nil, fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
-		}
 
 		isValidator := chainNode.Spec.Validator != nil
 		// The node generates and registers its own consensus key when it initializes genesis or runs
@@ -226,20 +209,6 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			}
 		}
 
-		// A validator that registers a freshly-generated key on-chain must sign with that same key,
-		// so the backend must be software (which references it) or Vault uploadGenerated (which
-		// imports it — auto-defaulted for genesis-init validators, matching the documented tmKMS
-		// parity) — not a pre-provisioned Vault/GCP key with a different pubkey. Waived for a
-		// migration only after the controller records the operator address, consensus public key, and
-		// staking status returned by the on-chain validator query. Account and local-key setup can
-		// populate the address and public key before registration completes. Cosmopilot performs a
-		// break-before-make signer transition, while the user remains responsible for the selected key
-		// for the on-chain validator. On the no-webhook path
-		// (old == nil) the waiver requires the status-recorded signing digest to MATCH the current
-		// spec: the digest is only ever recorded after this exact signer identity was rolled out and
-		// serving, so a matching digest proves the pre-provisioned key is the in-effect one — while
-		// a NEWLY added signer (no digest, or digest from a different identity) stays subject to the
-		// rule, since "registration completed" alone says nothing about the new backend's key.
 		registrationRecorded := func(candidate *ChainNode) bool {
 			return candidate.Status.ValidatorAddress != "" && candidate.Status.PubKey != "" && candidate.Status.ValidatorStatus != ""
 		}
@@ -392,12 +361,6 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			case oldHasInit && !newHasInit:
 				return nil, fmt.Errorf(".spec.validator.init cannot be removed after genesis has been created: its validator is part of the immutable genesis validator set")
 			case oldHasInit && newHasInit:
-				// A managed signer migration may intentionally change signing keys. When cosmosigner is
-				// involved, keep the non-signing genesis configuration immutable while leaving the
-				// on-chain key choice to the user. A ChainNodeSet-generated child never carries
-				// .spec.cosmosigner — the signer belongs to its parent and the child is marked with
-				// .spec.remoteSignerTarget — so both shapes must be recognised here, otherwise a
-				// nodeset validator can never migrate off tmKMS once genesis exists.
 				oldFP := old.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
 				newFP := chainNode.Spec.Validator.GenesisSigningFingerprint(defaultPrivKeySecret)
 				if old.IsSignerTarget() || chainNode.IsSignerTarget() {
@@ -426,8 +389,7 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 		}
 	}
 
-	warnings := chainNode.tmKMSDeprecationWarnings()
-	warnings = append(warnings, chainNode.Spec.App.UpgradeImageWarnings(".spec.app")...)
+	warnings := chainNode.Spec.App.UpgradeImageWarnings(".spec.app")
 	return warnings, nil
 }
 
@@ -451,9 +413,9 @@ func (chainNode *ChainNode) GenesisSigningDigestAllowsRefresh(recorded string) b
 // settings and genesis identity that bind a genesis-initializing validator to the immutable genesis.
 func (v *ValidatorConfig) GenesisSigningFingerprint(defaultPrivKeySecret string) string {
 	if v == nil {
-		return genesisSigningFingerprint(nil, nil, nil, nil, "", "", "", defaultPrivKeySecret)
+		return genesisSigningFingerprint(nil, nil, nil, "", "", "", defaultPrivKeySecret)
 	}
-	return genesisSigningFingerprint(v.PrivateKeySecret, v.TmKMS, v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath(), defaultPrivKeySecret)
+	return genesisSigningFingerprint(v.PrivateKeySecret, v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath(), defaultPrivKeySecret)
 }
 
 // validateGenesisValidators rejects duplicate signing keys or account mnemonics among

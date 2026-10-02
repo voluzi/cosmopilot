@@ -33,16 +33,7 @@ const (
 	DefaultCosmosignerLogLevel = "info"
 )
 
-// Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
-// (github.com/voluzi/cosmosigner). Unlike TmKMS, which runs as a sidecar in the validator
-// pod, cosmosigner runs as a separate StatefulSet that dials the targeted nodes'
-// priv_validator_laddr over the network. This allows any group of nodes to act as the
-// signing endpoint for a single consensus identity (horcrux-style fan-out), and enables
-// raft-based high availability across multiple signer replicas.
-//
-// On a ChainNodeSet, .nodeGroups selects which node groups the signer connects to; when it
-// is empty and a validator is configured, the validator group is targeted by default. On a
-// standalone ChainNode, the ChainNode itself is the target and .nodeGroups must be empty.
+// Cosmosigner configures an external consensus signer deployment.
 type Cosmosigner struct {
 	// NodeGroups is the list of node group names (.spec.nodes[].name) the signer will connect
 	// to and sign for. Only valid on a ChainNodeSet. When empty, the configured validator group

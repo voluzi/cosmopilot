@@ -47,25 +47,6 @@ func (nodeSet *ChainNodeSet) ValidateDelete(_ context.Context, obj *ChainNodeSet
 	return nil, nil
 }
 
-func (nodeSet *ChainNodeSet) tmKMSDeprecationWarnings() admission.Warnings {
-	warnings := admission.Warnings{}
-	if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.TmKMS != nil {
-		warnings = append(warnings, ".spec.validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.cosmosigner")
-		if hashicorp := nodeSet.Spec.Validator.TmKMS.Provider.Hashicorp; hashicorp != nil && hashicorp.AutoRenewToken {
-			warnings = append(warnings, ".spec.validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.cosmosigner, which renews Vault tokens internally")
-		}
-	}
-	for i, group := range nodeSet.Spec.Nodes {
-		if group.Validator != nil && group.Validator.TmKMS != nil {
-			warnings = append(warnings, fmt.Sprintf(".spec.nodes[%d].validator.tmKMS is deprecated and will be removed in a future version; migrate to .spec.nodes[%d].cosmosigner", i, i))
-			if hashicorp := group.Validator.TmKMS.Provider.Hashicorp; hashicorp != nil && hashicorp.AutoRenewToken {
-				warnings = append(warnings, fmt.Sprintf(".spec.nodes[%d].validator.tmKMS.provider.hashicorp.autoRenewToken uses the deprecated vault-token-renewer sidecar; migrate to .spec.nodes[%d].cosmosigner, which renews Vault tokens internally", i, i))
-			}
-		}
-	}
-	return warnings
-}
-
 // validatorGroupMisplacedFieldWarnings surfaces group-level settings that a validator group
 // silently ignores. Without them a misplaced .spec.nodes[i].pdb or .persistence is a no-op with no
 // signal anywhere — the operator believes the validator is configured when it is not. These are
@@ -237,14 +218,6 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		return nil, fmt.Errorf(".spec.validator.init and .spec.validator.createValidator are mutually exclusive")
 	}
 
-	// Mirror the per-group create-validator/TmKMS guard below for the legacy singleton .spec.validator:
-	// the pod signs through the KMS sidecar and never mounts the local priv-key secret, so the
-	// locally-registered create-validator pubkey only matches the signing key when the generated key
-	// is uploaded to the KMS.
-	if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.CreateValidator != nil && nodeSet.Spec.Validator.TmKMS != nil && !tmkmsUploadsGeneratedPrivKey(nodeSet.Spec.Validator) {
-		return nil, fmt.Errorf(".spec.validator.tmKMS with createValidator requires hashicorp.uploadGenerated=true so the locally-generated key is uploaded to the KMS and the registered create-validator pubkey matches the signing key")
-	}
-
 	// Validate validator snapshots config
 	if nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Persistence != nil && nodeSet.Spec.Validator.Persistence.Snapshots != nil {
 		if err := validateSnapshotsConfig(nodeSet.Spec.Validator.Persistence.Snapshots, ".spec.validator.persistence.snapshots"); err != nil {
@@ -345,21 +318,12 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			if group.Validator.Init != nil && group.Validator.CreateValidator != nil {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.init and .spec.nodes[%d].validator.createValidator are mutually exclusive", i, i)
 			}
-			// A multi-instance validator group WITHOUT a cosmosigner runs one validator per instance,
-			// each of which must sign with its own consensus key. A shared privateKeySecret or a shared
-			// tmKMS key would make every instance sign with the same key (double-signing), so both are
-			// rejected regardless of genesis mode; the controller generates a distinct key per instance.
-			// A cosmosigner-targeted group instead holds ONE consensus identity (the signer's) and its
-			// nodes mount no local key, so an explicit privateKeySecret there names the signer's
-			// identity/import source and is allowed. tmKMS stays rejected either way: it is a per-pod
-			// sidecar, and cosmosigner+tmKMS are mutually exclusive anyway.
 			signerTargeted := nodeSet.groupCosmosigner(group.Name) != nil
+			// Local validators need distinct keys; a signer-targeted group shares one managed identity.
 			if group.GetInstances() > 1 && group.Validator.PrivateKeySecret != nil && !signerTargeted {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.privateKeySecret cannot be set when the validator group has multiple instances", i)
 			}
-			if group.GetInstances() > 1 && group.Validator.TmKMS != nil {
-				return nil, fmt.Errorf(".spec.nodes[%d].validator.tmKMS cannot be set when the validator group has multiple instances (every instance would sign with the same key)", i)
-			}
+
 			// For a genesis-initializing multi-instance group (no cosmosigner) the controller also
 			// manages the per-instance account mnemonic secrets, so a shared one cannot be provided.
 			// A cosmosigner-targeted group has a single validator (instance 0's flow), so its one
@@ -375,16 +339,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			if group.Validator.CreateValidator != nil && group.GetInstances() > 1 && group.Validator.CreateValidator.AccountMnemonicSecret != nil && !signerTargeted {
 				return nil, fmt.Errorf(".spec.nodes[%d].validator.createValidator.accountMnemonicSecret cannot be set when the validator group has multiple instances", i)
 			}
-			// A create-validator ChainNode registers Status.PubKey derived from its local priv-key
-			// secret, but a TmKMS validator signs through the KMS sidecar and never mounts that secret.
-			// Unless the local key is uploaded to the KMS (hashicorp.uploadGenerated=true), the
-			// registered pubkey would not match the key the pod actually signs with. An explicit
-			// privateKeySecret does not change this — it only selects which local key is registered, not
-			// what the KMS signs with — so the upload is required regardless until KMS pubkey
-			// registration is supported.
-			if group.Validator.CreateValidator != nil && group.Validator.TmKMS != nil && !tmkmsUploadsGeneratedPrivKey(group.Validator) {
-				return nil, fmt.Errorf(".spec.nodes[%d].validator.tmKMS with createValidator requires hashicorp.uploadGenerated=true so the locally-generated key is uploaded to the KMS and the registered create-validator pubkey matches the signing key", i)
-			}
+
 			// Validate validator persistence size with the same logic regular group persistence uses,
 			// so an invalid quantity is rejected here instead of failing later on the generated ChainNode.
 			if group.Validator.Persistence != nil && group.Validator.Persistence.Size != nil {
@@ -529,10 +484,6 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			(nodeSet.Spec.Validator == nil || nodeSet.Spec.Validator.Init == nil) {
 			return nil, fmt.Errorf(".spec.validator.init cannot be removed after genesis has been created: its validator is part of the immutable genesis validator set")
 		}
-		// The legacy genesis-initializing validator is fixed in the immutable genesis. Reject changing
-		// its signing material (private-key secret or tmKMS key) or any genesis parameter in .init
-		// (assets, stake, accounts, ...) even when the validator is otherwise kept: a recreated genesis
-		// would otherwise differ. The add/remove guards above guarantee both old and new carry .init here.
 		if old.Spec.Validator != nil && old.Spec.Validator.Init != nil &&
 			nodeSet.Spec.Validator != nil && nodeSet.Spec.Validator.Init != nil {
 			defaultPrivKeySecret := fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName())
@@ -582,12 +533,6 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 			if group.GetInstances() < og.GetInstances() && !(signerTargetedBothSides && group.GetInstances() >= 1) {
 				return nil, fmt.Errorf(".spec.nodes[%d] genesis-initializing validator group %q cannot be scaled down after creation: its validators are part of the immutable genesis validator set", i, group.Name)
 			}
-			// The group's validators are in the immutable genesis with fixed consensus keys and gentx
-			// parameters. Reject changing their signing material (privateKeySecret or tmKMS key) or any
-			// genesis parameter in .init (assets, stake, accounts, genesisValidators, ...) — a recreated
-			// genesis would otherwise differ. Non-signer multi-instance groups cannot set
-			// privateKeySecret/tmKMS (rejected above) and their per-instance keys derive from stable
-			// names, so this only flags real changes.
 			defaultPrivKeySecret := fmt.Sprintf("%s-%s-0-priv-key", nodeSet.GetName(), group.Name)
 			changed := genesisSigningMaterialChanged(og.Validator, group.Validator, defaultPrivKeySecret)
 			if old.groupCosmosigner(group.Name) != nil || nodeSet.groupCosmosigner(group.Name) != nil {
@@ -656,7 +601,7 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		}
 	}
 
-	warnings := append(nodeSet.tmKMSDeprecationWarnings(), nodeSet.validatorGroupMisplacedFieldWarnings()...)
+	warnings := nodeSet.validatorGroupMisplacedFieldWarnings()
 	warnings = append(warnings, nodeSet.Spec.App.UpgradeImageWarnings(".spec.app")...)
 	return append(warnings, nodeSet.genesisSignerCollapseWarnings(genesisAlreadyCreated)...), nil
 }
@@ -848,9 +793,7 @@ func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 		if nodeSet.Spec.Validator == nil {
 			return fmt.Errorf(".spec.cosmosigner.nodeGroups is required when .spec.validator is not set")
 		}
-		if nodeSet.Spec.Validator.TmKMS != nil {
-			return fmt.Errorf(".spec.cosmosigner and .spec.validator.tmKMS are mutually exclusive")
-		}
+
 		validatorTargets = 1
 	} else {
 		seen := map[string]struct{}{}
@@ -860,17 +803,11 @@ func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 			}
 			seen[name] = struct{}{}
 
-			// The reserved "validator" name targets the legacy .spec.validator singleton, not a
-			// group in .spec.nodes: handle it here so a single signer can dial both the legacy
-			// validator AND a sentry/fullnode group together. The per-target rules below (multi-instance,
-			// tmKMS) only apply to a real .spec.nodes[] group.
 			if name == ReservedValidatorGroupName {
 				if nodeSet.Spec.Validator == nil {
 					return fmt.Errorf(".spec.cosmosigner.nodeGroups[%d] %q targets the legacy .spec.validator, which is not set", i, name)
 				}
-				if nodeSet.Spec.Validator.TmKMS != nil {
-					return fmt.Errorf(".spec.cosmosigner cannot target the legacy .spec.validator, which uses tmKMS: cosmosigner and tmKMS are mutually exclusive")
-				}
+
 				validatorTargets++
 				continue
 			}
@@ -883,9 +820,7 @@ func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 				return fmt.Errorf(".spec.cosmosigner cannot target group %q with zero instances", name)
 			}
 			if group.Validator != nil {
-				if group.Validator.TmKMS != nil {
-					return fmt.Errorf(".spec.cosmosigner cannot target group %q which uses tmKMS: cosmosigner and tmKMS are mutually exclusive", name)
-				}
+
 				validatorTargets++
 			}
 		}
@@ -896,11 +831,6 @@ func (nodeSet *ChainNodeSet) validateTopLevelCosmosigner(c *Cosmosigner) error {
 	return nil
 }
 
-// validateGroupCosmosigner validates a per-group .spec.nodes[i].cosmosigner: exactly-one-backend and
-// no nodeGroups (its target is the enclosing group), the group must have at least one instance, and
-// the group's validator must not also use tmKMS. A multi-instance group is fine — validator or
-// sentry — the signer holds ONE consensus identity and dials every instance pod (for a validator
-// group the instances are redundant signing endpoints of the same validator, never N validators).
 func (nodeSet *ChainNodeSet) validateGroupCosmosigner(i int, g *NodeGroupSpec) error {
 	path := fmt.Sprintf(".spec.nodes[%d].cosmosigner", i)
 	if err := g.Cosmosigner.Validate(path, false); err != nil {
@@ -909,9 +839,7 @@ func (nodeSet *ChainNodeSet) validateGroupCosmosigner(i int, g *NodeGroupSpec) e
 	if g.GetInstances() == 0 {
 		return fmt.Errorf("%s cannot be set on group %q with zero instances", path, g.Name)
 	}
-	if g.Validator != nil && g.Validator.TmKMS != nil {
-		return fmt.Errorf("%s and .spec.nodes[%d].validator.tmKMS are mutually exclusive", path, i)
-	}
+
 	return nil
 }
 
@@ -1533,7 +1461,7 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 		st := old.GetCosmosignerStatus(s.Name)
 		replacement, replaced := nodeSet.DesiredReplacementSigner(desiredSigners, st)
 		if st != nil && (st.ServingIdentity != "" || st.SigningDigest != "") && !replaced {
-			return fmt.Errorf("cosmosigner %q cannot be removed without a replacement managed signer for validator group %q: no supported handoff can transfer its slash-protection state to an independent local/tmKMS path", s.Name, st.ServingGroup)
+			return fmt.Errorf("cosmosigner %q cannot be removed without a replacement managed signer for validator group %q: no supported handoff can transfer its slash-protection state to an independent local path", s.Name, st.ServingGroup)
 		}
 		if addedSigner {
 			if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
@@ -1600,25 +1528,8 @@ func (nodeSet *ChainNodeSet) genesisValidatorPrivKeySecrets() map[string]struct{
 	return out
 }
 
-// validateUniqueSigningKeys rejects two running validators that would sign with the same
-// consensus key (double-signing). Two validators collide when they resolve to the same private
-// key secret — whether that name is set explicitly via privateKeySecret or left to the generated
-// ChainNode default — or when they reference the same tmKMS signing key.
-//
-// The resolved default secret name is included for every running validator so an explicit
-// privateKeySecret on one validator cannot silently alias another validator's default secret
-// (e.g. a single-instance group setting "<nodeset>-<group>-0-priv-key", the default of a
-// multi-instance group instance). The names match the generated ChainNode defaults precisely:
-// <nodeset>-validator-priv-key for the legacy singleton and <nodeset>-<group>-<index>-priv-key
-// for group validators.
-//
-// "Running" validators are the legacy singleton .spec.validator and every .spec.nodes[].validator
-// group with at least one instance.
 func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	privateKeySecrets := map[string]string{}
-	tmKMSKeys := map[string]string{}
-	// vaultKeys tracks Vault Transit keys in a backend-agnostic form so the same key referenced
-	// through tmKMS and through cosmosigner is detected as a collision.
 	vaultKeys := map[string]string{}
 	// genesisValidatorSecrets are priv-key secrets registered in genesis via init.genesisValidators. A
 	// sentry-mode software signer may legitimately share such a secret (that entry is how its key gets
@@ -1642,7 +1553,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	}
 
 	// registerGcp registers a GCP KMS key version. Its identity namespace ("gcpkms\x00...") never
-	// collides with Vault/local/tmKMS identities, so sharing vaultKeys only ever detects a
+	// collides with Vault/local identities, so sharing vaultKeys only ever detects a
 	// GCP-vs-GCP collision between two signers referencing the same key version.
 	registerGcp := func(path, keyVersion string) error {
 		id := "gcpkms\x00" + keyVersion
@@ -1650,21 +1561,6 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 			return fmt.Errorf("%s references the same GCP KMS signing key as %s; each validator must sign with a distinct key", path, prev)
 		}
 		vaultKeys[id] = path
-		return nil
-	}
-
-	registerTmKMS := func(path string, v *NodeSetValidatorConfig) error {
-		if id, ok := tmKMSSigningKeyIdentity(v.TmKMS); ok {
-			if prev, ok := tmKMSKeys[id]; ok {
-				return fmt.Errorf("%s.tmKMS references the same signing key as %s; each validator must sign with a distinct key", path, prev)
-			}
-			tmKMSKeys[id] = path
-		}
-		if id, ok := tmkmsNormalizedVaultKey(v.TmKMS); ok {
-			if err := registerVault(path+".tmKMS", id); err != nil {
-				return err
-			}
-		}
 		return nil
 	}
 
@@ -1745,16 +1641,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 	// Legacy singleton validator: its ChainNode is named <nodeset>-validator, so without an
 	// explicit privateKeySecret it resolves to <nodeset>-validator-priv-key.
 	if v := nodeSet.Spec.Validator; v != nil {
-		// A TmKMS validator signs through the external KMS sidecar and never mounts a local priv-key
-		// secret, so reserving its secret — default OR explicit — would wrongly reject another validator
-		// that uses that name. Only reserve when the validator actually uses a local key: it does not use
-		// TmKMS, it initializes genesis, or it runs create-validator while uploading the generated key to
-		// the KMS. In the last two cases the controller still creates/uploads the local priv-key via
-		// RequiresPrivKey, so its resolved name is the validator's real consensus key and must be reserved.
-		// An explicit privateKeySecret on a pure TmKMS validator is unused and must not be reserved. The
-		// same applies when a pre-provisioned external cosmosigner is the signer.
-		if (v.TmKMS == nil || v.Init != nil || tmkmsUploadsGeneratedPrivKey(v)) &&
-			!cosmosignerLeavesLocalKeyUnused(ReservedValidatorGroupName, v) {
+		if !cosmosignerLeavesLocalKeyUnused(ReservedValidatorGroupName, v) {
 			secret := fmt.Sprintf("%s-validator-priv-key", nodeSet.GetName())
 			if v.PrivateKeySecret != nil {
 				secret = *v.PrivateKeySecret
@@ -1763,9 +1650,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				return err
 			}
 		}
-		if err := registerTmKMS(".spec.validator", v); err != nil {
-			return err
-		}
+
 		if err := registerGenesisValidators(".spec.validator", v.Init); err != nil {
 			return err
 		}
@@ -1776,17 +1661,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 			continue
 		}
 		path := fmt.Sprintf(".spec.nodes[%d].validator", i)
-		// A TmKMS validator group signs through the external KMS sidecar and never mounts a local priv-key
-		// secret, so neither its explicit privateKeySecret nor its per-instance defaults must be reserved
-		// here — another validator may use that name. Only reserve when the group actually uses a local
-		// key: it does not use TmKMS, it initializes genesis, or it runs create-validator with Hashicorp
-		// uploadGenerated (the last two create/upload the local priv-key via RequiresPrivKey). An explicit
-		// privateKeySecret names one key (single-instance group, or the single identity of a
-		// cosmosigner-targeted group); otherwise every instance resolves to its own default — except in a
-		// cosmosigner-targeted group, which holds one identity (instance 0's key) and has no per-instance
-		// keys to reserve.
-		usesLocalKey := (group.Validator.TmKMS == nil || group.Validator.Init != nil || tmkmsUploadsGeneratedPrivKey(group.Validator)) &&
-			!cosmosignerLeavesLocalKeyUnused(group.Name, group.Validator)
+		usesLocalKey := !cosmosignerLeavesLocalKeyUnused(group.Name, group.Validator)
 		if !usesLocalKey {
 			// Nothing to reserve.
 		} else if group.Validator.PrivateKeySecret != nil {
@@ -1805,9 +1680,7 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 				}
 			}
 		}
-		if err := registerTmKMS(path, group.Validator); err != nil {
-			return err
-		}
+
 		if err := registerGenesisValidators(path, group.Validator.Init); err != nil {
 			return err
 		}
@@ -1878,21 +1751,6 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 		}
 	}
 	return nil
-}
-
-// tmkmsUploadsGeneratedPrivKey reports whether a TmKMS validator still has the controller generate a
-// local consensus priv-key and upload it to the KMS. Outside of genesis-initializing validators
-// (handled separately via .init), this happens when the validator runs create-validator and the
-// Hashicorp provider sets uploadGenerated: RequiresPrivKey then creates the default <...>-priv-key
-// secret and uploads it to Vault. That generated secret holds the validator's real consensus key, so
-// it must be reserved for uniqueness like a local key even though block signing goes through the KMS
-// sidecar.
-func tmkmsUploadsGeneratedPrivKey(v *NodeSetValidatorConfig) bool {
-	if v == nil || v.TmKMS == nil || v.CreateValidator == nil {
-		return false
-	}
-	h := v.TmKMS.Provider.Hashicorp
-	return h != nil && h.UploadGenerated
 }
 
 // validateUniqueCreateValidatorAccounts rejects two running create-validator validators that would
@@ -2077,37 +1935,15 @@ func (nodeSet *ChainNodeSet) validateUniqueGenesisValidatorAccounts() error {
 	return nil
 }
 
-// genesisSigningMaterialChanged reports whether the consensus signing material or genesis identity
-// of a genesis-initializing validator differs between its old and new config. It compares the
-// resolved genesis-signing fingerprint of both sides, so any change to the signing material
-// (private-key secret or tmKMS identity), the init chain ID, or the preserved genesis validator list
-// is detected, while no-op edits keep the same fingerprint and are not rejected.
 func genesisSigningMaterialChanged(oldVal, newVal *NodeSetValidatorConfig, defaultPrivKeySecret string) bool {
 	return oldVal.GenesisSigningFingerprint(defaultPrivKeySecret) != newVal.GenesisSigningFingerprint(defaultPrivKeySecret)
 }
 
-// GenesisSigningFingerprint returns a stable, opaque fingerprint of the signing material and genesis
-// identity that bind a genesis-initializing validator to the immutable genesis validator set:
-//
-//   - the resolved private-key secret (an explicit privateKeySecret, otherwise defaultPrivKeySecret,
-//     the generated ChainNode default);
-//   - the concrete tmKMS signing-key identity;
-//   - the resolved account derivation settings (accountPrefix, valPrefix, accountHDPath), which live on
-//     the validator config and determine the operator/account addresses initGenesis derives; and
-//   - the entire .validator.init config. The whole block feeds initGenesis (chainID, assets, stake
-//     amount, commission, accounts, additional init commands, the preserved genesis validator list,
-//     ...), so it is all immutable after genesis: a recreated init ChainNode would otherwise rebuild a
-//     different genesis under the same chain ID. It is serialized rather than cherry-picked so newly
-//     added genesis-affecting fields are covered automatically.
-//
-// Two configs with the same fingerprint produce the same genesis (membership, consensus keys and
-// gentx parameters), so a changed fingerprint means a genesis-affecting change. Field separators are
-// non-printable bytes so distinct fields cannot collide.
 func (v *NodeSetValidatorConfig) GenesisSigningFingerprint(defaultPrivKeySecret string) string {
 	if v == nil {
-		return genesisSigningFingerprint(nil, nil, nil, nil, "", "", "", defaultPrivKeySecret)
+		return genesisSigningFingerprint(nil, nil, nil, "", "", "", defaultPrivKeySecret)
 	}
-	return genesisSigningFingerprint(v.PrivateKeySecret, v.TmKMS, v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath(), defaultPrivKeySecret)
+	return genesisSigningFingerprint(v.PrivateKeySecret, v.Init, v.Info, v.GetAccountPrefix(), v.GetValPrefix(), v.GetAccountHDPath(), defaultPrivKeySecret)
 }
 
 // genesisSigningFingerprint is the component-based core of GenesisSigningFingerprint, taking the
@@ -2115,13 +1951,13 @@ func (v *NodeSetValidatorConfig) GenesisSigningFingerprint(defaultPrivKeySecret 
 // NodeSetValidatorConfig (ChainNodeSet) and ValidatorConfig (ChainNode), which share these fields but
 // are distinct types. .validator.info (moniker/details/website/identity) is included because
 // initGenesis bakes it into the init validator's gentx.
-func genesisSigningFingerprint(privateKeySecret *string, tmKMS *TmKMS, init *GenesisInitConfig, info *ValidatorInfo, accountPrefix, valPrefix, accountHDPath, defaultPrivKeySecret string) string {
+func genesisSigningFingerprint(privateKeySecret *string, init *GenesisInitConfig, info *ValidatorInfo, accountPrefix, valPrefix, accountHDPath, defaultPrivKeySecret string) string {
 	secret := defaultPrivKeySecret
 	if privateKeySecret != nil {
 		secret = *privateKeySecret
 	}
-	tmKMSID, _ := tmKMSSigningKeyIdentity(tmKMS)
-	return strings.Join([]string{secret, tmKMSID, genesisConfigurationFingerprint(init, info, accountPrefix, valPrefix, accountHDPath)}, "\x00")
+	// Keep the empty signing-path element so recorded genesis fingerprints remain comparable.
+	return strings.Join([]string{secret, "", genesisConfigurationFingerprint(init, info, accountPrefix, valPrefix, accountHDPath)}, "\x00")
 }
 
 func genesisConfigurationFingerprint(init *GenesisInitConfig, info *ValidatorInfo, accountPrefix, valPrefix, accountHDPath string) string {
@@ -2172,34 +2008,4 @@ func (nodeSet *ChainNodeSet) GenesisSigningDigestAllowsRefresh(group string, cfg
 // The namespace and null-byte separators prevent distinct Vault keys from being conflated.
 func normalizedVaultIdentity(address, namespace, mount, key string, version int) string {
 	return fmt.Sprintf("vault\x00%s\x00%s\x00%s\x00%s\x00%d", address, namespace, mount, key, version)
-}
-
-// tmkmsNormalizedVaultKey returns the backend-agnostic Vault identity a tmKMS config points at, and
-// whether one is configured.
-func tmkmsNormalizedVaultKey(t *TmKMS) (string, bool) {
-	if t == nil || t.Provider.Hashicorp == nil {
-		return "", false
-	}
-	h := t.Provider.Hashicorp
-	if h.Address == "" || h.Key == "" {
-		return "", false
-	}
-	return normalizedVaultIdentity(h.Address, "", DefaultCosmosignerVaultMount, h.Key, 1), true
-}
-
-// tmKMSSigningKeyIdentity returns a stable identifier for the concrete signing key a tmKMS config
-// points at, and whether one is configured. Only a fully specified provider yields an identity; an
-// unconfigured provider has no concrete key to compare and is skipped (reported as not configured).
-// The null-byte separator keeps the address and key fields unambiguous in the composite key.
-func tmKMSSigningKeyIdentity(t *TmKMS) (string, bool) {
-	if t == nil {
-		return "", false
-	}
-	if h := t.Provider.Hashicorp; h != nil {
-		if h.Address == "" || h.Key == "" {
-			return "", false
-		}
-		return fmt.Sprintf("hashicorp\x00%s\x00%s", h.Address, h.Key), true
-	}
-	return "", false
 }

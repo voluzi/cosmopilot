@@ -103,5 +103,3 @@ const (
 	AppTomlFile         = "app.toml"
 	MinimumGasPricesKey = "minimum-gas-prices"
 )
-
-const AnnotationVaultKeyUploaded = "cosmopilot.voluzi.com/vault-key-uploaded"

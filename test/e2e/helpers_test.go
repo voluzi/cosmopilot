@@ -206,27 +206,6 @@ func CopyVaultSecretsToNamespace(namespace string) (tokenSecretName, caSecretNam
 	return tokenSecretName, caSecretName
 }
 
-// WaitForTmkmsContainerRunning waits for the TMKMS container to be ready in the ChainNode pod
-func WaitForTmkmsContainerRunning(chainNode *appsv1.ChainNode) {
-	Eventually(func() bool {
-		pod := &corev1.Pod{}
-		if err := Framework().Client().Get(Framework().Context(), client.ObjectKey{
-			Namespace: chainNode.Namespace,
-			Name:      chainNode.Name,
-		}, pod); err != nil {
-			return false
-		}
-
-		// Check if tmkms container exists and is ready
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Name == "tmkms" {
-				return cs.Ready
-			}
-		}
-		return false
-	}).Should(BeTrue())
-}
-
 // DescribeChainNode renders the parts of a ChainNode's status that explain why it stopped making
 // progress: an upgrade that reports completed covers both a clean restart and one the controller gave
 // up on, so the upgrade entries and conditions are what separate the two.

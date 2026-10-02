@@ -9,8 +9,3 @@ const (
 	DefaultUtilityImage      = "ghcr.io/voluzi/node-tools:1.4.3"
 	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.0.2"
 )
-
-const (
-	DefaultTmKmsImage             = "ghcr.io/voluzi/tmkms:0.14.0-vault"
-	DefaultVaultTokenRenewerImage = "ghcr.io/voluzi/vault-renewer:1.0.1"
-)

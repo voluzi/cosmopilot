@@ -286,7 +286,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Tear down any managed signer the spec no longer desires before children are reconciled, and wait
-	// for completion: a child switching back to its local/tmKMS signing path while old signer pods are
+	// for completion: a child switching back to its local signing path while old signer pods are
 	// still terminating would put two signers on the same consensus key.
 	if tornDown, err := r.reconcileSignerTeardown(ctx, nodeSet); err != nil {
 		return ctrl.Result{}, err

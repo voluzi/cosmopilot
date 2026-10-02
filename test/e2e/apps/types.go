@@ -346,8 +346,8 @@ func (t TestApp) BuildChainNodeWithVPA(namespace string, vpa *appsv1.VerticalAut
 	return chainNode
 }
 
-// TmKMSConfig holds configuration for building a ChainNode with TMKMS
-type TmKMSConfig struct {
+// VaultConfig holds configuration for the cosmosigner Vault backend
+type VaultConfig struct {
 	// VaultAddress is the full address of the Vault cluster
 	VaultAddress string
 
@@ -368,7 +368,7 @@ type CosmosignerConfig struct {
 	Replicas int32
 
 	// Vault, when set, configures the Vault backend (otherwise the software backend is used).
-	Vault *TmKMSConfig
+	Vault *VaultConfig
 }
 
 // cosmosignerSharedKeySecret is the fixed priv-key secret name shared by the genesis-init
@@ -420,51 +420,4 @@ func (t TestApp) BuildChainNodeSetWithCosmosigner(namespace string, cfg Cosmosig
 		UnsafeAllowInsecureRaft: replicas > 1,
 	}
 	return cns
-}
-
-// BuildChainNodeWithTmKMS creates a ChainNode resource with TMKMS Vault configuration
-func (t TestApp) BuildChainNodeWithTmKMS(namespace string, tmkmsConfig TmKMSConfig) *appsv1.ChainNode {
-	chainNode := t.BuildChainNode(namespace)
-	chainNode.Spec.Validator.TmKMS = t.tmKMS(tmkmsConfig)
-	return chainNode
-}
-
-// BuildChainNodeSetWithTmKMS creates a genesis-initializing ChainNodeSet whose legacy singleton
-// validator signs through a TMKMS Vault sidecar. This is the pre-migration shape of a set that later
-// moves onto a Cosmopilot-managed cosmosigner over the same Vault key.
-func (t TestApp) BuildChainNodeSetWithTmKMS(namespace string, tmkmsConfig TmKMSConfig) *appsv1.ChainNodeSet {
-	cns := t.BuildChainNodeSet(namespace, 1)
-	cns.Spec.Validator.TmKMS = t.tmKMS(tmkmsConfig)
-	return cns
-}
-
-// tmKMS builds the Vault-provider TMKMS configuration shared by the ChainNode and ChainNodeSet
-// builders, so both describe the same signing sidecar.
-func (t TestApp) tmKMS(tmkmsConfig TmKMSConfig) *appsv1.TmKMS {
-	return &appsv1.TmKMS{
-		Provider: appsv1.TmKmsProvider{
-			Hashicorp: &appsv1.TmKmsHashicorpProvider{
-				Address: tmkmsConfig.VaultAddress,
-				Key:     tmkmsConfig.KeyName,
-				TokenSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: tmkmsConfig.TokenSecretName,
-					},
-					Key: "token",
-				},
-				CertificateSecret: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: tmkmsConfig.CASecretName,
-					},
-					Key: "ca.crt",
-				},
-				UploadGenerated: true,
-			},
-		},
-		KeyFormat: &appsv1.TmKmsKeyFormat{
-			Type:               "bech32",
-			AccountKeyPrefix:   t.ValidatorConfig.AccountPrefix + "pub",
-			ConsensusKeyPrefix: t.ValidatorConfig.ValPrefix + "conspub",
-		},
-	}
 }

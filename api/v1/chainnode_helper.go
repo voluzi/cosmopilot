@@ -167,10 +167,6 @@ func (chainNode *ChainNode) ShouldInitGenesis() bool {
 	return chainNode.Spec.Validator != nil && chainNode.Spec.Validator.Init != nil
 }
 
-func (chainNode *ChainNode) UsesTmKms() bool {
-	return chainNode.Spec.Validator != nil && chainNode.Spec.Validator.TmKMS != nil
-}
-
 // UsesCosmosigner reports whether this ChainNode declares its own managed cosmosigner deployment
 // (standalone ChainNode usage).
 func (chainNode *ChainNode) UsesCosmosigner() bool {
@@ -184,20 +180,9 @@ func (chainNode *ChainNode) IsSignerTarget() bool {
 	return chainNode.UsesCosmosigner() || chainNode.Spec.RemoteSignerTarget
 }
 
-// UsesRemoteSigner reports whether block signing for this node happens outside the node process,
-// either via a TmKMS sidecar or via an external cosmosigner deployment. In both cases the node
-// listens on priv_validator_laddr and the local priv-key secret is not mounted.
-func (chainNode *ChainNode) UsesRemoteSigner() bool {
-	return chainNode.UsesTmKms() || chainNode.IsSignerTarget()
-}
-
 func (chainNode *ChainNode) ShouldUploadVaultKey() bool {
 	if chainNode.ShouldInitGenesis() {
 		return true
-	}
-
-	if chainNode.Spec.Validator.TmKMS != nil && chainNode.Spec.Validator.TmKMS.Provider.Hashicorp != nil {
-		return chainNode.Spec.Validator.TmKMS.Provider.Hashicorp.UploadGenerated
 	}
 
 	return false
@@ -215,9 +200,6 @@ func (chainNode *ChainNode) RequiresPrivKey() bool {
 	if chainNode.Status.PubKey == "" && chainNode.ShouldInitGenesis() {
 		// For key upload when we are initializing a chain
 
-		if chainNode.Spec.Validator.TmKMS != nil && chainNode.Spec.Validator.TmKMS.Provider.Hashicorp != nil {
-			chainNode.Spec.Validator.TmKMS.Provider.Hashicorp.UploadGenerated = true
-		}
 		return true
 	}
 

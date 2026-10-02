@@ -9,7 +9,7 @@ import (
 func GetKeyFormatter(chainNode *appsv1.ChainNode) *KeyFormatter {
 	return &KeyFormatter{
 		IsValidator:     chainNode.IsValidator(),
-		UseRemoteSigner: chainNode.UsesRemoteSigner(),
+		UseRemoteSigner: chainNode.IsSignerTarget(),
 		UseDashes:       chainNode.Spec.Config.UseDashedConfigToml(),
 	}
 }
