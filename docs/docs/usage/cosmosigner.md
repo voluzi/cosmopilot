@@ -469,11 +469,40 @@ Multi-replica signers require `raftTLSSecret`, containing `tls.crt`, `tls.key`, 
 membership and state replication use mutual TLS. `unsafeAllowInsecureRaft: true` is an explicit opt-out
 for isolated test networks only and cannot be combined with `raftTLSSecret`.
 
+### Running signers highly available
+
 Every managed signer has a PodDisruptionBudget named after its StatefulSet, with
 `maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow` (Kubernetes 1.27+).
 A single-replica signer can therefore be evicted during a drain. An overlapping user-managed PDB
 or unavailable policy API/permissions makes the operator skip its PDB and emit a warning event.
 PDBs only gate voluntary evictions; they do not block managed signer migrations.
+
+Set `nodeSelector` and `affinity` on the signer itself; these fields are not inherited from node
+specs and do not apply to one-shot import or public-key pods. For example, prefer spreading this
+three-replica signer across nodes (replace `mychain-signer` with its actual resource name):
+
+```yaml
+cosmosigner:
+  replicas: 3
+  raftTLSSecret: cosmosigner-raft-tls
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: cosmosigner
+                app.kubernetes.io/instance: mychain-signer
+            topologyKey: kubernetes.io/hostname
+```
+
+Required anti-affinity across nodes leaves replicas Pending when the cluster has fewer nodes than
+replicas, including a single-node cluster. Preferred anti-affinity permits co-location on fewer
+nodes. Changing either scheduling field on a running signer uses the same break-before-make
+migration as an image or resource change: all replicas stop and restart once, retaining their PVCs
+and Raft state. With both fields unset, this feature does not change the lifecycle digest or restart
+existing signers on operator upgrade.
 
 ### Raft TLS Secret
 

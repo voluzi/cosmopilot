@@ -94,6 +94,8 @@ type Params struct {
 	Resources          corev1.ResourceRequirements
 	RaftTLSSecret      *string
 	ServiceAccountName string
+	NodeSelector       map[string]string
+	Affinity           *corev1.Affinity
 
 	// ImagePullSecrets are applied to the ONE-SHOT key-management pods only (import, pubkey). The
 	// signer StatefulSet deliberately does not carry them: its pod template feeds LifecycleDigest, so
@@ -594,6 +596,8 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: p.ServiceAccountName,
+					NodeSelector:       p.NodeSelector,
+					Affinity:           p.Affinity,
 					SecurityContext:    k8s.RestrictedPodSecurityContext(),
 					Containers:         []corev1.Container{signer},
 					Volumes:            volumes,

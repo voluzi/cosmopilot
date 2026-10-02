@@ -773,6 +773,8 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, chainNode *appsv1.Ch
 		Resources:          c.GetResources(),
 		RaftTLSSecret:      c.RaftTLSSecret,
 		ServiceAccountName: c.GetServiceAccountName(),
+		NodeSelector:       c.NodeSelector,
+		Affinity:           c.Affinity,
 		ImagePullSecrets:   imagePullSecrets,
 		Backend:            backend,
 		Labels:             labels,

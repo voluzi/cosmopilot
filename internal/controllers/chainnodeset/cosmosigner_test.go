@@ -530,6 +530,8 @@ func TestReconcileCosmosignerMigrationsCoversRuntimeAndKeyDrift(t *testing.T) {
 		wantReset     bool
 	}{
 		{name: "runtime-only change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) { p.Image = "new-image" }},
+		{name: "node selector change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) { p.NodeSelector = map[string]string{"pool": "signers"} }},
+		{name: "affinity change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) { p.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}} }},
 		{name: "public-key drift resets raft state", desiredKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", mutateDesired: func(*cosmosigner.Params) {}, wantReset: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

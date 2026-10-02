@@ -136,35 +136,47 @@ func TestReconcileCosmosignerMigrationComparesActualPublicKeys(t *testing.T) {
 }
 
 func TestReconcileCosmosignerMigrationQuiescesRuntimeOnlyChange(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
-		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
-			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
-		}}},
-	}
-	const publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	params := cosmosigner.Params{
-		Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "new-image", Replicas: 1,
-		ExpectedPublicKey: publicKey, StateStorageSize: "1Gi",
-		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
-	}
-	oldParams := params
-	oldParams.Image = "old-image"
-	oldDigest, err := oldParams.LifecycleDigest(chainNode.CosmosignerSigningDigest())
-	require.NoError(t, err)
-	chainNode.Status.CosmosignerAppliedDigest = oldDigest
-	chainNode.Status.CosmosignerPublicKey = publicKey
+	for _, tc := range []struct {
+		name   string
+		mutate func(*cosmosigner.Params)
+	}{
+		{name: "image", mutate: func(p *cosmosigner.Params) { p.Image = "new-image" }},
+		{name: "node selector", mutate: func(p *cosmosigner.Params) { p.NodeSelector = map[string]string{"pool": "signers"} }},
+		{name: "affinity", mutate: func(p *cosmosigner.Params) { p.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build(), Scheme: scheme}
+			chainNode := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+				Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}}},
+			}
+			const publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			params := cosmosigner.Params{
+				Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "old-image", Replicas: 1,
+				ExpectedPublicKey: publicKey, StateStorageSize: "1Gi",
+				Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
+			}
+			oldParams := params
+			tc.mutate(&params)
+			oldDigest, err := oldParams.LifecycleDigest(chainNode.CosmosignerSigningDigest())
+			require.NoError(t, err)
+			chainNode.Status.CosmosignerAppliedDigest = oldDigest
+			chainNode.Status.CosmosignerPublicKey = publicKey
 
-	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
-	require.NoError(t, err)
-	require.True(t, pending)
-	require.NotNil(t, chainNode.Status.CosmosignerMigration)
-	require.False(t, chainNode.Status.CosmosignerMigration.ResetState)
-	require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build(), Scheme: scheme}
+
+			pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
+			require.NoError(t, err)
+			require.True(t, pending)
+			require.NotNil(t, chainNode.Status.CosmosignerMigration)
+			require.False(t, chainNode.Status.CosmosignerMigration.ResetState)
+			require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
+		})
+	}
 }
 
 func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing.T) {

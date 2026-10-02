@@ -65,6 +65,16 @@ type Cosmosigner struct {
 	// +optional
 	Image *string `json:"image,omitempty"`
 
+	// NodeSelector restricts signer pods to nodes with matching labels. It is independent of node
+	// scheduling. Changing it on a running signer restarts all replicas through a managed migration.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Affinity constrains signer pod placement independently of the targeted nodes. Changing it on
+	// a running signer restarts all replicas through a managed migration.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
 	// Backend selects and configures where the consensus key material lives and how signing is
 	// performed. Exactly one backend must be configured.
 	Backend CosmosignerBackend `json:"backend"`
