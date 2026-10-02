@@ -63,3 +63,15 @@ func TestVaultUploadsGeneratedAutoDefaultsForInitTargets(t *testing.T) {
 		t.Fatal("a non-Vault backend must never report a Vault import")
 	}
 }
+
+func TestVaultPinnedKeyVersionsHaveDistinctSigningIdentities(t *testing.T) {
+	versionOne, versionTwo := 1, 2
+	node := &ChainNode{Spec: ChainNodeSpec{Cosmosigner: &Cosmosigner{Backend: CosmosignerBackend{
+		Vault: &CosmosignerVaultBackend{Address: "https://vault:8200", KeyName: "validator", KeyVersion: &versionOne},
+	}}}}
+	firstIdentity := node.EffectiveSigningIdentity()
+	node.Spec.Cosmosigner.Backend.Vault.KeyVersion = &versionTwo
+	if firstIdentity == "" || node.EffectiveSigningIdentity() == firstIdentity {
+		t.Fatal("different pinned Vault key versions must have distinct signing identities")
+	}
+}

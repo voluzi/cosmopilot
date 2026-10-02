@@ -282,6 +282,36 @@ func TestChainNodeValidateRejectsInitChangeAfterCreation(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// A generated validator's signer marker permits a key transition while its genesis stays immutable.
+func TestChainNodeValidateAllowsSignerMigrationOnGeneratedValidator(t *testing.T) {
+	old := &ChainNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "cns-validator", OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: GroupVersion.String(), Kind: "ChainNodeSet", Name: "cns", UID: "nodeset-uid", Controller: ptr.To(true),
+		}}},
+		Spec: ChainNodeSpec{Validator: &ValidatorConfig{
+			PrivateKeySecret: ptr.To("local-key"),
+			Init:             &GenesisInitConfig{ChainID: "test-localnet", Assets: []string{"1unibi"}, StakeAmount: "1unibi"},
+		}},
+		Status: ChainNodeStatus{ChainID: "test-localnet"},
+	}
+	migrated := old.DeepCopy()
+	migrated.Status = ChainNodeStatus{}
+	migrated.Spec.Validator.PrivateKeySecret = nil
+	migrated.Spec.RemoteSignerTarget = true
+	_, err := migrated.Validate(old)
+	require.NoError(t, err)
+
+	changedStake := migrated.DeepCopy()
+	changedStake.Spec.Validator.Init.StakeAmount = "2unibi"
+	_, err = changedStake.Validate(old)
+	require.ErrorContains(t, err, "immutable after genesis")
+
+	local := migrated.DeepCopy()
+	local.Spec.RemoteSignerTarget = false
+	_, err = local.Validate(old)
+	require.ErrorContains(t, err, "immutable after genesis")
+}
+
 // TestChainNodeValidateRejectsInitChangeNoWebhook verifies the no-webhook reconcile path (Validate with
 // old == nil): a post-genesis .validator.init change is rejected by diffing the current spec against the
 // genesis fingerprint recorded in the object's own status. Without a recorded digest (legacy/upgrade)
