@@ -49,6 +49,8 @@ var reservedNameSuffixes = []string{
 	"-signer", "-signer-privval", "-signer-import", "-signer-pubkey",
 	"-seed", "-seed-headless", "-cosmoseed",
 	"-validator",
+	// Claim retirement identifies legacy helpers by name, so node names must not collide.
+	"-tmkms-generate-identity", "-tmkms-vault-upload",
 }
 
 // ValidateReservedResourceName rejects creating a ChainNode whose name ends in a suffix cosmopilot
