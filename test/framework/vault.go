@@ -240,7 +240,7 @@ func (f *KindFramework) installVault() error {
 
 	// Create cosmosigner policy and token
 	log.Info("Creating cosmosigner policy and token")
-	if err := f.createcosmosignerToken(rootToken); err != nil {
+	if err := f.createCosmosignerToken(rootToken); err != nil {
 		return fmt.Errorf("failed to create cosmosigner token: %w", err)
 	}
 
@@ -402,8 +402,8 @@ func (f *KindFramework) configureVaultTransit(rootToken string) error {
 	return nil
 }
 
-// createcosmosignerToken creates the cosmosigner policy and generates a token
-func (f *KindFramework) createcosmosignerToken(rootToken string) error {
+// createCosmosignerToken creates the cosmosigner policy and generates a token
+func (f *KindFramework) createCosmosignerToken(rootToken string) error {
 	podName, err := f.getVaultPodName()
 	if err != nil {
 		return err

@@ -37,7 +37,7 @@ func runWaitForSignerCommand(ctx context.Context, resolver dnsResolver, args []s
 	if err != nil {
 		return fmt.Errorf("listen for signer: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	diagnosticCtx, stopDiagnostic := context.WithCancel(ctx)
 	defer stopDiagnostic()
 	dnsObservations := make(chan error, 1)
@@ -58,7 +58,7 @@ func runWaitForSignerCommand(ctx context.Context, resolver dnsResolver, args []s
 }
 
 func waitForSignerConnection(ctx context.Context, listener net.Listener) error {
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
 	defer stop()
 	for {

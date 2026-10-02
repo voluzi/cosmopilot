@@ -14,7 +14,7 @@ func TestWaitForSignerReleasesOnInboundConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	result := make(chan error, 1)
@@ -23,7 +23,7 @@ func TestWaitForSignerReleasesOnInboundConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte{1}); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestWaitForSignerReleasesOnInboundConnection(t *testing.T) {
 		t.Fatal("gate left the signer connection open")
 	}
 	if conn, err := net.DialTimeout("tcp", listener.Addr().String(), 100*time.Millisecond); err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("gate left its listener open")
 	}
 }
@@ -47,7 +47,7 @@ func TestWaitForSignerIgnoresConnectionWithoutData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	result := make(chan error, 1)
@@ -61,12 +61,12 @@ func TestWaitForSignerIgnoresConnectionWithoutData(t *testing.T) {
 		t.Fatalf("bare connection released gate: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
-	conn.Close()
+	_ = conn.Close()
 	conn, err = net.Dial("tcp", listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte{1}); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestWaitForSignerCancellationClosesIdleConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
@@ -103,7 +103,7 @@ func TestWaitForSignerCancellationClosesIdleConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	cancel()
 	select {
 	case err := <-result:

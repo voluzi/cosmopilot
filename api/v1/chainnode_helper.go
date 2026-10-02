@@ -180,14 +180,6 @@ func (chainNode *ChainNode) IsSignerTarget() bool {
 	return chainNode.UsesCosmosigner() || chainNode.Spec.RemoteSignerTarget
 }
 
-func (chainNode *ChainNode) ShouldUploadVaultKey() bool {
-	if chainNode.ShouldInitGenesis() {
-		return true
-	}
-
-	return false
-}
-
 func (chainNode *ChainNode) ShouldCreateValidator() bool {
 	return chainNode.Spec.Validator != nil && chainNode.Spec.Validator.CreateValidator != nil && chainNode.Status.ValidatorStatus == ""
 }

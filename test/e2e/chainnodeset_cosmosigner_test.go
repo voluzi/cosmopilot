@@ -185,7 +185,7 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 			WaitForChainNodeSetHeight(cns, oldHeight)
 		})
 
-		It("should fail over a TLS-secured Raft leader and stop signing without quorum", func() {
+		It("should keep signing across five consecutive TLS-secured Raft leader deletions and stop signing without quorum", func() {
 			requireCosmosignerE2E()
 			app := apps.Nibiru()
 			ns := CreateTestNamespace()
@@ -204,35 +204,32 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 			}).Should(BeNumerically(">", 3), "the initial TLS-secured Raft cluster should produce blocks")
 			pods := waitForReadySignerPods(ns.Name, resourceName, 3)
 			leaderName := waitForSignerLeader(ns.Name, resourceName, "")
-			var leaderUID string
-			for i := range pods {
-				if pods[i].Name == leaderName {
-					leaderUID = string(pods[i].UID)
-				}
+			for deletion := 0; deletion < 5; deletion++ {
+				var heightBeforeFailover int64
+				Eventually(func() (int64, error) {
+					height, err := liveHeight()
+					if err == nil {
+						heightBeforeFailover = height
+					}
+					return height, err
+				}, 5*time.Minute, time.Second).Should(BeNumerically(">", 3), "capture a live baseline before deleting the signer leader")
+
+				leaderPod := &corev1.Pod{}
+				Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: leaderName}, leaderPod)).To(Succeed())
+				Expect(Framework().Client().Delete(Framework().Context(), leaderPod)).To(Succeed())
+				newLeaderName := waitForSignerLeader(ns.Name, resourceName, leaderName)
+				Expect(newLeaderName).NotTo(Equal(leaderName))
+				Eventually(func() (int64, error) {
+					return liveHeight()
+				}).Should(BeNumerically(">", heightBeforeFailover), "a surviving Raft replica should resume signing after leader deletion %d", deletion+1)
+				waitForReplacementSignerPod(ns.Name, leaderName, string(leaderPod.UID))
+				pods = waitForReadySignerPods(ns.Name, resourceName, 3)
+				leaderName = newLeaderName
 			}
-			Expect(leaderUID).NotTo(BeEmpty())
-			var heightBeforeFailover int64
-			Eventually(func() (int64, error) {
-				height, err := liveHeight()
-				if err == nil {
-					heightBeforeFailover = height
-				}
-				return height, err
-			}, 5*time.Minute, time.Second).Should(BeNumerically(">", 3), "capture a live baseline before deleting the signer leader")
 
-			leaderPod := &corev1.Pod{}
-			Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: leaderName}, leaderPod)).To(Succeed())
-			Expect(Framework().Client().Delete(Framework().Context(), leaderPod)).To(Succeed())
-			newLeaderName := waitForSignerLeader(ns.Name, resourceName, leaderName)
-			Expect(newLeaderName).NotTo(Equal(leaderName))
-			Eventually(func() (int64, error) {
-				return liveHeight()
-			}).Should(BeNumerically(">", heightBeforeFailover), "a surviving Raft replica should resume signing after leader deletion")
-			pods = waitForReadySignerPods(ns.Name, resourceName, 3)
-
-			heldNames := []string{newLeaderName}
+			heldNames := []string{leaderName}
 			for i := range pods {
-				if pods[i].Name != newLeaderName {
+				if pods[i].Name != leaderName {
 					heldNames = append(heldNames, pods[i].Name)
 					break
 				}
@@ -437,11 +434,6 @@ func moveTopLevelCosmosignerIntoGroup(cns *appsv1.ChainNodeSet, groupName string
 		return fmt.Errorf("node group %q not found", groupName)
 	}).Should(Succeed())
 }
-
-const (
-	cosmopilotNamespace      = "cosmopilot-system"
-	cosmopilotDeploymentName = "cosmopilot"
-)
 
 const (
 	cosmosignerSentryGroupA = "sentry-a"
