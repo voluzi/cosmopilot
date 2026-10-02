@@ -512,6 +512,23 @@ func TestReconcileConsensusKeyReservationClaimsBlocksUnsafeStandaloneSigningPath
 		},
 	}
 
+	for _, marker := range []string{"-tmkms-generate-identity", "-tmkms-vault-upload"} {
+		tests = append(tests,
+			struct {
+				name   string
+				object func(*appsv1.ChainNode) client.Object
+			}{name: marker + " Job", object: func(owner *appsv1.ChainNode) client.Object {
+				return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: owner.Name + marker, Namespace: owner.Namespace, UID: "job-uid"}}
+			}},
+			struct {
+				name   string
+				object func(*appsv1.ChainNode) client.Object
+			}{name: marker + " generated Pod", object: func(owner *appsv1.ChainNode) client.Object {
+				return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: owner.Name + marker + "-generated", Namespace: owner.Namespace, UID: "pod-uid"}}
+			}},
+		)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := reservationLifecycleScheme(t)

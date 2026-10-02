@@ -342,12 +342,13 @@ func deterministicNodeSetSignerResourceName(name, nodeSetName string) bool {
 	return strings.HasPrefix(name, nodeSetName+"-") && strings.HasSuffix(name, "-signer")
 }
 
+// Legacy tmKMS helpers must block claim retirement until an upgraded cluster is quiescent.
 func managedClaimOneShotName(name, claim string) bool {
 	if !strings.HasPrefix(name, claim+"-") {
 		return false
 	}
 	for _, marker := range []string{
-		"-import", "-pubkey",
+		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
 	} {
 		if strings.HasSuffix(name, marker) || strings.Contains(name, marker+"-") {
 			return true

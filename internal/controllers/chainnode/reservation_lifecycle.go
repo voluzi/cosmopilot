@@ -196,8 +196,11 @@ func standaloneManagedSigningOneShotPodName(name string, chainNode *appsv1.Chain
 	return false
 }
 
+// Legacy tmKMS helpers must block claim retirement until an upgraded cluster is quiescent.
 func standaloneManagedSigningOneShotNames(chainNode *appsv1.ChainNode) []string {
 	return []string{
+		chainNode.GetName() + "-tmkms-generate-identity",
+		chainNode.GetName() + "-tmkms-vault-upload",
 		cosmosignerName(chainNode) + "-import",
 		cosmosignerName(chainNode) + "-pubkey",
 	}

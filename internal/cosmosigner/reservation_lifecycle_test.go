@@ -1260,3 +1260,72 @@ func TestFinalizeConsensusKeySigningPathsIgnoresSameNameChainNodeSetSigner(t *te
 		})
 	}
 }
+
+func TestEnsureConsensusKeyReservationBlocksLegacyTmKMSHelpers(t *testing.T) {
+	for _, kind := range []string{"ChainNode", "ChainNodeSet"} {
+		for _, marker := range []string{"-tmkms-generate-identity", "-tmkms-vault-upload"} {
+			for _, artifact := range []string{"job", "direct pod", "generated pod", "child-owned pod"} {
+				t.Run(kind+marker+artifact, func(t *testing.T) {
+					scheme := reservationLifecycleScheme(t)
+					holder := ReservationHolder{UID: "new-owner-uid", Kind: kind, Namespace: "default", Name: "validator", Claim: "validator"}
+					stale := reservationLifecycleObject(ConsensusKeyReservationName("chain-1", reservationTestPublicKey), "ckr-stale", ReservationHolder{
+						UID: "old-owner-uid", Kind: kind, Namespace: holder.Namespace, Name: holder.Name, Claim: holder.Claim,
+					})
+					var current client.Object = &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer}}}
+					if kind == "ChainNodeSet" {
+						current = &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: holder.Name, Namespace: holder.Namespace, UID: holder.UID, Finalizers: []string{ReservationOwnerFinalizer}}}
+					}
+					meta := metav1.ObjectMeta{Name: holder.Claim + marker, Namespace: holder.Namespace, UID: "helper-uid"}
+					var path client.Object = &corev1.Pod{ObjectMeta: meta}
+					switch artifact {
+					case "job":
+						path = &batchv1.Job{ObjectMeta: meta}
+					case "generated pod":
+						path.SetName(meta.Name + "-generated")
+						path.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: meta.Name, UID: "deleted-job-uid", Controller: ptr.To(true)}})
+					case "child-owned pod":
+						path.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: "validator-child", UID: "child-uid", Controller: ptr.To(true)}})
+					}
+					c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reservationLifecycleNamespace(holder.Namespace), current, stale, path).Build()
+					_, err := EnsureConsensusKeyReservationWithResult(t.Context(), c, c, "chain-1", reservationTestPublicKey, holder)
+					if !errors.Is(err, ErrConsensusKeyReservationRecoveryBlocked) || !strings.Contains(err.Error(), path.GetName()) {
+						t.Fatalf("legacy helper must block recovery and identify the artifact: %v", err)
+					}
+					if err := c.Get(t.Context(), client.ObjectKeyFromObject(stale), &appsv1.ConsensusKeyReservation{}); err != nil {
+						t.Fatalf("legacy helper must retain the stale reservation: %v", err)
+					}
+					if err := c.Get(t.Context(), client.ObjectKeyFromObject(path), path); err != nil {
+						t.Fatalf("legacy helper must remain untouched: %v", err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestFinalizeConsensusKeySigningPathsPreservesLegacyTmKMSHelpers(t *testing.T) {
+	for _, marker := range []string{"-tmkms-generate-identity", "-tmkms-vault-upload"} {
+		for _, artifact := range []string{"job", "direct pod", "generated pod"} {
+			t.Run(marker+artifact, func(t *testing.T) {
+				scheme := reservationLifecycleScheme(t)
+				owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default", UID: "owner-uid"}}
+				meta := metav1.ObjectMeta{Name: owner.Name + marker, Namespace: owner.Namespace, UID: "helper-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: owner.Name, UID: owner.UID, Controller: ptr.To(true)}}}
+				var path client.Object = &corev1.Pod{ObjectMeta: meta}
+				if artifact == "job" {
+					path = &batchv1.Job{ObjectMeta: meta}
+				} else if artifact == "generated pod" {
+					path.SetName(meta.Name + "-generated")
+					path.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: meta.Name, UID: "deleted-job-uid", Controller: ptr.To(true)}})
+				}
+				c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, path).Build()
+				done, err := FinalizeConsensusKeySigningPaths(t.Context(), c, c, owner, owner.Namespace)
+				if done || err == nil || !strings.Contains(err.Error(), path.GetName()) {
+					t.Fatalf("legacy helpers must block finalization: done=%v err=%v", done, err)
+				}
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(path), path); err != nil {
+					t.Fatalf("finalization must preserve legacy helpers: %v", err)
+				}
+			})
+		}
+	}
+}

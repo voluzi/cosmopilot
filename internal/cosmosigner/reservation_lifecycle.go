@@ -107,6 +107,9 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	oneShotNames := make([]string, 0)
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
+		if isLegacyTmKMSOneShotName(job.GetName()) && managedSigningOneShotBelongsToRoot(job.GetName(), job.GetLabels(), owner) {
+			return false, fmt.Errorf("legacy tmKMS Job %s/%s must be removed before reservation release", job.GetNamespace(), job.GetName())
+		}
 		if controlledByAnyUID(job, childControllerUIDs) {
 			if job.GetUID() != "" {
 				childWorkloadUIDs[job.GetUID()] = struct{}{}
@@ -129,6 +132,13 @@ func FinalizeConsensusKeySigningPaths(ctx context.Context, reader client.Reader,
 	podNames := make([]string, 0)
 	for i := range ownedPods.Items {
 		pod := &ownedPods.Items[i]
+		helperName := pod.GetName()
+		if jobName, ok := managedSigningOneShotPodJobName(helperName); ok {
+			helperName = jobName
+		}
+		if isLegacyTmKMSOneShotName(helperName) && managedSigningOneShotBelongsToRoot(helperName, pod.GetLabels(), owner) {
+			return false, fmt.Errorf("legacy tmKMS Pod %s/%s must be removed before reservation release", pod.GetNamespace(), pod.GetName())
+		}
 		if controlledByAnyUID(pod, childControllerUIDs) || controlledByAnyUID(pod, childWorkloadUIDs) ||
 			(controlledByAnyUID(pod, foreignSignerUIDs) && !labelsAttributeToChainNode(pod.GetLabels(), owner)) {
 			continue
@@ -361,15 +371,20 @@ func sortedUnique(values []string) []string {
 	return result
 }
 
+// Legacy tmKMS helpers still block key reuse after upgrades, even though tmKMS is unsupported.
+func isLegacyTmKMSOneShotName(name string) bool {
+	return strings.HasSuffix(name, "-tmkms-generate-identity") || strings.HasSuffix(name, "-tmkms-vault-upload")
+}
+
 func isManagedSigningOneShotName(name string) bool {
-	return strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
+	return isLegacyTmKMSOneShotName(name) || strings.HasSuffix(name, "-import") || strings.HasSuffix(name, "-pubkey")
 }
 
 func managedSigningOneShotPodJobName(name string) (string, bool) {
 	lastIndex := -1
 	jobName := ""
 	for _, marker := range []string{
-		"-import", "-pubkey",
+		"-tmkms-generate-identity", "-tmkms-vault-upload", "-import", "-pubkey",
 	} {
 		if index := strings.LastIndex(name, marker+"-"); index > lastIndex {
 			lastIndex = index
