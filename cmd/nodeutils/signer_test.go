@@ -136,3 +136,76 @@ func TestWaitForSignerRejectsInvalidPort(t *testing.T) {
 		})
 	}
 }
+
+type delayedSignerDNSResolver struct {
+	signerAddress string
+	sent          chan error
+	canceled      chan struct{}
+	release       chan struct{}
+	returned      chan struct{}
+}
+
+func (r *delayedSignerDNSResolver) LookupIPAddr(ctx context.Context, _ string) ([]net.IPAddr, error) {
+	defer close(r.returned)
+	conn, err := net.Dial("tcp", r.signerAddress)
+	if err == nil {
+		_, err = conn.Write([]byte{1})
+		_ = conn.Close()
+	}
+	r.sent <- err
+	<-ctx.Done()
+	close(r.canceled)
+	<-r.release
+	return nil, ctx.Err()
+}
+
+func TestWaitForSignerSuccessDoesNotWaitForDNSDiagnostics(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &delayedSignerDNSResolver{
+		signerAddress: address, sent: make(chan error, 1), canceled: make(chan struct{}),
+		release: make(chan struct{}), returned: make(chan struct{}),
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	t.Cleanup(func() {
+		cancel()
+		close(resolver.release)
+		select {
+		case <-resolver.returned:
+		case <-time.After(time.Second):
+			t.Error("DNS lookup did not exit")
+		}
+	})
+	result := make(chan error, 1)
+	go func() {
+		result <- runWaitForSignerCommand(ctx, resolver, []string{port, "signer-privval.default.svc", "10.0.0.2", "2s"}, time.Millisecond)
+	}()
+	select {
+	case err := <-resolver.sent:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("signer did not send data")
+	}
+	select {
+	case <-resolver.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("diagnostics were not canceled after signer confirmation")
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("successful signer gate waited for the diagnostic lookup")
+	}
+}

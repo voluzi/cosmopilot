@@ -40,16 +40,17 @@ func runWaitForSignerCommand(ctx context.Context, resolver dnsResolver, args []s
 	defer func() { _ = listener.Close() }()
 	diagnosticCtx, stopDiagnostic := context.WithCancel(ctx)
 	defer stopDiagnostic()
+	// Buffer the single result so diagnostics can finish after a successful gate has returned.
 	dnsObservations := make(chan error, 1)
 	go func() {
 		dnsObservations <- waitForDNSAddress(diagnosticCtx, resolver, args[1], args[2], interval)
 	}()
 	signerErr := waitForSignerConnection(ctx, listener)
-	stopDiagnostic()
-	dnsErr := <-dnsObservations
 	if signerErr == nil {
 		return nil
 	}
+	stopDiagnostic()
+	dnsErr := <-dnsObservations
 	dnsStatus := "address published"
 	if dnsErr != nil {
 		dnsStatus = dnsErr.Error()
