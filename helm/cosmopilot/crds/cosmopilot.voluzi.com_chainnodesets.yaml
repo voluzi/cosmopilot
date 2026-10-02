@@ -419,7 +419,16 @@ spec:
                 - message: ingress and gateway are mutually exclusive
                   rule: '!(has(self.ingress) && has(self.gateway))'
               cosmosigner:
-                description: Cosmosigner configures an external consensus signer deployment.
+                description: |-
+                  Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
+                  (github.com/voluzi/cosmosigner). Cosmosigner runs as a separate StatefulSet that dials
+                  the targeted nodes' priv_validator_laddr over the network. This allows any group of nodes
+                  to act as the signing endpoint for a single consensus identity (horcrux-style fan-out),
+                  and enables raft-based high availability across multiple signer replicas.
+
+                  On a ChainNodeSet, .nodeGroups selects which node groups the signer connects to; when it
+                  is empty and a validator is configured, the validator group is targeted by default. On a
+                  standalone ChainNode, the ChainNode itself is the target and .nodeGroups must be empty.
                 properties:
                   backend:
                     description: |-
