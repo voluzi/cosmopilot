@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -86,7 +87,7 @@ func TestValidateRecoveredSigningIdentityRequiresPinnedRuntimeIdentity(t *testin
 		name   string
 		mutate func(*Params)
 	}{
-		{name: "expected public key", mutate: func(p *Params) { p.ExpectedPublicKey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=" }},
+		{name: "expected public key", mutate: func(p *Params) { p.ExpectedPublicKey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=" }},
 		{name: "vault key version", mutate: func(p *Params) { p.Backend.Vault.KeyVersion = 2 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,8 +106,61 @@ func TestValidateRecoveredSigningIdentityRequiresPinnedRuntimeIdentity(t *testin
 			c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(configMap, statefulSet).Build()
 
 			err = ValidateRecoveredSigningIdentity(context.Background(), c, owner, base)
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrRecoveredIdentityMismatch)
 			require.Contains(t, err.Error(), "live signing identity")
+		})
+	}
+}
+
+func TestRecoveredSigningPublicKeyRequiresMatchingArgAndConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*appsv1.StatefulSet)
+		err    string
+	}{
+		{name: "coherent runtime pin", mutate: func(sts *appsv1.StatefulSet) {}},
+		{name: "missing argument", mutate: func(sts *appsv1.StatefulSet) { sts.Spec.Template.Spec.Containers[0].Args = []string{"run"} }, err: "live signing identity is not pinned by exactly one expected-public-key argument"},
+		{name: "duplicate argument", mutate: func(sts *appsv1.StatefulSet) {
+			sts.Spec.Template.Spec.Containers[0].Args = append(sts.Spec.Template.Spec.Containers[0].Args, "--expected-public-key", reservationTestPublicKey)
+		}, err: "live signing identity is not pinned by exactly one expected-public-key argument"},
+		{name: "argument without a value", mutate: func(sts *appsv1.StatefulSet) {
+			sts.Spec.Template.Spec.Containers[0].Args = append(sts.Spec.Template.Spec.Containers[0].Args, "--expected-public-key")
+		}, err: "live signing identity argument has no value"},
+		{name: "different argument", mutate: func(sts *appsv1.StatefulSet) {
+			args := sts.Spec.Template.Spec.Containers[0].Args
+			for i, arg := range args {
+				if arg == "--expected-public-key" {
+					args[i+1] = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA="
+				}
+			}
+		}, err: "live signing identity argument does not match its ConfigMap"},
+		{name: "retained state lost", mutate: func(sts *appsv1.StatefulSet) {
+			sts.Annotations = map[string]string{retainedStateLostAnnotation: "true"}
+		}, err: "retained state is lost; refusing to trust its live signing identity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := fakeOwner("owner", types.UID("owner-uid"))
+			params := testParams()
+			yaml, err := params.ConfigYAML()
+			require.NoError(t, err)
+			cm, err := params.ConfigMap(yaml)
+			require.NoError(t, err)
+			sts, err := params.StatefulSet(yaml)
+			require.NoError(t, err)
+			cm.OwnerReferences = []metav1.OwnerReference{ownerRef(owner)}
+			sts.OwnerReferences = []metav1.OwnerReference{ownerRef(owner)}
+			tc.mutate(sts)
+			c := fake.NewClientBuilder().WithScheme(lockScheme(t)).WithObjects(cm, sts).Build()
+			publicKey, live, err := RecoveredSigningPublicKey(context.Background(), c, owner, params)
+			if tc.err == "" {
+				require.NoError(t, err)
+				require.True(t, live)
+				require.Equal(t, reservationTestPublicKey, publicKey)
+			} else {
+				require.EqualError(t, err, `cosmosigner "mychain-signer" `+tc.err)
+				require.False(t, live)
+				require.Empty(t, publicKey)
+			}
 		})
 	}
 }

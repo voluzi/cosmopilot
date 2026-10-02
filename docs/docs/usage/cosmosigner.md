@@ -376,6 +376,10 @@ after accepting it; a successful import Pod alone is therefore **not** completio
 Secret and all out-of-cluster backups until the import is verified and the signer has rolled out with
 the recorded version. A mismatched key is a hard error and never retargets the validator.
 
+Keep the `gcpKms.import` configuration after verification. Replacing it with `gcpKms.keyVersion`
+for the same CryptoKey is not supported, even for the version recorded in status; this changes the
+managed import identity and key-discovery path rather than acting as a configuration no-op.
+
 If an ImportJob expires before the import completes, choose a new `importJob` name. Changing the job
 does not change the destination consensus identity; changing `project`, `location`, `keyRing`, or
 `key` selects a different destination and is handled as a managed signer migration.
@@ -464,6 +468,45 @@ See [HTTP health probes](#http-health-probes).
 Multi-replica signers require `raftTLSSecret`, containing `tls.crt`, `tls.key`, and `ca.crt`, so Raft
 membership and state replication use mutual TLS. `unsafeAllowInsecureRaft: true` is an explicit opt-out
 for isolated test networks only and cannot be combined with `raftTLSSecret`.
+
+### Running signers highly available
+
+Cosmopilot manages one PodDisruptionBudget per signer, named after its StatefulSet, with
+`maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow` (Kubernetes 1.27+).
+A single-replica signer can therefore be evicted during a drain. Adding a second budget selecting
+those pods makes Kubernetes refuse their evictions, blocking drains of their nodes until the second
+budget is removed. A budget with the signer's name that is not owned by Cosmopilot blocks the signer's
+reconcile like any other name collision. Missing policy API access or permissions is a reconciliation
+error.
+PDBs only gate voluntary evictions; they do not block managed signer migrations.
+
+Set `nodeSelector` and `affinity` on the signer itself; these fields are not inherited from node
+specs and do not apply to one-shot import or public-key pods. For example, prefer spreading this
+three-replica signer across nodes (replace `mychain-signer` with its actual resource name):
+
+```yaml
+cosmosigner:
+  replicas: 3
+  raftTLSSecret: cosmosigner-raft-tls
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: cosmosigner
+                app.kubernetes.io/instance: mychain-signer
+            topologyKey: kubernetes.io/hostname
+```
+
+Required anti-affinity across nodes leaves replicas Pending when the cluster has fewer nodes than
+replicas, including a single-node cluster. Preferred anti-affinity permits co-location on fewer
+nodes. Changing either scheduling field on a running signer uses the same break-before-make
+migration as an image or resource change: all replicas stop and restart once, retaining their PVCs
+and Raft state. Cosmopilot does not validate these fields: a value Kubernetes rejects, or one no
+node satisfies, keeps the whole signer down after the stop until the spec is corrected. With both fields unset, this feature does not change the lifecycle
+digest or restart existing signers on operator upgrade.
 
 ### Raft TLS Secret
 
@@ -618,7 +661,7 @@ on `helm upgrade`. Existing installations must apply the CRDs from the target ch
 the controller:
 
 ```shell
-helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply -f -
+helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply --server-side --force-conflicts -f -
 ```
 
 Confirm `consensuskeyreservations.cosmopilot.voluzi.com` exists before starting the new controller.

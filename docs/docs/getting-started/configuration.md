@@ -66,7 +66,7 @@ the SDK marker with the application's filesystem identity.
 - **Description**: The default container image of [Cosmosigner](https://github.com/voluzi/cosmosigner) (with version tag included), used when deploying managed remote signers. Can be overridden per-signer with `.spec.cosmosigner.image`.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
-Cosmopilot 5.0.0 defaults to Cosmosigner 3.1.0 and requires its HTTP health endpoints and bounded
+Cosmopilot 5.0.0 defaults to Cosmosigner 3.1.1 and requires its HTTP health endpoints and bounded
 redial. The image is not version-checked: with an older build `/livez` never answers, the signer
 never becomes live, and the validator does not sign until the image is corrected.
 

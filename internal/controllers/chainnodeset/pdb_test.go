@@ -872,3 +872,17 @@ func TestEnsurePodDisruptionBudgetsZeroInstanceGroupRendersValidMinAvailable(t *
 	require.NotNil(t, pdb.Spec.MinAvailable)
 	assert.Equal(t, 0, pdb.Spec.MinAvailable.IntValue())
 }
+
+func TestDeleteStalePodDisruptionBudgetsKeepsSignerPDB(t *testing.T) {
+	nodeSet := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}}
+	r := newPdbTestReconciler(t, nodeSet)
+	signerPDB := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "set-signer", Namespace: nodeSet.Namespace, Labels: map[string]string{"app.kubernetes.io/name": "cosmosigner", "app.kubernetes.io/instance": "set-signer"}}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, signerPDB, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), signerPDB))
+	stale := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "set-stale", Namespace: nodeSet.Namespace}}
+	require.NoError(t, controllerutil.SetControllerReference(nodeSet, stale, r.Scheme))
+	require.NoError(t, r.Create(context.Background(), stale))
+	require.NoError(t, r.deleteStalePodDisruptionBudgets(context.Background(), nodeSet, map[string]struct{}{}))
+	require.NotNil(t, getPdb(t, r, nodeSet.Namespace, signerPDB.Name))
+	require.Nil(t, getPdb(t, r, nodeSet.Namespace, stale.Name))
+}

@@ -10,6 +10,7 @@ import (
 	k8sappsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -135,35 +136,47 @@ func TestReconcileCosmosignerMigrationComparesActualPublicKeys(t *testing.T) {
 }
 
 func TestReconcileCosmosignerMigrationQuiescesRuntimeOnlyChange(t *testing.T) {
-	chainNode := &appsv1.ChainNode{
-		ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
-		Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
-			Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
-		}}},
-	}
-	const publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	params := cosmosigner.Params{
-		Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "new-image", Replicas: 1,
-		ExpectedPublicKey: publicKey, StateStorageSize: "1Gi",
-		Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
-	}
-	oldParams := params
-	oldParams.Image = "old-image"
-	oldDigest, err := oldParams.LifecycleDigest(chainNode.CosmosignerSigningDigest())
-	require.NoError(t, err)
-	chainNode.Status.CosmosignerAppliedDigest = oldDigest
-	chainNode.Status.CosmosignerPublicKey = publicKey
+	for _, tc := range []struct {
+		name   string
+		mutate func(*cosmosigner.Params)
+	}{
+		{name: "image", mutate: func(p *cosmosigner.Params) { p.Image = "new-image" }},
+		{name: "node selector", mutate: func(p *cosmosigner.Params) { p.NodeSelector = map[string]string{"pool": "signers"} }},
+		{name: "affinity", mutate: func(p *cosmosigner.Params) { p.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 
-	scheme := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build(), Scheme: scheme}
+			chainNode := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "sentry", Namespace: "default", UID: "sentry-uid"},
+				Spec: appsv1.ChainNodeSpec{Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
+					Software: &appsv1.CosmosignerSoftwareBackend{PrivateKeySecret: ptr.To("sentry-key")},
+				}}},
+			}
+			const publicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			params := cosmosigner.Params{
+				Name: cosmosignerName(chainNode), Namespace: chainNode.Namespace, ChainID: "test-1", Image: "old-image", Replicas: 1,
+				ExpectedPublicKey: publicKey, StateStorageSize: "1Gi",
+				Backend: cosmosigner.Backend{Software: &cosmosigner.SoftwareBackend{SecretName: "sentry-key"}},
+			}
+			oldParams := params
+			tc.mutate(&params)
+			oldDigest, err := oldParams.LifecycleDigest(chainNode.CosmosignerSigningDigest())
+			require.NoError(t, err)
+			chainNode.Status.CosmosignerAppliedDigest = oldDigest
+			chainNode.Status.CosmosignerPublicKey = publicKey
 
-	pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
-	require.NoError(t, err)
-	require.True(t, pending)
-	require.NotNil(t, chainNode.Status.CosmosignerMigration)
-	require.False(t, chainNode.Status.CosmosignerMigration.ResetState)
-	require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build(), Scheme: scheme}
+
+			pending, err := r.reconcileCosmosignerMigration(context.Background(), chainNode, params)
+			require.NoError(t, err)
+			require.True(t, pending)
+			require.NotNil(t, chainNode.Status.CosmosignerMigration)
+			require.False(t, chainNode.Status.CosmosignerMigration.ResetState)
+			require.Equal(t, appsv1.CosmosignerMigrationQuiescing, chainNode.Status.CosmosignerMigration.Phase)
+		})
+	}
 }
 
 func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing.T) {
@@ -191,6 +204,7 @@ func TestPreflightCosmosignerRefusesEstablishedSignerWithoutRaftState(t *testing
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
 		Scheme: scheme,
@@ -298,6 +312,7 @@ func TestPreflightCosmosignerQuiescesSentrySignerOnReservationConflict(t *testin
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, batchv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 	r := &Reconciler{
@@ -337,6 +352,7 @@ func TestPreflightCosmosignerRejectsDifferentRecordedValidatorPublicKey(t *testi
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
 		Scheme: scheme, opts: &controllers.ControllerRunOptions{},
@@ -408,6 +424,7 @@ func TestPreflightCosmosignerLeavesHealthySignerRunningOnRejectedKey(t *testing.
 			require.NoError(t, appsv1.AddToScheme(scheme))
 			require.NoError(t, corev1.AddToScheme(scheme))
 			require.NoError(t, k8sappsv1.AddToScheme(scheme))
+			require.NoError(t, policyv1.AddToScheme(scheme))
 			require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 			r := &Reconciler{
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, sts, pvc).Build(),
@@ -452,6 +469,7 @@ func TestPreflightCosmosignerQuiescesRecoveredSignerWithStaleStatusOnKeyMismatch
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 	params, err := r.cosmosignerParams(context.Background(), chainNode)
 	require.NoError(t, err)
@@ -514,6 +532,7 @@ func TestPreflightCosmosignerRecoversMissingPublicKeyBeforeReservation(t *testin
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, reservation).Build(), Scheme: scheme, opts: &controllers.ControllerRunOptions{}}
 	params, err := r.cosmosignerParams(context.Background(), chainNode)
 	require.NoError(t, err)
@@ -879,6 +898,7 @@ func TestReconcileSigningConfigsValidatesMigrationSourceBeforeQuiescing(t *testi
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, sts, scheme))
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&appsv1.ChainNode{}, &k8sappsv1.StatefulSet{}).
@@ -1037,6 +1057,7 @@ func requireRecoveredStandaloneIdentityMismatchRejected(t *testing.T, currentVal
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, liveConfigMap, scheme))
 	require.NoError(t, controllerutil.SetControllerReference(chainNode, liveStatefulSet, scheme))
 	token := &corev1.Secret{
@@ -1183,6 +1204,7 @@ func TestUndeployCosmosignerClearsPartialStatusAfterTeardown(t *testing.T) {
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, policyv1.AddToScheme(scheme))
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).WithObjects(chainNode).Build()
 	r := &Reconciler{Client: cl, Scheme: scheme}
 

@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -83,6 +84,7 @@ func PreflightDeployable(ctx context.Context, c client.Client, owner client.Obje
 		obj  client.Object
 	}{
 		{"ConfigMap", &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
+		{"PodDisruptionBudget", &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}},
 		{"NetworkPolicy", networkPolicyObject(namespace, name)},
 		{"target NetworkPolicy", networkPolicyObject(namespace, name+discoveryServiceSuffix)},
 	}
@@ -631,6 +633,7 @@ func Undeploy(ctx context.Context, c client.Client, owner client.Object, namespa
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name + discoveryServiceSuffix, Namespace: namespace}},
+		&policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
 		networkPolicyObject(namespace, name),
 		networkPolicyObject(namespace, name+discoveryServiceSuffix),
 	}
@@ -694,6 +697,15 @@ func IsTornDown(ctx context.Context, c client.Client, owner metav1.Object, names
 		} else if !errors.IsNotFound(err) {
 			return false, err
 		}
+	}
+
+	pdb := &policyv1.PodDisruptionBudget{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, pdb); err == nil {
+		if metav1.IsControlledBy(pdb, owner) {
+			return false, nil
+		}
+	} else if !errors.IsNotFound(err) {
+		return false, err
 	}
 
 	sts := &appsv1.StatefulSet{}

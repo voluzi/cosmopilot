@@ -219,6 +219,8 @@ func TestLifecycleDigestCoversRuntimeAndExpectedIdentity(t *testing.T) {
 		{name: "resources", mutate: func(p *Params) {
 			p.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")}
 		}},
+		{name: "node selector", mutate: func(p *Params) { p.NodeSelector = map[string]string{"pool": "signers"} }},
+		{name: "affinity", mutate: func(p *Params) { p.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}} }},
 		{name: "service account", mutate: func(p *Params) { p.ServiceAccountName = "signer" }},
 		{name: "pod labels", mutate: func(p *Params) { p.Labels["security.example/policy"] = "restricted" }},
 	}

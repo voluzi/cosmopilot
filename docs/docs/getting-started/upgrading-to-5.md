@@ -52,10 +52,22 @@ or update them to compatible images:
 - **node-utils 4.0.0 or newer** supplies the `wait-for-signer` init command.
 - **Cosmosigner 3.1.0 or newer** supplies HTTP health endpoints and bounded redial.
 
-The release defaults use these versions. Image overrides are not version-checked, so check any
+The release defaults use node-utils 4.0.0 and Cosmosigner 3.1.1. Image overrides are not version-checked, so check any
 `cosmosignerImage` or `.spec.cosmosigner.image` override before upgrading. With a Cosmosigner build
 older than 3.1.0, `/livez` never answers, the signer never becomes live, and the validator does not
 sign until the image is corrected.
+
+For existing managed signers using the default image, upgrading the operator changes the signer
+pod template and triggers a break-before-make migration: all replicas stop once, the StatefulSet
+is deleted and recreated, and PVCs and Raft state are retained. This is a full signer stop per
+validator. A per-signer image override avoids the restart caused by this default image bump.
+It does not avoid the one-time managed-signer migration required by the 4.x to 5.0.0 lifecycle
+upgrade described below.
+
+Cosmopilot manages one PodDisruptionBudget per signer (`maxUnavailable: 1`); a second budget
+selecting the same pods makes Kubernetes refuse their evictions, blocking drains of their nodes
+until that second budget is removed. A budget with the signer's name that is not owned by Cosmopilot
+blocks the signer's reconcile like any other name collision.
 
 ## 3. Verify NetworkPolicy enforcement
 
@@ -73,7 +85,7 @@ from the target chart before upgrading the controller. Replace `<target-chart-ve
 chart release for Cosmopilot 5.0.0 and `<release>` with your existing release name:
 
 ```shell
-helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-chart-version> | kubectl apply -f -
+helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-chart-version> | kubectl apply --server-side --force-conflicts -f -
 helm upgrade <release> oci://ghcr.io/voluzi/helm/cosmopilot --version <target-chart-version> -f values.yaml
 ```
 

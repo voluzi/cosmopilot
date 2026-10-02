@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -93,6 +94,8 @@ type Params struct {
 	Resources          corev1.ResourceRequirements
 	RaftTLSSecret      *string
 	ServiceAccountName string
+	NodeSelector       map[string]string
+	Affinity           *corev1.Affinity
 
 	// ImagePullSecrets are applied to the ONE-SHOT key-management pods only (import, pubkey). The
 	// signer StatefulSet deliberately does not carry them: its pod template feeds LifecycleDigest, so
@@ -170,6 +173,11 @@ func InstanceLabels(name string) map[string]string {
 		labelAppName:  appNameCosmosigner,
 		labelInstance: name,
 	}
+}
+
+// HasSignerLabels identifies resources whose lifecycle belongs to a managed signer.
+func HasSignerLabels(labels map[string]string) bool {
+	return labels[labelAppName] == appNameCosmosigner
 }
 
 // podLabels merges the caller labels with the immutable selector labels.
@@ -391,6 +399,18 @@ func (p Params) NetworkPolicy() *networkingv1.NetworkPolicy {
 	}
 }
 
+// PodDisruptionBudget allows one voluntary disruption, including for a single-replica signer.
+func (p Params) PodDisruptionBudget() *policyv1.PodDisruptionBudget {
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: p.Name, Namespace: p.Namespace, Labels: p.podLabels()},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable:             ptr.To(intstr.FromInt32(1)),
+			Selector:                   &metav1.LabelSelector{MatchLabels: p.selectorLabels()},
+			UnhealthyPodEvictionPolicy: ptr.To(policyv1.AlwaysAllow),
+		},
+	}
+}
+
 // TargetNetworkPolicy restricts privval to signer pods while preserving all other ingress.
 func (p Params) TargetNetworkPolicy() *networkingv1.NetworkPolicy {
 	tcp, udp, sctp := corev1.ProtocolTCP, corev1.ProtocolUDP, corev1.ProtocolSCTP
@@ -576,6 +596,8 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: p.ServiceAccountName,
+					NodeSelector:       p.NodeSelector,
+					Affinity:           p.Affinity,
 					SecurityContext:    k8s.RestrictedPodSecurityContext(),
 					Containers:         []corev1.Container{signer},
 					Volumes:            volumes,

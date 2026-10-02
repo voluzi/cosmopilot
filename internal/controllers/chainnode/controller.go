@@ -9,6 +9,7 @@ import (
 	k8sappsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -574,6 +575,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&k8sappsv1.StatefulSet{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

@@ -42,6 +42,65 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		}
 	}
 
+	It("persists signer scheduling through admission for every placement", func() {
+		ctx := Framework().Context()
+		for _, placement := range []string{"ChainNode", "ChainNodeSet", "group"} {
+			c := &appsv1.Cosmosigner{
+				NodeSelector: map[string]string{"pool": "signers"},
+				Affinity: &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "cosmosigner"}}, TopologyKey: "kubernetes.io/hostname",
+				}}}}, Backend: vaultBackend(),
+			}
+			if placement == "ChainNode" {
+				node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name}, Spec: appsv1.ChainNodeSpec{App: DefaultChainNodeTestApp, Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis")}, Cosmosigner: c}}
+				Expect(Framework().Client().Create(ctx, node)).To(Succeed())
+				live := &appsv1.ChainNode{}
+				Expect(Framework().Client().Get(ctx, client.ObjectKeyFromObject(node), live)).To(Succeed())
+				Expect(live.Spec.Cosmosigner.NodeSelector).To(Equal(c.NodeSelector))
+				Expect(live.Spec.Cosmosigner.Affinity).To(Equal(c.Affinity))
+				Eventually(func() error {
+					if err := Framework().Client().Get(ctx, client.ObjectKeyFromObject(node), live); err != nil {
+						return err
+					}
+					live.Spec.Cosmosigner.NodeSelector = map[string]string{"pool": "changed"}
+					live.Spec.Cosmosigner.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey = "topology.kubernetes.io/zone"
+					return Framework().Client().Update(ctx, live)
+				}).Should(Succeed())
+				continue
+			}
+			groups := []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}}
+			var cs *appsv1.ChainNodeSet
+			if placement == "group" {
+				groups[0].Cosmosigner = c
+				cs = newNodeSet(nil, groups, nil)
+			} else {
+				c.NodeGroups = []string{"sentries"}
+				cs = newNodeSet(c, groups, nil)
+			}
+			Expect(Framework().Client().Create(ctx, cs)).To(Succeed())
+			live := &appsv1.ChainNodeSet{}
+			Expect(Framework().Client().Get(ctx, client.ObjectKeyFromObject(cs), live)).To(Succeed())
+			spec := live.Spec.Cosmosigner
+			if placement == "group" {
+				spec = live.Spec.Nodes[0].Cosmosigner
+			}
+			Expect(spec.NodeSelector).To(Equal(c.NodeSelector))
+			Expect(spec.Affinity).To(Equal(c.Affinity))
+			Eventually(func() error {
+				if err := Framework().Client().Get(ctx, client.ObjectKeyFromObject(cs), live); err != nil {
+					return err
+				}
+				spec := live.Spec.Cosmosigner
+				if placement == "group" {
+					spec = live.Spec.Nodes[0].Cosmosigner
+				}
+				spec.NodeSelector = map[string]string{"pool": "changed"}
+				spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey = "topology.kubernetes.io/zone"
+				return Framework().Client().Update(ctx, live)
+			}).Should(Succeed())
+		}
+	})
+
 	It("accepts a sentry-mode signer targeting a fullnode group", func() {
 		cs := newNodeSet(
 			&appsv1.Cosmosigner{NodeGroups: []string{"fullnodes"}, Replicas: ptr.To(int32(3)), UnsafeAllowInsecureRaft: true, Backend: vaultBackend()},

@@ -805,8 +805,9 @@ func (c *Cosmosigner) keyResource() string {
 }
 
 // validateCosmosignerKeyVersionChange rejects moving a signer to another version of the same Vault
-// key or Cloud KMS CryptoKey. That migration resets the signer's Raft state, and cosmosigner 3.x
-// refuses the new cluster because the key is still bound to the old one.
+// key or Cloud KMS CryptoKey, including either direction between managed GCP import and a
+// pre-provisioned keyVersion. Those migrations reset Raft state, and cosmosigner 3.x refuses the
+// new cluster because the key is still bound to the old one.
 func validateCosmosignerKeyVersionChange(path string, oldC, newC *Cosmosigner) error {
 	if oldC == nil || newC == nil {
 		return nil
@@ -814,6 +815,12 @@ func validateCosmosignerKeyVersionChange(path string, oldC, newC *Cosmosigner) e
 	if resource := oldC.keyResource(); resource == "" || resource != newC.keyResource() ||
 		oldC.effectiveSigningIdentity("") == newC.effectiveSigningIdentity("") {
 		return nil
+	}
+	if oldC.UsesGcpKmsBackend() && newC.UsesGcpKmsBackend() && oldC.GcpImportsKey() != newC.GcpImportsKey() {
+		if oldC.GcpImportsKey() {
+			return fmt.Errorf("%s: switching from gcpKms.import to gcpKms.keyVersion for the same Cloud KMS CryptoKey is not supported, even when keyVersion is the imported version; keep the managed import configuration for this signer", path)
+		}
+		return fmt.Errorf("%s: switching from gcpKms.keyVersion to gcpKms.import for the same Cloud KMS CryptoKey is not supported; keep the pre-provisioned keyVersion configuration for this signer, or use a new Cloud KMS CryptoKey for managed import", path)
 	}
 	return fmt.Errorf("%s: moving to another version of the same Vault key or Cloud KMS CryptoKey is not supported, because cosmosigner binds the whole key to the signer cluster that first used it; use a new Vault keyName or Cloud KMS CryptoKey for new key material", path)
 }

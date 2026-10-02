@@ -59,11 +59,21 @@ type Cosmosigner struct {
 
 	// Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
 	// image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-	// defaulting to `ghcr.io/voluzi/cosmosigner:3.1.0`). Set this to pin or override the image for
+	// defaulting to `ghcr.io/voluzi/cosmosigner:3.1.1`). Set this to pin or override the image for
 	// this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is
 	// unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes.
 	// +optional
 	Image *string `json:"image,omitempty"`
+
+	// NodeSelector restricts signer pods to nodes with matching labels. It is independent of the
+	// scheduling of the nodes the signer targets. Changing it on a running signer restarts all replicas through a managed migration.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Affinity constrains signer pod placement independently of the targeted nodes. Changing it on
+	// a running signer restarts all replicas through a managed migration.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// Backend selects and configures where the consensus key material lives and how signing is
 	// performed. Exactly one backend must be configured.

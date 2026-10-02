@@ -123,7 +123,7 @@ any migration that writes `.spec.deletionPolicy`; otherwise the API server canno
 field:
 
 ```shell
-helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply -f -
+helm show crds oci://ghcr.io/voluzi/helm/cosmopilot --version <target-version> | kubectl apply --server-side --force-conflicts -f -
 ```
 
 Only after that command succeeds, review existing manifests that use `deleteWithNode: true`. The new
