@@ -1739,12 +1739,12 @@ func (r *Reconciler) reconcileSigner(ctx context.Context, nodeSet *appsv1.ChainN
 	if err := r.applyCosmosignerObject(ctx, nodeSet, params.TargetNetworkPolicy()); err != nil {
 		return false, err
 	}
-	skipped, err := cosmosigner.EnsurePodDisruptionBudget(ctx, r.Client, r.Scheme, nodeSet, params.PodDisruptionBudget())
+	skipReason, err := cosmosigner.EnsurePodDisruptionBudget(ctx, r.Client, r.Scheme, nodeSet, params.PodDisruptionBudget())
 	if err != nil {
 		return false, err
 	}
-	if skipped && r.recorder != nil {
-		r.recorder.Eventf(nodeSet, corev1.EventTypeWarning, "CosmosignerPDBSkipped", "Skipping PodDisruptionBudget for signer %q: foreign PDB coverage or policy API/permissions unavailable", params.Name)
+	if skipReason != "" && r.recorder != nil {
+		r.recorder.Eventf(nodeSet, corev1.EventTypeWarning, "CosmosignerPDBSkipped", "Skipping PodDisruptionBudget for signer %q: %s", params.Name, skipReason)
 	}
 
 	// Do not roll out the signer until the validator's generated key has been imported into Vault,

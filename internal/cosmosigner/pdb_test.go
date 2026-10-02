@@ -2,21 +2,17 @@ package cosmosigner
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestSignerPodDisruptionBudgetTeardown(t *testing.T) {
@@ -71,6 +67,7 @@ func TestEnsurePodDisruptionBudgetSkipsForeignOverlap(t *testing.T) {
 	}{
 		{"mychain-signer", &metav1.LabelSelector{MatchLabels: map[string]string{"other": "pods"}}, true},
 		{"external", &metav1.LabelSelector{MatchLabels: InstanceLabels("mychain-signer")}, true},
+		{"mixed", &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/instance": "mychain-signer", "chain-node-set": "mychain"}}, true},
 		{"expression", &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "app.kubernetes.io/name", Operator: metav1.LabelSelectorOpIn, Values: []string{"cosmosigner"}}}}, true},
 		{"unrelated", &metav1.LabelSelector{MatchLabels: InstanceLabels("other-signer")}, false},
 	} {
@@ -80,9 +77,17 @@ func TestEnsurePodDisruptionBudgetSkipsForeignOverlap(t *testing.T) {
 			owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"}}
 			foreign := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: "default"}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: tc.selector}}
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
-			skipped, err := EnsurePodDisruptionBudget(ctx, c, scheme, owner, testParams().PodDisruptionBudget())
+			reason, err := EnsurePodDisruptionBudget(ctx, c, scheme, owner, testParams().PodDisruptionBudget())
 			require.NoError(t, err)
-			require.Equal(t, tc.skipped, skipped)
+			require.Equal(t, tc.skipped, reason != "")
+			if tc.skipped {
+				require.Contains(t, reason, `foreign PodDisruptionBudget "`+tc.name+`"`)
+				if tc.name == "mychain-signer" {
+					require.Contains(t, reason, "signer is left without a budget")
+				} else {
+					require.Contains(t, reason, "signer pods are covered")
+				}
+			}
 			live := &policyv1.PodDisruptionBudget{}
 			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(foreign), live))
 			require.Empty(t, live.OwnerReferences)
@@ -95,46 +100,12 @@ func TestEnsurePodDisruptionBudgetSkipsForeignOverlap(t *testing.T) {
 				require.True(t, metav1.IsControlledBy(live, owner))
 				desired := testParams().PodDisruptionBudget()
 				desired.Spec.MaxUnavailable = ptr.To(intstr.FromInt32(2))
-				skipped, err = EnsurePodDisruptionBudget(ctx, c, scheme, owner, desired)
+				reason, err = EnsurePodDisruptionBudget(ctx, c, scheme, owner, desired)
 				require.NoError(t, err)
-				require.False(t, skipped)
+				require.Empty(t, reason)
 				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(desired), live))
 				require.Equal(t, intstr.FromInt32(2), *live.Spec.MaxUnavailable)
 			}
 		})
-	}
-}
-
-func TestEnsurePodDisruptionBudgetUnavailable(t *testing.T) {
-	for _, op := range []string{"list", "create"} {
-		for _, denied := range []error{
-			apierrors.NewForbidden(schema.GroupResource{Group: "policy", Resource: "poddisruptionbudgets"}, "mychain-signer", fmt.Errorf("denied")),
-			&meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "policy", Kind: "PodDisruptionBudget"}},
-			fmt.Errorf("connection lost"),
-		} {
-			t.Run(op+"/"+denied.Error(), func(t *testing.T) {
-				scheme := lockScheme(t)
-				c := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
-					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-						if op == "list" {
-							return denied
-						}
-						return c.List(ctx, list, opts...)
-					},
-					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-						return denied
-					},
-				}).Build()
-				owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "default", UID: "owner-uid"}}
-				skipped, err := EnsurePodDisruptionBudget(context.Background(), c, scheme, owner, testParams().PodDisruptionBudget())
-				if apierrors.IsForbidden(denied) || meta.IsNoMatchError(denied) {
-					require.NoError(t, err)
-					require.True(t, skipped)
-				} else {
-					require.ErrorIs(t, err, denied)
-					require.False(t, skipped)
-				}
-			})
-		}
 	}
 }

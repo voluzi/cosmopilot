@@ -473,8 +473,10 @@ for isolated test networks only and cannot be combined with `raftTLSSecret`.
 
 Every managed signer has a PodDisruptionBudget named after its StatefulSet, with
 `maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow` (Kubernetes 1.27+).
-A single-replica signer can therefore be evicted during a drain. An overlapping user-managed PDB
-or unavailable policy API/permissions makes the operator skip its PDB and emit a warning event.
+A single-replica signer can therefore be evicted during a drain. A foreign PDB covering signer pods
+or taking the budget name makes the operator skip its PDB and emit a warning event naming that PDB
+and stating whether it covers the signer. Missing policy API
+access or permissions is a reconciliation error.
 PDBs only gate voluntary evictions; they do not block managed signer migrations.
 
 Set `nodeSelector` and `affinity` on the signer itself; these fields are not inherited from node

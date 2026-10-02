@@ -13,7 +13,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -58,16 +57,15 @@ func ReadLifecycleDigest(ctx context.Context, c client.Client, namespace, name s
 	return digest, digest != "", nil
 }
 
-// EnsurePodDisruptionBudget skips foreign coverage and unavailable policy permissions so an
-// optional drain guard cannot block signing. Overlapping PDBs make the eviction API refuse drains.
-func EnsurePodDisruptionBudget(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, pdb *policyv1.PodDisruptionBudget) (bool, error) {
+// EnsurePodDisruptionBudget returns a skip reason when a foreign PDB covers signer pods or takes
+// the budget name. The rendered PDB labels carry the full pod label set; overlapping budgets make
+// the eviction API refuse drains. Policy API and permission errors must remain visible.
+func EnsurePodDisruptionBudget(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, pdb *policyv1.PodDisruptionBudget) (string, error) {
 	pdbs := &policyv1.PodDisruptionBudgetList{}
 	if err := c.List(ctx, pdbs, client.InNamespace(pdb.Namespace)); err != nil {
-		if errors.IsForbidden(err) || meta.IsNoMatchError(err) {
-			return true, nil
-		}
-		return false, err
+		return "", err
 	}
+	nameCollision := false
 	for i := range pdbs.Items {
 		existing := &pdbs.Items[i]
 		if metav1.IsControlledBy(existing, owner) {
@@ -75,19 +73,20 @@ func EnsurePodDisruptionBudget(ctx context.Context, c client.Client, scheme *run
 		}
 		selector, err := metav1.LabelSelectorAsSelector(existing.Spec.Selector)
 		if err != nil {
-			return false, err
+			return "", err
 		}
-		if existing.Name == pdb.Name || selector.Matches(labels.Set(InstanceLabels(pdb.Name))) {
-			return true, nil
+		if selector.Matches(labels.Set(pdb.Labels)) {
+			return fmt.Sprintf("signer pods are covered by foreign PodDisruptionBudget %q", existing.Name), nil
 		}
+		nameCollision = nameCollision || existing.Name == pdb.Name
+	}
+	if nameCollision {
+		return fmt.Sprintf("foreign PodDisruptionBudget %q takes the budget name but does not cover signer pods; signer is left without a budget", pdb.Name), nil
 	}
 	if err := ApplyOwned(ctx, c, scheme, owner, pdb); err != nil {
-		if errors.IsForbidden(err) || meta.IsNoMatchError(err) {
-			return true, nil
-		}
-		return false, err
+		return "", err
 	}
-	return false, nil
+	return "", nil
 }
 
 // PreflightDeployable reports (as an error) whether the signer named `name` can be deployed by owner,

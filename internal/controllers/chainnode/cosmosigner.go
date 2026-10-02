@@ -286,12 +286,12 @@ func (r *Reconciler) ensureCosmosignerWithParams(ctx context.Context, chainNode 
 	if err := r.applyCosmosignerObject(ctx, chainNode, params.TargetNetworkPolicy()); err != nil {
 		return false, err
 	}
-	skipped, err := cosmosigner.EnsurePodDisruptionBudget(ctx, r.Client, r.Scheme, chainNode, params.PodDisruptionBudget())
+	skipReason, err := cosmosigner.EnsurePodDisruptionBudget(ctx, r.Client, r.Scheme, chainNode, params.PodDisruptionBudget())
 	if err != nil {
 		return false, err
 	}
-	if skipped && r.recorder != nil {
-		r.recorder.Eventf(chainNode, corev1.EventTypeWarning, "CosmosignerPDBSkipped", "Skipping PodDisruptionBudget for signer %q: foreign PDB coverage or policy API/permissions unavailable", params.Name)
+	if skipReason != "" && r.recorder != nil {
+		r.recorder.Eventf(chainNode, corev1.EventTypeWarning, "CosmosignerPDBSkipped", "Skipping PodDisruptionBudget for signer %q: %s", params.Name, skipReason)
 	}
 
 	// Do not roll out the signer until the node's key import into the backend is durably COMPLETE (for
