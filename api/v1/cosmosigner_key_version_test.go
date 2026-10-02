@@ -62,8 +62,10 @@ func TestWebhooksRejectGcpImportKeyVersionSwitchWithAccurateMessage(t *testing.T
 	for _, reverse := range []bool{false, true} {
 		t.Run(map[bool]string{false: "import to keyVersion", true: "keyVersion to import"}[reverse], func(t *testing.T) {
 			oldSigner, newSigner := imported, gcpKeySigner(keyVersion)
+			want := "switching from gcpKms.import to gcpKms.keyVersion for the same Cloud KMS CryptoKey is not supported, even when keyVersion is the imported version; keep the managed import configuration for this signer"
 			if reverse {
 				oldSigner, newSigner = newSigner, oldSigner
+				want = "switching from gcpKms.keyVersion to gcpKms.import for the same Cloud KMS CryptoKey is not supported; keep the pre-provisioned keyVersion configuration for this signer, or use a new Cloud KMS CryptoKey for managed import"
 			}
 			t.Run("ChainNode", func(t *testing.T) {
 				oldNode := &ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "default"}, Spec: ChainNodeSpec{
@@ -73,8 +75,7 @@ func TestWebhooksRejectGcpImportKeyVersionSwitchWithAccurateMessage(t *testing.T
 				newNode := oldNode.DeepCopy()
 				newNode.Spec.Cosmosigner = newSigner
 				_, err := newNode.Validate(oldNode)
-				require.ErrorContains(t, err, "switching between gcpKms.import and gcpKms.keyVersion")
-				require.ErrorContains(t, err, "even when keyVersion is the imported version")
+				require.ErrorContains(t, err, want)
 				require.NotContains(t, err.Error(), "moving to another version")
 			})
 			for _, group := range []bool{false, true} {
@@ -96,8 +97,7 @@ func TestWebhooksRejectGcpImportKeyVersionSwitchWithAccurateMessage(t *testing.T
 						newSet.Spec.Cosmosigner = newSigner
 					}
 					err := newSet.validateCosmosignerUpdate(oldSet)
-					require.ErrorContains(t, err, "switching between gcpKms.import and gcpKms.keyVersion")
-					require.ErrorContains(t, err, "even when keyVersion is the imported version")
+					require.ErrorContains(t, err, want)
 					require.NotContains(t, err.Error(), "moving to another version")
 				})
 			}
