@@ -205,23 +205,30 @@ var _ = Describe("ChainNodeSet Cosmosigner", Label("cosmosigner"), func() {
 			pods := waitForReadySignerPods(ns.Name, resourceName, 3)
 			leaderName := waitForSignerLeader(ns.Name, resourceName, "")
 			for deletion := 0; deletion < 5; deletion++ {
-				var heightBeforeFailover int64
 				Eventually(func() (int64, error) {
-					height, err := liveHeight()
-					if err == nil {
-						heightBeforeFailover = height
-					}
-					return height, err
-				}, 5*time.Minute, time.Second).Should(BeNumerically(">", 3), "capture a live baseline before deleting the signer leader")
+					return liveHeight()
+				}, 5*time.Minute, time.Second).Should(BeNumerically(">", 3), "the validator should be live before deleting the signer leader")
 
 				leaderPod := &corev1.Pod{}
 				Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: leaderName}, leaderPod)).To(Succeed())
 				Expect(Framework().Client().Delete(Framework().Context(), leaderPod)).To(Succeed())
+				// Thirty seconds allows election, redial and several 1-second blocks, but rejects
+				// minute-long stalls. Check progress before waiting for leader logs to bound the handoff.
+				// A post-deletion baseline prevents a block committed before deletion from passing it.
+				var heightAfterDeletion int64
+				Eventually(func() (bool, error) {
+					height, err := liveHeight()
+					if err != nil {
+						return false, err
+					}
+					if heightAfterDeletion == 0 {
+						heightAfterDeletion = height
+						return false, nil
+					}
+					return height > heightAfterDeletion, nil
+				}, 30*time.Second, time.Second).Should(BeTrue(), "a surviving Raft replica should resume signing within 30 seconds after leader deletion %d", deletion+1)
 				newLeaderName := waitForSignerLeader(ns.Name, resourceName, leaderName)
 				Expect(newLeaderName).NotTo(Equal(leaderName))
-				Eventually(func() (int64, error) {
-					return liveHeight()
-				}).Should(BeNumerically(">", heightBeforeFailover), "a surviving Raft replica should resume signing after leader deletion %d", deletion+1)
 				waitForReplacementSignerPod(ns.Name, leaderName, string(leaderPod.UID))
 				pods = waitForReadySignerPods(ns.Name, resourceName, 3)
 				leaderName = newLeaderName
