@@ -3,6 +3,7 @@ package chainnode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -275,4 +276,53 @@ func TestRestoreReplacementVolumeRebasesApplicationAtArchiveHeight(t *testing.T)
 			require.Equal(t, tc.image, pod.Spec.InitContainers[1].Image)
 		})
 	}
+	for _, managed := range []bool{false, true} {
+		name := "new standalone node"
+		if managed {
+			name = "new ChainNodeSet child"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, height := range []int64{200, 250} {
+				t.Run(fmt.Sprint(height), func(t *testing.T) {
+					node := restoreNode()
+					node.Spec.Persistence.Restore.Height = ptr.To(height)
+					node.Spec.App.Upgrades = []appsv1.UpgradeSpec{
+						{Height: 100, Image: "app:v2"},
+						{Height: 200, Image: "app:v3"},
+						{Height: 300, Image: "app:v4"},
+					}
+					if managed {
+						node.OwnerReferences = []metav1.OwnerReference{{
+							APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet",
+							Name: "set", UID: "set-uid", Controller: ptr.To(true),
+						}}
+						set := &appsv1.ChainNodeSet{Spec: appsv1.ChainNodeSetSpec{App: node.Spec.App}}
+						set.Spec.App.Upgrades = nil
+						set.Status.Upgrades = []appsv1.Upgrade{
+							{Height: 100, Image: "app:v2", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeCompleted},
+							{Height: 200, Image: "app:v3", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeCompleted},
+							{Height: 300, Image: "app:v4", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeScheduled},
+						}
+						node.Spec.App = set.GetAppSpecWithUpgrades()
+					}
+					r := restoreReconciler(t, node)
+					app, err := r.newApp(node)
+					require.NoError(t, err)
+					_, result, err := r.ensureDataVolume(t.Context(), app, node)
+					require.NoError(t, err)
+					require.Positive(t, result.RequeueAfter)
+					require.Empty(t, node.Status.Upgrades)
+					require.Equal(t, height, node.Status.LatestHeight)
+					require.Equal(t, appsv1.PhaseChainNodeInitData, node.Status.Phase)
+					require.NoError(t, r.ensureUpgrades(t.Context(), node, false))
+					require.Len(t, node.Status.Upgrades, 3)
+					require.Equal(t, appsv1.UpgradeSkipped, node.Status.Upgrades[0].Status)
+					require.Equal(t, appsv1.UpgradeSkipped, node.Status.Upgrades[1].Status)
+					require.Equal(t, appsv1.UpgradeScheduled, node.Status.Upgrades[2].Status)
+					require.Equal(t, "app:v3", r.buildAppContainer(node, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
+				})
+			}
+		})
+	}
+
 }

@@ -81,9 +81,12 @@ Set `persistence.restore` to initialize a new node's data volume from one explic
 unsplit object in S3, S3-compatible storage, or GCS. To restore an existing node, set this
 configuration and delete its data PVC; Cosmopilot recreates the volume and initializes it from
 the configured object. Changing or removing restore configuration does not affect an initialized
-volume until it is recreated. For an existing node, set optional `restore.height` to the archive's
+volume until it is recreated. Set optional `restore.height` to the archive's
 block height: Cosmopilot rebases upgrade progress and selects the application image at that height,
 as it does for a VolumeSnapshot. Without it, the node starts on `spec.app.image`/`version`.
+A `restore.height` higher than the archive's actual height leaves `status.latestHeight` and the
+volume's height annotation at that value until the chain passes it, and starts the node on an
+application binary newer than the data.
 PVC deletion discards its current data; Kubernetes PVC protection may defer deletion until Pods mounting it are stopped and removed.
 
 ```yaml
