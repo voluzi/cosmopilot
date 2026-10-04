@@ -108,7 +108,7 @@ func TestRestoreRejectsUnsafeArchiveEntries(t *testing.T) {
 		{"device", []*tar.Header{{Name: "device", Typeflag: tar.TypeChar}}},
 		{"duplicate", []*tar.Header{{Name: "file", Typeflag: tar.TypeReg}, {Name: "file", Typeflag: tar.TypeReg}}},
 		{"conflicting parent", []*tar.Header{{Name: "file", Typeflag: tar.TypeReg}, {Name: "file/child", Typeflag: tar.TypeReg}}},
-		{"restore marker", []*tar.Header{{Name: ".cosmopilot-restore-complete", Typeflag: tar.TypeReg}}},
+		{"restore marker child", []*tar.Header{{Name: ".cosmopilot-restore-complete/file", Typeflag: tar.TypeReg}}},
 		{"provisioner directory", []*tar.Header{{Name: "lost+found/file", Typeflag: tar.TypeReg}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,6 +124,40 @@ func TestRestoreRejectsUnsafeArchiveEntries(t *testing.T) {
 			require.Error(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", ""))
 			_, err := os.Stat(filepath.Join(root, "escape"))
 			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
+	for _, name := range []string{restoreMarker, "./" + restoreMarker} {
+		t.Run(name, func(t *testing.T) {
+			var archive bytes.Buffer
+			tw := tar.NewWriter(&archive)
+			for _, entry := range []struct{ name, data string }{{name, "old completion marker"}, {"db/state", "block data"}} {
+				require.NoError(t, tw.WriteHeader(&tar.Header{Name: entry.name, Typeflag: tar.TypeReg, Mode: 0600, Size: int64(len(entry.data))}))
+				_, err := tw.Write([]byte(entry.data))
+				require.NoError(t, err)
+			}
+			require.NoError(t, tw.Close())
+			for _, digest := range []string{"", strings.Repeat("0", 64)} {
+				target := t.TempDir()
+				err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", digest)
+				if digest != "" {
+					var stage *RestoreError
+					require.ErrorAs(t, err, &stage)
+					require.Equal(t, "verification", stage.Stage)
+					_, err = os.Stat(filepath.Join(target, restoreMarker))
+					require.ErrorIs(t, err, os.ErrNotExist)
+					continue
+				}
+				require.NoError(t, err)
+				data, err := os.ReadFile(filepath.Join(target, "db/state"))
+				require.NoError(t, err)
+				require.Equal(t, "block data", string(data))
+				marker, err := os.ReadFile(filepath.Join(target, restoreMarker))
+				require.NoError(t, err)
+				require.Empty(t, marker)
+			}
 		})
 	}
 }

@@ -174,7 +174,11 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 		if name == "." && hdr.Typeflag == tar.TypeDir {
 			continue
 		}
-		if name == restoreMarker || strings.HasPrefix(name, restoreMarker+"/") || name == "lost+found" || strings.HasPrefix(name, "lost+found/") {
+		// Archives of restored data may carry an old marker; only this restore can mark completion.
+		if name == restoreMarker {
+			continue
+		}
+		if strings.HasPrefix(name, restoreMarker+"/") || name == "lost+found" || strings.HasPrefix(name, "lost+found/") {
 			return restoreExtractionError(fmt.Errorf("reserved archive path %q", hdr.Name))
 		}
 		if seen[name] {
