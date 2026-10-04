@@ -7,8 +7,8 @@ NODE_UTILS_VERSION ?= $(shell git describe --tags --match 'node-utils/*' --abbre
 NODE_UTILS_IMG 	   ?= $(NODE_UTILS_NAME):$(NODE_UTILS_VERSION:node-utils/v%=%)
 
 DATA_EXPORTER_NAME ?= ghcr.io/voluzi/dataexporter
-DATA_EXPORTER_VERSION ?= 2.1.0
-DATA_EXPORTER_IMG ?= $(DATA_EXPORTER_NAME):$(DATA_EXPORTER_VERSION)
+DATA_EXPORTER_VERSION ?= $(shell git describe --tags --match 'dataexporter/*' --abbrev=0)
+DATA_EXPORTER_IMG ?= $(DATA_EXPORTER_NAME):$(DATA_EXPORTER_VERSION:dataexporter/v%=%)
 MINIO_IMG ?= cosmopilot-e2e/minio:2025-10-15
 
 BUILDDIR ?= $(CURDIR)/build
@@ -178,6 +178,7 @@ test.e2e.release: kind kubectl helm ginkgo ## Run e2e tests with released chart 
 	CLUSTER_NAME=$(CLUSTER_NAME) \
 	CHART_VERSION=$(CHART_VERSION) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
+	DATA_EXPORTER_IMAGE=$(DATA_EXPORTER_IMG) \
 	MINIO_IMAGE=$(MINIO_IMG) \
 	BUILD_MINIO=$(BUILD_MINIO) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \

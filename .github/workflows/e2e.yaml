@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Every shard needs the same two images, so they are built once here and handed over as a tarball.
+  # Every shard needs the same images, so they are built once here and handed over as a tarball.
   # Layers are cached in the Actions cache on top of that, which is what keeps this job short on the
   # common run where only test code moved.
   build-images:
@@ -39,11 +39,13 @@ jobs:
     outputs:
       controller-image: ${{ steps.images.outputs.controller }}
       node-utils-image: ${{ steps.images.outputs.node-utils }}
+      dataexporter-image: ${{ steps.images.outputs.dataexporter }}
+      minio-image: ${{ steps.images.outputs.minio }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          # Both image tags come from `git describe`, so the tags have to be fetched.
+          # Image tags come from `git describe`, so the tags have to be fetched.
           fetch-depth: 0
           persist-credentials: false
 
@@ -57,11 +59,13 @@ jobs:
         run: |
           controller="$(make -s print-IMG)"
           node_utils="$(make -s print-NODE_UTILS_IMG)"
+          dataexporter="$(make -s print-DATA_EXPORTER_IMG)"
+          minio="$(make -s print-MINIO_IMG)"
 
-          # Both tags come out of `git describe`, so an unfetched tag or a shallow clone yields a
+          # Component tags come out of `git describe`, so an unfetched tag or a shallow clone yields a
           # reference with nothing after the colon. Caught here it costs twenty seconds; carried
           # forward it surfaces as an opaque `docker load` failure in six parallel shards.
-          for image in "$controller" "$node_utils"; do
+          for image in "$controller" "$node_utils" "$dataexporter" "$minio"; do
             case "$image" in
               *:?*) ;;
               *) echo "::error::could not resolve an image tag: '$image'"; exit 1 ;;
@@ -70,6 +74,8 @@ jobs:
 
           echo "controller=$controller" >> "$GITHUB_OUTPUT"
           echo "node-utils=$node_utils" >> "$GITHUB_OUTPUT"
+          echo "dataexporter=$dataexporter" >> "$GITHUB_OUTPUT"
+          echo "minio=$minio" >> "$GITHUB_OUTPUT"
 
       # Written straight out as tarballs rather than loaded into this runner's daemon and saved back:
       # only the shards need them in a daemon.
@@ -84,6 +90,14 @@ jobs:
             --cache-from=type=gha,scope=node-utils \
             --cache-to=type=gha,scope=node-utils,mode=max \
             --output=type=docker,dest=/tmp/images/node-utils.tar"
+          make docker-build-dataexporter DOCKER_BUILD="docker buildx build \
+            --cache-from=type=gha,scope=dataexporter \
+            --cache-to=type=gha,scope=dataexporter,mode=max \
+            --output=type=docker,dest=/tmp/images/dataexporter.tar"
+          make docker-build-minio DOCKER_BUILD="docker buildx build \
+            --cache-from=type=gha,scope=minio \
+            --cache-to=type=gha,scope=minio,mode=max \
+            --output=type=docker,dest=/tmp/images/minio.tar"
 
       - name: Upload images
         uses: actions/upload-artifact@v7
@@ -158,6 +172,8 @@ jobs:
         run: |
           docker load -i /tmp/images/cosmopilot.tar
           docker load -i /tmp/images/node-utils.tar
+          docker load -i /tmp/images/dataexporter.tar
+          docker load -i /tmp/images/minio.tar
 
       - name: Run E2E Tests (${{ matrix.shard }})
         run: |
@@ -165,6 +181,8 @@ jobs:
             BUILD_IMAGES=false \
             IMG='${{ needs.build-images.outputs.controller-image }}' \
             NODE_UTILS_IMG='${{ needs.build-images.outputs.node-utils-image }}' \
+            DATA_EXPORTER_IMG='${{ needs.build-images.outputs.dataexporter-image }}' \
+            MINIO_IMG='${{ needs.build-images.outputs.minio-image }}' \
             TEST_TIMEOUT=25m \
             PROCS=4 \
             REUSE_CLUSTER=false \

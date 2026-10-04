@@ -21,7 +21,7 @@ import (
 )
 
 var _ = Describe("Exported snapshot restore E2E", func() {
-	apps.ForEachApp("should bootstrap from an S3 export and preserve data on pod recreation", WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
+	It("should bootstrap from an S3 export and preserve data on pod recreation", WithApp(func(app apps.TestApp, ns *corev1.Namespace) {
 		ctx := Framework().Context()
 		c := Framework().Client()
 		endpoint, credentials := createRestoreObjectStore(ns)
