@@ -87,6 +87,8 @@ as it does for a VolumeSnapshot. Without it, the node starts on `spec.app.image`
 A `restore.height` higher than the archive's actual height leaves `status.latestHeight` and the
 volume's height annotation at that value until the chain passes it, and starts the node on an
 application binary newer than the data.
+On a new node, `additionalInitCommands` without an explicit `image` still run on
+`spec.app.image`.
 PVC deletion discards its current data; Kubernetes PVC protection may defer deletion until Pods mounting it are stopped and removed.
 
 ```yaml
