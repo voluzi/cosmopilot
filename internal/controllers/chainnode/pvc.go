@@ -213,13 +213,11 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 	// If PVC does not exist
 	if pvc == nil {
 		// A helper left from the previous volume cannot prove that this new volume is initialized.
-		if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil {
-			staleInit := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name + "-init-data", Namespace: chainNode.Namespace}}
-			if err := r.Delete(ctx, staleInit); err == nil {
-				return nil, ctrl.Result{RequeueAfter: initDataRetryPeriod}, nil
-			} else if !errors.IsNotFound(err) {
-				return nil, ctrl.Result{}, err
-			}
+		staleInit := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name + "-init-data", Namespace: chainNode.Namespace}}
+		if err := r.Delete(ctx, staleInit); err == nil {
+			return nil, ctrl.Result{RequeueAfter: initDataRetryPeriod}, nil
+		} else if !errors.IsNotFound(err) {
+			return nil, ctrl.Result{}, err
 		}
 
 		// Assume .spec size by default
