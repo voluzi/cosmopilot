@@ -479,3 +479,7 @@ func (gcs *GcsExporter) Delete(bucket, name string, opts ...DeleteOption) error 
 	}).Infof("deleting object(s) with name(prefix): %s", name)
 	return gcs.batchDelete(ctx, bucket, objectNames, options.ConcurrentJobs)
 }
+
+func (gcs *GcsExporter) Read(ctx context.Context, bucket, name string) (io.ReadCloser, error) {
+	return gcs.client.Bucket(bucket).Object(name).NewReader(ctx)
+}

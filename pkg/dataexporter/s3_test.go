@@ -521,3 +521,13 @@ func TestNewS3ExporterUsesBatchedDeletesAgainstAmazonS3(t *testing.T) {
 		t.Fatal("Amazon S3 accepts batched deletes; per-object would cost one request per object")
 	}
 }
+
+func (f *fakeS3Client) GetObject(_ context.Context, input *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.completed[aws.ToString(input.Key)]
+	if !ok {
+		return nil, fmt.Errorf("object not found")
+	}
+	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(data))}, nil
+}

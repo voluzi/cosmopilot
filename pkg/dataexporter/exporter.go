@@ -5,13 +5,17 @@ package dataexporter
 import (
 	"context"
 	"fmt"
+	"io"
 )
 
 // Provider identifies a cloud storage provider.
 type Provider string
 
-// Exporter provides methods to upload and delete data snapshots from cloud storage.
+// Exporter provides methods to upload, read and delete data snapshots from cloud storage.
 type Exporter interface {
+	// Read opens one exact object key; the caller must close the returned stream.
+	Read(ctx context.Context, bucket, name string) (io.ReadCloser, error)
+
 	// Provider returns the cloud storage provider type.
 	Provider() Provider
 
