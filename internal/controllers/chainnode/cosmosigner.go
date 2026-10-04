@@ -815,6 +815,18 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 			BindingMount:      ptr.Deref(v.BindingMount, ""),
 			ClaimTokenSecret:  v.ClaimTokenSecret,
 		}}, nil
+	case c.UsesAwsKmsBackend():
+		a := c.Backend.AwsKMS
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "AWS credentials", a.CredentialsSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
+		return cosmosigner.Backend{AWS: &cosmosigner.AwsBackend{
+			KeyID:             a.KeyID,
+			Region:            a.Region,
+			CredentialsSecret: a.CredentialsSecret,
+			ClaimRoleARN:      ptr.Deref(a.ClaimRoleARN, ""),
+			Timeout:           ptr.Deref(a.Timeout, ""),
+		}}, nil
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "GCP credentials", g.CredentialsSecret); err != nil {

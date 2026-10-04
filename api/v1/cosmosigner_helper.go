@@ -94,6 +94,11 @@ func (c *Cosmosigner) UsesGcpKmsBackend() bool {
 	return c != nil && c.Backend.GcpKMS != nil
 }
 
+// UsesAwsKmsBackend reports whether the AWS KMS backend is configured.
+func (c *Cosmosigner) UsesAwsKmsBackend() bool {
+	return c != nil && c.Backend.AwsKMS != nil
+}
+
 // VaultUploadsGenerated reports whether the Vault backend imports the validator's locally-generated
 // key: explicitly via uploadGenerated, or implicitly when the targeted validator initializes a new
 // genesis (the documented auto-default — a fresh genesis always generates its consensus key
@@ -578,11 +583,14 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 	if c.Backend.GcpKMS != nil {
 		backends++
 	}
+	if c.Backend.AwsKMS != nil {
+		backends++
+	}
 	if backends == 0 {
-		return fmt.Errorf("%s.backend must configure exactly one of software, vault or gcpKms", path)
+		return fmt.Errorf("%s.backend must configure exactly one of software, vault, gcpKms or awsKms", path)
 	}
 	if backends > 1 {
-		return fmt.Errorf("%s.backend must configure exactly one of software, vault or gcpKms, not multiple", path)
+		return fmt.Errorf("%s.backend must configure exactly one of software, vault, gcpKms or awsKms, not multiple", path)
 	}
 
 	// Replicas must be an odd number so the embedded raft cluster can form a quorum.
@@ -713,6 +721,8 @@ func (c *Cosmosigner) effectiveSigningIdentity(softwareKeySecret string) string 
 		return "gcpkms-import\x00" + c.Backend.GcpKMS.Import.gcpImportIdentity()
 	case c.UsesGcpKmsBackend():
 		return "gcpkms\x00" + c.Backend.GcpKMS.KeyVersion
+	case c.UsesAwsKmsBackend():
+		return "awskms\x00" + c.Backend.AwsKMS.KeyID
 	case c.UsesSoftwareBackend():
 		return "software\x00" + softwareKeySecret
 	}
@@ -787,9 +797,9 @@ func (nodeSet *ChainNodeSet) ValidatorGroupResolvesSigningIdentity(group string,
 	return identity != "" && nodeSet.validatorGroupSigningIdentity(group, cfg) == identity
 }
 
-// keyResource is the Vault Transit key or Cloud KMS CryptoKey the signer's key version belongs to:
-// cosmosigner 3.x binds the whole resource, not a version, to the signer cluster that first used it.
-// Empty for the software backend.
+// keyResource is the Vault Transit key, Cloud KMS CryptoKey or AWS KMS key ARN bound to the signer
+// cluster. Vault and Cloud KMS versions share a resource claim; an AWS key ARN is already the
+// immutable resource identity. Empty for the software backend.
 func (c *Cosmosigner) keyResource() string {
 	switch {
 	case c.UsesVaultBackend():
@@ -800,6 +810,8 @@ func (c *Cosmosigner) keyResource() string {
 	case c.UsesGcpKmsBackend():
 		cryptoKey, _, _ := strings.Cut(c.Backend.GcpKMS.KeyVersion, "/cryptoKeyVersions/")
 		return "gcpkms\x00" + cryptoKey
+	case c.UsesAwsKmsBackend():
+		return "awskms\x00" + c.Backend.AwsKMS.KeyID
 	}
 	return ""
 }

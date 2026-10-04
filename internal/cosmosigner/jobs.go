@@ -103,6 +103,12 @@ func (b Backend) backendEnv() []corev1.EnvVar {
 			env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_GCP_CREDENTIALS_FILE", Value: gcpCredsFile})
 		}
 		return env
+	case b.AWS != nil:
+		return append([]corev1.EnvVar{
+			{Name: "COSMOSIGNER_BACKEND", Value: backendAwsKms},
+			{Name: "COSMOSIGNER_AWS_KEY_ID", Value: b.AWS.KeyID},
+			{Name: "COSMOSIGNER_AWS_REGION", Value: b.AWS.Region},
+		}, b.runtimeEnv()...)
 	default:
 		return nil
 	}

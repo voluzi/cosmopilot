@@ -33,6 +33,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
 * [CosmoseedIngressConfig](#cosmoseedingressconfig)
 * [Cosmosigner](#cosmosigner)
+* [CosmosignerAwsKmsBackend](#cosmosignerawskmsbackend)
 * [CosmosignerBackend](#cosmosignerbackend)
 * [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
 * [CosmosignerGcpKmsImport](#cosmosignergcpkmsimport)
@@ -1231,7 +1232,21 @@ Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
 | raftTLSSecret | RaftTLSSecret is the name of a secret containing `tls.crt`, `tls.key` and `ca.crt` used to secure the inter-replica raft transport with mutual TLS. It is required when replicas is greater than one unless unsafeAllowInsecureRaft explicitly opts into plain TCP. | *string | false |
 | unsafeAllowInsecureRaft | UnsafeAllowInsecureRaft permits a multi-replica signer to use plain TCP for Raft. This is an explicit security opt-out for isolated test networks; production HA signers should set raftTLSSecret instead. | bool | false |
 | logLevel | LogLevel is the log level for the signer. Defaults to `info`. | *string | false |
-| serviceAccountName | ServiceAccountName is the Kubernetes service account the signer pods run as. Required in practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google service account to a specific Kubernetes service account). Defaults to the namespace default. | *string | false |
+| serviceAccountName | ServiceAccountName is the Kubernetes service account the signer pods run as. Required in practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google service account to a specific Kubernetes service account). AWS KMS can use it for IRSA. Defaults to the namespace default. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerAwsKmsBackend
+
+CosmosignerAwsKmsBackend configures a pre-provisioned AWS KMS signing key.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| keyId | KeyID is the full immutable KMS key ARN used for public-key discovery and signing. Aliases and bare key IDs are not supported. | string | true |
+| region | Region is the AWS region passed to the signer and public-key discovery pod. | string | true |
+| credentialsSecret | CredentialsSecret references an AWS shared-credentials file with a default profile. When unset, the standard AWS SDK credential chain applies, including IRSA through serviceAccountName. The selected file is mounted for the signer and public-key discovery pod. | *corev1.SecretKeySelector | false |
+| claimRoleArn | ClaimRoleARN optionally selects a role assumed only to claim an unowned key at signer startup. When unset, the runtime identity also needs kms:TagResource on the key. | *string | false |
+| timeout | Timeout is passed through COSMOSIGNER_AWS_TIMEOUT. When unset, Cosmosigner uses its default AWS request timeout (10s). | *string | false |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -1244,6 +1259,7 @@ CosmosignerBackend selects the signing backend. Exactly one field must be set.
 | software | Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is the simplest backend and is mainly intended for testnets and testing. | *[CosmosignerSoftwareBackend](#cosmosignersoftwarebackend) | false |
 | vault | Vault uses a non-exportable ed25519 key in HashiCorp Vault Transit. | *[CosmosignerVaultBackend](#cosmosignervaultbackend) | false |
 | gcpKms | GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS. | *[CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend) | false |
+| awsKms | AwsKMS uses a non-exportable Ed25519 key in AWS KMS. | *[CosmosignerAwsKmsBackend](#cosmosignerawskmsbackend) | false |
 
 [Back to Custom Resources](#custom-resources)
 

@@ -35,14 +35,16 @@ const (
 	backendSoftware = "software"
 	backendVault    = "vault"
 	backendGcpKms   = "gcpkms"
+	backendAwsKms   = "awskms"
 
 	// softwareKeyPath is where the priv_validator_key.json is mounted for the software backend.
 	softwareKeyDir  = "/keys"
 	softwareKeyFile = softwareKeyDir + "/priv_validator_key.json"
 
-	// vaultMountDir and gcpMountDir are where backend credentials are mounted.
+	// Backend credentials are mounted in separate directories.
 	vaultMountDir = "/vault"
 	gcpMountDir   = "/gcp"
+	awsMountDir   = "/aws"
 
 	// raftTLSMountDir is where the raft mTLS material is mounted.
 	raftTLSMountDir = "/tls/raft"
@@ -69,6 +71,7 @@ type BackendConfig struct {
 	KeyFile string       `yaml:"key_file,omitempty"`
 	Vault   *VaultConfig `yaml:"vault,omitempty"`
 	GCP     *GCPConfig   `yaml:"gcp,omitempty"`
+	AWS     *AWSConfig   `yaml:"aws,omitempty"`
 }
 
 // VaultConfig mirrors cosmosigner's backend.VaultConfig.
@@ -86,6 +89,12 @@ type VaultConfig struct {
 type GCPConfig struct {
 	KeyVersion      string `yaml:"key_version"`
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
+}
+
+// AWSConfig mirrors Cosmosigner's backend.AWSKMSConfig YAML fields used at runtime.
+type AWSConfig struct {
+	KeyID  string `yaml:"key_id"`
+	Region string `yaml:"region"`
 }
 
 // RaftConfig mirrors cosmosigner's config.RaftConfig. node_id and advertise are supplied per-pod

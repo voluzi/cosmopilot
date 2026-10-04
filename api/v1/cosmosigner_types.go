@@ -111,7 +111,8 @@ type Cosmosigner struct {
 
 	// ServiceAccountName is the Kubernetes service account the signer pods run as. Required in
 	// practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google
-	// service account to a specific Kubernetes service account). Defaults to the namespace default.
+	// service account to a specific Kubernetes service account). AWS KMS can use it for IRSA.
+	// Defaults to the namespace default.
 	// +optional
 	ServiceAccountName *string `json:"serviceAccountName,omitempty"`
 }
@@ -130,6 +131,10 @@ type CosmosignerBackend struct {
 	// GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS.
 	// +optional
 	GcpKMS *CosmosignerGcpKmsBackend `json:"gcpKms,omitempty"`
+
+	// AwsKMS uses a non-exportable Ed25519 key in AWS KMS.
+	// +optional
+	AwsKMS *CosmosignerAwsKmsBackend `json:"awsKms,omitempty"`
 }
 
 // CosmosignerSoftwareBackend configures the local software signing backend.
@@ -224,6 +229,34 @@ type CosmosignerGcpKmsBackend struct {
 	// `cloudkms.cryptoKeys.update` on the CryptoKey.
 	// +optional
 	ClaimCredentialsSecret *corev1.SecretKeySelector `json:"claimCredentialsSecret,omitempty"`
+}
+
+// CosmosignerAwsKmsBackend configures a pre-provisioned AWS KMS signing key.
+type CosmosignerAwsKmsBackend struct {
+	// KeyID is the full immutable KMS key ARN used for public-key discovery and signing.
+	// Aliases and bare key IDs are not supported.
+	// +kubebuilder:validation:Pattern="^arn:[^:]+:kms:[^:]+:[^:]+:key/[^/]+$"
+	KeyID string `json:"keyId"`
+
+	// Region is the AWS region passed to the signer and public-key discovery pod.
+	// +kubebuilder:validation:MinLength=1
+	Region string `json:"region"`
+
+	// CredentialsSecret references an AWS shared-credentials file with a default profile.
+	// When unset, the standard AWS SDK credential chain applies, including IRSA through
+	// serviceAccountName. The selected file is mounted for the signer and public-key discovery pod.
+	// +optional
+	CredentialsSecret *corev1.SecretKeySelector `json:"credentialsSecret,omitempty"`
+
+	// ClaimRoleARN optionally selects a role assumed only to claim an unowned key at signer
+	// startup. When unset, the runtime identity also needs kms:TagResource on the key.
+	// +optional
+	ClaimRoleARN *string `json:"claimRoleArn,omitempty"`
+
+	// Timeout is passed through COSMOSIGNER_AWS_TIMEOUT. When unset, Cosmosigner uses its
+	// default AWS request timeout (10s).
+	// +optional
+	Timeout *string `json:"timeout,omitempty"`
 }
 
 // CosmosignerGcpKmsImport describes the Cloud KMS destination of a controller-managed BYOK import.
