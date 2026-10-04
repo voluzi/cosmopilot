@@ -132,7 +132,8 @@ type CosmosignerBackend struct {
 	// +optional
 	GcpKMS *CosmosignerGcpKmsBackend `json:"gcpKms,omitempty"`
 
-	// AwsKMS uses a non-exportable Ed25519 key in AWS KMS.
+	// AwsKMS uses a non-exportable Ed25519 key in AWS KMS. It requires a cosmosigner image with the
+	// AWS KMS backend, which the default image (3.1.1) does not have: set `image` accordingly.
 	// +optional
 	AwsKMS *CosmosignerAwsKmsBackend `json:"awsKms,omitempty"`
 }

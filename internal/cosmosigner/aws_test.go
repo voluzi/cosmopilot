@@ -82,6 +82,9 @@ func TestAWSRuntimeAndPubkeyCredentials(t *testing.T) {
 func TestAWSLifecycleDigest(t *testing.T) {
 	base, err := awsParams().LifecycleDigest("identity")
 	require.NoError(t, err)
+	same, err := awsParams().LifecycleDigest("identity")
+	require.NoError(t, err)
+	require.Equal(t, base, same)
 	for name, mutate := range map[string]func(*AwsBackend){
 		"key":         func(b *AwsBackend) { b.KeyID += "-other" },
 		"region":      func(b *AwsBackend) { b.Region = "us-east-1" },

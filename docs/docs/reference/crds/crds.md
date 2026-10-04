@@ -1259,7 +1259,7 @@ CosmosignerBackend selects the signing backend. Exactly one field must be set.
 | software | Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is the simplest backend and is mainly intended for testnets and testing. | *[CosmosignerSoftwareBackend](#cosmosignersoftwarebackend) | false |
 | vault | Vault uses a non-exportable ed25519 key in HashiCorp Vault Transit. | *[CosmosignerVaultBackend](#cosmosignervaultbackend) | false |
 | gcpKms | GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS. | *[CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend) | false |
-| awsKms | AwsKMS uses a non-exportable Ed25519 key in AWS KMS. | *[CosmosignerAwsKmsBackend](#cosmosignerawskmsbackend) | false |
+| awsKms | AwsKMS uses a non-exportable Ed25519 key in AWS KMS. It requires a cosmosigner image with the AWS KMS backend, which the default image (3.1.1) does not have: set `image` accordingly. | *[CosmosignerAwsKmsBackend](#cosmosignerawskmsbackend) | false |
 
 [Back to Custom Resources](#custom-resources)
 
