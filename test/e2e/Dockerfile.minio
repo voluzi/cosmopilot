@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.7
+
+FROM golang:1.27-alpine AS builder
+
+WORKDIR /workspace
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 \
+    go install -trimpath -ldflags="-s -w" github.com/minio/minio@RELEASE.2025-10-15T17-29-55Z && \
+    CGO_ENABLED=0 \
+    go install -trimpath -ldflags="-s -w" github.com/minio/mc@RELEASE.2025-08-13T08-35-41Z
+
+FROM alpine:3.23
+
+WORKDIR /data
+COPY --from=builder /go/bin/ /usr/local/bin/
+USER 65532:65532
+EXPOSE 9000
+ENTRYPOINT ["/usr/local/bin/minio"]

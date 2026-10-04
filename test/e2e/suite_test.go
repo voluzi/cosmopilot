@@ -41,6 +41,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	controllerImage := environ.GetString("CONTROLLER_IMAGE", "")
 	cosmosignerImage := environ.GetString("COSMOSIGNER_IMAGE", "")
 	chartVersion := environ.GetString("CHART_VERSION", "")
+	dataExporterImage := environ.GetString("DATA_EXPORTER_IMAGE", "")
 	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
 	reuseCluster := environ.GetBool("REUSE_CLUSTER", true)
 	installVault := environ.GetBool("INSTALL_VAULT", true)
@@ -51,6 +52,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		framework.WithCosmosignerImage(cosmosignerImage),
 		framework.WithChartVersion(chartVersion),
 		framework.WithNodeUtilsImage(nodeUtilsImage),
+		framework.WithDataExporterImage(dataExporterImage),
 		framework.WithReuseCluster(reuseCluster),
 		framework.WithCertManager(true),
 		framework.WithCSIDriver(true),
@@ -82,6 +84,18 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	if environ.GetBool("BUILD_DATA_EXPORTER", false) && dataExporterImage != "" {
+		By("Loading dataexporter image into Kind cluster")
+		err = setupFramework.LoadImage(dataExporterImage)
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	if environ.GetBool("BUILD_MINIO", false) {
+		By("Loading the object-storage fixture into Kind cluster")
+		err = setupFramework.LoadImage(environ.GetString("MINIO_IMAGE", "cosmopilot-e2e/minio:2025-10-15"))
+		Expect(err).NotTo(HaveOccurred())
+	}
+
 	By("Deploying controller to cluster")
 	err = setupFramework.DeployController()
 	Expect(err).NotTo(HaveOccurred())
@@ -103,6 +117,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	controllerImage := environ.GetString("CONTROLLER_IMAGE", "")
 	cosmosignerImage := environ.GetString("COSMOSIGNER_IMAGE", "")
 	chartVersion := environ.GetString("CHART_VERSION", "")
+	dataExporterImage := environ.GetString("DATA_EXPORTER_IMAGE", "")
 	nodeUtilsImage := environ.GetString("NODE_UTILS_IMAGE", "ghcr.io/voluzi/node-utils")
 	installVault := environ.GetBool("INSTALL_VAULT", true)
 
@@ -118,6 +133,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		framework.WithCosmosignerImage(cosmosignerImage),
 		framework.WithChartVersion(chartVersion),
 		framework.WithNodeUtilsImage(nodeUtilsImage),
+		framework.WithDataExporterImage(dataExporterImage),
 		framework.WithReuseCluster(true), // Always reuse - cluster is already set up
 		framework.WithCertManager(true),
 		framework.WithCSIDriver(true),

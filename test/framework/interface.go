@@ -76,6 +76,9 @@ type Config struct {
 	// NodeUtilsImage is the node-utils image to use
 	NodeUtilsImage string
 
+	// DataExporterImage overrides the snapshot transfer image.
+	DataExporterImage string
+
 	// ControllerImage is the controller image (for e2e only)
 	ControllerImage string
 
@@ -155,6 +158,10 @@ func WithNodeUtilsImage(image string) Option {
 	return func(c *Config) {
 		c.NodeUtilsImage = image
 	}
+}
+
+func WithDataExporterImage(image string) Option {
+	return func(c *Config) { c.DataExporterImage = image }
 }
 
 // WithControllerImage sets the controller image (for e2e)

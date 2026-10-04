@@ -6,6 +6,11 @@ NODE_UTILS_NAME    ?= ghcr.io/voluzi/node-utils
 NODE_UTILS_VERSION ?= $(shell git describe --tags --match 'node-utils/*' --abbrev=0)
 NODE_UTILS_IMG 	   ?= $(NODE_UTILS_NAME):$(NODE_UTILS_VERSION:node-utils/v%=%)
 
+DATA_EXPORTER_NAME ?= ghcr.io/voluzi/dataexporter
+DATA_EXPORTER_VERSION ?= 2.1.0
+DATA_EXPORTER_IMG ?= $(DATA_EXPORTER_NAME):$(DATA_EXPORTER_VERSION)
+MINIO_IMG ?= cosmopilot-e2e/minio:2025-10-15
+
 BUILDDIR ?= $(CURDIR)/build
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
@@ -114,6 +119,8 @@ test.e2e: CLUSTER_NAME?=cosmopilot-e2e
 test.e2e: REUSE_CLUSTER?=true
 test.e2e: BUILD_IMAGES?=true
 test.e2e: BUILD_NODE_UTILS?=true
+test.e2e: BUILD_DATA_EXPORTER?=true
+test.e2e: BUILD_MINIO?=true
 test.e2e: COSMOSIGNER_IMAGE?=
 test.e2e: FOCUS?=
 test.e2e: SKIP?=
@@ -128,12 +135,22 @@ test.e2e: manifests generate fmt vet kind kubectl helm ginkgo ## Run e2e tests w
 	@if [ "$(BUILD_IMAGES)" = "true" ] && [ "$(BUILD_NODE_UTILS)" = "true" ]; then \
 		$(MAKE) docker-build-nodeutils; \
 	fi
+	@if [ "$(BUILD_IMAGES)" = "true" ] && [ "$(BUILD_DATA_EXPORTER)" = "true" ]; then \
+		$(MAKE) docker-build-dataexporter; \
+	fi
+	@if [ "$(BUILD_IMAGES)" = "true" ] && [ "$(BUILD_MINIO)" = "true" ]; then \
+		$(MAKE) docker-build-minio; \
+	fi
 	E2E_TEST=true \
 	CLUSTER_NAME=$(CLUSTER_NAME) \
 	CONTROLLER_IMAGE=$(IMG) \
 	COSMOSIGNER_IMAGE=$(COSMOSIGNER_IMAGE) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
 	BUILD_NODE_UTILS=$(BUILD_NODE_UTILS) \
+	DATA_EXPORTER_IMAGE=$(DATA_EXPORTER_IMG) \
+	BUILD_DATA_EXPORTER=$(BUILD_DATA_EXPORTER) \
+	MINIO_IMAGE=$(MINIO_IMG) \
+	BUILD_MINIO=$(BUILD_MINIO) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \
 	TEST_APPS=$(TEST_APPS) \
 	$(GINKGO) -v -procs=$(PROCS) --timeout=$(TEST_TIMEOUT) \
@@ -146,6 +163,7 @@ test.e2e: manifests generate fmt vet kind kubectl helm ginkgo ## Run e2e tests w
 test.e2e.release: CLUSTER_NAME?=cosmopilot-e2e
 test.e2e.release: CHART_VERSION?=$(VERSION:v%=%)
 test.e2e.release: REUSE_CLUSTER?=true
+test.e2e.release: BUILD_MINIO?=true
 test.e2e.release: FOCUS?=
 test.e2e.release: SKIP?=
 test.e2e.release: LABEL_FILTER?=
@@ -153,10 +171,15 @@ test.e2e.release: TEST_APPS?=
 test.e2e.release: TEST_TIMEOUT?=30m
 test.e2e.release: PROCS?=4
 test.e2e.release: kind kubectl helm ginkgo ## Run e2e tests with released chart version.
+	@if [ "$(BUILD_MINIO)" = "true" ]; then \
+		$(MAKE) docker-build-minio; \
+	fi
 	E2E_TEST=true \
 	CLUSTER_NAME=$(CLUSTER_NAME) \
 	CHART_VERSION=$(CHART_VERSION) \
 	NODE_UTILS_IMAGE=$(NODE_UTILS_IMG) \
+	MINIO_IMAGE=$(MINIO_IMG) \
+	BUILD_MINIO=$(BUILD_MINIO) \
 	REUSE_CLUSTER=$(REUSE_CLUSTER) \
 	TEST_APPS=$(TEST_APPS) \
 	$(GINKGO) -v -procs=$(PROCS) --timeout=$(TEST_TIMEOUT) \
@@ -186,6 +209,14 @@ docker-build: ## Build docker image.
 .PHONY: docker-build-nodeutils
 docker-build-nodeutils: ## Build node-utils docker image.
 	$(DOCKER_BUILD) -t $(NODE_UTILS_IMG) -f Dockerfile.utils .
+
+.PHONY: docker-build-dataexporter
+docker-build-dataexporter: ## Build dataexporter docker image.
+	$(DOCKER_BUILD) -t $(DATA_EXPORTER_IMG) -f Dockerfile.dataExporter .
+
+.PHONY: docker-build-minio
+docker-build-minio: ## Build the e2e object-storage fixture.
+	$(DOCKER_BUILD) -t $(MINIO_IMG) -f test/e2e/Dockerfile.minio .
 
 .PHONY: helm.package
 helm.package: manifests helm $(BUILDDIR)/ ## Package helm chart. Chart version and appVersion are both VERSION: cosmopilot-<<VERSION>>.tgz
