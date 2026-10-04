@@ -1579,7 +1579,12 @@ type SubdomainsConfig struct {
 
 // SnapshotRestoreConfig initializes a data volume from an exported archive.
 type SnapshotRestoreConfig struct {
+	// Snapshot identifies the exported archive and the identity used to read it.
 	Snapshot SnapshotRestoreSource `json:"snapshot"`
+	// Height is the archive block height used to select the application image and rebase upgrades.
+	// When omitted, replacement data starts from height zero.
+	// +optional
+	Height *int64 `json:"height,omitempty"`
 	// Optional verification of the complete stored object.
 	// +optional
 	Verification *SnapshotRestoreVerification `json:"verification,omitempty"`
@@ -1590,6 +1595,7 @@ type SnapshotRestoreConfig struct {
 
 // SnapshotRestoreSource identifies one unsplit object and its read credentials.
 type SnapshotRestoreSource struct {
+	// Provider selects S3-compatible storage or Google Cloud Storage.
 	// +kubebuilder:validation:Enum=s3;gcs
 	Provider string `json:"provider"`
 	// +kubebuilder:validation:MinLength=1
@@ -1597,15 +1603,19 @@ type SnapshotRestoreSource struct {
 	// Exact object key including .tar, .tar.gz, .tar.zst or .tar.lz4 extension.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+	// Region is the AWS region used to access the S3 bucket.
 	// +optional
 	Region string `json:"region,omitempty"`
+	// Endpoint overrides the S3 API endpoint for S3-compatible storage.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+	// ForcePathStyle addresses S3 buckets through URL paths instead of hostnames.
 	// +optional
 	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
 	// GCS uses Key (default: credentials.json); S3 uses envFrom.
 	// +optional
 	CredentialsSecret *SnapshotExportSecretReference `json:"credentialsSecret,omitempty"`
+	// ServiceAccountName is the identity for the whole init pod, including additional init commands.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }

@@ -6831,6 +6831,12 @@ spec:
                           description: Initialize a data volume from one explicitly
                             named exported snapshot object.
                           properties:
+                            height:
+                              description: |-
+                                Height is the archive block height used to select the application image and rebase upgrades.
+                                When omitted, replacement data starts from height zero.
+                              format: int64
+                              type: integer
                             resources:
                               description: Compute resources for the restore container.
                               properties:
@@ -6892,8 +6898,8 @@ spec:
                                   type: object
                               type: object
                             snapshot:
-                              description: SnapshotRestoreSource identifies one unsplit
-                                object and its read credentials.
+                              description: Snapshot identifies the exported archive
+                                and the identity used to read it.
                               properties:
                                 bucket:
                                   minLength: 1
@@ -6910,8 +6916,12 @@ spec:
                                   - name
                                   type: object
                                 endpoint:
+                                  description: Endpoint overrides the S3 API endpoint
+                                    for S3-compatible storage.
                                   type: string
                                 forcePathStyle:
+                                  description: ForcePathStyle addresses S3 buckets
+                                    through URL paths instead of hostnames.
                                   type: boolean
                                 name:
                                   description: Exact object key including .tar, .tar.gz,
@@ -6919,13 +6929,20 @@ spec:
                                   minLength: 1
                                   type: string
                                 provider:
+                                  description: Provider selects S3-compatible storage
+                                    or Google Cloud Storage.
                                   enum:
                                   - s3
                                   - gcs
                                   type: string
                                 region:
+                                  description: Region is the AWS region used to access
+                                    the S3 bucket.
                                   type: string
                                 serviceAccountName:
+                                  description: ServiceAccountName is the identity
+                                    for the whole init pod, including additional init
+                                    commands.
                                   type: string
                               required:
                               - bucket
@@ -12019,6 +12036,12 @@ spec:
                               description: Initialize a data volume from one explicitly
                                 named exported snapshot object.
                               properties:
+                                height:
+                                  description: |-
+                                    Height is the archive block height used to select the application image and rebase upgrades.
+                                    When omitted, replacement data starts from height zero.
+                                  format: int64
+                                  type: integer
                                 resources:
                                   description: Compute resources for the restore container.
                                   properties:
@@ -12080,8 +12103,8 @@ spec:
                                       type: object
                                   type: object
                                 snapshot:
-                                  description: SnapshotRestoreSource identifies one
-                                    unsplit object and its read credentials.
+                                  description: Snapshot identifies the exported archive
+                                    and the identity used to read it.
                                   properties:
                                     bucket:
                                       minLength: 1
@@ -12098,8 +12121,12 @@ spec:
                                       - name
                                       type: object
                                     endpoint:
+                                      description: Endpoint overrides the S3 API endpoint
+                                        for S3-compatible storage.
                                       type: string
                                     forcePathStyle:
+                                      description: ForcePathStyle addresses S3 buckets
+                                        through URL paths instead of hostnames.
                                       type: boolean
                                     name:
                                       description: Exact object key including .tar,
@@ -12107,13 +12134,20 @@ spec:
                                       minLength: 1
                                       type: string
                                     provider:
+                                      description: Provider selects S3-compatible
+                                        storage or Google Cloud Storage.
                                       enum:
                                       - s3
                                       - gcs
                                       type: string
                                     region:
+                                      description: Region is the AWS region used to
+                                        access the S3 bucket.
                                       type: string
                                     serviceAccountName:
+                                      description: ServiceAccountName is the identity
+                                        for the whole init pod, including additional
+                                        init commands.
                                       type: string
                                   required:
                                   - bucket
@@ -17768,6 +17802,12 @@ spec:
                         description: Initialize a data volume from one explicitly
                           named exported snapshot object.
                         properties:
+                          height:
+                            description: |-
+                              Height is the archive block height used to select the application image and rebase upgrades.
+                              When omitted, replacement data starts from height zero.
+                            format: int64
+                            type: integer
                           resources:
                             description: Compute resources for the restore container.
                             properties:
@@ -17829,8 +17869,8 @@ spec:
                                 type: object
                             type: object
                           snapshot:
-                            description: SnapshotRestoreSource identifies one unsplit
-                              object and its read credentials.
+                            description: Snapshot identifies the exported archive
+                              and the identity used to read it.
                             properties:
                               bucket:
                                 minLength: 1
@@ -17847,8 +17887,12 @@ spec:
                                 - name
                                 type: object
                               endpoint:
+                                description: Endpoint overrides the S3 API endpoint
+                                  for S3-compatible storage.
                                 type: string
                               forcePathStyle:
+                                description: ForcePathStyle addresses S3 buckets through
+                                  URL paths instead of hostnames.
                                 type: boolean
                               name:
                                 description: Exact object key including .tar, .tar.gz,
@@ -17856,13 +17900,19 @@ spec:
                                 minLength: 1
                                 type: string
                               provider:
+                                description: Provider selects S3-compatible storage
+                                  or Google Cloud Storage.
                                 enum:
                                 - s3
                                 - gcs
                                 type: string
                               region:
+                                description: Region is the AWS region used to access
+                                  the S3 bucket.
                                 type: string
                               serviceAccountName:
+                                description: ServiceAccountName is the identity for
+                                  the whole init pod, including additional init commands.
                                 type: string
                             required:
                             - bucket

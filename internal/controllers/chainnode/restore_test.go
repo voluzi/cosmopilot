@@ -203,3 +203,76 @@ func TestDataInitializationDiscardsStaleHelperBeforeCreatingVolume(t *testing.T)
 		})
 	}
 }
+
+func TestDataInitializationPreservesActiveHelperOnMissingCachedVolume(t *testing.T) {
+	for _, phase := range []corev1.PodPhase{corev1.PodPending, corev1.PodRunning} {
+		t.Run(string(phase), func(t *testing.T) {
+			node := restoreNode()
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace}, Status: corev1.PodStatus{Phase: phase}}
+			r := restoreReconciler(t, node, pvc, pod)
+			original := r.Client.(client.WithWatch)
+			r.Client = interceptor.NewClient(original, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+					return apierrors.NewNotFound(corev1.Resource("persistentvolumeclaims"), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			}})
+			_, result, err := r.ensureDataVolume(t.Context(), nil, node)
+			require.NoError(t, err)
+			require.Positive(t, result.RequeueAfter)
+			current := &corev1.Pod{}
+			require.NoError(t, original.Get(t.Context(), client.ObjectKeyFromObject(pod), current))
+			require.Equal(t, phase, current.Status.Phase)
+			require.NoError(t, original.Get(t.Context(), client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{}))
+		})
+	}
+}
+
+func TestRestoreReplacementVolumeRebasesApplicationAtArchiveHeight(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		height *int64
+		image  string
+		phases []appsv1.UpgradePhase
+	}{
+		{"unset", nil, "app:v1", []appsv1.UpgradePhase{appsv1.UpgradeScheduled, appsv1.UpgradeScheduled}},
+		{"zero", ptr.To(int64(0)), "app:v1", []appsv1.UpgradePhase{appsv1.UpgradeScheduled, appsv1.UpgradeScheduled}},
+		{"between upgrades", ptr.To(int64(150)), "app:v2", []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeScheduled}},
+		{"after upgrades", ptr.To(int64(250)), "app:v3", []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeCompleted}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := restoreNode()
+			node.Spec.Persistence.Restore.Height = tc.height
+			node.Spec.Persistence.AdditionalInitCommands = []appsv1.InitCommand{{Command: []string{"echo"}, Args: []string{"initialized"}}}
+			node.Status.LatestHeight = 300
+			node.Status.AppImage = "app:v3"
+			node.Status.AppVersion = "v3"
+			node.Status.Upgrades = []appsv1.Upgrade{
+				{Height: 100, Image: "app:v2", Status: appsv1.UpgradeCompleted},
+				{Height: 200, Image: "app:v3", Status: appsv1.UpgradeCompleted},
+			}
+			r := restoreReconciler(t, node)
+			app, err := r.newApp(node)
+			require.NoError(t, err)
+			pvc, result, err := r.ensureDataVolume(t.Context(), app, node)
+			require.NoError(t, err)
+			require.Positive(t, result.RequeueAfter)
+			current := &appsv1.ChainNode{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+			height := int64(0)
+			if tc.height != nil {
+				height = *tc.height
+			}
+			require.Equal(t, height, current.Status.LatestHeight)
+			require.Equal(t, tc.image, current.GetAppImage())
+			for i, phase := range tc.phases {
+				require.Equal(t, phase, current.Status.Upgrades[i].Status)
+			}
+			require.Equal(t, "false", pvc.Annotations[controllers.AnnotationDataInitialized])
+			pod := &corev1.Pod{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKey{Name: node.Name + "-init-data", Namespace: node.Namespace}, pod))
+			require.Equal(t, tc.image, pod.Spec.InitContainers[1].Image)
+		})
+	}
+}

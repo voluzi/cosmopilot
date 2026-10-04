@@ -1076,7 +1076,8 @@ SnapshotRestoreConfig initializes a data volume from an exported archive.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| snapshot |  | [SnapshotRestoreSource](#snapshotrestoresource) | true |
+| snapshot | Snapshot identifies the exported archive and the identity used to read it. | [SnapshotRestoreSource](#snapshotrestoresource) | true |
+| height | Height is the archive block height used to select the application image and rebase upgrades. When omitted, replacement data starts from height zero. | *int64 | false |
 | verification | Optional verification of the complete stored object. | *[SnapshotRestoreVerification](#snapshotrestoreverification) | false |
 | resources | Compute resources for the restore container. | corev1.ResourceRequirements | false |
 
@@ -1088,14 +1089,14 @@ SnapshotRestoreSource identifies one unsplit object and its read credentials.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| provider |  | string | true |
+| provider | Provider selects S3-compatible storage or Google Cloud Storage. | string | true |
 | bucket |  | string | true |
 | name | Exact object key including .tar, .tar.gz, .tar.zst or .tar.lz4 extension. | string | true |
-| region |  | string | false |
-| endpoint |  | string | false |
-| forcePathStyle |  | bool | false |
+| region | Region is the AWS region used to access the S3 bucket. | string | false |
+| endpoint | Endpoint overrides the S3 API endpoint for S3-compatible storage. | string | false |
+| forcePathStyle | ForcePathStyle addresses S3 buckets through URL paths instead of hostnames. | bool | false |
 | credentialsSecret | GCS uses Key (default: credentials.json); S3 uses envFrom. | *[SnapshotExportSecretReference](#snapshotexportsecretreference) | false |
-| serviceAccountName |  | string | false |
+| serviceAccountName | ServiceAccountName is the identity for the whole init pod, including additional init commands. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 

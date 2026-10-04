@@ -81,7 +81,7 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 			} else {
 				objects = append(objects, &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{Name: "node-init-data", Namespace: "default"},
-					Status:     corev1.PodStatus{Phase: corev1.PodPending},
+					Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
 				})
 			}
 			c := fakeclient.NewClientBuilder().
@@ -254,7 +254,7 @@ func TestEnsureDataVolumePreservesLatestCompletedImageForStateSyncFromScratch(t 
 	}
 	initPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-init-data", Namespace: "default"},
-		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
 	}
 	c := fakeclient.NewClientBuilder().
 		WithScheme(scheme).

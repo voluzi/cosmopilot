@@ -2753,6 +2753,11 @@ func (in *SnapshotExportStatus) DeepCopy() *SnapshotExportStatus {
 func (in *SnapshotRestoreConfig) DeepCopyInto(out *SnapshotRestoreConfig) {
 	*out = *in
 	in.Snapshot.DeepCopyInto(&out.Snapshot)
+	if in.Height != nil {
+		in, out := &in.Height, &out.Height
+		*out = new(int64)
+		**out = **in
+	}
 	if in.Verification != nil {
 		in, out := &in.Verification, &out.Verification
 		*out = new(SnapshotRestoreVerification)
