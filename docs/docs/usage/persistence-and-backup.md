@@ -560,3 +560,10 @@ cat snapshot-part-*.tar.zst | zstd -dc | tar -xf -
 ## Restoring Data from Snapshot
 
 For detailed instructions on restoring data from a snapshot, refer to the [Restore from Snapshot](../usage/restoring-from-snapshot) page.
+
+## Initializing from an Exported Backup
+
+Use [`persistence.restore`](./restoring-from-snapshot#restoring-an-exported-snapshot) to initialize
+new data volumes from one unsplit S3 or GCS export. To restore an existing node, configure the
+source and delete its data PVC. Choose storage large enough for the extracted data and a compatible
+application image; changing the source only takes effect when the volume is recreated.
