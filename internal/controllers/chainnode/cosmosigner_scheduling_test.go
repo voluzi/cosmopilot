@@ -30,6 +30,9 @@ func TestChainNodeSignerScheduling(t *testing.T) {
 			if configured {
 				node.Spec.Cosmosigner.NodeSelector = map[string]string{"pool": "signers"}
 				node.Spec.Cosmosigner.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}}
+				node.Spec.Cosmosigner.Env = []corev1.EnvVar{{Name: "VENDOR", Value: "config"}}
+				node.Spec.Cosmosigner.Volumes = []corev1.Volume{{Name: "vendor", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+				node.Spec.Cosmosigner.VolumeMounts = []corev1.VolumeMount{{Name: "vendor", MountPath: "/vendor"}}
 			}
 			key, err := cometbft.GeneratePrivKey()
 			require.NoError(t, err)
@@ -49,6 +52,11 @@ func TestChainNodeSignerScheduling(t *testing.T) {
 			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: node.Namespace, Name: params.Name}, sts))
 			require.Equal(t, node.Spec.Cosmosigner.NodeSelector, sts.Spec.Template.Spec.NodeSelector)
 			require.Equal(t, node.Spec.Cosmosigner.Affinity, sts.Spec.Template.Spec.Affinity)
+			if configured {
+				require.Contains(t, sts.Spec.Template.Spec.Containers[0].Env, node.Spec.Cosmosigner.Env[0])
+				require.Contains(t, sts.Spec.Template.Spec.Volumes, node.Spec.Cosmosigner.Volumes[0])
+				require.Contains(t, sts.Spec.Template.Spec.Containers[0].VolumeMounts, node.Spec.Cosmosigner.VolumeMounts[0])
+			}
 		})
 	}
 }

@@ -24,6 +24,9 @@ func TestChainNodeSetSignerScheduling(t *testing.T) {
 				if configured {
 					c.NodeSelector = map[string]string{"pool": "signers"}
 					c.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}}
+					c.Env = []corev1.EnvVar{{Name: "VENDOR", Value: "config"}}
+					c.Volumes = []corev1.Volume{{Name: "vendor", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+					c.VolumeMounts = []corev1.VolumeMount{{Name: "vendor", MountPath: "/vendor"}}
 				}
 				set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"}, Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1), NodeSelector: map[string]string{"pool": "nodes"}, Affinity: &corev1.Affinity{PodAffinity: &corev1.PodAffinity{}}}}}, Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"}}
 				if group {
@@ -49,6 +52,11 @@ func TestChainNodeSetSignerScheduling(t *testing.T) {
 				require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: set.Namespace, Name: params.Name}, sts))
 				require.Equal(t, c.NodeSelector, sts.Spec.Template.Spec.NodeSelector)
 				require.Equal(t, c.Affinity, sts.Spec.Template.Spec.Affinity)
+				if configured {
+					require.Contains(t, sts.Spec.Template.Spec.Containers[0].Env, c.Env[0])
+					require.Contains(t, sts.Spec.Template.Spec.Volumes, c.Volumes[0])
+					require.Contains(t, sts.Spec.Template.Spec.Containers[0].VolumeMounts, c.VolumeMounts[0])
+				}
 			})
 		}
 	}

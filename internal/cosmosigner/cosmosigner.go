@@ -96,6 +96,9 @@ type Params struct {
 	ServiceAccountName string
 	NodeSelector       map[string]string
 	Affinity           *corev1.Affinity
+	Env                []corev1.EnvVar
+	Volumes            []corev1.Volume
+	VolumeMounts       []corev1.VolumeMount
 
 	// ImagePullSecrets are applied to the ONE-SHOT key-management pods only (import, pubkey). The
 	// signer StatefulSet deliberately does not carry them: its pod template feeds LifecycleDigest, so
@@ -546,6 +549,9 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 		},
 	}
 
+	volumes = append(volumes, p.Volumes...)
+	signer.VolumeMounts = append(signer.VolumeMounts, p.VolumeMounts...)
+	signer.Env = append(append([]corev1.EnvVar(nil), p.Env...), signer.Env...)
 	signer.Env = append(signer.Env, p.raftSecurityEnv()...)
 	signer.Env = append(signer.Env, p.Backend.clusterBindingEnv()...)
 	signer.Env = append(signer.Env, p.Backend.runtimeEnv()...)

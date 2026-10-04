@@ -75,6 +75,18 @@ type Cosmosigner struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Env supplies vendor client configuration to the signer container. Operator-managed variables take precedence.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Volumes supplies deployment-specific vendor configuration and credentials.
+	// +optional
+	Volumes []corev1.Volume `json:"volumes,omitempty"`
+
+	// VolumeMounts mounts vendor files in the signer container; managed mounts must not be shadowed.
+	// +optional
+	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
 	// Backend selects and configures where the consensus key material lives and how signing is
 	// performed. Exactly one backend must be configured.
 	Backend CosmosignerBackend `json:"backend"`

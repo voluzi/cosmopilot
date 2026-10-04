@@ -1877,6 +1877,9 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.Chai
 		ServiceAccountName: c.GetServiceAccountName(),
 		NodeSelector:       c.NodeSelector,
 		Affinity:           c.Affinity,
+		Env:                c.Env,
+		Volumes:            c.Volumes,
+		VolumeMounts:       c.VolumeMounts,
 		Backend:            backend,
 		Labels:             labels,
 		// One-shot import/pubkey pods only — the signer StatefulSet keeps its existing lifecycle digest.
