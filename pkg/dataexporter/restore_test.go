@@ -108,6 +108,7 @@ func TestRestoreRejectsUnsafeArchiveEntries(t *testing.T) {
 		{"device", []*tar.Header{{Name: "device", Typeflag: tar.TypeChar}}},
 		{"duplicate", []*tar.Header{{Name: "file", Typeflag: tar.TypeReg}, {Name: "file", Typeflag: tar.TypeReg}}},
 		{"conflicting parent", []*tar.Header{{Name: "file", Typeflag: tar.TypeReg}, {Name: "file/child", Typeflag: tar.TypeReg}}},
+		{"restore marker", []*tar.Header{{Name: ".cosmopilot-restore-complete", Typeflag: tar.TypeReg}}},
 		{"provisioner directory", []*tar.Header{{Name: "lost+found/file", Typeflag: tar.TypeReg}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,4 +196,57 @@ func TestRestoreRequiresTarTerminatorAfterZeroFilledFiles(t *testing.T) {
 	require.NoError(t, writeTarball(source, &archive, CompressionNone))
 	truncated := archive.Bytes()[:archive.Len()-1024]
 	require.Error(t, Restore(t.Context(), restoreTestExporter{data: truncated}, t.TempDir(), "bucket", "snapshot.tar", ""))
+}
+
+func TestRestoreCompletedRetryDoesNotDownload(t *testing.T) {
+	source := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(source, "state"), []byte("block data"), 0600))
+	var archive bytes.Buffer
+	require.NoError(t, writeTarball(source, &archive, CompressionGzip))
+	digest := sha256.Sum256(archive.Bytes())
+	target := t.TempDir()
+	require.NoError(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar.gz", hex.EncodeToString(digest[:])))
+	require.NoError(t, Restore(t.Context(), restoreTestExporter{err: errors.New("unexpected download")}, target, "bucket", "snapshot.tar.gz", hex.EncodeToString(digest[:])))
+	data, err := os.ReadFile(filepath.Join(target, "state"))
+	require.NoError(t, err)
+	require.Equal(t, "block data", string(data))
+
+	// Re-exported application data must not carry completion evidence into another volume.
+	var exported bytes.Buffer
+	require.NoError(t, writeTarball(target, &exported, CompressionNone))
+	tr := tar.NewReader(&exported)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		require.NotEqual(t, ".cosmopilot-restore-complete", header.Name)
+	}
+}
+
+func TestRestoreIncompleteRetryRefusesTarget(t *testing.T) {
+	source := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(source, "state"), []byte("block data"), 0600))
+	var archive bytes.Buffer
+	require.NoError(t, writeTarball(source, &archive, CompressionNone))
+	for _, failure := range []string{"extraction", "verification"} {
+		t.Run(failure, func(t *testing.T) {
+			stored := archive.Bytes()
+			digest := strings.Repeat("0", 64)
+			if failure == "extraction" {
+				stored = stored[:len(stored)-1024]
+				digest = ""
+			}
+			target := t.TempDir()
+			require.Error(t, Restore(t.Context(), restoreTestExporter{data: stored}, target, "bucket", "snapshot.tar", digest))
+			data, err := os.ReadFile(filepath.Join(target, "state"))
+			require.NoError(t, err)
+			require.Equal(t, "block data", string(data))
+			err = Restore(t.Context(), restoreTestExporter{err: errors.New("unexpected download")}, target, "bucket", "snapshot.tar", "")
+			var stage *RestoreError
+			require.ErrorAs(t, err, &stage)
+			require.Equal(t, "target", stage.Stage)
+		})
+	}
 }

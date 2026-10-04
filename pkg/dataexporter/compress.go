@@ -90,6 +90,10 @@ func writeTarball(dir string, out io.Writer, compression Compression) error {
 		if err != nil {
 			return err
 		}
+		// Completion evidence belongs to this volume, never to an exported archive.
+		if relPath == restoreMarker {
+			return nil
+		}
 		linkTarget := ""
 		if info.Mode()&os.ModeSymlink != 0 {
 			linkTarget, err = os.Readlink(path)

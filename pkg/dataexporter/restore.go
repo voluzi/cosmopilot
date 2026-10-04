@@ -34,21 +34,28 @@ type RestoreError struct {
 func (e *RestoreError) Error() string { return e.Stage + ": " + e.Err.Error() }
 func (e *RestoreError) Unwrap() error { return e.Err }
 
+const restoreMarker = ".cosmopilot-restore-complete"
+
 // Restore streams a single exported object into an empty data directory. Failed extraction leaves
 // partial data untouched; recreate the volume before attempting installation again.
 func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest string) error {
-	compression, err := restoreCompression(name)
-	if err != nil {
-		return &RestoreError{"download", err}
-	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return &RestoreError{"target", err}
 	}
 	for _, entry := range entries {
+		if entry.Name() == restoreMarker {
+			return nil
+		}
+	}
+	for _, entry := range entries {
 		if entry.Name() != "lost+found" {
 			return &RestoreError{"target", errors.New("restore target is not empty; recreate the data volume to retry")}
 		}
+	}
+	compression, err := restoreCompression(name)
+	if err != nil {
+		return &RestoreError{"download", err}
 	}
 	object, err := exporter.Read(ctx, bucket, name)
 	if err != nil {
@@ -82,6 +89,9 @@ func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest s
 		return &RestoreError{"verification", errors.New("SHA-256 mismatch")}
 	}
 
+	if err := os.WriteFile(filepath.Join(dir, restoreMarker), nil, 0600); err != nil {
+		return &RestoreError{"target", err}
+	}
 	return nil
 }
 
@@ -164,7 +174,7 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 		if name == "." && hdr.Typeflag == tar.TypeDir {
 			continue
 		}
-		if name == "lost+found" || strings.HasPrefix(name, "lost+found/") {
+		if name == restoreMarker || strings.HasPrefix(name, restoreMarker+"/") || name == "lost+found" || strings.HasPrefix(name, "lost+found/") {
 			return restoreExtractionError(fmt.Errorf("reserved archive path %q", hdr.Name))
 		}
 		if seen[name] {
