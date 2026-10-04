@@ -537,6 +537,9 @@ persistence:
 For DigitalOcean Spaces, use the region-specific HTTPS endpoint and normally
 leave `forcePathStyle` disabled.
 
+The exporter archives symlinks, but `persistence.restore` accepts only regular files and directories;
+exports containing symlinks cannot be restored with that setting.
+
 ### Restoring exported archives
 
 After downloading an archive, extract it into the node home directory using the

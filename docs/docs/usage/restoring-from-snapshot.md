@@ -81,14 +81,18 @@ Set `persistence.restore` to initialize a new node's data volume from one explic
 unsplit object in S3, S3-compatible storage, or GCS. To restore an existing node, set this
 configuration and delete its data PVC; Cosmopilot recreates the volume and initializes it from
 the configured object. Changing or removing restore configuration does not affect an initialized
-volume until it is recreated. PVC deletion discards its current data; Kubernetes PVC protection
-may defer deletion until Pods mounting it are stopped and removed.
+volume until it is recreated. For an existing node, set optional `restore.height` to the archive's
+block height: Cosmopilot rebases upgrade progress and selects the application image at that height,
+as it does for a VolumeSnapshot. Without it, the node starts on `spec.app.image`/`version`.
+PVC deletion discards its current data; Kubernetes PVC protection may defer deletion until Pods mounting it are stopped and removed.
 
 ```yaml
 persistence:
   size: 500Gi
   initTimeout: 2h
   restore:
+    # Optional: block height of the archived data, used to select the application image.
+    height: 12345678
     snapshot:
       provider: s3
       bucket: cosmos-backups
@@ -129,7 +133,9 @@ credentials, images, or volume sizes fail through the normal SDK, Kubernetes, or
 
 Supported formats are `.tar`, `.tar.gz`, `.tar.zst`, and `.tar.lz4`. Supply the exact object key,
 including its extension; there is no latest-object selection. Split exports, links, special files,
-unsafe paths, and conflicting archive paths are unsupported. Archives contain the data directory,
+unsafe paths, and conflicting archive paths are unsupported. The exporter includes symlinks, but
+`persistence.restore` accepts only regular files and directories, so an export containing a symlink
+cannot be restored through this workflow. Archives contain the data directory,
 not the whole application home. Continue configuring a normal genesis source and an application
 image compatible with the archived database. Set the initial PVC size for the extracted data and
 increase `initTimeout` for large backups; the transfer streams directly into the volume without
@@ -142,8 +148,9 @@ checks bytes, not database consistency, chain identity, application compatibilit
 state. Export-time `snapshots.verify` remains an application readability check.
 
 Restore replaces the application's data-initialization container in the existing init-data Pod.
-Persistence `additionalInitCommands` run afterward. A CSI `restoreFromSnapshot` initializes the
-PVC directly and takes precedence; state-sync configuration retains its existing startup behavior.
+Persistence `additionalInitCommands` run afterward. `restore.snapshot.serviceAccountName` applies
+to the whole init pod, so the additional init command containers also run under that identity.
+A CSI `restoreFromSnapshot` initializes the PVC directly and takes precedence; state-sync configuration retains its existing startup behavior.
 Use the desired initialization source without combining unrelated sources. The same `restore`
 configuration can be set on ChainNodeSet node groups and validator persistence; every instance
 initializes independently, regardless of `snapshotNodeIndex`.
@@ -152,9 +159,15 @@ The existing `InitializingData` phase and `DataInitStarted`, `DataInitFailed`, a
 Events describe installation. Failed restores include a download, verification, or extraction
 message in the failure Event and container termination message. An initialized volume is never
 extracted over. The helper also refuses nonempty targets, leaving partial data untouched after an
-interrupted or failed extraction; recreate that PVC to retry. After installation, ordinary node
-startup, syncing, and diagnostics apply. There is no automatic compatibility selection, traffic
-cutover, health-gated adoption, or rollback.
+interrupted or failed extraction; recreate that PVC to retry. The default `persistence.initTimeout`
+is five minutes, and Kubernetes kills the init pod at that deadline; increase it for real snapshots
+to avoid an interrupted extraction that requires recreating the PVC.
+After extraction and checksum verification succeed, the helper writes the reserved hidden file
+`.cosmopilot-restore-complete` at the data-volume root, where the application ignores it and the
+exporter excludes it from archives. On retry, that marker skips downloading and extraction, so a
+later additional init command failure, timeout, or lost pod does not discard the completed restore.
+After installation, ordinary node startup, syncing, and diagnostics apply. There is no automatic
+compatibility selection, traffic cutover, health-gated adoption, or rollback.
 
 For validators signing with a local key, the archive carries the signing state from the moment it
 was taken: never run the restored node alongside another node using the same key, and do not
