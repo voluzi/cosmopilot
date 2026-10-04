@@ -72,6 +72,9 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [SnapshotExportDestination](#snapshotexportdestination)
 * [SnapshotExportSecretReference](#snapshotexportsecretreference)
 * [SnapshotExportStatus](#snapshotexportstatus)
+* [SnapshotRestoreConfig](#snapshotrestoreconfig)
+* [SnapshotRestoreSource](#snapshotrestoresource)
+* [SnapshotRestoreVerification](#snapshotrestoreverification)
 * [StateSyncConfig](#statesyncconfig)
 * [SubdomainsConfig](#subdomainsconfig)
 * [Upgrade](#upgrade)
@@ -936,6 +939,7 @@ Persistence configuration for a node.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
+| restore | Initialize a data volume from one explicitly named exported snapshot object. | *[SnapshotRestoreConfig](#snapshotrestoreconfig) | false |
 | size | Size of the persistent volume for storing data. Can't be updated when autoResize is enabled. Defaults to `50Gi`. | *string | false |
 | storageClass | Name of the storage class to use for the PVC. Uses the default class if not specified. to create persistent volumes. | *string | false |
 | autoResize | Automatically resize PVC. Defaults to `true`. | *bool | false |
@@ -1063,6 +1067,45 @@ SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarba
 | deleteExhausted | DeleteExhausted records that the final logical delete attempt was observed to fail. | bool | false |
 | lastDeleteError | LastDeleteError is the terminal error reported by the most recent logical delete attempt. | string | false |
 | nextDeleteRetryAt | NextDeleteRetryAt is when the controller may reserve the next logical delete attempt. | *metav1.Time | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotRestoreConfig
+
+SnapshotRestoreConfig initializes a data volume from an exported archive.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| snapshot |  | [SnapshotRestoreSource](#snapshotrestoresource) | true |
+| verification | Optional verification of the complete stored object. | *[SnapshotRestoreVerification](#snapshotrestoreverification) | false |
+| resources | Compute resources for the restore container. | corev1.ResourceRequirements | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotRestoreSource
+
+SnapshotRestoreSource identifies one unsplit object and its read credentials.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| provider |  | string | true |
+| bucket |  | string | true |
+| name | Exact object key including .tar, .tar.gz, .tar.zst or .tar.lz4 extension. | string | true |
+| region |  | string | false |
+| endpoint |  | string | false |
+| forcePathStyle |  | bool | false |
+| credentialsSecret | GCS uses Key (default: credentials.json); S3 uses envFrom. | *[SnapshotExportSecretReference](#snapshotexportsecretreference) | false |
+| serviceAccountName |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotRestoreVerification
+
+SnapshotRestoreVerification verifies bytes, not chain or application compatibility.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| sha256 | Expected SHA-256 of the complete stored object. Omit to skip verification. | string | false |
 
 [Back to Custom Resources](#custom-resources)
 

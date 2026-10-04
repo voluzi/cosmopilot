@@ -899,6 +899,10 @@ type FromNodeRPCConfig struct {
 
 // Persistence configuration for a node.
 type Persistence struct {
+	// Initialize a data volume from one explicitly named exported snapshot object.
+	// +optional
+	Restore *SnapshotRestoreConfig `json:"restore,omitempty"`
+
 	// Size of the persistent volume for storing data. Can't be updated when autoResize is enabled.
 	// Defaults to `50Gi`.
 	// +optional
@@ -1571,4 +1575,45 @@ type SubdomainsConfig struct {
 	// EvmRpcWs subdomain prefix. Defaults to "evm-rpc-ws".
 	// +optional
 	EvmRpcWs *string `json:"evmRpcWS,omitempty"`
+}
+
+// SnapshotRestoreConfig initializes a data volume from an exported archive.
+type SnapshotRestoreConfig struct {
+	Snapshot SnapshotRestoreSource `json:"snapshot"`
+	// Optional verification of the complete stored object.
+	// +optional
+	Verification *SnapshotRestoreVerification `json:"verification,omitempty"`
+	// Compute resources for the restore container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// SnapshotRestoreSource identifies one unsplit object and its read credentials.
+type SnapshotRestoreSource struct {
+	// +kubebuilder:validation:Enum=s3;gcs
+	Provider string `json:"provider"`
+	// +kubebuilder:validation:MinLength=1
+	Bucket string `json:"bucket"`
+	// Exact object key including .tar, .tar.gz, .tar.zst or .tar.lz4 extension.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +optional
+	Region string `json:"region,omitempty"`
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// +optional
+	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
+	// GCS uses Key (default: credentials.json); S3 uses envFrom.
+	// +optional
+	CredentialsSecret *SnapshotExportSecretReference `json:"credentialsSecret,omitempty"`
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+}
+
+// SnapshotRestoreVerification verifies bytes, not chain or application compatibility.
+type SnapshotRestoreVerification struct {
+	// Expected SHA-256 of the complete stored object. Omit to skip verification.
+	// +optional
+	// +kubebuilder:validation:Pattern="^[a-fA-F0-9]{64}$"
+	SHA256 string `json:"sha256,omitempty"`
 }

@@ -4897,6 +4897,123 @@ spec:
                     description: Time to wait for data initialization pod to be successful.
                       Defaults to `5m`.
                     type: string
+                  restore:
+                    description: Initialize a data volume from one explicitly named
+                      exported snapshot object.
+                    properties:
+                      resources:
+                        description: Compute resources for the restore container.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                      snapshot:
+                        description: SnapshotRestoreSource identifies one unsplit
+                          object and its read credentials.
+                        properties:
+                          bucket:
+                            minLength: 1
+                            type: string
+                          credentialsSecret:
+                            description: 'GCS uses Key (default: credentials.json);
+                              S3 uses envFrom.'
+                            properties:
+                              key:
+                                type: string
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          endpoint:
+                            type: string
+                          forcePathStyle:
+                            type: boolean
+                          name:
+                            description: Exact object key including .tar, .tar.gz,
+                              .tar.zst or .tar.lz4 extension.
+                            minLength: 1
+                            type: string
+                          provider:
+                            enum:
+                            - s3
+                            - gcs
+                            type: string
+                          region:
+                            type: string
+                          serviceAccountName:
+                            type: string
+                        required:
+                        - bucket
+                        - name
+                        - provider
+                        type: object
+                      verification:
+                        description: Optional verification of the complete stored
+                          object.
+                        properties:
+                          sha256:
+                            description: Expected SHA-256 of the complete stored object.
+                              Omit to skip verification.
+                            pattern: ^[a-fA-F0-9]{64}$
+                            type: string
+                        type: object
+                    required:
+                    - snapshot
+                    type: object
                   restoreFromSnapshot:
                     description: Restore from the specified snapshot when creating
                       the PVC for this node.
