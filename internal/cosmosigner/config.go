@@ -36,6 +36,7 @@ const (
 	backendVault    = "vault"
 	backendGcpKms   = "gcpkms"
 	backendAwsKms   = "awskms"
+	backendPKCS11   = "pkcs11"
 
 	// softwareKeyPath is where the priv_validator_key.json is mounted for the software backend.
 	softwareKeyDir  = "/keys"
@@ -67,11 +68,12 @@ type Config struct {
 
 // BackendConfig mirrors cosmosigner's backend.Config.
 type BackendConfig struct {
-	Type    string       `yaml:"type"`
-	KeyFile string       `yaml:"key_file,omitempty"`
-	Vault   *VaultConfig `yaml:"vault,omitempty"`
-	GCP     *GCPConfig   `yaml:"gcp,omitempty"`
-	AWS     *AWSConfig   `yaml:"aws,omitempty"`
+	Type    string        `yaml:"type"`
+	KeyFile string        `yaml:"key_file,omitempty"`
+	Vault   *VaultConfig  `yaml:"vault,omitempty"`
+	GCP     *GCPConfig    `yaml:"gcp,omitempty"`
+	AWS     *AWSConfig    `yaml:"aws,omitempty"`
+	PKCS11  *PKCS11Config `yaml:"pkcs11,omitempty"`
 }
 
 // VaultConfig mirrors cosmosigner's backend.VaultConfig.
@@ -95,6 +97,17 @@ type GCPConfig struct {
 type AWSConfig struct {
 	KeyID  string `yaml:"key_id"`
 	Region string `yaml:"region"`
+}
+
+// PKCS11Config mirrors cosmosigner's token configuration; the binding lives with each replica's state.
+type PKCS11Config struct {
+	Module      string `yaml:"module"`
+	TokenLabel  string `yaml:"token_label,omitempty"`
+	Slot        *int64 `yaml:"slot,omitempty"`
+	KeyLabel    string `yaml:"key_label,omitempty"`
+	KeyID       string `yaml:"key_id,omitempty"`
+	PINFile     string `yaml:"pin_file"`
+	BindingFile string `yaml:"binding_file"`
 }
 
 // RaftConfig mirrors cosmosigner's config.RaftConfig. node_id and advertise are supplied per-pod

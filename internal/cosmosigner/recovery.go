@@ -4,12 +4,14 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -169,6 +171,11 @@ func recoveredBackendMatches(live BackendConfig, desired Backend, sts *appsv1.St
 			live.Vault.KeyVersion == want.Vault.KeyVersion
 	case desired.GCP != nil:
 		return live.GCP != nil && want.GCP != nil && live.GCP.KeyVersion == want.GCP.KeyVersion
+	case desired.PKCS11 != nil:
+		return live.PKCS11 != nil && want.PKCS11 != nil &&
+			live.PKCS11.Module == want.PKCS11.Module && live.PKCS11.TokenLabel == want.PKCS11.TokenLabel &&
+			ptr.Equal(live.PKCS11.Slot, want.PKCS11.Slot) && live.PKCS11.KeyLabel == want.PKCS11.KeyLabel &&
+			strings.EqualFold(live.PKCS11.KeyID, want.PKCS11.KeyID)
 	case desired.AWS != nil:
 		return live.AWS != nil && want.AWS != nil && live.AWS.KeyID == want.AWS.KeyID
 	default:

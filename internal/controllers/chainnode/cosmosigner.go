@@ -701,6 +701,9 @@ func (r *Reconciler) recordCosmosignerAppliedState(ctx context.Context, chainNod
 }
 
 func (r *Reconciler) cosmosignerPublicKey(ctx context.Context, chainNode *appsv1.ChainNode, params cosmosigner.Params) (string, error) {
+	if params.Backend.PKCS11 != nil {
+		return chainNode.Spec.Cosmosigner.Backend.PKCS11.PublicKey, nil
+	}
 	if params.Backend.Software != nil {
 		return cosmosigner.PublicKeyFromSecret(ctx, r.Client, chainNode.GetNamespace(), params.Backend.Software.SecretName)
 	}
@@ -818,6 +821,9 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 			BindingMount:      ptr.Deref(v.BindingMount, ""),
 			ClaimTokenSecret:  v.ClaimTokenSecret,
 		}}, nil
+	case c.UsesPKCS11Backend():
+		p := c.Backend.PKCS11
+		return cosmosigner.Backend{PKCS11: &cosmosigner.PKCS11Backend{Module: p.Module, TokenLabel: p.TokenLabel, Slot: p.Slot, KeyLabel: p.KeyLabel, KeyID: p.KeyID, PINSecret: &p.PINSecret}}, nil
 	case c.UsesAwsKmsBackend():
 		a := c.Backend.AwsKMS
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "AWS credentials", a.CredentialsSecret); err != nil {

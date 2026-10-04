@@ -12,6 +12,7 @@ type Backend struct {
 	Vault    *VaultBackend
 	GCP      *GcpBackend
 	AWS      *AwsBackend
+	PKCS11   *PKCS11Backend
 }
 
 // SoftwareBackend holds the local software backend configuration.
@@ -54,6 +55,16 @@ type AwsBackend struct {
 	CredentialsSecret *corev1.SecretKeySelector
 	ClaimRoleARN      string
 	Timeout           string
+}
+
+// PKCS11Backend configures access to an existing token key.
+type PKCS11Backend struct {
+	Module     string
+	TokenLabel string
+	Slot       *int64
+	KeyLabel   string
+	KeyID      string
+	PINSecret  *corev1.SecretKeySelector
 }
 
 // GcpImport are the Cloud KMS destination coordinates of a controller-managed BYOK import. They are
@@ -219,6 +230,9 @@ func (b Backend) backendConfig() BackendConfig {
 				CredentialsFile: gcpCredsFilePath(b.GCP),
 			},
 		}
+	case b.PKCS11 != nil:
+		p := b.PKCS11
+		return BackendConfig{Type: backendPKCS11, PKCS11: &PKCS11Config{Module: p.Module, TokenLabel: p.TokenLabel, Slot: p.Slot, KeyLabel: p.KeyLabel, KeyID: p.KeyID, PINFile: "/pkcs11/pin/pin", BindingFile: softwareBindingFile}}
 	case b.AWS != nil:
 		return BackendConfig{
 			Type: backendAwsKms,
@@ -246,6 +260,8 @@ func gcpCredsFilePath(g *GcpBackend) string {
 // volumes returns the volumes required by the backend.
 func (b Backend) volumes() []corev1.Volume {
 	switch {
+	case b.PKCS11 != nil:
+		return []corev1.Volume{{Name: "pkcs11-pin", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: b.PKCS11.PINSecret.Name, Items: []corev1.KeyToPath{{Key: b.PKCS11.PINSecret.Key, Path: "pin"}}}}}}
 	case b.Software != nil:
 		// Project ONLY priv_validator_key.json: the referenced Secret may carry unrelated keys (e.g. a
 		// validator's account mnemonic in a shared Secret) that must not be readable by the signer.
@@ -318,6 +334,8 @@ func (b Backend) volumes() []corev1.Volume {
 // volumeMounts returns the volume mounts required by the backend.
 func (b Backend) volumeMounts() []corev1.VolumeMount {
 	switch {
+	case b.PKCS11 != nil:
+		return []corev1.VolumeMount{{Name: "pkcs11-pin", MountPath: "/pkcs11/pin", ReadOnly: true}}
 	case b.Software != nil:
 		// Directory mount (no subPath): the secret's priv_validator_key.json lands at softwareKeyFile
 		// and an in-place rotation propagates into the container.

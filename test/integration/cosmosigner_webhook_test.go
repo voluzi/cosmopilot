@@ -128,7 +128,7 @@ var _ = Describe("Cosmosigner Webhook Validation", func() {
 		)
 		err := Framework().Client().Create(Framework().Context(), cs)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("exactly one of software, vault, gcpKms or awsKms"))
+		Expect(err.Error()).To(ContainSubstring("exactly one of software, vault, gcpKms, awsKms or pkcs11"))
 	})
 
 	It("rejects an even replica count", func() {

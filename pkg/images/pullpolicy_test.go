@@ -18,6 +18,9 @@ func TestPullPolicy(t *testing.T) {
 		{image: "ghcr.io/voluzi/node-utils", fallback: "", want: corev1.PullAlways},
 		{image: "registry.voluzi.xyz:5000/node-utils", fallback: "", want: corev1.PullAlways},
 		{image: "registry.voluzi.xyz:5000/node-utils:edge", fallback: "", want: corev1.PullAlways},
+		{image: "ghcr.io/voluzi/cosmosigner:edge-pkcs11", fallback: "", want: corev1.PullAlways},
+		{image: "ghcr.io/voluzi/cosmosigner:latest-pkcs11", fallback: "", want: corev1.PullAlways},
+		{image: "ghcr.io/voluzi/cosmosigner:edge-pkcs11@sha256:0123456789abcdef", fallback: corev1.PullIfNotPresent, want: corev1.PullIfNotPresent},
 		// Pinned images keep the policy the container had, including none at all.
 		{image: "ghcr.io/voluzi/node-utils:3.0.0", fallback: corev1.PullIfNotPresent, want: corev1.PullIfNotPresent},
 		{image: "ghcr.io/voluzi/node-utils:3.0.0", fallback: "", want: ""},

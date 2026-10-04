@@ -3,6 +3,7 @@ package v1
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -99,6 +100,11 @@ func (c *Cosmosigner) UsesAwsKmsBackend() bool {
 	return c != nil && c.Backend.AwsKMS != nil
 }
 
+// UsesPKCS11Backend reports whether a pre-existing PKCS#11 key is configured.
+func (c *Cosmosigner) UsesPKCS11Backend() bool {
+	return c != nil && c.Backend.PKCS11 != nil
+}
+
 // VaultUploadsGenerated reports whether the Vault backend imports the validator's locally-generated
 // key: explicitly via uploadGenerated, or implicitly when the targeted validator initializes a new
 // genesis (the documented auto-default — a fresh genesis always generates its consensus key
@@ -122,13 +128,11 @@ func (c *Cosmosigner) ImportsGeneratedKey(initTarget bool) bool {
 	return c.VaultUploadsGenerated(initTarget) || c.GcpImportsKey()
 }
 
-// UsesPubkeyPod reports whether the signer's consensus public key is read back from the BACKEND
-// through the one-shot `<signer>-pubkey` pod. The software backend reads it from the mounted secret,
-// and a Vault uploadGenerated import resolves it from the source secret it is about to upload; every
-// other backend — including a managed GCP KMS import, which must verify the version it created —
-// needs the pod, so its name is reserved.
+// UsesPubkeyPod reports whether key resolution uses a one-shot discovery pod. Software reads its
+// Secret, PKCS#11 uses the supplied publicKey, and Vault imports use their source Secret. Other
+// backends, including GCP imports that must verify the created version, reserve the pubkey pod name.
 func (c *Cosmosigner) UsesPubkeyPod(initTarget bool) bool {
-	return c != nil && !c.UsesSoftwareBackend() && !c.VaultUploadsGenerated(initTarget)
+	return c != nil && !c.UsesSoftwareBackend() && !c.UsesPKCS11Backend() && !c.VaultUploadsGenerated(initTarget)
 }
 
 // groupCosmosigner returns the Cosmosigner block targeting the given group: the group's own
@@ -586,11 +590,14 @@ func (c *Cosmosigner) Validate(path string, allowNodeGroups bool) error {
 	if c.Backend.AwsKMS != nil {
 		backends++
 	}
+	if c.Backend.PKCS11 != nil {
+		backends++
+	}
 	if backends == 0 {
-		return fmt.Errorf("%s.backend must configure exactly one of software, vault, gcpKms or awsKms", path)
+		return fmt.Errorf("%s.backend must configure exactly one of software, vault, gcpKms, awsKms or pkcs11", path)
 	}
 	if backends > 1 {
-		return fmt.Errorf("%s.backend must configure exactly one of software, vault, gcpKms or awsKms, not multiple", path)
+		return fmt.Errorf("%s.backend must configure exactly one of software, vault, gcpKms, awsKms or pkcs11, not multiple", path)
 	}
 
 	// Replicas must be an odd number so the embedded raft cluster can form a quorum.
@@ -721,6 +728,8 @@ func (c *Cosmosigner) effectiveSigningIdentity(softwareKeySecret string) string 
 		return "gcpkms-import\x00" + c.Backend.GcpKMS.Import.gcpImportIdentity()
 	case c.UsesGcpKmsBackend():
 		return "gcpkms\x00" + c.Backend.GcpKMS.KeyVersion
+	case c.UsesPKCS11Backend():
+		return c.Backend.PKCS11.signingCoordinates() + "\x00" + c.Backend.PKCS11.PublicKey
 	case c.UsesAwsKmsBackend():
 		return "awskms\x00" + c.Backend.AwsKMS.KeyID
 	case c.UsesSoftwareBackend():
@@ -882,4 +891,12 @@ func CosmosignerStateStorageEqual(sizeA string, classA *string, sizeB string, cl
 		return sizeA == sizeB
 	}
 	return qa.Cmp(qb) == 0
+}
+
+func (p *CosmosignerPKCS11Backend) signingCoordinates() string {
+	kind, selector := "token", p.TokenLabel
+	if p.Slot != nil {
+		kind, selector = "slot", strconv.FormatInt(*p.Slot, 10)
+	}
+	return strings.Join([]string{"pkcs11", p.Module, kind, selector, p.KeyLabel, strings.ToLower(p.KeyID)}, "\x00")
 }

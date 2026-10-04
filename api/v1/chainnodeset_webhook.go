@@ -1726,6 +1726,12 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 					return err
 				}
 			}
+		case c.UsesPKCS11Backend():
+			id := c.Backend.PKCS11.signingCoordinates()
+			if prev, ok := vaultKeys[id]; ok {
+				return fmt.Errorf("%s references the same PKCS#11 signing key as %s; each validator must sign with a distinct key", path, prev)
+			}
+			vaultKeys[id] = path
 		case c.UsesAwsKmsBackend():
 			id := c.effectiveSigningIdentity("")
 			if prev, ok := vaultKeys[id]; ok {

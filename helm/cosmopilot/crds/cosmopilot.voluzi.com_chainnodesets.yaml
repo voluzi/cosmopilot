@@ -1514,6 +1514,80 @@ spec:
                               exclusive with import.
                             type: string
                         type: object
+                      pkcs11:
+                        description: PKCS11 uses a pre-existing Ed25519 key on an
+                          operator-held token.
+                        properties:
+                          keyId:
+                            description: KeyID selects the key by its hexadecimal
+                              ID.
+                            pattern: ^([0-9a-fA-F]{2})+$
+                            type: string
+                          keyLabel:
+                            description: KeyLabel selects the key by label; when keyId
+                              is set both selectors must match.
+                            minLength: 1
+                            type: string
+                          module:
+                            description: Module is the vendor shared-library path
+                              inside the selected signer image.
+                            minLength: 1
+                            type: string
+                          pinSecret:
+                            description: PINSecret selects the PIN mounted as a file
+                              in the signer; it is never read by a discovery pod.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          publicKey:
+                            description: |-
+                              PublicKey is the base64 Ed25519 consensus public key printed by cosmosigner pubkey.
+                              It pins validator identity without logging in to the token during reconciliation.
+                            pattern: ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$
+                            type: string
+                          slot:
+                            description: Slot selects a token by slot, including explicit
+                              zero.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                          tokenLabel:
+                            description: TokenLabel selects a token by label, exclusively
+                              with slot.
+                            minLength: 1
+                            type: string
+                        required:
+                        - module
+                        - pinSecret
+                        - publicKey
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of tokenLabel or slot is required
+                          rule: has(self.tokenLabel) != has(self.slot)
+                        - message: keyLabel or keyId is required
+                          rule: has(self.keyLabel) || has(self.keyId)
+                        - message: pinSecret.name and pinSecret.key are required
+                          rule: size(self.pinSecret.name) > 0 && size(self.pinSecret.key)
+                            > 0
                       software:
                         description: |-
                           Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is
@@ -8133,6 +8207,81 @@ spec:
                                     exclusive with import.
                                   type: string
                               type: object
+                            pkcs11:
+                              description: PKCS11 uses a pre-existing Ed25519 key
+                                on an operator-held token.
+                              properties:
+                                keyId:
+                                  description: KeyID selects the key by its hexadecimal
+                                    ID.
+                                  pattern: ^([0-9a-fA-F]{2})+$
+                                  type: string
+                                keyLabel:
+                                  description: KeyLabel selects the key by label;
+                                    when keyId is set both selectors must match.
+                                  minLength: 1
+                                  type: string
+                                module:
+                                  description: Module is the vendor shared-library
+                                    path inside the selected signer image.
+                                  minLength: 1
+                                  type: string
+                                pinSecret:
+                                  description: PINSecret selects the PIN mounted as
+                                    a file in the signer; it is never read by a discovery
+                                    pod.
+                                  properties:
+                                    key:
+                                      description: The key of the secret to select
+                                        from.  Must be a valid secret key.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the Secret or its
+                                        key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                publicKey:
+                                  description: |-
+                                    PublicKey is the base64 Ed25519 consensus public key printed by cosmosigner pubkey.
+                                    It pins validator identity without logging in to the token during reconciliation.
+                                  pattern: ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$
+                                  type: string
+                                slot:
+                                  description: Slot selects a token by slot, including
+                                    explicit zero.
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
+                                tokenLabel:
+                                  description: TokenLabel selects a token by label,
+                                    exclusively with slot.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - module
+                              - pinSecret
+                              - publicKey
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of tokenLabel or slot is required
+                                rule: has(self.tokenLabel) != has(self.slot)
+                              - message: keyLabel or keyId is required
+                                rule: has(self.keyLabel) || has(self.keyId)
+                              - message: pinSecret.name and pinSecret.key are required
+                                rule: size(self.pinSecret.name) > 0 && size(self.pinSecret.key)
+                                  > 0
                             software:
                               description: |-
                                 Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is
