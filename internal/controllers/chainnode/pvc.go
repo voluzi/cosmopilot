@@ -216,7 +216,9 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		staleInit := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name + "-init-data", Namespace: chainNode.Namespace}}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(staleInit), staleInit); err == nil {
 			if staleInit.Spec.NodeName == "" || staleInit.Status.Phase == corev1.PodSucceeded || staleInit.Status.Phase == corev1.PodFailed {
-				if err := r.Delete(ctx, staleInit); err != nil && !errors.IsNotFound(err) {
+				// The precondition spares a pod that was bound after this possibly stale read.
+				seen := client.Preconditions{UID: &staleInit.UID, ResourceVersion: &staleInit.ResourceVersion}
+				if err := r.Delete(ctx, staleInit, seen); err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
 					return nil, ctrl.Result{}, err
 				}
 			}
