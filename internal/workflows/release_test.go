@@ -18,12 +18,18 @@ type workflow struct {
 }
 
 type workflowJob struct {
+	Strategy struct {
+		Matrix struct {
+			Include []struct{ Shard string } `yaml:"include"`
+		} `yaml:"matrix"`
+	} `yaml:"strategy"`
 	Outputs     map[string]string `yaml:"outputs"`
 	Permissions map[string]string `yaml:"permissions"`
 	Steps       []workflowStep    `yaml:"steps"`
 }
 
 type workflowStep struct {
+	If   string         `yaml:"if"`
 	Name string         `yaml:"name"`
 	ID   string         `yaml:"id"`
 	Uses string         `yaml:"uses"`

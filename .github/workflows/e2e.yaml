@@ -30,12 +30,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Every shard needs the same images, so they are built once here and handed over as a tarball.
+  # Images are built once and handed over as tarballs; only the shared shard needs MinIO.
   # Layers are cached in the Actions cache on top of that, which is what keeps this job short on the
   # common run where only test code moved.
   build-images:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     outputs:
       controller-image: ${{ steps.images.outputs.controller }}
       node-utils-image: ${{ steps.images.outputs.node-utils }}
@@ -103,7 +103,17 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: e2e-images
-          path: /tmp/images
+          path: |
+            /tmp/images/cosmopilot.tar
+            /tmp/images/node-utils.tar
+            /tmp/images/dataexporter.tar
+          retention-days: 1
+
+      - name: Upload MinIO image
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-minio-image
+          path: /tmp/images/minio.tar
           retention-days: 1
 
   e2e:
@@ -168,17 +178,27 @@ jobs:
           name: e2e-images
           path: /tmp/images
 
+      - name: Download MinIO image
+        if: ${{ matrix.shard == 'shared' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-minio-image
+          path: /tmp/images
+
       - name: Load images
         run: |
           docker load -i /tmp/images/cosmopilot.tar
           docker load -i /tmp/images/node-utils.tar
           docker load -i /tmp/images/dataexporter.tar
-          docker load -i /tmp/images/minio.tar
+          if [ '${{ matrix.shard }}' = shared ]; then
+            docker load -i /tmp/images/minio.tar
+          fi
 
       - name: Run E2E Tests (${{ matrix.shard }})
         run: |
           make test.e2e \
             BUILD_IMAGES=false \
+            BUILD_MINIO=${{ matrix.shard == 'shared' }} \
             IMG='${{ needs.build-images.outputs.controller-image }}' \
             NODE_UTILS_IMG='${{ needs.build-images.outputs.node-utils-image }}' \
             DATA_EXPORTER_IMG='${{ needs.build-images.outputs.dataexporter-image }}' \

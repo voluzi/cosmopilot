@@ -73,12 +73,6 @@ printf '%s\n' "$image" > "$archive"
 	runBash(t, root, findStep(t, steps, "Resolve image tags").Run, env)
 	build := strings.ReplaceAll(findStep(t, steps, "Build images").Run, "/tmp/images", filepath.Join(dir, "images"))
 	runBash(t, root, build, env)
-	load := strings.ReplaceAll(findStep(t, wf.Jobs["e2e"].Steps, "Load images").Run, "/tmp/images", filepath.Join(dir, "images"))
-	runBash(t, root, load, env)
-	loadedBytes, err := os.ReadFile(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
 	resolvedBytes, err := os.ReadFile(output)
 	if err != nil {
 		t.Fatal(err)
@@ -89,30 +83,71 @@ printf '%s\n' "$image" > "$archive"
 		resolved[name] = image
 	}
 	for name, image := range images {
-		if resolved[name] != image || !strings.Contains(string(loadedBytes), image+"\n") {
-			t.Errorf("%s image %q was not resolved and transported to the shard", name, image)
+		if resolved[name] != image {
+			t.Errorf("%s image %q was not resolved", name, image)
 		}
+	}
+	steps = wf.Jobs["e2e"].Steps
+	minioDownload := findStep(t, steps, "Download MinIO image")
+	if minioDownload.If != "${{ matrix.shard == 'shared' }}" {
+		t.Fatal("MinIO download must be restricted to the shared shard")
+	}
+	minioUpload := findStep(t, wf.Jobs["build-images"].Steps, "Upload MinIO image")
+	if minioDownload.With["name"] != minioUpload.With["name"] || minioUpload.With["path"] != "/tmp/images/minio.tar" {
+		t.Fatal("shared shard must download the separately uploaded MinIO archive")
+	}
+	upload := findStep(t, wf.Jobs["build-images"].Steps, "Upload images")
+	if upload.With["path"] != "/tmp/images/cosmopilot.tar\n/tmp/images/node-utils.tar\n/tmp/images/dataexporter.tar\n" {
+		t.Fatal("common image artifact must contain only the three application images")
 	}
 	// Resolve the cross-job references and capture the arguments handed to the test target.
 	args := filepath.Join(dir, "args")
 	if err := os.WriteFile(filepath.Join(bin, "make"), []byte("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$SHARD_ARGS\"\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	shard := findStep(t, wf.Jobs["e2e"].Steps, "Run E2E Tests (${{ matrix.shard }})").Run
-	for outputName, reference := range wf.Jobs["build-images"].Outputs {
-		key := strings.TrimSuffix(strings.TrimPrefix(reference, "${{ steps.images.outputs."), " }}")
-		shard = strings.ReplaceAll(shard, "${{ needs.build-images.outputs."+outputName+" }}", resolved[key])
-	}
-	shard = regexp.MustCompile(`\$\{\{[^}]*\}\}`).ReplaceAllString(shard, "")
-	runBash(t, root, shard, append(env, "SHARD_ARGS="+args))
-	arguments, err := os.ReadFile(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, variable := range variables {
-		if !strings.Contains(string(arguments), variable+"="+images[name]+"\n") {
-			t.Errorf("shard did not receive %s=%s", variable, images[name])
-		}
+	for _, entry := range wf.Jobs["e2e"].Strategy.Matrix.Include {
+		t.Run(entry.Shard, func(t *testing.T) {
+			if err := os.WriteFile(loaded, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			load := strings.ReplaceAll(findStep(t, steps, "Load images").Run, "/tmp/images", filepath.Join(dir, "images"))
+			load = strings.ReplaceAll(load, "${{ matrix.shard }}", entry.Shard)
+			runBash(t, root, load, env)
+			loadedBytes, err := os.ReadFile(loaded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, image := range images {
+				want := name != "minio" || entry.Shard == "shared"
+				if strings.Contains(string(loadedBytes), image+"\n") != want {
+					t.Errorf("%s image loading does not match the %s shard's needs", name, entry.Shard)
+				}
+			}
+			shard := findStep(t, steps, "Run E2E Tests (${{ matrix.shard }})").Run
+			for outputName, reference := range wf.Jobs["build-images"].Outputs {
+				key := strings.TrimSuffix(strings.TrimPrefix(reference, "${{ steps.images.outputs."), " }}")
+				shard = strings.ReplaceAll(shard, "${{ needs.build-images.outputs."+outputName+" }}", resolved[key])
+			}
+			buildMinio := "false"
+			if entry.Shard == "shared" {
+				buildMinio = "true"
+			}
+			shard = strings.ReplaceAll(shard, "${{ matrix.shard == 'shared' }}", buildMinio)
+			shard = regexp.MustCompile(`\$\{\{[^}]*\}\}`).ReplaceAllString(shard, "")
+			runBash(t, root, shard, append(env, "SHARD_ARGS="+args))
+			arguments, err := os.ReadFile(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, variable := range variables {
+				if !strings.Contains(string(arguments), variable+"="+images[name]+"\n") {
+					t.Errorf("shard did not receive %s=%s", variable, images[name])
+				}
+			}
+			if !strings.Contains(string(arguments), "BUILD_MINIO="+buildMinio+"\n") {
+				t.Errorf("%s shard did not receive BUILD_MINIO=%s", entry.Shard, buildMinio)
+			}
+		})
 	}
 }
 
