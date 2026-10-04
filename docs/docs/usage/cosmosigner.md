@@ -450,7 +450,8 @@ For static credentials, create a Secret key containing an AWS shared-credentials
 
 Only that Secret key is projected into a read-only directory mount, as `/aws/credentials`.
 Cosmopilot sets `AWS_SHARED_CREDENTIALS_FILE=/aws/credentials` on the signer and public-key Pod;
-Cosmosigner uses those credentials for AWS requests. In-place Secret updates reach the mounted
+Cosmosigner uses those credentials for AWS requests, unless the Pod also receives IRSA web-identity
+variables through its ServiceAccount: the AWS SDK prefers web identity, so use one or the other. In-place Secret updates reach the mounted
 file but do not restart the signer, and SDK file reloading is not guaranteed. Change the Secret
 name/key to trigger the existing managed migration when rotating static credentials.
 

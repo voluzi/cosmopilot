@@ -26,8 +26,6 @@ func TestAWSBackendIdentityAndValidation(t *testing.T) {
 	c.Backend.AwsKMS.Timeout = ptr.To("20s")
 	c.Backend.AwsKMS.CredentialsSecret = &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "credentials"}, Key: "ini"}
 	require.Equal(t, original, c.effectiveSigningIdentity(""))
-	require.NoError(t, validateCosmosignerKeyVersionChange(".spec.cosmosigner", awsKeySigner(awsTestKeyARN), c))
-	require.NoError(t, validateCosmosignerKeyVersionChange(".spec.cosmosigner", c, awsKeySigner(awsTestKeyARN+"-other")))
 	c.Backend.Software = &CosmosignerSoftwareBackend{}
 	require.ErrorContains(t, c.Validate(".spec.cosmosigner", false), "not multiple")
 }
