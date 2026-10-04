@@ -215,12 +215,12 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		// A helper left from the previous volume cannot prove that this new volume is initialized.
 		staleInit := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name + "-init-data", Namespace: chainNode.Namespace}}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(staleInit), staleInit); err == nil {
-			if staleInit.Status.Phase == corev1.PodSucceeded || staleInit.Status.Phase == corev1.PodFailed {
+			if staleInit.Spec.NodeName == "" || staleInit.Status.Phase == corev1.PodSucceeded || staleInit.Status.Phase == corev1.PodFailed {
 				if err := r.Delete(ctx, staleInit); err != nil && !errors.IsNotFound(err) {
 					return nil, ctrl.Result{}, err
 				}
 			}
-			// A cache miss on the PVC must not interrupt an active initialization pod.
+			// A scheduled pod protects its PVC from deletion; a missing PVC may be a cache miss.
 			return nil, ctrl.Result{RequeueAfter: initDataRetryPeriod}, nil
 		} else if !errors.IsNotFound(err) {
 			return nil, ctrl.Result{}, err

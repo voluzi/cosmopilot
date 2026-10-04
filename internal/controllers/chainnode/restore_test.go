@@ -170,37 +170,44 @@ func TestRestoreFailureEventIncludesStage(t *testing.T) {
 }
 
 func TestDataInitializationDiscardsStaleHelperBeforeCreatingVolume(t *testing.T) {
-	for _, keepRestore := range []bool{true, false} {
-		name := "restore configured"
-		if !keepRestore {
-			name = "restore removed"
-		}
-		t.Run(name, func(t *testing.T) {
-			node := restoreNode()
-			if !keepRestore {
-				node.Spec.Persistence.Restore = nil
+	for _, phase := range []corev1.PodPhase{corev1.PodSucceeded, corev1.PodFailed, corev1.PodPending} {
+		t.Run(string(phase), func(t *testing.T) {
+			for _, keepRestore := range []bool{true, false} {
+				name := "restore configured"
+				if !keepRestore {
+					name = "restore removed"
+				}
+				t.Run(name, func(t *testing.T) {
+					node := restoreNode()
+					if !keepRestore {
+						node.Spec.Persistence.Restore = nil
+					}
+					oldPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace}, Status: corev1.PodStatus{Phase: phase}}
+					if phase != corev1.PodPending {
+						oldPod.Spec.NodeName = "worker"
+					}
+					r := restoreReconciler(t, node, oldPod)
+					pvc, result, err := r.ensureDataVolume(t.Context(), nil, node)
+					require.NoError(t, err)
+					require.Nil(t, pvc)
+					require.Positive(t, result.RequeueAfter)
+					require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(oldPod), &corev1.Pod{})))
+					app, err := r.newApp(node)
+					require.NoError(t, err)
+					pvc, result, err = r.ensureDataVolume(t.Context(), app, node)
+					require.NoError(t, err)
+					require.Equal(t, "false", pvc.Annotations[controllers.AnnotationDataInitialized])
+					require.Positive(t, result.RequeueAfter)
+					current := &corev1.Pod{}
+					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(oldPod), current))
+					expected := "app"
+					if keepRestore {
+						expected = "data-restore"
+					}
+					require.Equal(t, expected, current.Spec.InitContainers[0].Name)
+					require.NotEqual(t, corev1.PodSucceeded, current.Status.Phase)
+				})
 			}
-			oldPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
-			r := restoreReconciler(t, node, oldPod)
-			pvc, result, err := r.ensureDataVolume(t.Context(), nil, node)
-			require.NoError(t, err)
-			require.Nil(t, pvc)
-			require.Positive(t, result.RequeueAfter)
-			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(oldPod), &corev1.Pod{})))
-			app, err := r.newApp(node)
-			require.NoError(t, err)
-			pvc, result, err = r.ensureDataVolume(t.Context(), app, node)
-			require.NoError(t, err)
-			require.Equal(t, "false", pvc.Annotations[controllers.AnnotationDataInitialized])
-			require.Positive(t, result.RequeueAfter)
-			current := &corev1.Pod{}
-			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(oldPod), current))
-			expected := "app"
-			if keepRestore {
-				expected = "data-restore"
-			}
-			require.Equal(t, expected, current.Spec.InitContainers[0].Name)
-			require.NotEqual(t, corev1.PodSucceeded, current.Status.Phase)
 		})
 	}
 }
@@ -210,7 +217,7 @@ func TestDataInitializationPreservesActiveHelperOnMissingCachedVolume(t *testing
 		t.Run(string(phase), func(t *testing.T) {
 			node := restoreNode()
 			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace}}
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace}, Status: corev1.PodStatus{Phase: phase}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace}, Spec: corev1.PodSpec{NodeName: "worker"}, Status: corev1.PodStatus{Phase: phase}}
 			r := restoreReconciler(t, node, pvc, pod)
 			original := r.Client.(client.WithWatch)
 			r.Client = interceptor.NewClient(original, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
