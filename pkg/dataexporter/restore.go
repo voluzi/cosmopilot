@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
@@ -89,6 +90,8 @@ func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest s
 		return &RestoreError{"verification", errors.New("SHA-256 mismatch")}
 	}
 
+	// The marker must not outlive a crash that loses directory entries created above.
+	syscall.Sync()
 	if err := os.WriteFile(filepath.Join(dir, restoreMarker), nil, 0600); err != nil {
 		return &RestoreError{"target", err}
 	}
