@@ -2,6 +2,7 @@ package chainnode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"strconv"
@@ -87,11 +88,11 @@ func (r *Reconciler) initializeData(ctx context.Context, app *chainutils.App, ch
 		return ctrl.Result{}, fmt.Errorf("failed to update phase to InitData: %w", err)
 	}
 
-	initCommands := r.buildInitCommands(chainNode)
-	additionalVolumes := r.buildAdditionalVolumes(chainNode)
-	initTimeout := chainNode.GetPersistenceInitTimeout()
-
-	if err := app.CreateInitPod(ctx, pvc, initTimeout, additionalVolumes, initCommands...); err != nil {
+	initPod, err := r.buildDataInitPod(app, chainNode, pvc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.Create(ctx, initPod); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create init pod: %w", err)
 	}
 
@@ -107,17 +108,15 @@ func (r *Reconciler) initializeData(ctx context.Context, app *chainutils.App, ch
 
 // markDataInitialized marks the PVC as initialized and cleans up the init pod.
 func (r *Reconciler) markDataInitialized(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim, initPod *corev1.Pod) (ctrl.Result, error) {
-	// Clean up the init pod
-	if err := r.Delete(ctx, initPod); err != nil && !errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("failed to delete completed init pod: %w", err)
-	}
-
 	// Get the updated PVC for updating annotation
 	if err := r.Get(ctx, client.ObjectKeyFromObject(pvc), pvc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC %s after initialization: %w", pvc.GetName(), err)
 	}
 
 	// Mark PVC as initialized
+	if pvc.Annotations == nil {
+		pvc.Annotations = map[string]string{}
+	}
 	pvc.Annotations[controllers.AnnotationDataInitialized] = controllers.StringValueTrue
 	if err := r.Update(ctx, pvc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to update PVC %s with initialized annotation: %w", pvc.GetName(), err)
@@ -132,6 +131,12 @@ func (r *Reconciler) markDataInitialized(ctx context.Context, chainNode *appsv1.
 	chainNode.Status.PvcSize = pvc.Spec.Resources.Requests.Storage().String()
 	if err := r.Status().Update(ctx, chainNode); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Persist the initialized marker before deleting the success evidence, so pod cleanup cannot
+	// cause data initialization to run again.
+	if err := r.Delete(ctx, initPod); err != nil && !errors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("failed to delete completed init pod: %w", err)
 	}
 
 	// Requeue immediately to continue reconciliation
@@ -175,6 +180,16 @@ func getPodFailureReason(pod *corev1.Pod) string {
 	// Check container statuses for termination reason
 	for _, cs := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
 		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+			if cs.State.Terminated.Message != "" {
+				var result struct {
+					Stage   string `json:"stage"`
+					Message string `json:"message"`
+				}
+				if json.Unmarshal([]byte(cs.State.Terminated.Message), &result) == nil && result.Message != "" {
+					return fmt.Sprintf("%s: %s: %s", cs.Name, result.Stage, result.Message)
+				}
+				return fmt.Sprintf("%s: %s", cs.Name, cs.State.Terminated.Message)
+			}
 			if cs.State.Terminated.Reason != "" {
 				return fmt.Sprintf("%s: %s", cs.Name, cs.State.Terminated.Reason)
 			}
@@ -197,6 +212,22 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 
 	// If PVC does not exist
 	if pvc == nil {
+		// A helper left from the previous volume cannot prove that this new volume is initialized.
+		staleInit := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: chainNode.Name + "-init-data", Namespace: chainNode.Namespace}}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(staleInit), staleInit); err == nil {
+			if staleInit.Spec.NodeName == "" || staleInit.Status.Phase == corev1.PodSucceeded || staleInit.Status.Phase == corev1.PodFailed {
+				// The precondition spares a pod that was bound after this possibly stale read.
+				seen := client.Preconditions{UID: &staleInit.UID, ResourceVersion: &staleInit.ResourceVersion}
+				if err := r.Delete(ctx, staleInit, seen); err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+					return nil, ctrl.Result{}, err
+				}
+			}
+			// A scheduled pod protects its PVC from deletion; a missing PVC may be a cache miss.
+			return nil, ctrl.Result{RequeueAfter: initDataRetryPeriod}, nil
+		} else if !errors.IsNotFound(err) {
+			return nil, ctrl.Result{}, err
+		}
+
 		// Assume .spec size by default
 		storageSize, err := resource.ParseQuantity(chainNode.GetPersistenceSize())
 		if err != nil {
@@ -230,9 +261,13 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 				}
 			}
 		} else {
-			// In case the PVC was deleted on an existing node, lets set latest height to 0 to make sure state-sync
-			// configuration can be applied if necessary.
-			if rebaseDataProgress(chainNode, 0) {
+			// Replacement data must select the application image at the archive height.
+			// Without a height, retain the zero-height reset used for fresh data and state-sync.
+			height := int64(0)
+			if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && chainNode.Spec.Persistence.Restore.Height != nil {
+				height = *chainNode.Spec.Persistence.Restore.Height
+			}
+			if rebaseDataProgress(chainNode, height) {
 				if err = r.Status().Update(ctx, chainNode); err != nil {
 					return nil, ctrl.Result{}, err
 				}
@@ -322,6 +357,17 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 		result, err := r.initializeData(ctx, app, chainNode, pvc)
 		return pvc, result, err
 	}
+	initPod := &corev1.Pod{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: chainNode.Namespace, Name: chainNode.Name + "-init-data"}, initPod); err == nil {
+		if initPod.Status.Phase == corev1.PodSucceeded {
+			if err := r.Delete(ctx, initPod); err != nil && !errors.IsNotFound(err) {
+				return pvc, ctrl.Result{}, err
+			}
+		}
+	} else if !errors.IsNotFound(err) {
+		return pvc, ctrl.Result{}, err
+	}
+
 	return pvc, ctrl.Result{}, nil
 }
 

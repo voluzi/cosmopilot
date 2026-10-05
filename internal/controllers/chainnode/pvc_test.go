@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -80,7 +81,7 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 			} else {
 				objects = append(objects, &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{Name: "node-init-data", Namespace: "default"},
-					Status:     corev1.PodStatus{Phase: corev1.PodPending},
+					Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
 				})
 			}
 			c := fakeclient.NewClientBuilder().
@@ -88,12 +89,18 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 				WithStatusSubresource(&appsv1.ChainNode{}).
 				WithObjects(objects...).
 				Build()
-			r := &Reconciler{Client: c, APIReader: c, Scheme: scheme}
+			r := &Reconciler{Client: c, APIReader: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}, recorder: record.NewFakeRecorder(20)}
 			stored := &appsv1.ChainNode{}
 			require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 
 			_, _, err := r.ensureDataVolume(t.Context(), nil, stored)
 			require.NoError(t, err)
+			if !tt.restore {
+				app, err := r.newApp(stored)
+				require.NoError(t, err)
+				_, _, err = r.ensureDataVolume(t.Context(), app, stored)
+				require.NoError(t, err)
+			}
 			assert.Equal(t, tt.expectedHeight, stored.Status.LatestHeight)
 			assert.Empty(t, stored.Status.AppImage)
 			assert.Empty(t, stored.Status.AppVersion)
@@ -247,18 +254,22 @@ func TestEnsureDataVolumePreservesLatestCompletedImageForStateSyncFromScratch(t 
 	}
 	initPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-init-data", Namespace: "default"},
-		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+		Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
 	}
 	c := fakeclient.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&appsv1.ChainNode{}).
 		WithObjects(node, initPod).
 		Build()
-	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme}
+	r := &Reconciler{Client: c, APIReader: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}, recorder: record.NewFakeRecorder(20)}
 	stored := &appsv1.ChainNode{}
 	require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
 
 	_, _, err := r.ensureDataVolume(t.Context(), nil, stored)
+	require.NoError(t, err)
+	app, err := r.newApp(stored)
+	require.NoError(t, err)
+	_, _, err = r.ensureDataVolume(t.Context(), app, stored)
 	require.NoError(t, err)
 	assert.Zero(t, stored.Status.LatestHeight)
 	assert.Empty(t, stored.Status.AppImage)

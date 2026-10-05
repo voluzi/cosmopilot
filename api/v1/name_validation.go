@@ -17,6 +17,8 @@ var reservedPodVolumeNames = []string{
 	"app-empty-dir", "data", "config-empty-dir", "config", "node-key", "upgrades-config", "genesis", "priv-key",
 	// Data-init pod (internal/chainutils/data.go), which also mounts the additional volumes.
 	"home", "temp",
+	// Restore pod (internal/controllers/chainnode/restore.go).
+	"restore-credentials",
 }
 
 // validateDNS1123Label rejects a user-supplied name that becomes (part of) a Kubernetes object,

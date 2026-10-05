@@ -259,7 +259,8 @@ func isHistoricalBootstrapUpgrade(chainNode *appsv1.ChainNode, nodePodRunning bo
 	if chainNode.ShouldRestoreFromSnapshot() {
 		return chainNode.Status.Phase == ""
 	}
-	return chainNode.StateSyncRestoreEnabled() &&
+	restore := chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && chainNode.Spec.Persistence.Restore.Height != nil
+	return (restore || chainNode.StateSyncRestoreEnabled()) &&
 		(chainNode.Status.Phase == "" || chainNode.Status.Phase == appsv1.PhaseChainNodeInitData)
 }
 

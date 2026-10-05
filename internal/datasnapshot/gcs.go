@@ -20,6 +20,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/k8s"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 const (
@@ -170,7 +171,7 @@ func (gcs *GCS) uploadJob(name string) *batchv1.Job {
 						Name:            uploadContainerName,
 						Image:           gcs.dataExporterImage,
 						Resources:       uploadJobResources(gcs.ExportConfig, gcs.defaultUploadRequests()),
-						ImagePullPolicy: corev1.PullAlways,
+						ImagePullPolicy: images.PullPolicy(gcs.dataExporterImage, ""),
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"gcs", "upload", "data", gcs.Config.Bucket, name},
 						WorkingDir:      "/home/app",
@@ -390,7 +391,7 @@ func (gcs *GCS) snapshotDeletionJob(name string, upload *SnapshotJobIdentity, bo
 						{
 							Name:            "dataexporter",
 							Image:           gcs.dataExporterImage,
-							ImagePullPolicy: corev1.PullAlways,
+							ImagePullPolicy: images.PullPolicy(gcs.dataExporterImage, ""),
 							SecurityContext: k8s.RestrictedSecurityContext(),
 							Args:            []string{"gcs", "delete", gcs.Config.Bucket, name},
 							WorkingDir:      "/app",

@@ -899,6 +899,10 @@ type FromNodeRPCConfig struct {
 
 // Persistence configuration for a node.
 type Persistence struct {
+	// Initialize a data volume from one explicitly named exported snapshot object.
+	// +optional
+	Restore *SnapshotRestoreConfig `json:"restore,omitempty"`
+
 	// Size of the persistent volume for storing data. Can't be updated when autoResize is enabled.
 	// Defaults to `50Gi`.
 	// +optional
@@ -1571,4 +1575,56 @@ type SubdomainsConfig struct {
 	// EvmRpcWs subdomain prefix. Defaults to "evm-rpc-ws".
 	// +optional
 	EvmRpcWs *string `json:"evmRpcWS,omitempty"`
+}
+
+// SnapshotRestoreConfig initializes a data volume from an exported archive.
+type SnapshotRestoreConfig struct {
+	// Snapshot identifies the exported archive and the identity used to read it.
+	Snapshot SnapshotRestoreSource `json:"snapshot"`
+	// Height is the archive block height used to select the application image and rebase upgrades.
+	// When omitted, replacement data starts from height zero.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Height *int64 `json:"height,omitempty"`
+	// Optional verification of the complete stored object.
+	// +optional
+	Verification *SnapshotRestoreVerification `json:"verification,omitempty"`
+	// Compute resources for the restore container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// SnapshotRestoreSource identifies one unsplit object and its read credentials.
+type SnapshotRestoreSource struct {
+	// Provider selects S3-compatible storage or Google Cloud Storage.
+	// +kubebuilder:validation:Enum=s3;gcs
+	Provider string `json:"provider"`
+	// +kubebuilder:validation:MinLength=1
+	Bucket string `json:"bucket"`
+	// Exact object key including .tar, .tar.gz, .tar.zst or .tar.lz4 extension.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// Region is the AWS region used to access the S3 bucket.
+	// +optional
+	Region string `json:"region,omitempty"`
+	// Endpoint overrides the S3 API endpoint for S3-compatible storage.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// ForcePathStyle addresses S3 buckets through URL paths instead of hostnames.
+	// +optional
+	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
+	// GCS uses Key (default: credentials.json); S3 uses envFrom.
+	// +optional
+	CredentialsSecret *SnapshotExportSecretReference `json:"credentialsSecret,omitempty"`
+	// ServiceAccountName is the identity for the whole init pod, including additional init commands.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+}
+
+// SnapshotRestoreVerification verifies bytes, not chain or application compatibility.
+type SnapshotRestoreVerification struct {
+	// Expected SHA-256 of the complete stored object. Omit to skip verification.
+	// +optional
+	// +kubebuilder:validation:Pattern="^[a-fA-F0-9]{64}$"
+	SHA256 string `json:"sha256,omitempty"`
 }

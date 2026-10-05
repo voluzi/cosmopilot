@@ -1,10 +1,8 @@
 package chainutils
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -136,49 +134,4 @@ func (a *App) BuildInitPod(pvc *corev1.PersistentVolumeClaim, additionalVolumes 
 	}
 
 	return pod, nil
-}
-
-// CreateInitPod creates the init pod without waiting for completion.
-// The caller is responsible for monitoring the pod status and cleaning up.
-// The timeout is enforced via activeDeadlineSeconds on the pod spec.
-func (a *App) CreateInitPod(ctx context.Context, pvc *corev1.PersistentVolumeClaim, timeout time.Duration, additionalVolumes []AdditionalVolume, initCommands ...*InitCommand) error {
-	pod, err := a.BuildInitPod(pvc, additionalVolumes, initCommands...)
-	if err != nil {
-		return err
-	}
-
-	// Enforce timeout via Kubernetes activeDeadlineSeconds
-	// This causes the pod to transition to Failed if it exceeds the deadline
-	if timeout > 0 {
-		deadlineSeconds := int64(timeout.Seconds())
-		pod.Spec.ActiveDeadlineSeconds = &deadlineSeconds
-	}
-
-	ph := k8s.NewPodHelper(a.client, a.restConfig, pod)
-	return ph.Create(ctx)
-}
-
-// InitPvcData creates an init pod and blocks until it completes or times out.
-// Deprecated: This method blocks the reconciliation loop. Use CreateInitPod with
-// status monitoring in the controller instead. This method is kept for backwards
-// compatibility but will delete any existing init pod, losing progress on restart.
-func (a *App) InitPvcData(ctx context.Context, pvc *corev1.PersistentVolumeClaim, timeout time.Duration, additionalVolumes []AdditionalVolume, initCommands ...*InitCommand) error {
-	pod, err := a.BuildInitPod(pvc, additionalVolumes, initCommands...)
-	if err != nil {
-		return err
-	}
-
-	ph := k8s.NewPodHelper(a.client, a.restConfig, pod)
-
-	// Delete the pod if it already exists
-	_ = ph.Delete(ctx)
-
-	// Delete the pod independently of the result
-	defer func() { _ = ph.Delete(ctx) }()
-
-	// Create the pod
-	if err := ph.Create(ctx); err != nil {
-		return err
-	}
-	return ph.WaitForPodSucceeded(ctx, timeout)
 }

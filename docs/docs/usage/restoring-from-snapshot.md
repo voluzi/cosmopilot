@@ -75,6 +75,117 @@ persistence:
 
 This will instruct `Cosmopilot` to create a Persistent Volume Claim (PVC) from the specified snapshot and attach it to the node.
 
+For an existing node, set `restoreFromSnapshot`, request deletion of its data PVC with
+`kubectl delete pvc <node-name> --wait=false`, then delete the node Pod and any other Pods mounting
+that claim so PVC protection can release it.
+
+## Restoring an Exported Snapshot
+
+Set `persistence.restore` to initialize a new node's data volume from one explicitly named,
+unsplit object in S3, S3-compatible storage, or GCS. To restore an existing node, set this
+configuration, request deletion of its data PVC with `kubectl delete pvc <node-name> --wait=false`,
+then delete the node Pod and any other Pods mounting that claim so PVC protection can release it.
+Cosmopilot recreates the volume and initializes it from
+the configured object. Changing or removing restore configuration does not affect an initialized
+volume until it is recreated. Set optional `restore.height` to the archive's
+block height: Cosmopilot rebases upgrade progress and selects the application image at that height,
+as it does for a VolumeSnapshot. Without it, the node starts on `spec.app.image`/`version`.
+A `restore.height` higher than the archive's actual height leaves `status.latestHeight` and the
+volume's height annotation at that value until the chain passes it, and starts the node on an
+application binary newer than the data.
+On a new node, `additionalInitCommands` without an explicit `image` still run on
+`spec.app.image`.
+PVC deletion discards its current data.
+
+```yaml
+persistence:
+  size: 500Gi
+  initTimeout: 2h
+  restore:
+    # Optional: block height of the archived data, used to select the application image.
+    height: 12345678
+    snapshot:
+      provider: s3
+      bucket: cosmos-backups
+      name: nibiru-1-20260906120000.tar.zst
+      region: us-east-1
+      endpoint: https://object-storage.example.com
+      forcePathStyle: true
+      credentialsSecret:
+        name: backup-reader
+    # Optional: expected SHA-256 of the complete stored object.
+    verification:
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+```
+
+For AWS S3, omit `endpoint` and use the bucket's region. S3 credentials use Secret `envFrom`
+with standard AWS environment variables, or the SDK's credential chain. For GCS, use:
+
+```yaml
+persistence:
+  size: 500Gi
+  initTimeout: 2h
+  restore:
+    snapshot:
+      provider: gcs
+      bucket: cosmos-backups
+      name: nibiru-1-20260906120000.tar.gz
+      serviceAccountName: snapshot-reader
+      # Alternatively, mount a JSON credential Secret:
+      # credentialsSecret:
+      #   name: backup-reader
+      #   key: credentials.json
+```
+
+GCS uses Application Default Credentials with the chosen ServiceAccount, or the selected Secret
+key (default `credentials.json`) through `GOOGLE_APPLICATION_CREDENTIALS`. Grant object-read
+permission; restoration needs no listing, upload, or deletion permissions. Wrong storage settings,
+credentials, images, or volume sizes fail through the normal SDK, Kubernetes, or application path.
+
+Supported formats are `.tar`, `.tar.gz`, `.tar.zst`, and `.tar.lz4`. Supply the exact object key,
+including its extension; there is no latest-object selection. Split exports, links, special files,
+unsafe paths, and conflicting archive paths are unsupported. The exporter includes symlinks, but
+`persistence.restore` accepts only regular files and directories, so an export containing a symlink
+cannot be restored through this workflow. Archives contain the data directory,
+not the whole application home. Continue configuring a normal genesis source and an application
+image compatible with the archived database. Set the initial PVC size for the extracted data and
+increase `initTimeout` for large backups; the transfer streams directly into the volume without
+storing a compressed copy or resizing storage during initialization.
+
+`verification.sha256` is optional. When supplied, it must match the SHA-256 of the complete stored
+object, including compression bytes. Get it from your trusted backup record; the exporter does not
+create a checksum manifest, and multipart S3 ETags are not SHA-256 digests. A matching digest
+checks bytes, not database consistency, chain identity, application compatibility, or canonical app
+state. Export-time `snapshots.verify` remains an application readability check.
+
+Restore replaces the application's data-initialization container in the existing init-data Pod.
+Persistence `additionalInitCommands` run afterward. `restore.snapshot.serviceAccountName` applies
+to the whole init pod, so the additional init command containers also run under that identity.
+A CSI `restoreFromSnapshot` initializes the PVC directly and takes precedence; state-sync configuration retains its existing startup behavior.
+Use the desired initialization source without combining unrelated sources. The same `restore`
+configuration can be set on ChainNodeSet node groups and validator persistence; every instance
+initializes independently, regardless of `snapshotNodeIndex`.
+
+The existing `InitializingData` phase and `DataInitStarted`, `DataInitFailed`, and `DataInitialized`
+Events describe installation. Failed restores include a download, verification, or extraction
+message in the failure Event and container termination message. An initialized volume is never
+extracted over. The helper also refuses nonempty targets, leaving partial data untouched after an
+interrupted or failed extraction; recreate that PVC to retry. The default `persistence.initTimeout`
+is five minutes, and Kubernetes kills the init pod at that deadline; increase it for real snapshots
+to avoid an interrupted extraction that requires recreating the PVC.
+After extraction and checksum verification succeed, the helper writes the reserved hidden file
+`.cosmopilot-restore-complete` at the data-volume root, where the application ignores it and the
+exporter excludes it from archives. On retry, that marker skips downloading and extraction, so a
+later additional init command failure, timeout, or lost pod does not discard the completed restore.
+After installation, ordinary node startup, syncing, and diagnostics apply. There is no automatic
+compatibility selection, traffic cutover, health-gated adoption, or rollback.
+
+For validators signing with a local key, the archive carries the signing state from the moment it
+was taken: never run the restored node alongside another node using the same key, and do not
+restore while the chain is halted at a height that validator already voted on. Managed Cosmosigner
+keeps its signing high-water mark in its separate Raft state; restoring node data does not modify
+Cosmosigner volumes or state. `priv_validator_state.json` is restored like any other archive file.
+
 ## Custom Snapshot Restore
 
 `Cosmopilot` allows you to specify additional commands (containers) to run during the initialization of the data volume. This can be used to, for example, download a tarball and extract it into the data directory.

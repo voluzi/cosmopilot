@@ -18,6 +18,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/k8s"
+	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 const s3Exporter = "s3-exporter"
@@ -138,7 +139,7 @@ func (provider *S3) uploadJob(name string) *batchv1.Job {
 						Name:            uploadContainerName,
 						Image:           provider.dataExporterImage,
 						Resources:       uploadJobResources(provider.ExportConfig, provider.defaultUploadRequests()),
-						ImagePullPolicy: corev1.PullAlways,
+						ImagePullPolicy: images.PullPolicy(provider.dataExporterImage, ""),
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"s3", "upload", "data", provider.Config.Bucket, name},
 						WorkingDir:      "/home/app",
@@ -318,7 +319,7 @@ func (provider *S3) snapshotDeletionJob(name string, upload *SnapshotJobIdentity
 					Containers: []corev1.Container{{
 						Name:            "dataexporter",
 						Image:           provider.dataExporterImage,
-						ImagePullPolicy: corev1.PullAlways,
+						ImagePullPolicy: images.PullPolicy(provider.dataExporterImage, ""),
 						SecurityContext: k8s.RestrictedSecurityContext(),
 						Args:            []string{"s3", "delete", provider.Config.Bucket, name},
 						WorkingDir:      "/app",

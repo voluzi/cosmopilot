@@ -71,8 +71,11 @@ redial. The image is not version-checked: with an older build `/livez` never ans
 never becomes live, and the validator does not sign until the image is corrected.
 
 ### `dataExporterImage`
-- **Description**: The container image of Data Exporter (with version tag included) used by snapshot tarball upload and deletion Jobs.
+- **Description**: The container image of Data Exporter (with version tag included) used by snapshot tarball upload and deletion Jobs and exported-snapshot data initialization.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
+
+Exported-snapshot restore requires Data Exporter 2.1.0 or newer, which adds the S3 and GCS
+`restore` commands. An older override fails during data initialization; update or clear the override.
 
 ### `utilityImage`
 - **Description**: Versioned utility image used by operator-owned helper containers for genesis, configuration, PVC, and snapshot integrity operations. Overrides may use a tag or digest and must provide the commands used by these helpers, including standard file utilities, `jq`, `wget`, `gunzip`, `zstd`, `pidof`, and `nc`.

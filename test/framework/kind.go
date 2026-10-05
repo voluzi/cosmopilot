@@ -343,6 +343,9 @@ func (f *KindFramework) DeployController() error {
 			args = append(args, "--set", fmt.Sprintf("imageTag=%s", parts[1]))
 		}
 	}
+	if f.cfg.DataExporterImage != "" {
+		args = append(args, "--set", fmt.Sprintf("dataExporterImage=%s", f.cfg.DataExporterImage))
+	}
 	if f.cfg.CosmosignerImage != "" {
 		args = append(args, "--set", fmt.Sprintf("cosmosignerImage=%s", f.cfg.CosmosignerImage))
 	}
