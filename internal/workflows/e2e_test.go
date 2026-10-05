@@ -96,9 +96,17 @@ printf '%s\n' "$image" > "$archive"
 	if minioDownload.With["name"] != minioUpload.With["name"] || minioUpload.With["path"] != "/tmp/images/minio.tar" {
 		t.Fatal("shared shard must download the separately uploaded MinIO archive")
 	}
+	dataExporterDownload := findStep(t, steps, "Download dataexporter image")
+	if dataExporterDownload.If != "${{ matrix.shard == 'shared' }}" {
+		t.Fatal("dataexporter download must be restricted to the shared shard")
+	}
+	dataExporterUpload := findStep(t, wf.Jobs["build-images"].Steps, "Upload dataexporter image")
+	if dataExporterDownload.With["name"] != dataExporterUpload.With["name"] || dataExporterUpload.With["path"] != "/tmp/images/dataexporter.tar" {
+		t.Fatal("shared shard must download the separately uploaded dataexporter archive")
+	}
 	upload := findStep(t, wf.Jobs["build-images"].Steps, "Upload images")
-	if upload.With["path"] != "/tmp/images/cosmopilot.tar\n/tmp/images/node-utils.tar\n/tmp/images/dataexporter.tar\n" {
-		t.Fatal("common image artifact must contain only the three application images")
+	if upload.With["path"] != "/tmp/images/cosmopilot.tar\n/tmp/images/node-utils.tar\n" {
+		t.Fatal("common image artifact must contain only the controller and node-utils images")
 	}
 	// Resolve the cross-job references and capture the arguments handed to the test target.
 	args := filepath.Join(dir, "args")
@@ -118,7 +126,7 @@ printf '%s\n' "$image" > "$archive"
 				t.Fatal(err)
 			}
 			for name, image := range images {
-				want := name != "minio" || entry.Shard == "shared"
+				want := (name != "minio" && name != "dataexporter") || entry.Shard == "shared"
 				if strings.Contains(string(loadedBytes), image+"\n") != want {
 					t.Errorf("%s image loading does not match the %s shard's needs", name, entry.Shard)
 				}
@@ -128,11 +136,11 @@ printf '%s\n' "$image" > "$archive"
 				key := strings.TrimSuffix(strings.TrimPrefix(reference, "${{ steps.images.outputs."), " }}")
 				shard = strings.ReplaceAll(shard, "${{ needs.build-images.outputs."+outputName+" }}", resolved[key])
 			}
-			buildMinio := "false"
+			buildSharedImages := "false"
 			if entry.Shard == "shared" {
-				buildMinio = "true"
+				buildSharedImages = "true"
 			}
-			shard = strings.ReplaceAll(shard, "${{ matrix.shard == 'shared' }}", buildMinio)
+			shard = strings.ReplaceAll(shard, "${{ matrix.shard == 'shared' }}", buildSharedImages)
 			shard = regexp.MustCompile(`\$\{\{[^}]*\}\}`).ReplaceAllString(shard, "")
 			runBash(t, root, shard, append(env, "SHARD_ARGS="+args))
 			arguments, err := os.ReadFile(args)
@@ -144,8 +152,10 @@ printf '%s\n' "$image" > "$archive"
 					t.Errorf("shard did not receive %s=%s", variable, images[name])
 				}
 			}
-			if !strings.Contains(string(arguments), "BUILD_MINIO="+buildMinio+"\n") {
-				t.Errorf("%s shard did not receive BUILD_MINIO=%s", entry.Shard, buildMinio)
+			for _, variable := range []string{"BUILD_MINIO", "BUILD_DATA_EXPORTER"} {
+				if !strings.Contains(string(arguments), variable+"="+buildSharedImages+"\n") {
+					t.Errorf("%s shard did not receive %s=%s", entry.Shard, variable, buildSharedImages)
+				}
 			}
 		})
 	}
