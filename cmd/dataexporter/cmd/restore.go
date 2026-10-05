@@ -31,11 +31,12 @@ func writeRestoreTermination(err error) {
 		result.Stage = restoreErr.Stage
 		result.Message = restoreErr.Err.Error()
 	}
-	// Leave space for Kubernetes' termination-message limit, even for long provider errors.
-	if len(result.Message) > 1800 {
-		result.Message = result.Message[:1800]
-	}
+	// Kubernetes truncates a termination message at 4096 bytes, which would leave invalid JSON.
 	data, marshalErr := json.Marshal(result)
+	for marshalErr == nil && len(data) > 4096 {
+		result.Message = result.Message[:len(result.Message)/2]
+		data, marshalErr = json.Marshal(result)
+	}
 	if marshalErr == nil {
 		_ = os.WriteFile("/dev/termination-log", data, 0644)
 	}

@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/option"
 )
@@ -44,6 +45,7 @@ func TestRestoreExporterArchiveFormats(t *testing.T) {
 			require.NoError(t, os.Mkdir(filepath.Join(source, "db"), 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(source, "db", "state"), []byte("block data"), 0600))
 			require.NoError(t, os.WriteFile(filepath.Join(source, "priv_validator_state.json"), []byte(`{"height":"42"}`), 0600))
+			require.NoError(t, os.Symlink("db/state", filepath.Join(source, "current")))
 			var archive bytes.Buffer
 			require.NoError(t, writeTarball(source, &archive, compression))
 			digest := sha256.Sum256(archive.Bytes())
@@ -56,6 +58,9 @@ func TestRestoreExporterArchiveFormats(t *testing.T) {
 				state, err := os.ReadFile(filepath.Join(target, "priv_validator_state.json"))
 				require.NoError(t, err)
 				require.JSONEq(t, `{"height":"42"}`, string(state))
+				link, err := os.Readlink(filepath.Join(target, "current"))
+				require.NoError(t, err)
+				require.Equal(t, "db/state", link)
 			}
 		})
 	}
@@ -104,6 +109,8 @@ func TestRestoreRejectsUnsafeArchiveEntries(t *testing.T) {
 		{"traversal", []*tar.Header{{Name: "../escape", Typeflag: tar.TypeReg}}},
 		{"absolute", []*tar.Header{{Name: "/escape", Typeflag: tar.TypeReg}}},
 		{"symlink", []*tar.Header{{Name: "link", Linkname: "../escape", Typeflag: tar.TypeSymlink}}},
+		{"nested symlink", []*tar.Header{{Name: "sub/link", Linkname: "..", Typeflag: tar.TypeSymlink}}},
+		{"absolute symlink", []*tar.Header{{Name: "link", Linkname: "/etc", Typeflag: tar.TypeSymlink}}},
 		{"hardlink", []*tar.Header{{Name: "link", Linkname: "file", Typeflag: tar.TypeLink}}},
 		{"device", []*tar.Header{{Name: "device", Typeflag: tar.TypeChar}}},
 		{"duplicate", []*tar.Header{{Name: "file", Typeflag: tar.TypeReg}, {Name: "file", Typeflag: tar.TypeReg}}},
@@ -162,14 +169,14 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 	}
 }
 
-func TestRestoreRefusesExistingDataAndSplitObjects(t *testing.T) {
+func TestRestoreRefusesExistingDataAndUnknownExtensions(t *testing.T) {
 	target := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(target, "existing"), []byte("keep me"), 0600))
 	require.Error(t, Restore(t.Context(), restoreTestExporter{}, target, "bucket", "backup.tar", ""))
 	data, err := os.ReadFile(filepath.Join(target, "existing"))
 	require.NoError(t, err)
 	require.Equal(t, "keep me", string(data))
-	for _, key := range []string{"backup-part-00000001.tar.gz", "backup-part-1.tar.zst", "backup-part-01", "backup.zip"} {
+	for _, key := range []string{"backup-part-01", "backup.zip"} {
 		require.Error(t, Restore(t.Context(), restoreTestExporter{}, t.TempDir(), "bucket", key, ""))
 	}
 }
@@ -187,7 +194,7 @@ func TestRestoreProviderReads(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Contains(t, r.URL.Path, "bucket")
+		assert.Contains(t, r.URL.Path, "bucket")
 		if strings.Contains(r.URL.Path, "missing") {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -196,7 +203,7 @@ func TestRestoreProviderReads(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		require.Contains(t, r.URL.Path, "snapshot.tar")
+		assert.Contains(t, r.URL.Path, "snapshot.tar")
 		_, _ = fmt.Fprint(w, "stored bytes")
 	}))
 	defer server.Close()

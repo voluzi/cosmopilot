@@ -572,7 +572,7 @@ func formatS3DeleteErrors(deleteErrors []types.Error) string {
 func (exporter *S3Exporter) Read(ctx context.Context, bucket, name string) (io.ReadCloser, error) {
 	object, err := exporter.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(name)})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read S3 object %q from bucket %q: %w", name, bucket, err)
 	}
 	return object.Body, nil
 }

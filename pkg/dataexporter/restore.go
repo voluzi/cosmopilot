@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
@@ -116,10 +117,6 @@ func restoreCompression(name string) (Compression, error) {
 		if !strings.HasSuffix(name, c.Extension()) {
 			continue
 		}
-		base := strings.TrimSuffix(name, c.Extension())
-		if index := strings.LastIndex(base, "-part-"); index >= 0 && isDecimal(base[index+len("-part-"):]) {
-			return "", errors.New("split snapshot objects are not supported")
-		}
 		return c, nil
 	}
 	return "", fmt.Errorf("unsupported archive extension: %q", name)
@@ -186,6 +183,9 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 		}
 		seen[name] = true
 		target := filepath.Join(dir, filepath.FromSlash(name))
+		if !strings.HasPrefix(target, filepath.Clean(dir)+string(os.PathSeparator)) {
+			return restoreExtractionError(fmt.Errorf("unsafe archive path %q", hdr.Name))
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0755); err != nil {
@@ -203,6 +203,17 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 			syncErr := f.Sync()
 			closeErr := f.Close()
 			if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
+				return restoreExtractionError(err)
+			}
+		case tar.TypeSymlink:
+			// A relative link that only descends cannot leave the target, even through other links.
+			if path.IsAbs(hdr.Linkname) || slices.Contains(strings.Split(hdr.Linkname, "/"), "..") {
+				return restoreExtractionError(fmt.Errorf("unsafe archive symlink %q -> %q", name, hdr.Linkname))
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return restoreExtractionError(err)
+			}
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
 				return restoreExtractionError(err)
 			}
 		default:
