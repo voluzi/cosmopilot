@@ -3936,8 +3936,9 @@ spec:
                             type: string
                         type: object
                       pkcs11:
-                        description: PKCS11 uses a pre-existing Ed25519 key on an
-                          operator-held token.
+                        description: |-
+                          PKCS11 uses a pre-existing Ed25519 key on an operator-held token. It requires a cosmosigner
+                          image built with the PKCS#11 backend, which the default image does not include.
                         properties:
                           keyId:
                             description: KeyID selects the key by its hexadecimal
@@ -4150,8 +4151,9 @@ spec:
                         type: object
                     type: object
                   env:
-                    description: Env supplies vendor client configuration to the signer
-                      container. Operator-managed variables take precedence.
+                    description: |-
+                      Env supplies vendor client configuration to the signer container; do not set COSMOSIGNER_*
+                      variables because they override the rendered signer configuration.
                     items:
                       description: EnvVar represents an environment variable present
                         in a Container.

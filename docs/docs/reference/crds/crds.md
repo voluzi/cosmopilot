@@ -1226,7 +1226,7 @@ Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
 | image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:3.1.1`). Set this to pin or override the image for this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes. | *string | false |
 | nodeSelector | NodeSelector restricts signer pods to nodes with matching labels. It is independent of the scheduling of the nodes the signer targets. Changing it on a running signer restarts all replicas through a managed migration. | map[string]string | false |
 | affinity | Affinity constrains signer pod placement independently of the targeted nodes. Changing it on a running signer restarts all replicas through a managed migration. | *corev1.Affinity | false |
-| env | Env supplies vendor client configuration to the signer container. Operator-managed variables take precedence. | []corev1.EnvVar | false |
+| env | Env supplies vendor client configuration to the signer container; do not set COSMOSIGNER_* variables because they override the rendered signer configuration. | []corev1.EnvVar | false |
 | volumes | Volumes supplies deployment-specific vendor configuration and credentials. | []corev1.Volume | false |
 | volumeMounts | VolumeMounts mounts vendor files in the signer container; managed mounts must not be shadowed. | []corev1.VolumeMount | false |
 | backend | Backend selects and configures where the consensus key material lives and how signing is performed. Exactly one backend must be configured. | [CosmosignerBackend](#cosmosignerbackend) | true |
@@ -1263,7 +1263,7 @@ CosmosignerBackend selects the signing backend. Exactly one field must be set.
 | software | Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is the simplest backend and is mainly intended for testnets and testing. | *[CosmosignerSoftwareBackend](#cosmosignersoftwarebackend) | false |
 | vault | Vault uses a non-exportable ed25519 key in HashiCorp Vault Transit. | *[CosmosignerVaultBackend](#cosmosignervaultbackend) | false |
 | gcpKms | GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS. | *[CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend) | false |
-| pkcs11 | PKCS11 uses a pre-existing Ed25519 key on an operator-held token. | *[CosmosignerPKCS11Backend](#cosmosignerpkcs11backend) | false |
+| pkcs11 | PKCS11 uses a pre-existing Ed25519 key on an operator-held token. It requires a cosmosigner image built with the PKCS#11 backend, which the default image does not include. | *[CosmosignerPKCS11Backend](#cosmosignerpkcs11backend) | false |
 | awsKms | AwsKMS uses a non-exportable Ed25519 key in AWS KMS. It requires a cosmosigner image with the AWS KMS backend, which the default image (3.1.1) does not have: set `image` accordingly. | *[CosmosignerAwsKmsBackend](#cosmosignerawskmsbackend) | false |
 
 [Back to Custom Resources](#custom-resources)

@@ -75,7 +75,8 @@ type Cosmosigner struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
-	// Env supplies vendor client configuration to the signer container. Operator-managed variables take precedence.
+	// Env supplies vendor client configuration to the signer container; do not set COSMOSIGNER_*
+	// variables because they override the rendered signer configuration.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
@@ -144,7 +145,8 @@ type CosmosignerBackend struct {
 	// +optional
 	GcpKMS *CosmosignerGcpKmsBackend `json:"gcpKms,omitempty"`
 
-	// PKCS11 uses a pre-existing Ed25519 key on an operator-held token.
+	// PKCS11 uses a pre-existing Ed25519 key on an operator-held token. It requires a cosmosigner
+	// image built with the PKCS#11 backend, which the default image does not include.
 	// +optional
 	PKCS11 *CosmosignerPKCS11Backend `json:"pkcs11,omitempty"`
 

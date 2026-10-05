@@ -505,9 +505,12 @@ and set `image` explicitly. The backend is unreleased; the default `3.1.1` image
 unsupported-build error. Cosmopilot does not derive image names; `edge-pkcs11` and `latest-pkcs11`
 use `Always` pull policy, while pinned tags and digests retain the ordinary policy.
 
-Obtain the token key's base64 Ed25519 consensus public key with `cosmosigner pubkey` outside the
-reconcile loop and supply it as `publicKey`. Cosmopilot uses that value for validator identity,
-consensus-key reservations, on-chain comparison and status, and pins it as the signer's expected
+Obtain the token key's base64 Ed25519 consensus public key with `cosmosigner pubkey --backend pkcs11`
+outside the reconcile loop, supplying `--pkcs11-module`, exactly one of `--pkcs11-token-label` or
+`--pkcs11-slot`, `--pkcs11-key-label` and/or `--pkcs11-key-id`, `--pkcs11-pin-file` and
+`--pkcs11-binding-file` (a marker path in an existing directory); this logs in to the token and makes
+one PIN attempt. Supply the resulting key as `publicKey`. Cosmopilot uses that value for validator
+identity, consensus-key reservations, on-chain comparison and status, and pins it as the signer's expected
 public key. It never creates a PKCS#11 public-key discovery pod, avoiding unattended PIN attempts.
 Register that key on-chain or supply an external genesis containing it before using this backend;
 local genesis initialization and create-validator flows require software or a managed import.
@@ -543,13 +546,17 @@ spec:
 
 Use the vendor's actual environment variables and configuration files; `env`, `volumes` and
 `volumeMounts` reach only the signer container, and changing any of them uses the existing full-stop
-migration. Operator-managed environment variables take precedence and managed mounts must not be
-shadowed. A wrong module path, token selector or vendor configuration fails normally and must be
-corrected by its operator. A `publicKey` that does not match the token key keeps the signer in
-CrashLoopBackOff until corrected, while a wrong PIN leaves it running but not ready until someone
-restarts it after fixing the Secret. Each concurrently starting replica can make one failed PIN
+migration. Do not set `COSMOSIGNER_*` variables in `env`, because they override rendered signer
+configuration, and do not shadow operator-managed mounts. A wrong module path, token selector or
+vendor configuration fails normally and must be corrected by its operator. A `publicKey` that does
+not match the token key keeps the signer in CrashLoopBackOff until corrected before its first recorded
+rollout, while a wrong PIN leaves it running but not ready until someone restarts it after fixing the
+Secret. Each concurrently starting replica can make one failed PIN
 attempt. The PIN is a directory-mounted Secret file, so updates propagate, but the PIN hold requires
 an explicit restart after correction.
+
+Correcting the initial `publicKey` stops all signer pods before moving its reservation and re-pinning
+the signer; after rollout, the existing validator key-change refusal and sentry migration rules apply.
 
 Every replica must reach the same token and key, which in practice requires a network HSM for more
 than one replica. The container runs as UID/GID 1000; give it access to the module, client files and
