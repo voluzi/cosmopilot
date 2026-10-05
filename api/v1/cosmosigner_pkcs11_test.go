@@ -85,6 +85,8 @@ func TestPKCS11InitialPublicKeyCorrectionAdmission(t *testing.T) {
 					_, err := next.Validate(node)
 					if tc.recorded || tc.module {
 						require.ErrorContains(t, err, "records its applied public key")
+						require.ErrorContains(t, err, "documented PKCS#11 manual recovery procedure")
+						require.NotContains(t, err.Error(), "wait for one reconcile")
 					} else {
 						require.NoError(t, err)
 					}
@@ -107,6 +109,8 @@ func TestPKCS11InitialPublicKeyCorrectionAdmission(t *testing.T) {
 					_, err := updated.Validate(set)
 					if tc.recorded || tc.module {
 						require.ErrorContains(t, err, "records its applied public key")
+						require.ErrorContains(t, err, "documented PKCS#11 manual recovery procedure")
+						require.NotContains(t, err.Error(), "wait for one reconcile")
 					} else {
 						require.NoError(t, err)
 					}

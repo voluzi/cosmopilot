@@ -1405,7 +1405,12 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 				if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
 					recorded := st != nil && (st.AppliedDigest != "" || st.SigningDigest != "" || st.PublicKey != "" || st.ServingIdentity != "" || st.Migration != nil)
 					if os.ValidatorGroup != ns.ValidatorGroup || !ns.Spec.initialPKCS11PublicKeyCorrection(os.Spec, recorded) {
-						return fmt.Errorf("%s cannot be migrated until the controller records its applied public key; restore the previous configuration and wait for one reconcile", path)
+						advice := "restore the previous configuration and wait for one reconcile"
+						if ns.Spec.UsesPKCS11Backend() && os.Spec.UsesPKCS11Backend() &&
+							ns.Spec.Backend.PKCS11.PublicKey != os.Spec.Backend.PKCS11.PublicKey {
+							advice = "restore the previous configuration; if the signer never became ready, follow the documented PKCS#11 manual recovery procedure"
+						}
+						return fmt.Errorf("%s cannot be migrated until the controller records its applied public key; %s", path, advice)
 					}
 				}
 			}
