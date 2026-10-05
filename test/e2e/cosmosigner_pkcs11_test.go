@@ -21,7 +21,7 @@ import (
 )
 
 var _ = Describe("PKCS11 SoftHSM", Label("cosmosigner", "pkcs11"), func() {
-	It("produces blocks with the token key and holds a wrong PIN live without restarts", func() {
+	It("corrects an initial public key, produces blocks and holds a wrong PIN live without restarts", func() {
 		image := environ.GetString("PKCS11_TEST_IMAGE", "")
 		if image == "" {
 			Skip("set PKCS11_TEST_IMAGE to a locally built SoftHSM fixture image")
@@ -71,11 +71,32 @@ sleep infinity`}, Env: []corev1.EnvVar{{Name: "CONSENSUS_PUBLIC_KEY", Value: pub
 		cns.Spec.Validator.Init = nil
 		cns.Spec.Genesis = &appsv1.GenesisConfig{ConfigMap: ptr.To(cm.Name)}
 		cns.Spec.Cosmosigner = &appsv1.Cosmosigner{Image: ptr.To(image), Replicas: ptr.To(int32(1)), Backend: appsv1.CosmosignerBackend{PKCS11: &appsv1.CosmosignerPKCS11Backend{
-			Module: "/usr/lib/softhsm/libsofthsm2.so", TokenLabel: "validator-token", KeyLabel: "consensus", KeyID: "01", PublicKey: publicKey, PINSecret: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: pin.Name}, Key: "pin"},
+			Module: "/usr/lib/softhsm/libsofthsm2.so", TokenLabel: "validator-token", KeyLabel: "consensus", KeyID: "01", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", PINSecret: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: pin.Name}, Key: "pin"},
 		}}, Env: []corev1.EnvVar{{Name: "SOFTHSM2_CONF", Value: "/token/softhsm2.conf"}}, Volumes: []corev1.Volume{tokenVolume}, VolumeMounts: []corev1.VolumeMount{tokenMount}}
 		Expect(cl.Create(ctx, cns)).To(Succeed())
-		WaitForChainNodeSetHeight(cns, 3)
 		name := cns.Name + "-signer"
+		Eventually(func() bool {
+			pod := &corev1.Pod{}
+			if cl.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: name + "-0"}, pod) != nil {
+				return false
+			}
+			return len(pod.Status.ContainerStatuses) == 1 && pod.Status.ContainerStatuses[0].RestartCount > 0 &&
+				pod.Status.ContainerStatuses[0].State.Waiting != nil && pod.Status.ContainerStatuses[0].State.Waiting.Reason == "CrashLoopBackOff"
+		}).Should(BeTrue())
+		oldReservation := &appsv1.ConsensusKeyReservation{}
+		Expect(cl.Get(ctx, client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("pkcs11-e2e", cns.Spec.Cosmosigner.Backend.PKCS11.PublicKey)}, oldReservation)).To(Succeed())
+		Eventually(func() error {
+			if err := cl.Get(ctx, client.ObjectKeyFromObject(cns), cns); err != nil {
+				return err
+			}
+			for _, st := range cns.Status.Cosmosigners {
+				Expect(st.AppliedDigest).To(BeEmpty())
+			}
+			cns.Spec.Cosmosigner.Backend.PKCS11.PublicKey = publicKey
+			return cl.Update(ctx, cns)
+		}).Should(Succeed())
+		WaitForChainNodeSetHeight(cns, 3)
+		Expect(cl.Get(ctx, client.ObjectKeyFromObject(oldReservation), &appsv1.ConsensusKeyReservation{})).To(MatchError(ContainSubstring("not found")))
 		status := waitForCosmosignerApplied(cns, name)
 		Expect(status.PublicKey).To(Equal(publicKey))
 		oldPVCs := signerPVCUIDs(ns.Name, name, 1)

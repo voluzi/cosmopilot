@@ -24,7 +24,8 @@ Use a unique cluster name, record Docker containers, images, volumes and network
 before the run, and remove the task-built images and task-created resources after
 both successful and failed runs. Do not target a real cluster.
 
-The assertions cover validator block production, the supplied key in signer
+The assertions cover correcting a mismatching `publicKey` before the first rollout,
+moving its reservation, validator block production, the supplied key in signer
 status, one signer replica, a persistent binding marker, and a wrong PIN remaining
 live but unready with zero Kubernetes restarts for 30 seconds. Correcting the PIN
 Secret and explicitly replacing the held pod must resume blocks with the same
