@@ -73,22 +73,27 @@ var _ = Describe("Exported snapshot initialization", func() {
 		Expect(pod.Spec.InitContainers[0].Args).To(ContainElement("replacement.tar.zst"))
 	}))
 
-	It("validates source shapes and optional SHA-256 through the CRD", WithNamespace(func(ns *corev1.Namespace) {
+	It("validates source shapes, optional SHA-256, and restore height through the CRD", WithNamespace(func(ns *corev1.Namespace) {
 		for _, tc := range []struct {
 			provider, bucket, name, digest string
+			height                         *int64
 			valid                          bool
 		}{
-			{"s3", "backups", "snapshot.tar", "", true},
-			{"gcs", "backups", "snapshot.tar", strings.Repeat("A", 64), true},
-			{"ftp", "backups", "snapshot.tar", "", false},
-			{"s3", "", "snapshot.tar", "", false},
-			{"s3", "backups", "", "", false},
-			{"s3", "backups", "snapshot.tar", "not-a-digest", false},
+			{"s3", "backups", "snapshot.tar", "", nil, true},
+			{"gcs", "backups", "snapshot.tar", strings.Repeat("A", 64), nil, true},
+			{"ftp", "backups", "snapshot.tar", "", nil, false},
+			{"s3", "", "snapshot.tar", "", nil, false},
+			{"s3", "backups", "", "", nil, false},
+			{"s3", "backups", "snapshot.tar", "not-a-digest", nil, false},
+			{"s3", "backups", "snapshot.tar", "", ptr.To[int64](-1), false},
+			{"s3", "backups", "snapshot.tar", "", ptr.To[int64](0), true},
+			{"s3", "backups", "snapshot.tar", "", ptr.To[int64](123), true},
 		} {
 			node := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodePrefix, Namespace: ns.Name}, Spec: appsv1.ChainNodeSpec{App: DefaultChainNodeTestApp, Genesis: &appsv1.GenesisConfig{ConfigMap: ptr.To("unavailable-genesis")}, Persistence: &appsv1.Persistence{Restore: &appsv1.SnapshotRestoreConfig{Snapshot: appsv1.SnapshotRestoreSource{Provider: tc.provider, Bucket: tc.bucket, Name: tc.name}}}}}
 			if tc.digest != "" {
 				node.Spec.Persistence.Restore.Verification = &appsv1.SnapshotRestoreVerification{SHA256: tc.digest}
 			}
+			node.Spec.Persistence.Restore.Height = tc.height
 			err := Framework().Client().Create(Framework().Context(), node)
 			if tc.valid {
 				Expect(err).NotTo(HaveOccurred())

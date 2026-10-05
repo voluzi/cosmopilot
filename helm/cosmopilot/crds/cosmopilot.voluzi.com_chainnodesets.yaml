@@ -6836,6 +6836,7 @@ spec:
                                 Height is the archive block height used to select the application image and rebase upgrades.
                                 When omitted, replacement data starts from height zero.
                               format: int64
+                              minimum: 0
                               type: integer
                             resources:
                               description: Compute resources for the restore container.
@@ -12041,6 +12042,7 @@ spec:
                                     Height is the archive block height used to select the application image and rebase upgrades.
                                     When omitted, replacement data starts from height zero.
                                   format: int64
+                                  minimum: 0
                                   type: integer
                                 resources:
                                   description: Compute resources for the restore container.
@@ -17807,6 +17809,7 @@ spec:
                               Height is the archive block height used to select the application image and rebase upgrades.
                               When omitted, replacement data starts from height zero.
                             format: int64
+                            minimum: 0
                             type: integer
                           resources:
                             description: Compute resources for the restore container.

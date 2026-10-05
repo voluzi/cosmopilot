@@ -1584,6 +1584,7 @@ type SnapshotRestoreConfig struct {
 	// Height is the archive block height used to select the application image and rebase upgrades.
 	// When omitted, replacement data starts from height zero.
 	// +optional
+	// +kubebuilder:validation:Minimum=0
 	Height *int64 `json:"height,omitempty"`
 	// Optional verification of the complete stored object.
 	// +optional
