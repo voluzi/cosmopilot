@@ -87,6 +87,29 @@ var _ = Describe("PKCS11 Cosmosigner admission", func() {
 			}
 		}
 	})
+	It("rejects duplicate public keys at different coordinates on creation and update", func() {
+		for _, placement := range []string{"ChainNodeSet", "group"} {
+			set := object(placement, signer()).(*appsv1.ChainNodeSet)
+			other := signer()
+			other.Backend.PKCS11.Module = "/other/module.so"
+			other.Backend.PKCS11.Slot = nil
+			other.Backend.PKCS11.TokenLabel = "other-token"
+			other.Backend.PKCS11.KeyID = "02"
+			set.Spec.Nodes = append(set.Spec.Nodes, appsv1.NodeGroupSpec{Name: "other", Instances: ptr.To(1), Cosmosigner: other})
+			err := Framework().Client().Create(Framework().Context(), set)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("same PKCS#11 signing key"))
+			other.Backend.PKCS11.PublicKey = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			Expect(Framework().Client().Create(Framework().Context(), set)).To(Succeed())
+			Eventually(func() error {
+				return Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(set), set)
+			}).Should(Succeed())
+			set.Spec.Nodes[1].Cosmosigner.Backend.PKCS11.PublicKey = getSigner(set, placement).Backend.PKCS11.PublicKey
+			err = Framework().Client().Update(Framework().Context(), set)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("same PKCS#11 signing key"))
+		}
+	})
 	It("rejects duplicate coordinates and local genesis registration", func() {
 		set := object("group", signer()).(*appsv1.ChainNodeSet)
 		set.Spec.Nodes = append(set.Spec.Nodes, appsv1.NodeGroupSpec{Name: "other", Instances: ptr.To(1), Cosmosigner: signer()})

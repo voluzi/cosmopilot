@@ -51,4 +51,6 @@ func TestPKCS11UniqueSigningCoordinates(t *testing.T) {
 	require.ErrorContains(t, set.validateUniqueSigningKeys(), "same PKCS#11 signing key")
 	set.Spec.Nodes[1].Cosmosigner.Backend.PKCS11.KeyID = "01"
 	require.NoError(t, set.validateUniqueSigningKeys())
+	set.Spec.Nodes[1].Cosmosigner.Backend.PKCS11.PublicKey = set.Spec.Nodes[0].Cosmosigner.Backend.PKCS11.PublicKey
+	require.ErrorContains(t, set.validateUniqueSigningKeys(), "same PKCS#11 signing key")
 }
