@@ -18,7 +18,7 @@ var (
 var s3Cmd = &cobra.Command{
 	Use:   "s3",
 	Short: "Amazon S3 and S3-compatible storage operations",
-	Long:  "Manage uploads and deletions in Amazon S3, MinIO, DigitalOcean Spaces, and compatible object stores.",
+	Long:  "Manage uploads, restores and deletions in Amazon S3, MinIO, DigitalOcean Spaces, and compatible object stores.",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if err := rootCmd.PersistentPreRunE(cmd, args); err != nil {
 			return err
@@ -49,4 +49,5 @@ func init() {
 	)
 	s3Cmd.AddCommand(newUploadCmd(dataexporter.DefaultS3ChunkSize))
 	s3Cmd.AddCommand(newDeleteCmd())
+	s3Cmd.AddCommand(newRestoreCmd())
 }

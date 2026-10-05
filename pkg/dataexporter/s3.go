@@ -40,6 +40,7 @@ type S3Config struct {
 }
 
 type s3API interface {
+	GetObject(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	CreateMultipartUpload(context.Context, *s3.CreateMultipartUploadInput, ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error)
 	UploadPart(context.Context, *s3.UploadPartInput, ...func(*s3.Options)) (*s3.UploadPartOutput, error)
 	CompleteMultipartUpload(context.Context, *s3.CompleteMultipartUploadInput, ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
@@ -566,4 +567,12 @@ func formatS3DeleteErrors(deleteErrors []types.Error) string {
 		messages = append(messages, fmt.Sprintf("%s: %s", aws.ToString(deleteErr.Key), aws.ToString(deleteErr.Message)))
 	}
 	return fmt.Sprint(messages)
+}
+
+func (exporter *S3Exporter) Read(ctx context.Context, bucket, name string) (io.ReadCloser, error) {
+	object, err := exporter.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(name)})
+	if err != nil {
+		return nil, fmt.Errorf("read S3 object %q from bucket %q: %w", name, bucket, err)
+	}
+	return object.Body, nil
 }
