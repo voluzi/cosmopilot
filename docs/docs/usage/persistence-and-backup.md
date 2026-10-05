@@ -537,10 +537,10 @@ persistence:
 For DigitalOcean Spaces, use the region-specific HTTPS endpoint and normally
 leave `forcePathStyle` disabled.
 
+### Restoring exported archives
+
 The exporter archives symlinks, but `persistence.restore` accepts only regular files and directories;
 exports containing symlinks cannot be restored with that setting.
-
-### Restoring exported archives
 
 After downloading an archive, extract it into the node home directory using the
 command matching its extension:
@@ -568,5 +568,6 @@ For detailed instructions on restoring data from a snapshot, refer to the [Resto
 
 Use [`persistence.restore`](./restoring-from-snapshot#restoring-an-exported-snapshot) to initialize
 new data volumes from one unsplit S3 or GCS export. To restore an existing node, configure the
-source and delete its data PVC. Choose storage large enough for the extracted data and a compatible
+source, request deletion of its data PVC, then delete the node Pod and any other Pods mounting that
+claim so PVC protection can release it. Choose storage large enough for the extracted data and a compatible
 application image; changing the source only takes effect when the volume is recreated.
