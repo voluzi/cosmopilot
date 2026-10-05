@@ -130,10 +130,36 @@ func TestPKCS11AlternateSelectorsCannotReserveSamePublicKey(t *testing.T) {
 	signer := func(label string) *appsv1.Cosmosigner {
 		return &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{PKCS11: &appsv1.CosmosignerPKCS11Backend{Module: "/vendor/lib.so", TokenLabel: label, KeyLabel: "validator", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", PINSecret: *claimSelector("pin")}}}
 	}
-	set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}, Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{Name: "first", Instances: ptr.To(1), Cosmosigner: signer("label-one")}, {Name: "second", Instances: ptr.To(1), Cosmosigner: signer("label-two")}}}, Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"}}
-	r := newValidatorTestReconciler(t, set, claimSecret("pin"))
-	_, err := r.prepareCosmosignerParams(context.Background(), set)
-	require.ErrorIs(t, err, cosmosigner.ErrConsensusKeyReservationConflict)
+	t.Run("same root", func(t *testing.T) {
+		set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}, Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{Name: "first", Instances: ptr.To(1), Cosmosigner: signer("label-one")}, {Name: "second", Instances: ptr.To(1), Cosmosigner: signer("label-two")}}}, Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"}}
+		r := newValidatorTestReconciler(t, set, claimSecret("pin"))
+		_, err := r.prepareCosmosignerParams(context.Background(), set)
+		require.ErrorIs(t, err, cosmosigner.ErrConsensusKeyReservationConflict)
+		require.ErrorContains(t, err, "same consensus public key")
+	})
+	t.Run("independent roots", func(t *testing.T) {
+		first := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "first", Namespace: "default", UID: "first-uid"}, Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1), Cosmosigner: signer("label-one")}}}, Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"}}
+		second := first.DeepCopy()
+		second.Name, second.UID = "second", "second-uid"
+		second.Spec.Nodes[0].Cosmosigner = signer("label-two")
+		r := newValidatorTestReconciler(t, first, second, claimSecret("pin"))
+		ctx := context.Background()
+		_, err := r.prepareCosmosignerParams(ctx, first)
+		require.NoError(t, err)
+		reservation := &appsv1.ConsensusKeyReservation{}
+		key := client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", first.Spec.Nodes[0].Cosmosigner.Backend.PKCS11.PublicKey)}
+		require.NoError(t, r.Get(ctx, key, reservation))
+		require.Equal(t, first.UID, reservation.Spec.OwnerUID)
+		original := reservation.DeepCopy()
+		_, err = r.prepareCosmosignerParams(ctx, second)
+		require.ErrorIs(t, err, cosmosigner.ErrConsensusKeyReservationConflict)
+		require.ErrorContains(t, err, "already reserved by ChainNodeSet default/first")
+		require.NoError(t, r.Get(ctx, key, reservation))
+		require.Equal(t, original.Spec, reservation.Spec)
+		reservations := &appsv1.ConsensusKeyReservationList{}
+		require.NoError(t, r.List(ctx, reservations))
+		require.Len(t, reservations.Items, 1)
+	})
 }
 
 func TestPKCS11AddressMigrationRetainsState(t *testing.T) {
