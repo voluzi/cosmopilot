@@ -264,7 +264,11 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			if old.Spec.Cosmosigner != nil && chainNode.Spec.Cosmosigner != nil &&
 				old.CosmosignerSigningDigest() != chainNode.CosmosignerSigningDigest() &&
 				(old.Status.CosmosignerAppliedDigest == "" || old.Status.CosmosignerPublicKey == "") {
-				return nil, fmt.Errorf(".spec.cosmosigner cannot be migrated until the controller records its applied public key; restore the previous configuration and wait for one reconcile")
+				recorded := old.Status.CosmosignerAppliedDigest != "" || old.Status.CosmosignerSigningDigest != "" ||
+					old.Status.CosmosignerPublicKey != "" || old.Status.CosmosignerServingIdentity != "" || old.Status.CosmosignerMigration != nil
+				if old.IsValidator() != chainNode.IsValidator() || !chainNode.Spec.Cosmosigner.initialPKCS11PublicKeyCorrection(old.Spec.Cosmosigner, recorded) {
+					return nil, fmt.Errorf(".spec.cosmosigner cannot be migrated until the controller records its applied public key; restore the previous configuration and wait for one reconcile")
+				}
 			}
 		}
 	}

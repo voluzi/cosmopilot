@@ -1403,7 +1403,10 @@ func (nodeSet *ChainNodeSet) validateCosmosignerUpdate(old *ChainNodeSet) error 
 			if old.Status.ChainID != "" && os.Digest() != ns.Digest() {
 				st := old.GetCosmosignerStatus(os.Name)
 				if st == nil || st.AppliedDigest == "" || st.PublicKey == "" {
-					return fmt.Errorf("%s cannot be migrated until the controller records its applied public key; restore the previous configuration and wait for one reconcile", path)
+					recorded := st != nil && (st.AppliedDigest != "" || st.SigningDigest != "" || st.PublicKey != "" || st.ServingIdentity != "" || st.Migration != nil)
+					if os.ValidatorGroup != ns.ValidatorGroup || !ns.Spec.initialPKCS11PublicKeyCorrection(os.Spec, recorded) {
+						return fmt.Errorf("%s cannot be migrated until the controller records its applied public key; restore the previous configuration and wait for one reconcile", path)
+					}
 				}
 			}
 		} else if st := old.GetCosmosignerStatus(ns.Name); st != nil {

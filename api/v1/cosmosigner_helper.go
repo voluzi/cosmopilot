@@ -3,6 +3,7 @@ package v1
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,17 @@ func (c *Cosmosigner) GetReplicas() int32 {
 		return *c.Replicas
 	}
 	return DefaultCosmosignerReplicas
+}
+
+// initialPKCS11PublicKeyCorrection admits only a first-deploy pin correction; the controller
+// still verifies live rollout evidence and stops the signing path before releasing its reservation.
+func (c *Cosmosigner) initialPKCS11PublicKeyCorrection(previous *Cosmosigner, recorded bool) bool {
+	if recorded || c == nil || previous == nil || !c.UsesPKCS11Backend() || !previous.UsesPKCS11Backend() {
+		return false
+	}
+	adjusted := previous.DeepCopy()
+	adjusted.Backend.PKCS11.PublicKey = c.Backend.PKCS11.PublicKey
+	return reflect.DeepEqual(adjusted, c)
 }
 
 // GetImage returns the configured signer image: the explicit per-CR override when set, otherwise

@@ -5,6 +5,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -71,6 +72,52 @@ var _ = Describe("PKCS11 Cosmosigner admission", func() {
 			}).Should(Succeed())
 		}
 	})
+	It("admits only a public-key correction before rollout in all placements", func() {
+		for _, placement := range []string{"ChainNode", "ChainNodeSet", "group"} {
+			obj := object(placement, signer())
+			Expect(Framework().Client().Create(Framework().Context(), obj)).To(Succeed())
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(obj), obj); err != nil {
+					return err
+				}
+				switch v := obj.(type) {
+				case *appsv1.ChainNode:
+					v.SetEstablishedChainID("external-1")
+				case *appsv1.ChainNodeSet:
+					v.SetEstablishedChainID("external-1")
+				}
+				return Framework().Client().Status().Update(Framework().Context(), obj)
+			})).To(Succeed())
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(obj), obj); err != nil {
+					return err
+				}
+				getSigner(obj, placement).Backend.PKCS11.PublicKey = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+				return Framework().Client().Update(Framework().Context(), obj)
+			})).To(Succeed())
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(obj), obj); err != nil {
+					return err
+				}
+				switch v := obj.(type) {
+				case *appsv1.ChainNode:
+					v.Status.CosmosignerSigningDigest = "served"
+				case *appsv1.ChainNodeSet:
+					v.Status.Cosmosigners[0].SigningDigest = "served"
+				}
+				return Framework().Client().Status().Update(Framework().Context(), obj)
+			})).To(Succeed())
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(obj), obj); err != nil {
+					return err
+				}
+				getSigner(obj, placement).Backend.PKCS11.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+				return Framework().Client().Update(Framework().Context(), obj)
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("records its applied public key"))
+		}
+	})
 	It("rejects malformed backend shapes in all placements", func() {
 		for _, placement := range []string{"ChainNode", "ChainNodeSet", "group"} {
 			for _, mutate := range []func(*appsv1.CosmosignerPKCS11Backend){
@@ -101,11 +148,13 @@ var _ = Describe("PKCS11 Cosmosigner admission", func() {
 			Expect(err.Error()).To(ContainSubstring("same PKCS#11 signing key"))
 			other.Backend.PKCS11.PublicKey = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 			Expect(Framework().Client().Create(Framework().Context(), set)).To(Succeed())
-			Eventually(func() error {
-				return Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(set), set)
-			}).Should(Succeed())
-			set.Spec.Nodes[1].Cosmosigner.Backend.PKCS11.PublicKey = getSigner(set, placement).Backend.PKCS11.PublicKey
-			err = Framework().Client().Update(Framework().Context(), set)
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(set), set); err != nil {
+					return err
+				}
+				set.Spec.Nodes[1].Cosmosigner.Backend.PKCS11.PublicKey = getSigner(set, placement).Backend.PKCS11.PublicKey
+				return Framework().Client().Update(Framework().Context(), set)
+			})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("same PKCS#11 signing key"))
 		}
