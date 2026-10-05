@@ -823,6 +823,9 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, chainNode *appsv1.C
 		}}, nil
 	case c.UsesPKCS11Backend():
 		p := c.Backend.PKCS11
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, chainNode.GetNamespace(), "PKCS#11 PIN", &p.PINSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
 		return cosmosigner.Backend{PKCS11: &cosmosigner.PKCS11Backend{Module: p.Module, TokenLabel: p.TokenLabel, Slot: p.Slot, KeyLabel: p.KeyLabel, KeyID: p.KeyID, PINSecret: &p.PINSecret}}, nil
 	case c.UsesAwsKmsBackend():
 		a := c.Backend.AwsKMS

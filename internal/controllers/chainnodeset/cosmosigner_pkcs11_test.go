@@ -37,7 +37,7 @@ func TestPKCS11CosmosignerSuppliedPublicKey(t *testing.T) {
 					set.Spec.Nodes[0].Cosmosigner = signer
 				}
 			}
-			r := newValidatorTestReconciler(t, set)
+			r := newValidatorTestReconciler(t, set, claimSecret("pin"))
 			resolved := resolveSingleSigner(t, set)
 			params, err := r.cosmosignerParams(context.Background(), set, resolved)
 			require.NoError(t, err)
@@ -95,7 +95,7 @@ func TestPrepareCosmosignerParamsRejectsDifferentRecordedValidatorPublicKeyPKCS1
 						Name: "validators", Instances: ptr.To(1),
 						Validator: &appsv1.NodeSetValidatorConfig{PrivateKeySecret: ptr.To("validator-key")},
 						Cosmosigner: &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{
-							PKCS11: &appsv1.CosmosignerPKCS11Backend{Module: "/vendor/lib.so", TokenLabel: "validator", KeyLabel: "consensus", PublicKey: desiredKey, PINSecret: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "pin"}, Key: "pin"}},
+							PKCS11: &appsv1.CosmosignerPKCS11Backend{Module: "/vendor/lib.so", TokenLabel: "validator", KeyLabel: "consensus", PublicKey: desiredKey, PINSecret: *claimSelector("pin")},
 						}},
 					}},
 				},
@@ -112,7 +112,7 @@ func TestPrepareCosmosignerParamsRejectsDifferentRecordedValidatorPublicKeyPKCS1
 				Replicas: &one, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: cosmosigner.InstanceLabels("test-nodeset-validators-signer")}},
 			}}
 			require.NoError(t, controllerutil.SetControllerReference(nodeSet, sts, testScheme(t)))
-			r := newValidatorTestReconciler(t, nodeSet, sts)
+			r := newValidatorTestReconciler(t, nodeSet, sts, claimSecret("pin"))
 
 			_, err := r.prepareCosmosignerParams(context.Background(), nodeSet)
 			require.ErrorContains(t, err, tc.wantErr)
@@ -131,33 +131,41 @@ func TestPKCS11AlternateSelectorsCannotReserveSamePublicKey(t *testing.T) {
 		return &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{PKCS11: &appsv1.CosmosignerPKCS11Backend{Module: "/vendor/lib.so", TokenLabel: label, KeyLabel: "validator", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", PINSecret: *claimSelector("pin")}}}
 	}
 	set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}, Spec: appsv1.ChainNodeSetSpec{Nodes: []appsv1.NodeGroupSpec{{Name: "first", Instances: ptr.To(1), Cosmosigner: signer("label-one")}, {Name: "second", Instances: ptr.To(1), Cosmosigner: signer("label-two")}}}, Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"}}
-	r := newValidatorTestReconciler(t, set)
+	r := newValidatorTestReconciler(t, set, claimSecret("pin"))
 	_, err := r.prepareCosmosignerParams(context.Background(), set)
 	require.ErrorIs(t, err, cosmosigner.ErrConsensusKeyReservationConflict)
 }
 
 func TestPKCS11AddressMigrationRetainsState(t *testing.T) {
-	for name, change := range map[string]func(*cosmosigner.PKCS11Backend){
-		"module":        func(p *cosmosigner.PKCS11Backend) { p.Module = "/other.so" },
-		"selector":      func(p *cosmosigner.PKCS11Backend) { p.TokenLabel = ""; p.Slot = ptr.To(int64(0)) },
-		"PIN reference": func(p *cosmosigner.PKCS11Backend) { p.PINSecret = claimSelector("other-pin") },
+	for name, change := range map[string]func(*appsv1.CosmosignerPKCS11Backend){
+		"module":        func(p *appsv1.CosmosignerPKCS11Backend) { p.Module = "/other.so" },
+		"selector":      func(p *appsv1.CosmosignerPKCS11Backend) { p.TokenLabel = ""; p.Slot = ptr.To(int64(0)) },
+		"key ID":        func(p *appsv1.CosmosignerPKCS11Backend) { p.KeyID = "01" },
+		"PIN reference": func(p *appsv1.CosmosignerPKCS11Backend) { p.PINSecret = *claimSelector("other-pin") },
 	} {
 		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
 			c := &appsv1.Cosmosigner{NodeGroups: []string{"sentries"}, Backend: appsv1.CosmosignerBackend{PKCS11: &appsv1.CosmosignerPKCS11Backend{Module: "/vendor/lib.so", TokenLabel: "validator", KeyLabel: "consensus", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", PINSecret: *claimSelector("pin")}}}
 			set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}, Spec: appsv1.ChainNodeSetSpec{Cosmosigner: c, Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}}}, Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"}}
-			r := newValidatorTestReconciler(t, set)
+			r := newValidatorTestReconciler(t, set, claimSecret("pin"), claimSecret("other-pin"))
 			signer := resolveSingleSigner(t, set)
-			old, err := r.cosmosignerParams(context.Background(), set, signer)
+			prepared, err := r.prepareCosmosignerParams(ctx, set)
 			require.NoError(t, err)
-			old.ExpectedPublicKey = c.Backend.PKCS11.PublicKey
+			old := prepared[signer.Name]
+			claim := nodeSetCosmosignerReservationClaim(set, signer)
 			digest, err := old.LifecycleDigest(signer.Digest())
 			require.NoError(t, err)
 			set.Status.Cosmosigners = []appsv1.CosmosignerStatus{{Name: signer.Name, AppliedDigest: digest, PublicKey: old.ExpectedPublicKey}}
-			desired := old
-			backend := *old.Backend.PKCS11
-			desired.Backend.PKCS11 = &backend
-			change(desired.Backend.PKCS11)
-			pending, err := r.reconcileCosmosignerMigrations(context.Background(), set, map[string]cosmosigner.Params{signer.Name: desired})
+			require.NoError(t, r.Status().Update(ctx, set))
+			change(set.Spec.Cosmosigner.Backend.PKCS11)
+			require.NoError(t, r.Update(ctx, set))
+			prepared, err = r.prepareCosmosignerParams(ctx, set)
+			require.NoError(t, err)
+			reservations := &appsv1.ConsensusKeyReservationList{}
+			require.NoError(t, r.List(ctx, reservations))
+			require.Len(t, reservations.Items, 1)
+			require.Equal(t, claim, reservations.Items[0].Spec.Claim)
+			pending, err := r.reconcileCosmosignerMigrations(ctx, set, prepared)
 			require.NoError(t, err)
 			require.True(t, pending)
 			migration := set.Status.Cosmosigners[0].Migration

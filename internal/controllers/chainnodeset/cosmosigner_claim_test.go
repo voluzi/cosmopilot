@@ -70,3 +70,15 @@ func TestCosmosignerBackendRequiresClaimSecrets(t *testing.T) {
 	}})
 	require.ErrorContains(t, err, "GCP claim credentials")
 }
+
+func TestPKCS11BackendRequiresPINSecret(t *testing.T) {
+	backend := appsv1.CosmosignerBackend{PKCS11: &appsv1.CosmosignerPKCS11Backend{PINSecret: *claimSelector("pin")}}
+	_, err := claimTestBackend(t, backend)
+	require.ErrorContains(t, err, "PKCS#11 PIN secret")
+	empty := claimSecret("pin")
+	empty.Data = nil
+	_, err = claimTestBackend(t, backend, empty)
+	require.ErrorContains(t, err, "missing key")
+	_, err = claimTestBackend(t, backend, claimSecret("pin"))
+	require.NoError(t, err)
+}

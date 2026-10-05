@@ -26,18 +26,19 @@ func TestPKCS11SigningIdentity(t *testing.T) {
 	c.Backend.PKCS11.PINSecret.Name = "other-pin"
 	require.Equal(t, original, c.effectiveSigningIdentity(""))
 	for name, change := range map[string]func(*CosmosignerPKCS11Backend){
-		"module":     func(p *CosmosignerPKCS11Backend) { p.Module = "/other.so" },
-		"slot zero":  func(p *CosmosignerPKCS11Backend) { p.TokenLabel = ""; p.Slot = ptr.To(int64(0)) },
-		"key label":  func(p *CosmosignerPKCS11Backend) { p.KeyLabel = "other" },
-		"key id":     func(p *CosmosignerPKCS11Backend) { p.KeyID = "01" },
-		"public key": func(p *CosmosignerPKCS11Backend) { p.PublicKey = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
+		"module":    func(p *CosmosignerPKCS11Backend) { p.Module = "/other.so" },
+		"slot zero": func(p *CosmosignerPKCS11Backend) { p.TokenLabel = ""; p.Slot = ptr.To(int64(0)) },
+		"key label": func(p *CosmosignerPKCS11Backend) { p.KeyLabel = "other" },
+		"key id":    func(p *CosmosignerPKCS11Backend) { p.KeyID = "01" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := pkcs11Signer()
 			change(c.Backend.PKCS11)
-			require.NotEqual(t, original, c.effectiveSigningIdentity(""))
+			require.Equal(t, original, c.effectiveSigningIdentity(""))
 		})
 	}
+	c.Backend.PKCS11.PublicKey = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	require.NotEqual(t, original, c.effectiveSigningIdentity(""))
 }
 
 func TestPKCS11UniqueSigningCoordinates(t *testing.T) {

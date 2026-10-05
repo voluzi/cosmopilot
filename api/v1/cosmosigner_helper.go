@@ -729,7 +729,7 @@ func (c *Cosmosigner) effectiveSigningIdentity(softwareKeySecret string) string 
 	case c.UsesGcpKmsBackend():
 		return "gcpkms\x00" + c.Backend.GcpKMS.KeyVersion
 	case c.UsesPKCS11Backend():
-		return c.Backend.PKCS11.signingCoordinates() + "\x00" + c.Backend.PKCS11.PublicKey
+		return "pkcs11\x00" + c.Backend.PKCS11.PublicKey
 	case c.UsesAwsKmsBackend():
 		return "awskms\x00" + c.Backend.AwsKMS.KeyID
 	case c.UsesSoftwareBackend():
