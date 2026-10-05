@@ -10,11 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
@@ -90,12 +90,34 @@ func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest s
 		return &RestoreError{"verification", errors.New("SHA-256 mismatch")}
 	}
 
-	// The marker must not outlive a crash that loses directory entries created above.
-	syscall.Sync()
-	if err := os.WriteFile(filepath.Join(dir, restoreMarker), nil, 0600); err != nil {
+	// File contents are synced as they are written; the marker must not outlive a crash that loses
+	// their directory entries, so directories go first, then the marker, then the root again.
+	marker := filepath.Join(dir, restoreMarker)
+	err = filepath.WalkDir(dir, func(p string, entry fs.DirEntry, err error) error {
+		// The provisioner's lost+found may be unreadable and holds nothing restored.
+		if p == filepath.Join(dir, "lost+found") {
+			return fs.SkipDir
+		}
+		if err != nil || !entry.IsDir() {
+			return err
+		}
+		return syncPath(p)
+	})
+	if err == nil {
+		err = os.WriteFile(marker, nil, 0600)
+	}
+	if err := errors.Join(err, syncPath(marker), syncPath(dir)); err != nil {
 		return &RestoreError{"target", err}
 	}
 	return nil
+}
+
+func syncPath(name string) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
 }
 
 type restoreObjectReader struct {
