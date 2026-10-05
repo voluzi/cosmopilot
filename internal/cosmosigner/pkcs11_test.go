@@ -45,13 +45,16 @@ func TestPKCS11Runtime(t *testing.T) {
 		}
 	}
 	require.True(t, found)
+	found = false
 	for _, m := range sts.Spec.Template.Spec.Containers[0].VolumeMounts {
 		if m.Name == "pkcs11-pin" {
+			found = true
 			require.Equal(t, "/pkcs11/pin", m.MountPath)
 			require.True(t, m.ReadOnly)
 			require.Empty(t, m.SubPath)
 		}
 	}
+	require.True(t, found, "pkcs11-pin volume mount must be present")
 	for _, c := range p.Backend.volumeMounts() {
 		require.NotEqual(t, "/data", c.MountPath)
 	}
