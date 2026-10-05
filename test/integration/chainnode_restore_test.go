@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -47,9 +48,13 @@ var _ = Describe("Exported snapshot initialization", func() {
 			return pvc.Annotations[controllers.AnnotationDataInitialized]
 		}, 45*time.Second).Should(Equal("true"))
 		Eventually(func() bool { return apierrors.IsNotFound(c.Get(ctx, initKey, &corev1.Pod{})) }).Should(BeTrue())
-		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
-		node.Spec.Persistence.Restore.Snapshot.Name = "replacement.tar.zst"
-		Expect(c.Update(ctx, node)).To(Succeed())
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := c.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
+				return err
+			}
+			node.Spec.Persistence.Restore.Snapshot.Name = "replacement.tar.zst"
+			return c.Update(ctx, node)
+		})).To(Succeed())
 		Consistently(func() bool { return c.Get(ctx, initKey, &corev1.Pod{}) == nil }, time.Second, 100*time.Millisecond).Should(BeFalse())
 		oldUID := pvc.UID
 		Expect(c.Delete(ctx, pvc)).To(Succeed())
