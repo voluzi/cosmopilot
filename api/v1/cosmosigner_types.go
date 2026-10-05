@@ -59,7 +59,7 @@ type Cosmosigner struct {
 
 	// Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
 	// image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-	// defaulting to `ghcr.io/voluzi/cosmosigner:3.1.1`). Set this to pin or override the image for
+	// defaulting to `ghcr.io/voluzi/cosmosigner:3.2.0`). Set this to pin or override the image for
 	// this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is
 	// unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes.
 	// +optional
@@ -132,8 +132,7 @@ type CosmosignerBackend struct {
 	// +optional
 	GcpKMS *CosmosignerGcpKmsBackend `json:"gcpKms,omitempty"`
 
-	// AwsKMS uses a non-exportable Ed25519 key in AWS KMS. It requires a cosmosigner image with the
-	// AWS KMS backend, which the default image (3.1.1) does not have: set `image` accordingly.
+	// AwsKMS uses a non-exportable Ed25519 key in AWS KMS. It requires cosmosigner 3.2.0 or later.
 	// +optional
 	AwsKMS *CosmosignerAwsKmsBackend `json:"awsKms,omitempty"`
 }

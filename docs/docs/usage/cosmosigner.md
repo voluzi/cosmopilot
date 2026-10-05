@@ -23,10 +23,7 @@ answers, the signer never becomes live, and the validator does not sign until th
 corrected. For production validators, use
 an immutable image digest rather than a mutable tag so a rescheduled replica cannot pick up different code without a managed migration.
 
-`awsKms` requires a Cosmosigner release that includes the AWS backend (the next release after
-3.1.1). The default image remains `ghcr.io/voluzi/cosmosigner:3.1.1`, which does not include it.
-Until that release is available, set `image` to a build containing the backend, such as
-`ghcr.io/voluzi/cosmosigner:edge` for integration testing.
+`awsKms` requires Cosmosigner 3.2.0 or later, which is the default image.
 :::
 
 :::warning[node-utils compatibility]
@@ -416,7 +413,6 @@ ARN, rather than an alias, alias ARN or bare key ID:
 
 ```yaml
 cosmosigner:
-  image: ghcr.io/voluzi/cosmosigner:edge   # until a release after 3.1.1 includes the AWS backend
   replicas: 3
   raftTLSSecret: cosmosigner-raft-tls
   serviceAccountName: cosmosigner        # Kubernetes service account configured for IRSA
