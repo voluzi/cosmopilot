@@ -547,14 +547,18 @@ spec:
 Use the vendor's actual environment variables and configuration files; `env`, `volumes` and
 `volumeMounts` reach only the signer container, and changing any of them uses the existing full-stop
 migration. User `env` entries follow `POD_NAME`, so values can reference `$(POD_NAME)`, and precede
-managed signer variables, which take precedence. Do not shadow operator-managed mounts. A mismatching
+the variables the operator sets, which take precedence. Do not set `POD_NAME` or any `COSMOSIGNER_*`
+variable in `env`: they override the signer's identity and its rendered configuration. Do not shadow
+operator-managed mounts. A mismatching
 `publicKey` leaves the signer in CrashLoopBackOff; a wrong PIN leaves it running but not ready until someone restarts it after
 fixing the Secret. Each concurrently starting replica can make one failed PIN attempt. The PIN is a
 directory-mounted Secret file, so updates propagate, but the PIN hold requires an explicit restart.
 
 For a wrong module, token selector or key selector, correct the spec, then delete the signer
 StatefulSet. For a wrong `publicKey`, correct the spec, then delete the signer StatefulSet and the
-ConsensusKeyReservation of the wrong key. Correct the spec first so reconciliation does not restore
+ConsensusKeyReservation of the wrong key. If both are wrong, correct them in two separate edits:
+admission accepts an initial `publicKey` correction only when nothing else in the backend changes.
+Correct the spec first so reconciliation does not restore
 the default PVC retention policy. In both cases, before deleting the StatefulSet, set its
 `spec.persistentVolumeClaimRetentionPolicy.whenDeleted` to `Retain` and wait for its PVCs' StatefulSet
 owner references to disappear; use foreground deletion and wait for its pods to terminate before

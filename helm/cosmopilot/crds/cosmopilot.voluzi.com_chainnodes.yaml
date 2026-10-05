@@ -4153,7 +4153,9 @@ spec:
                   env:
                     description: |-
                       Env supplies vendor client configuration after POD_NAME and before managed signer variables.
-                      Managed signer variables take precedence over user entries with the same name.
+                      Variables the operator sets take precedence over user entries with the same name. Do not set
+                      POD_NAME or any COSMOSIGNER_* variable here: they override the signer's identity and its
+                      rendered configuration.
                     items:
                       description: EnvVar represents an environment variable present
                         in a Container.
