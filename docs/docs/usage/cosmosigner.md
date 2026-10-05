@@ -554,9 +554,12 @@ directory-mounted Secret file, so updates propagate, but the PIN hold requires a
 
 For a wrong module, token selector or key selector, correct the spec, then delete the signer
 StatefulSet. For a wrong `publicKey`, correct the spec, then delete the signer StatefulSet and the
-ConsensusKeyReservation of the wrong key. Keep the signer's PVCs in both cases; the ConfigMap does
-not need deletion. These procedures are only for a signer that never became ready; validator key
-changes after serving are refused, and sentry key changes follow the existing migration rules.
+ConsensusKeyReservation of the wrong key. In both cases, before deleting the StatefulSet, set its
+`spec.persistentVolumeClaimRetentionPolicy.whenDeleted` to `Retain` and wait for its PVCs' StatefulSet
+owner references to disappear; use foreground deletion and wait for its pods to terminate before
+deleting the reservation. Keep the signer's PVCs; the ConfigMap does not need deletion. These procedures
+are only for a signer that never became ready; validator key changes after serving are refused, and
+sentry key changes follow the existing migration rules.
 
 Every replica must reach the same token and key, which in practice requires a network HSM for more
 than one replica. The container runs as UID/GID 1000; give it access to the module, client files and

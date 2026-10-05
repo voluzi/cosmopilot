@@ -148,7 +148,9 @@ func TestPKCS11ManualRecovery(t *testing.T) {
 					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(node), node))
 					require.Empty(t, node.Status.CosmosignerAppliedDigest)
 					require.Empty(t, node.Status.CosmosignerPublicKey)
-					require.NoError(t, r.Delete(ctx, currentSTS))
+					currentSTS.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted = apps.RetainPersistentVolumeClaimRetentionPolicyType
+					require.NoError(t, r.Update(ctx, currentSTS))
+					require.NoError(t, r.Delete(ctx, currentSTS, client.PropagationPolicy(metav1.DeletePropagationForeground)))
 					if tc.keyChange {
 						require.NoError(t, r.Delete(ctx, currentReservation))
 					}

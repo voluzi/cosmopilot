@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1k8s "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -21,7 +22,7 @@ import (
 )
 
 var _ = Describe("PKCS11 SoftHSM", Label("cosmosigner", "pkcs11"), func() {
-	It("corrects an initial public key, produces blocks and holds a wrong PIN live without restarts", func() {
+	It("manually corrects an initial public key, produces blocks and holds a wrong PIN live without restarts", func() {
 		image := environ.GetString("PKCS11_TEST_IMAGE", "")
 		if image == "" {
 			Skip("set PKCS11_TEST_IMAGE to a locally built SoftHSM fixture image")
@@ -85,6 +86,7 @@ sleep infinity`}, Env: []corev1.EnvVar{{Name: "CONSENSUS_PUBLIC_KEY", Value: pub
 		}).Should(BeTrue())
 		oldReservation := &appsv1.ConsensusKeyReservation{}
 		Expect(cl.Get(ctx, client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("pkcs11-e2e", cns.Spec.Cosmosigner.Backend.PKCS11.PublicKey)}, oldReservation)).To(Succeed())
+		oldPVCs := signerPVCUIDs(ns.Name, name, 1)
 		Eventually(func() error {
 			if err := cl.Get(ctx, client.ObjectKeyFromObject(cns), cns); err != nil {
 				return err
@@ -95,15 +97,41 @@ sleep infinity`}, Env: []corev1.EnvVar{{Name: "CONSENSUS_PUBLIC_KEY", Value: pub
 			cns.Spec.Cosmosigner.Backend.PKCS11.PublicKey = publicKey
 			return cl.Update(ctx, cns)
 		}).Should(Succeed())
+		sts := &appsv1k8s.StatefulSet{}
+		Expect(cl.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: name}, sts)).To(Succeed())
+		Eventually(func() error {
+			if err := cl.Get(ctx, client.ObjectKeyFromObject(sts), sts); err != nil {
+				return err
+			}
+			sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted = appsv1k8s.RetainPersistentVolumeClaimRetentionPolicyType
+			return cl.Update(ctx, sts)
+		}).Should(Succeed())
+		Eventually(func() bool {
+			claim := &corev1.PersistentVolumeClaim{}
+			if cl.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: "data-" + name + "-0"}, claim) != nil {
+				return false
+			}
+			for _, owner := range claim.OwnerReferences {
+				if owner.UID == sts.UID {
+					return false
+				}
+			}
+			return claim.DeletionTimestamp.IsZero()
+		}).Should(BeTrue())
+		Expect(cl.Delete(ctx, sts, client.PropagationPolicy(metav1.DeletePropagationForeground))).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(cl.Get(ctx, client.ObjectKeyFromObject(sts), &appsv1k8s.StatefulSet{})) &&
+				apierrors.IsNotFound(cl.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: name + "-0"}, &corev1.Pod{}))
+		}).Should(BeTrue())
+		Expect(cl.Delete(ctx, oldReservation)).To(Succeed())
 		WaitForChainNodeSetHeight(cns, 3)
 		Expect(cl.Get(ctx, client.ObjectKeyFromObject(oldReservation), &appsv1.ConsensusKeyReservation{})).To(MatchError(ContainSubstring("not found")))
 		status := waitForCosmosignerApplied(cns, name)
 		Expect(status.PublicKey).To(Equal(publicKey))
-		oldPVCs := signerPVCUIDs(ns.Name, name, 1)
+		Expect(signerPVCUIDs(ns.Name, name, 1)).To(Equal(oldPVCs))
 		marker, err := Framework().PodExec(ns.Name, name+"-0", "cosmosigner", "cat", "/data/cluster-binding.json")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(marker).To(ContainSubstring(publicKey))
-		sts := &appsv1k8s.StatefulSet{}
 		Expect(cl.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: name}, sts)).To(Succeed())
 		Expect(*sts.Spec.Replicas).To(Equal(int32(1)))
 		Eventually(func() error {
