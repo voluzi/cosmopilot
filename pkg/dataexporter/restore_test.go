@@ -304,6 +304,9 @@ func TestRestoreIgnoresUnreadableLostAndFound(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(source, "state"), []byte("block data"), 0600))
 	var archive bytes.Buffer
 	require.NoError(t, writeTarball(source, &archive, CompressionNone))
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions are not enforced for root")
+	}
 	target := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(target, "lost+found"), 0))
 	require.NoError(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", ""))

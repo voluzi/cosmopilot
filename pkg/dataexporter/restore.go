@@ -107,6 +107,8 @@ func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest s
 		err = os.WriteFile(marker, nil, 0600)
 	}
 	if err := errors.Join(err, syncPath(marker), syncPath(dir)); err != nil {
+		// A marker that was not durably committed must not vouch for this volume on retry.
+		_ = os.Remove(marker)
 		return &RestoreError{"target", err}
 	}
 	return nil
@@ -202,6 +204,10 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 		}
 		// Archives of restored data may carry an old marker; only this restore can mark completion.
 		if name == restoreMarker {
+			// Consume its data here so it cannot pass for the end-of-archive blocks below.
+			if _, err := io.Copy(io.Discard, tr); err != nil {
+				return restoreExtractionError(err)
+			}
 			continue
 		}
 		if strings.HasPrefix(name, restoreMarker+"/") || name == "lost+found" || strings.HasPrefix(name, "lost+found/") {
