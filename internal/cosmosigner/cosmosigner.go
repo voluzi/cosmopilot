@@ -3,6 +3,7 @@ package cosmosigner
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -551,7 +552,8 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 
 	volumes = append(volumes, p.Volumes...)
 	signer.VolumeMounts = append(signer.VolumeMounts, p.VolumeMounts...)
-	signer.Env = append(append([]corev1.EnvVar(nil), p.Env...), signer.Env...)
+	// User values can expand POD_NAME; managed signer variables take precedence.
+	signer.Env = slices.Insert(signer.Env, 1, p.Env...)
 	signer.Env = append(signer.Env, p.raftSecurityEnv()...)
 	signer.Env = append(signer.Env, p.Backend.clusterBindingEnv()...)
 	signer.Env = append(signer.Env, p.Backend.runtimeEnv()...)

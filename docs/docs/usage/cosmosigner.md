@@ -546,9 +546,9 @@ spec:
 
 Use the vendor's actual environment variables and configuration files; `env`, `volumes` and
 `volumeMounts` reach only the signer container, and changing any of them uses the existing full-stop
-migration. Do not set `COSMOSIGNER_*` variables in `env`, because they override rendered signer
-configuration, and do not shadow operator-managed mounts. A mismatching `publicKey` leaves the signer
-in CrashLoopBackOff; a wrong PIN leaves it running but not ready until someone restarts it after
+migration. User `env` entries follow `POD_NAME`, so values can reference `$(POD_NAME)`, and precede
+managed signer variables, which take precedence. Do not shadow operator-managed mounts. A mismatching
+`publicKey` leaves the signer in CrashLoopBackOff; a wrong PIN leaves it running but not ready until someone restarts it after
 fixing the Secret. Each concurrently starting replica can make one failed PIN attempt. The PIN is a
 directory-mounted Secret file, so updates propagate, but the PIN hold requires an explicit restart.
 

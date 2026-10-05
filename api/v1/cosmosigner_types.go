@@ -75,8 +75,8 @@ type Cosmosigner struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
-	// Env supplies vendor client configuration to the signer container; do not set COSMOSIGNER_*
-	// variables because they override the rendered signer configuration.
+	// Env supplies vendor client configuration after POD_NAME and before managed signer variables.
+	// Managed signer variables take precedence over user entries with the same name.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 

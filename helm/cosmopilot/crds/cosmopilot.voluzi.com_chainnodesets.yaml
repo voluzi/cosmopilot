@@ -1731,8 +1731,8 @@ spec:
                     type: object
                   env:
                     description: |-
-                      Env supplies vendor client configuration to the signer container; do not set COSMOSIGNER_*
-                      variables because they override the rendered signer configuration.
+                      Env supplies vendor client configuration after POD_NAME and before managed signer variables.
+                      Managed signer variables take precedence over user entries with the same name.
                     items:
                       description: EnvVar represents an environment variable present
                         in a Container.
@@ -8427,8 +8427,8 @@ spec:
                           type: object
                         env:
                           description: |-
-                            Env supplies vendor client configuration to the signer container; do not set COSMOSIGNER_*
-                            variables because they override the rendered signer configuration.
+                            Env supplies vendor client configuration after POD_NAME and before managed signer variables.
+                            Managed signer variables take precedence over user entries with the same name.
                           items:
                             description: EnvVar represents an environment variable
                               present in a Container.
