@@ -11,6 +11,7 @@ type Backend struct {
 	Software *SoftwareBackend
 	Vault    *VaultBackend
 	GCP      *GcpBackend
+	AWS      *AwsBackend
 }
 
 // SoftwareBackend holds the local software backend configuration.
@@ -46,6 +47,15 @@ type GcpBackend struct {
 	ClaimCredentialsSecret *corev1.SecretKeySelector
 }
 
+// AwsBackend holds the pre-provisioned AWS KMS backend configuration.
+type AwsBackend struct {
+	KeyID             string
+	Region            string
+	CredentialsSecret *corev1.SecretKeySelector
+	ClaimRoleARN      string
+	Timeout           string
+}
+
 // GcpImport are the Cloud KMS destination coordinates of a controller-managed BYOK import. They are
 // passed as flags to the one-shot `cosmosigner import` pod ONLY and never reach the signer
 // StatefulSet, whose backend is configured purely from the resolved KeyVersion — so resolving an
@@ -72,6 +82,7 @@ const (
 	vaultTokenVolume = "vault-token"
 	vaultCaVolume    = "vault-ca"
 	gcpCredsVolume   = "gcp-credentials"
+	awsCredsVolume   = "aws-credentials"
 	softwareVolume   = "software-key"
 
 	// Credential files are exposed via DIRECTORY mounts with an items projection (never subPath):
@@ -84,6 +95,7 @@ const (
 	vaultCaDir     = vaultMountDir + "/ca-dir"
 	vaultCaFile    = vaultCaDir + "/ca.crt"
 	gcpCredsFile   = gcpMountDir + "/credentials.json"
+	awsCredsFile   = awsMountDir + "/credentials"
 
 	vaultClaimTokenVolume = "vault-claim-token"
 	gcpClaimCredsVolume   = "gcp-claim-credentials"
@@ -121,6 +133,25 @@ func (b Backend) clusterBindingEnv() []corev1.EnvVar {
 		if b.GCP.ClaimCredentialsSecret != nil {
 			env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_GCP_CLAIM_CREDENTIALS_FILE", Value: gcpClaimCredsFile})
 		}
+	case b.AWS != nil:
+		if b.AWS.ClaimRoleARN != "" {
+			env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_AWS_CLAIM_ROLE_ARN", Value: b.AWS.ClaimRoleARN})
+		}
+	}
+	return env
+}
+
+// runtimeEnv supplies backend settings that cannot be expressed in Cosmosigner's YAML config.
+func (b Backend) runtimeEnv() []corev1.EnvVar {
+	if b.AWS == nil {
+		return nil
+	}
+	var env []corev1.EnvVar
+	if b.AWS.CredentialsSecret != nil {
+		env = append(env, corev1.EnvVar{Name: "AWS_SHARED_CREDENTIALS_FILE", Value: awsCredsFile})
+	}
+	if b.AWS.Timeout != "" {
+		env = append(env, corev1.EnvVar{Name: "COSMOSIGNER_AWS_TIMEOUT", Value: b.AWS.Timeout})
 	}
 	return env
 }
@@ -187,6 +218,11 @@ func (b Backend) backendConfig() BackendConfig {
 				KeyVersion:      b.GCP.KeyVersion,
 				CredentialsFile: gcpCredsFilePath(b.GCP),
 			},
+		}
+	case b.AWS != nil:
+		return BackendConfig{
+			Type: backendAwsKms,
+			AWS:  &AWSConfig{KeyID: b.AWS.KeyID, Region: b.AWS.Region},
 		}
 	default:
 		return BackendConfig{Type: backendSoftware}
@@ -265,6 +301,16 @@ func (b Backend) volumes() []corev1.Volume {
 				},
 			}
 		}
+	case b.AWS != nil:
+		if b.AWS.CredentialsSecret != nil {
+			return []corev1.Volume{{
+				Name: awsCredsVolume,
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: b.AWS.CredentialsSecret.Name,
+					Items:      []corev1.KeyToPath{{Key: b.AWS.CredentialsSecret.Key, Path: "credentials"}},
+				}},
+			}}
+		}
 	}
 	return nil
 }
@@ -294,6 +340,10 @@ func (b Backend) volumeMounts() []corev1.VolumeMount {
 			return []corev1.VolumeMount{
 				{Name: gcpCredsVolume, ReadOnly: true, MountPath: gcpMountDir},
 			}
+		}
+	case b.AWS != nil:
+		if b.AWS.CredentialsSecret != nil {
+			return []corev1.VolumeMount{{Name: awsCredsVolume, ReadOnly: true, MountPath: awsMountDir}}
 		}
 	}
 	return nil

@@ -1726,6 +1726,12 @@ func (nodeSet *ChainNodeSet) validateUniqueSigningKeys() error {
 					return err
 				}
 			}
+		case c.UsesAwsKmsBackend():
+			id := c.effectiveSigningIdentity("")
+			if prev, ok := vaultKeys[id]; ok {
+				return fmt.Errorf("%s references the same AWS KMS signing key as %s; each validator must sign with a distinct key", path, prev)
+			}
+			vaultKeys[id] = path
 		case c.UsesSoftwareBackend():
 			// A validator-targeted software signer reuses that validator's already-registered key, so
 			// nothing extra is registered.

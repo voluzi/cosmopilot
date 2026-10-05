@@ -169,6 +169,8 @@ func recoveredBackendMatches(live BackendConfig, desired Backend, sts *appsv1.St
 			live.Vault.KeyVersion == want.Vault.KeyVersion
 	case desired.GCP != nil:
 		return live.GCP != nil && want.GCP != nil && live.GCP.KeyVersion == want.GCP.KeyVersion
+	case desired.AWS != nil:
+		return live.AWS != nil && want.AWS != nil && live.AWS.KeyID == want.AWS.KeyID
 	default:
 		return false
 	}

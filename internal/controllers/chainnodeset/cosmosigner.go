@@ -1995,6 +1995,18 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			ClaimTokenSecret:  v.ClaimTokenSecret,
 		}}, nil
 
+	case c.UsesAwsKmsBackend():
+		a := c.Backend.AwsKMS
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "AWS credentials", a.CredentialsSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
+		return cosmosigner.Backend{AWS: &cosmosigner.AwsBackend{
+			KeyID:             a.KeyID,
+			Region:            a.Region,
+			CredentialsSecret: a.CredentialsSecret,
+			ClaimRoleARN:      ptr.Deref(a.ClaimRoleARN, ""),
+			Timeout:           ptr.Deref(a.Timeout, ""),
+		}}, nil
 	case c.UsesGcpKmsBackend():
 		g := c.Backend.GcpKMS
 		// The GCP credentials Secret (when set — omitted for Workload Identity) is mounted at startup.

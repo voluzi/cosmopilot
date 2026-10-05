@@ -3,7 +3,7 @@
 [`Cosmosigner`](https://github.com/voluzi/cosmosigner) is a Go-native CometBFT remote signer. It keeps
 your consensus key off the validator node and signs blocks over the network, with:
 
-- **Multiple backends** — HashiCorp Vault Transit, Google Cloud KMS, or a local software key.
+- **Multiple backends** — HashiCorp Vault Transit, Google Cloud KMS, AWS KMS, or a local software key.
 - **High availability** — an embedded raft cluster elects a single leader that signs; a lost quorum
   fails closed (downtime) rather than risking a double-sign.
 - **Node fan-out** — one signer identity can sign for a whole group of nodes (sentry-style), each of
@@ -22,6 +22,8 @@ redial. An overridden image is not version-checked: with a build older than 3.1.
 answers, the signer never becomes live, and the validator does not sign until the image is
 corrected. For production validators, use
 an immutable image digest rather than a mutable tag so a rescheduled replica cannot pick up different code without a managed migration.
+
+`awsKms` requires Cosmosigner 3.2.0 or later, which is the default image.
 :::
 
 :::warning[node-utils compatibility]
@@ -308,7 +310,7 @@ When cosmosigner targets a validator, the signer uses the **validator's own cons
 the software backend it references the validator's private-key secret, and with Vault
 `uploadGenerated` or GCP KMS `import` it imports that same key. When no validator is targeted (a
 sentry-mode signer over regular groups), you must supply the key yourself: set
-`backend.software.privateKeySecret`, or pre-provision the Vault/GCP key. This guarantees the signer
+`backend.software.privateKeySecret`, or pre-provision the Vault/GCP/AWS key. This guarantees the signer
 signs with exactly the key registered on-chain.
 :::
 
@@ -404,6 +406,95 @@ used only for that label write.
       claimCredentialsSecret: { name: gcp-kms-claim, key: credentials.json }   # optional
 ```
 
+### AWS KMS
+
+Use `keyId` when the consensus key already exists in AWS KMS. It must be the full immutable key
+ARN, rather than an alias, alias ARN or bare key ID:
+
+```yaml
+cosmosigner:
+  replicas: 3
+  raftTLSSecret: cosmosigner-raft-tls
+  serviceAccountName: cosmosigner        # Kubernetes service account configured for IRSA
+  backend:
+    awsKms:
+      keyId: arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012
+      region: eu-west-1
+      # credentialsSecret omitted -> standard AWS SDK credential chain
+      # claimRoleArn: arn:aws:iam::123456789012:role/validator-key-claimer
+      # timeout: 10s
+```
+
+The same backend block works on a standalone ChainNode, a top-level ChainNodeSet signer, or a
+per-group signer. The customer-managed key must be single-region `ECC_NIST_EDWARDS25519` with
+`SIGN_VERIFY` usage and `ED25519_SHA_512` support. Use the same AWS account and region for the
+signer and key; Cosmosigner rejects multi-region keys. It signs RAW messages, so the full sign
+bytes must fit within 4096 bytes, including canonical vote-extension encoding. Chains requiring
+larger extensions cannot use this backend.
+
+Without `credentialsSecret`, the standard AWS SDK credential chain applies. For IRSA, configure
+`serviceAccountName` with the AWS role binding and web-identity setup; the same service account is
+used by the signer and its one-shot public-key discovery Pod. A Google Workload Identity binding
+alone does not grant AWS access.
+
+For static credentials, create a Secret key containing an AWS shared-credentials INI file with a
+`[default]` profile, then reference it:
+
+```yaml
+      credentialsSecret: { name: aws-kms-credentials, key: credentials }
+```
+
+Only that Secret key is projected into a read-only directory mount, as `/aws/credentials`.
+Cosmopilot sets `AWS_SHARED_CREDENTIALS_FILE=/aws/credentials` on the signer and public-key Pod;
+Cosmosigner uses those credentials for AWS requests, unless the Pod also receives IRSA web-identity
+variables through its ServiceAccount: the AWS SDK prefers web identity, so use one or the other. In-place Secret updates reach the mounted
+file but do not restart the signer, and SDK file reloading is not guaranteed. Change the Secret
+name/key to trigger the existing managed migration when rotating static credentials.
+
+| Operation | AWS permissions on the key |
+| --- | --- |
+| Runtime signer | `kms:GetPublicKey`, `kms:Sign`, `kms:ListResourceTags` |
+| Public-key discovery | `kms:GetPublicKey` |
+| First startup claim | `kms:GetPublicKey`, `kms:ListResourceTags`, `kms:TagResource` |
+
+The key policy must also permit the relevant operations. Without `claimRoleArn`, the runtime
+identity needs `kms:TagResource` for the first startup claim. With it, the runtime identity needs
+`sts:AssumeRole` on that role and the role's trust policy must allow the runtime principal. The
+claim role needs the first-startup-claim permissions above. It is used only by signer startup and
+is not passed to the public-key discovery Pod. These are AWS permissions, not Kubernetes RBAC.
+
+`timeout` is passed through `COSMOSIGNER_AWS_TIMEOUT` to both Pods; when omitted, Cosmosigner uses
+its default `10s` AWS request timeout. It is not a YAML backend config field in Cosmosigner.
+
+Cosmopilot discovers the public key with `cosmosigner pubkey` against the configured ARN, following
+the same one-shot Pod lifecycle as pre-provisioned `gcpKms.keyVersion`. Cosmosigner verifies that
+AWS returns that exact ARN. Cosmopilot reserves the consensus public key and pins it into signer
+startup with `--expected-public-key`, so a signer cannot serve a different validator key. The
+recorded serving identity is `awskms` plus the key ARN; credentials, region, claim role and timeout
+are runtime settings whose changes use the existing break-before-make migration. A migration
+preserves Raft state when the public key is unchanged. Changing the ARN does not rotate an
+established validator's on-chain key: the discovered public key must still match that validator.
+
+To move an existing validator key into AWS KMS, run `cosmosigner import` yourself under an
+administrative identity, following the [Cosmosigner AWS backend instructions](https://github.com/voluzi/cosmosigner#aws-kms-backend).
+Then verify it with `cosmosigner pubkey` and configure `keyId` with the resulting key ARN.
+Cosmopilot does not provision or import AWS keys. Import acceptance may precede public-key
+availability: confirm that the public key matches the original validator key before using it.
+Retain a protected recovery backup of the original imported material outside AWS; AWS imported
+material cannot be exported, and the customer is responsible for its durability.
+
+A pre-provisioned AWS key cannot be used with `validator.init` or `createValidator`: those flows
+register a locally generated consensus key. Use an externally registered validator identity or
+sentry mode with a key already registered on-chain.
+
+Cosmopilot enables startup claiming, as it does for the other backends. Three replicas sharing one
+Raft history acquire the same cluster ID and write the same `cosmosigner-cluster-id` key tag.
+AWS tag writes have no compare-and-set and reads are eventually consistent. Guarantee exclusive
+key ownership and externally serialize first adoption across Kubernetes clusters and unmanaged
+signers; Cosmopilot's reservation only coordinates its own Kubernetes control domain. Allow prior
+claims to become visible. If claim propagation prevents readiness, retry with the same preserved
+Raft history. Never remove or rewrite a claim to bypass lost signing history.
+
 ### Software (testing)
 
 ```yaml
@@ -429,10 +520,10 @@ key could never be in the validator set.
 ### Key ownership (Cosmosigner 3.x)
 
 Cosmosigner 3.x binds each key to one signer cluster: the first time a signer cluster starts it
-records its Raft cluster ID with the key (a Vault KV record, a label on the Cloud KMS CryptoKey, or a
-marker file for the software backend), and afterwards it refuses to sign with a key recorded for a
-different cluster. This stops a second, independent signer cluster from ever signing with the same
-key.
+records its Raft cluster ID with the key (a Vault KV record, a label on the Cloud KMS CryptoKey, an
+AWS KMS key tag, or a marker file for the software backend), and afterwards it refuses to sign
+with a key recorded for a different cluster. A visible claim prevents a second independent history from adopting the key;
+initial KMS adoption still requires exclusive ownership as described above.
 
 `Cosmopilot` lets the signer write that record itself (`COSMOSIGNER_CLAIM_IF_UNCLAIMED`), because it
 already guarantees the precondition: a consensus key is reserved for one signer, and every migration

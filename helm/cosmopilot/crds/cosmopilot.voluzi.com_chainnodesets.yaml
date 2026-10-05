@@ -1349,6 +1349,62 @@ spec:
                       Backend selects and configures where the consensus key material lives and how signing is
                       performed. Exactly one backend must be configured.
                     properties:
+                      awsKms:
+                        description: AwsKMS uses a non-exportable Ed25519 key in AWS
+                          KMS. It requires cosmosigner 3.2.0 or later.
+                        properties:
+                          claimRoleArn:
+                            description: |-
+                              ClaimRoleARN optionally selects a role assumed only to claim an unowned key at signer
+                              startup. When unset, the runtime identity also needs kms:TagResource on the key.
+                            type: string
+                          credentialsSecret:
+                            description: |-
+                              CredentialsSecret references an AWS shared-credentials file with a default profile.
+                              When unset, the standard AWS SDK credential chain applies, including IRSA through
+                              serviceAccountName. The selected file is mounted for the signer and public-key discovery pod.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          keyId:
+                            description: |-
+                              KeyID is the full immutable KMS key ARN used for public-key discovery and signing.
+                              Aliases and bare key IDs are not supported.
+                            pattern: ^arn:[^:]+:kms:[^:]+:[^:]+:key/[^/]+$
+                            type: string
+                          region:
+                            description: Region is the AWS region passed to the signer
+                              and public-key discovery pod.
+                            minLength: 1
+                            type: string
+                          timeout:
+                            description: |-
+                              Timeout is passed through COSMOSIGNER_AWS_TIMEOUT. When unset, Cosmosigner uses its
+                              default AWS request timeout (10s).
+                            type: string
+                        required:
+                        - keyId
+                        - region
+                        type: object
                       gcpKms:
                         description: GcpKMS uses a non-exportable EC_SIGN_ED25519
                           key in Google Cloud KMS.
@@ -1602,7 +1658,7 @@ spec:
                     description: |-
                       Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
                       image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-                      defaulting to `ghcr.io/voluzi/cosmosigner:3.1.1`). Set this to pin or override the image for
+                      defaulting to `ghcr.io/voluzi/cosmosigner:3.2.0`). Set this to pin or override the image for
                       this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is
                       unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes.
                     type: string
@@ -1704,7 +1760,8 @@ spec:
                     description: |-
                       ServiceAccountName is the Kubernetes service account the signer pods run as. Required in
                       practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google
-                      service account to a specific Kubernetes service account). Defaults to the namespace default.
+                      service account to a specific Kubernetes service account). AWS KMS can use it for IRSA.
+                      Defaults to the namespace default.
                     type: string
                   stateStorageSize:
                     description: |-
@@ -5663,6 +5720,62 @@ spec:
                             Backend selects and configures where the consensus key material lives and how signing is
                             performed. Exactly one backend must be configured.
                           properties:
+                            awsKms:
+                              description: AwsKMS uses a non-exportable Ed25519 key
+                                in AWS KMS. It requires cosmosigner 3.2.0 or later.
+                              properties:
+                                claimRoleArn:
+                                  description: |-
+                                    ClaimRoleARN optionally selects a role assumed only to claim an unowned key at signer
+                                    startup. When unset, the runtime identity also needs kms:TagResource on the key.
+                                  type: string
+                                credentialsSecret:
+                                  description: |-
+                                    CredentialsSecret references an AWS shared-credentials file with a default profile.
+                                    When unset, the standard AWS SDK credential chain applies, including IRSA through
+                                    serviceAccountName. The selected file is mounted for the signer and public-key discovery pod.
+                                  properties:
+                                    key:
+                                      description: The key of the secret to select
+                                        from.  Must be a valid secret key.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the Secret or its
+                                        key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                                keyId:
+                                  description: |-
+                                    KeyID is the full immutable KMS key ARN used for public-key discovery and signing.
+                                    Aliases and bare key IDs are not supported.
+                                  pattern: ^arn:[^:]+:kms:[^:]+:[^:]+:key/[^/]+$
+                                  type: string
+                                region:
+                                  description: Region is the AWS region passed to
+                                    the signer and public-key discovery pod.
+                                  minLength: 1
+                                  type: string
+                                timeout:
+                                  description: |-
+                                    Timeout is passed through COSMOSIGNER_AWS_TIMEOUT. When unset, Cosmosigner uses its
+                                    default AWS request timeout (10s).
+                                  type: string
+                              required:
+                              - keyId
+                              - region
+                              type: object
                             gcpKms:
                               description: GcpKMS uses a non-exportable EC_SIGN_ED25519
                                 key in Google Cloud KMS.
@@ -5916,7 +6029,7 @@ spec:
                           description: |-
                             Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner
                             image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself
-                            defaulting to `ghcr.io/voluzi/cosmosigner:3.1.1`). Set this to pin or override the image for
+                            defaulting to `ghcr.io/voluzi/cosmosigner:3.2.0`). Set this to pin or override the image for
                             this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is
                             unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes.
                           type: string
@@ -6019,7 +6132,8 @@ spec:
                           description: |-
                             ServiceAccountName is the Kubernetes service account the signer pods run as. Required in
                             practice for the GCP KMS backend without credentialsSecret (Workload Identity binds the Google
-                            service account to a specific Kubernetes service account). Defaults to the namespace default.
+                            service account to a specific Kubernetes service account). AWS KMS can use it for IRSA.
+                            Defaults to the namespace default.
                           type: string
                         stateStorageSize:
                           description: |-

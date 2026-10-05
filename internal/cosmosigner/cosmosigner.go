@@ -548,6 +548,7 @@ func (p Params) StatefulSet(configYAML string) (*appsv1.StatefulSet, error) {
 
 	signer.Env = append(signer.Env, p.raftSecurityEnv()...)
 	signer.Env = append(signer.Env, p.Backend.clusterBindingEnv()...)
+	signer.Env = append(signer.Env, p.Backend.runtimeEnv()...)
 
 	claim := corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
