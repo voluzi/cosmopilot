@@ -499,8 +499,8 @@ Raft history. Never remove or rewrite a claim to bypass lost signing history.
 
 `backend.pkcs11` selects a pre-existing, sensitive, non-extractable Ed25519 key on a token;
 Cosmopilot does not provision or import token keys. Build a signer image from
-`ghcr.io/voluzi/cosmosigner:edge-pkcs11` with the vendor's glibc shared library and its dependencies,
-and set `image` explicitly. The backend is unreleased; the default `3.1.1` image does not include it.
+`ghcr.io/voluzi/cosmosigner:3.2.0-pkcs11` with the vendor's glibc shared library and its dependencies,
+and set `image` explicitly. The default image is a static build and does not include the backend.
 `cosmosigner version` reports `pkcs11: true` for a supported build; a static build reports its own
 unsupported-build error. Cosmopilot does not derive image names; `edge-pkcs11` and `latest-pkcs11`
 use `Always` pull policy, while pinned tags and digests retain the ordinary policy.

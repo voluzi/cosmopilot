@@ -1,6 +1,6 @@
 # SoftHSM signer fixture
 
-This opt-in kind test uses the unreleased `edge-pkcs11` binary in a Debian bookworm
+This opt-in kind test uses the `3.2.0-pkcs11` binary in a Debian bookworm
 image with SoftHSM2, OpenSC and curl. The fixture pod creates a fresh, sensitive,
 non-extractable Ed25519 token key. A separate Nibiru pod builds external genesis
 with that consensus public key through `gentx --pubkey`; no token private key is

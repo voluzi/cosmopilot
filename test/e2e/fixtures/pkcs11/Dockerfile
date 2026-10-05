@@ -1,4 +1,4 @@
-FROM ghcr.io/voluzi/cosmosigner:edge-pkcs11 AS signer
+FROM ghcr.io/voluzi/cosmosigner:3.2.0-pkcs11 AS signer
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends softhsm2 opensc curl ca-certificates \
