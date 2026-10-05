@@ -440,6 +440,9 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 		(chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == "")
 	publicKey := ""
 	if recovering {
+		if params.Backend.PKCS11 != nil {
+			params.ExpectedPublicKey = chainNode.Spec.Cosmosigner.Backend.PKCS11.PublicKey
+		}
 		recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, chainNode, params)
 		if err != nil {
 			return cosmosigner.Params{}, r.refuseRecoveredCosmosignerIdentity(ctx, chainNode, params.Name, err)

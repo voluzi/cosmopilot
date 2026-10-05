@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	snapshot "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 	apps "k8s.io/api/apps/v1"
@@ -89,6 +90,18 @@ func manualRecoveryFixture(t *testing.T, validator bool) (*Reconciler, *appsv1.C
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(node), node))
 	require.Empty(t, node.Status.CosmosignerAppliedDigest)
 	require.Empty(t, node.Status.CosmosignerPublicKey)
+
+	target := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace,
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(node, appsv1.GroupVersion.WithKind("ChainNode"))},
+		Labels: map[string]string{
+			controllers.LabelCosmosignerTarget: sts.Name,
+			controllers.LabelValidator:         controllers.StringValueFalse,
+		},
+	}, Spec: core.PodSpec{Containers: []core.Container{{Name: "app", Image: "image"}}}}
+	if validator {
+		target.Labels[controllers.LabelValidator] = controllers.StringValueTrue
+	}
+	require.NoError(t, r.Create(context.Background(), target))
 	return r, node, sts, pvc
 }
 
@@ -201,4 +214,25 @@ func TestPKCS11RolledOutValidatorKeyChangeRefused(t *testing.T) {
 	require.Equal(t, manualRecoveryPublicKey, readManualRecoveryConfig(t, r.Client, client.ObjectKeyFromObject(sts)).ExpectedPublicKey)
 	require.NoError(t, r.Get(ctx, client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", manualRecoveryPublicKey)}, &appsv1.ConsensusKeyReservation{}))
 	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", manualRecoveryCorrectedKey)}, &appsv1.ConsensusKeyReservation{})))
+}
+
+func TestPKCS11PublicKeyCorrectionPreservesRetention(t *testing.T) {
+	r, node, sts, _ := manualRecoveryFixture(t, true)
+	ctx := context.Background()
+	old := node.DeepCopy()
+	node.Spec.Cosmosigner.Backend.PKCS11.PublicKey = manualRecoveryCorrectedKey
+	_, err := node.Validate(old)
+	require.NoError(t, err)
+	require.NoError(t, r.Update(ctx, node))
+	sts.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted = apps.RetainPersistentVolumeClaimRetentionPolicyType
+	require.NoError(t, r.Update(ctx, sts))
+	for i := 0; i < 2; i++ {
+		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)})
+		assert.ErrorIs(t, err, cosmosigner.ErrRecoveredIdentityMismatch)
+		current := &apps.StatefulSet{}
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sts), current))
+		require.Equal(t, sts.Spec.Template, current.Spec.Template)
+		require.Equal(t, sts.Spec.PersistentVolumeClaimRetentionPolicy, current.Spec.PersistentVolumeClaimRetentionPolicy)
+		require.Equal(t, manualRecoveryPublicKey, readManualRecoveryConfig(t, r.Client, client.ObjectKeyFromObject(sts)).ExpectedPublicKey)
+	}
 }

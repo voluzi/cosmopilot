@@ -305,6 +305,9 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			return err
 		}
 		if signerStatusNeedsRecovery(st) || (s.TargetsValidator() && st.PublicKey == "") {
+			if params.Backend.PKCS11 != nil {
+				params.ExpectedPublicKey = s.Spec.Backend.PKCS11.PublicKey
+			}
 			recoveredPublicKey, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, resourceName, err)
@@ -403,6 +406,9 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		st := nodeSet.GetCosmosignerStatus(s.Name)
 		publicKey := ""
 		if signerStatusNeedsRecovery(st) {
+			if params.Backend.PKCS11 != nil {
+				params.ExpectedPublicKey = s.Spec.Backend.PKCS11.PublicKey
+			}
 			recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return nil, r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, params.Name, err)

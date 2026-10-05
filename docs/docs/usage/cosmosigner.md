@@ -554,7 +554,8 @@ directory-mounted Secret file, so updates propagate, but the PIN hold requires a
 
 For a wrong module, token selector or key selector, correct the spec, then delete the signer
 StatefulSet. For a wrong `publicKey`, correct the spec, then delete the signer StatefulSet and the
-ConsensusKeyReservation of the wrong key. In both cases, before deleting the StatefulSet, set its
+ConsensusKeyReservation of the wrong key. Correct the spec first so reconciliation does not restore
+the default PVC retention policy. In both cases, before deleting the StatefulSet, set its
 `spec.persistentVolumeClaimRetentionPolicy.whenDeleted` to `Retain` and wait for its PVCs' StatefulSet
 owner references to disappear; use foreground deletion and wait for its pods to terminate before
 deleting the reservation. Keep the signer's PVCs; the ConfigMap does not need deletion. These procedures
