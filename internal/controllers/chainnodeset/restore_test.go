@@ -22,6 +22,7 @@ func TestNodeSetPropagatesRestoreToEveryInstance(t *testing.T) {
 	r := &Reconciler{Scheme: scheme}
 	first, err := r.getNodeSpec(nodeSet, group, 0)
 	require.NoError(t, err)
+	require.Equal(t, "snapshot.tar", first.Spec.Persistence.Restore.Snapshot.Name)
 	first.Spec.Persistence.Restore.Snapshot.Name = "other.tar"
 	for i := 1; i < 3; i++ {
 		child, err := r.getNodeSpec(nodeSet, group, i)
