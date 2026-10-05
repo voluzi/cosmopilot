@@ -20,9 +20,17 @@ var ErrRecoveredIdentityMismatch = stderrors.New("recovered cosmosigner identity
 
 // RecoveredSigningPublicKey validates an owned live signer's immutable runtime configuration and
 // returns the canonical public key pinned in that configuration. A missing StatefulSet is a first
-// rollout only when no raft-state PVC survives. Controllers use the returned key before writing a
-// reservation so lost status cannot make a restored spec reserve a different key first.
+// rollout only when no raft-state PVC survives, except for PKCS#11. Controllers use the returned key
+// before writing a reservation so lost status cannot make a restored spec reserve a different key first.
 func RecoveredSigningPublicKey(ctx context.Context, c client.Client, owner client.Object, params Params) (string, bool, error) {
+	// PKCS#11 keys come from the spec, not the retained Raft volume.
+	// Deleting the StatefulSet removes the live pin without discarding signing history.
+	if params.Backend.PKCS11 != nil {
+		sts := &appsv1.StatefulSet{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: params.Namespace, Name: params.Name}, sts); errors.IsNotFound(err) {
+			return "", false, nil
+		}
+	}
 	sts, liveConfig, err := liveSigningConfig(ctx, c, owner, params.Namespace, params.Name)
 	if err != nil {
 		return "", false, err

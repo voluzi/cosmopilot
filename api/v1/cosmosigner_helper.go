@@ -24,8 +24,8 @@ func (c *Cosmosigner) GetReplicas() int32 {
 	return DefaultCosmosignerReplicas
 }
 
-// initialPKCS11PublicKeyCorrection admits only a first-deploy pin correction; the controller
-// still verifies live rollout evidence and stops the signing path before releasing its reservation.
+// initialPKCS11PublicKeyCorrection permits a public-key-only edit before signing state is recorded.
+// Deploying the corrected pin still requires manual workload and reservation deletion.
 func (c *Cosmosigner) initialPKCS11PublicKeyCorrection(previous *Cosmosigner, recorded bool) bool {
 	if recorded || c == nil || previous == nil || !c.UsesPKCS11Backend() || !previous.UsesPKCS11Backend() {
 		return false

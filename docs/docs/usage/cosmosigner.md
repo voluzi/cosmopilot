@@ -547,16 +547,16 @@ spec:
 Use the vendor's actual environment variables and configuration files; `env`, `volumes` and
 `volumeMounts` reach only the signer container, and changing any of them uses the existing full-stop
 migration. Do not set `COSMOSIGNER_*` variables in `env`, because they override rendered signer
-configuration, and do not shadow operator-managed mounts. A wrong module path, token selector or
-vendor configuration fails normally and must be corrected by its operator. A `publicKey` that does
-not match the token key keeps the signer in CrashLoopBackOff until corrected before its first recorded
-rollout, while a wrong PIN leaves it running but not ready until someone restarts it after fixing the
-Secret. Each concurrently starting replica can make one failed PIN
-attempt. The PIN is a directory-mounted Secret file, so updates propagate, but the PIN hold requires
-an explicit restart after correction.
+configuration, and do not shadow operator-managed mounts. A mismatching `publicKey` leaves the signer
+in CrashLoopBackOff; a wrong PIN leaves it running but not ready until someone restarts it after
+fixing the Secret. Each concurrently starting replica can make one failed PIN attempt. The PIN is a
+directory-mounted Secret file, so updates propagate, but the PIN hold requires an explicit restart.
 
-Correcting the initial `publicKey` stops all signer pods before moving its reservation and re-pinning
-the signer; after rollout, the existing validator key-change refusal and sentry migration rules apply.
+For a wrong module, token selector or key selector, correct the spec, then delete the signer
+StatefulSet. For a wrong `publicKey`, correct the spec, then delete the signer StatefulSet and the
+ConsensusKeyReservation of the wrong key. Keep the signer's PVCs in both cases; the ConfigMap does
+not need deletion. These procedures are only for a signer that never became ready; validator key
+changes after serving are refused, and sentry key changes follow the existing migration rules.
 
 Every replica must reach the same token and key, which in practice requires a network HSM for more
 than one replica. The container runs as UID/GID 1000; give it access to the module, client files and
