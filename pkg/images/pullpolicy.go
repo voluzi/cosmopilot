@@ -6,8 +6,7 @@ import (
 	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
-// mutableTags are the tags that are moved to new builds: `latest`, and `edge`, which every push to
-// cosmopilot main republishes.
+// mutableTags tracks republished latest/edge builds, including cosmosigner PKCS#11 variants.
 var mutableTags = map[string]bool{"latest": true, "edge": true, "latest-pkcs11": true, "edge-pkcs11": true}
 
 // PullPolicy returns the pull policy for an operator-owned image. An image without a reference or
