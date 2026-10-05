@@ -175,3 +175,90 @@ func TestPKCS11AddressMigrationRetainsState(t *testing.T) {
 		})
 	}
 }
+
+func TestPKCS11InitialPublicKeyCorrection(t *testing.T) {
+	for _, tc := range []struct {
+		name                               string
+		validator, recorded, everRolledOut bool
+	}{
+		{name: "validator", validator: true}, {name: "sentry"},
+		{name: "recorded validator", validator: true, recorded: true},
+		{name: "lost validator status", validator: true, everRolledOut: true},
+		{name: "lost sentry status", everRolledOut: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			c := &appsv1.Cosmosigner{Backend: appsv1.CosmosignerBackend{PKCS11: &appsv1.CosmosignerPKCS11Backend{Module: "/vendor/lib.so", TokenLabel: "validator", KeyLabel: "consensus", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", PINSecret: *claimSelector("pin")}}}
+			set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "default", UID: "nodes-uid"}, Spec: appsv1.ChainNodeSetSpec{Genesis: &appsv1.GenesisConfig{Url: ptr.To("https://example.com/genesis.json")}, Cosmosigner: c, Nodes: []appsv1.NodeGroupSpec{{Name: "sentries", Instances: ptr.To(1)}}}, Status: appsv1.ChainNodeSetStatus{ChainID: "test-1"}}
+			if tc.validator {
+				set.Spec.Validator = &appsv1.NodeSetValidatorConfig{}
+			} else {
+				c.NodeGroups = []string{"sentries"}
+			}
+			r := newValidatorTestReconciler(t, set, claimSecret("pin"))
+			signer := resolveSingleSigner(t, set)
+			prepared, err := r.prepareCosmosignerParams(ctx, set)
+			require.NoError(t, err)
+			old := prepared[signer.Name]
+			_, err = r.initCosmosignerLocks(ctx, set)
+			require.NoError(t, err)
+			config, err := old.ConfigYAML()
+			require.NoError(t, err)
+			cm, err := old.ConfigMap(config)
+			require.NoError(t, err)
+			sts, err := old.StatefulSet(config)
+			require.NoError(t, err)
+			sts.UID = "signer-uid"
+			if tc.everRolledOut {
+				sts.Annotations = map[string]string{cosmosigner.EverRolledOutAnnotation: "true"}
+			}
+			for _, obj := range []client.Object{cm, sts} {
+				require.NoError(t, controllerutil.SetControllerReference(set, obj, r.Scheme))
+				require.NoError(t, r.Create(ctx, obj))
+			}
+			pvc := sts.Spec.VolumeClaimTemplates[0].DeepCopy()
+			pvc.Name = "data-" + sts.Name + "-0"
+			pvc.Namespace = set.Namespace
+			pvc.Spec.VolumeName = "signer-state"
+			pvc.Status.Phase = corev1.ClaimBound
+			require.NoError(t, r.Create(ctx, pvc))
+			oldReservation := &appsv1.ConsensusKeyReservation{}
+			require.NoError(t, r.Get(ctx, client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName(set.Status.ChainID, old.ExpectedPublicKey)}, oldReservation))
+			oldReservation.UID = "reservation-uid"
+			require.NoError(t, r.Update(ctx, oldReservation))
+			if tc.recorded {
+				set.Status.Cosmosigners = []appsv1.CosmosignerStatus{{Name: signer.Name, AppliedDigest: "applied", PublicKey: old.ExpectedPublicKey, Replicas: ptr.To(int32(1))}}
+				require.NoError(t, r.Status().Update(ctx, set))
+			}
+			const correctedKey = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			set.Spec.Cosmosigner.Backend.PKCS11.PublicKey = correctedKey
+			require.NoError(t, r.Update(ctx, set))
+			for i := 0; i < 3; i++ {
+				err = r.preflightCosmosigners(ctx, set)
+				if err == nil {
+					prepared, err = r.prepareCosmosignerParams(ctx, set)
+				}
+				if err == nil && prepared[signer.Name].ExpectedPublicKey == correctedKey {
+					break
+				}
+			}
+			if tc.recorded || tc.everRolledOut {
+				require.Error(t, err)
+				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(oldReservation), &appsv1.ConsensusKeyReservation{}))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, correctedKey, prepared[signer.Name].ExpectedPublicKey)
+			reservations := &appsv1.ConsensusKeyReservationList{}
+			require.NoError(t, r.List(ctx, reservations))
+			require.Len(t, reservations.Items, 1)
+			require.Equal(t, correctedKey, reservations.Items[0].Spec.PublicKey)
+			_, err = r.reconcileSigner(ctx, set, resolveSingleSigner(t, set), prepared[signer.Name])
+			require.NoError(t, err)
+			liveKey, found, err := cosmosigner.LiveSigningPublicKey(ctx, r.Client, set, set.Namespace, old.Name)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, correctedKey, liveKey)
+		})
+	}
+}

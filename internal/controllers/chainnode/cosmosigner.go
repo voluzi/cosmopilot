@@ -436,10 +436,19 @@ func (r *Reconciler) preflightCosmosigner(ctx context.Context, chainNode *appsv1
 	if err := cosmosigner.PreflightDeployable(ctx, r.Client, chainNode, chainNode.GetNamespace(), cosmosignerName(chainNode), replicas, usesImportPod, usesPubkeyPod, requireRetainedState); err != nil {
 		return cosmosigner.Params{}, err
 	}
+	if params.Backend.PKCS11 != nil {
+		params.ExpectedPublicKey = chainNode.Spec.Cosmosigner.Backend.PKCS11.PublicKey
+	}
+	correcting, err := cosmosigner.PrepareInitialPKCS11KeyCorrection(ctx, r.reservationReader(), r.Client, chainNode, params, cosmosigner.ReservationHolder{
+		UID: chainNode.UID, Kind: "ChainNode", Namespace: chainNode.Namespace, Name: chainNode.Name, Claim: standaloneCosmosignerReservationClaim(chainNode),
+	}, established || chainNode.Status.CosmosignerMigration != nil)
+	if err != nil {
+		return cosmosigner.Params{}, err
+	}
 	recovering := (chainNode.IsValidator() && chainNode.Status.CosmosignerPublicKey == "") ||
 		(chainNode.Status.CosmosignerAppliedDigest == "" && chainNode.Status.CosmosignerSigningDigest == "")
 	publicKey := ""
-	if recovering {
+	if recovering && !correcting {
 		recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, chainNode, params)
 		if err != nil {
 			return cosmosigner.Params{}, r.refuseRecoveredCosmosignerIdentity(ctx, chainNode, params.Name, err)

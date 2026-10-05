@@ -304,7 +304,14 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 		if err := cosmosigner.PreflightDeployable(ctx, r.Client, nodeSet, nodeSet.GetNamespace(), resourceName, replicas, usesImportPod, usesPubkeyPod, requireRetainedState); err != nil {
 			return err
 		}
-		if signerStatusNeedsRecovery(st) || (s.TargetsValidator() && st.PublicKey == "") {
+		if params.Backend.PKCS11 != nil {
+			params.ExpectedPublicKey = s.Spec.Backend.PKCS11.PublicKey
+		}
+		correcting, err := r.prepareInitialPKCS11KeyCorrection(ctx, nodeSet, s, params)
+		if err != nil {
+			return err
+		}
+		if !correcting && (signerStatusNeedsRecovery(st) || (s.TargetsValidator() && st.PublicKey == "")) {
 			recoveredPublicKey, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, resourceName, err)
@@ -401,8 +408,15 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 			return nil, err
 		}
 		st := nodeSet.GetCosmosignerStatus(s.Name)
+		if params.Backend.PKCS11 != nil {
+			params.ExpectedPublicKey = s.Spec.Backend.PKCS11.PublicKey
+		}
+		correcting, err := r.prepareInitialPKCS11KeyCorrection(ctx, nodeSet, s, params)
+		if err != nil {
+			return nil, err
+		}
 		publicKey := ""
-		if signerStatusNeedsRecovery(st) {
+		if signerStatusNeedsRecovery(st) && !correcting {
 			recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return nil, r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, params.Name, err)
@@ -2575,4 +2589,12 @@ func (r *Reconciler) applyCosmosignerStatefulSet(ctx context.Context, nodeSet *a
 		return err
 	}
 	return cosmosigner.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, sts, guard)
+}
+
+func (r *Reconciler) prepareInitialPKCS11KeyCorrection(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, params cosmosigner.Params) (bool, error) {
+	st := nodeSet.GetCosmosignerStatus(s.Name)
+	recorded := st != nil && (st.AppliedDigest != "" || st.SigningDigest != "" || st.PublicKey != "" || st.ServingIdentity != "" || st.Migration != nil)
+	return cosmosigner.PrepareInitialPKCS11KeyCorrection(ctx, r.uncachedReader(), r.Client, nodeSet, params, cosmosigner.ReservationHolder{
+		UID: nodeSet.UID, Kind: "ChainNodeSet", Namespace: nodeSet.Namespace, Name: nodeSet.Name, Claim: nodeSetCosmosignerReservationClaim(nodeSet, s),
+	}, recorded)
 }
