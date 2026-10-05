@@ -13,7 +13,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
@@ -144,6 +143,11 @@ func restoreDecoder(r io.Reader, c Compression) (io.Reader, func() error, error)
 }
 
 func extractRestoreTar(dir string, reader io.Reader) error {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return &RestoreError{"target", err}
+	}
+	root := strings.TrimSuffix(dir, string(os.PathSeparator)) + string(os.PathSeparator)
 	tail := &restoreTarReader{reader: reader}
 	tr := tar.NewReader(tail)
 	seen := map[string]bool{}
@@ -183,7 +187,7 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 		}
 		seen[name] = true
 		target := filepath.Join(dir, filepath.FromSlash(name))
-		if !strings.HasPrefix(target, filepath.Clean(dir)+string(os.PathSeparator)) {
+		if !strings.HasPrefix(target, root) {
 			return restoreExtractionError(fmt.Errorf("unsafe archive path %q", hdr.Name))
 		}
 		switch hdr.Typeflag {
@@ -203,17 +207,6 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 			syncErr := f.Sync()
 			closeErr := f.Close()
 			if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
-				return restoreExtractionError(err)
-			}
-		case tar.TypeSymlink:
-			// A relative link that only descends cannot leave the target, even through other links.
-			if path.IsAbs(hdr.Linkname) || slices.Contains(strings.Split(hdr.Linkname, "/"), "..") {
-				return restoreExtractionError(fmt.Errorf("unsafe archive symlink %q -> %q", name, hdr.Linkname))
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return restoreExtractionError(err)
-			}
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
 				return restoreExtractionError(err)
 			}
 		default:

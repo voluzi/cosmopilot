@@ -45,7 +45,6 @@ func TestRestoreExporterArchiveFormats(t *testing.T) {
 			require.NoError(t, os.Mkdir(filepath.Join(source, "db"), 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(source, "db", "state"), []byte("block data"), 0600))
 			require.NoError(t, os.WriteFile(filepath.Join(source, "priv_validator_state.json"), []byte(`{"height":"42"}`), 0600))
-			require.NoError(t, os.Symlink("db/state", filepath.Join(source, "current")))
 			var archive bytes.Buffer
 			require.NoError(t, writeTarball(source, &archive, compression))
 			digest := sha256.Sum256(archive.Bytes())
@@ -58,9 +57,6 @@ func TestRestoreExporterArchiveFormats(t *testing.T) {
 				state, err := os.ReadFile(filepath.Join(target, "priv_validator_state.json"))
 				require.NoError(t, err)
 				require.JSONEq(t, `{"height":"42"}`, string(state))
-				link, err := os.Readlink(filepath.Join(target, "current"))
-				require.NoError(t, err)
-				require.Equal(t, "db/state", link)
 			}
 		})
 	}
@@ -109,8 +105,7 @@ func TestRestoreRejectsUnsafeArchiveEntries(t *testing.T) {
 		{"traversal", []*tar.Header{{Name: "../escape", Typeflag: tar.TypeReg}}},
 		{"absolute", []*tar.Header{{Name: "/escape", Typeflag: tar.TypeReg}}},
 		{"symlink", []*tar.Header{{Name: "link", Linkname: "../escape", Typeflag: tar.TypeSymlink}}},
-		{"nested symlink", []*tar.Header{{Name: "sub/link", Linkname: "..", Typeflag: tar.TypeSymlink}}},
-		{"absolute symlink", []*tar.Header{{Name: "link", Linkname: "/etc", Typeflag: tar.TypeSymlink}}},
+		{"descending symlink", []*tar.Header{{Name: "link", Linkname: "file", Typeflag: tar.TypeSymlink}}},
 		{"hardlink", []*tar.Header{{Name: "link", Linkname: "file", Typeflag: tar.TypeLink}}},
 		{"device", []*tar.Header{{Name: "device", Typeflag: tar.TypeChar}}},
 		{"duplicate", []*tar.Header{{Name: "file", Typeflag: tar.TypeReg}, {Name: "file", Typeflag: tar.TypeReg}}},
@@ -290,4 +285,16 @@ func TestRestoreIncompleteRetryRefusesTarget(t *testing.T) {
 			require.Equal(t, "target", stage.Stage)
 		})
 	}
+}
+
+func TestRestoreIntoRelativeDirectory(t *testing.T) {
+	source := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(source, "state"), []byte("block data"), 0600))
+	var archive bytes.Buffer
+	require.NoError(t, writeTarball(source, &archive, CompressionNone))
+	t.Chdir(t.TempDir())
+	require.NoError(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, ".", "bucket", "snapshot.tar", ""))
+	data, err := os.ReadFile("state")
+	require.NoError(t, err)
+	require.Equal(t, "block data", string(data))
 }
