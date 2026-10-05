@@ -264,7 +264,16 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 			if old.Spec.Cosmosigner != nil && chainNode.Spec.Cosmosigner != nil &&
 				old.CosmosignerSigningDigest() != chainNode.CosmosignerSigningDigest() &&
 				(old.Status.CosmosignerAppliedDigest == "" || old.Status.CosmosignerPublicKey == "") {
-				return nil, fmt.Errorf(".spec.cosmosigner cannot be migrated until the controller records its applied public key; restore the previous configuration and wait for one reconcile")
+				recorded := old.Status.CosmosignerAppliedDigest != "" || old.Status.CosmosignerSigningDigest != "" ||
+					old.Status.CosmosignerPublicKey != "" || old.Status.CosmosignerServingIdentity != "" || old.Status.CosmosignerMigration != nil
+				if old.IsValidator() != chainNode.IsValidator() || !chainNode.Spec.Cosmosigner.initialPKCS11PublicKeyCorrection(old.Spec.Cosmosigner, recorded) {
+					advice := "restore the previous configuration and wait for one reconcile"
+					if chainNode.Spec.Cosmosigner.UsesPKCS11Backend() && old.Spec.Cosmosigner.UsesPKCS11Backend() &&
+						chainNode.Spec.Cosmosigner.Backend.PKCS11.PublicKey != old.Spec.Cosmosigner.Backend.PKCS11.PublicKey {
+						advice = "restore the previous configuration; if the signer never became ready, follow the documented PKCS#11 manual recovery procedure"
+					}
+					return nil, fmt.Errorf(".spec.cosmosigner cannot be migrated until the controller records its applied public key; %s", advice)
+				}
 			}
 		}
 	}

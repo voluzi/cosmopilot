@@ -305,6 +305,9 @@ func (r *Reconciler) preflightCosmosigners(ctx context.Context, nodeSet *appsv1.
 			return err
 		}
 		if signerStatusNeedsRecovery(st) || (s.TargetsValidator() && st.PublicKey == "") {
+			if params.Backend.PKCS11 != nil {
+				params.ExpectedPublicKey = s.Spec.Backend.PKCS11.PublicKey
+			}
 			recoveredPublicKey, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, resourceName, err)
@@ -403,6 +406,9 @@ func (r *Reconciler) prepareCosmosignerParams(ctx context.Context, nodeSet *apps
 		st := nodeSet.GetCosmosignerStatus(s.Name)
 		publicKey := ""
 		if signerStatusNeedsRecovery(st) {
+			if params.Backend.PKCS11 != nil {
+				params.ExpectedPublicKey = s.Spec.Backend.PKCS11.PublicKey
+			}
 			recovered, live, err := cosmosigner.RecoveredSigningPublicKey(ctx, r.Client, nodeSet, params)
 			if err != nil {
 				return nil, r.refuseRecoveredCosmosignerIdentity(ctx, nodeSet, s, params.Name, err)
@@ -1119,6 +1125,9 @@ func (r *Reconciler) cosmosignerPublicKey(ctx context.Context, nodeSet *appsv1.C
 }
 
 func (r *Reconciler) cosmosignerPublicKeyWithParams(ctx context.Context, nodeSet *appsv1.ChainNodeSet, s appsv1.ResolvedSigner, params cosmosigner.Params) (string, error) {
+	if params.Backend.PKCS11 != nil {
+		return s.Spec.Backend.PKCS11.PublicKey, nil
+	}
 	if params.Backend.Software != nil {
 		return cosmosigner.PublicKeyFromSecret(ctx, r.Client, nodeSet.GetNamespace(), params.Backend.Software.SecretName)
 	}
@@ -1877,6 +1886,9 @@ func (r *Reconciler) cosmosignerParams(ctx context.Context, nodeSet *appsv1.Chai
 		ServiceAccountName: c.GetServiceAccountName(),
 		NodeSelector:       c.NodeSelector,
 		Affinity:           c.Affinity,
+		Env:                c.Env,
+		Volumes:            c.Volumes,
+		VolumeMounts:       c.VolumeMounts,
 		Backend:            backend,
 		Labels:             labels,
 		// One-shot import/pubkey pods only — the signer StatefulSet keeps its existing lifecycle digest.
@@ -1995,6 +2007,12 @@ func (r *Reconciler) cosmosignerBackend(ctx context.Context, nodeSet *appsv1.Cha
 			ClaimTokenSecret:  v.ClaimTokenSecret,
 		}}, nil
 
+	case c.UsesPKCS11Backend():
+		p := c.Backend.PKCS11
+		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "PKCS#11 PIN", &p.PINSecret); err != nil {
+			return cosmosigner.Backend{}, err
+		}
+		return cosmosigner.Backend{PKCS11: &cosmosigner.PKCS11Backend{Module: p.Module, TokenLabel: p.TokenLabel, Slot: p.Slot, KeyLabel: p.KeyLabel, KeyID: p.KeyID, PINSecret: &p.PINSecret}}, nil
 	case c.UsesAwsKmsBackend():
 		a := c.Backend.AwsKMS
 		if err := cosmosigner.RequireSecretSelector(ctx, r.Client, nodeSet.GetNamespace(), "AWS credentials", a.CredentialsSecret); err != nil {

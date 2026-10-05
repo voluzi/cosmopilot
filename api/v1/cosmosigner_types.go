@@ -75,6 +75,21 @@ type Cosmosigner struct {
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
+	// Env supplies vendor client configuration after POD_NAME and before managed signer variables.
+	// Variables the operator sets take precedence over user entries with the same name. Do not set
+	// POD_NAME or any COSMOSIGNER_* variable here: they override the signer's identity and its
+	// rendered configuration.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Volumes supplies deployment-specific vendor configuration and credentials.
+	// +optional
+	Volumes []corev1.Volume `json:"volumes,omitempty"`
+
+	// VolumeMounts mounts vendor files in the signer container; managed mounts must not be shadowed.
+	// +optional
+	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
 	// Backend selects and configures where the consensus key material lives and how signing is
 	// performed. Exactly one backend must be configured.
 	Backend CosmosignerBackend `json:"backend"`
@@ -131,6 +146,11 @@ type CosmosignerBackend struct {
 	// GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS.
 	// +optional
 	GcpKMS *CosmosignerGcpKmsBackend `json:"gcpKms,omitempty"`
+
+	// PKCS11 uses a pre-existing Ed25519 key on an operator-held token. It requires a cosmosigner
+	// image built with the PKCS#11 backend, which the default image does not include.
+	// +optional
+	PKCS11 *CosmosignerPKCS11Backend `json:"pkcs11,omitempty"`
 
 	// AwsKMS uses a non-exportable Ed25519 key in AWS KMS. It requires cosmosigner 3.2.0 or later.
 	// +optional
@@ -257,6 +277,44 @@ type CosmosignerAwsKmsBackend struct {
 	// default AWS request timeout (10s).
 	// +optional
 	Timeout *string `json:"timeout,omitempty"`
+}
+
+// CosmosignerPKCS11Backend selects an existing token key; Cosmopilot never provisions or imports it.
+// +kubebuilder:validation:XValidation:rule="has(self.tokenLabel) != has(self.slot)",message="exactly one of tokenLabel or slot is required"
+// +kubebuilder:validation:XValidation:rule="has(self.keyLabel) || has(self.keyId)",message="keyLabel or keyId is required"
+// +kubebuilder:validation:XValidation:rule="size(self.pinSecret.name) > 0 && size(self.pinSecret.key) > 0",message="pinSecret.name and pinSecret.key are required"
+type CosmosignerPKCS11Backend struct {
+	// Module is the vendor shared-library path inside the selected signer image.
+	// +kubebuilder:validation:MinLength=1
+	Module string `json:"module"`
+
+	// TokenLabel selects a token by label, exclusively with slot.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	TokenLabel string `json:"tokenLabel,omitempty"`
+
+	// Slot selects a token by slot, including explicit zero.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Slot *int64 `json:"slot,omitempty"`
+
+	// KeyLabel selects the key by label; when keyId is set both selectors must match.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	KeyLabel string `json:"keyLabel,omitempty"`
+
+	// KeyID selects the key by its hexadecimal ID.
+	// +optional
+	// +kubebuilder:validation:Pattern="^([0-9a-fA-F]{2})+$"
+	KeyID string `json:"keyId,omitempty"`
+
+	// PINSecret selects the PIN mounted as a file in the signer; it is never read by a discovery pod.
+	PINSecret corev1.SecretKeySelector `json:"pinSecret"`
+
+	// PublicKey is the base64 Ed25519 consensus public key printed by cosmosigner pubkey.
+	// It pins validator identity without logging in to the token during reconciliation.
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$"
+	PublicKey string `json:"publicKey"`
 }
 
 // CosmosignerGcpKmsImport describes the Cloud KMS destination of a controller-managed BYOK import.

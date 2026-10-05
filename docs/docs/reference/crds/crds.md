@@ -38,6 +38,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend)
 * [CosmosignerGcpKmsImport](#cosmosignergcpkmsimport)
 * [CosmosignerMigrationStatus](#cosmosignermigrationstatus)
+* [CosmosignerPKCS11Backend](#cosmosignerpkcs11backend)
 * [CosmosignerSoftwareBackend](#cosmosignersoftwarebackend)
 * [CosmosignerStatus](#cosmosignerstatus)
 * [CosmosignerVaultBackend](#cosmosignervaultbackend)
@@ -1225,6 +1226,9 @@ Cosmosigner configures a Cosmopilot-managed cosmosigner remote-signer deployment
 | image | Image is the cosmosigner container image to use. Defaults to the operator-wide cosmosigner image (configured via the `-cosmosigner-image`/`COSMOSIGNER_IMAGE` operator flag, itself defaulting to `ghcr.io/voluzi/cosmosigner:3.2.0`). Set this to pin or override the image for this specific signer only. Downgrading a signer that already ran cosmosigner 3.x to 0.2.x is unsupported: 0.2.x cannot restore the Raft snapshots 3.x writes. | *string | false |
 | nodeSelector | NodeSelector restricts signer pods to nodes with matching labels. It is independent of the scheduling of the nodes the signer targets. Changing it on a running signer restarts all replicas through a managed migration. | map[string]string | false |
 | affinity | Affinity constrains signer pod placement independently of the targeted nodes. Changing it on a running signer restarts all replicas through a managed migration. | *corev1.Affinity | false |
+| env | Env supplies vendor client configuration after POD_NAME and before managed signer variables. Variables the operator sets take precedence over user entries with the same name. Do not set POD_NAME or any COSMOSIGNER_* variable here: they override the signer's identity and its rendered configuration. | []corev1.EnvVar | false |
+| volumes | Volumes supplies deployment-specific vendor configuration and credentials. | []corev1.Volume | false |
+| volumeMounts | VolumeMounts mounts vendor files in the signer container; managed mounts must not be shadowed. | []corev1.VolumeMount | false |
 | backend | Backend selects and configures where the consensus key material lives and how signing is performed. Exactly one backend must be configured. | [CosmosignerBackend](#cosmosignerbackend) | true |
 | stateStorageSize | StateStorageSize is the size of the per-replica PVC used for the raft double-sign protection state and the persisted connection key. Defaults to `1Gi`. | *string | false |
 | storageClassName | StorageClassName is the storage class for the per-replica state PVC. Defaults to the cluster default storage class when unset. | *string | false |
@@ -1259,6 +1263,7 @@ CosmosignerBackend selects the signing backend. Exactly one field must be set.
 | software | Software uses a local ed25519 priv_validator_key.json held in a Kubernetes secret. This is the simplest backend and is mainly intended for testnets and testing. | *[CosmosignerSoftwareBackend](#cosmosignersoftwarebackend) | false |
 | vault | Vault uses a non-exportable ed25519 key in HashiCorp Vault Transit. | *[CosmosignerVaultBackend](#cosmosignervaultbackend) | false |
 | gcpKms | GcpKMS uses a non-exportable EC_SIGN_ED25519 key in Google Cloud KMS. | *[CosmosignerGcpKmsBackend](#cosmosignergcpkmsbackend) | false |
+| pkcs11 | PKCS11 uses a pre-existing Ed25519 key on an operator-held token. It requires a cosmosigner image built with the PKCS#11 backend, which the default image does not include. | *[CosmosignerPKCS11Backend](#cosmosignerpkcs11backend) | false |
 | awsKms | AwsKMS uses a non-exportable Ed25519 key in AWS KMS. It requires cosmosigner 3.2.0 or later. | *[CosmosignerAwsKmsBackend](#cosmosignerawskmsbackend) | false |
 
 [Back to Custom Resources](#custom-resources)
@@ -1302,6 +1307,22 @@ CosmosignerMigrationStatus records enough progress to resume a migration after a
 | phase | Phase is the current break-before-make migration stage. | CosmosignerMigrationPhase | true |
 | resetState | ResetState is true when the desired public key differs from the applied key, requiring the old raft-state PVCs to be deleted before recreation. | bool | false |
 | rolloutObservedAt | RolloutObservedAt records when the replacement StatefulSet was first observed fully rolled out. Target health evidence must be newer than this timestamp before the migration can complete. | *metav1.Time | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmosignerPKCS11Backend
+
+CosmosignerPKCS11Backend selects an existing token key; Cosmopilot never provisions or imports it.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| module | Module is the vendor shared-library path inside the selected signer image. | string | true |
+| tokenLabel | TokenLabel selects a token by label, exclusively with slot. | string | false |
+| slot | Slot selects a token by slot, including explicit zero. | *int64 | false |
+| keyLabel | KeyLabel selects the key by label; when keyId is set both selectors must match. | string | false |
+| keyId | KeyID selects the key by its hexadecimal ID. | string | false |
+| pinSecret | PINSecret selects the PIN mounted as a file in the signer; it is never read by a discovery pod. | corev1.SecretKeySelector | true |
+| publicKey | PublicKey is the base64 Ed25519 consensus public key printed by cosmosigner pubkey. It pins validator identity without logging in to the token during reconciliation. | string | true |
 
 [Back to Custom Resources](#custom-resources)
 

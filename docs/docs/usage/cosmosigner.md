@@ -3,7 +3,7 @@
 [`Cosmosigner`](https://github.com/voluzi/cosmosigner) is a Go-native CometBFT remote signer. It keeps
 your consensus key off the validator node and signs blocks over the network, with:
 
-- **Multiple backends** — HashiCorp Vault Transit, Google Cloud KMS, AWS KMS, or a local software key.
+- **Multiple backends** — HashiCorp Vault Transit, Google Cloud KMS, AWS KMS, PKCS#11 tokens, or a local software key.
 - **High availability** — an embedded raft cluster elects a single leader that signs; a lost quorum
   fails closed (downtime) rather than risking a double-sign.
 - **Node fan-out** — one signer identity can sign for a whole group of nodes (sentry-style), each of
@@ -494,6 +494,85 @@ key ownership and externally serialize first adoption across Kubernetes clusters
 signers; Cosmopilot's reservation only coordinates its own Kubernetes control domain. Allow prior
 claims to become visible. If claim propagation prevents readiness, retry with the same preserved
 Raft history. Never remove or rewrite a claim to bypass lost signing history.
+
+### PKCS#11
+
+`backend.pkcs11` selects a pre-existing, sensitive, non-extractable Ed25519 key on a token;
+Cosmopilot does not provision or import token keys. Build a signer image from
+`ghcr.io/voluzi/cosmosigner:3.2.0-pkcs11` with the vendor's glibc shared library and its dependencies,
+and set `image` explicitly. The default image is a static build and does not include the backend.
+`cosmosigner version` reports `pkcs11: true` for a supported build; a static build reports its own
+unsupported-build error. Cosmopilot does not derive image names; `edge-pkcs11` and `latest-pkcs11`
+use `Always` pull policy, while pinned tags and digests retain the ordinary policy.
+
+Obtain the token key's base64 Ed25519 consensus public key with `cosmosigner pubkey --backend pkcs11`
+outside the reconcile loop, supplying `--pkcs11-module`, exactly one of `--pkcs11-token-label` or
+`--pkcs11-slot`, `--pkcs11-key-label` and/or `--pkcs11-key-id`, `--pkcs11-pin-file` and
+`--pkcs11-binding-file` (a marker path in an existing directory); this logs in to the token and makes
+one PIN attempt. Supply the resulting key as `publicKey`. Cosmopilot uses that value for validator
+identity, consensus-key reservations, on-chain comparison and status, and pins it as the signer's expected
+public key. It never creates a PKCS#11 public-key discovery pod, avoiding unattended PIN attempts.
+Register that key on-chain or supply an external genesis containing it before using this backend;
+local genesis initialization and create-validator flows require software or a managed import.
+
+```yaml
+spec:
+  cosmosigner:
+    image: registry.example.com/cosmosigner-vendor:tested-pkcs11
+    replicas: 1
+    backend:
+      pkcs11:
+        module: /opt/vendor/libpkcs11.so
+        tokenLabel: validator-token
+        # slot: 0                  # exactly one of tokenLabel or slot
+        keyLabel: consensus
+        keyId: "01a2"              # label and ID intersect when both are set
+        pinSecret:
+          name: validator-hsm-pin
+          key: pin
+        publicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" # replace with the token key
+    env:
+      - name: VENDOR_CLIENT_CONFIG
+        value: /vendor/config/client.conf
+    volumes:
+      - name: vendor-config
+        configMap:
+          name: validator-hsm-config
+    volumeMounts:
+      - name: vendor-config
+        mountPath: /vendor/config
+        readOnly: true
+```
+
+Use the vendor's actual environment variables and configuration files; `env`, `volumes` and
+`volumeMounts` reach only the signer container, and changing any of them uses the existing full-stop
+migration. User `env` entries follow `POD_NAME`, so values can reference `$(POD_NAME)`, and precede
+the variables the operator sets, which take precedence. Do not set `POD_NAME` or any `COSMOSIGNER_*`
+variable in `env`: they override the signer's identity and its rendered configuration. Do not shadow
+operator-managed mounts. A mismatching
+`publicKey` leaves the signer in CrashLoopBackOff; a wrong PIN leaves it running but not ready until someone restarts it after
+fixing the Secret. Each concurrently starting replica can make one failed PIN attempt. The PIN is a
+directory-mounted Secret file, so updates propagate, but the PIN hold requires an explicit restart.
+
+For a wrong module, token selector or key selector, correct the spec, then delete the signer
+StatefulSet. For a wrong `publicKey`, correct the spec, then delete the signer StatefulSet and the
+ConsensusKeyReservation of the wrong key. If both are wrong, correct them in two separate edits:
+admission accepts an initial `publicKey` correction only when nothing else in the backend changes.
+Correct the spec first so reconciliation does not restore
+the default PVC retention policy. In both cases, before deleting the StatefulSet, set its
+`spec.persistentVolumeClaimRetentionPolicy.whenDeleted` to `Retain` and wait for its PVCs' StatefulSet
+owner references to disappear; use foreground deletion and wait for its pods to terminate before
+deleting the reservation. Keep the signer's PVCs; the ConfigMap does not need deletion. These procedures
+are only for a signer that never became ready; validator key changes after serving are refused, and
+sentry key changes follow the existing migration rules.
+
+Every replica must reach the same token and key, which in practice requires a network HSM for more
+than one replica. The container runs as UID/GID 1000; give it access to the module, client files and
+token. Each replica keeps its binding marker at `/data/cluster-binding.json` beside its Raft history
+on its own PVC, and same-key migrations preserve both. This marker protects that history, not token
+ownership across independent deployments: the existing consensus-key reservation covers managed
+owners in this Kubernetes cluster. SoftHSM tests do not establish compatibility, determinism,
+concurrent sessions, failover or PIN policy on a real HSM.
 
 ### Software (testing)
 

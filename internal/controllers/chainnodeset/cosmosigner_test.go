@@ -532,6 +532,13 @@ func TestReconcileCosmosignerMigrationsCoversRuntimeAndKeyDrift(t *testing.T) {
 		{name: "runtime-only change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) { p.Image = "new-image" }},
 		{name: "node selector change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) { p.NodeSelector = map[string]string{"pool": "signers"} }},
 		{name: "affinity change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) { p.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}} }},
+		{name: "env change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) { p.Env = []corev1.EnvVar{{Name: "VENDOR_CONFIG", Value: "/vendor"}} }},
+		{name: "volumes change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) {
+			p.Volumes = []corev1.Volume{{Name: "vendor", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+		}},
+		{name: "mounts change retains raft state", desiredKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", mutateDesired: func(p *cosmosigner.Params) {
+			p.VolumeMounts = []corev1.VolumeMount{{Name: "vendor", MountPath: "/vendor"}}
+		}},
 		{name: "public-key drift resets raft state", desiredKey: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", mutateDesired: func(*cosmosigner.Params) {}, wantReset: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

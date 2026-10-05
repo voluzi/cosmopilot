@@ -4,12 +4,14 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -18,9 +20,17 @@ var ErrRecoveredIdentityMismatch = stderrors.New("recovered cosmosigner identity
 
 // RecoveredSigningPublicKey validates an owned live signer's immutable runtime configuration and
 // returns the canonical public key pinned in that configuration. A missing StatefulSet is a first
-// rollout only when no raft-state PVC survives. Controllers use the returned key before writing a
-// reservation so lost status cannot make a restored spec reserve a different key first.
+// rollout only when no raft-state PVC survives, except for PKCS#11. Controllers use the returned key
+// before writing a reservation so lost status cannot make a restored spec reserve a different key first.
 func RecoveredSigningPublicKey(ctx context.Context, c client.Client, owner client.Object, params Params) (string, bool, error) {
+	// PKCS#11 keys come from the spec, not the retained Raft volume.
+	// Deleting the StatefulSet removes the live pin without discarding signing history.
+	if params.Backend.PKCS11 != nil {
+		sts := &appsv1.StatefulSet{}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: params.Namespace, Name: params.Name}, sts); errors.IsNotFound(err) {
+			return "", false, nil
+		}
+	}
 	sts, liveConfig, err := liveSigningConfig(ctx, c, owner, params.Namespace, params.Name)
 	if err != nil {
 		return "", false, err
@@ -169,6 +179,11 @@ func recoveredBackendMatches(live BackendConfig, desired Backend, sts *appsv1.St
 			live.Vault.KeyVersion == want.Vault.KeyVersion
 	case desired.GCP != nil:
 		return live.GCP != nil && want.GCP != nil && live.GCP.KeyVersion == want.GCP.KeyVersion
+	case desired.PKCS11 != nil:
+		return live.PKCS11 != nil && want.PKCS11 != nil &&
+			live.PKCS11.Module == want.PKCS11.Module && live.PKCS11.TokenLabel == want.PKCS11.TokenLabel &&
+			ptr.Equal(live.PKCS11.Slot, want.PKCS11.Slot) && live.PKCS11.KeyLabel == want.PKCS11.KeyLabel &&
+			strings.EqualFold(live.PKCS11.KeyID, want.PKCS11.KeyID)
 	case desired.AWS != nil:
 		return live.AWS != nil && want.AWS != nil && live.AWS.KeyID == want.AWS.KeyID
 	default:
