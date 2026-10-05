@@ -73,7 +73,7 @@ func TestPreflightCosmosignerRejectsDifferentRecordedValidatorPublicKeyPKCS11(t 
 	}
 
 	_, err := r.preflightCosmosigner(context.Background(), chainNode)
-	require.ErrorContains(t, err, "on-chain validator public key")
+	require.EqualError(t, err, "cosmosigner public key does not match the on-chain validator public key recorded in status; Cosmopilot does not rotate validator consensus keys")
 	reservation := &appsv1.ConsensusKeyReservation{}
 	getErr := r.Get(context.Background(), client.ObjectKey{Name: cosmosigner.ConsensusKeyReservationName("test-1", desiredKey)}, reservation)
 	require.True(t, apierrors.IsNotFound(getErr), "a rejected signer key must not leave an immutable reservation: %v", getErr)
