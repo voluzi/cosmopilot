@@ -144,7 +144,8 @@ func TestPKCS11ManualRecovery(t *testing.T) {
 					require.NoError(t, err)
 					require.NoError(t, r.Update(ctx, node))
 					for i := 0; i < 2; i++ {
-						_, _ = r.Reconcile(ctx, req)
+						_, err = r.Reconcile(ctx, req)
+						require.ErrorIs(t, err, cosmosigner.ErrRecoveredIdentityMismatch)
 					}
 					currentCM := &core.ConfigMap{}
 					require.NoError(t, r.Get(ctx, key, currentCM))
