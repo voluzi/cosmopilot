@@ -92,12 +92,15 @@ S3/GCS object metadata (`cosmopilot-height`). Cosmopilot rebases upgrade progres
 application image at that height, as it does for a VolumeSnapshot. Optional `restore.height`
 overrides the reported height, including an explicit zero. Without metadata, or with dataexporter
 2.1.0, an omitted `restore.height` retains the existing zero-height behavior and base application image.
+A nonnumeric `cosmopilot-height` makes initialization fail until `restore.height` is set.
 A `restore.height` higher than the archive's actual height leaves `status.latestHeight` and the
 volume's height annotation at that value until the chain passes it, and starts the node on an
 application binary newer than the data.
-On new nodes and when height comes from object metadata, `additionalInitCommands` without an
-explicit `image` run on `spec.app.image` (the height or upgrade state is not known when the single
-init Pod is built); set `restore.height` or the command's `image` if they need the upgraded binary.
+On new nodes, `additionalInitCommands` without an explicit `image` run on `spec.app.image` even
+with `restore.height`, because upgrade state is not yet available; when height comes from object
+metadata, they also run on `spec.app.image` because the height is unknown when the single init Pod
+is built, so set the command's `image` if it needs the upgraded binary (on replacement volumes,
+an explicit `restore.height` can also select it from existing upgrade state).
 PVC deletion discards its current data.
 
 ```yaml
