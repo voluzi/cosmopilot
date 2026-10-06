@@ -425,7 +425,8 @@ func rebaseDataProgress(chainNode *appsv1.ChainNode, height int64) bool {
 		case appsv1.UpgradeScheduled:
 			// The replacement data is already past this upgrade, and a plan discovered from governance
 			// cannot be reclassified before the node runs; left scheduled, its image would be ignored.
-			if upgrade.Height <= height {
+			// One without an image stays scheduled so the spec can still supply it.
+			if height > 0 && upgrade.Height <= height && upgrade.Image != "" {
 				upgrade.Status = appsv1.UpgradeSkipped
 				changed = true
 			}

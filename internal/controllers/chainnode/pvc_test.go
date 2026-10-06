@@ -120,12 +120,14 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 func TestEnsureDataVolumeSkipsScheduledUpgradesBehindReplacementData(t *testing.T) {
 	for name, tc := range map[string]struct {
 		snapshotHeight string
+		upgradeImage   string
 		wantStatus     appsv1.UpgradePhase
 		wantImage      string
 	}{
-		"data past the upgrade":   {snapshotHeight: "150", wantStatus: appsv1.UpgradeSkipped, wantImage: "repo/app:v2"},
-		"data at the upgrade":     {snapshotHeight: "100", wantStatus: appsv1.UpgradeSkipped, wantImage: "repo/app:v2"},
-		"data before the upgrade": {snapshotHeight: "99", wantStatus: appsv1.UpgradeScheduled, wantImage: "repo/app:v1"},
+		"data past the upgrade":        {snapshotHeight: "150", upgradeImage: "repo/app:v2", wantStatus: appsv1.UpgradeSkipped, wantImage: "repo/app:v2"},
+		"data at the upgrade":          {snapshotHeight: "100", upgradeImage: "repo/app:v2", wantStatus: appsv1.UpgradeSkipped, wantImage: "repo/app:v2"},
+		"data before the upgrade":      {snapshotHeight: "99", upgradeImage: "repo/app:v2", wantStatus: appsv1.UpgradeScheduled, wantImage: "repo/app:v1"},
+		"upgrade without an image yet": {snapshotHeight: "150", wantStatus: appsv1.UpgradeScheduled, wantImage: "repo/app:v1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
@@ -141,7 +143,7 @@ func TestEnsureDataVolumeSkipsScheduledUpgradesBehindReplacementData(t *testing.
 				// A governance plan discovered at runtime exists only in status.
 				Status: appsv1.ChainNodeStatus{
 					LatestHeight: 60,
-					Upgrades:     []appsv1.Upgrade{{Height: 100, Image: "repo/app:v2", Status: appsv1.UpgradeScheduled}},
+					Upgrades:     []appsv1.Upgrade{{Height: 100, Image: tc.upgradeImage, Status: appsv1.UpgradeScheduled}},
 				},
 			}
 			snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
