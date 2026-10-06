@@ -117,6 +117,59 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 	}
 }
 
+func TestEnsureDataVolumeSkipsScheduledUpgradesBehindReplacementData(t *testing.T) {
+	for name, tc := range map[string]struct {
+		snapshotHeight string
+		wantStatus     appsv1.UpgradePhase
+		wantImage      string
+	}{
+		"data past the upgrade":   {snapshotHeight: "150", wantStatus: appsv1.UpgradeSkipped, wantImage: "repo/app:v2"},
+		"data at the upgrade":     {snapshotHeight: "100", wantStatus: appsv1.UpgradeSkipped, wantImage: "repo/app:v2"},
+		"data before the upgrade": {snapshotHeight: "99", wantStatus: appsv1.UpgradeScheduled, wantImage: "repo/app:v1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, snapshotv1.AddToScheme(scheme))
+			node := &appsv1.ChainNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "node-uid"},
+				Spec: appsv1.ChainNodeSpec{
+					App:         appsv1.AppSpec{App: "appd", Image: "repo/app", Version: ptr.To("v1")},
+					Persistence: &appsv1.Persistence{RestoreFromSnapshot: &appsv1.PvcSnapshot{Name: "snapshot"}},
+				},
+				// A governance plan discovered at runtime exists only in status.
+				Status: appsv1.ChainNodeStatus{
+					LatestHeight: 60,
+					Upgrades:     []appsv1.Upgrade{{Height: 100, Image: "repo/app:v2", Status: appsv1.UpgradeScheduled}},
+				},
+			}
+			snapshot := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{
+				Name: "snapshot", Namespace: "default",
+				Annotations: map[string]string{controllers.AnnotationDataHeight: tc.snapshotHeight},
+			}, Status: &snapshotv1.VolumeSnapshotStatus{}}
+			c := fakeclient.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&appsv1.ChainNode{}).
+				WithObjects(node, snapshot).
+				Build()
+			r := &Reconciler{Client: c, APIReader: c, Scheme: scheme, opts: &controllers.ControllerRunOptions{}, recorder: record.NewFakeRecorder(20)}
+			stored := &appsv1.ChainNode{}
+			require.NoError(t, c.Get(t.Context(), types.NamespacedName{Name: "node", Namespace: "default"}, stored))
+
+			_, _, err := r.ensureDataVolume(t.Context(), nil, stored)
+			require.NoError(t, err)
+
+			persisted := &appsv1.ChainNode{}
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(stored), persisted))
+			assert.Equal(t, tc.wantStatus, persisted.Status.Upgrades[0].Status)
+			assert.Equal(t, tc.wantImage, persisted.GetAppImage())
+			container := r.buildAppContainer(persisted, nil, "/ready", corev1.ResourceRequirements{}, nil)
+			assert.Equal(t, tc.wantImage, container.Image)
+		})
+	}
+}
+
 func TestEnsureDataVolumeClearsHaltHoldWhenSnapshotHeightIsUnknown(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, appsv1.AddToScheme(scheme))
