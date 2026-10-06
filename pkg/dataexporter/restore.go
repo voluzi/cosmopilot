@@ -230,7 +230,7 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 			continue
 		}
 		// Archives of restored data may carry an old marker; only this restore can mark completion.
-		if name == restoreMarker {
+		if name == restoreMarker || name == restoreMarker+".tmp" {
 			// Consume its data here so it cannot pass for the end-of-archive blocks below.
 			if _, err := io.Copy(io.Discard, tr); err != nil {
 				return restoreExtractionError(err)
