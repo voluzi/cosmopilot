@@ -120,11 +120,21 @@ func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest s
 		}
 		return syncPath(p)
 	})
+	// The marker appears only complete: a crash mid-write must not leave an empty or partial one,
+	// which a retry would read as a finished restore without a height.
+	pending := marker + ".tmp"
 	if err == nil {
-		err = os.WriteFile(marker, data, 0600)
+		err = os.WriteFile(pending, data, 0600)
 	}
-	if err := errors.Join(err, syncPath(marker), syncPath(dir)); err != nil {
+	if err == nil {
+		err = syncPath(pending)
+	}
+	if err == nil {
+		err = os.Rename(pending, marker)
+	}
+	if err := errors.Join(err, syncPath(dir)); err != nil {
 		// A marker that was not durably committed must not vouch for this volume on retry.
+		_ = os.Remove(pending)
 		_ = os.Remove(marker)
 		return RestoreResult{}, &RestoreError{"target", err}
 	}
