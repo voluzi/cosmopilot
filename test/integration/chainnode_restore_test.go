@@ -37,6 +37,7 @@ var _ = Describe("Exported snapshot initialization", func() {
 		Expect(pod.Spec.InitContainers[0].Name).To(Equal("data-restore"))
 		Expect(pod.Spec.InitContainers[0].Args).To(ContainElement("snapshot.tar.gz"))
 		Expect(pod.Spec.InitContainers[0].Args).NotTo(ContainElement("--sha256"))
+		initialDeadline := *pod.Spec.ActiveDeadlineSeconds
 		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
 		Expect(node.Status.Phase).To(Equal(appsv1.PhaseChainNodeInitData))
 		pvc := GetPVC(ns.Name, node.Name)
@@ -45,6 +46,7 @@ var _ = Describe("Exported snapshot initialization", func() {
 		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: `{"stage":"complete","message":"","height":"150"}`}}}}
 		Expect(c.Status().Update(ctx, pod)).To(Succeed())
 		requestRestoreReconcile(node)
+		Expect(node.Spec.Persistence.InitTimeout).To(BeNil())
 		Eventually(func() string {
 			Expect(c.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
 			return pvc.Annotations[controllers.AnnotationDataInitialized]
@@ -76,6 +78,7 @@ var _ = Describe("Exported snapshot initialization", func() {
 		Expect(pvc.Annotations[controllers.AnnotationDataInitialized]).To(Equal("false"))
 		Eventually(func() error { return c.Get(ctx, initKey, pod) }).Should(Succeed())
 		Expect(pod.Spec.InitContainers[0].Args).To(ContainElement("replacement.tar.zst"))
+		Expect(*pod.Spec.ActiveDeadlineSeconds).To(Equal(initialDeadline))
 		Expect(pvc.Annotations[controllers.AnnotationDataHeight]).To(Equal("0"))
 		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
 		Expect(node.Status.LatestHeight).To(Equal(int64(150)))
@@ -190,18 +193,24 @@ var _ = Describe("Exported snapshot initialization", func() {
 
 func requestRestoreReconcile(node *appsv1.ChainNode) {
 	// Pod status changes do not pass the controller's generation filter; a spec update avoids
-	// waiting for the 30-second poll when observing initialization checkpoints in envtest.
+	// waiting for the 30-second poll without changing the init Pod's execution settings.
 	c := Framework().Client()
 	ctx := Framework().Context()
 	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
 			return err
 		}
-		timeout := "6m"
-		if node.Spec.Persistence.InitTimeout != nil && *node.Spec.Persistence.InitTimeout == timeout {
-			timeout = "5m"
+		if node.Spec.Config == nil {
+			node.Spec.Config = &appsv1.Config{}
 		}
-		node.Spec.Persistence.InitTimeout = ptr.To(timeout)
+		if node.Spec.Config.PodAnnotations == nil {
+			node.Spec.Config.PodAnnotations = map[string]string{}
+		}
+		value := "1"
+		if node.Spec.Config.PodAnnotations["test.cosmopilot.voluzi.com/reconcile"] == value {
+			value = "2"
+		}
+		node.Spec.Config.PodAnnotations["test.cosmopilot.voluzi.com/reconcile"] = value
 		return c.Update(ctx, node)
 	})).To(Succeed())
 }
