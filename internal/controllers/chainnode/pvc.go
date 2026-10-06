@@ -120,8 +120,8 @@ func (r *Reconciler) markDataInitialized(ctx context.Context, chainNode *appsv1.
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			rebaseDataProgress(chainNode, height)
 		}
+		rebaseDataProgress(chainNode, height)
 		chainNode.Status.PvcSize = pvc.Spec.Resources.Requests.Storage().String()
 		// Keep the successful Pod until status and the PVC checkpoint are durable, so a
 		// controller restart can replay the restore result without losing upgrade history.
