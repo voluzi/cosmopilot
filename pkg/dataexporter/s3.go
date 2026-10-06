@@ -230,13 +230,15 @@ func (exporter *S3Exporter) uploadObject(
 	options *UploadOptions,
 	totalSize datasize.ByteSize,
 ) (int64, error) {
+	metadata := map[string]string{"cosmopilot-compression": string(options.Compression)}
+	if options.Height != "" {
+		metadata[HeightMetadataKey] = options.Height
+	}
 	created, err := exporter.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket:      aws.String(bucket),
 		Key:         aws.String(objectName),
 		ContentType: aws.String(options.Compression.ContentType()),
-		Metadata: map[string]string{
-			"cosmopilot-compression": string(options.Compression),
-		},
+		Metadata:    metadata,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("create S3 multipart upload for %q: %w", objectName, err)
@@ -569,10 +571,10 @@ func formatS3DeleteErrors(deleteErrors []types.Error) string {
 	return fmt.Sprint(messages)
 }
 
-func (exporter *S3Exporter) Read(ctx context.Context, bucket, name string) (io.ReadCloser, error) {
+func (exporter *S3Exporter) Read(ctx context.Context, bucket, name string) (io.ReadCloser, map[string]string, error) {
 	object, err := exporter.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(name)})
 	if err != nil {
-		return nil, fmt.Errorf("read S3 object %q from bucket %q: %w", name, bucket, err)
+		return nil, nil, fmt.Errorf("read S3 object %q from bucket %q: %w", name, bucket, err)
 	}
-	return object.Body, nil
+	return object.Body, object.Metadata, nil
 }

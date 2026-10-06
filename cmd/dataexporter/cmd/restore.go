@@ -17,7 +17,11 @@ func newRestoreCmd() *cobra.Command {
 		Short: "Install an exported snapshot in a fresh data directory",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return dataexporter.Restore(cmd.Context(), exporter, args[0], args[1], args[2], digest)
+			result, err := dataexporter.Restore(cmd.Context(), exporter, args[0], args[1], args[2], digest)
+			if err == nil {
+				writeRestoreResult("/dev/termination-log", result)
+			}
+			return err
 		},
 	}
 	command.Flags().StringVar(&digest, "sha256", "", "Optional SHA-256 of the complete stored object")
@@ -31,13 +35,17 @@ func writeRestoreTermination(err error) {
 		result.Stage = restoreErr.Stage
 		result.Message = restoreErr.Err.Error()
 	}
+	writeRestoreResult("/dev/termination-log", result)
+}
+
+func writeRestoreResult(destination string, result dataexporter.RestoreResult) {
 	// Kubernetes truncates a termination message at 4096 bytes, which would leave invalid JSON.
 	data, marshalErr := json.Marshal(result)
-	for marshalErr == nil && len(data) > 4096 {
+	for marshalErr == nil && len(data) > 4096 && len(result.Message) > 0 {
 		result.Message = result.Message[:len(result.Message)/2]
 		data, marshalErr = json.Marshal(result)
 	}
 	if marshalErr == nil {
-		_ = os.WriteFile("/dev/termination-log", data, 0644)
+		_ = os.WriteFile(destination, data, 0644)
 	}
 }

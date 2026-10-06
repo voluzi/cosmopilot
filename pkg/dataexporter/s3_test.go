@@ -120,6 +120,7 @@ func TestS3UploadSplitsOversizedArchives(t *testing.T) {
 	exporter := newS3Exporter(client)
 	if err := exporter.Upload(dir, "snapshots", "osmosis-1",
 		WithCompression(CompressionNone),
+		WithHeight("150"),
 		WithSizeLimit("1B"),
 		WithPartSize("6MB"),
 		WithChunkSize("6MB"),
@@ -131,6 +132,11 @@ func TestS3UploadSplitsOversizedArchives(t *testing.T) {
 	want := []string{"osmosis-1-part-00000000.tar", "osmosis-1-part-00000001.tar"}
 	if fmt.Sprint(names) != fmt.Sprint(want) {
 		t.Fatalf("completed objects = %v, want %v", names, want)
+	}
+	for _, name := range names {
+		if client.metadata[name]["cosmopilot-height"] != "150" {
+			t.Fatalf("missing height on %s: %v", name, client.metadata[name])
+		}
 	}
 	combined := append(client.mustCompletedObject(t, want[0]), client.mustCompletedObject(t, want[1])...)
 	files := readTarFiles(t, bytes.NewReader(combined))
@@ -346,6 +352,7 @@ func TestS3DeleteReportsPerObjectFailures(t *testing.T) {
 type fakeS3Client struct {
 	mu            sync.Mutex
 	parts         map[string]map[int32][]byte
+	metadata      map[string]map[string]string
 	contentTypes  map[string]string
 	completed     map[string][]byte
 	listedObjects []types.Object
@@ -362,6 +369,7 @@ type fakeS3Client struct {
 func newFakeS3Client() *fakeS3Client {
 	return &fakeS3Client{
 		parts:        make(map[string]map[int32][]byte),
+		metadata:     make(map[string]map[string]string),
 		contentTypes: make(map[string]string),
 		completed:    make(map[string][]byte),
 		diskBacked:   true,
@@ -375,6 +383,7 @@ func (f *fakeS3Client) CreateMultipartUpload(_ context.Context, input *s3.Create
 	uploadID := fmt.Sprintf("upload-%d", f.nextUploadID)
 	f.parts[uploadID] = make(map[int32][]byte)
 	f.contentTypes[aws.ToString(input.Key)] = aws.ToString(input.ContentType)
+	f.metadata[aws.ToString(input.Key)] = input.Metadata
 	return &s3.CreateMultipartUploadOutput{UploadId: aws.String(uploadID)}, nil
 }
 
@@ -529,5 +538,32 @@ func (f *fakeS3Client) GetObject(_ context.Context, input *s3.GetObjectInput, _ 
 	if !ok {
 		return nil, fmt.Errorf("object not found")
 	}
-	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(data))}, nil
+	return &s3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(data)), Metadata: f.metadata[aws.ToString(input.Key)]}, nil
+}
+
+func TestS3UploadHeightMetadata(t *testing.T) {
+	for _, height := range []string{"", "0", "150"} {
+		t.Run("height="+height, func(t *testing.T) {
+			client := newFakeS3Client()
+			exporter := newS3Exporter(client)
+			if err := exporter.Upload(t.TempDir(), "bucket", "snapshot", WithHeight(height)); err != nil {
+				t.Fatal(err)
+			}
+			metadata := client.metadata["snapshot.tar.gz"]
+			if metadata["cosmopilot-compression"] != "gzip" {
+				t.Fatalf("compression metadata: %v", metadata)
+			}
+			if got, exists := metadata["cosmopilot-height"]; got != height || exists != (height != "") {
+				t.Fatalf("height metadata: %v", metadata)
+			}
+			reader, readMetadata, err := exporter.Read(t.Context(), "bucket", "snapshot.tar.gz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			if fmt.Sprint(readMetadata) != fmt.Sprint(metadata) {
+				t.Fatalf("read metadata: %v", readMetadata)
+			}
+		})
+	}
 }

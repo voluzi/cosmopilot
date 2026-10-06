@@ -19,6 +19,7 @@ func newUploadCmd(defaultChunkSize string) *cobra.Command {
 	var concurrentUploadJobs int
 	var bufferSize string
 	var compressionName string
+	var height string
 
 	command := &cobra.Command{
 		Use:   "upload <dir> <bucket> <name>",
@@ -33,6 +34,7 @@ func newUploadCmd(defaultChunkSize string) *cobra.Command {
 			start := time.Now()
 			if err := exporter.Upload(dir, bucket, name,
 				dataexporter.WithCompression(compression),
+				dataexporter.WithHeight(height),
 				dataexporter.WithChunkSize(chunkSize),
 				dataexporter.WithSizeLimit(sizeLimit),
 				dataexporter.WithPartSize(partSize),
@@ -47,6 +49,7 @@ func newUploadCmd(defaultChunkSize string) *cobra.Command {
 		},
 	}
 
+	command.Flags().StringVar(&height, "height", environ.GetString("DATA_HEIGHT", ""), "Archived dataset block height")
 	command.Flags().StringVar(&compressionName, "compression",
 		environ.GetString("COMPRESSION", string(dataexporter.CompressionGzip)),
 		"Archive compression: none, gzip, zstd, or lz4",

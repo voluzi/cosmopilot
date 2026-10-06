@@ -20,6 +20,7 @@ const (
 
 // UploadOptions configures the behavior of data uploads to cloud storage.
 type UploadOptions struct {
+	Height         string
 	Compression    Compression
 	PartSize       datasize.ByteSize
 	ChunkSize      datasize.ByteSize
@@ -50,6 +51,11 @@ func defaultS3UploadOptions() *UploadOptions {
 
 // UploadOption is a functional option for configuring uploads.
 type UploadOption func(*UploadOptions)
+
+// WithHeight records the archived dataset height in object metadata.
+func WithHeight(height string) UploadOption {
+	return func(o *UploadOptions) { o.Height = height }
+}
 
 // WithCompression selects the archive compression format.
 func WithCompression(compression Compression) UploadOption {
