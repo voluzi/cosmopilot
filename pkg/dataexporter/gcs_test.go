@@ -99,6 +99,7 @@ func TestGcsUploadHeightMetadata(t *testing.T) {
 		{"multiple composition rounds", "1KB", "1MB", "5TB"},
 		{"split composition", "1KB", "2KB", "1B"},
 		{"split copy", "4KB", "4KB", "1B"},
+		{"single copy", "1MB", "1MB", "1B"},
 	} {
 		for _, height := range []string{"", "0", "150"} {
 			t.Run(tc.name+"/height="+height, func(t *testing.T) {

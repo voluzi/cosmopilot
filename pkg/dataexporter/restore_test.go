@@ -142,7 +142,7 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var archive bytes.Buffer
 			tw := tar.NewWriter(&archive)
-			for _, entry := range []struct{ name, data string }{{name, "old completion marker"}, {"db/state", "block data"}} {
+			for _, entry := range []struct{ name, data string }{{name, `{"stage":"complete","message":"","height":"999"}`}, {"db/state", "block data"}} {
 				require.NoError(t, tw.WriteHeader(&tar.Header{Name: entry.name, Typeflag: tar.TypeReg, Mode: 0600, Size: int64(len(entry.data))}))
 				_, err := tw.Write([]byte(entry.data))
 				require.NoError(t, err)
@@ -150,7 +150,7 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 			require.NoError(t, tw.Close())
 			for _, digest := range []string{"", strings.Repeat("0", 64)} {
 				target := t.TempDir()
-				_, err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", digest)
+				result, err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", digest)
 				if digest != "" {
 					var stage *RestoreError
 					require.ErrorAs(t, err, &stage)
@@ -160,6 +160,7 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 					continue
 				}
 				require.NoError(t, err)
+				require.Empty(t, result.Height)
 				data, err := os.ReadFile(filepath.Join(target, "db/state"))
 				require.NoError(t, err)
 				require.Equal(t, "block data", string(data))

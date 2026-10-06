@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
 	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
 )
 
