@@ -75,8 +75,10 @@ func (r *Reconciler) buildDataInitPod(app *chainutils.App, chainNode *appsv1.Cha
 }
 
 func restoredDataHeight(chainNode *appsv1.ChainNode, pod *corev1.Pod) (int64, error) {
-	if height := chainNode.Spec.Persistence.Restore.Height; height != nil {
-		return *height, nil
+	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil {
+		if height := chainNode.Spec.Persistence.Restore.Height; height != nil {
+			return *height, nil
+		}
 	}
 	for _, status := range pod.Status.InitContainerStatuses {
 		terminated := status.State.Terminated

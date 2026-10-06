@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
@@ -112,7 +113,9 @@ func (r *Reconciler) markDataInitialized(ctx context.Context, chainNode *appsv1.
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC %s after initialization: %w", pvc.GetName(), err)
 	}
 	if pvc.Annotations[controllers.AnnotationDataInitialized] != controllers.StringValueTrue {
-		restoring := chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && !chainNode.ShouldRestoreFromSnapshot()
+		restoring := slices.ContainsFunc(initPod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
+			return status.Name == "data-restore" && status.State.Terminated != nil && status.State.Terminated.ExitCode == 0
+		})
 		var height int64
 		if restoring {
 			var err error
@@ -136,9 +139,7 @@ func (r *Reconciler) markDataInitialized(ctx context.Context, chainNode *appsv1.
 		if pvc.Annotations == nil {
 			pvc.Annotations = map[string]string{}
 		}
-		if restoring {
-			pvc.Annotations[controllers.AnnotationDataHeight] = strconv.FormatInt(height, 10)
-		}
+		pvc.Annotations[controllers.AnnotationDataHeight] = strconv.FormatInt(height, 10)
 		pvc.Annotations[controllers.AnnotationDataInitialized] = controllers.StringValueTrue
 		if err := r.Update(ctx, pvc); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update PVC %s with initialized annotation: %w", pvc.GetName(), err)

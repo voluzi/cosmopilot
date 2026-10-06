@@ -346,16 +346,18 @@ func TestRestoreReportedHeightSelectsNodeImage(t *testing.T) {
 				explicit      *int64
 				height        int64
 				image         string
+				removeRestore bool
 			}{
-				{"metadata", `{"stage":"complete","message":"","height":"150"}`, nil, 150, "app:v2"},
-				{"metadata zero", `{"stage":"complete","message":"","height":"0"}`, nil, 0, "app:v1"},
-				{"metadata overridden", `{"stage":"complete","message":"","height":"250"}`, ptr.To(int64(150)), 150, "app:v2"},
-				{"explicit zero", `{"stage":"complete","message":"","height":"250"}`, ptr.To(int64(0)), 0, "app:v1"},
-				{"invalid metadata overridden", `not JSON`, ptr.To(int64(150)), 150, "app:v2"},
-				{"new image old object", `{"stage":"complete","message":""}`, nil, 0, "app:v1"},
-				{"old image", "", nil, 0, "app:v1"},
-				{"new image old object explicit", `{"stage":"complete","message":""}`, ptr.To(int64(150)), 150, "app:v2"},
-				{"old image explicit", "", ptr.To(int64(150)), 150, "app:v2"},
+				{"metadata", `{"stage":"complete","message":"","height":"150"}`, nil, 150, "app:v2", false},
+				{"metadata zero", `{"stage":"complete","message":"","height":"0"}`, nil, 0, "app:v1", false},
+				{"metadata overridden", `{"stage":"complete","message":"","height":"250"}`, ptr.To(int64(150)), 150, "app:v2", false},
+				{"explicit zero", `{"stage":"complete","message":"","height":"250"}`, ptr.To(int64(0)), 0, "app:v1", false},
+				{"invalid metadata overridden", `not JSON`, ptr.To(int64(150)), 150, "app:v2", false},
+				{"new image old object", `{"stage":"complete","message":""}`, nil, 0, "app:v1", false},
+				{"old image", "", nil, 0, "app:v1", false},
+				{"new image old object explicit", `{"stage":"complete","message":""}`, ptr.To(int64(150)), 150, "app:v2", false},
+				{"old image explicit", "", ptr.To(int64(150)), 150, "app:v2", false},
+				{"restore removed while running", `{"stage":"complete","message":"","height":"150"}`, nil, 150, "app:v2", true},
 			} {
 				t.Run(fmt.Sprintf("managed=%t/replacement=%t/%s", managed, replacement, tc.name), func(t *testing.T) {
 					node := restoreNode()
@@ -387,6 +389,14 @@ func TestRestoreReportedHeightSelectsNodeImage(t *testing.T) {
 					}
 					pod := &corev1.Pod{}
 					require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: node.Namespace, Name: node.Name + "-init-data"}, pod))
+					if tc.removeRestore {
+						pod.Status.Phase = corev1.PodRunning
+						require.NoError(t, r.Status().Update(t.Context(), pod))
+						node.Spec.Persistence.Restore = nil
+						require.NoError(t, r.Update(t.Context(), node))
+						_, err = r.initializeData(t.Context(), nil, node, pvc)
+						require.NoError(t, err)
+					}
 					pod.Status.Phase = corev1.PodSucceeded
 					pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: tc.message}}}}
 					require.NoError(t, r.Status().Update(t.Context(), pod))
@@ -399,6 +409,7 @@ func TestRestoreReportedHeightSelectsNodeImage(t *testing.T) {
 					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
 					require.Equal(t, fmt.Sprint(tc.height), pvc.Annotations[controllers.AnnotationDataHeight])
 					require.Equal(t, "true", pvc.Annotations[controllers.AnnotationDataInitialized])
+					require.Equal(t, tc.image, node.GetAppImage())
 					require.NoError(t, r.ensureUpgrades(t.Context(), node, false))
 					require.Equal(t, tc.image, r.buildAppContainer(node, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
 					if replacement && tc.height > 0 {
@@ -421,14 +432,19 @@ func TestRestoreRemovalRebasesReplacementVolume(t *testing.T) {
 		name               string
 		removeWhileRunning bool
 		restoreSucceeds    bool
+		explicit           *int64
 	}{
 		{name: "after failed restore"},
 		{name: "while running before failure", removeWhileRunning: true},
 		{name: "while running before success", removeWhileRunning: true, restoreSucceeds: true},
+		{name: "after failed explicit restore", explicit: ptr.To(int64(150))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := restoreNode()
-			node.Spec.Persistence.Restore.Snapshot.Name = "missing-object.tar"
+			if !tc.restoreSucceeds {
+				node.Spec.Persistence.Restore.Snapshot.Name = "missing-object.tar"
+			}
+			node.Spec.Persistence.Restore.Height = tc.explicit
 			node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}, {Height: 200, Image: "app:v3"}}
 			node.Status.LatestHeight = 300
 			node.Status.AppImage = "app:v3"
@@ -441,7 +457,11 @@ func TestRestoreRemovalRebasesReplacementVolume(t *testing.T) {
 			require.NoError(t, err)
 			pvc, _, err = r.ensureDataVolume(t.Context(), app, node)
 			require.NoError(t, err)
-			require.Equal(t, int64(300), node.Status.LatestHeight)
+			initialHeight := int64(300)
+			if tc.explicit != nil {
+				initialHeight = *tc.explicit
+			}
+			require.Equal(t, initialHeight, node.Status.LatestHeight)
 			pod := &corev1.Pod{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: node.Namespace, Name: node.Name + "-init-data"}, pod))
 			require.Equal(t, "data-restore", pod.Spec.InitContainers[0].Name)
@@ -479,16 +499,24 @@ func TestRestoreRemovalRebasesReplacementVolume(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), node))
-			require.Zero(t, node.Status.LatestHeight)
+			height, image := int64(0), "app:v1"
+			if tc.restoreSucceeds {
+				height, image = 150, "app:v2"
+			}
+			require.Equal(t, height, node.Status.LatestHeight)
 			require.Empty(t, node.Status.AppImage)
 			require.Empty(t, node.Status.AppVersion)
 			for _, upgrade := range node.Status.Upgrades {
-				require.Equal(t, appsv1.UpgradeScheduled, upgrade.Status)
+				phase := appsv1.UpgradeScheduled
+				if tc.restoreSucceeds && upgrade.Height <= height {
+					phase = appsv1.UpgradeCompleted
+				}
+				require.Equal(t, phase, upgrade.Status)
 			}
-			require.Equal(t, "app:v1", r.buildAppContainer(node, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
+			require.Equal(t, image, r.buildAppContainer(node, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
 			require.Equal(t, "true", pvc.Annotations[controllers.AnnotationDataInitialized])
-			require.Equal(t, "0", pvc.Annotations[controllers.AnnotationDataHeight])
+			require.Equal(t, fmt.Sprint(height), pvc.Annotations[controllers.AnnotationDataHeight])
 			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
 		})
 	}
