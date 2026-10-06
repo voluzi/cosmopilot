@@ -309,6 +309,13 @@ persistence:
 Cloud Storage (GCS), Amazon S3, or an S3-compatible object store such as MinIO or
 DigitalOcean Spaces. Archives can be uncompressed or use gzip, zstd, or lz4.
 
+With dataexporter 2.2.0 or later, final S3 and GCS objects record the source VolumeSnapshot's
+`cosmopilot.voluzi.com/data-height` annotation as the decimal string metadata value
+`cosmopilot-height`, when available. Every final part of a split export receives the same height;
+split restoration remains unsupported. Restores can discover this height automatically or override
+it with `persistence.restore.height`. Older objects and dataexporter images retain the existing
+behavior without a known height.
+
 To enable this functionality, configure the `.persistence.snapshots.exportTarball` field.
 
 ### Configuration

@@ -87,14 +87,20 @@ configuration, request deletion of its data PVC with `kubectl delete pvc <node-n
 then delete the node Pod and any other Pods mounting that claim so PVC protection can release it.
 Cosmopilot recreates the volume and initializes it from
 the configured object. Changing or removing restore configuration does not affect an initialized
-volume until it is recreated. Set optional `restore.height` to the archive's
-block height: Cosmopilot rebases upgrade progress and selects the application image at that height,
-as it does for a VolumeSnapshot. Without it, the node starts on `spec.app.image`/`version`.
+volume until it is recreated. Dataexporter 2.2.0 or later reports the archive's block height from
+S3/GCS object metadata (`cosmopilot-height`). Cosmopilot rebases upgrade progress and selects the
+application image at that height, as it does for a VolumeSnapshot. Optional `restore.height`
+overrides the reported height, including an explicit zero. Without metadata, or with dataexporter
+2.1.0, an omitted `restore.height` retains the existing zero-height behavior and base application image.
+A nonnumeric `cosmopilot-height` makes initialization fail until `restore.height` is set.
 A `restore.height` higher than the archive's actual height leaves `status.latestHeight` and the
 volume's height annotation at that value until the chain passes it, and starts the node on an
 application binary newer than the data.
-On a new node, `additionalInitCommands` without an explicit `image` still run on
-`spec.app.image`.
+On new nodes, `additionalInitCommands` without an explicit `image` run on `spec.app.image` even
+with `restore.height`, because upgrade state is not yet available; when height comes from object
+metadata, they also run on `spec.app.image` because the height is unknown when the single init Pod
+is built, so set the command's `image` if it needs the upgraded binary (on replacement volumes,
+an explicit `restore.height` can also select it from existing upgrade state).
 PVC deletion discards its current data.
 
 ```yaml
@@ -102,7 +108,7 @@ persistence:
   size: 500Gi
   initTimeout: 2h
   restore:
-    # Optional: block height of the archived data, used to select the application image.
+    # Optional: override the height reported from object metadata.
     height: 12345678
     snapshot:
       provider: s3
@@ -175,10 +181,30 @@ is five minutes, and Kubernetes kills the init pod at that deadline; increase it
 to avoid an interrupted extraction that requires recreating the PVC.
 After extraction and checksum verification succeed, the helper writes the reserved hidden file
 `.cosmopilot-restore-complete` at the data-volume root, where the application ignores it and the
-exporter excludes it from archives. On retry, that marker skips downloading and extraction, so a
+exporter excludes it from archives. The marker retains the successful result and height, so a retry
+reports the original height without storage access. An empty marker from dataexporter 2.1.0 means
+successful restoration without a known height. On retry, the marker skips downloading and extraction, so a
 later additional init command failure, timeout, or lost pod does not discard the completed restore.
 After installation, ordinary node startup, syncing, and diagnostics apply. There is no automatic
 compatibility selection, traffic cutover, health-gated adoption, or rollback.
+
+With the new operator, compatibility is:
+
+| Object height | Dataexporter | `restore.height` | Effective height |
+| --- | --- | --- | --- |
+| Present | 2.1.0 | Set | Explicit height |
+| Present | 2.1.0 | Unset | Zero |
+| Absent | 2.1.0 | Set | Explicit height |
+| Absent | 2.1.0 | Unset | Zero |
+| Present | 2.2.0+ | Set | Explicit height |
+| Present | 2.2.0+ | Unset | Object metadata |
+| Absent | 2.2.0+ | Set | Explicit height |
+| Absent | 2.2.0+ | Unset | Zero |
+
+Older dataexporter images ignore the upload's `DATA_HEIGHT` environment variable and continue
+exporting without height metadata. Restore uses no new flags. A new dataexporter also works with
+an older operator, which omits upload height and ignores successful restore termination messages.
+Height discovery adds no archive manifest or CRD fields.
 
 For validators signing with a local key, the archive carries the signing state from the moment it
 was taken: never run the restored node alongside another node using the same key, and do not

@@ -244,7 +244,7 @@ func TestRestoreReplacementVolumeRebasesApplicationAtArchiveHeight(t *testing.T)
 		image  string
 		phases []appsv1.UpgradePhase
 	}{
-		{"unset", nil, "app:v1", []appsv1.UpgradePhase{appsv1.UpgradeScheduled, appsv1.UpgradeScheduled}},
+		{"unset", nil, "app:v3", []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeCompleted}},
 		{"zero", ptr.To(int64(0)), "app:v1", []appsv1.UpgradePhase{appsv1.UpgradeScheduled, appsv1.UpgradeScheduled}},
 		{"between upgrades", ptr.To(int64(150)), "app:v2", []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeScheduled}},
 		{"after upgrades", ptr.To(int64(250)), "app:v3", []appsv1.UpgradePhase{appsv1.UpgradeCompleted, appsv1.UpgradeCompleted}},
@@ -268,7 +268,7 @@ func TestRestoreReplacementVolumeRebasesApplicationAtArchiveHeight(t *testing.T)
 			require.Positive(t, result.RequeueAfter)
 			current := &appsv1.ChainNode{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), current))
-			height := int64(0)
+			height := int64(300)
 			if tc.height != nil {
 				height = *tc.height
 			}
@@ -280,7 +280,11 @@ func TestRestoreReplacementVolumeRebasesApplicationAtArchiveHeight(t *testing.T)
 			require.Equal(t, "false", pvc.Annotations[controllers.AnnotationDataInitialized])
 			pod := &corev1.Pod{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKey{Name: node.Name + "-init-data", Namespace: node.Namespace}, pod))
-			require.Equal(t, tc.image, pod.Spec.InitContainers[1].Image)
+			commandImage := tc.image
+			if tc.height == nil {
+				commandImage = "app:v1"
+			}
+			require.Equal(t, commandImage, pod.Spec.InitContainers[1].Image)
 		})
 	}
 	for _, managed := range []bool{false, true} {
@@ -332,4 +336,264 @@ func TestRestoreReplacementVolumeRebasesApplicationAtArchiveHeight(t *testing.T)
 		})
 	}
 
+}
+
+func TestRestoreReportedHeightSelectsNodeImage(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		for _, replacement := range []bool{false, true} {
+			for _, tc := range []struct {
+				name, message string
+				explicit      *int64
+				height        int64
+				image         string
+				removeRestore bool
+			}{
+				{"metadata", `{"stage":"complete","message":"","height":"150"}`, nil, 150, "app:v2", false},
+				{"metadata zero", `{"stage":"complete","message":"","height":"0"}`, nil, 0, "app:v1", false},
+				{"metadata overridden", `{"stage":"complete","message":"","height":"250"}`, ptr.To(int64(150)), 150, "app:v2", false},
+				{"explicit zero", `{"stage":"complete","message":"","height":"250"}`, ptr.To(int64(0)), 0, "app:v1", false},
+				{"invalid metadata overridden", `not JSON`, ptr.To(int64(150)), 150, "app:v2", false},
+				{"new image old object", `{"stage":"complete","message":""}`, nil, 0, "app:v1", false},
+				{"old image", "", nil, 0, "app:v1", false},
+				{"new image old object explicit", `{"stage":"complete","message":""}`, ptr.To(int64(150)), 150, "app:v2", false},
+				{"old image explicit", "", ptr.To(int64(150)), 150, "app:v2", false},
+				{"restore removed while running", `{"stage":"complete","message":"","height":"150"}`, nil, 150, "app:v2", true},
+			} {
+				t.Run(fmt.Sprintf("managed=%t/replacement=%t/%s", managed, replacement, tc.name), func(t *testing.T) {
+					node := restoreNode()
+					node.Spec.Persistence.Restore.Height = tc.explicit
+					node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}, {Height: 200, Image: "app:v3"}}
+					if managed {
+						set := &appsv1.ChainNodeSet{Spec: appsv1.ChainNodeSetSpec{App: node.Spec.App}}
+						set.Spec.App.Upgrades = nil
+						set.Status.Upgrades = []appsv1.Upgrade{{Height: 100, Image: "app:v2", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeCompleted}, {Height: 200, Image: "app:v3", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeScheduled}}
+						node.Spec.App = set.GetAppSpecWithUpgrades()
+						node.OwnerReferences = []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNodeSet", Name: "set", UID: "set-uid", Controller: ptr.To(true)}}
+					}
+					if replacement {
+						node.Status.LatestHeight = 300
+						node.Status.AppImage = "app:v3"
+						node.Status.AppVersion = "v3"
+						node.Status.Upgrades = []appsv1.Upgrade{{Height: 50, Image: "app:historical", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeCompleted}, {Height: 75, Image: "app:skipped", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeSkipped}, {Height: 200, Image: "app:v3", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeCompleted}}
+					}
+					r := restoreReconciler(t, node)
+					app, err := r.newApp(node)
+					require.NoError(t, err)
+					pvc, _, err := r.ensureDataVolume(t.Context(), app, node)
+					require.NoError(t, err)
+					if replacement && tc.explicit == nil {
+						require.Equal(t, int64(300), node.Status.LatestHeight)
+						require.Equal(t, appsv1.UpgradeCompleted, node.Status.Upgrades[0].Status)
+						require.Equal(t, appsv1.UpgradeSkipped, node.Status.Upgrades[1].Status)
+						require.Equal(t, "0", pvc.Annotations[controllers.AnnotationDataHeight])
+					}
+					pod := &corev1.Pod{}
+					require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: node.Namespace, Name: node.Name + "-init-data"}, pod))
+					if tc.removeRestore {
+						pod.Status.Phase = corev1.PodRunning
+						require.NoError(t, r.Status().Update(t.Context(), pod))
+						node.Spec.Persistence.Restore = nil
+						require.NoError(t, r.Update(t.Context(), node))
+						_, err = r.initializeData(t.Context(), nil, node, pvc)
+						require.NoError(t, err)
+					}
+					pod.Status.Phase = corev1.PodSucceeded
+					pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: tc.message}}}}
+					require.NoError(t, r.Status().Update(t.Context(), pod))
+					_, err = r.initializeData(t.Context(), nil, node, pvc)
+					require.NoError(t, err)
+					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), node))
+					require.Equal(t, tc.height, node.Status.LatestHeight)
+					require.Empty(t, node.Status.AppImage)
+					require.Empty(t, node.Status.AppVersion)
+					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
+					require.Equal(t, fmt.Sprint(tc.height), pvc.Annotations[controllers.AnnotationDataHeight])
+					require.Equal(t, "true", pvc.Annotations[controllers.AnnotationDataInitialized])
+					require.Equal(t, tc.image, node.GetAppImage())
+					require.NoError(t, r.ensureUpgrades(t.Context(), node, false))
+					require.Equal(t, tc.image, r.buildAppContainer(node, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
+					if replacement && tc.height > 0 {
+						require.Equal(t, appsv1.UpgradeCompleted, node.Status.Upgrades[0].Status)
+						require.Equal(t, appsv1.UpgradeSkipped, node.Status.Upgrades[1].Status)
+					}
+					node.Status.LatestHeight = 400
+					require.NoError(t, r.Status().Update(t.Context(), node))
+					_, _, err = r.ensureDataVolume(t.Context(), nil, node)
+					require.NoError(t, err)
+					require.Equal(t, int64(400), node.Status.LatestHeight)
+				})
+			}
+		}
+	}
+}
+
+func TestRestoreRemovalRebasesReplacementVolume(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		removeWhileRunning bool
+		restoreSucceeds    bool
+		explicit           *int64
+	}{
+		{name: "after failed restore"},
+		{name: "while running before failure", removeWhileRunning: true},
+		{name: "while running before success", removeWhileRunning: true, restoreSucceeds: true},
+		{name: "after failed explicit restore", explicit: ptr.To(int64(150))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := restoreNode()
+			if !tc.restoreSucceeds {
+				node.Spec.Persistence.Restore.Snapshot.Name = "missing-object.tar"
+			}
+			node.Spec.Persistence.Restore.Height = tc.explicit
+			node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}, {Height: 200, Image: "app:v3"}}
+			node.Status.LatestHeight = 300
+			node.Status.AppImage = "app:v3"
+			node.Status.AppVersion = "v3"
+			node.Status.Upgrades = []appsv1.Upgrade{{Height: 100, Image: "app:v2", Source: appsv1.ManualUpgrade, Status: appsv1.UpgradeCompleted}, {Height: 200, Image: "app:v3", Source: appsv1.ManualUpgrade, Status: appsv1.UpgradeCompleted}}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, Annotations: map[string]string{controllers.AnnotationDataInitialized: "true", controllers.AnnotationDataHeight: "300"}}}
+			r := restoreReconciler(t, node, pvc)
+			require.NoError(t, r.Delete(t.Context(), pvc))
+			app, err := r.newApp(node)
+			require.NoError(t, err)
+			pvc, _, err = r.ensureDataVolume(t.Context(), app, node)
+			require.NoError(t, err)
+			initialHeight := int64(300)
+			if tc.explicit != nil {
+				initialHeight = *tc.explicit
+			}
+			require.Equal(t, initialHeight, node.Status.LatestHeight)
+			pod := &corev1.Pod{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: node.Namespace, Name: node.Name + "-init-data"}, pod))
+			require.Equal(t, "data-restore", pod.Spec.InitContainers[0].Name)
+			if tc.removeWhileRunning {
+				pod.Status.Phase = corev1.PodRunning
+				require.NoError(t, r.Status().Update(t.Context(), pod))
+				node.Spec.Persistence.Restore = nil
+				require.NoError(t, r.Update(t.Context(), node))
+				_, err = r.initializeData(t.Context(), nil, node, pvc)
+				require.NoError(t, err)
+				require.Equal(t, int64(300), node.Status.LatestHeight)
+			}
+			pod.Status.Phase = corev1.PodFailed
+			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: `{"stage":"download","message":"object not found"}`}}}}
+			if tc.restoreSucceeds {
+				pod.Status.Phase = corev1.PodSucceeded
+				pod.Status.InitContainerStatuses[0].State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 0, Message: `{"stage":"complete","message":"","height":"150"}`}
+			}
+			require.NoError(t, r.Status().Update(t.Context(), pod))
+			_, err = r.initializeData(t.Context(), nil, node, pvc)
+			require.NoError(t, err)
+			if !tc.restoreSucceeds {
+				node.Spec.Persistence.Restore = nil
+				require.NoError(t, r.Update(t.Context(), node))
+				app, err = r.newApp(node)
+				require.NoError(t, err)
+				_, _, err = r.ensureDataVolume(t.Context(), app, node)
+				require.NoError(t, err)
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+				require.Equal(t, "app", pod.Spec.InitContainers[0].Name)
+				pod.Status.Phase = corev1.PodSucceeded
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "app", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}}}
+				require.NoError(t, r.Status().Update(t.Context(), pod))
+				_, err = r.initializeData(t.Context(), nil, node, pvc)
+				require.NoError(t, err)
+			}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(node), node))
+			height, image := int64(0), "app:v1"
+			if tc.restoreSucceeds {
+				height, image = 150, "app:v2"
+			}
+			require.Equal(t, height, node.Status.LatestHeight)
+			require.Empty(t, node.Status.AppImage)
+			require.Empty(t, node.Status.AppVersion)
+			for _, upgrade := range node.Status.Upgrades {
+				phase := appsv1.UpgradeScheduled
+				if tc.restoreSucceeds && upgrade.Height <= height {
+					phase = appsv1.UpgradeCompleted
+				}
+				require.Equal(t, phase, upgrade.Status)
+			}
+			require.Equal(t, image, r.buildAppContainer(node, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
+			require.Equal(t, "true", pvc.Annotations[controllers.AnnotationDataInitialized])
+			require.Equal(t, fmt.Sprint(height), pvc.Annotations[controllers.AnnotationDataHeight])
+			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+		})
+	}
+}
+
+func TestRestoreCompletionResumesAfterPersistenceFailures(t *testing.T) {
+	for _, failure := range []string{"height status", "upgrade status", "PVC checkpoint", "Pod deletion"} {
+		t.Run(failure, func(t *testing.T) {
+			node := restoreNode()
+			node.Status.Phase = appsv1.PhaseChainNodeInitData
+			node.Spec.App.Upgrades = []appsv1.UpgradeSpec{{Height: 100, Image: "app:v2"}}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, Annotations: map[string]string{controllers.AnnotationDataInitialized: "false"}}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded, InitContainerStatuses: []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: `{"stage":"complete","message":"","height":"150"}`}}}}}}
+			r := restoreReconciler(t, node, pvc, pod)
+			original := r.Client.(client.WithWatch)
+			statusUpdates := 0
+			r.Client = interceptor.NewClient(original, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					if _, ok := obj.(*appsv1.ChainNode); ok && sub == "status" {
+						statusUpdates++
+						if failure == "height status" || failure == "upgrade status" && statusUpdates == 2 {
+							return errors.New("status unavailable")
+						}
+					}
+					return c.SubResource(sub).Update(ctx, obj, opts...)
+				},
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*corev1.PersistentVolumeClaim); ok && failure == "PVC checkpoint" {
+						return errors.New("PVC unavailable")
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if failure == "Pod deletion" {
+						return errors.New("Pod deletion unavailable")
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			})
+			_, err := r.initializeData(t.Context(), nil, node, pvc)
+			require.Error(t, err)
+			require.NoError(t, original.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
+			require.NoError(t, original.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
+			if failure == "Pod deletion" {
+				require.Equal(t, "true", pvc.Annotations[controllers.AnnotationDataInitialized])
+				require.Equal(t, "150", pvc.Annotations[controllers.AnnotationDataHeight])
+			} else {
+				require.Equal(t, "false", pvc.Annotations[controllers.AnnotationDataInitialized])
+			}
+			current := &appsv1.ChainNode{}
+			require.NoError(t, original.Get(t.Context(), client.ObjectKeyFromObject(node), current))
+			fresh := &Reconciler{Client: original, APIReader: original, Scheme: r.Scheme, recorder: record.NewFakeRecorder(30), opts: r.opts}
+			_, _, err = fresh.ensureDataVolume(t.Context(), nil, current)
+			require.NoError(t, err)
+			require.NoError(t, original.Get(t.Context(), client.ObjectKeyFromObject(current), current))
+			require.Equal(t, int64(150), current.Status.LatestHeight)
+			require.Equal(t, "app:v2", fresh.buildAppContainer(current, nil, "/ready", corev1.ResourceRequirements{}, nil).Image)
+			require.NoError(t, original.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
+			require.Equal(t, "true", pvc.Annotations[controllers.AnnotationDataInitialized])
+			require.Equal(t, "150", pvc.Annotations[controllers.AnnotationDataHeight])
+			require.True(t, apierrors.IsNotFound(original.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+		})
+	}
+}
+
+func TestRestoreMalformedResultRetainsSuccessEvidence(t *testing.T) {
+	for _, message := range []string{`not JSON`, `{"stage":"complete","height":"invalid"}`, `{"stage":"extraction","message":"failed"}`} {
+		t.Run(message, func(t *testing.T) {
+			node := restoreNode()
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: node.Name, Namespace: node.Namespace, Annotations: map[string]string{controllers.AnnotationDataInitialized: "false"}}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: node.Name + "-init-data", Namespace: node.Namespace}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded, InitContainerStatuses: []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: message}}}}}}
+			r := restoreReconciler(t, node, pvc, pod)
+			_, err := r.initializeData(t.Context(), nil, node, pvc)
+			require.Error(t, err)
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
+			require.Equal(t, "false", pvc.Annotations[controllers.AnnotationDataInitialized])
+		})
+	}
 }

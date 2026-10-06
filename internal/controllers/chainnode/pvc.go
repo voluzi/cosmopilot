@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
@@ -108,38 +109,46 @@ func (r *Reconciler) initializeData(ctx context.Context, app *chainutils.App, ch
 
 // markDataInitialized marks the PVC as initialized and cleans up the init pod.
 func (r *Reconciler) markDataInitialized(ctx context.Context, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim, initPod *corev1.Pod) (ctrl.Result, error) {
-	// Get the updated PVC for updating annotation
 	if err := r.Get(ctx, client.ObjectKeyFromObject(pvc), pvc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC %s after initialization: %w", pvc.GetName(), err)
 	}
-
-	// Mark PVC as initialized
-	if pvc.Annotations == nil {
-		pvc.Annotations = map[string]string{}
+	if pvc.Annotations[controllers.AnnotationDataInitialized] != controllers.StringValueTrue {
+		restoring := slices.ContainsFunc(initPod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
+			return status.Name == "data-restore" && status.State.Terminated != nil && status.State.Terminated.ExitCode == 0
+		})
+		var height int64
+		if restoring {
+			var err error
+			height, err = restoredDataHeight(chainNode, initPod)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		rebaseDataProgress(chainNode, height)
+		chainNode.Status.PvcSize = pvc.Spec.Resources.Requests.Storage().String()
+		// Keep the successful Pod until status and the PVC checkpoint are durable, so a
+		// controller restart can replay the restore result without losing upgrade history.
+		if err := r.Status().Update(ctx, chainNode); err != nil {
+			return ctrl.Result{}, err
+		}
+		if restoring {
+			if err := r.ensureUpgrades(ctx, chainNode, false); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		if pvc.Annotations == nil {
+			pvc.Annotations = map[string]string{}
+		}
+		pvc.Annotations[controllers.AnnotationDataHeight] = strconv.FormatInt(height, 10)
+		pvc.Annotations[controllers.AnnotationDataInitialized] = controllers.StringValueTrue
+		if err := r.Update(ctx, pvc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update PVC %s with initialized annotation: %w", pvc.GetName(), err)
+		}
+		r.recorder.Eventf(chainNode, corev1.EventTypeNormal, appsv1.ReasonDataInitialized, "Data volume was successfully initialized")
 	}
-	pvc.Annotations[controllers.AnnotationDataInitialized] = controllers.StringValueTrue
-	if err := r.Update(ctx, pvc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update PVC %s with initialized annotation: %w", pvc.GetName(), err)
-	}
-
-	r.recorder.Eventf(chainNode,
-		corev1.EventTypeNormal,
-		appsv1.ReasonDataInitialized,
-		"Data volume was successfully initialized",
-	)
-
-	chainNode.Status.PvcSize = pvc.Spec.Resources.Requests.Storage().String()
-	if err := r.Status().Update(ctx, chainNode); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Persist the initialized marker before deleting the success evidence, so pod cleanup cannot
-	// cause data initialization to run again.
 	if err := r.Delete(ctx, initPod); err != nil && !errors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("failed to delete completed init pod: %w", err)
 	}
-
-	// Requeue immediately to continue reconciliation
 	return ctrl.Result{Requeue: true}, nil
 }
 
@@ -155,6 +164,9 @@ func (r *Reconciler) buildInitCommands(chainNode *appsv1.ChainNode) []*chainutil
 		}
 		if c.Image != nil {
 			initCommands[i].Image = *c.Image
+		} else if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && chainNode.Spec.Persistence.Restore.Height == nil && !chainNode.HasImageOverride() && !chainNode.ShouldRestoreFromSnapshot() {
+			// The object height is only known after this Pod finishes restoring.
+			initCommands[i].Image = chainNode.Spec.App.GetImage()
 		} else {
 			initCommands[i].Image = chainNode.GetAppImage()
 		}
@@ -261,15 +273,17 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 				}
 			}
 		} else {
-			// Replacement data must select the application image at the archive height.
-			// Without a height, retain the zero-height reset used for fresh data and state-sync.
 			height := int64(0)
-			if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && chainNode.Spec.Persistence.Restore.Height != nil {
-				height = *chainNode.Spec.Persistence.Restore.Height
-			}
-			if rebaseDataProgress(chainNode, height) {
-				if err = r.Status().Update(ctx, chainNode); err != nil {
-					return nil, ctrl.Result{}, err
+			// Rebasing to zero before discovery would discard completed replacement-volume upgrades.
+			automaticRestore := chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && chainNode.Spec.Persistence.Restore.Height == nil
+			if !automaticRestore {
+				if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil {
+					height = *chainNode.Spec.Persistence.Restore.Height
+				}
+				if rebaseDataProgress(chainNode, height) {
+					if err = r.Status().Update(ctx, chainNode); err != nil {
+						return nil, ctrl.Result{}, err
+					}
 				}
 			}
 		}
@@ -301,6 +315,10 @@ func (r *Reconciler) ensureDataVolume(ctx context.Context, app *chainutils.App, 
 				},
 				StorageClassName: chainNode.GetPersistenceStorageClass(),
 			},
+		}
+
+		if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && chainNode.Spec.Persistence.Restore.Height == nil && !chainNode.ShouldRestoreFromSnapshot() {
+			pvc.Annotations[controllers.AnnotationDataHeight] = "0"
 		}
 
 		if chainNode.ShouldRestoreFromSnapshot() {

@@ -1,6 +1,7 @@
 package chainnode
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -8,6 +9,7 @@ import (
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
 	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
@@ -37,6 +39,7 @@ func (r *Reconciler) buildDataInitPod(app *chainutils.App, chainNode *appsv1.Cha
 	container.Args = append(container.Args, "--", "/home/app/data", source.Bucket, source.Name)
 	container.Resources = restore.Resources
 	container.Env = nil
+	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 	pod.Spec.ServiceAccountName = source.ServiceAccountName
 	switch source.Provider {
 	case "s3":
@@ -69,4 +72,34 @@ func (r *Reconciler) buildDataInitPod(app *chainutils.App, chainNode *appsv1.Cha
 		return nil, fmt.Errorf("unsupported restore provider %q", source.Provider)
 	}
 	return pod, nil
+}
+
+func restoredDataHeight(chainNode *appsv1.ChainNode, pod *corev1.Pod) (int64, error) {
+	if chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil {
+		if height := chainNode.Spec.Persistence.Restore.Height; height != nil {
+			return *height, nil
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		terminated := status.State.Terminated
+		if status.Name != "data-restore" || terminated == nil || terminated.ExitCode != 0 || terminated.Message == "" {
+			continue
+		}
+		var result dataexporter.RestoreResult
+		if err := json.Unmarshal([]byte(terminated.Message), &result); err != nil {
+			return 0, fmt.Errorf("read restore result: %w", err)
+		}
+		if result.Stage != "complete" {
+			return 0, fmt.Errorf("unexpected restore result stage %q", result.Stage)
+		}
+		if result.Height == "" {
+			return 0, nil
+		}
+		height, err := strconv.ParseInt(result.Height, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("read restored data height: %w", err)
+		}
+		return height, nil
+	}
+	return 0, nil
 }

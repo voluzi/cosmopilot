@@ -95,12 +95,10 @@ func TestEnsureDataVolumeRebasesRecordedImageForReplacementData(t *testing.T) {
 
 			_, _, err := r.ensureDataVolume(t.Context(), nil, stored)
 			require.NoError(t, err)
-			if !tt.restore {
-				app, err := r.newApp(stored)
-				require.NoError(t, err)
-				_, _, err = r.ensureDataVolume(t.Context(), app, stored)
-				require.NoError(t, err)
-			}
+			app, err := r.newApp(stored)
+			require.NoError(t, err)
+			_, _, err = r.ensureDataVolume(t.Context(), app, stored)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expectedHeight, stored.Status.LatestHeight)
 			assert.Empty(t, stored.Status.AppImage)
 			assert.Empty(t, stored.Status.AppVersion)
@@ -270,6 +268,13 @@ func TestEnsureDataVolumePreservesLatestCompletedImageForStateSyncFromScratch(t 
 	app, err := r.newApp(stored)
 	require.NoError(t, err)
 	_, _, err = r.ensureDataVolume(t.Context(), app, stored)
+	require.NoError(t, err)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(initPod), initPod))
+	initPod.Status.Phase = corev1.PodSucceeded
+	require.NoError(t, c.Status().Update(t.Context(), initPod))
+	pvc := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(stored), pvc))
+	_, err = r.initializeData(t.Context(), nil, stored, pvc)
 	require.NoError(t, err)
 	assert.Zero(t, stored.Status.LatestHeight)
 	assert.Empty(t, stored.Status.AppImage)

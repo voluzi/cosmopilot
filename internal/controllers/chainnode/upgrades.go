@@ -259,9 +259,10 @@ func isHistoricalBootstrapUpgrade(chainNode *appsv1.ChainNode, nodePodRunning bo
 	if chainNode.ShouldRestoreFromSnapshot() {
 		return chainNode.Status.Phase == ""
 	}
-	restore := chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil && chainNode.Spec.Persistence.Restore.Height != nil
-	return (restore || chainNode.StateSyncRestoreEnabled()) &&
-		(chainNode.Status.Phase == "" || chainNode.Status.Phase == appsv1.PhaseChainNodeInitData)
+	restore := chainNode.Spec.Persistence != nil && chainNode.Spec.Persistence.Restore != nil
+	// Initialization applies the data height before classification, even if the restore spec was removed.
+	return chainNode.Status.Phase == appsv1.PhaseChainNodeInitData ||
+		((restore || chainNode.StateSyncRestoreEnabled()) && chainNode.Status.Phase == "")
 }
 
 func (r *Reconciler) ensureUpgradesConfig(ctx context.Context, chainNode *appsv1.ChainNode) error {

@@ -9,9 +9,12 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 )
 
 func requireUploadJobHardening(t *testing.T, job *batchv1.Job, wantRequests corev1.ResourceList) {
@@ -78,4 +81,36 @@ func TestUploadRequestRejectsOverflow(t *testing.T) {
 	quantity, ok := uploadRequest("1GB", 3)
 	require.True(t, ok)
 	assert.Equal(t, int64(3*datasize.GB), quantity.Value())
+}
+
+func TestUploadJobsUseSourceSnapshotHeight(t *testing.T) {
+	for _, providerName := range []string{"s3", "gcs"} {
+		for _, height := range []string{"", "0", "150"} {
+			t.Run(providerName+"/height="+height, func(t *testing.T) {
+				var provider SnapshotProvider
+				var c kubernetes.Interface
+				if providerName == "s3" {
+					s3 := newTestS3Provider(t, &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{Bucket: "backups"}})
+					s3.Owner.SetAnnotations(map[string]string{controllers.AnnotationDataHeight: "900"})
+					provider, c = s3, s3.Client
+				} else {
+					gcs := newTestGCSProvider(t, &appsv1.ExportTarballConfig{GCS: &appsv1.GcsExportConfig{Bucket: "backups"}})
+					gcs.Owner.SetAnnotations(map[string]string{controllers.AnnotationDataHeight: "900"})
+					provider, c = gcs, gcs.Client
+				}
+				vs := testVolumeSnapshot()
+				vs.Annotations = map[string]string{controllers.AnnotationDataHeight: height}
+				for attempt := 0; attempt < 2; attempt++ {
+					require.NoError(t, provider.CreateSnapshot(t.Context(), "snapshot", vs))
+					job, err := c.BatchV1().Jobs("default").Get(t.Context(), "snapshot-upload", metav1.GetOptions{})
+					require.NoError(t, err)
+					require.Equal(t, height, envValue(job.Spec.Template.Spec.Containers[0].Env, "DATA_HEIGHT"))
+					require.Equal(t, height != "", hasEnv(job.Spec.Template.Spec.Containers[0].Env, "DATA_HEIGHT"))
+					status, err := provider.GetSnapshotStatus(t.Context(), "snapshot")
+					require.NoError(t, err)
+					require.Equal(t, SnapshotActive, status)
+				}
+			})
+		}
+	}
 }
