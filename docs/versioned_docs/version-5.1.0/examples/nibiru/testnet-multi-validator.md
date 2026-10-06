@@ -1,0 +1,52 @@
+# Nibiru Testnet Multi Validator
+
+```yaml
+apiVersion: cosmopilot.voluzi.com/v1
+kind: ChainNodeSet
+metadata:
+  name: nibiru-testnet
+spec:
+  app:
+    image: ghcr.io/nibiruchain/nibiru
+    version: 2.9.0
+    app: nibid
+    sdkVersion: v0.47
+
+  nodes:
+    # A genesis-initializing validator group. Instance 0 generates the genesis;
+    # the remaining instances are added to that same genesis as full validators,
+    # each with its own consensus key and operator account (Cosmopilot creates the
+    # per-instance secrets automatically). All three are part of the initial
+    # validator set.
+    - name: validators
+      instances: 3
+
+      validator:
+        accountPrefix: nibi
+        valPrefix: nibivaloper
+
+        config:
+          override:
+            app.toml:
+              minimum-gas-prices: 0.025unibi
+
+        init:
+          chainID: nibiru-testnet-0
+          assets: ["100000000000000unibi", "1000000000000000000unusd", "10000000000000000uusdt"]
+          stakeAmount: 100000000unibi
+          unbondingTime: 60s
+          votingPeriod: 60s
+
+    # Regular (non-validator) full nodes.
+    - name: fullnodes
+      instances: 2
+
+      config:
+        override:
+          app.toml:
+            minimum-gas-prices: 0.025unibi
+            pruning: custom
+            pruning-keep-recent: "100"
+            pruning-interval: "10"
+
+```
