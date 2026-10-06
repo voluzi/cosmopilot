@@ -7,5 +7,5 @@ const (
 	DefaultCosmoGuardImage   = "ghcr.io/voluzi/cosmoguard:5.0.0"
 	DefaultCosmosignerImage  = "ghcr.io/voluzi/cosmosigner:3.2.0"
 	DefaultUtilityImage      = "ghcr.io/voluzi/node-tools:1.4.3"
-	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.1.0"
+	DefaultDataExporterImage = "ghcr.io/voluzi/dataexporter:2.2.0"
 )

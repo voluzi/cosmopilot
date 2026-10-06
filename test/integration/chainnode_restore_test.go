@@ -42,11 +42,16 @@ var _ = Describe("Exported snapshot initialization", func() {
 		pvc := GetPVC(ns.Name, node.Name)
 		Expect(pvc.Annotations[controllers.AnnotationDataInitialized]).To(Equal("false"))
 		pod.Status.Phase = corev1.PodSucceeded
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: `{"stage":"complete","message":"","height":"150"}`}}}}
 		Expect(c.Status().Update(ctx, pod)).To(Succeed())
+		requestRestoreReconcile(node)
 		Eventually(func() string {
 			Expect(c.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
 			return pvc.Annotations[controllers.AnnotationDataInitialized]
 		}, 45*time.Second).Should(Equal("true"))
+		Expect(pvc.Annotations[controllers.AnnotationDataHeight]).To(Equal("150"))
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		Expect(node.Status.LatestHeight).To(Equal(int64(150)))
 		Eventually(func() bool { return apierrors.IsNotFound(c.Get(ctx, initKey, &corev1.Pod{})) }).Should(BeTrue())
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			if err := c.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
@@ -71,6 +76,85 @@ var _ = Describe("Exported snapshot initialization", func() {
 		Expect(pvc.Annotations[controllers.AnnotationDataInitialized]).To(Equal("false"))
 		Eventually(func() error { return c.Get(ctx, initKey, pod) }).Should(Succeed())
 		Expect(pod.Spec.InitContainers[0].Args).To(ContainElement("replacement.tar.zst"))
+		Expect(pvc.Annotations[controllers.AnnotationDataHeight]).To(Equal("0"))
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		Expect(node.Status.LatestHeight).To(Equal(int64(150)))
+		pod.Status.Phase = corev1.PodSucceeded
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}}}
+		Expect(c.Status().Update(ctx, pod)).To(Succeed())
+		requestRestoreReconcile(node)
+		Eventually(func() string {
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
+			return pvc.Annotations[controllers.AnnotationDataInitialized]
+		}).Should(Equal("true"))
+		Expect(pvc.Annotations[controllers.AnnotationDataHeight]).To(Equal("0"))
+		Expect(c.Get(ctx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+		Expect(node.Status.LatestHeight).To(BeZero())
+	}))
+
+	It("classifies upgrades propagated from ChainNodeSet after the single init Pod succeeds", WithNamespace(func(ns *corev1.Namespace) {
+		ctx := Framework().Context()
+		c := Framework().Client()
+		set := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{GenerateName: ChainNodeSetPrefix, Namespace: ns.Name}, Spec: appsv1.ChainNodeSetSpec{
+			App:     DefaultChainNodeSetTestApp,
+			Genesis: &appsv1.GenesisConfig{ConfigMap: ptr.To("set-genesis")},
+			Nodes: []appsv1.NodeGroupSpec{{Name: "restore", Instances: ptr.To(1), Persistence: &appsv1.Persistence{
+				Restore:                &appsv1.SnapshotRestoreConfig{Snapshot: appsv1.SnapshotRestoreSource{Provider: "s3", Bucket: "backups", Name: "snapshot.tar.gz"}},
+				AdditionalInitCommands: []appsv1.InitCommand{{Command: []string{"echo"}, Args: []string{"after restore"}}, {Image: ptr.To("commands:custom"), Command: []string{"echo"}, Args: []string{"custom"}}},
+			}}},
+		}}
+		genesis := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "set-genesis", Namespace: ns.Name}, Data: map[string]string{"genesis.json": `{"chain_id":"restore-chain"}`}}
+		Expect(c.Create(ctx, genesis)).To(Succeed())
+		Expect(c.Create(ctx, set)).To(Succeed())
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := c.Get(ctx, client.ObjectKeyFromObject(set), set); err != nil {
+				return err
+			}
+			set.Status.Upgrades = []appsv1.Upgrade{{Height: 100, Image: "app:v2", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeCompleted}, {Height: 200, Image: "app:v3", Source: appsv1.OnChainUpgrade, Status: appsv1.UpgradeScheduled}}
+			return c.Status().Update(ctx, set)
+		})).To(Succeed())
+		node := &appsv1.ChainNode{}
+		nodeKey := client.ObjectKey{Namespace: ns.Name, Name: set.Name + "-restore-0"}
+		Eventually(func() int {
+			if err := c.Get(ctx, nodeKey, node); err != nil {
+				return 0
+			}
+			return len(node.Spec.App.Upgrades)
+		}).Should(Equal(2))
+		// Hold configuration generation after restore; envtest has no kubelet for helper execution.
+		Expect(c.Delete(ctx, genesis)).To(Succeed())
+		pod := &corev1.Pod{}
+		initKey := client.ObjectKey{Namespace: ns.Name, Name: node.Name + "-init-data"}
+		Eventually(func() error { return c.Get(ctx, initKey, pod) }).Should(Succeed())
+		Expect(pod.Spec.InitContainers).To(HaveLen(3))
+		Expect(pod.Spec.InitContainers[0].Name).To(Equal("data-restore"))
+		Expect(pod.Spec.InitContainers[1].Image).To(Equal(set.Spec.App.GetImage()))
+		Expect(pod.Spec.InitContainers[2].Image).To(Equal("commands:custom"))
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "data-restore", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: `{"stage":"complete","message":"","height":"150"}`}}}}
+		Expect(c.Status().Update(ctx, pod)).To(Succeed())
+		requestRestoreReconcile(node)
+		pvc := GetPVC(ns.Name, node.Name)
+		Consistently(func() string {
+			Expect(c.Get(ctx, nodeKey, node)).To(Succeed())
+			Expect(node.Status.LatestHeight).To(BeZero())
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
+			return pvc.Annotations[controllers.AnnotationDataInitialized]
+		}, time.Second, 100*time.Millisecond).Should(Equal("false"))
+		pod.Status.Phase = corev1.PodSucceeded
+		Expect(c.Status().Update(ctx, pod)).To(Succeed())
+		requestRestoreReconcile(node)
+		Eventually(func() string {
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)).To(Succeed())
+			return pvc.Annotations[controllers.AnnotationDataInitialized]
+		}).Should(Equal("true"))
+		Expect(pvc.Annotations[controllers.AnnotationDataHeight]).To(Equal("150"))
+		Expect(c.Get(ctx, nodeKey, node)).To(Succeed())
+		Expect(node.Status.LatestHeight).To(Equal(int64(150)))
+		Expect(node.Status.Upgrades).To(HaveLen(2))
+		Expect(node.Status.Upgrades[0].Status).To(Equal(appsv1.UpgradeSkipped))
+		Expect(node.Status.Upgrades[1].Status).To(Equal(appsv1.UpgradeScheduled))
+		Expect(node.GetAppImage()).To(Equal("app:v2"))
 	}))
 
 	It("validates source shapes, optional SHA-256, and restore height through the CRD", WithNamespace(func(ns *corev1.Namespace) {
@@ -103,3 +187,21 @@ var _ = Describe("Exported snapshot initialization", func() {
 		}
 	}))
 })
+
+func requestRestoreReconcile(node *appsv1.ChainNode) {
+	// Pod status changes do not pass the controller's generation filter; a spec update avoids
+	// waiting for the 30-second poll when observing initialization checkpoints in envtest.
+	c := Framework().Client()
+	ctx := Framework().Context()
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
+			return err
+		}
+		timeout := "6m"
+		if node.Spec.Persistence.InitTimeout != nil && *node.Spec.Persistence.InitTimeout == timeout {
+			timeout = "5m"
+		}
+		node.Spec.Persistence.InitTimeout = ptr.To(timeout)
+		return c.Update(ctx, node)
+	})).To(Succeed())
+}

@@ -1581,8 +1581,8 @@ type SubdomainsConfig struct {
 type SnapshotRestoreConfig struct {
 	// Snapshot identifies the exported archive and the identity used to read it.
 	Snapshot SnapshotRestoreSource `json:"snapshot"`
-	// Height is the archive block height used to select the application image and rebase upgrades.
-	// When omitted, replacement data starts from height zero.
+	// Height overrides the archive block height used to select the application image and rebase upgrades.
+	// When omitted, object metadata supplies the height when available; otherwise it defaults to zero.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Height *int64 `json:"height,omitempty"`

@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/internal/k8s"
 	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
@@ -166,6 +167,9 @@ func (provider *S3) CreateSnapshot(ctx context.Context, name string, snapshot *s
 	}
 
 	job := provider.uploadJob(name)
+	if height := snapshot.Annotations[controllers.AnnotationDataHeight]; height != "" {
+		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "DATA_HEIGHT", Value: height})
+	}
 	if err := controllerutil.SetControllerReference(provider.Owner, job, provider.Scheme); err != nil {
 		return err
 	}

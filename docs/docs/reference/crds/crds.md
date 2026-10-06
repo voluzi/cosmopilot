@@ -1078,7 +1078,7 @@ SnapshotRestoreConfig initializes a data volume from an exported archive.
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
 | snapshot | Snapshot identifies the exported archive and the identity used to read it. | [SnapshotRestoreSource](#snapshotrestoresource) | true |
-| height | Height is the archive block height used to select the application image and rebase upgrades. When omitted, replacement data starts from height zero. | *int64 | false |
+| height | Height overrides the archive block height used to select the application image and rebase upgrades. When omitted, object metadata supplies the height when available; otherwise it defaults to zero. | *int64 | false |
 | verification | Optional verification of the complete stored object. | *[SnapshotRestoreVerification](#snapshotrestoreverification) | false |
 | resources | Compute resources for the restore container. | corev1.ResourceRequirements | false |
 
