@@ -24,18 +24,19 @@ import (
 
 type restoreTestExporter struct {
 	Exporter
-	data []byte
-	err  error
+	metadata map[string]string
+	data     []byte
+	err      error
 }
 
-func (e restoreTestExporter) Read(ctx context.Context, _, _ string) (io.ReadCloser, error) {
+func (e restoreTestExporter) Read(ctx context.Context, _, _ string) (io.ReadCloser, map[string]string, error) {
 	if e.err != nil {
-		return nil, e.err
+		return nil, nil, e.err
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return io.NopCloser(bytes.NewReader(e.data)), nil
+	return io.NopCloser(bytes.NewReader(e.data)), e.metadata, nil
 }
 
 func TestRestoreExporterArchiveFormats(t *testing.T) {
@@ -50,7 +51,8 @@ func TestRestoreExporterArchiveFormats(t *testing.T) {
 			digest := sha256.Sum256(archive.Bytes())
 			for _, expected := range []string{"", hex.EncodeToString(digest[:])} {
 				target := t.TempDir()
-				require.NoError(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot"+compression.Extension(), expected))
+				_, restoreErr := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot"+compression.Extension(), expected)
+				require.NoError(t, restoreErr)
 				data, err := os.ReadFile(filepath.Join(target, "db", "state"))
 				require.NoError(t, err)
 				require.Equal(t, "block data", string(data))
@@ -69,19 +71,21 @@ func TestRestoreRejectsCorruption(t *testing.T) {
 		var archive bytes.Buffer
 		require.NoError(t, writeTarball(source, &archive, compression))
 		t.Run(string(compression)+" checksum", func(t *testing.T) {
-			err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, t.TempDir(), "bucket", "backup"+compression.Extension(), strings.Repeat("0", 64))
+			_, err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, t.TempDir(), "bucket", "backup"+compression.Extension(), strings.Repeat("0", 64))
 			var stage *RestoreError
 			require.ErrorAs(t, err, &stage)
 			require.Equal(t, "verification", stage.Stage)
 		})
 		t.Run(string(compression)+" truncated", func(t *testing.T) {
-			require.Error(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()[:len(archive.Bytes())/2]}, t.TempDir(), "bucket", "backup"+compression.Extension(), ""))
+			_, restoreErr := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()[:len(archive.Bytes())/2]}, t.TempDir(), "bucket", "backup"+compression.Extension(), "")
+			require.Error(t, restoreErr)
 		})
 		if compression != CompressionNone {
 			t.Run(string(compression)+" trailer", func(t *testing.T) {
 				corrupt := bytes.Clone(archive.Bytes())
 				corrupt[len(corrupt)-1] ^= 255
-				require.Error(t, Restore(t.Context(), restoreTestExporter{data: corrupt}, t.TempDir(), "bucket", "backup"+compression.Extension(), ""))
+				_, restoreErr := Restore(t.Context(), restoreTestExporter{data: corrupt}, t.TempDir(), "bucket", "backup"+compression.Extension(), "")
+				require.Error(t, restoreErr)
 			})
 		}
 	}
@@ -92,9 +96,11 @@ func TestRestoreVerifiesCompleteObject(t *testing.T) {
 	require.NoError(t, writeTarball(t.TempDir(), &archive, CompressionNone))
 	stored := append(bytes.Clone(archive.Bytes()), []byte("trailing stored bytes")...)
 	digest := sha256.Sum256(stored)
-	require.NoError(t, Restore(t.Context(), restoreTestExporter{data: stored}, t.TempDir(), "bucket", "backup.tar", hex.EncodeToString(digest[:])))
+	_, restoreErr := Restore(t.Context(), restoreTestExporter{data: stored}, t.TempDir(), "bucket", "backup.tar", hex.EncodeToString(digest[:]))
+	require.NoError(t, restoreErr)
 	shortDigest := sha256.Sum256(archive.Bytes())
-	require.Error(t, Restore(t.Context(), restoreTestExporter{data: stored}, t.TempDir(), "bucket", "backup.tar", hex.EncodeToString(shortDigest[:])))
+	_, restoreErr = Restore(t.Context(), restoreTestExporter{data: stored}, t.TempDir(), "bucket", "backup.tar", hex.EncodeToString(shortDigest[:]))
+	require.Error(t, restoreErr)
 }
 
 func TestRestoreRejectsUnsafeArchiveEntries(t *testing.T) {
@@ -123,7 +129,8 @@ func TestRestoreRejectsUnsafeArchiveEntries(t *testing.T) {
 			root := t.TempDir()
 			target := filepath.Join(root, "target")
 			require.NoError(t, os.Mkdir(target, 0755))
-			require.Error(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", ""))
+			_, restoreErr := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", "")
+			require.Error(t, restoreErr)
 			_, err := os.Stat(filepath.Join(root, "escape"))
 			require.ErrorIs(t, err, os.ErrNotExist)
 		})
@@ -135,7 +142,7 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var archive bytes.Buffer
 			tw := tar.NewWriter(&archive)
-			for _, entry := range []struct{ name, data string }{{name, "old completion marker"}, {"db/state", "block data"}} {
+			for _, entry := range []struct{ name, data string }{{name, `{"stage":"complete","message":"","height":"999"}`}, {"db/state", "block data"}} {
 				require.NoError(t, tw.WriteHeader(&tar.Header{Name: entry.name, Typeflag: tar.TypeReg, Mode: 0600, Size: int64(len(entry.data))}))
 				_, err := tw.Write([]byte(entry.data))
 				require.NoError(t, err)
@@ -143,7 +150,7 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 			require.NoError(t, tw.Close())
 			for _, digest := range []string{"", strings.Repeat("0", 64)} {
 				target := t.TempDir()
-				err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", digest)
+				result, err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", digest)
 				if digest != "" {
 					var stage *RestoreError
 					require.ErrorAs(t, err, &stage)
@@ -153,12 +160,13 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 					continue
 				}
 				require.NoError(t, err)
+				require.Empty(t, result.Height)
 				data, err := os.ReadFile(filepath.Join(target, "db/state"))
 				require.NoError(t, err)
 				require.Equal(t, "block data", string(data))
 				marker, err := os.ReadFile(filepath.Join(target, restoreMarker))
 				require.NoError(t, err)
-				require.Empty(t, marker)
+				require.JSONEq(t, `{"stage":"complete","message":""}`, string(marker))
 			}
 		})
 	}
@@ -167,21 +175,24 @@ func TestRestoreSkipsArchivedCompletionMarker(t *testing.T) {
 func TestRestoreRefusesExistingDataAndUnknownExtensions(t *testing.T) {
 	target := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(target, "existing"), []byte("keep me"), 0600))
-	require.Error(t, Restore(t.Context(), restoreTestExporter{}, target, "bucket", "backup.tar", ""))
+	_, restoreErr := Restore(t.Context(), restoreTestExporter{}, target, "bucket", "backup.tar", "")
+	require.Error(t, restoreErr)
 	data, err := os.ReadFile(filepath.Join(target, "existing"))
 	require.NoError(t, err)
 	require.Equal(t, "keep me", string(data))
 	for _, key := range []string{"backup-part-01", "backup.zip"} {
-		require.Error(t, Restore(t.Context(), restoreTestExporter{}, t.TempDir(), "bucket", key, ""))
+		_, restoreErr := Restore(t.Context(), restoreTestExporter{}, t.TempDir(), "bucket", key, "")
+		require.Error(t, restoreErr)
 	}
 }
 
 func TestRestoreDownloadFailures(t *testing.T) {
-	err := Restore(t.Context(), restoreTestExporter{err: io.ErrUnexpectedEOF}, t.TempDir(), "bucket", "snapshot.tar", "")
+	_, err := Restore(t.Context(), restoreTestExporter{err: io.ErrUnexpectedEOF}, t.TempDir(), "bucket", "snapshot.tar", "")
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	require.ErrorIs(t, Restore(ctx, restoreTestExporter{}, t.TempDir(), "bucket", "snapshot.tar", ""), context.Canceled)
+	_, restoreErr := Restore(ctx, restoreTestExporter{}, t.TempDir(), "bucket", "snapshot.tar", "")
+	require.ErrorIs(t, restoreErr, context.Canceled)
 }
 
 func TestRestoreProviderReads(t *testing.T) {
@@ -199,6 +210,16 @@ func TestRestoreProviderReads(t *testing.T) {
 			return
 		}
 		assert.Contains(t, r.URL.Path, "snapshot.tar")
+		if strings.Contains(r.URL.Path, "/o/") && r.URL.Query().Get("alt") != "media" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"generation":"7","metadata":{"cosmopilot-height":"150"}}`)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/o/") {
+			assert.Equal(t, "7", r.URL.Query().Get("generation"))
+		}
+		w.Header().Set("X-Goog-Generation", "7")
+		w.Header().Set("X-Amz-Meta-Cosmopilot-Height", "150")
 		_, _ = fmt.Fprint(w, "stored bytes")
 	}))
 	defer server.Close()
@@ -208,19 +229,20 @@ func TestRestoreProviderReads(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, gcsClient.Close()) }()
 	for _, exporter := range []Exporter{s3Exporter, &GcsExporter{client: gcsClient}} {
-		reader, err := exporter.Read(t.Context(), "bucket", "snapshot.tar")
+		reader, metadata, err := exporter.Read(t.Context(), "bucket", "snapshot.tar")
 		require.NoError(t, err)
+		require.Equal(t, "150", metadata["cosmopilot-height"])
 		data, err := io.ReadAll(reader)
 		require.NoError(t, err)
 		require.NoError(t, reader.Close())
 		require.Equal(t, "stored bytes", string(data))
 		for _, key := range []string{"missing", "denied"} {
-			_, err := exporter.Read(t.Context(), "bucket", key)
+			_, _, err := exporter.Read(t.Context(), "bucket", key)
 			require.Error(t, err)
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		_, err = exporter.Read(ctx, "bucket", "snapshot.tar")
+		_, _, err = exporter.Read(ctx, "bucket", "snapshot.tar")
 		require.True(t, errors.Is(err, context.Canceled), "%v", err)
 	}
 }
@@ -231,7 +253,8 @@ func TestRestoreRequiresTarTerminatorAfterZeroFilledFiles(t *testing.T) {
 	var archive bytes.Buffer
 	require.NoError(t, writeTarball(source, &archive, CompressionNone))
 	truncated := archive.Bytes()[:archive.Len()-1024]
-	require.Error(t, Restore(t.Context(), restoreTestExporter{data: truncated}, t.TempDir(), "bucket", "snapshot.tar", ""))
+	_, restoreErr := Restore(t.Context(), restoreTestExporter{data: truncated}, t.TempDir(), "bucket", "snapshot.tar", "")
+	require.Error(t, restoreErr)
 }
 
 func TestRestoreCompletedRetryDoesNotDownload(t *testing.T) {
@@ -241,8 +264,10 @@ func TestRestoreCompletedRetryDoesNotDownload(t *testing.T) {
 	require.NoError(t, writeTarball(source, &archive, CompressionGzip))
 	digest := sha256.Sum256(archive.Bytes())
 	target := t.TempDir()
-	require.NoError(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar.gz", hex.EncodeToString(digest[:])))
-	require.NoError(t, Restore(t.Context(), restoreTestExporter{err: errors.New("unexpected download")}, target, "bucket", "snapshot.tar.gz", hex.EncodeToString(digest[:])))
+	_, restoreErr := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar.gz", hex.EncodeToString(digest[:]))
+	require.NoError(t, restoreErr)
+	_, restoreErr = Restore(t.Context(), restoreTestExporter{err: errors.New("unexpected download")}, target, "bucket", "snapshot.tar.gz", hex.EncodeToString(digest[:]))
+	require.NoError(t, restoreErr)
 	data, err := os.ReadFile(filepath.Join(target, "state"))
 	require.NoError(t, err)
 	require.Equal(t, "block data", string(data))
@@ -275,11 +300,15 @@ func TestRestoreIncompleteRetryRefusesTarget(t *testing.T) {
 				digest = ""
 			}
 			target := t.TempDir()
-			require.Error(t, Restore(t.Context(), restoreTestExporter{data: stored}, target, "bucket", "snapshot.tar", digest))
+			result, restoreErr := Restore(t.Context(), restoreTestExporter{data: stored, metadata: map[string]string{"cosmopilot-height": "150"}}, target, "bucket", "snapshot.tar", digest)
+			require.Error(t, restoreErr)
+			require.Empty(t, result)
+			_, markerErr := os.Stat(filepath.Join(target, restoreMarker))
+			require.ErrorIs(t, markerErr, os.ErrNotExist)
 			data, err := os.ReadFile(filepath.Join(target, "state"))
 			require.NoError(t, err)
 			require.Equal(t, "block data", string(data))
-			err = Restore(t.Context(), restoreTestExporter{err: errors.New("unexpected download")}, target, "bucket", "snapshot.tar", "")
+			_, err = Restore(t.Context(), restoreTestExporter{err: errors.New("unexpected download")}, target, "bucket", "snapshot.tar", "")
 			var stage *RestoreError
 			require.ErrorAs(t, err, &stage)
 			require.Equal(t, "target", stage.Stage)
@@ -293,7 +322,8 @@ func TestRestoreIntoRelativeDirectory(t *testing.T) {
 	var archive bytes.Buffer
 	require.NoError(t, writeTarball(source, &archive, CompressionNone))
 	t.Chdir(t.TempDir())
-	require.NoError(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, ".", "bucket", "snapshot.tar", ""))
+	_, restoreErr := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, ".", "bucket", "snapshot.tar", "")
+	require.NoError(t, restoreErr)
 	data, err := os.ReadFile("state")
 	require.NoError(t, err)
 	require.Equal(t, "block data", string(data))
@@ -309,7 +339,45 @@ func TestRestoreIgnoresUnreadableLostAndFound(t *testing.T) {
 	}
 	target := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(target, "lost+found"), 0))
-	require.NoError(t, Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", ""))
+	_, restoreErr := Restore(t.Context(), restoreTestExporter{data: archive.Bytes()}, target, "bucket", "snapshot.tar", "")
+	require.NoError(t, restoreErr)
 	_, err := os.Stat(filepath.Join(target, restoreMarker))
 	require.NoError(t, err)
+}
+
+func TestRestoreHeightAndMarkerReplay(t *testing.T) {
+	for _, compression := range []Compression{CompressionNone, CompressionGzip, CompressionZstd, CompressionLz4} {
+		for _, height := range []string{"", "0", "150"} {
+			t.Run(string(compression)+"/height="+height, func(t *testing.T) {
+				var archive bytes.Buffer
+				require.NoError(t, writeTarball(t.TempDir(), &archive, compression))
+				target := t.TempDir()
+				result, err := Restore(t.Context(), restoreTestExporter{data: archive.Bytes(), metadata: map[string]string{"cosmopilot-height": height}}, target, "bucket", "snapshot"+compression.Extension(), "")
+				require.NoError(t, err)
+				require.Equal(t, RestoreResult{Stage: "complete", Height: height}, result)
+				retry, err := Restore(t.Context(), restoreTestExporter{err: errors.New("storage unavailable")}, target, "bucket", "snapshot"+compression.Extension(), "")
+				require.NoError(t, err)
+				require.Equal(t, result, retry)
+			})
+		}
+	}
+}
+
+func TestRestoreLegacyAndInvalidMarkers(t *testing.T) {
+	for _, marker := range []string{"", "{invalid"} {
+		t.Run("marker="+marker, func(t *testing.T) {
+			target := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(target, restoreMarker), []byte(marker), 0600))
+			result, err := Restore(t.Context(), restoreTestExporter{err: errors.New("unexpected download")}, target, "bucket", "snapshot.tar", "")
+			if marker == "" {
+				require.NoError(t, err)
+				require.Equal(t, RestoreResult{Stage: "complete"}, result)
+			} else {
+				var stage *RestoreError
+				require.ErrorAs(t, err, &stage)
+				require.Equal(t, "target", stage.Stage)
+				require.Empty(t, result)
+			}
+		})
+	}
 }

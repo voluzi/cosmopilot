@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 type RestoreResult struct {
 	Stage   string `json:"stage"`
 	Message string `json:"message"`
+	Height  string `json:"height,omitempty"`
 }
 
 // RestoreError identifies the failed installation stage without parsing logs.
@@ -39,59 +41,74 @@ const restoreMarker = ".cosmopilot-restore-complete"
 
 // Restore streams a single exported object into an empty data directory. Failed extraction leaves
 // partial data untouched; recreate the volume before attempting installation again.
-func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest string) error {
+func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest string) (RestoreResult, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return &RestoreError{"target", err}
+		return RestoreResult{}, &RestoreError{"target", err}
 	}
 	for _, entry := range entries {
 		if entry.Name() == restoreMarker {
-			return nil
+			data, err := os.ReadFile(filepath.Join(dir, restoreMarker))
+			if err != nil {
+				return RestoreResult{}, &RestoreError{"target", err}
+			}
+			result := RestoreResult{Stage: "complete"}
+			if len(data) != 0 {
+				if err := json.Unmarshal(data, &result); err != nil {
+					return RestoreResult{}, &RestoreError{"target", err}
+				}
+			}
+			return result, nil
 		}
 	}
 	for _, entry := range entries {
 		if entry.Name() != "lost+found" {
-			return &RestoreError{"target", errors.New("restore target is not empty; recreate the data volume to retry")}
+			return RestoreResult{}, &RestoreError{"target", errors.New("restore target is not empty; recreate the data volume to retry")}
 		}
 	}
 	compression, err := restoreCompression(name)
 	if err != nil {
-		return &RestoreError{"download", err}
+		return RestoreResult{}, &RestoreError{"download", err}
 	}
-	object, err := exporter.Read(ctx, bucket, name)
+	object, metadata, err := exporter.Read(ctx, bucket, name)
 	if err != nil {
-		return &RestoreError{"download", err}
+		return RestoreResult{}, &RestoreError{"download", err}
 	}
 	defer func() { _ = object.Close() }()
 	hash := sha256.New()
 	stream := io.TeeReader(&restoreObjectReader{ctx: ctx, reader: object}, hash)
 	decoded, closeDecoder, err := restoreDecoder(stream, compression)
 	if err != nil {
-		return restoreExtractionError(err)
+		return RestoreResult{}, restoreExtractionError(err)
 	}
 	defer func() { _ = closeDecoder() }()
 	if err := extractRestoreTar(dir, decoded); err != nil {
-		return err
+		return RestoreResult{}, err
 	}
 	// Tar EOF does not consume codec trailers or all bytes of the stored object.
 	if _, err := io.Copy(io.Discard, decoded); err != nil {
-		return restoreExtractionError(err)
+		return RestoreResult{}, restoreExtractionError(err)
 	}
 	if err := closeDecoder(); err != nil {
-		return restoreExtractionError(err)
+		return RestoreResult{}, restoreExtractionError(err)
 	}
 	if _, err := io.Copy(io.Discard, stream); err != nil {
-		return &RestoreError{"download", err}
+		return RestoreResult{}, &RestoreError{"download", err}
 	}
 	if err := object.Close(); err != nil {
-		return &RestoreError{"download", err}
+		return RestoreResult{}, &RestoreError{"download", err}
 	}
 	if digest != "" && !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), digest) {
-		return &RestoreError{"verification", errors.New("SHA-256 mismatch")}
+		return RestoreResult{}, &RestoreError{"verification", errors.New("SHA-256 mismatch")}
 	}
 
 	// File contents are synced as they are written; the marker must not outlive a crash that loses
 	// their directory entries, so directories go first, then the marker, then the root again.
+	result := RestoreResult{Stage: "complete", Height: metadata[HeightMetadataKey]}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return RestoreResult{}, &RestoreError{"target", err}
+	}
 	marker := filepath.Join(dir, restoreMarker)
 	err = filepath.WalkDir(dir, func(p string, entry fs.DirEntry, err error) error {
 		// The provisioner's lost+found may be unreadable and holds nothing restored.
@@ -103,15 +120,25 @@ func Restore(ctx context.Context, exporter Exporter, dir, bucket, name, digest s
 		}
 		return syncPath(p)
 	})
+	// The marker appears only complete: a crash mid-write must not leave an empty or partial one,
+	// which a retry would read as a finished restore without a height.
+	pending := marker + ".tmp"
 	if err == nil {
-		err = os.WriteFile(marker, nil, 0600)
+		err = os.WriteFile(pending, data, 0600)
 	}
-	if err := errors.Join(err, syncPath(marker), syncPath(dir)); err != nil {
+	if err == nil {
+		err = syncPath(pending)
+	}
+	if err == nil {
+		err = os.Rename(pending, marker)
+	}
+	if err := errors.Join(err, syncPath(dir)); err != nil {
 		// A marker that was not durably committed must not vouch for this volume on retry.
+		_ = os.Remove(pending)
 		_ = os.Remove(marker)
-		return &RestoreError{"target", err}
+		return RestoreResult{}, &RestoreError{"target", err}
 	}
-	return nil
+	return result, nil
 }
 
 func syncPath(name string) error {
@@ -203,7 +230,7 @@ func extractRestoreTar(dir string, reader io.Reader) error {
 			continue
 		}
 		// Archives of restored data may carry an old marker; only this restore can mark completion.
-		if name == restoreMarker {
+		if name == restoreMarker || name == restoreMarker+".tmp" {
 			// Consume its data here so it cannot pass for the end-of-archive blocks below.
 			if _, err := io.Copy(io.Discard, tr); err != nil {
 				return restoreExtractionError(err)

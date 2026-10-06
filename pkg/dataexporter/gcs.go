@@ -298,7 +298,7 @@ func (gcs *GcsExporter) renameToFinalNames(ctx context.Context, objects []string
 	}
 
 	if len(objects) == 1 {
-		return gcs.renameObject(ctx, bucket, objects[0], objectName+extension)
+		return gcs.renameObject(ctx, bucket, objects[0], objectName+extension, opts)
 	}
 
 	digits := getDigitCount(len(objects) - 1)
@@ -306,17 +306,21 @@ func (gcs *GcsExporter) renameToFinalNames(ctx context.Context, objects []string
 
 	for i, object := range objects {
 		finalName := fmt.Sprintf(formatString, objectName, i)
-		if err := gcs.renameObject(ctx, bucket, object, finalName); err != nil {
+		if err := gcs.renameObject(ctx, bucket, object, finalName, opts); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (gcs *GcsExporter) renameObject(ctx context.Context, bucket, oldName, newName string) error {
+func (gcs *GcsExporter) renameObject(ctx context.Context, bucket, oldName, newName string, opts *UploadOptions) error {
 	log.Debugf("renaming %s to %s", oldName, newName)
 	src := gcs.client.Bucket(bucket).Object(oldName)
-	if _, err := gcs.client.Bucket(bucket).Object(newName).CopierFrom(src).Run(ctx); err != nil {
+	copier := gcs.client.Bucket(bucket).Object(newName).CopierFrom(src)
+	if opts.Height != "" {
+		copier.Metadata = map[string]string{HeightMetadataKey: opts.Height}
+	}
+	if _, err := copier.Run(ctx); err != nil {
 		return fmt.Errorf("failed to rename object %s -> %s: %v", oldName, newName, err)
 	}
 	return src.Delete(ctx)
@@ -388,6 +392,9 @@ func (gcs *GcsExporter) composeIntoSingleObject(ctx context.Context, bucket stri
 
 	finalObject := gcs.client.Bucket(bucket).Object(objectName)
 	composer := finalObject.ComposerFrom(objectsToHandles(gcs.client, bucket, objects)...)
+	if opts.Height != "" {
+		composer.Metadata = map[string]string{HeightMetadataKey: opts.Height}
+	}
 	if _, err := composer.Run(ctx); err != nil {
 		return fmt.Errorf("failed to compose final object: %v", err)
 	}
@@ -480,6 +487,15 @@ func (gcs *GcsExporter) Delete(bucket, name string, opts ...DeleteOption) error 
 	return gcs.batchDelete(ctx, bucket, objectNames, options.ConcurrentJobs)
 }
 
-func (gcs *GcsExporter) Read(ctx context.Context, bucket, name string) (io.ReadCloser, error) {
-	return gcs.client.Bucket(bucket).Object(name).NewReader(ctx)
+func (gcs *GcsExporter) Read(ctx context.Context, bucket, name string) (io.ReadCloser, map[string]string, error) {
+	object := gcs.client.Bucket(bucket).Object(name)
+	attrs, err := object.Attrs(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	reader, err := object.Generation(attrs.Generation).NewReader(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reader, attrs.Metadata, nil
 }

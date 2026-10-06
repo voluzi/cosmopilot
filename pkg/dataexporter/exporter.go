@@ -8,13 +8,16 @@ import (
 	"io"
 )
 
+// HeightMetadataKey identifies the archived dataset height in S3 and GCS object metadata.
+const HeightMetadataKey = "cosmopilot-height"
+
 // Provider identifies a cloud storage provider.
 type Provider string
 
 // Exporter provides methods to upload, read and delete data snapshots from cloud storage.
 type Exporter interface {
 	// Read opens one exact object key; the caller must close the returned stream.
-	Read(ctx context.Context, bucket, name string) (io.ReadCloser, error)
+	Read(ctx context.Context, bucket, name string) (io.ReadCloser, map[string]string, error)
 
 	// Provider returns the cloud storage provider type.
 	Provider() Provider
