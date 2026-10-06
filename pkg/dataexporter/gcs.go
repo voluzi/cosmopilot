@@ -317,9 +317,8 @@ func (gcs *GcsExporter) renameObject(ctx context.Context, bucket, oldName, newNa
 	log.Debugf("renaming %s to %s", oldName, newName)
 	src := gcs.client.Bucket(bucket).Object(oldName)
 	copier := gcs.client.Bucket(bucket).Object(newName).CopierFrom(src)
-	copier.Metadata = map[string]string{}
 	if opts.Height != "" {
-		copier.Metadata[HeightMetadataKey] = opts.Height
+		copier.Metadata = map[string]string{HeightMetadataKey: opts.Height}
 	}
 	if _, err := copier.Run(ctx); err != nil {
 		return fmt.Errorf("failed to rename object %s -> %s: %v", oldName, newName, err)
@@ -393,9 +392,8 @@ func (gcs *GcsExporter) composeIntoSingleObject(ctx context.Context, bucket stri
 
 	finalObject := gcs.client.Bucket(bucket).Object(objectName)
 	composer := finalObject.ComposerFrom(objectsToHandles(gcs.client, bucket, objects)...)
-	composer.Metadata = map[string]string{}
 	if opts.Height != "" {
-		composer.Metadata[HeightMetadataKey] = opts.Height
+		composer.Metadata = map[string]string{HeightMetadataKey: opts.Height}
 	}
 	if _, err := composer.Run(ctx); err != nil {
 		return fmt.Errorf("failed to compose final object: %v", err)
