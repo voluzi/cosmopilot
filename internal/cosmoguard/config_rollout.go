@@ -97,9 +97,6 @@ func (p Params) prepareConfigRollout(ctx context.Context, c client.Client, desir
 	previousFingerprint := desired.Annotations[controllers.AnnotationCosmoGuardRestartFingerprint]
 	previousDigest := desired.Annotations[controllers.AnnotationCosmoGuardConfigDigest]
 	comparable := live != nil && previousFingerprint != "" && previousDigest != "" && desired.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme] == scheme
-	if comparable && previousDigest == digest {
-		return nil
-	}
 	cfg, err := guardconfig.ParseConfig(raw, func(name string) (string, bool) { value, ok := env[name]; return value, ok })
 	if err != nil {
 		// Parser errors can contain config values, including credentials.
@@ -111,7 +108,7 @@ func (p Params) prepareConfigRollout(ctx context.Context, c client.Client, desir
 		return err
 	}
 	value := keyedConfigValue(key, []byte(fingerprint))
-	if comparable && previousFingerprint != value {
+	if comparable && previousDigest != digest && previousFingerprint != value {
 		if desired.Spec.Template.Annotations == nil {
 			desired.Spec.Template.Annotations = map[string]string{}
 		}

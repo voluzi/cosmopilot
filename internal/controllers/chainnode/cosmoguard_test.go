@@ -768,3 +768,88 @@ func TestCosmoGuardConfigMapRequests(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"standalone", "routed-child"}, names)
 }
+
+func TestCosmoGuardRulesOnlyAfterEnvironmentChange(t *testing.T) {
+	cases := []struct {
+		name           string
+		change         func(*appsv1.Config)
+		rotatePassword bool
+	}{
+		{name: "EVM enable", change: func(cfg *appsv1.Config) { cfg.EvmEnabled = ptr.To(true) }},
+		{name: "dashboard enable", change: func(cfg *appsv1.Config) { cfg.CosmoGuard.Dashboard.Enable = true }},
+		{name: "dashboard port", change: func(cfg *appsv1.Config) { cfg.CosmoGuard.Dashboard.Port = ptr.To(int32(8081)) }},
+		{name: "dashboard Secret rotation", rotatePassword: true},
+	}
+	for _, tc := range cases {
+		for _, simultaneous := range []bool{false, true} {
+			sequence := "then rules only"
+			if simultaneous {
+				sequence = "with restart-required file change"
+			}
+			t.Run(tc.name+" "+sequence, func(t *testing.T) {
+				ctx := context.Background()
+				cn := guardedChainNode("node-0", false)
+				cn.Spec.Config.CosmoGuard.Dashboard = &appsv1.CosmoGuardDashboardConfig{
+					Enable: tc.name != "dashboard enable",
+					BasicAuth: &appsv1.CosmoGuardDashboardAuth{
+						Username: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "dashboard-auth"}, Key: "user"},
+						Password: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "dashboard-auth"}, Key: "password"},
+					},
+				}
+				credentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "dashboard-auth", Namespace: "ns"}, Data: map[string][]byte{"user": []byte("test-user"), "password": []byte("initial-password")}}
+				cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}, Data: map[string]string{"cosmoguard.yaml": "lcd: {rules: [{paths: [/old], action: allow}]}"}}
+				r := cosmoGuardTestReconciler(t, cn, cm, credentials)
+				apply := func() { require.NoError(t, ensureGuard(r, ctx, cn)) }
+				read := func() *k8sappsv1.StatefulSet {
+					sts := &k8sappsv1.StatefulSet{}
+					require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: cn.CosmoGuardName()}, sts))
+					return sts
+				}
+				changeFile := func(raw string) {
+					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(cm), cm))
+					cm.Data["cosmoguard.yaml"] = raw
+					require.NoError(t, r.Update(ctx, cm))
+				}
+				apply()
+				initial := read()
+				if tc.rotatePassword {
+					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(credentials), credentials))
+					credentials.Data["password"] = []byte("rotated-password")
+					require.NoError(t, r.Update(ctx, credentials))
+				} else {
+					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(cn), cn))
+					tc.change(cn.Spec.Config)
+					require.NoError(t, r.Update(ctx, cn))
+				}
+				if simultaneous {
+					changeFile("auth: {enable: true}\nlcd: {rules: [{paths: [/old], action: allow}]}")
+				}
+				apply()
+				refreshed := read()
+				if simultaneous {
+					require.NotEqual(t, initial.Spec.Template, refreshed.Spec.Template)
+					if tc.rotatePassword {
+						require.NotEmpty(t, refreshed.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
+					}
+				} else {
+					require.Empty(t, refreshed.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
+					if tc.rotatePassword {
+						require.Equal(t, initial.Spec.Template, refreshed.Spec.Template)
+					} else {
+						require.NotEqual(t, initial.Spec.Template, refreshed.Spec.Template)
+					}
+				}
+				auth := ""
+				if simultaneous {
+					auth = "auth: {enable: true}\n"
+				}
+				changeFile(auth + "lcd: {rules: [{paths: [/new], action: deny}]}")
+				apply()
+				assert.Equal(t, refreshed.Spec.Template, read().Spec.Template, "rules-only edits must not roll after environment changes")
+				converged := read()
+				apply()
+				assert.Equal(t, converged.ResourceVersion, read().ResourceVersion)
+			})
+		}
+	}
+}
