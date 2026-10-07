@@ -30,6 +30,7 @@ import (
 )
 
 func TestConfigRolloutState(t *testing.T) {
+	t.Setenv("COSMOGUARD_ENABLE_EVM", "false")
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -78,8 +79,20 @@ func TestConfigRolloutState(t *testing.T) {
 			assert.NotContains(t, value, raw)
 		}
 	})
-	t.Run("rules and overridden declarations preserve template", func(t *testing.T) {
+	t.Run("operator process environment does not affect rollout inputs", func(t *testing.T) {
+		before := read()
+		// The operator's environment must not enter the guard's closed comparison lookup.
 		t.Setenv("COSMOGUARD_ENABLE_EVM", "true")
+		require.NoError(t, apply(c))
+		assert.Equal(t, before.ResourceVersion, read().ResourceVersion)
+		change("# force classification with unchanged guard configuration\n", false)
+		require.NoError(t, apply(c))
+		after := read()
+		assert.Equal(t, before.Spec.Template, after.Spec.Template)
+		assert.Equal(t, before.Annotations[controllers.AnnotationCosmoGuardRestartFingerprint], after.Annotations[controllers.AnnotationCosmoGuardRestartFingerprint])
+		assert.NotEqual(t, before.Annotations[controllers.AnnotationCosmoGuardConfigDigest], after.Annotations[controllers.AnnotationCosmoGuardConfigDigest])
+	})
+	t.Run("rules and overridden declarations preserve template", func(t *testing.T) {
 		for _, raw := range []string{"lcd: {rules: [{paths: [/new], action: deny}]}", "# comment\nlcd: {rules: [{paths: [/new], action: deny}]}", "metrics: {enable: false, port: 9999}\nnode: {host: ignored}\nlcd: {rules: [{paths: [/other], action: allow}]}"} {
 			change(raw, false)
 			require.NoError(t, apply(c))
