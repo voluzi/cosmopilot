@@ -94,7 +94,7 @@ config:
       name: cosmoguard-config  # Name of the ConfigMap created in Step 2.
       key: cosmoguard.yaml     # Key within the ConfigMap containing the rules.
     replicas: 2                # Optional: number of CosmoGuard replicas (default 1). Ignored when autoscaling is enabled.
-    image: ghcr.io/voluzi/cosmoguard:5.0.0  # Optional: override the operator-wide default image.
+    image: ghcr.io/voluzi/cosmoguard:5.1.0  # Optional: override the operator-wide default image.
     resources:                 # Optional: per-pod resources (defaults shown).
       requests:
         cpu: 200m
