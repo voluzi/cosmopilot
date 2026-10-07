@@ -24,6 +24,10 @@ import (
 // reconciles don't churn resourceVersions. The live object is copied back into obj so callers can
 // read status (e.g. Deployment ReadyReplicas) after the call.
 func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, obj client.Object) error {
+	return applyOwned(ctx, c, scheme, owner, obj, nil)
+}
+
+func applyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, obj client.Object, prepare func(client.Object) error) error {
 	if err := controllerutil.SetControllerReference(owner, obj, scheme); err != nil {
 		return err
 	}
@@ -35,6 +39,11 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 
 	err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing)
 	if errors.IsNotFound(err) {
+		if prepare != nil {
+			if err := prepare(nil); err != nil {
+				return err
+			}
+		}
 		if err := patch.DefaultAnnotator.SetLastAppliedAnnotation(obj); err != nil {
 			return err
 		}
@@ -46,6 +55,12 @@ func ApplyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 
 	if !metav1.IsControlledBy(existing, owner) {
 		return fmt.Errorf("resource %q is managed by another owner; refusing to overwrite it — rename the ChainNode/ChainNodeSet to avoid the name collision", obj.GetName())
+	}
+
+	if prepare != nil {
+		if err := prepare(existing); err != nil {
+			return err
+		}
 	}
 
 	// When autoscaling owns .spec.replicas we submit a nil Replicas. A full Update would reset the

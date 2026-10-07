@@ -396,7 +396,7 @@ func (r *Reconciler) ensureCosmoGuard(ctx context.Context, chainNode *appsv1.Cha
 	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.PeerService()); err != nil {
 		return false, fmt.Errorf("failed to apply cosmoguard peer service for %s: %w", chainNode.GetName(), err)
 	}
-	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.StatefulSet()); err != nil {
+	if err := cosmoguard.ApplyStatefulSet(ctx, r.Client, r.Scheme, chainNode, params, params.StatefulSet()); err != nil {
 		return false, fmt.Errorf("failed to apply cosmoguard statefulset for %s: %w", chainNode.GetName(), err)
 	}
 	if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, chainNode, params.Service()); err != nil {

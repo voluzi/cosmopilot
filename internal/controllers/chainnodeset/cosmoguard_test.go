@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -436,4 +437,175 @@ func TestCosmoGuardRouteReady(t *testing.T) {
 	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": false}))
 	assert.True(t, cosmoGuardRouteReady(nodeSet, []string{"fullnodes"}, map[string]bool{"fullnodes": true}))
 	assert.False(t, cosmoGuardRouteReady(nodeSet, []string{"a", "b"}, map[string]bool{"a": true, "b": false}))
+}
+
+func TestCosmoGuardConfigRollout(t *testing.T) {
+	ctx := context.Background()
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}, Data: map[string]string{"cosmoguard.yaml": "lcd: {rules: [{paths: [/old], action: allow}]}"}}
+	ns, group := guardedNodeSet()
+	r := newValidatorTestReconciler(t, ns, cm)
+	name := groupCosmoGuardName(ns, group)
+	apply := func() { _, err := r.ensureCosmoGuards(ctx, ns); require.NoError(t, err) }
+	read := func() *k8sappsv1.StatefulSet {
+		sts := &k8sappsv1.StatefulSet{}
+		require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, sts))
+		return sts
+	}
+	change := func(raw string) {
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(cm), cm))
+		cm.Data["cosmoguard.yaml"] = raw
+		require.NoError(t, r.Update(ctx, cm))
+		apply()
+	}
+	apply()
+	initial := read()
+	require.NotEmpty(t, initial.Annotations["cosmopilot.voluzi.com/cosmoguard-restart-fingerprint"])
+	require.Empty(t, initial.Spec.Template.Annotations["cosmopilot.voluzi.com/cosmoguard-restart"])
+	t.Run("rules only preserves template", func(t *testing.T) {
+		change("lcd: {rules: [{paths: [/new], action: deny}]}")
+		assert.Equal(t, initial.Spec.Template, read().Spec.Template)
+	})
+	t.Run("auth rolls exactly once", func(t *testing.T) {
+		change("auth: {enable: true}\nlcd: {rules: [{paths: [/new], action: deny}]}")
+		rolled := read()
+		require.NotEqual(t, initial.Spec.Template, rolled.Spec.Template)
+		require.NotEmpty(t, rolled.Spec.Template.Annotations["cosmopilot.voluzi.com/cosmoguard-restart"])
+		apply()
+		assert.Equal(t, rolled.ResourceVersion, read().ResourceVersion)
+	})
+	t.Run("invalid leaves state unchanged", func(t *testing.T) {
+		previous := read()
+		change("auth: [invalid")
+		assert.Equal(t, previous.Spec.Template, read().Spec.Template)
+		assert.Equal(t, previous.Annotations, read().Annotations)
+	})
+	t.Run("upgrade adopts without rollout", func(t *testing.T) {
+		live := read()
+		for key := range live.Annotations {
+			if key != "banzaicloud.com/last-applied" {
+				delete(live.Annotations, key)
+			}
+		}
+		require.NoError(t, r.Update(ctx, live))
+		change("auth: {enable: false}")
+		adopted := read()
+		assert.Equal(t, live.Spec.Template, adopted.Spec.Template)
+		require.NotEmpty(t, adopted.Annotations["cosmopilot.voluzi.com/cosmoguard-restart-fingerprint"])
+	})
+}
+
+func TestCosmoGuardConfigMapRequests(t *testing.T) {
+	enabled, _ := guardedNodeSet()
+	enabled.Spec.Nodes = append(enabled.Spec.Nodes, enabled.Spec.Nodes[0])
+	enabled.Spec.Nodes[1].Name = "second"
+	disabled := enabled.DeepCopy()
+	disabled.Name = "disabled"
+	disabled.Spec.Nodes = disabled.Spec.Nodes[:1]
+	disabled.Spec.Nodes[0].Config.CosmoGuard.Enable = false
+	zero := enabled.DeepCopy()
+	zero.Name = "zero"
+	zero.Spec.Nodes = zero.Spec.Nodes[:1]
+	zero.Spec.Nodes[0].Instances = ptr.To(0)
+	unrelated := enabled.DeepCopy()
+	unrelated.Name = "unrelated"
+	for i := range unrelated.Spec.Nodes {
+		unrelated.Spec.Nodes[i].Config.CosmoGuard.Config.Name = "other"
+	}
+	otherNamespace := enabled.DeepCopy()
+	otherNamespace.Name = "other-namespace"
+	otherNamespace.Namespace = "elsewhere"
+	validator := disabled.DeepCopy()
+	validator.Name = "validator"
+	validator.Spec.Nodes[0].Validator = &appsv1.NodeSetValidatorConfig{Config: enabled.Spec.Nodes[0].Config.DeepCopy()}
+	r := newValidatorTestReconciler(t, enabled, disabled, zero, unrelated, otherNamespace, validator)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}}
+	requests := r.cosmoGuardConfigMapRequests(context.Background(), cm)
+	var names []string
+	for _, request := range requests {
+		names = append(names, request.String())
+	}
+	assert.ElementsMatch(t, []string{"ns/" + enabled.Name, "ns/" + validator.Name}, names)
+}
+
+func TestCosmoGuardRulesOnlyAfterEnvironmentChange(t *testing.T) {
+	cases := []struct {
+		name          string
+		change        func(*appsv1.Config)
+		credentialKey string
+	}{
+		{name: "EVM enable", change: func(cfg *appsv1.Config) { cfg.EvmEnabled = ptr.To(true) }},
+		{name: "dashboard enable", change: func(cfg *appsv1.Config) { cfg.CosmoGuard.Dashboard.Enable = true }},
+		{name: "dashboard port", change: func(cfg *appsv1.Config) { cfg.CosmoGuard.Dashboard.Port = ptr.To(int32(8081)) }},
+		{name: "dashboard username Secret rotation", credentialKey: "user"},
+		{name: "dashboard password Secret rotation", credentialKey: "password"},
+	}
+	for _, tc := range cases {
+		for _, simultaneous := range []bool{false, true} {
+			sequence := "then rules only"
+			if simultaneous {
+				sequence = "with restart-required file change"
+			}
+			t.Run(tc.name+" "+sequence, func(t *testing.T) {
+				ctx := context.Background()
+				ns, group := guardedNodeSet()
+				group.Config.CosmoGuard.Dashboard = &appsv1.CosmoGuardDashboardConfig{
+					Enable: tc.name != "dashboard enable",
+					BasicAuth: &appsv1.CosmoGuardDashboardAuth{
+						Username: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "dashboard-auth"}, Key: "user"},
+						Password: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "dashboard-auth"}, Key: "password"},
+					},
+				}
+				credentials := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "dashboard-auth", Namespace: "ns"}, Data: map[string][]byte{"user": []byte("test-user"), "password": []byte("initial-password")}}
+				cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}, Data: map[string]string{"cosmoguard.yaml": "lcd: {rules: [{paths: [/old], action: allow}]}"}}
+				r := newValidatorTestReconciler(t, ns, cm, credentials)
+				apply := func() { _, err := r.ensureCosmoGuards(ctx, ns); require.NoError(t, err) }
+				read := func() *k8sappsv1.StatefulSet {
+					sts := &k8sappsv1.StatefulSet{}
+					require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: groupCosmoGuardName(ns, group)}, sts))
+					return sts
+				}
+				changeFile := func(raw string) {
+					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(cm), cm))
+					cm.Data["cosmoguard.yaml"] = raw
+					require.NoError(t, r.Update(ctx, cm))
+				}
+				apply()
+				initial := read()
+				apply()
+				require.Equal(t, initial.ResourceVersion, read().ResourceVersion, "unchanged file and environment must not write")
+				if tc.credentialKey != "" {
+					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(credentials), credentials))
+					credentials.Data[tc.credentialKey] = []byte("rotated-credential")
+					require.NoError(t, r.Update(ctx, credentials))
+				} else {
+					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ns), ns))
+					tc.change(ns.Spec.Nodes[0].Config)
+					require.NoError(t, r.Update(ctx, ns))
+				}
+				if simultaneous {
+					changeFile("auth: {enable: true}\nlcd: {rules: [{paths: [/old], action: allow}]}")
+				}
+				apply()
+				refreshed := read()
+				assert.NotEqual(t, initial.Spec.Template, refreshed.Spec.Template)
+				assert.NotEmpty(t, refreshed.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
+				assert.NotEqual(t, initial.Annotations[controllers.AnnotationCosmoGuardConfigDigest], refreshed.Annotations[controllers.AnnotationCosmoGuardConfigDigest])
+				if tc.credentialKey != "" {
+					require.Equal(t, initial.Spec.Template.Spec, refreshed.Spec.Template.Spec, "Secret rotation changes only the rollout marker")
+				}
+				apply()
+				require.Equal(t, refreshed.ResourceVersion, read().ResourceVersion, "environment changes must request only one rollout")
+				auth := ""
+				if simultaneous {
+					auth = "auth: {enable: true}\n"
+				}
+				changeFile(auth + "lcd: {rules: [{paths: [/new], action: deny}]}")
+				apply()
+				assert.Equal(t, refreshed.Spec.Template, read().Spec.Template, "rules-only edits must not roll after environment changes")
+				converged := read()
+				apply()
+				assert.Equal(t, converged.ResourceVersion, read().ResourceVersion)
+			})
+		}
+	}
 }

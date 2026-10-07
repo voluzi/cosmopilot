@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -50,7 +49,7 @@ func (p GenerationChangedPredicate) Create(e event.CreateEvent) bool {
 	}
 
 	// Ignore events from temporary pods
-	if isTemporaryPodName(e.Object.(metav1.Object).GetName()) {
+	if pod, ok := e.Object.(*corev1.Pod); ok && isTemporaryPodName(pod.Name) {
 		return false
 	}
 
@@ -64,7 +63,7 @@ func (p GenerationChangedPredicate) Delete(e event.DeleteEvent) bool {
 	}
 
 	// Ignore events from temporary pods
-	if isTemporaryPodName(e.Object.(metav1.Object).GetName()) {
+	if pod, ok := e.Object.(*corev1.Pod); ok && isTemporaryPodName(pod.Name) {
 		return false
 	}
 

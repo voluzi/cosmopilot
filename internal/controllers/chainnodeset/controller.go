@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -86,6 +87,7 @@ func (r *Reconciler) requeueWaiting(ctx context.Context, nodeSet *appsv1.ChainNo
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodes,verbs=get;list;watch
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create;delete
 //+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
 //+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
@@ -817,6 +819,7 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&k8sappsv1.StatefulSet{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.cosmoGuardConfigMapRequests)).
 		WithEventFilter(GenerationChangedPredicate{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

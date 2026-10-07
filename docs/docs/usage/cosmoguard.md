@@ -24,6 +24,8 @@ CosmoGuard runs as a StatefulSet so every replica joins one **embedded olric cac
 - a **headless peer Service** (`<name>-cg-peer`) gives each replica stable DNS for olric's peer discovery;
 - gossip traffic is encrypted with a key Cosmopilot generates once into a **Secret** (`<name>-cg-cluster`) and mounts into every replica.
 
+The per-guard `<name>-cg-cluster` Secret holds the gossip encryption key; if it is deleted, Cosmopilot recreates it with a new key while running replicas retain the old one and cannot form a cluster with replicas started later, so restart the guards after deletion.
+
 You don't configure any of this — enabling CosmoGuard is enough.
 
 :::info[Migrating from the sidecar model]
@@ -37,6 +39,18 @@ Earlier releases ran CosmoGuard as a sidecar container inside each node pod. Ena
 - **Rate Limiting & WebSocket Management:** Protect nodes from overload.
 - **Independent Scaling:** Scale the guard independently of the nodes, with optional autoscaling.
 - **Hot-Reloading:** Rule changes in the `ConfigMap` are hot-reloaded without a restart.
+
+## Configuration updates
+
+Changes to rules, trusted proxies, request logging, JSON-RPC batch size and gRPC protosets hot-reload without restarting guard or node pods. When a file change requires a restart according to CosmoGuard's own policy (for example, authentication, cache topology or server timeouts), Cosmopilot requests the guard StatefulSet's ordered rolling update; with two or more replicas, old and new replicas can serve together until it completes. Classification uses the CosmoGuard module bundled with the operator, so an overridden guard image may have a different reload policy.
+
+An operator upgrade adopts the current valid configuration without restarting existing guards solely because the rollout baseline is introduced, including when the bundled CosmoGuard module version changes; a guard image change still triggers its normal StatefulSet rollout. Invalid files leave the rollout state unchanged and do not block other reconciliation; CosmoGuard rejects and logs them itself. The `cosmopilot.voluzi.com/cosmoguard-*` annotations are operator-managed rollout state, with digests protected by the existing per-guard cluster encryption key.
+
+`${VAR}` references in the rules file are resolved by Cosmopilot only against the variables it renders into the guard pod, so a file requiring any other variable (for example `${HOSTNAME}`) cannot be classified and its restart-required changes are not rolled out automatically.
+
+With a single replica (the default), the guard is unavailable for the duration of a pod restart caused by a restart-required change.
+
+Dashboard credentials are read from Secrets at startup, so rotating those Secrets rolls the guards on the next reconcile of the owning ChainNode or ChainNodeSet; referenced credential Secrets are not watched.
 
 ## Setting Up CosmoGuard
 
@@ -88,7 +102,7 @@ config:
       name: cosmoguard-config  # Name of the ConfigMap created in Step 2.
       key: cosmoguard.yaml     # Key within the ConfigMap containing the rules.
     replicas: 2                # Optional: number of CosmoGuard replicas (default 1). Ignored when autoscaling is enabled.
-    image: ghcr.io/voluzi/cosmoguard:5.0.0  # Optional: override the operator-wide default image.
+    image: ghcr.io/voluzi/cosmoguard:5.1.0  # Optional: override the operator-wide default image.
     resources:                 # Optional: per-pod resources (defaults shown).
       requests:
         cpu: 200m
