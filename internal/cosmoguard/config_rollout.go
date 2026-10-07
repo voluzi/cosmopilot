@@ -24,6 +24,9 @@ var cosmoGuardModuleVersion = func() string {
 	if info != nil {
 		for _, dep := range info.Deps {
 			if dep.Path == "github.com/voluzi/cosmoguard/v5" {
+				if dep.Replace != nil {
+					return dep.Replace.Version
+				}
 				return dep.Version
 			}
 		}
