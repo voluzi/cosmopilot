@@ -40,9 +40,15 @@ Earlier releases ran CosmoGuard as a sidecar container inside each node pod. Ena
 
 ## Configuration updates
 
-Changes to rules, trusted proxies, request logging, JSON-RPC batch size and gRPC protosets hot-reload without restarting guard or node pods. When a file change requires a restart according to CosmoGuard's own policy (for example, authentication, cache topology or server timeouts), Cosmopilot requests the guard StatefulSet's ordered rolling update; old and new replicas can serve together until it completes. Classification uses the CosmoGuard module bundled with the operator, so an overridden guard image may have a different reload policy.
+Changes to rules, trusted proxies, request logging, JSON-RPC batch size and gRPC protosets hot-reload without restarting guard or node pods. When a file change requires a restart according to CosmoGuard's own policy (for example, authentication, cache topology or server timeouts), Cosmopilot requests the guard StatefulSet's ordered rolling update; with two or more replicas, old and new replicas can serve together until it completes. Classification uses the CosmoGuard module bundled with the operator, so an overridden guard image may have a different reload policy.
 
 An operator upgrade adopts the current valid configuration without restarting existing guards, including when the bundled CosmoGuard module version changes. Invalid files leave the rollout state unchanged and do not block other reconciliation; CosmoGuard rejects and logs them itself. The `cosmopilot.voluzi.com/cosmoguard-*` annotations are operator-managed rollout state, with digests protected by the existing per-guard cluster encryption key.
+
+`${VAR}` references in the rules file are resolved by Cosmopilot only against the variables it renders into the guard pod, so a file requiring any other variable (for example `${HOSTNAME}`) cannot be classified and its restart-required changes are not rolled out automatically.
+
+With a single replica (the default), the guard is unavailable for the duration of a pod restart caused by a restart-required change.
+
+Secret-sourced values such as dashboard credentials are read by the guard at startup, so rotating the Secret does not restart guards; restart them to apply the new values.
 
 ## Setting Up CosmoGuard
 
