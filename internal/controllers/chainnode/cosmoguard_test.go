@@ -764,9 +764,9 @@ func TestCosmoGuardConfigMapRequests(t *testing.T) {
 	requests := r.cosmoGuardConfigMapRequests(context.Background(), cm)
 	var names []string
 	for _, request := range requests {
-		names = append(names, request.Name)
+		names = append(names, request.String())
 	}
-	assert.ElementsMatch(t, []string{"standalone", "routed-child"}, names)
+	assert.ElementsMatch(t, []string{"ns/standalone", "ns/routed-child"}, names)
 }
 
 func TestCosmoGuardRulesOnlyAfterEnvironmentChange(t *testing.T) {
