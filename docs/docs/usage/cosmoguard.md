@@ -24,6 +24,8 @@ CosmoGuard runs as a StatefulSet so every replica joins one **embedded olric cac
 - a **headless peer Service** (`<name>-cg-peer`) gives each replica stable DNS for olric's peer discovery;
 - gossip traffic is encrypted with a key Cosmopilot generates once into a **Secret** (`<name>-cg-cluster`) and mounts into every replica.
 
+The per-guard `<name>-cg-cluster` Secret holds the gossip encryption key; if it is deleted, Cosmopilot recreates it with a new key while running replicas retain the old one and cannot form a cluster with replicas started later, so restart the guards after deletion.
+
 You don't configure any of this — enabling CosmoGuard is enough.
 
 :::info[Migrating from the sidecar model]
