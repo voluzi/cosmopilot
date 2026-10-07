@@ -38,6 +38,12 @@ Earlier releases ran CosmoGuard as a sidecar container inside each node pod. Ena
 - **Independent Scaling:** Scale the guard independently of the nodes, with optional autoscaling.
 - **Hot-Reloading:** Rule changes in the `ConfigMap` are hot-reloaded without a restart.
 
+## Configuration updates
+
+Changes to rules, trusted proxies, request logging, JSON-RPC batch size and gRPC protosets hot-reload without restarting guard or node pods. When a file change requires a restart according to CosmoGuard's own policy (for example, authentication, cache topology or server timeouts), Cosmopilot requests the guard StatefulSet's ordered rolling update; old and new replicas can serve together until it completes. Classification uses the CosmoGuard module bundled with the operator, so an overridden guard image may have a different reload policy.
+
+An operator upgrade adopts the current valid configuration without restarting existing guards, including when the bundled CosmoGuard module version changes. Invalid files leave the rollout state unchanged and do not block other reconciliation; CosmoGuard rejects and logs them itself. The `cosmopilot.voluzi.com/cosmoguard-*` annotations are operator-managed rollout state, with digests protected by the existing per-guard cluster encryption key.
+
 ## Setting Up CosmoGuard
 
 ### Step 1: Create the CosmoGuard rules

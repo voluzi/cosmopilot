@@ -288,7 +288,7 @@ func (r *Reconciler) ensureCosmoGuards(ctx context.Context, nodeSet *appsv1.Chai
 
 		sts := params.StatefulSet()
 		withCosmoGuardScope(sts)
-		if err := cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, sts); err != nil {
+		if err := cosmoguard.ApplyStatefulSet(ctx, r.Client, r.Scheme, nodeSet, params, sts); err != nil {
 			return cosmoGuardReconcile{}, fmt.Errorf("failed to apply cosmoguard statefulset for group %s: %w", group.Name, err)
 		}
 

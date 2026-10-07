@@ -692,3 +692,79 @@ func TestDisableGuardUndeploys(t *testing.T) {
 		assert.True(t, apierrors.IsNotFound(err), "dashboard HTTPRoute %s should be removed when disabled", name)
 	}
 }
+
+func TestCosmoGuardConfigRollout(t *testing.T) {
+	ctx := context.Background()
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}, Data: map[string]string{"cosmoguard.yaml": "lcd: {rules: [{paths: [/old], action: allow}]}"}}
+	cn := guardedChainNode("node-0", false)
+	r := cosmoGuardTestReconciler(t, cn, cm)
+	name := cn.CosmoGuardName()
+	apply := func() { require.NoError(t, ensureGuard(r, ctx, cn)) }
+	read := func() *k8sappsv1.StatefulSet {
+		sts := &k8sappsv1.StatefulSet{}
+		require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, sts))
+		return sts
+	}
+	change := func(raw string) {
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(cm), cm))
+		cm.Data["cosmoguard.yaml"] = raw
+		require.NoError(t, r.Update(ctx, cm))
+		apply()
+	}
+	apply()
+	initial := read()
+	require.NotEmpty(t, initial.Annotations["cosmopilot.voluzi.com/cosmoguard-restart-fingerprint"])
+	require.Empty(t, initial.Spec.Template.Annotations["cosmopilot.voluzi.com/cosmoguard-restart"])
+	t.Run("rules only preserves template", func(t *testing.T) {
+		change("lcd: {rules: [{paths: [/new], action: deny}]}")
+		assert.Equal(t, initial.Spec.Template, read().Spec.Template)
+	})
+	t.Run("auth rolls exactly once", func(t *testing.T) {
+		change("auth: {enable: true}\nlcd: {rules: [{paths: [/new], action: deny}]}")
+		rolled := read()
+		require.NotEqual(t, initial.Spec.Template, rolled.Spec.Template)
+		require.NotEmpty(t, rolled.Spec.Template.Annotations["cosmopilot.voluzi.com/cosmoguard-restart"])
+		apply()
+		assert.Equal(t, rolled.ResourceVersion, read().ResourceVersion)
+	})
+	t.Run("invalid leaves state unchanged", func(t *testing.T) {
+		previous := read()
+		change("auth: [invalid")
+		assert.Equal(t, previous.Spec.Template, read().Spec.Template)
+		assert.Equal(t, previous.Annotations, read().Annotations)
+	})
+	t.Run("upgrade adopts without rollout", func(t *testing.T) {
+		live := read()
+		for key := range live.Annotations {
+			if key != "banzaicloud.com/last-applied" {
+				delete(live.Annotations, key)
+			}
+		}
+		require.NoError(t, r.Update(ctx, live))
+		change("auth: {enable: false}")
+		adopted := read()
+		assert.Equal(t, live.Spec.Template, adopted.Spec.Template)
+		require.NotEmpty(t, adopted.Annotations["cosmopilot.voluzi.com/cosmoguard-restart-fingerprint"])
+	})
+}
+
+func TestCosmoGuardConfigMapRequests(t *testing.T) {
+	standalone := guardedChainNode("standalone", false)
+	child := guardedChainNode("child", true)
+	routedChild := guardedChainNode("routed-child", true)
+	routedChild.Spec.Ingress = &appsv1.IngressConfig{}
+	disabled := guardedChainNode("disabled", false)
+	disabled.Spec.Config.CosmoGuard.Enable = false
+	unrelated := guardedChainNode("unrelated", false)
+	unrelated.Spec.Config.CosmoGuard.Config.Name = "other"
+	otherNamespace := guardedChainNode("other-namespace", false)
+	otherNamespace.Namespace = "elsewhere"
+	r := cosmoGuardTestReconciler(t, standalone, child, routedChild, disabled, unrelated, otherNamespace)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}}
+	requests := r.cosmoGuardConfigMapRequests(context.Background(), cm)
+	var names []string
+	for _, request := range requests {
+		names = append(names, request.Name)
+	}
+	assert.ElementsMatch(t, []string{"standalone", "routed-child"}, names)
+}
