@@ -100,7 +100,7 @@ func (p Params) prepareConfigRollout(ctx context.Context, c client.Client, desir
 	cfg, err := guardconfig.ParseConfig(raw, func(name string) (string, bool) { value, ok := env[name]; return value, ok })
 	if err != nil {
 		// Parser errors can contain config values, including credentials.
-		log.FromContext(ctx).Info("cosmoguard configuration cannot be parsed; skipping config rollout", "configMap", cm.Name)
+		log.FromContext(ctx).Error(nil, "cosmoguard configuration cannot be parsed; skipping config rollout", "configMap", cm.Name, "key", p.ConfigMap.Key)
 		return nil
 	}
 	fingerprint, err := guardconfig.RestartFingerprint(cfg)

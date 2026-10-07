@@ -1,11 +1,13 @@
 package cosmoguard
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,6 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 )
@@ -211,6 +215,47 @@ func TestConfigRolloutRenderedOverrides(t *testing.T) {
 			previous := read()
 			apply()
 			assert.Equal(t, previous.ResourceVersion, read().ResourceVersion)
+		})
+	}
+}
+
+func TestConfigRolloutUnclassifiableConfig(t *testing.T) {
+	t.Setenv("HOSTNAME", "operator-host-value")
+	cases := []struct{ name, raw, privateValue string }{
+		{"parse failure", "auth: [private-config-value", "private-config-value"},
+		{"unresolved variable", "auth: {identities: [{name: test, apiKey: '${HOSTNAME:?private-message}'}]}", "private-message"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, appsv1.AddToScheme(scheme))
+			owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "ns", UID: "owner"}}
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}, Data: map[string]string{"cosmoguard.yaml": ""}}
+			p := baseParams()
+			p.UpstreamHost = "node.ns.svc.cluster.local"
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: p.EncryptionKeySecret, Namespace: "ns"}, Data: map[string][]byte{EncryptionKeySecretKey: []byte(base64.StdEncoding.EncodeToString(make([]byte, 32)))}}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, cm, secret).Build()
+			require.NoError(t, ApplyStatefulSet(ctx, c, scheme, owner, p, p.StatefulSet()))
+			before := &appsv1.StatefulSet{}
+			require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: p.Name}, before))
+			cm.Data["cosmoguard.yaml"] = tc.raw
+			require.NoError(t, c.Update(ctx, cm))
+			var output bytes.Buffer
+			logger := zap.New(zap.UseDevMode(false), zap.WriteTo(&output))
+			require.NoError(t, ApplyStatefulSet(log.IntoContext(ctx, logger), c, scheme, owner, p, p.StatefulSet()))
+			var entry map[string]any
+			require.NoError(t, json.Unmarshal(bytes.TrimSpace(output.Bytes()), &entry))
+			assert.Equal(t, "error", entry["level"])
+			assert.Equal(t, cm.Name, entry["configMap"])
+			assert.Equal(t, p.ConfigMap.Key, entry["key"])
+			assert.NotContains(t, output.String(), tc.privateValue)
+			assert.NotContains(t, output.String(), "HOSTNAME")
+			assert.NotContains(t, output.String(), "operator-host-value")
+			after := &appsv1.StatefulSet{}
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(before), after))
+			assert.Equal(t, before.ResourceVersion, after.ResourceVersion)
 		})
 	}
 }
