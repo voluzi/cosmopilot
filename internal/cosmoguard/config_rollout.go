@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"maps"
 	"runtime/debug"
+	"slices"
 
 	guardconfig "github.com/voluzi/cosmoguard/v5/pkg/cosmoguard"
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,7 +36,7 @@ var cosmoGuardModuleVersion = func() string {
 	return ""
 }()
 
-// ApplyStatefulSet classifies file changes using CosmoGuard's reload policy against the same
+// ApplyStatefulSet classifies config changes using CosmoGuard's reload policy against the same
 // live object ApplyOwned updates, so a conflicting write cannot advance the rollout baseline.
 func ApplyStatefulSet(ctx context.Context, c client.Client, scheme *runtime.Scheme, owner client.Object, p Params, desired *appsv1.StatefulSet) error {
 	return applyOwned(ctx, c, scheme, owner, desired, func(existing client.Object) error {
@@ -85,6 +87,7 @@ func (p Params) prepareConfigRollout(ctx context.Context, c client.Client, desir
 		return nil
 	}
 
+	// Referenced credential Secrets are not watched; rotations are noticed on the owner's next reconcile.
 	env, err := guardEnvironment(ctx, c, desired)
 	if err != nil {
 		return err
@@ -93,13 +96,16 @@ func (p Params) prepareConfigRollout(ctx context.Context, c client.Client, desir
 		return nil
 	}
 	key := []byte(env["COSMOGUARD_CLUSTER_ENCRYPTION_KEY"])
-	digest := keyedConfigValue(key, raw)
+	digest := configInputDigest(key, raw, env)
 	// Include the module version because fingerprints from different releases are not comparable.
 	// The keyed scheme identifier also rebaselines encryption-key rotation without a file rollout.
 	scheme := cosmoGuardModuleVersion + ":" + keyedConfigValue(key, []byte("config-rollout-v1"))
 	previousFingerprint := desired.Annotations[controllers.AnnotationCosmoGuardRestartFingerprint]
 	previousDigest := desired.Annotations[controllers.AnnotationCosmoGuardConfigDigest]
 	comparable := live != nil && previousFingerprint != "" && previousDigest != "" && desired.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme] == scheme
+	if comparable && previousDigest == digest {
+		return nil
+	}
 	cfg, err := guardconfig.ParseConfig(raw, func(name string) (string, bool) { value, ok := env[name]; return value, ok })
 	if err != nil {
 		// Parser errors can contain config values, including credentials.
@@ -111,7 +117,7 @@ func (p Params) prepareConfigRollout(ctx context.Context, c client.Client, desir
 		return err
 	}
 	value := keyedConfigValue(key, []byte(fingerprint))
-	if comparable && previousDigest != digest && previousFingerprint != value {
+	if comparable && previousFingerprint != value {
 		if desired.Spec.Template.Annotations == nil {
 			desired.Spec.Template.Annotations = map[string]string{}
 		}
@@ -121,6 +127,18 @@ func (p Params) prepareConfigRollout(ctx context.Context, c client.Client, desir
 	desired.Annotations[controllers.AnnotationCosmoGuardRestartFingerprint] = value
 	desired.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme] = scheme
 	return nil
+}
+
+func configInputDigest(key, raw []byte, env map[string]string) string {
+	// Length prefixes keep arbitrary file and credential bytes from blurring entry boundaries.
+	input := binary.BigEndian.AppendUint64(nil, uint64(len(raw)))
+	input = append(input, raw...)
+	for _, name := range slices.Sorted(maps.Keys(env)) {
+		pair := name + "=" + env[name]
+		input = binary.BigEndian.AppendUint64(input, uint64(len(pair)))
+		input = append(input, pair...)
+	}
+	return keyedConfigValue(key, input)
 }
 
 func keyedConfigValue(key, value []byte) string {

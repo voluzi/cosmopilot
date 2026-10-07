@@ -529,14 +529,15 @@ func TestCosmoGuardConfigMapRequests(t *testing.T) {
 
 func TestCosmoGuardRulesOnlyAfterEnvironmentChange(t *testing.T) {
 	cases := []struct {
-		name           string
-		change         func(*appsv1.Config)
-		rotatePassword bool
+		name          string
+		change        func(*appsv1.Config)
+		credentialKey string
 	}{
 		{name: "EVM enable", change: func(cfg *appsv1.Config) { cfg.EvmEnabled = ptr.To(true) }},
 		{name: "dashboard enable", change: func(cfg *appsv1.Config) { cfg.CosmoGuard.Dashboard.Enable = true }},
 		{name: "dashboard port", change: func(cfg *appsv1.Config) { cfg.CosmoGuard.Dashboard.Port = ptr.To(int32(8081)) }},
-		{name: "dashboard Secret rotation", rotatePassword: true},
+		{name: "dashboard username Secret rotation", credentialKey: "user"},
+		{name: "dashboard password Secret rotation", credentialKey: "password"},
 	}
 	for _, tc := range cases {
 		for _, simultaneous := range []bool{false, true} {
@@ -570,9 +571,11 @@ func TestCosmoGuardRulesOnlyAfterEnvironmentChange(t *testing.T) {
 				}
 				apply()
 				initial := read()
-				if tc.rotatePassword {
+				apply()
+				require.Equal(t, initial.ResourceVersion, read().ResourceVersion, "unchanged file and environment must not write")
+				if tc.credentialKey != "" {
 					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(credentials), credentials))
-					credentials.Data["password"] = []byte("rotated-password")
+					credentials.Data[tc.credentialKey] = []byte("rotated-credential")
 					require.NoError(t, r.Update(ctx, credentials))
 				} else {
 					require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ns), ns))
@@ -584,19 +587,14 @@ func TestCosmoGuardRulesOnlyAfterEnvironmentChange(t *testing.T) {
 				}
 				apply()
 				refreshed := read()
-				if simultaneous {
-					require.NotEqual(t, initial.Spec.Template, refreshed.Spec.Template)
-					if tc.rotatePassword {
-						require.NotEmpty(t, refreshed.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
-					}
-				} else {
-					require.Empty(t, refreshed.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
-					if tc.rotatePassword {
-						require.Equal(t, initial.Spec.Template, refreshed.Spec.Template)
-					} else {
-						require.NotEqual(t, initial.Spec.Template, refreshed.Spec.Template)
-					}
+				assert.NotEqual(t, initial.Spec.Template, refreshed.Spec.Template)
+				assert.NotEmpty(t, refreshed.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
+				assert.NotEqual(t, initial.Annotations[controllers.AnnotationCosmoGuardConfigDigest], refreshed.Annotations[controllers.AnnotationCosmoGuardConfigDigest])
+				if tc.credentialKey != "" {
+					require.Equal(t, initial.Spec.Template.Spec, refreshed.Spec.Template.Spec, "Secret rotation changes only the rollout marker")
 				}
+				apply()
+				require.Equal(t, refreshed.ResourceVersion, read().ResourceVersion, "environment changes must request only one rollout")
 				auth := ""
 				if simultaneous {
 					auth = "auth: {enable: true}\n"

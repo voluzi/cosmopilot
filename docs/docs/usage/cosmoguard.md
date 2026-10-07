@@ -48,7 +48,7 @@ An operator upgrade adopts the current valid configuration without restarting ex
 
 With a single replica (the default), the guard is unavailable for the duration of a pod restart caused by a restart-required change.
 
-Secret-sourced values such as dashboard credentials are read by the guard at startup, so rotating the Secret does not restart guards; restart them to apply the new values.
+Dashboard credentials are read from Secrets at startup, so rotating those Secrets rolls the guards on the next reconcile of the owning ChainNode or ChainNodeSet; referenced credential Secrets are not watched.
 
 ## Setting Up CosmoGuard
 
