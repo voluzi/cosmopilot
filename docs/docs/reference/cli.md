@@ -23,7 +23,7 @@ admission webhook server.
 | `-health-probe-bind-address` | `HEALTH_PROBE_BIND_ADDRESS` | `:8081` | Address the health/readiness probe endpoint binds to. |
 | `-enable-leader-election` | `ENABLE_LEADER_ELECTION` | `false` | Enable leader election so only one manager is active at a time. |
 | `-nodeutils-image` | `NODE_UTILS_IMAGE` | Pinned manager-release default | `node-utils` image deployed as a sidecar with each node. |
-| `-cosmoguard-image` | `COSMOGUARD_IMAGE` | Pinned manager-release default | CosmoGuard image for the standalone deployments created when CosmoGuard is enabled. |
+| `-cosmoguard-image` | `COSMOGUARD_IMAGE` | Pinned manager-release default | CosmoGuard image for the standalone StatefulSets created when CosmoGuard is enabled. |
 | `-cosmoseed-image` | `COSMOSEED_IMAGE` | Pinned manager-release default | Image used for Cosmoseed deployments when enabled. |
 | `-cosmosigner-image` | `COSMOSIGNER_IMAGE` | Pinned manager-release default | Default image for managed Cosmosigner deployments; a per-resource image overrides it. |
 | `-dataexporter-image` | `DATA_EXPORTER_IMAGE` | Pinned manager-release default | Data exporter image used by snapshot upload and deletion Jobs. |

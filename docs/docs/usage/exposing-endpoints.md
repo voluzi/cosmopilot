@@ -27,14 +27,17 @@ expose:
 
 ## Exposing API Endpoints
 
-API endpoints can be enabled either:
-1. **Per ChainNode**: Configure under `.spec.ingress` on the `ChainNode` resource.
-2. **Per Group of Nodes**: Configure under `.spec.nodes[].ingress` on a `ChainNodeSet`.
-3. **Global Ingress**: Configure under `.spec.ingresses` to target multiple groups of nodes (this is the recommended approach, as per-group ingress configuration might be deprecated in the future).
+API endpoints can be enabled through:
+
+1. **ChainNode ingress**: Configure `.spec.ingress` on a standalone `ChainNode`.
+2. **ChainNodeSet ingress**: Configure `.spec.ingresses` with one or multiple group names.
+
+`spec.nodes[].ingress` is not a supported field. For separate per-node routes,
+node groups support `nodes[].individualIngresses`.
 
 ### ChainNode Ingress Example
 
-To expose API endpoints for a single `ChainNode`, use the following configuration under `.spec.ingress`:
+To expose API endpoints for a single `ChainNode`, use the following configuration under `spec`:
 
 ```yaml
 ingress:
@@ -47,24 +50,35 @@ ingress:
   tlsSecretName: node-tls # optional. Defaults to `<service-name>-tls`.
 ```
 
-### Per Group Ingress Example
+### Single-Group Ingress Example
 
-To expose API endpoints for a specific group of nodes within a `ChainNodeSet`, use the following configuration under `.spec.nodes[].ingress`:
+To expose one group in a `ChainNodeSet`, select it under `spec.ingresses`:
 
 ```yaml
-ingress:
-  host: nodes.example.com 
-  enableRPC: true # optional. Defaults to `false`.
-  enableGRPC: true # optional. Defaults to `false`.
-  enableLCD: true # optional. Defaults to `false`.
-  enableEvmRPC: false # optional. Defaults to `false`.
-  enableEvmRpcWS: false # optional. Defaults to `false`.
-  ingressClass: nginx # optional. Defaults to `nginx`.
-  annotations: # optional annotations to ingress resource
-    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-  disableTLS: false # optional. Defaults to `false`.
-  tlsSecretName: example-tls-secret # optional. Defaults to `<service-name>-tls`.
+spec:
+  ingresses:
+    - name: fullnodes
+      groups: [fullnodes]
+      host: nodes.example.com
+      enableRPC: true # optional. Defaults to `false`.
+      enableGRPC: true # optional. Defaults to `false`.
+      enableLCD: true # optional. Defaults to `false`.
+      enableEvmRPC: false # optional. Defaults to `false`.
+      enableEvmRpcWS: false # optional. Defaults to `false`.
+      ingressClass: nginx # optional. Defaults to `nginx`.
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+      grpcAnnotations:
+        nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+        nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+      disableTLS: false # optional. Defaults to `false`.
+      tlsSecretName: example-tls-secret # optional. Defaults to `<service-name>-tls`.
 ```
+
+`annotations` applies to the ordinary HTTP Ingress and is not copied to the
+separate gRPC Ingress. Use `grpcAnnotations` for gRPC-specific settings. An explicit
+`grpcAnnotations` map replaces the default map, so include `backend-protocol` when
+using nginx.
 
 ### **Global Ingress Example**
 
@@ -102,7 +116,7 @@ ingresses:
 ```
 
 :::info[NOTE]
-Each `API` endpoint is exposed as a subdomain of the configured `host` as follows. These are not configurable.
+Each `API` endpoint is exposed as a subdomain of the configured `host`. The following prefixes are defaults; override them with `subdomains` on either ingress configuration type.
 - Tendermint RPC is available at `rpc.<host>`.
 - Cosmos-SDK RPC is available at `lcd.<host>`.
 - gRPC is available at `grpc.<host>`.
@@ -118,4 +132,4 @@ gRPC is served over HTTP/2 only, so it gets its own `<name>-grpc` Ingress backed
 
 ### Recommended Approach
 
-For flexibility and better scalability, it is recommended to use `.spec.ingresses` to configure API endpoints instead of per-group ingress configurations.
+Use `.spec.ingresses` to expose one or multiple groups through a group-wide ingress.
