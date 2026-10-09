@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -334,6 +335,8 @@ func TestConfigRolloutUpgradeTemplate(t *testing.T) {
 	require.NotNil(t, upgraded.Spec.Template.Spec.TerminationGracePeriodSeconds)
 	assert.Equal(t, int64(30), *upgraded.Spec.Template.Spec.TerminationGracePeriodSeconds)
 	assert.NotEqual(t, old.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], upgraded.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme])
+	assert.True(t, strings.HasPrefix(upgraded.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], "v6.0.0:"),
+		"scheme must carry the cosmoguard module version read from build info")
 	assert.Empty(t, upgraded.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
 	apply()
 	assert.Equal(t, upgraded.ResourceVersion, read().ResourceVersion)
