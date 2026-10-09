@@ -1,6 +1,6 @@
 # ChainNodeSet with a CosmoGuard-protected full node group.
 #
-# Cosmopilot deploys a standalone CosmoGuard v4 Deployment per node group. It fronts every node in
+# Cosmopilot deploys a standalone clustered CosmoGuard v6 StatefulSet per node group. It fronts every node in
 # the group (discovered through a headless Service), can run multiple replicas, and is autoscaled by
 # an HPA. The group Service is routed through the guard once it is ready.
 #

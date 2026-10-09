@@ -640,7 +640,7 @@ Config allows setting specific configurations for a node, including overriding c
 | env | List of environment variables to set in the app container. | []corev1.EnvVar | false |
 | podAnnotations | PodAnnotations allows setting additional annotations on the node's pod. | map[string]string | false |
 | safeToEvict | SafeToEvict sets cluster-autoscaler.kubernetes.io/safe-to-evict annotation to the given value. It allows/disallows cluster-autoscaler to evict this node's pod. | *bool | false |
-| cosmoGuard | Deploys a standalone CosmoGuard deployment fronting this node's API endpoints. | *[CosmoGuardConfig](#cosmoguardconfig) | false |
+| cosmoGuard | Deploys a standalone CosmoGuard StatefulSet fronting this node's API endpoints. | *[CosmoGuardConfig](#cosmoguardconfig) | false |
 | nodeUtilsLogLevel | Log level for node-utils container. Defaults to `info`. | *string | false |
 | startupTime | The time after which a node will be restarted if it does not start properly. Defaults to `1h`. | *string | false |
 | ignoreSyncing | Marks the node as ready even when it is catching up. This is useful when a chain is halted, but you still need the node to be ready for querying existing data. Defaults to `false`. | *bool | false |
@@ -683,9 +683,9 @@ CosmoGuardConfig allows configuring CosmoGuard - a standalone firewall/policy pr
 | config | ConfigMap containing the CosmoGuard rules configuration. Only rules should be set here; upstream, listener, metrics and dashboard settings are managed by Cosmopilot. | *corev1.ConfigMapKeySelector | true |
 | image | Container image to use for CosmoGuard. Overrides the operator-wide default image. | *string | false |
 | replicas | Number of CosmoGuard replicas to run. Defaults to `1`. Ignored when autoscaling is enabled. | *int32 | false |
-| autoscaling | Autoscaling configures a HorizontalPodAutoscaler for the CosmoGuard deployment. | *[CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig) | false |
+| autoscaling | Autoscaling configures a HorizontalPodAutoscaler for the CosmoGuard StatefulSet. | *[CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig) | false |
 | dashboard | Dashboard exposes CosmoGuard's read-only web dashboard. | *[CosmoGuardDashboardConfig](#cosmoguarddashboardconfig) | false |
-| resources | Compute Resources for each CosmoGuard pod. | *corev1.ResourceRequirements | false |
+| resources | Compute Resources for each CosmoGuard pod. When the field is omitted entirely, requests and limits both default to 500m CPU and 500Mi memory. A block that is set is used as written, except with autoscaling enabled: an empty block then takes the defaults, and a missing request for a metric the autoscaler targets is filled with the default, capped at a smaller limit. | *corev1.ResourceRequirements | false |
 | restartPodOnFailure | Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes, so this field has no effect and will be removed in a future release. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)

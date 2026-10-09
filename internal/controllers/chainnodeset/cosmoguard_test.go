@@ -113,10 +113,21 @@ func TestGroupServiceFlipsToGuardOnlyWhenReady(t *testing.T) {
 // Config's ServiceAccount; a validator group uses the validator sub-config's nodeSelector/affinity,
 // the validators' priority, and the validator Config's ServiceAccount.
 func TestGroupGuardScheduling(t *testing.T) {
+	placement := func(pool string) *corev1.Affinity {
+		return &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "pool", Operator: corev1.NodeSelectorOpIn, Values: []string{pool}}}}},
+			}},
+			PodAntiAffinity: &corev1.PodAntiAffinity{PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{Weight: 50, PodAffinityTerm: corev1.PodAffinityTerm{
+				TopologyKey: "kubernetes.io/hostname", LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"workload": "node"}},
+			}}}},
+		}
+	}
 	// Regular group: group-level placement, nodes priority, group Config SA.
 	regularNodeSet, regularGroup := guardedNodeSet()
 	regularGroup.NodeSelector = map[string]string{"pool": "nodes"}
-	regularGroup.Affinity = &corev1.Affinity{}
+	regularGroup.Affinity = placement("nodes")
+	regularBefore := regularGroup.Affinity.DeepCopy()
 	regularGroup.Config.ServiceAccountName = ptr.To("nodes-sa")
 	regularNodeSet.Spec.Nodes = []appsv1.NodeGroupSpec{regularGroup}
 
@@ -128,9 +139,17 @@ func TestGroupGuardScheduling(t *testing.T) {
 	assert.Equal(t, regularGroup.Affinity, p.Affinity)
 	assert.Equal(t, "rel-nodes", p.PriorityClassName)
 	assert.Equal(t, "nodes-sa", p.ServiceAccountName)
+	regularPod := p.StatefulSet().Spec.Template.Spec
+	assert.Equal(t, map[string]string{"pool": "nodes"}, regularPod.NodeSelector)
+	assert.Equal(t, regularBefore, regularPod.Affinity)
+	assert.Equal(t, regularBefore, regularGroup.Affinity)
+	require.Len(t, regularPod.TopologySpreadConstraints, 1)
+	assert.Equal(t, corev1.ScheduleAnyway, regularPod.TopologySpreadConstraints[0].WhenUnsatisfiable)
+	assert.Equal(t, int32(1), *p.StatefulSet().Spec.Replicas)
 
 	// Validator group: the pods are rendered from group.Validator, so the guard must follow it.
-	valAffinity := &corev1.Affinity{}
+	valAffinity := placement("validators")
+	valBefore := valAffinity.DeepCopy()
 	valGroup := appsv1.NodeGroupSpec{
 		Name: "validators",
 		Validator: &appsv1.NodeSetValidatorConfig{
@@ -158,6 +177,12 @@ func TestGroupGuardScheduling(t *testing.T) {
 	assert.Equal(t, valAffinity, p.Affinity)
 	assert.Equal(t, "rel-validators", p.PriorityClassName)
 	assert.Equal(t, "validators-sa", p.ServiceAccountName)
+	validatorPod := p.StatefulSet().Spec.Template.Spec
+	assert.Equal(t, map[string]string{"pool": "validators"}, validatorPod.NodeSelector)
+	assert.Equal(t, valBefore, validatorPod.Affinity)
+	assert.Equal(t, valBefore, valAffinity)
+	require.Len(t, validatorPod.TopologySpreadConstraints, 1)
+	assert.Equal(t, corev1.ScheduleAnyway, validatorPod.TopologySpreadConstraints[0].WhenUnsatisfiable)
 }
 
 // TestZeroInstanceGroupSkipsGuard verifies a group scaled to instances:0 (still CosmoGuard-enabled)

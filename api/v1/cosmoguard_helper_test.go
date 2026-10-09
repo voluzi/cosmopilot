@@ -8,8 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
-
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
 )
 
 func TestGetCosmoGuardImagePrecedence(t *testing.T) {
@@ -22,10 +20,40 @@ func TestGetCosmoGuardImagePrecedence(t *testing.T) {
 	empty := ""
 	cfg.CosmoGuard.Image = &empty
 	assert.Equal(t, "operator/default:v1", cfg.GetCosmoGuardImage("operator/default:v1"))
-	assert.Equal(t, images.DefaultCosmoGuardImage, cfg.GetCosmoGuardImage(""))
+	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.0.0", cfg.GetCosmoGuardImage(""))
 
 	var nilCfg *Config
-	assert.Equal(t, images.DefaultCosmoGuardImage, nilCfg.GetCosmoGuardImage(""))
+	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.0.0", nilCfg.GetCosmoGuardImage(""))
+}
+
+func TestGetCosmoGuardResources(t *testing.T) {
+	custom := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m"), corev1.ResourceMemory: resource.MustParse("250Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m"), corev1.ResourceMemory: resource.MustParse("250Mi")},
+	}
+	for _, tc := range []struct {
+		name     string
+		cfg      *Config
+		override *corev1.ResourceRequirements
+	}{
+		{name: "nil config"},
+		{name: "empty config", cfg: &Config{}},
+		{name: "empty guard", cfg: &Config{CosmoGuard: &CosmoGuardConfig{}}},
+		{name: "custom resources", cfg: &Config{CosmoGuard: &CosmoGuardConfig{Resources: custom}}, override: custom},
+		{name: "explicit empty resources", cfg: &Config{CosmoGuard: &CosmoGuardConfig{Resources: &corev1.ResourceRequirements{}}}, override: &corev1.ResourceRequirements{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.cfg.GetCosmoGuardResources()
+			if tc.override != nil {
+				assert.Equal(t, *tc.override, got)
+				return
+			}
+			for _, quantities := range []corev1.ResourceList{got.Requests, got.Limits} {
+				assert.Equal(t, 0, quantities.Cpu().Cmp(resource.MustParse("500m")))
+				assert.Equal(t, 0, quantities.Memory().Cmp(resource.MustParse("500Mi")))
+			}
+		})
+	}
 }
 
 // TestValidateCosmoGuardDashboard verifies the dashboard port is rejected when it collides with a
@@ -276,7 +304,10 @@ func TestGetCosmoGuardAutoscalingTargets(t *testing.T) {
 	res, cpu, mem := autoscaledConfig(nil).GetCosmoGuardAutoscalingTargets()
 	assert.Equal(t, DefaultCosmoGuardAutoscalingCPUTarget, *cpu)
 	assert.Nil(t, mem)
-	assert.False(t, res.Requests.Cpu().IsZero())
+	assert.Equal(t, 0, res.Requests.Cpu().Cmp(resource.MustParse("500m")))
+	assert.Equal(t, 0, res.Requests.Memory().Cmp(resource.MustParse("500Mi")))
+	assert.Equal(t, 0, res.Limits.Cpu().Cmp(resource.MustParse("500m")))
+	assert.Equal(t, 0, res.Limits.Memory().Cmp(resource.MustParse("500Mi")))
 
 	// Only a memory request -> default the metric to memory (no CPU request to measure).
 	memOnly := &corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}}
@@ -296,14 +327,16 @@ func TestGetCosmoGuardAutoscalingTargets(t *testing.T) {
 	res, cpu, mem = autoscaledConfig(zeroCPU).GetCosmoGuardAutoscalingTargets()
 	assert.Equal(t, DefaultCosmoGuardAutoscalingCPUTarget, *cpu)
 	assert.Nil(t, mem)
-	assert.True(t, res.Requests.Cpu().Cmp(resource.MustParse(DefaultCosmoGuardCPU)) == 0, "injected default CPU request")
+	assert.True(t, res.Requests.Cpu().Cmp(resource.MustParse("500m")) == 0, "injected default CPU request")
 
 	// Explicit empty resources + autoscaling -> inject defaults so the HPA has a request to measure.
 	res, cpu, mem = autoscaledConfig(&corev1.ResourceRequirements{}).GetCosmoGuardAutoscalingTargets()
 	assert.Equal(t, DefaultCosmoGuardAutoscalingCPUTarget, *cpu)
 	assert.Nil(t, mem)
-	assert.False(t, res.Requests.Cpu().IsZero(), "default CPU request injected")
-	assert.False(t, res.Requests.Memory().IsZero(), "default memory request injected")
+	assert.Equal(t, 0, res.Requests.Cpu().Cmp(resource.MustParse("500m")))
+	assert.Equal(t, 0, res.Limits.Cpu().Cmp(resource.MustParse("500m")))
+	assert.Equal(t, 0, res.Requests.Memory().Cmp(resource.MustParse("500Mi")))
+	assert.Equal(t, 0, res.Limits.Memory().Cmp(resource.MustParse("500Mi")))
 
 	// Explicit user targets always win, regardless of requests.
 	cfg := autoscaledConfig(memOnly)

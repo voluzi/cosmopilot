@@ -2,7 +2,41 @@
 
 [CosmoGuard](https://github.com/voluzi/cosmoguard) is a lightweight firewall designed specifically for protecting Cosmos nodes. With CosmoGuard you can control access at the API endpoint level, cache responses for performance, rate-limit clients, and limit WebSocket connections for better resource management.
 
-`Cosmopilot` integrates with CosmoGuard **v5** and deploys it as a **standalone clustered StatefulSet** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
+`Cosmopilot` integrates with CosmoGuard **v6.0.0** and deploys it as a **standalone clustered StatefulSet** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
+
+## Upgrading to CosmoGuard 6.0.0
+
+Upgrading the operator changes the default guard image from 5.1.0 to 6.0.0 and the
+per-replica resources from 200m CPU / 250Mi memory to **500m CPU / 500Mi memory,
+with requests equal to limits**. Defaulted guard StatefulSets roll automatically
+as they reconcile; no rules-file change is required. The new soft hostname spread
+constraint changes every managed guard pod template, including guards with image
+and resource overrides, so every guard StatefulSet rolls once on operator
+upgrade. Adopting the new module's
+configuration baseline does not cause an additional restart.
+
+Plan a low-traffic window. Upstream observed roughly a minute of reduced throughput
+per guard cluster during the first v5.x-to-v6 rollout, with three replicas at
+200m/250Mi and zero container restarts. Severe dips lasted approximately 45–90
+seconds, within a longer rollout and partial-capacity period. These measurements
+are not a guaranteed duration or a promise of zero errors. A StatefulSet pod
+replacement is distinct from a container restart within a pod. A single-replica
+guard is unavailable until its replacement is ready; multiple replicas reduce
+disruption but do not eliminate mixed-v5/v6 degradation.
+
+Reserve an additional 300m CPU and 250Mi memory per defaulted replica: three
+replicas request 1.5 CPU and 1500Mi. Complete explicit resources and the existing
+image override precedence remain unchanged. With HPA enabled, empty or incomplete
+resource overrides can still receive default requests for the selected metrics;
+higher CPU requests can change percentage-based scaling. Capacity and inherited
+placement constraints can leave replacements Pending.
+
+V6 automatically derives its bounded L2 storage budgets from the container memory
+limit; no new configuration is required. See the upstream
+[v6 upgrade guide](https://github.com/voluzi/cosmoguard/blob/v6.0.0/docs/upgrade-v6.md)
+for measured rollout results, malformed HTTP query sanitization and verification
+limits, and [configuration reference](https://github.com/voluzi/cosmoguard/blob/v6.0.0/CONFIG.md#memory-budget)
+for memory budgets.
 
 ## Topology
 
@@ -16,6 +50,17 @@ client traffic
 - On a **`ChainNodeSet`**, Cosmopilot deploys **one CosmoGuard StatefulSet per node group**, fronting every node in that group. It can run multiple replicas and be autoscaled with an HPA.
 - On a standalone **`ChainNode`**, Cosmopilot deploys a single CosmoGuard StatefulSet fronting that node.
 - The node's main and `-internal` Services keep serving the raw node ports. Guarded traffic is routed through the group/global Services (whose selectors are flipped to the guard once it is ready) and through the dedicated `<name>-cg` Service.
+
+### Host spreading
+
+Every guard has a soft topology spread preference over `kubernetes.io/hostname`,
+with `maxSkew: 1` and `ScheduleAnyway`. Its selector counts only that guard's
+replicas. This applies to a single replica, fixed multiple replicas and HPA-managed
+guards, including an HPA starting at one replica. It prefers different eligible
+hosts while allowing colocation on a one-host pool or when capacity or inherited
+placement limits choices. Existing node selectors and affinity remain in force.
+This does not guarantee one replica per host or rebalance already-running pods;
+the preference takes effect when replacements are scheduled.
 
 ### Shared cache (olric cluster)
 
@@ -52,6 +97,22 @@ With a single replica (the default), the guard is unavailable for the duration o
 
 Dashboard credentials are read from Secrets at startup, so rotating those Secrets rolls the guards on the next reconcile of the owning ChainNode or ChainNodeSet; referenced credential Secrets are not watched.
 
+## Probes and termination
+
+The startup probe uses `/healthz` on port 9001 every two seconds with a failure
+threshold of 30. V6 answers health during bootstrap, so this checks the process
+and operations listener rather than imposing a 60-second cluster-join deadline.
+Readiness uses `/readyz` every five seconds with a failure threshold of three,
+keeping a joining guard out of traffic until it can serve. The binary caps total
+bootstrap waiting at ten minutes and can fail earlier on discovery or
+coordinator reachability. Liveness uses `/healthz` every ten seconds with a
+failure threshold of three; a healthy bootstrap wait does not trigger a restart.
+
+The pod explicitly has a 30-second termination grace period, matching Kubernetes'
+default. At SIGTERM, v6 fails readiness, continues serving for five seconds, then
+drains and cleans up within an absolute 29-second budget. No preStop hook is
+needed. WebSocket clients must reconnect and resubscribe after replacement.
+
 ## Setting Up CosmoGuard
 
 ### Step 1: Create the CosmoGuard rules
@@ -75,9 +136,9 @@ rpc:
 :::warning[IMPORTANT]
 Provide **rules only** in your `ConfigMap`. Cosmopilot manages the upstream (node discovery), listener ports, metrics and dashboard settings through environment variables — do not set them in the file.
 
-CosmoGuard v5 **validates rules strictly**: unknown keys are rejected, every rule and section `default` must use `action: allow` or `action: deny`, and every `rateLimit` block needs a positive `rate`. A rules file that CosmoGuard v4 accepted can fail startup under v5, so validate it before upgrading. While the replicas roll from v4 to v5, the dashboard's cluster panels can show partial data; proxy traffic is unaffected.
+Since v5, CosmoGuard **validates rules strictly**: unknown keys are rejected, every rule and section `default` must use `action: allow` or `action: deny`, and every `rateLimit` block needs a positive `rate`. A rules file that CosmoGuard v4 accepted can fail startup on later versions, so validate it before upgrading.
 
-CosmoGuard v4 **removed Redis**: a `cache.backend`, `cache.redis` or `cache.redis-sentinel` key now fails startup. For multi-replica caches CosmoGuard uses an embedded cluster; single-replica needs no cache backend at all. See the CosmoGuard [v4 migration notes](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md) for other breaking changes (WebSocket cross-origin now denied by default, CosmoGuard owns CORS, gRPC reflection is no longer auto-allowed). You can validate a file with `cosmoguard validate --config <file>`.
+In v4, CosmoGuard **removed Redis**: a `cache.backend`, `cache.redis` or `cache.redis-sentinel` key now fails startup. For multi-replica caches CosmoGuard uses an embedded cluster; single-replica needs no cache backend at all. See the CosmoGuard [v4 migration notes](https://github.com/voluzi/cosmoguard/blob/main/CONFIG.md) for other breaking changes (WebSocket cross-origin now denied by default, CosmoGuard owns CORS, gRPC reflection is no longer auto-allowed). You can validate a file with `cosmoguard validate --config <file>`.
 :::
 
 :::warning[WebSocket connections behind an Ingress or Gateway]
@@ -102,14 +163,14 @@ config:
       name: cosmoguard-config  # Name of the ConfigMap created in Step 2.
       key: cosmoguard.yaml     # Key within the ConfigMap containing the rules.
     replicas: 2                # Optional: number of CosmoGuard replicas (default 1). Ignored when autoscaling is enabled.
-    image: ghcr.io/voluzi/cosmoguard:5.1.0  # Optional: override the operator-wide default image.
+    image: ghcr.io/voluzi/cosmoguard:6.0.0  # Optional: override the operator-wide default image.
     resources:                 # Optional: per-pod resources (defaults shown).
       requests:
-        cpu: 200m
-        memory: 250Mi
+        cpu: 500m
+        memory: 500Mi
       limits:
-        cpu: 200m
-        memory: 250Mi
+        cpu: 500m
+        memory: 500Mi
 ```
 
 :::note

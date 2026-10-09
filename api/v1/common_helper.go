@@ -82,11 +82,11 @@ const (
 	// DefaultNodeUtilsMemory is the default memory request for the node-utils container.
 	DefaultNodeUtilsMemory = "100Mi"
 
-	// DefaultCosmoGuardCPU is the default CPU request for the CosmoGuard container.
-	DefaultCosmoGuardCPU = "200m"
+	// DefaultCosmoGuardCPU is the default CPU request and limit for the CosmoGuard container.
+	DefaultCosmoGuardCPU = "500m"
 
-	// DefaultCosmoGuardMemory is the default memory request for the CosmoGuard container.
-	DefaultCosmoGuardMemory = "250Mi"
+	// DefaultCosmoGuardMemory is the default memory request and limit for the CosmoGuard container.
+	DefaultCosmoGuardMemory = "500Mi"
 
 	// DefaultCosmoGuardDashboardPort is the default port the CosmoGuard dashboard listens on.
 	DefaultCosmoGuardDashboardPort int32 = 8080

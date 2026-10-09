@@ -55,7 +55,7 @@ the SDK marker with the application's filesystem identity.
 :::
 
 ### `cosmoGuardImage`
-- **Description**: The container image of [CosmoGuard](https://github.com/voluzi/cosmoguard) (with version tag included) used for the standalone CosmoGuard deployments.
+- **Description**: The container image of [CosmoGuard](https://github.com/voluzi/cosmoguard) (with version tag included) used for the standalone CosmoGuard StatefulSets.
 - **Default**: `""` (inherits the pinned default from the selected manager release)
 
 ### `cosmoseedImage`

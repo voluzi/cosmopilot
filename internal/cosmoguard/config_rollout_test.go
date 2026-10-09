@@ -8,14 +8,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	guardconfig "github.com/voluzi/cosmoguard/v5/pkg/cosmoguard"
+	guardconfig "github.com/voluzi/cosmoguard/v6/pkg/cosmoguard"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -26,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	v1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 )
 
@@ -154,6 +157,24 @@ func TestConfigRolloutState(t *testing.T) {
 		require.NoError(t, apply(c))
 		assert.Equal(t, adopted.ResourceVersion, read().ResourceVersion)
 	})
+	t.Run("module upgrade rebaselines unchanged inputs", func(t *testing.T) {
+		for _, marker := range []string{"", "previous-restart"} {
+			live := read()
+			live.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme] = "v5.1.0:old-scheme"
+			if marker == "" {
+				delete(live.Spec.Template.Annotations, controllers.AnnotationCosmoGuardRestart)
+			} else {
+				live.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart] = marker
+			}
+			require.NoError(t, c.Update(ctx, live))
+			require.NoError(t, apply(c))
+			adopted := read()
+			assert.Equal(t, live.Spec.Template, adopted.Spec.Template)
+			assert.NotEqual(t, live.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], adopted.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme])
+			require.NoError(t, apply(c))
+			assert.Equal(t, adopted.ResourceVersion, read().ResourceVersion)
+		}
+	})
 	t.Run("conflict leaves stored baseline untouched and retry rolls", func(t *testing.T) {
 		before := read()
 		change("auth: {enable: true}", false)
@@ -271,4 +292,53 @@ func TestConfigRolloutUnclassifiableConfig(t *testing.T) {
 			assert.Equal(t, before.ResourceVersion, after.ResourceVersion)
 		})
 	}
+}
+
+func TestConfigRolloutUpgradeTemplate(t *testing.T) {
+	ctx := t.Context()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	owner := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "ns", UID: "owner"}}
+	p := baseParams()
+	p.UpstreamHost = "node.ns.svc.cluster.local"
+	cfg := &v1.Config{}
+	p.Image, p.Resources = cfg.GetCosmoGuardImage(""), cfg.GetCosmoGuardResources()
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: p.EncryptionKeySecret, Namespace: "ns"}, Data: map[string][]byte{EncryptionKeySecretKey: []byte(base64.StdEncoding.EncodeToString(make([]byte, 32)))}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}, Data: map[string]string{"cosmoguard.yaml": "lcd: {rules: [{paths: [/status], action: allow}]}"}}
+	old := p.StatefulSet()
+	old.Spec.Template.Spec.TopologySpreadConstraints = nil
+	old.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
+	old.Spec.Template.Spec.Containers[0].Image = "ghcr.io/voluzi/cosmoguard:5.1.0"
+	old.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m"), corev1.ResourceMemory: resource.MustParse("250Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m"), corev1.ResourceMemory: resource.MustParse("250Mi")},
+	}
+	old.Annotations = map[string]string{controllers.AnnotationCosmoGuardFingerprintScheme: "v5.1.0:old-scheme", controllers.AnnotationCosmoGuardRestartFingerprint: "old-fingerprint", controllers.AnnotationCosmoGuardConfigDigest: "old-digest"}
+	require.NoError(t, controllerutil.SetControllerReference(owner, old, scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, secret, cm, old).Build()
+	apply := func() { require.NoError(t, ApplyStatefulSet(ctx, c, scheme, owner, p, p.StatefulSet())) }
+	read := func() *appsv1.StatefulSet {
+		sts := &appsv1.StatefulSet{}
+		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(old), sts))
+		return sts
+	}
+	apply()
+	upgraded := read()
+	container := upgraded.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.0.0", container.Image)
+	for _, quantities := range []corev1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
+		assert.Equal(t, 0, quantities.Cpu().Cmp(resource.MustParse("500m")))
+		assert.Equal(t, 0, quantities.Memory().Cmp(resource.MustParse("500Mi")))
+	}
+	require.Len(t, upgraded.Spec.Template.Spec.TopologySpreadConstraints, 1)
+	assert.Equal(t, corev1.ScheduleAnyway, upgraded.Spec.Template.Spec.TopologySpreadConstraints[0].WhenUnsatisfiable)
+	require.NotNil(t, upgraded.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	assert.Equal(t, int64(30), *upgraded.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	assert.NotEqual(t, old.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], upgraded.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme])
+	assert.True(t, strings.HasPrefix(upgraded.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], "v6.0.0:"),
+		"scheme must carry the cosmoguard module version read from build info")
+	assert.Empty(t, upgraded.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
+	apply()
+	assert.Equal(t, upgraded.ResourceVersion, read().ResourceVersion)
 }

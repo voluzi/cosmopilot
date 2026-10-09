@@ -10,7 +10,7 @@ import (
 	"runtime/debug"
 	"slices"
 
-	guardconfig "github.com/voluzi/cosmoguard/v5/pkg/cosmoguard"
+	guardconfig "github.com/voluzi/cosmoguard/v6/pkg/cosmoguard"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +25,7 @@ var cosmoGuardModuleVersion = func() string {
 	info, _ := debug.ReadBuildInfo()
 	if info != nil {
 		for _, dep := range info.Deps {
-			if dep.Path == "github.com/voluzi/cosmoguard/v5" {
+			if dep.Path == "github.com/voluzi/cosmoguard/v6" {
 				if dep.Replace != nil {
 					return dep.Replace.Version
 				}

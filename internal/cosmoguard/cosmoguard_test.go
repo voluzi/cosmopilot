@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -78,7 +80,8 @@ func TestStatefulSet_ProbeSemantics(t *testing.T) {
 	p := baseParams()
 	p.UpstreamHost = "host"
 
-	container := p.StatefulSet().Spec.Template.Spec.Containers[0]
+	pod := p.StatefulSet().Spec.Template.Spec
+	container := pod.Containers[0]
 
 	require.NotNil(t, container.StartupProbe)
 	require.NotNil(t, container.StartupProbe.HTTPGet)
@@ -91,6 +94,70 @@ func TestStatefulSet_ProbeSemantics(t *testing.T) {
 	require.NotNil(t, container.LivenessProbe)
 	require.NotNil(t, container.LivenessProbe.HTTPGet)
 	assert.Equal(t, "/healthz", container.LivenessProbe.HTTPGet.Path)
+	for _, tc := range []struct {
+		probe            *corev1.Probe
+		period, failures int32
+	}{
+		{container.StartupProbe, 2, 30}, {container.ReadinessProbe, 5, 3}, {container.LivenessProbe, 10, 3},
+	} {
+		assert.Equal(t, int32(9001), tc.probe.HTTPGet.Port.IntVal)
+		assert.Equal(t, tc.period, tc.probe.PeriodSeconds)
+		assert.Equal(t, tc.failures, tc.probe.FailureThreshold)
+	}
+	require.NotNil(t, pod.TerminationGracePeriodSeconds)
+	assert.Equal(t, int64(30), *pod.TerminationGracePeriodSeconds)
+	assert.Nil(t, container.Lifecycle)
+
+}
+
+func TestStatefulSet_SoftHostSpread(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		replicas    int32
+		autoscaling *AutoscalingParams
+	}{
+		{name: "single replica", replicas: 1},
+		{name: "three replicas", replicas: 3},
+		{name: "autoscaled from one", autoscaling: &AutoscalingParams{MinReplicas: ptr.To[int32](1), MaxReplicas: 3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := baseParams()
+			p.Replicas, p.Autoscaling = tc.replicas, tc.autoscaling
+			p.Labels["cosmoguard.voluzi.com/route-global"] = "true"
+			sts := p.StatefulSet()
+			pod := sts.Spec.Template
+			require.Len(t, pod.Spec.TopologySpreadConstraints, 1)
+			spread := pod.Spec.TopologySpreadConstraints[0]
+			assert.Equal(t, int32(1), spread.MaxSkew)
+			assert.Equal(t, "kubernetes.io/hostname", spread.TopologyKey)
+			assert.Equal(t, corev1.ScheduleAnyway, spread.WhenUnsatisfiable)
+			require.NotNil(t, spread.LabelSelector)
+			assert.Equal(t, map[string]string{"cosmoguard.voluzi.com/managed-by": "cosmoguard", "cosmoguard.voluzi.com/instance": p.Name}, spread.LabelSelector.MatchLabels)
+			assert.Empty(t, spread.LabelSelector.MatchExpressions)
+			assert.Nil(t, spread.MinDomains)
+			assert.Nil(t, spread.NodeAffinityPolicy)
+			assert.Nil(t, spread.NodeTaintsPolicy)
+			assert.Empty(t, spread.MatchLabelKeys)
+			selector, err := metav1.LabelSelectorAsSelector(spread.LabelSelector)
+			require.NoError(t, err)
+			assert.True(t, selector.Matches(labels.Set(pod.Labels)))
+			other := p
+			other.Name = "other-guard"
+			assert.False(t, selector.Matches(labels.Set(other.StatefulSet().Spec.Template.Labels)), "shared routing labels must not count another guard")
+			rawNode := labels.Set{labelAppName: appName, labelInstance: p.Name}
+			for key, value := range p.Labels {
+				rawNode[key] = value
+			}
+			assert.False(t, selector.Matches(rawNode), "raw nodes with conventional and routing labels must not count")
+			assert.Nil(t, pod.Spec.Affinity, "spreading must not add hard anti-affinity")
+			if tc.autoscaling != nil {
+				assert.Nil(t, sts.Spec.Replicas)
+			} else {
+				require.NotNil(t, sts.Spec.Replicas)
+				assert.Equal(t, tc.replicas, *sts.Spec.Replicas)
+			}
+		})
+	}
 }
 
 func TestStatefulSet_DiscoveryUpstream(t *testing.T) {
