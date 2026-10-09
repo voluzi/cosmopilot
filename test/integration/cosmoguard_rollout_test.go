@@ -61,7 +61,7 @@ var _ = Describe("CosmoGuard config rollout", func() {
 			}
 			initial := read()
 			container := initial.Spec.Template.Spec.Containers[0]
-			Expect(container.Image).To(Equal("ghcr.io/voluzi/cosmoguard:6.0.0"))
+			Expect(container.Image).To(Equal("ghcr.io/voluzi/cosmoguard:6.1.0"))
 			for _, quantities := range []corev1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
 				Expect(quantities.Cpu().Cmp(resource.MustParse("500m"))).To(BeZero())
 				Expect(quantities.Memory().Cmp(resource.MustParse("500Mi"))).To(BeZero())

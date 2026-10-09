@@ -755,8 +755,8 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/voluzi/cosmoguard/v6 v6.0.0 h1:x361uC1ILM2rBAF6x04UJ8BZNwiAeqT0dnOSwxdXN+w=
-github.com/voluzi/cosmoguard/v6 v6.0.0/go.mod h1:hkJjYqrQolq9ETaKTlUYi5DILbmzu9OMlHg5BQ4hBUo=
+github.com/voluzi/cosmoguard/v6 v6.1.0 h1:c1TTaldOiQKfVZ35tnEfD2f7LnGeYxvsLCyLt8qdVGI=
+github.com/voluzi/cosmoguard/v6 v6.1.0/go.mod h1:hkJjYqrQolq9ETaKTlUYi5DILbmzu9OMlHg5BQ4hBUo=
 github.com/voluzi/cosmoseed v0.12.0 h1:J5qJXGbxHqjDs4ULo8g5j3/2qGwrpzo7G7vZ6NMfd7c=
 github.com/voluzi/cosmoseed v0.12.0/go.mod h1:LhHe3w93nJ6PsqIwzOH7eSHSSuzbv7c1RjHHJfD+EX4=
 github.com/voluzi/olric v0.7.5-0.20261009015321-b44a5f871051 h1:pNSDqZmKtPpyl9Nq8FtNDC1OmN2qQZ4/5J7EBHsPCJo=

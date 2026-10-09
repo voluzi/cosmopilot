@@ -20,10 +20,10 @@ func TestGetCosmoGuardImagePrecedence(t *testing.T) {
 	empty := ""
 	cfg.CosmoGuard.Image = &empty
 	assert.Equal(t, "operator/default:v1", cfg.GetCosmoGuardImage("operator/default:v1"))
-	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.0.0", cfg.GetCosmoGuardImage(""))
+	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.1.0", cfg.GetCosmoGuardImage(""))
 
 	var nilCfg *Config
-	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.0.0", nilCfg.GetCosmoGuardImage(""))
+	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.1.0", nilCfg.GetCosmoGuardImage(""))
 }
 
 func TestGetCosmoGuardResources(t *testing.T) {
