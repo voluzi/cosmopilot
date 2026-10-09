@@ -308,6 +308,7 @@ func TestConfigRolloutUpgradeTemplate(t *testing.T) {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: "ns"}, Data: map[string]string{"cosmoguard.yaml": "lcd: {rules: [{paths: [/status], action: allow}]}"}}
 	old := p.StatefulSet()
 	old.Spec.Template.Spec.TopologySpreadConstraints = nil
+	old.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
 	old.Spec.Template.Spec.Containers[0].Image = "ghcr.io/voluzi/cosmoguard:5.1.0"
 	old.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m"), corev1.ResourceMemory: resource.MustParse("250Mi")},
