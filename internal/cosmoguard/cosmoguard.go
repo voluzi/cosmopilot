@@ -97,7 +97,7 @@ func GenerateEncryptionKey() (string, error) {
 // Params carries everything needed to render a CosmoGuard deployment's resources. The owner
 // (ChainNode or ChainNodeSet controller) sets owner references and applies the returned objects.
 type Params struct {
-	// Name is the name of the CosmoGuard Deployment/Service (e.g. "<node>-cg").
+	// Name is the name of the CosmoGuard StatefulSet/Service (e.g. "<node>-cg").
 	Name      string
 	Namespace string
 
@@ -420,13 +420,14 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: p.podLabels(), Annotations: p.PodAnnotations},
 				Spec: corev1.PodSpec{
-					SecurityContext:    p.podSecurityContext(),
-					PriorityClassName:  p.PriorityClassName,
-					ServiceAccountName: p.ServiceAccountName,
-					ImagePullSecrets:   p.ImagePullSecrets,
-					NodeSelector:       p.NodeSelector,
-					Affinity:           p.Affinity,
-					Containers:         []corev1.Container{container},
+					TerminationGracePeriodSeconds: ptr.To[int64](30),
+					SecurityContext:               p.podSecurityContext(),
+					PriorityClassName:             p.PriorityClassName,
+					ServiceAccountName:            p.ServiceAccountName,
+					ImagePullSecrets:              p.ImagePullSecrets,
+					NodeSelector:                  p.NodeSelector,
+					Affinity:                      p.Affinity,
+					Containers:                    []corev1.Container{container},
 					Volumes: []corev1.Volume{
 						{
 							Name: configVolumeName,

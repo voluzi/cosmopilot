@@ -78,7 +78,8 @@ func TestStatefulSet_ProbeSemantics(t *testing.T) {
 	p := baseParams()
 	p.UpstreamHost = "host"
 
-	container := p.StatefulSet().Spec.Template.Spec.Containers[0]
+	pod := p.StatefulSet().Spec.Template.Spec
+	container := pod.Containers[0]
 
 	require.NotNil(t, container.StartupProbe)
 	require.NotNil(t, container.StartupProbe.HTTPGet)
@@ -91,6 +92,20 @@ func TestStatefulSet_ProbeSemantics(t *testing.T) {
 	require.NotNil(t, container.LivenessProbe)
 	require.NotNil(t, container.LivenessProbe.HTTPGet)
 	assert.Equal(t, "/healthz", container.LivenessProbe.HTTPGet.Path)
+	for _, tc := range []struct {
+		probe            *corev1.Probe
+		period, failures int32
+	}{
+		{container.StartupProbe, 2, 30}, {container.ReadinessProbe, 5, 3}, {container.LivenessProbe, 10, 3},
+	} {
+		assert.Equal(t, int32(9001), tc.probe.HTTPGet.Port.IntVal)
+		assert.Equal(t, tc.period, tc.probe.PeriodSeconds)
+		assert.Equal(t, tc.failures, tc.probe.FailureThreshold)
+	}
+	require.NotNil(t, pod.TerminationGracePeriodSeconds)
+	assert.Equal(t, int64(30), *pod.TerminationGracePeriodSeconds)
+	assert.Nil(t, container.Lifecycle)
+
 }
 
 func TestStatefulSet_DiscoveryUpstream(t *testing.T) {

@@ -1087,12 +1087,12 @@ spec:
                     format: duration
                     type: string
                   cosmoGuard:
-                    description: Deploys a standalone CosmoGuard deployment fronting
+                    description: Deploys a standalone CosmoGuard StatefulSet fronting
                       this node's API endpoints.
                     properties:
                       autoscaling:
                         description: Autoscaling configures a HorizontalPodAutoscaler
-                          for the CosmoGuard deployment.
+                          for the CosmoGuard StatefulSet.
                         properties:
                           enable:
                             description: Whether to enable horizontal autoscaling
@@ -1343,7 +1343,9 @@ spec:
                         minimum: 1
                         type: integer
                       resources:
-                        description: Compute Resources for each CosmoGuard pod.
+                        description: |-
+                          Compute Resources for each CosmoGuard pod. When omitted, requests and limits
+                          both default to 500m CPU and 500Mi memory.
                         properties:
                           claims:
                             description: |-

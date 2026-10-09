@@ -60,6 +60,14 @@ var _ = Describe("CosmoGuard config rollout", func() {
 				changeTimeout = 10 * time.Second
 			}
 			initial := read()
+			container := initial.Spec.Template.Spec.Containers[0]
+			Expect(container.Image).To(Equal("ghcr.io/voluzi/cosmoguard:6.0.0"))
+			for _, quantities := range []corev1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
+				Expect(quantities.Cpu().Cmp(resource.MustParse("500m"))).To(BeZero())
+				Expect(quantities.Memory().Cmp(resource.MustParse("500Mi"))).To(BeZero())
+			}
+			Expect(initial.Spec.Template.Spec.TerminationGracePeriodSeconds).NotTo(BeNil())
+			Expect(*initial.Spec.Template.Spec.TerminationGracePeriodSeconds).To(Equal(int64(30)))
 			// Stay well within the node set's 15-second periodic requeue, after initial events settle.
 			Consistently(func() string { return read().ResourceVersion }, 2*time.Second, 100*time.Millisecond).Should(Equal(initial.ResourceVersion))
 			update := func(raw string) {

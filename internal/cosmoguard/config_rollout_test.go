@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	guardconfig "github.com/voluzi/cosmoguard/v5/pkg/cosmoguard"
+	guardconfig "github.com/voluzi/cosmoguard/v6/pkg/cosmoguard"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -153,6 +153,24 @@ func TestConfigRolloutState(t *testing.T) {
 		assert.NotEqual(t, live.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], adopted.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme])
 		require.NoError(t, apply(c))
 		assert.Equal(t, adopted.ResourceVersion, read().ResourceVersion)
+	})
+	t.Run("module upgrade rebaselines unchanged inputs", func(t *testing.T) {
+		for _, marker := range []string{"", "previous-restart"} {
+			live := read()
+			live.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme] = "v5.1.0:old-scheme"
+			if marker == "" {
+				delete(live.Spec.Template.Annotations, controllers.AnnotationCosmoGuardRestart)
+			} else {
+				live.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart] = marker
+			}
+			require.NoError(t, c.Update(ctx, live))
+			require.NoError(t, apply(c))
+			adopted := read()
+			assert.Equal(t, live.Spec.Template, adopted.Spec.Template)
+			assert.NotEqual(t, live.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], adopted.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme])
+			require.NoError(t, apply(c))
+			assert.Equal(t, adopted.ResourceVersion, read().ResourceVersion)
+		}
 	})
 	t.Run("conflict leaves stored baseline untouched and retry rolls", func(t *testing.T) {
 		before := read()
