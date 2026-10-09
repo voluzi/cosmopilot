@@ -409,7 +409,9 @@ type CosmoGuardConfig struct {
 
 	// Compute Resources for each CosmoGuard pod. When the field is omitted entirely,
 	// requests and limits both default to 500m CPU and 500Mi memory. A block that is
-	// set is used as written.
+	// set is used as written, except with autoscaling enabled: an empty block then
+	// takes the defaults, and a missing request for a metric the autoscaler targets
+	// is filled with the default, capped at a smaller limit.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
