@@ -2,12 +2,12 @@
 
 [CosmoGuard](https://github.com/voluzi/cosmoguard) is a lightweight firewall designed specifically for protecting Cosmos nodes. With CosmoGuard you can control access at the API endpoint level, cache responses for performance, rate-limit clients, and limit WebSocket connections for better resource management.
 
-`Cosmopilot` integrates with CosmoGuard **v6.0.0** and deploys it as a **standalone clustered StatefulSet** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
+`Cosmopilot` integrates with CosmoGuard **v6.1.0** and deploys it as a **standalone clustered StatefulSet** that sits in front of your node(s), rather than as a sidecar container inside the node pod.
 
-## Upgrading to CosmoGuard 6.0.0
+## Upgrading to CosmoGuard 6.1.0
 
-Upgrading the operator changes the default guard image from 5.1.0 to 6.0.0 and the
-per-replica resources from 200m CPU / 250Mi memory to **500m CPU / 500Mi memory,
+Upgrading from an operator using CosmoGuard 5.1.0 changes the default guard image
+to 6.1.0 and the per-replica resources from 200m CPU / 250Mi memory to **500m CPU / 500Mi memory,
 with requests equal to limits**. Defaulted guard StatefulSets roll automatically
 as they reconcile; no rules-file change is required. The new soft hostname spread
 constraint changes every managed guard pod template, including guards with image
@@ -33,9 +33,9 @@ placement constraints can leave replacements Pending.
 
 V6 automatically derives its bounded L2 storage budgets from the container memory
 limit; no new configuration is required. See the upstream
-[v6 upgrade guide](https://github.com/voluzi/cosmoguard/blob/v6.0.0/docs/upgrade-v6.md)
+[v6 upgrade guide](https://github.com/voluzi/cosmoguard/blob/v6.1.0/docs/upgrade-v6.md)
 for measured rollout results, malformed HTTP query sanitization and verification
-limits, and [configuration reference](https://github.com/voluzi/cosmoguard/blob/v6.0.0/CONFIG.md#memory-budget)
+limits, and [configuration reference](https://github.com/voluzi/cosmoguard/blob/v6.1.0/CONFIG.md#memory-budget)
 for memory budgets.
 
 ## Topology
@@ -163,7 +163,7 @@ config:
       name: cosmoguard-config  # Name of the ConfigMap created in Step 2.
       key: cosmoguard.yaml     # Key within the ConfigMap containing the rules.
     replicas: 2                # Optional: number of CosmoGuard replicas (default 1). Ignored when autoscaling is enabled.
-    image: ghcr.io/voluzi/cosmoguard:6.0.0  # Optional: override the operator-wide default image.
+    image: ghcr.io/voluzi/cosmoguard:6.1.0  # Optional: override the operator-wide default image.
     resources:                 # Optional: per-pod resources (defaults shown).
       requests:
         cpu: 500m
