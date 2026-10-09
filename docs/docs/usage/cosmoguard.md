@@ -6,9 +6,9 @@
 
 ## Upgrading to CosmoGuard 6.1.0
 
-Upgrading from an operator using CosmoGuard 5.1.0 changes the default guard image
-to 6.1.0 and the per-replica resources from 200m CPU / 250Mi memory to **500m CPU / 500Mi memory,
-with requests equal to limits**. Defaulted guard StatefulSets roll automatically
+Upgrading from operator v5.1.0 changes the default guard image from 5.0.0 to 6.1.0
+and the per-replica resources from 200m CPU / 250Mi memory to **500m CPU / 500Mi
+memory, with requests equal to limits**. Defaulted guard StatefulSets roll automatically
 as they reconcile; no rules-file change is required. The new soft hostname spread
 constraint changes every managed guard pod template, including guards with image
 and resource overrides, so every guard StatefulSet rolls once on operator
