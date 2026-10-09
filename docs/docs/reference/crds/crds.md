@@ -685,7 +685,7 @@ CosmoGuardConfig allows configuring CosmoGuard - a standalone firewall/policy pr
 | replicas | Number of CosmoGuard replicas to run. Defaults to `1`. Ignored when autoscaling is enabled. | *int32 | false |
 | autoscaling | Autoscaling configures a HorizontalPodAutoscaler for the CosmoGuard StatefulSet. | *[CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig) | false |
 | dashboard | Dashboard exposes CosmoGuard's read-only web dashboard. | *[CosmoGuardDashboardConfig](#cosmoguarddashboardconfig) | false |
-| resources | Compute Resources for each CosmoGuard pod. When omitted, requests and limits both default to 500m CPU and 500Mi memory. | *corev1.ResourceRequirements | false |
+| resources | Compute Resources for each CosmoGuard pod. When the field is omitted entirely, requests and limits both default to 500m CPU and 500Mi memory. A block that is set is used as written. | *corev1.ResourceRequirements | false |
 | restartPodOnFailure | Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes, so this field has no effect and will be removed in a future release. | *bool | false |
 
 [Back to Custom Resources](#custom-resources)

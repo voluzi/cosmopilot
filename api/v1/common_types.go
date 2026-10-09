@@ -407,8 +407,9 @@ type CosmoGuardConfig struct {
 	// +optional
 	Dashboard *CosmoGuardDashboardConfig `json:"dashboard,omitempty"`
 
-	// Compute Resources for each CosmoGuard pod. When omitted, requests and limits
-	// both default to 500m CPU and 500Mi memory.
+	// Compute Resources for each CosmoGuard pod. When the field is omitted entirely,
+	// requests and limits both default to 500m CPU and 500Mi memory. A block that is
+	// set is used as written.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 

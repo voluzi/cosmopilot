@@ -36,8 +36,7 @@ limit; no new configuration is required. See the upstream
 [v6 upgrade guide](https://github.com/voluzi/cosmoguard/blob/v6.0.0/docs/upgrade-v6.md)
 for measured rollout results, malformed HTTP query sanitization and verification
 limits, and [configuration reference](https://github.com/voluzi/cosmoguard/blob/v6.0.0/CONFIG.md#memory-budget)
-for memory budgets. Published-image reverse rollback and whole-guard long soaks
-remain outside the evidence described here.
+for memory budgets.
 
 ## Topology
 

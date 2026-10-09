@@ -1344,8 +1344,9 @@ spec:
                         type: integer
                       resources:
                         description: |-
-                          Compute Resources for each CosmoGuard pod. When omitted, requests and limits
-                          both default to 500m CPU and 500Mi memory.
+                          Compute Resources for each CosmoGuard pod. When the field is omitted entirely,
+                          requests and limits both default to 500m CPU and 500Mi memory. A block that is
+                          set is used as written.
                         properties:
                           claims:
                             description: |-
