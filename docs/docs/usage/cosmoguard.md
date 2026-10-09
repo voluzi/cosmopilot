@@ -9,7 +9,10 @@
 Upgrading the operator changes the default guard image from 5.1.0 to 6.0.0 and the
 per-replica resources from 200m CPU / 250Mi memory to **500m CPU / 500Mi memory,
 with requests equal to limits**. Defaulted guard StatefulSets roll automatically
-as they reconcile; no rules-file change is required. Adopting the new module's
+as they reconcile; no rules-file change is required. The new soft hostname spread
+constraint changes every managed guard pod template, including guards with image
+and resource overrides, so every guard StatefulSet rolls once on operator
+upgrade. Adopting the new module's
 configuration baseline does not cause an additional restart.
 
 Plan a low-traffic window. Upstream observed roughly a minute of reduced throughput
@@ -48,6 +51,17 @@ client traffic
 - On a **`ChainNodeSet`**, Cosmopilot deploys **one CosmoGuard StatefulSet per node group**, fronting every node in that group. It can run multiple replicas and be autoscaled with an HPA.
 - On a standalone **`ChainNode`**, Cosmopilot deploys a single CosmoGuard StatefulSet fronting that node.
 - The node's main and `-internal` Services keep serving the raw node ports. Guarded traffic is routed through the group/global Services (whose selectors are flipped to the guard once it is ready) and through the dedicated `<name>-cg` Service.
+
+### Host spreading
+
+Every guard has a soft topology spread preference over `kubernetes.io/hostname`,
+with `maxSkew: 1` and `ScheduleAnyway`. Its selector counts only that guard's
+replicas. This applies to a single replica, fixed multiple replicas and HPA-managed
+guards, including an HPA starting at one replica. It prefers different eligible
+hosts while allowing colocation on a one-host pool or when capacity or inherited
+placement limits choices. Existing node selectors and affinity remain in force.
+This does not guarantee one replica per host or rebalance already-running pods;
+the preference takes effect when replacements are scheduled.
 
 ### Shared cache (olric cluster)
 

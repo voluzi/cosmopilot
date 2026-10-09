@@ -421,13 +421,19 @@ func (p Params) StatefulSet() *appsv1.StatefulSet {
 				ObjectMeta: metav1.ObjectMeta{Labels: p.podLabels(), Annotations: p.PodAnnotations},
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: ptr.To[int64](30),
-					SecurityContext:               p.podSecurityContext(),
-					PriorityClassName:             p.PriorityClassName,
-					ServiceAccountName:            p.ServiceAccountName,
-					ImagePullSecrets:              p.ImagePullSecrets,
-					NodeSelector:                  p.NodeSelector,
-					Affinity:                      p.Affinity,
-					Containers:                    []corev1.Container{container},
+					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+						MaxSkew:           1,
+						TopologyKey:       "kubernetes.io/hostname",
+						WhenUnsatisfiable: corev1.ScheduleAnyway,
+						LabelSelector:     &metav1.LabelSelector{MatchLabels: InstanceLabels(p.Name)},
+					}},
+					SecurityContext:    p.podSecurityContext(),
+					PriorityClassName:  p.PriorityClassName,
+					ServiceAccountName: p.ServiceAccountName,
+					ImagePullSecrets:   p.ImagePullSecrets,
+					NodeSelector:       p.NodeSelector,
+					Affinity:           p.Affinity,
+					Containers:         []corev1.Container{container},
 					Volumes: []corev1.Volume{
 						{
 							Name: configVolumeName,
