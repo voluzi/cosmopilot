@@ -31,7 +31,7 @@ func Allora() TestApp {
 		},
 		AppSpec: appsv1.AppSpec{
 			Image:      "alloranetwork/allora-chain",
-			Version:    ptr.To("v0.14.0"),
+			Version:    ptr.To("v0.17.2"),
 			App:        "allorad",
 			SdkVersion: ptr.To(appsv1.V0_50),
 		},

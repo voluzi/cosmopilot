@@ -10,7 +10,7 @@ spec:
     dataVolumes: Delete
   app:
     image: osmolabs/osmosis
-    version: 31.0.0
+    version: 31.0.3
     app: osmosisd
     sdkVersion: v0.53
     sdkOptions:

@@ -8,7 +8,7 @@ metadata:
 spec:
   app:
     image: alloranetwork/allora-chain
-    version: v0.14.0
+    version: v0.17.2
     app: allorad
     sdkVersion: v0.50
 

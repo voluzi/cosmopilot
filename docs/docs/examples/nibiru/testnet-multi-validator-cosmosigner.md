@@ -15,7 +15,7 @@ metadata:
 spec:
   app:
     image: ghcr.io/nibiruchain/nibiru
-    version: 2.9.0
+    version: 2.21.0
     app: nibid
     sdkVersion: v0.47
 

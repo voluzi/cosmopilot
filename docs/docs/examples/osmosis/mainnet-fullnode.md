@@ -30,7 +30,7 @@ spec:
           port: 12556
 
       persistence:
-        size: 100Gi
+        size: 200Gi
         initTimeout: 1h
         additionalVolumes:
           - name: wasm
@@ -45,7 +45,7 @@ spec:
             args:
               - "-c"
               - |
-                SNAPSHOT_URL=$(wget -qO- https://snapshots.osmosis.zone/index.html | sed -n 's/.*href="\(https:\/\/hel1\.your-objectstorage\.com\/osmosis\/osmosis-1\/snapshots\/v31\/[^"]*\.tar\.lz4\)".*/\1/p' | tail -1) && \
+                SNAPSHOT_URL="https://snapshots.kjnodes.com/osmosis/snapshot_latest.tar.lz4" && \
                 echo "Downloading snapshot: $SNAPSHOT_URL" && \
                 wget -T 0 -qO- "$SNAPSHOT_URL" | lz4 -d | tar -C /home/app -xvf -
 

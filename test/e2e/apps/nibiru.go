@@ -34,7 +34,7 @@ func Nibiru() TestApp {
 		},
 		AppSpec: appsv1.AppSpec{
 			Image:      "ghcr.io/nibiruchain/nibiru",
-			Version:    ptr.To("2.9.0"),
+			Version:    ptr.To("2.21.0"),
 			App:        "nibid",
 			SdkVersion: ptr.To(appsv1.V0_47),
 		},

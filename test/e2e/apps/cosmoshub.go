@@ -40,7 +40,7 @@ func CosmosHub() TestApp {
 		},
 		AppSpec: appsv1.AppSpec{
 			Image:      "ghcr.io/cosmos/gaia",
-			Version:    ptr.To("v25.2.0"),
+			Version:    ptr.To("v28.3.1"),
 			App:        "gaiad",
 			SdkVersion: ptr.To(appsv1.V0_53),
 		},

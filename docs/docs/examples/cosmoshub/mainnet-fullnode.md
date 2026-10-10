@@ -8,9 +8,8 @@ metadata:
 spec:
   app:
     image: ghcr.io/cosmos/gaia
-    version: v25.2.0
+    version: v28.3.1
     app: gaiad
-    sdkVersion: v0.53
 
   genesis:
     url: https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz
@@ -26,10 +25,6 @@ spec:
         - id: ade4d8bc8cbe014af6ebdf3cb7b1e9ad36f412c0
           address: seeds.polkachu.com
           port: 14956
-        # Lavender.Five Nodes
-        - id: 20e1000e88125698264454a884812746c2eb4807
-          address: seeds.lavenderfive.com
-          port: 14956
 
       persistence:
         size: 100Gi
@@ -44,9 +39,9 @@ spec:
             args:
               - "-c"
               - |
-                SNAPSHOT_URL="https://storage1.quicksync.io/cosmos/mainnet/daily/latest.tar.zst" && \
+                SNAPSHOT_URL="https://snapshots.kjnodes.com/cosmoshub/snapshot_latest.tar.lz4" && \
                 echo "Downloading snapshot: $SNAPSHOT_URL" && \
-                wget -T 0 -qO- "$SNAPSHOT_URL" | zstd -d | tar -C /home/app -xvf -
+                wget -T 0 -qO- "$SNAPSHOT_URL" | lz4 -d | tar -C /home/app -xvf -
 
       config:
         override:

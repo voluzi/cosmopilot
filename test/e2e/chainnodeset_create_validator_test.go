@@ -194,7 +194,7 @@ func TestNormalizeConsensusPubKeyRejectsInvalidInput(t *testing.T) {
 
 var _ = Describe("ChainNodeSet Post-Genesis Validator", func() {
 	for _, app := range apps.All() {
-		if app.Name != "Allora" || app.AppSpec.Version == nil || *app.AppSpec.Version != "v0.14.0" ||
+		if app.Name != "Allora" ||
 			app.AppSpec.SdkVersion == nil || *app.AppSpec.SdkVersion != appsv1.V0_50 {
 			continue
 		}

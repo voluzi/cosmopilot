@@ -4,12 +4,10 @@
 # ChainNodeSet with a CosmoGuard-protected full node group.
 #
 # Cosmopilot deploys a standalone clustered CosmoGuard v6 StatefulSet per node group. It fronts every node in
-# the group (discovered through a headless Service), can run multiple replicas, and is autoscaled by
-# an HPA. The group Service is routed through the guard once it is ready.
+# the group (discovered through a headless Service), runs three replicas, and can optionally be autoscaled
+# by an HPA. The group Service is routed through the guard once it is ready.
 #
-# Create the rules ConfigMap first (rules only — Cosmopilot manages upstream/listener/metrics):
-#   kubectl create configmap cosmoguard-config \
-#     --from-file=cosmoguard.yaml=./cosmoguard.yaml -n <namespace>
+# The rules ConfigMap is included below (rules only — Cosmopilot manages upstream/listener/metrics).
 apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
@@ -17,9 +15,24 @@ metadata:
 spec:
   app:
     image: ghcr.io/nibiruchain/nibiru
-    version: 2.9.0
+    version: 2.21.0
     app: nibid
     sdkVersion: v0.47
+
+  validator:
+    accountPrefix: nibi
+    valPrefix: nibivaloper
+    init:
+      chainID: nibiru-testnet-0
+      assets: ["100000000000000unibi"]
+      stakeAmount: 100000000unibi
+      additionalInitCommands:
+        - command: [ "sh", "-c" ]
+          args:
+            - |
+              nibid genesis add-sudo-root-account \
+                $(nibid keys show account -a --home=/home/app --keyring-backend test) \
+                --home=/home/app
 
   nodes:
     - name: fullnodes
@@ -36,25 +49,31 @@ spec:
             name: cosmoguard-config
             key: cosmoguard.yaml
 
-          # Run the guard with its own autoscaling, independent of the nodes.
-          autoscaling:
-            enable: true
-            minReplicas: 2
-            maxReplicas: 8
-            targetCPUUtilizationPercentage: 75
+          replicas: 3
+          # Alternative: autoscaling requires metrics-server.
+          # autoscaling:
+          #   enable: true
+          #   minReplicas: 2
+          #   maxReplicas: 8
+          #   targetCPUUtilizationPercentage: 75
 
-          # Optional read-only dashboard, protected with basic-auth from a Secret and exposed via Ingress.
+          # kubectl port-forward svc/nibiru-testnet-fullnodes-cg 8080:8080
           dashboard:
             enable: true
-            basicAuth:
-              username:
-                name: cosmoguard-dashboard-auth
-                key: username
-              password:
-                name: cosmoguard-dashboard-auth
-                key: password
-            ingress:
-              host: cosmoguard.testnet.example.com
-              ingressClassName: nginx
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cosmoguard-config
+data:
+  cosmoguard.yaml: |
+    lcd:
+      default: allow
+    rpc:
+      default: allow
+      jsonrpc:
+        default: allow
+    grpc:
+      default: allow
 
 ```
