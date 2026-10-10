@@ -10,11 +10,13 @@ spec:
     dataVolumes: Delete
   app:
     image: ghcr.io/cosmos/gaia
-    version: v25.2.0
+    version: v28.3.1
     app: gaiad
-    sdkVersion: v0.53
 
   validator:
+    # The upstream image is published for linux/amd64 only.
+    nodeSelector:
+      kubernetes.io/arch: amd64
     info:
       moniker: cosmopilot
 
@@ -33,7 +35,6 @@ spec:
       chainID: cosmoshub-testnet-0
       assets: ["1000000000000000000uatom"]
       stakeAmount: 100000000uatom
-      minSelfDelegation: ""
       unbondingTime: 60s
       votingPeriod: 60s
       expeditedVotingPeriod: 30s
@@ -47,6 +48,8 @@ spec:
   nodes:
     - name: fullnodes
       instances: 1
+      nodeSelector:
+        kubernetes.io/arch: amd64
 
       config:
         override:

@@ -8,7 +8,7 @@ metadata:
 spec:
   app:
     image: ghcr.io/nibiruchain/nibiru
-    version: 2.9.0
+    version: 2.21.0
     app: nibid
     sdkVersion: v0.47
 
@@ -49,7 +49,7 @@ spec:
       additionalInitCommands:
         - command: [ "sh", "-c" ]
           args:
-            - >
+            - |
               nibid genesis add-sudo-root-account \
                 $(nibid keys show account -a --home=/home/app --keyring-backend test) \
                 --home=/home/app

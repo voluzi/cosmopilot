@@ -8,7 +8,7 @@ metadata:
 spec:
   app:
     image: alloranetwork/allora-chain
-    version: v0.14.0
+    version: v0.17.2
     app: allorad
     sdkVersion: v0.50
 
@@ -18,20 +18,17 @@ spec:
   nodes:
     - name: fullnodes
       instances: 1
+      nodeSelector:
+        kubernetes.io/arch: amd64
 
       peers:
-        # Allora
-        - id: 557d0d381bb7edf7e390465cdad8343862cdd025
-          address: peer-1.mainnet.allora.network
-          port: 26656
-        # Allora
-        - id: aa75a17ad0e42c2cf449e3ffcf3f477405571104
-          address: peer-2.mainnet.allora.network
-          port: 26656
-        # Allora
-        - id: d1bdd4803dd928a13bd08c4a6e7e2ea216dfa28c
-          address: peer-3.mainnet.allora.network
-          port: 26656
+        # Current official seeds: allora-network/networks/allora-mainnet-1/seeds.txt
+        - id: c64889d2d2da06c9c3cf2269188320f725a4d01e
+          seed: true
+          address: 35.199.63.182
+        - id: 5f51e319631ba698a9f0bf6a6a990b7b36a9b0ed
+          seed: true
+          address: 34.145.136.119
 
       persistence:
         size: 100Gi
@@ -42,12 +39,15 @@ spec:
             args:
               - "-c"
               - |
-                SNAPSHOT_URL=$(curl -s "https://api.imperator.co/services?network=mainnets" | jq -r '.Allora.snapshots[0]."eu-west-1"[0]'.dl_url)
-                echo "Downloading snapshot: $SNAPSHOT_URL" && \
-                curl -sL "$SNAPSHOT_URL" | zstd -d --stdout | tar xf - -C /home/app
+                set -eu
+                set -o pipefail
+                SNAPSHOT_URL=$(curl -fsSL https://www.polkachu.com/tendermint_snapshots/allora | sed -n 's/.*href="\(https:\/\/snapshots.polkachu.com\/snapshots\/allora\/allora_[0-9]*\.tar\.lz4\)".*/\1/p')
+                test -n "$SNAPSHOT_URL"
+                curl -fL --retry 3 "$SNAPSHOT_URL" | lz4 -dc | tar -xf - -C /home/app
 
       config:
         override:
           app.toml:
             minimum-gas-prices: 10uallo
+
 ```

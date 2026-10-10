@@ -198,19 +198,16 @@ may be discovered.
 
 ## Compatible Chains
 
-The following table lists chains that have been tested with Cosmopilot:
+The table lists the current example versions. Their registry images and manifests have been
+checked, and local genesis command checks have been run. Kubernetes deployment tests for these
+refreshed examples are still pending. Mainnet versions can differ from the latest stable release.
 
-| Chain                                     | Version | SDK Version | Image                              | Join Network |                           New Network                            | Notes                                          |
-|-------------------------------------------|---------|-------------|------------------------------------|:------------:|:----------------------------------------------------------------:|------------------------------------------------|
-| [Cosmos Hub](https://cosmos.network/)     | v25.2.0 | v0.53       | `ghcr.io/cosmos/gaia:v25.2.0`      | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)  |                                                |
-| [Osmosis](https://osmosis.zone/)          | v31.0.0 | v0.53       | `osmolabs/osmosis:31.0.0`          | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)* | Set `.app.sdkOptions.genesisSubcommand = false` |
-| [Nibiru](https://nibiru.fi/)              | v2.9.0  | v0.47       | `ghcr.io/nibiruchain/nibiru:2.9.0` | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)  | All previous versions work                     |
-| [Allora-Network](https://allora.betwork/) | v0.14.0 | v0.50       | `alloranetwork/allora-chain:v0.14.0` | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)  |                      |
-
-**Status Legend:**
-- ![Verified](https://img.shields.io/badge/-Verified-brightgreen) - Fully tested and working
-- ![Partial](https://img.shields.io/badge/-Partial-yellow) - Works with limitations (see notes)
-- ![Unsupported](https://img.shields.io/badge/-Unsupported-red) - Known issues, not recommended
+| Chain | Testnet version | SDK version | Image | Join network | New network | Notes |
+|---|---|---|---|---|---|---|
+| [Cosmos Hub](https://cosmos.network/) | v28.3.1 | v0.53 | `ghcr.io/cosmos/gaia:v28.3.1` | Pending cluster test | Pending cluster test | amd64 only; mainnet RPCs report unpublished v28.3.0, so the example uses published v28.3.1 |
+| [Osmosis](https://osmosis.zone/) | v31.0.3 | v0.50 | `osmolabs/osmosis:31.0.3` | Pending cluster test | Pending cluster test | Mainnet uses 31.0.0; set `.app.sdkOptions.genesisSubcommand = false` |
+| [Nibiru](https://nibiru.fi/) | v2.21.0 | v0.47 | `ghcr.io/nibiruchain/nibiru:2.21.0` | Pending cluster test | Pending cluster test | Mainnet uses 2.20.0; initialise the sudo root account before generating gentxs |
+| [Allora Network](https://allora.network/) | v0.17.2 | v0.50 | `alloranetwork/allora-chain:v0.17.2` | Pending cluster test | Pending cluster test | amd64 only; local genesis uses uallo for staking and account balances |
 
 **Column Descriptions:**
 - **Join Network** - Joining an existing network with a provided genesis file

@@ -8,7 +8,7 @@ import (
 )
 
 // Allora returns the test configuration for Allora Network blockchain.
-// Configuration based on examples/allora/testnet-with-fullnode.yaml
+// Configuration based on examples/allora-network/testnet-with-fullnode.yaml
 func Allora() TestApp {
 	// Replace stake with uallo in genesis
 	denomReplacementCmd := appsv1.InitCommand{
@@ -31,7 +31,7 @@ func Allora() TestApp {
 		},
 		AppSpec: appsv1.AppSpec{
 			Image:      "alloranetwork/allora-chain",
-			Version:    ptr.To("v0.14.0"),
+			Version:    ptr.To("v0.17.2"),
 			App:        "allorad",
 			SdkVersion: ptr.To(appsv1.V0_50),
 		},
@@ -43,8 +43,8 @@ func Allora() TestApp {
 		ValidatorConfig: ValidatorTestConfig{
 			ChainID:                "allora-network-e2e",
 			Denom:                  "uallo",
-			Assets:                 []string{"1000000000allo"},
-			StakeAmount:            "10allo",
+			Assets:                 []string{"1000000000000000000000000000uallo"},
+			StakeAmount:            "10000000000000000000uallo",
 			AccountPrefix:          "allo",
 			ValPrefix:              "allovaloper",
 			AdditionalInitCommands: []appsv1.InitCommand{denomReplacementCmd},
