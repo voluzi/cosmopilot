@@ -30,7 +30,7 @@ spec:
           port: 12556
 
       persistence:
-        size: 100Gi
+        size: 200Gi
         initTimeout: 1h
         additionalVolumes:
           - name: wasm
