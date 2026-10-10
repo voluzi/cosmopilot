@@ -31,20 +31,6 @@ Use node-utils 4.0.0 or newer with this Cosmopilot release. It includes the `wai
 gate and the polling-based upgrade coordination used by node Pods without a trace FIFO.
 :::
 
-## Applying the local testnet examples
-
-The [sentry example](../examples/nibiru/testnet-cosmosigner-sentry.md) and
-[multiple-validator example](../examples/nibiru/testnet-multi-validator-cosmosigner.md) each
-include a complete local-chain genesis ConfigMap and publicly known software signing keys.
-Apply either file in its own namespace; neither requires Vault or pre-provisioned Secrets.
-The sentry example runs one validator identity through three node endpoints. The multiple-validator
-example registers three distinct identities, each with its own signer; validator-c has three
-redundant node endpoints.
-
-These disposable testnets explicitly use insecure Raft transport. Use fresh private keys and
-`raftTLSSecret` for production. All examples need persistent-volume provisioning; no particular
-StorageClass is selected.
-
 ## How it works
 
 `Cosmopilot` deploys, for each configured signer:
