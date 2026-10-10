@@ -205,7 +205,7 @@ The following table lists chains that have been tested with Cosmopilot:
 | [Cosmos Hub](https://cosmos.network/)     | v28.3.1 | v0.53       | `ghcr.io/cosmos/gaia:v28.3.1`      | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)  |                                                |
 | [Osmosis](https://osmosis.zone/)          | v31.0.3 | v0.53       | `osmolabs/osmosis:31.0.3`          | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)* | Set `.app.sdkOptions.genesisSubcommand = false` |
 | [Nibiru](https://nibiru.fi/)              | v2.21.0  | v0.47       | `ghcr.io/nibiruchain/nibiru:2.21.0` | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)  | All previous versions work                     |
-| [Allora-Network](https://allora.betwork/) | v0.17.2 | v0.50       | `alloranetwork/allora-chain:v0.17.2` | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)  |                      |
+| [Allora-Network](https://allora.network/) | v0.17.2 | v0.50       | `alloranetwork/allora-chain:v0.17.2` | ![Verified](https://img.shields.io/badge/-Verified-brightgreen) | ![Verified](https://img.shields.io/badge/-Verified-brightgreen)  |                      |
 
 **Status Legend:**
 - ![Verified](https://img.shields.io/badge/-Verified-brightgreen) - Fully tested and working
