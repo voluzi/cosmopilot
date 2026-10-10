@@ -113,6 +113,19 @@ default. At SIGTERM, v6 fails readiness, continues serving for five seconds, the
 drains and cleans up within an absolute 29-second budget. No preStop hook is
 needed. WebSocket clients must reconnect and resubscribe after replacement.
 
+## Applying the local testnet example
+
+The [Nibiru guard example](../examples/nibiru/testnet-cosmoguard.md) includes its rules
+ConfigMap and initialises a local chain. It uses three fixed guard replicas and the operator's
+image and resource defaults. The dashboard is internal and has no basic authentication:
+
+```bash
+kubectl port-forward svc/nibiru-testnet-fullnodes-cg 8080:8080
+```
+
+Open `http://localhost:8080`. The commented autoscaling alternative requires metrics-server;
+no Ingress controller is required by this example.
+
 ## Setting Up CosmoGuard
 
 ### Step 1: Create the CosmoGuard rules
