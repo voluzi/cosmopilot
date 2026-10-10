@@ -31,7 +31,7 @@ const config: Config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
           editUrl: 'https://github.com/voluzi/cosmopilot/tree/main/docs/',
-          lastVersion: '5.1.0',
+          lastVersion: '5.2.0',
           versions: {
             current: {
               label: 'Next',
