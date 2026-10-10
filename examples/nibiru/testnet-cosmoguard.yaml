@@ -1,4 +1,10 @@
-# Local testnet with three guard replicas; rules are included below.
+# ChainNodeSet with a CosmoGuard-protected full node group.
+#
+# Cosmopilot deploys a standalone clustered CosmoGuard v6 StatefulSet per node group. It fronts every node in
+# the group (discovered through a headless Service), runs three replicas, and can optionally be autoscaled
+# by an HPA. The group Service is routed through the guard once it is ready.
+#
+# The rules ConfigMap is included below (rules only — Cosmopilot manages upstream/listener/metrics).
 apiVersion: cosmopilot.voluzi.com/v1
 kind: ChainNodeSet
 metadata:
@@ -13,21 +19,10 @@ spec:
   validator:
     accountPrefix: nibi
     valPrefix: nibivaloper
-
-    info:
-      moniker: cosmopilot
-
-    config:
-      override:
-        app.toml:
-          minimum-gas-prices: 0.025unibi
-
     init:
       chainID: nibiru-testnet-0
-      assets: ["100000000000000unibi", "1000000000000000000unusd", "10000000000000000uusdt"]
+      assets: ["100000000000000unibi"]
       stakeAmount: 100000000unibi
-      unbondingTime: 60s
-      votingPeriod: 60s
       additionalInitCommands:
         - command: [ "sh", "-c" ]
           args:
