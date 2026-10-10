@@ -9,7 +9,7 @@ spec:
     image: osmolabs/osmosis
     version: 31.0.3
     app: osmosisd
-    sdkVersion: v0.50
+    sdkVersion: v0.53
     sdkOptions:
       genesisSubcommand: false
 

@@ -17,27 +17,25 @@ spec:
       instances: 1
 
       peers:
-        # Current public mainnet node (rpc.nibiru.fi/status).
-        - id: ac580cf22cb356a61fd495bbafd849071b908031
-          address: 35.195.24.164
+        # Nibiru
+        - id: 418e1b5d5872e9d6acd5341101aa5ae298a1a9a7
+          address: 35.241.151.181
+          port: 26656
 
       persistence:
-        size: 500Gi
-        initTimeout: 6h
+        size: 100Gi
+        initTimeout: 1h
         additionalInitCommands:
           - image: ghcr.io/voluzi/node-tools
             command: [ "sh" ]
             args:
               - "-c"
               - |
-                set -eu
-                set -o pipefail
-                SNAPSHOT_URL=$(curl -fsSL https://networks.nibiru.fi/cataclysm-1/snapshots | jq -er '[.[] | select(endswith("pruned-pebbledb.tar.gz"))] | last')
-                curl -fL --retry 3 "$SNAPSHOT_URL" | tar -xzf - -C /home/app/data
+                SNAPSHOT_URL=$(wget -qO- https://networks.nibiru.fi/cataclysm-1/snapshots | grep -o 'https://[^"]*pruned-pebbledb\.tar\.gz' | tail -1)
+                echo "Downloading snapshot: $SNAPSHOT_URL" && \
+                wget -T 0 -qO- "$SNAPSHOT_URL" | tar -xzvf - -C /home/app/data
 
       config:
         override:
-          config.toml:
-            db_backend: pebbledb
           app.toml:
             minimum-gas-prices: 0.025unibi

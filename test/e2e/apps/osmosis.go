@@ -47,7 +47,7 @@ func Osmosis() TestApp {
 			Image:      "osmolabs/osmosis",
 			Version:    ptr.To("31.0.3"),
 			App:        "osmosisd",
-			SdkVersion: ptr.To(appsv1.V0_50),
+			SdkVersion: ptr.To(appsv1.V0_53),
 			SdkOptions: &appsv1.SdkOptions{
 				GenesisSubcommand: ptr.To(false),
 			},

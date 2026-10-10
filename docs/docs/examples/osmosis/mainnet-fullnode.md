@@ -10,7 +10,7 @@ spec:
     image: osmolabs/osmosis
     version: 31.0.0
     app: osmosisd
-    sdkVersion: v0.50
+    sdkVersion: v0.53
     sdkOptions:
       genesisSubcommand: false
 
@@ -26,13 +26,12 @@ spec:
       peers:
         # Polkachu Nodes
         - id: ade4d8bc8cbe014af6ebdf3cb7b1e9ad36f412c0
-          seed: true
           address: seeds.polkachu.com
           port: 12556
 
       persistence:
-        size: 250Gi
-        initTimeout: 3h
+        size: 100Gi
+        initTimeout: 1h
         additionalVolumes:
           - name: wasm
             size: 1Gi
@@ -46,14 +45,13 @@ spec:
             args:
               - "-c"
               - |
-                set -eu
-                set -o pipefail
-                curl -fL --retry 3 "https://snapshots.kjnodes.com/osmosis/snapshot_latest.tar.lz4" | lz4 -dc | tar -xf - -C /home/app
+                SNAPSHOT_URL="https://snapshots.kjnodes.com/osmosis/snapshot_latest.tar.lz4" && \
+                echo "Downloading snapshot: $SNAPSHOT_URL" && \
+                wget -T 0 -qO- "$SNAPSHOT_URL" | lz4 -d | tar -C /home/app -xvf -
 
       config:
         runFlags: [ "--reject-config-defaults=true" ]
         override:
           app.toml:
             minimum-gas-prices: 0.025uosmo
-
 ```

@@ -13,9 +13,6 @@ spec:
     sdkVersion: v0.50
 
   validator:
-    # The upstream image is published for linux/amd64 only.
-    nodeSelector:
-      kubernetes.io/arch: amd64
     accountPrefix: allo
     valPrefix: allovaloper
 
@@ -29,9 +26,8 @@ spec:
 
     init:
       chainID: allora-testnet-0
-      # Allora uses 18 decimal places: 1 ALLO = 10^18 uallo.
-      assets: ["1000000000000000000000000000uallo"]
-      stakeAmount: 10000000000000000000uallo
+      assets: ["1000000000allo"]
+      stakeAmount: 10allo
       unbondingTime: 60s
       votingPeriod: 60s
       expeditedVotingPeriod: 30s
@@ -45,8 +41,6 @@ spec:
   nodes:
     - name: fullnodes
       instances: 1
-      nodeSelector:
-        kubernetes.io/arch: amd64
 
       config:
         override:

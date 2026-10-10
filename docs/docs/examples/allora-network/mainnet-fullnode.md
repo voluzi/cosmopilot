@@ -18,17 +18,17 @@ spec:
   nodes:
     - name: fullnodes
       instances: 1
-      nodeSelector:
-        kubernetes.io/arch: amd64
 
       peers:
-        # Current official seeds: allora-network/networks/allora-mainnet-1/seeds.txt
+        # Allora
         - id: c64889d2d2da06c9c3cf2269188320f725a4d01e
           seed: true
           address: 35.199.63.182
+          port: 26656
         - id: 5f51e319631ba698a9f0bf6a6a990b7b36a9b0ed
           seed: true
           address: 34.145.136.119
+          port: 26656
 
       persistence:
         size: 100Gi
@@ -39,15 +39,12 @@ spec:
             args:
               - "-c"
               - |
-                set -eu
-                set -o pipefail
-                SNAPSHOT_URL=$(curl -fsSL https://www.polkachu.com/tendermint_snapshots/allora | sed -n 's/.*href="\(https:\/\/snapshots.polkachu.com\/snapshots\/allora\/allora_[0-9]*\.tar\.lz4\)".*/\1/p')
-                test -n "$SNAPSHOT_URL"
-                curl -fL --retry 3 "$SNAPSHOT_URL" | lz4 -dc | tar -xf - -C /home/app
+                SNAPSHOT_URL=$(curl -sL https://www.polkachu.com/tendermint_snapshots/allora | sed -n 's/.*href="\(https:\/\/snapshots.polkachu.com\/snapshots\/allora\/allora_[0-9]*\.tar\.lz4\)".*/\1/p')
+                echo "Downloading snapshot: $SNAPSHOT_URL" && \
+                curl -sL "$SNAPSHOT_URL" | lz4 -d | tar xf - -C /home/app
 
       config:
         override:
           app.toml:
             minimum-gas-prices: 10uallo
-
 ```

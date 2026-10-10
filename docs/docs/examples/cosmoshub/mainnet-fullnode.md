@@ -19,13 +19,10 @@ spec:
   nodes:
     - name: fullnodes
       instances: 1
-      nodeSelector:
-        kubernetes.io/arch: amd64
 
       peers:
         # Polkachu Nodes
         - id: ade4d8bc8cbe014af6ebdf3cb7b1e9ad36f412c0
-          seed: true
           address: seeds.polkachu.com
           port: 14956
 
@@ -42,9 +39,9 @@ spec:
             args:
               - "-c"
               - |
-                set -eu
-                set -o pipefail
-                curl -fL --retry 3 "https://snapshots.kjnodes.com/cosmoshub/snapshot_latest.tar.lz4" | lz4 -dc | tar -xf - -C /home/app
+                SNAPSHOT_URL="https://snapshots.kjnodes.com/cosmoshub/snapshot_latest.tar.lz4" && \
+                echo "Downloading snapshot: $SNAPSHOT_URL" && \
+                wget -T 0 -qO- "$SNAPSHOT_URL" | lz4 -d | tar -C /home/app -xvf -
 
       config:
         override:
