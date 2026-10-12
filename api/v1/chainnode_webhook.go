@@ -125,6 +125,9 @@ func (chainNode *ChainNode) Validate(old *ChainNode) (admission.Warnings, error)
 	if err := chainNode.Spec.Config.ValidateCosmoGuardDashboard(chainNode.GetNamespace()); err != nil {
 		return nil, fmt.Errorf(".spec.config.%w", err)
 	}
+	if err := chainNode.Spec.Config.ValidateCosmoGuardService(); err != nil {
+		return nil, fmt.Errorf(".spec.config.%w", err)
+	}
 
 	// Reject duplicate subdomain prefixes across enabled endpoints
 	if ing := chainNode.Spec.Ingress; ing != nil {

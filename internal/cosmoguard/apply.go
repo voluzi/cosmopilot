@@ -95,6 +95,10 @@ func applyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 		return err
 	}
 	obj.SetResourceVersion(existing.GetResourceVersion())
+	// Foreign finalizers protect other controllers' cleanup and must survive a full Update.
+	if len(obj.GetFinalizers()) == 0 {
+		obj.SetFinalizers(append([]string(nil), existing.GetFinalizers()...))
+	}
 	return c.Update(ctx, obj)
 }
 

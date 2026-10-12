@@ -7,11 +7,79 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestApplyOwnedPreservesForeignFinalizer(t *testing.T) {
+	scheme := servingScheme(t)
+	require.NoError(t, corev1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	owner := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "ns", UID: "owner-uid"}}
+	p := baseParams()
+	require.NoError(t, ApplyOwned(t.Context(), c, scheme, owner, p.Service()))
+	live := &corev1.Service{}
+	key := client.ObjectKey{Namespace: p.Namespace, Name: p.Name}
+	require.NoError(t, c.Get(t.Context(), key, live))
+	live.Finalizers = []string{"tailscale.com/finalizer"}
+	require.NoError(t, c.Update(t.Context(), live))
+	resourceVersion := live.ResourceVersion
+	require.NoError(t, ApplyOwned(t.Context(), c, scheme, owner, p.Service()))
+	require.NoError(t, c.Get(t.Context(), key, live))
+	assert.Equal(t, resourceVersion, live.ResourceVersion, "a foreign finalizer must not trigger an Update")
+	p.EvmEnabled = true
+	require.NoError(t, ApplyOwned(t.Context(), c, scheme, owner, p.Service()))
+	require.NoError(t, c.Get(t.Context(), key, live))
+	assert.Equal(t, []string{"tailscale.com/finalizer"}, live.Finalizers)
+	assert.Len(t, live.Spec.Ports, 6)
+}
+
+func TestApplyOwnedServiceAnnotationsConverge(t *testing.T) {
+	scheme := servingScheme(t)
+	require.NoError(t, corev1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	owner := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "ns", UID: "owner-uid"}}
+	p := baseParams()
+	key := client.ObjectKey{Namespace: p.Namespace, Name: p.Name}
+	resourceVersion := ""
+	for _, tc := range []struct {
+		name        string
+		annotations map[string]string
+		unchanged   bool
+	}{
+		{name: "create", annotations: map[string]string{"tailscale.com/expose": "true"}},
+		{name: "unchanged", annotations: map[string]string{"tailscale.com/expose": "true"}, unchanged: true},
+		{name: "change", annotations: map[string]string{"tailscale.com/expose": "false"}},
+		{name: "add", annotations: map[string]string{"tailscale.com/expose": "false", "tailscale.com/hostname": "my-chain-rpc"}},
+		{name: "remove one", annotations: map[string]string{"tailscale.com/expose": "false"}},
+		{name: "remove all"},
+		{name: "empty unchanged", unchanged: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p.ServiceAnnotations = tc.annotations
+			require.NoError(t, ApplyOwned(t.Context(), c, scheme, owner, p.Service()))
+			live := &corev1.Service{}
+			require.NoError(t, c.Get(t.Context(), key, live))
+			assert.NotContains(t, tc.annotations, "banzaicloud.com/last-applied")
+			assert.NotEmpty(t, live.Annotations["banzaicloud.com/last-applied"])
+			delete(live.Annotations, "banzaicloud.com/last-applied")
+			assert.Len(t, live.Annotations, len(tc.annotations))
+			for key, value := range tc.annotations {
+				assert.Equal(t, value, live.Annotations[key])
+			}
+			if tc.unchanged {
+				assert.Equal(t, resourceVersion, live.ResourceVersion)
+			} else {
+				assert.NotEqual(t, resourceVersion, live.ResourceVersion)
+			}
+			resourceVersion = live.ResourceVersion
+		})
+	}
+}
 
 func servingScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()

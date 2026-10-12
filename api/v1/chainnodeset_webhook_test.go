@@ -11,6 +11,32 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestChainNodeSetValidateCosmoGuardService(t *testing.T) {
+	for _, validator := range []bool{false, true} {
+		name := "regular"
+		if validator {
+			name = "validator"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{CosmoGuard: &CosmoGuardConfig{Service: &CosmoGuardServiceConfig{Labels: map[string]string{"peer": "true"}}}}
+			group := NodeGroupSpec{Name: "nodes", Instances: ptr.To(1), Config: cfg}
+			if validator {
+				group.Config = nil
+				group.Validator = &NodeSetValidatorConfig{Config: cfg}
+			}
+			nodeSet := &ChainNodeSet{Spec: ChainNodeSetSpec{
+				Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+				Nodes:   []NodeGroupSpec{group},
+			}}
+			_, err := nodeSet.Validate(nil)
+			require.ErrorContains(t, err, ".spec.nodes[0] cosmoGuard.service.labels")
+			delete(cfg.CosmoGuard.Service.Labels, "peer")
+			_, err = nodeSet.Validate(nil)
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestChainNodeSetValidateRejectsCosmoGuardOnLegacyValidator(t *testing.T) {
 	guardCfg := func() *Config {
 		return &Config{CosmoGuard: &CosmoGuardConfig{

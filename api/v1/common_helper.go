@@ -8,7 +8,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
+	metavalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kube-openapi/pkg/validation/strfmt"
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -492,6 +495,22 @@ func (cfg *Config) GetCosmoGuardDashboard() *CosmoGuardDashboardConfig {
 	return nil
 }
 
+// GetCosmoGuardServiceAnnotations returns the API Service's configured annotations, or nil.
+func (cfg *Config) GetCosmoGuardServiceAnnotations() map[string]string {
+	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Service != nil {
+		return cfg.CosmoGuard.Service.Annotations
+	}
+	return nil
+}
+
+// GetCosmoGuardServiceLabels returns the API Service's configured labels, or nil.
+func (cfg *Config) GetCosmoGuardServiceLabels() map[string]string {
+	if cfg != nil && cfg.CosmoGuard != nil && cfg.CosmoGuard.Service != nil {
+		return cfg.CosmoGuard.Service.Labels
+	}
+	return nil
+}
+
 // CosmoGuardDashboardEnabled reports whether the CosmoGuard dashboard is enabled.
 func (cfg *Config) CosmoGuardDashboardEnabled() bool {
 	d := cfg.GetCosmoGuardDashboard()
@@ -533,6 +552,39 @@ var cosmoGuardReservedPorts = map[int32]string{
 	8546:  "EVM RPC WS",
 	18545: "EVM RPC listener",
 	18546: "EVM RPC WS listener",
+}
+
+// These keys mirror internal/controllers.GuardInheritedLabels and the guard's conventional labels.
+// api/v1 cannot import those packages without an import cycle.
+var cosmoGuardReservedServiceLabels = map[string]struct{}{
+	"app.kubernetes.io/name": {}, "app.kubernetes.io/instance": {},
+	"scope": {}, "peer": {}, "seed": {}, "chain-id": {}, "node-id": {}, "app": {},
+	"nodeset": {}, "group": {}, "validator": {}, "chain-node": {}, "global-ingress": {},
+	"upgrading": {}, "cosmosigner-target": {}, "worker-name": {},
+}
+
+// ValidateCosmoGuardService checks Service metadata syntax and reserved keys.
+func (cfg *Config) ValidateCosmoGuardService() error {
+	labels := cfg.GetCosmoGuardServiceLabels()
+	if errs := metavalidation.ValidateLabels(labels, field.NewPath("cosmoGuard", "service", "labels")); len(errs) > 0 {
+		return errs.ToAggregate()
+	}
+	for key := range labels {
+		_, reserved := cosmoGuardReservedServiceLabels[key]
+		if reserved || strings.HasPrefix(key, "cosmoguard.voluzi.com/") || strings.HasPrefix(key, "route.cosmoguard.voluzi.com/") {
+			return fmt.Errorf("cosmoGuard.service.labels key %q is reserved for Cosmopilot", key)
+		}
+	}
+	annotations := cfg.GetCosmoGuardServiceAnnotations()
+	if errs := apivalidation.ValidateAnnotations(annotations, field.NewPath("cosmoGuard", "service", "annotations")); len(errs) > 0 {
+		return errs.ToAggregate()
+	}
+	for key := range annotations {
+		if key == "banzaicloud.com/last-applied" || strings.HasPrefix(key, "cosmopilot.voluzi.com/") {
+			return fmt.Errorf("cosmoGuard.service.annotations key %q is reserved for Cosmopilot", key)
+		}
+	}
+	return nil
 }
 
 // ValidateCosmoGuardDashboard checks the CosmoGuard dashboard config is renderable: its port must not

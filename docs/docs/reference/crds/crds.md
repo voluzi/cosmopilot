@@ -29,6 +29,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CosmoGuardDashboardConfig](#cosmoguarddashboardconfig)
 * [CosmoGuardDashboardGateway](#cosmoguarddashboardgateway)
 * [CosmoGuardDashboardIngress](#cosmoguarddashboardingress)
+* [CosmoGuardServiceConfig](#cosmoguardserviceconfig)
 * [CosmoseedConfig](#cosmoseedconfig)
 * [CosmoseedGatewayConfig](#cosmoseedgatewayconfig)
 * [CosmoseedIngressConfig](#cosmoseedingressconfig)
@@ -685,6 +686,7 @@ CosmoGuardConfig allows configuring CosmoGuard - a standalone firewall/policy pr
 | replicas | Number of CosmoGuard replicas to run. Defaults to `1`. Ignored when autoscaling is enabled. | *int32 | false |
 | autoscaling | Autoscaling configures a HorizontalPodAutoscaler for the CosmoGuard StatefulSet. | *[CosmoGuardAutoscalingConfig](#cosmoguardautoscalingconfig) | false |
 | dashboard | Dashboard exposes CosmoGuard's read-only web dashboard. | *[CosmoGuardDashboardConfig](#cosmoguarddashboardconfig) | false |
+| service | Service customizes the metadata of the CosmoGuard API Service (`<name>-cg`), for example to expose it through a controller driven by Service annotations (such as the Tailscale operator). Applies only to that Service: not to the headless peer Service, the upstream discovery Service, nor to node, group or global Services. On a ChainNodeSet group it applies to the group's guard Service only and is not inherited by per-node guards. | *[CosmoGuardServiceConfig](#cosmoguardserviceconfig) | false |
 | resources | Compute Resources for each CosmoGuard pod. When the field is omitted entirely, requests and limits both default to 500m CPU and 500Mi memory. A block that is set is used as written, except with autoscaling enabled: an empty block then takes the defaults, and a missing request for a metric the autoscaler targets is filled with the default, capped at a smaller limit. | *corev1.ResourceRequirements | false |
 | restartPodOnFailure | Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes, so this field has no effect and will be removed in a future release. | *bool | false |
 
@@ -737,6 +739,17 @@ CosmoGuardDashboardIngress exposes the CosmoGuard dashboard through an Ingress.
 | ingressClassName | IngressClassName is the name of the IngressClass to use. | *string | false |
 | annotations | Annotations to add to the dashboard Ingress. | map[string]string | false |
 | tlsSecretName | TLS enables TLS for the dashboard Ingress using the given secret name for the certificate. | *string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### CosmoGuardServiceConfig
+
+CosmoGuardServiceConfig customizes the metadata of the CosmoGuard API Service.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| annotations | Annotations to add to the CosmoGuard API Service. | map[string]string | false |
+| labels | Labels to add to the CosmoGuard API Service. They are not added to the guard pods and never change the Service selector. Labels managed by Cosmopilot cannot be set here. | map[string]string | false |
 
 [Back to Custom Resources](#custom-resources)
 

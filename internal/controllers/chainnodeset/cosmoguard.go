@@ -77,14 +77,16 @@ func (r *Reconciler) groupCosmoGuardParams(nodeSet *appsv1.ChainNodeSet, group a
 
 	name := groupCosmoGuardName(nodeSet, group)
 	p := cosmoguard.Params{
-		Name:          name,
-		Namespace:     nodeSet.GetNamespace(),
-		Image:         cfg.GetCosmoGuardImage(r.opts.GetCosmoGuardImage()),
-		Replicas:      cfg.GetCosmoGuardReplicas(),
-		DiscoveryHost: fmt.Sprintf("%s.%s.svc.cluster.local", groupCosmoGuardUpstreamName(nodeSet, group), nodeSet.GetNamespace()),
-		EvmEnabled:    cfg.IsEvmEnabled(),
-		ConfigMap:     cfg.GetCosmoGuardConfig(),
-		Resources:     cfg.GetCosmoGuardResources(),
+		Name:               name,
+		Namespace:          nodeSet.GetNamespace(),
+		Image:              cfg.GetCosmoGuardImage(r.opts.GetCosmoGuardImage()),
+		Replicas:           cfg.GetCosmoGuardReplicas(),
+		DiscoveryHost:      fmt.Sprintf("%s.%s.svc.cluster.local", groupCosmoGuardUpstreamName(nodeSet, group), nodeSet.GetNamespace()),
+		EvmEnabled:         cfg.IsEvmEnabled(),
+		ConfigMap:          cfg.GetCosmoGuardConfig(),
+		Resources:          cfg.GetCosmoGuardResources(),
+		ServiceAnnotations: cfg.GetCosmoGuardServiceAnnotations(),
+		ServiceLabels:      cfg.GetCosmoGuardServiceLabels(),
 		// The global-route labels plus the ChainNodeSet's inherited user labels (minus cosmopilot-managed
 		// selector keys) so NetworkPolicies / monitoring that selected the node pods also cover the guard.
 		Labels:              utils.MergeMaps(controllers.GuardInheritedLabels(nodeSet.Labels), cosmoGuardRouteLabels(nodeSet, group.Name)),

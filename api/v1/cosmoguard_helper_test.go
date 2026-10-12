@@ -10,6 +10,43 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestValidateCosmoGuardService(t *testing.T) {
+	var nilConfig *Config
+	assert.NoError(t, nilConfig.ValidateCosmoGuardService())
+	assert.NoError(t, (&Config{}).ValidateCosmoGuardService())
+	assert.NoError(t, (&Config{CosmoGuard: &CosmoGuardConfig{}}).ValidateCosmoGuardService())
+
+	for _, tc := range []struct {
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		wantErr     string
+	}{
+		{name: "tailscale", annotations: map[string]string{"tailscale.com/expose": "true", "tailscale.com/hostname": "my-chain-rpc"}, labels: map[string]string{"team": "infra"}},
+		{name: "guard domain", labels: map[string]string{"cosmoguard.voluzi.com/custom": "true"}, wantErr: "labels"},
+		{name: "route domain", labels: map[string]string{"route.cosmoguard.voluzi.com/custom": "true"}, wantErr: "labels"},
+		{name: "app name", labels: map[string]string{"app.kubernetes.io/name": "node"}, wantErr: "labels"},
+		{name: "app instance", labels: map[string]string{"app.kubernetes.io/instance": "node"}, wantErr: "labels"},
+		{name: "managed key", labels: map[string]string{"peer": "true"}, wantErr: "labels"},
+		{name: "invalid label value", labels: map[string]string{"team": "bad value"}, wantErr: "labels"},
+		{name: "invalid annotation key", annotations: map[string]string{"bad key": "true"}, wantErr: "annotations"},
+		{name: "last applied", annotations: map[string]string{"banzaicloud.com/last-applied": "{}"}, wantErr: "annotations"},
+		{name: "operator annotation", annotations: map[string]string{"cosmopilot.voluzi.com/custom": "true"}, wantErr: "annotations"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{CosmoGuard: &CosmoGuardConfig{Service: &CosmoGuardServiceConfig{
+				Labels: tc.labels, Annotations: tc.annotations,
+			}}}
+			err := cfg.ValidateCosmoGuardService()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, "cosmoGuard.service."+tc.wantErr)
+		})
+	}
+}
+
 func TestGetCosmoGuardImagePrecedence(t *testing.T) {
 	explicit := "registry.example.com/cosmoguard@sha256:abcdef"
 	cfg := &Config{CosmoGuard: &CosmoGuardConfig{Image: &explicit}}

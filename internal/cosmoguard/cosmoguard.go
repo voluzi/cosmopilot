@@ -20,7 +20,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strconv"
+	"strings"
 
+	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -122,6 +124,10 @@ type Params struct {
 	// group/global/gateway Services can select them. They must never include node selector labels
 	// (chain-id/node-id/validator/peer/seed) — the caller is responsible for excluding those.
 	Labels map[string]string
+
+	// ServiceAnnotations / ServiceLabels customize only the API Service's metadata.
+	ServiceAnnotations map[string]string
+	ServiceLabels      map[string]string
 
 	Dashboard   *DashboardParams
 	Autoscaling *AutoscalingParams
@@ -262,6 +268,24 @@ func (p Params) podLabels() map[string]string {
 	// selector labels (authoritative — they win over anything the owner passed in p.Labels).
 	standard := map[string]string{labelAppName: appName, labelInstance: p.Name}
 	return utils.MergeMaps(utils.MergeMaps(p.Labels, standard), InstanceLabels(p.Name))
+}
+
+func (p Params) serviceLabels() map[string]string {
+	return utils.MergeMaps(controllers.GuardInheritedLabels(p.ServiceLabels), p.podLabels())
+}
+
+func (p Params) serviceAnnotations() map[string]string {
+	// The last-applied annotator mutates this map, so never share the caller's configuration map.
+	out := make(map[string]string, len(p.ServiceAnnotations))
+	for key, value := range p.ServiceAnnotations {
+		if key != patch.LastAppliedConfig && !strings.HasPrefix(key, "cosmopilot.voluzi.com/") {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // env builds the operator-managed COSMOGUARD_* environment injected into the guard container.
@@ -479,9 +503,10 @@ func (p Params) Service() *corev1.Service {
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      p.Name,
-			Namespace: p.Namespace,
-			Labels:    p.podLabels(),
+			Name:        p.Name,
+			Namespace:   p.Namespace,
+			Labels:      p.serviceLabels(),
+			Annotations: p.serviceAnnotations(),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     corev1.ServiceTypeClusterIP,

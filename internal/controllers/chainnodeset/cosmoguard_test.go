@@ -45,6 +45,27 @@ func guardedNodeSet() (*appsv1.ChainNodeSet, appsv1.NodeGroupSpec) {
 	return nodeSet, group
 }
 
+func TestGroupGuardServiceMetadata(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	group.Config.CosmoGuard.Service = &appsv1.CosmoGuardServiceConfig{
+		Annotations: map[string]string{"tailscale.com/expose": "true"},
+		Labels:      map[string]string{"team": "infra", "scope": "user"},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	_, err := r.ensureCosmoGuards(t.Context(), nodeSet)
+	require.NoError(t, err)
+	name := groupCosmoGuardName(nodeSet, group)
+	svc := &corev1.Service{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: "ns", Name: name}, svc))
+	assert.Equal(t, "true", svc.Annotations["tailscale.com/expose"])
+	assert.Equal(t, "infra", svc.Labels["team"])
+	assert.Equal(t, scopeCosmoGuard, svc.Labels[controllers.LabelScope])
+	upstream := &corev1.Service{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: "ns", Name: groupCosmoGuardUpstreamName(nodeSet, group)}, upstream))
+	assert.NotContains(t, upstream.Annotations, "tailscale.com/expose")
+	assert.NotContains(t, upstream.Labels, "team")
+}
+
 type nodeSetGatewayUnavailableClient struct {
 	client.Client
 }

@@ -5669,6 +5669,28 @@ spec:
                                 Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes,
                                 so this field has no effect and will be removed in a future release.
                               type: boolean
+                            service:
+                              description: |-
+                                Service customizes the metadata of the CosmoGuard API Service (`<name>-cg`), for example to
+                                expose it through a controller driven by Service annotations (such as the Tailscale operator).
+                                Applies only to that Service: not to the headless peer Service, the upstream discovery Service,
+                                nor to node, group or global Services. On a ChainNodeSet group it applies to the group's guard
+                                Service only and is not inherited by per-node guards.
+                              properties:
+                                annotations:
+                                  additionalProperties:
+                                    type: string
+                                  description: Annotations to add to the CosmoGuard
+                                    API Service.
+                                  type: object
+                                labels:
+                                  additionalProperties:
+                                    type: string
+                                  description: |-
+                                    Labels to add to the CosmoGuard API Service. They are not added to the guard pods and never
+                                    change the Service selector. Labels managed by Cosmopilot cannot be set here.
+                                  type: object
+                              type: object
                           required:
                           - config
                           - enable
@@ -14388,6 +14410,28 @@ spec:
                                     Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes,
                                     so this field has no effect and will be removed in a future release.
                                   type: boolean
+                                service:
+                                  description: |-
+                                    Service customizes the metadata of the CosmoGuard API Service (`<name>-cg`), for example to
+                                    expose it through a controller driven by Service annotations (such as the Tailscale operator).
+                                    Applies only to that Service: not to the headless peer Service, the upstream discovery Service,
+                                    nor to node, group or global Services. On a ChainNodeSet group it applies to the group's guard
+                                    Service only and is not inherited by per-node guards.
+                                  properties:
+                                    annotations:
+                                      additionalProperties:
+                                        type: string
+                                      description: Annotations to add to the CosmoGuard
+                                        API Service.
+                                      type: object
+                                    labels:
+                                      additionalProperties:
+                                        type: string
+                                      description: |-
+                                        Labels to add to the CosmoGuard API Service. They are not added to the guard pods and never
+                                        change the Service selector. Labels managed by Cosmopilot cannot be set here.
+                                      type: object
+                                  type: object
                               required:
                               - config
                               - enable
@@ -20183,6 +20227,28 @@ spec:
                               Deprecated: CosmoGuard now runs as a standalone StatefulSet supervised by Kubernetes,
                               so this field has no effect and will be removed in a future release.
                             type: boolean
+                          service:
+                            description: |-
+                              Service customizes the metadata of the CosmoGuard API Service (`<name>-cg`), for example to
+                              expose it through a controller driven by Service annotations (such as the Tailscale operator).
+                              Applies only to that Service: not to the headless peer Service, the upstream discovery Service,
+                              nor to node, group or global Services. On a ChainNodeSet group it applies to the group's guard
+                              Service only and is not inherited by per-node guards.
+                            properties:
+                              annotations:
+                                additionalProperties:
+                                  type: string
+                                description: Annotations to add to the CosmoGuard
+                                  API Service.
+                                type: object
+                              labels:
+                                additionalProperties:
+                                  type: string
+                                description: |-
+                                  Labels to add to the CosmoGuard API Service. They are not added to the guard pods and never
+                                  change the Service selector. Labels managed by Cosmopilot cannot be set here.
+                                type: object
+                            type: object
                         required:
                         - config
                         - enable
