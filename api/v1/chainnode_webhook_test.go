@@ -10,6 +10,18 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestChainNodeValidateCosmoGuardService(t *testing.T) {
+	node := &ChainNode{Spec: ChainNodeSpec{
+		Genesis: &GenesisConfig{Url: ptr.To("https://example.com/genesis.json")},
+		Config:  &Config{CosmoGuard: &CosmoGuardConfig{Service: &CosmoGuardServiceConfig{Labels: map[string]string{"peer": "true"}}}},
+	}}
+	_, err := node.Validate(nil)
+	require.ErrorContains(t, err, ".spec.config.cosmoGuard.service.labels")
+	delete(node.Spec.Config.CosmoGuard.Service.Labels, "peer")
+	_, err = node.Validate(nil)
+	require.NoError(t, err)
+}
+
 func TestConfigValidateNodeUtilsRunIdentity(t *testing.T) {
 	for _, tt := range []struct {
 		name    string

@@ -638,6 +638,22 @@ func TestGetNodeSpecStripsDashboardExposureFromChildren(t *testing.T) {
 		"stripping the child copy must not mutate the group config")
 }
 
+func TestGetNodeSpecDoesNotInheritGuardServiceMetadata(t *testing.T) {
+	nodeSet, group := guardedNodeSet()
+	group.Config.CosmoGuard.Service = &appsv1.CosmoGuardServiceConfig{
+		Annotations: map[string]string{"tailscale.com/hostname": "my-chain-rpc"},
+		Labels:      map[string]string{"team": "infra"},
+	}
+	r := newValidatorTestReconciler(t, nodeSet)
+	node, err := r.getNodeSpec(nodeSet, group, 0)
+	require.NoError(t, err)
+	require.NotNil(t, node.Spec.Config.CosmoGuard)
+	assert.Nil(t, node.Spec.Config.CosmoGuard.Service)
+	require.NotNil(t, group.Config.CosmoGuard.Service)
+	assert.Equal(t, "my-chain-rpc", group.Config.CosmoGuard.Service.Annotations["tailscale.com/hostname"])
+	assert.Equal(t, "infra", group.Config.CosmoGuard.Service.Labels["team"])
+}
+
 func TestPreserveImageOverrides(t *testing.T) {
 	node := func(version, image *string) *appsv1.ChainNode {
 		return &appsv1.ChainNode{Spec: appsv1.ChainNodeSpec{OverrideVersion: version, OverrideImage: image}}

@@ -202,6 +202,8 @@ func (r *Reconciler) cosmoGuardParams(chainNode *appsv1.ChainNode) cosmoguard.Pa
 		EvmEnabled:          cfg.IsEvmEnabled(),
 		ConfigMap:           cfg.GetCosmoGuardConfig(),
 		Resources:           cfg.GetCosmoGuardResources(),
+		ServiceAnnotations:  cfg.GetCosmoGuardServiceAnnotations(),
+		ServiceLabels:       cfg.GetCosmoGuardServiceLabels(),
 		PeerServiceName:     cosmoguard.PeerServiceName(name),
 		EncryptionKeySecret: cosmoguard.EncryptionKeySecretName(name),
 		ImagePullSecrets:    cfg.ImagePullSecrets,

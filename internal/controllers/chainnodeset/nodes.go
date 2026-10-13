@@ -774,11 +774,17 @@ func exposeForInstance(src *appsv1.ExposeConfig, index int) *appsv1.ExposeConfig
 // published externally.
 //
 // The rest of the dashboard config (enable, port, basicAuth) is inherited unchanged.
+//
+// Service metadata also belongs to the group guard: inheriting annotations such as
+// tailscale.com/hostname would make every per-node guard claim the group's hostname.
 func configForChild(src *appsv1.Config) *appsv1.Config {
 	if src == nil {
 		return nil
 	}
 	out := src.DeepCopy()
+	if out.CosmoGuard != nil {
+		out.CosmoGuard.Service = nil
+	}
 	if !out.CosmoGuardDashboardEnabled() {
 		return out
 	}

@@ -407,6 +407,14 @@ type CosmoGuardConfig struct {
 	// +optional
 	Dashboard *CosmoGuardDashboardConfig `json:"dashboard,omitempty"`
 
+	// Service customizes the metadata of the CosmoGuard API Service (`<name>-cg`), for example to
+	// expose it through a controller driven by Service annotations (such as the Tailscale operator).
+	// Applies only to that Service: not to the headless peer Service, the upstream discovery Service,
+	// nor to node, group or global Services. On a ChainNodeSet group it applies to the group's guard
+	// Service only and is not inherited by per-node guards.
+	// +optional
+	Service *CosmoGuardServiceConfig `json:"service,omitempty"`
+
 	// Compute Resources for each CosmoGuard pod. When the field is omitted entirely,
 	// requests and limits both default to 500m CPU and 500Mi memory. A block that is
 	// set is used as written, except with autoscaling enabled: an empty block then
@@ -419,6 +427,18 @@ type CosmoGuardConfig struct {
 	// so this field has no effect and will be removed in a future release.
 	// +optional
 	RestartPodOnFailure *bool `json:"restartPodOnFailure,omitempty"`
+}
+
+// CosmoGuardServiceConfig customizes the metadata of the CosmoGuard API Service.
+type CosmoGuardServiceConfig struct {
+	// Annotations to add to the CosmoGuard API Service.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Labels to add to the CosmoGuard API Service. They are not added to the guard pods and never
+	// change the Service selector. Labels managed by Cosmopilot cannot be set here.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // CosmoGuardAutoscalingConfig configures a HorizontalPodAutoscaler for CosmoGuard.

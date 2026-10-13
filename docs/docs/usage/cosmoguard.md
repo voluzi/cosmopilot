@@ -259,6 +259,46 @@ references must set `sectionName` and select different listeners. Cosmopilot own
 route resources and performs Ingress/Gateway changes make-before-break; if Gateway API CRDs are not
 installed, it preserves an existing dashboard Ingress instead of removing the working exposure.
 
+## Exposing the CosmoGuard Service
+
+Set `cosmoGuard.service.annotations` and `cosmoGuard.service.labels` to customize the dedicated
+`<name>-cg` API Service. For example, a Service annotation controller such as the Tailscale operator
+can expose it without an Ingress or Gateway:
+
+```yaml
+spec:
+  config:
+    cosmoGuard:
+      enable: true
+      config: {name: cosmoguard-config, key: cosmoguard.yaml}
+      service:
+        annotations: {tailscale.com/expose: "true", tailscale.com/hostname: my-chain-rpc}
+        labels: {team: infra}
+```
+
+This Service carries RPC (26657), LCD (1317), gRPC (9090), and metrics (9001), plus EVM RPC (8545)
+and WebSocket (8546) when EVM is enabled, and the configured dashboard port when the dashboard is
+enabled. These metadata settings apply only to this Service. They do not change its selector or
+the guard pods, and do not affect the headless peer Service, upstream discovery Service, or node,
+group, global, or separate gRPC Services.
+
+On a ChainNodeSet, put the block in the group's configuration (`spec.nodes[].config`, or
+`spec.nodes[].validator.config` for a validator group). It applies to the group's shared guard
+Service and is not inherited by per-node guards, avoiding competing claims to the same hostname.
+
+Labels under `cosmoguard.voluzi.com/` and `route.cosmoguard.voluzi.com/`,
+`app.kubernetes.io/name`, `app.kubernetes.io/instance`, and Cosmopilot's managed keys are reserved:
+`scope`, `peer`, `seed`, `chain-id`, `node-id`, `app`, `nodeset`, `group`, `validator`, `chain-node`,
+`global-ingress`, `upgrading`, `cosmosigner-target`, and `worker-name`. Annotations under
+`cosmopilot.voluzi.com/` and `banzaicloud.com/last-applied` are also reserved. Inherited owner labels
+take precedence over user Service labels.
+
+Whatever exposes this Service bypasses Ingress/Gateway policies. NetworkPolicies and other cluster
+controls that apply to the guard pods still apply on this path, but no Ingress or Gateway policy sits
+in front of the CosmoGuard rules. Configure those rules for the intended clients and endpoints.
+Annotations added by other controllers are not preserved when Cosmopilot rewrites the Service;
+declare the annotations you need in `cosmoGuard.service.annotations`.
+
 ## Customizing Rules
 
 Refer to the [CosmoGuard repo](https://github.com/voluzi/cosmoguard) for detailed information on creating custom rules. A few tips:

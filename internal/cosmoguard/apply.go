@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	appsv1 "k8s.io/api/apps/v1"
@@ -95,6 +96,12 @@ func applyOwned(ctx context.Context, c client.Client, scheme *runtime.Scheme, ow
 		return err
 	}
 	obj.SetResourceVersion(existing.GetResourceVersion())
+	// Foreign finalizers protect other controllers' cleanup and must survive a full Update. They are
+	// merged after the last-applied annotation is written so they are never recorded as desired
+	// state, and sorted because the patch maker reports any unsorted live list as a diff.
+	finalizers := slices.Concat(obj.GetFinalizers(), existing.GetFinalizers())
+	slices.Sort(finalizers)
+	obj.SetFinalizers(slices.Compact(finalizers))
 	return c.Update(ctx, obj)
 }
 

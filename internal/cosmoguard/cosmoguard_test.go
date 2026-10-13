@@ -389,6 +389,48 @@ func TestService_Ports(t *testing.T) {
 	assert.Equal(t, int32(controllers.CosmoGuardEvmRpcPort), byName[controllers.EvmRpcPortName].TargetPort.IntVal)
 }
 
+func TestService_CustomMetadata(t *testing.T) {
+	p := baseParams()
+	assert.Nil(t, p.Service().Annotations)
+	p.Labels["team"] = "owner"
+	p.ServiceLabels = map[string]string{
+		"team": "service", "exposure": "tailnet",
+		labelAppName: "node", labelInstance: "node",
+		labelGuardManagedBy: "node", labelGuardInstance: "node",
+		"cosmoguard.voluzi.com/custom":       "true",
+		"route.cosmoguard.voluzi.com/custom": "true",
+	}
+	// One managed key the owner sets and one it does not.
+	p.ServiceLabels[controllers.LabelChainNodeSetGroup] = "user"
+	p.ServiceLabels[controllers.LabelPeer] = "user"
+	p.ServiceAnnotations = map[string]string{
+		"tailscale.com/expose": "true", "tailscale.com/hostname": "my-chain-rpc",
+		"banzaicloud.com/last-applied": "invalid",
+		"cosmopilot.voluzi.com/custom": "true",
+	}
+
+	svc := p.Service()
+	assert.Equal(t, "tailnet", svc.Labels["exposure"])
+	assert.Equal(t, "owner", svc.Labels["team"])
+	assert.Equal(t, appName, svc.Labels[labelAppName])
+	assert.Equal(t, p.Name, svc.Labels[labelInstance])
+	assert.Equal(t, appName, svc.Labels[labelGuardManagedBy])
+	assert.Equal(t, p.Name, svc.Labels[labelGuardInstance])
+	assert.Equal(t, "group", svc.Labels[controllers.LabelChainNodeSetGroup])
+	assert.NotContains(t, svc.Labels, controllers.LabelPeer)
+	assert.NotContains(t, svc.Labels, "cosmoguard.voluzi.com/custom")
+	assert.NotContains(t, svc.Labels, "route.cosmoguard.voluzi.com/custom")
+	assert.Equal(t, map[string]string{"tailscale.com/expose": "true", "tailscale.com/hostname": "my-chain-rpc"}, svc.Annotations)
+	assert.Equal(t, InstanceLabels(p.Name), svc.Spec.Selector)
+	for _, metadata := range []metav1.ObjectMeta{p.PeerService().ObjectMeta, p.StatefulSet().Spec.Template.ObjectMeta} {
+		assert.NotContains(t, metadata.Labels, "exposure")
+		assert.NotContains(t, metadata.Annotations, "tailscale.com/expose")
+		assert.NotContains(t, metadata.Annotations, "tailscale.com/hostname")
+	}
+	p.ServiceAnnotations = map[string]string{"banzaicloud.com/last-applied": "invalid"}
+	assert.Nil(t, p.Service().Annotations)
+}
+
 func TestPDB(t *testing.T) {
 	// Single fixed replica -> no PDB (would only block drains).
 	p := baseParams()

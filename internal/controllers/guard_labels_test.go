@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 )
 
 // TestGuardInheritedLabels verifies genuine user labels are propagated to the guard while every
@@ -83,4 +85,14 @@ func TestStripCosmoGuardLabelDomain(t *testing.T) {
 		"acme-cosmoguard.voluzi.com/tier":  "keep",
 	})
 	assert.Equal(t, map[string]string{"team": "x", "acme-cosmoguard.voluzi.com/tier": "keep"}, out)
+}
+
+// The API validation mirrors the managed keys by hand because api/v1 cannot import this package.
+func TestServiceLabelValidationRejectsEveryManagedKey(t *testing.T) {
+	for _, key := range guardManagedLabelKeys {
+		cfg := &appsv1.Config{CosmoGuard: &appsv1.CosmoGuardConfig{
+			Service: &appsv1.CosmoGuardServiceConfig{Labels: map[string]string{key: "true"}},
+		}}
+		assert.Error(t, cfg.ValidateCosmoGuardService(), key)
+	}
 }

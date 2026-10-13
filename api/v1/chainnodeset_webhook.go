@@ -284,6 +284,9 @@ func (nodeSet *ChainNodeSet) Validate(old *ChainNodeSet) (admission.Warnings, er
 		if err := group.GetServiceConfig().ValidateCosmoGuardDashboard(nodeSet.GetNamespace()); err != nil {
 			return nil, fmt.Errorf(".spec.nodes[%d] %w", i, err)
 		}
+		if err := group.GetServiceConfig().ValidateCosmoGuardService(); err != nil {
+			return nil, fmt.Errorf(".spec.nodes[%d] %w", i, err)
+		}
 
 		if err := group.Expose.ValidateP2PGatewayExpose(fmt.Sprintf(".spec.nodes[%d].expose", i), group.GetInstances()); err != nil {
 			return nil, err

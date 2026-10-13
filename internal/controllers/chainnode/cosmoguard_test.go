@@ -163,6 +163,27 @@ func TestStandaloneGuardCreatesStatefulSetAndService(t *testing.T) {
 	assert.NotEmpty(t, secret.Data["encryptionKey"])
 }
 
+func TestStandaloneGuardServiceMetadata(t *testing.T) {
+	cn := guardedChainNode("node-0", false)
+	cn.Spec.Config.CosmoGuard.Service = &appsv1.CosmoGuardServiceConfig{
+		Annotations: map[string]string{"tailscale.com/expose": "true"},
+		Labels:      map[string]string{"team": "infra"},
+	}
+	r := cosmoGuardTestReconciler(t, cn)
+	require.NoError(t, ensureGuard(r, t.Context(), cn))
+	svc := &corev1.Service{}
+	key := client.ObjectKey{Namespace: "ns", Name: "node-0-cg"}
+	require.NoError(t, r.Get(t.Context(), key, svc))
+	assert.Equal(t, "true", svc.Annotations["tailscale.com/expose"])
+	assert.Equal(t, "infra", svc.Labels["team"])
+
+	cn.Spec.Config.CosmoGuard.Service = nil
+	require.NoError(t, ensureGuard(r, t.Context(), cn))
+	require.NoError(t, r.Get(t.Context(), key, svc))
+	assert.NotContains(t, svc.Annotations, "tailscale.com/expose")
+	assert.NotContains(t, svc.Labels, "team")
+}
+
 func TestStandaloneGuardCreatesDashboardHTTPRoutes(t *testing.T) {
 	cn := guardedChainNode("node-0", false)
 	cn.Spec.Config.CosmoGuard.Dashboard = dashboardGatewayConfig(true)
