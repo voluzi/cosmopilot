@@ -13,7 +13,6 @@ import (
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	cosmopilotv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 )
@@ -401,9 +400,9 @@ func TestService_CustomMetadata(t *testing.T) {
 		"cosmoguard.voluzi.com/custom":       "true",
 		"route.cosmoguard.voluzi.com/custom": "true",
 	}
-	for _, key := range controllers.GuardManagedLabelKeys {
-		p.ServiceLabels[key] = "user"
-	}
+	// One managed key the owner sets and one it does not.
+	p.ServiceLabels[controllers.LabelChainNodeSetGroup] = "user"
+	p.ServiceLabels[controllers.LabelPeer] = "user"
 	p.ServiceAnnotations = map[string]string{
 		"tailscale.com/expose": "true", "tailscale.com/hostname": "my-chain-rpc",
 		"banzaicloud.com/last-applied": "invalid",
@@ -417,13 +416,8 @@ func TestService_CustomMetadata(t *testing.T) {
 	assert.Equal(t, p.Name, svc.Labels[labelInstance])
 	assert.Equal(t, appName, svc.Labels[labelGuardManagedBy])
 	assert.Equal(t, p.Name, svc.Labels[labelGuardInstance])
-	for _, key := range controllers.GuardManagedLabelKeys {
-		if owner, ok := p.Labels[key]; ok {
-			assert.Equal(t, owner, svc.Labels[key])
-		} else {
-			assert.NotContains(t, svc.Labels, key)
-		}
-	}
+	assert.Equal(t, "group", svc.Labels[controllers.LabelChainNodeSetGroup])
+	assert.NotContains(t, svc.Labels, controllers.LabelPeer)
 	assert.NotContains(t, svc.Labels, "cosmoguard.voluzi.com/custom")
 	assert.NotContains(t, svc.Labels, "route.cosmoguard.voluzi.com/custom")
 	assert.Equal(t, map[string]string{"tailscale.com/expose": "true", "tailscale.com/hostname": "my-chain-rpc"}, svc.Annotations)
@@ -435,16 +429,6 @@ func TestService_CustomMetadata(t *testing.T) {
 	}
 	p.ServiceAnnotations = map[string]string{"banzaicloud.com/last-applied": "invalid"}
 	assert.Nil(t, p.Service().Annotations)
-}
-
-// The API validation mirrors the managed keys by hand because api/v1 cannot import this tree.
-func TestServiceLabelValidationRejectsEveryManagedKey(t *testing.T) {
-	for _, key := range controllers.GuardManagedLabelKeys {
-		cfg := &cosmopilotv1.Config{CosmoGuard: &cosmopilotv1.CosmoGuardConfig{
-			Service: &cosmopilotv1.CosmoGuardServiceConfig{Labels: map[string]string{key: "true"}},
-		}}
-		assert.Error(t, cfg.ValidateCosmoGuardService(), key)
-	}
 }
 
 func TestPDB(t *testing.T) {

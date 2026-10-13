@@ -12,8 +12,8 @@ import (
 // key would make a global-route Service select the guard even for routes it should not serve.
 const CosmoGuardLabelDomain = "cosmoguard.voluzi.com/"
 
-// GuardManagedLabelKeys are the cosmopilot-managed selector keys GuardInheritedLabels never propagates.
-var GuardManagedLabelKeys = []string{
+// guardManagedLabelKeys are the cosmopilot-managed selector keys GuardInheritedLabels never propagates.
+var guardManagedLabelKeys = []string{
 	LabelNodeID,
 	LabelChainID,
 	LabelValidator,
@@ -41,7 +41,7 @@ var GuardManagedLabelKeys = []string{
 // covered by the same NetworkPolicies and monitoring the in-pod sidecar was via the node pod. The
 // guard-private selector labels remain authoritative — callers layer these underneath them.
 func GuardInheritedLabels(ownerLabels map[string]string) map[string]string {
-	return StripCosmoGuardLabelDomain(utils.ExcludeMapKeys(ownerLabels, GuardManagedLabelKeys...))
+	return StripCosmoGuardLabelDomain(utils.ExcludeMapKeys(ownerLabels, guardManagedLabelKeys...))
 }
 
 // StripCosmoGuardLabelDomain removes any label under CosmoGuard's owned domain — its guard-private
