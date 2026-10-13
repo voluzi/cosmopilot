@@ -293,10 +293,11 @@ Labels under `cosmoguard.voluzi.com/` and `route.cosmoguard.voluzi.com/`,
 `cosmopilot.voluzi.com/` and `banzaicloud.com/last-applied` are also reserved. Inherited owner labels
 take precedence over user Service labels.
 
-Whatever exposes this Service bypasses Ingress/Gateway policies, so CosmoGuard rules are the only
-policy in front of the node on this path. Configure those rules for the intended clients and
-endpoints. Annotations added by other controllers are not preserved when Cosmopilot rewrites the
-Service; declare the annotations you need in `cosmoGuard.service.annotations`.
+Whatever exposes this Service bypasses Ingress/Gateway policies. NetworkPolicies and other cluster
+controls that apply to the guard pods still apply on this path, but no Ingress or Gateway policy sits
+in front of the CosmoGuard rules. Configure those rules for the intended clients and endpoints.
+Annotations added by other controllers are not preserved when Cosmopilot rewrites the Service;
+declare the annotations you need in `cosmoGuard.service.annotations`.
 
 ## Customizing Rules
 
