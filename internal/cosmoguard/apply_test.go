@@ -45,9 +45,16 @@ func TestApplyOwnedPreservesForeignFinalizer(t *testing.T) {
 		require.NoError(t, c.Update(t.Context(), live))
 		return live.ResourceVersion
 	}
+	setup := func(t *testing.T, finalizers ...string) {
+		t.Helper()
+		c = fake.NewClientBuilder().WithScheme(scheme).Build()
+		p = baseParams()
+		desired = finalizers
+		apply(t)
+	}
 
 	t.Run("no desired finalizers", func(t *testing.T) {
-		apply(t)
+		setup(t)
 		resourceVersion := setLiveFinalizers(t, shared, foreign)
 		assert.Equal(t, resourceVersion, apply(t).ResourceVersion, "a foreign finalizer must not trigger an Update")
 		p.EvmEnabled = true
@@ -57,18 +64,23 @@ func TestApplyOwnedPreservesForeignFinalizer(t *testing.T) {
 	})
 
 	t.Run("desired finalizers overlapping the live ones", func(t *testing.T) {
-		desired = []string{owned, shared}
-		p.EvmEnabled = false
+		setup(t, owned, shared)
+		setLiveFinalizers(t, shared, foreign)
+		p.EvmEnabled = true
 		live := apply(t)
 		assert.ElementsMatch(t, []string{owned, shared, foreign}, live.Finalizers)
-		assert.Len(t, live.Spec.Ports, 4)
+		assert.Len(t, live.Spec.Ports, 6)
 		assert.Equal(t, live.ResourceVersion, apply(t).ResourceVersion, "the merged finalizers must not trigger an Update")
 	})
 
 	t.Run("foreign finalizer removed by its controller", func(t *testing.T) {
+		setup(t, owned, shared)
+		setLiveFinalizers(t, owned, shared, foreign)
+		p.EvmEnabled = true
+		assert.Contains(t, apply(t).Finalizers, foreign)
 		resourceVersion := setLiveFinalizers(t, owned, shared)
 		assert.Equal(t, resourceVersion, apply(t).ResourceVersion)
-		p.EvmEnabled = true
+		p.EvmEnabled = false
 		live := apply(t)
 		assert.NotEqual(t, resourceVersion, live.ResourceVersion)
 		assert.ElementsMatch(t, []string{owned, shared}, live.Finalizers)
@@ -77,6 +89,7 @@ func TestApplyOwnedPreservesForeignFinalizer(t *testing.T) {
 	// The patch maker reports a list-order diff for any live finalizer list that is not sorted, so
 	// an order left as found would be rewritten on every reconcile.
 	t.Run("unordered live finalizers converge", func(t *testing.T) {
+		setup(t, owned, shared)
 		setLiveFinalizers(t, foreign, shared, owned)
 		live := apply(t)
 		assert.ElementsMatch(t, []string{owned, shared, foreign}, live.Finalizers)
