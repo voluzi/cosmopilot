@@ -2,7 +2,7 @@ module github.com/voluzi/cosmopilot/v5
 
 go 1.27.0
 
-toolchain go1.27.1
+toolchain go1.27.3
 
 require (
 	cloud.google.com/go/storage v1.69.0
