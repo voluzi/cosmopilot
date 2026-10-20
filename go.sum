@@ -646,8 +646,8 @@ github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.94.1/g
 github.com/prometheus/client_golang v0.9.1/go.mod h1:7SWBe2y4D6OKWSNQJUaRYU/AaXPKyh/dDVn+NZz0KFw=
 github.com/prometheus/client_golang v1.0.0/go.mod h1:db9x61etRT2tGnBNRi70OPL5FsnadC4Ky3P0J6CfImo=
 github.com/prometheus/client_golang v1.4.0/go.mod h1:e9GMxYsXl05ICDXkRhurwBS4Q3OK1iX/F2sw+iXX5zU=
-github.com/prometheus/client_golang v1.24.0 h1:5XStIklKuAtJSNpdD3s8XJj/Yv78IQmE1kbNk87JrAI=
-github.com/prometheus/client_golang v1.24.0/go.mod h1:QcsNdotprC2nS4BTM2ucbcqxd2CeXTEa9jW7zHO9iDE=
+github.com/prometheus/client_golang v1.25.0 h1:cDtW1TcFsMi1RJc8khwCKB4VhzwV04aKqbYtNOXuiK0=
+github.com/prometheus/client_golang v1.25.0/go.mod h1:j2X/4/kaQHLPnmyEU8zjmkndo1T317VpCIQEml8LTKk=
 github.com/prometheus/client_model v0.0.0-20180712105110-5c3871d89910/go.mod h1:MbSGuTsp3dbXC40dX6PRTWyKYBIrTGTE9sqQNg2J8bo=
 github.com/prometheus/client_model v0.0.0-20190129233127-fd36f4220a90/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
 github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
@@ -661,8 +661,8 @@ github.com/prometheus/common v0.72.1/go.mod h1:1IoBY4IRaJnhs2ESjNzjilP1cJ/P8pimG
 github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d/go.mod h1:c3At6R/oaqEKCNdg8wHV1ftS6bRYblBhIjjI8uT2IGk=
 github.com/prometheus/procfs v0.0.2/go.mod h1:TjEm7ze935MbeOT/UhFTIMYKhuLP4wbCsTZCD3I8kEA=
 github.com/prometheus/procfs v0.0.8/go.mod h1:7Qr8sr6344vo1JqZ6HhLceV9o3AJ1Ff+GxbHq6oeK9A=
-github.com/prometheus/procfs v0.21.1 h1:GljZCt+zSTS+NZq88cyQ1LjZ+RCHp3uVuabBWA5+OJI=
-github.com/prometheus/procfs v0.21.1/go.mod h1:aB55Cww9pdSJVHk0hUf0inxWyyjPogFIjmHKYgMKmtY=
+github.com/prometheus/procfs v0.22.0 h1:6q9+/JL9IKAPbCmBrv9n5O5Ty3NKnciV5X7YGw0oics=
+github.com/prometheus/procfs v0.22.0/go.mod h1:CvmFr/GVhIjIvWJZW3tgkODBQMRIf0EyWMQLHCHab58=
 github.com/rakyll/statik v0.1.7 h1:OF3QCZUuyPxuGEP7B4ypUa7sB/iHtqOTDYZXGM8KOdQ=
 github.com/rakyll/statik v0.1.7/go.mod h1:AlZONWzMtEnMs7W4e/1LURLiI49pIMmp6V9Unghqrcc=
 github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475 h1:N/ElC8H3+5XpJzTSTfLsJV/mx9Q9g7kxmchpfZyxgzM=
@@ -755,10 +755,10 @@ github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IU
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-github.com/voluzi/cosmoguard/v6 v6.1.0 h1:c1TTaldOiQKfVZ35tnEfD2f7LnGeYxvsLCyLt8qdVGI=
-github.com/voluzi/cosmoguard/v6 v6.1.0/go.mod h1:hkJjYqrQolq9ETaKTlUYi5DILbmzu9OMlHg5BQ4hBUo=
-github.com/voluzi/cosmoseed v0.12.0 h1:J5qJXGbxHqjDs4ULo8g5j3/2qGwrpzo7G7vZ6NMfd7c=
-github.com/voluzi/cosmoseed v0.12.0/go.mod h1:LhHe3w93nJ6PsqIwzOH7eSHSSuzbv7c1RjHHJfD+EX4=
+github.com/voluzi/cosmoguard/v6 v6.1.1 h1:dtI4HSM07n5WBWwlmLbud6TqCnFpWyJU371QuHEr7XM=
+github.com/voluzi/cosmoguard/v6 v6.1.1/go.mod h1:PMNYDaoJgoNIKs8GIK+jX369XGN0hHuf9KOBrFjKNGM=
+github.com/voluzi/cosmoseed v0.12.1 h1:XKP57pOWHJhu7FkPTI8E49e4q2jnJ2mWO/9e2nPFwkc=
+github.com/voluzi/cosmoseed v0.12.1/go.mod h1:AcflSTsJHmBz16Vg/GMIlAhmr6fKy7xnTY0Hygv3gU4=
 github.com/voluzi/olric v0.7.5-0.20261009015321-b44a5f871051 h1:pNSDqZmKtPpyl9Nq8FtNDC1OmN2qQZ4/5J7EBHsPCJo=
 github.com/voluzi/olric v0.7.5-0.20261009015321-b44a5f871051/go.mod h1:EsiqlQqGXpmGGExQJ6BumsRXwYd4VffjNG577lAPH/A=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
