@@ -336,7 +336,7 @@ func TestConfigRolloutUpgradeTemplate(t *testing.T) {
 	require.NotNil(t, upgraded.Spec.Template.Spec.TerminationGracePeriodSeconds)
 	assert.Equal(t, int64(30), *upgraded.Spec.Template.Spec.TerminationGracePeriodSeconds)
 	assert.NotEqual(t, old.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], upgraded.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme])
-	assert.True(t, strings.HasPrefix(upgraded.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], "v6.1.0:"),
+	assert.True(t, strings.HasPrefix(upgraded.Annotations[controllers.AnnotationCosmoGuardFingerprintScheme], "v6.1.1:"),
 		"scheme must carry the cosmoguard module version read from build info")
 	assert.Empty(t, upgraded.Spec.Template.Annotations[controllers.AnnotationCosmoGuardRestart])
 	apply()
