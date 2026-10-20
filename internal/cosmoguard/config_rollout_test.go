@@ -326,7 +326,7 @@ func TestConfigRolloutUpgradeTemplate(t *testing.T) {
 	apply()
 	upgraded := read()
 	container := upgraded.Spec.Template.Spec.Containers[0]
-	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.1.0", container.Image)
+	assert.Equal(t, "ghcr.io/voluzi/cosmoguard:6.1.1", container.Image)
 	for _, quantities := range []corev1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
 		assert.Equal(t, 0, quantities.Cpu().Cmp(resource.MustParse("500m")))
 		assert.Equal(t, 0, quantities.Memory().Cmp(resource.MustParse("500Mi")))
