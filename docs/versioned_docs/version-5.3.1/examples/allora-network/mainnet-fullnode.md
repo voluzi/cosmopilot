@@ -1,0 +1,50 @@
+# Allora-network Mainnet Fullnode
+
+```yaml
+apiVersion: cosmopilot.voluzi.com/v1
+kind: ChainNodeSet
+metadata:
+  name: allora
+spec:
+  app:
+    image: alloranetwork/allora-chain
+    version: v0.17.2
+    app: allorad
+    sdkVersion: v0.50
+
+  genesis:
+    url: https://raw.githubusercontent.com/allora-network/networks/main/allora-mainnet-1/genesis.json
+
+  nodes:
+    - name: fullnodes
+      instances: 1
+
+      peers:
+        # Allora
+        - id: c64889d2d2da06c9c3cf2269188320f725a4d01e
+          seed: true
+          address: 35.199.63.182
+          port: 26656
+        - id: 5f51e319631ba698a9f0bf6a6a990b7b36a9b0ed
+          seed: true
+          address: 34.145.136.119
+          port: 26656
+
+      persistence:
+        size: 100Gi
+        initTimeout: 1h
+        additionalInitCommands:
+          - image: ghcr.io/voluzi/node-tools
+            command: [ "sh" ]
+            args:
+              - "-c"
+              - |
+                SNAPSHOT_URL=$(curl -sL https://www.polkachu.com/tendermint_snapshots/allora | sed -n 's/.*href="\(https:\/\/snapshots.polkachu.com\/snapshots\/allora\/allora_[0-9]*\.tar\.lz4\)".*/\1/p')
+                echo "Downloading snapshot: $SNAPSHOT_URL" && \
+                curl -sL "$SNAPSHOT_URL" | lz4 -d | tar xf - -C /home/app
+
+      config:
+        override:
+          app.toml:
+            minimum-gas-prices: 10uallo
+```
