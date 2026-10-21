@@ -1,4 +1,4 @@
-FROM golang:1.27 AS builder
+FROM golang:1.27.3 AS builder
 
 ENV GOMODCACHE=/go/pkg/mod
 
