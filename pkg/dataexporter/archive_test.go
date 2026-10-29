@@ -4,14 +4,18 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWriteTarballCompressionFormats(t *testing.T) {
@@ -225,6 +229,65 @@ func TestIsArchiveObjectName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isArchiveObjectName("snapshot", tt.objectName); got != tt.want {
 				t.Fatalf("isArchiveObjectName() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUploadResultRejectsArchiveSourceFailure(t *testing.T) {
+	for _, provider := range []string{"s3", "gcs"} {
+		for _, compression := range []Compression{CompressionNone, CompressionGzip, CompressionZstd, CompressionLz4} {
+			t.Run(provider+"/"+string(compression), func(t *testing.T) {
+				dir, err := os.MkdirTemp("/tmp", "archive-source-")
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, os.RemoveAll(dir)) })
+				socket, err := net.Listen("unix", filepath.Join(dir, "socket"))
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, socket.Close()) })
+				var uploader interface {
+					UploadWithResult(context.Context, string, string, string, ...UploadOption) (UploadResult, error)
+				}
+				if provider == "s3" {
+					uploader = newS3Exporter(newFakeS3Client())
+				} else {
+					uploader = newGCSFixture(t).exporter
+				}
+				result, err := uploader.UploadWithResult(t.Context(), dir, "bucket", "snapshot", WithCompression(compression), WithChunkSize("5MB"), WithBufferSize("64KB"))
+				require.ErrorContains(t, err, "sockets not supported")
+				require.Equal(t, UploadResult{}, result)
+			})
+		}
+	}
+}
+
+type trailerFailureWriter struct {
+	remaining int
+	err       error
+}
+
+func (w *trailerFailureWriter) Write(p []byte) (int, error) {
+	if len(p) > w.remaining {
+		return 0, w.err
+	}
+	w.remaining -= len(p)
+	return len(p), nil
+}
+
+func TestWriteTarballPropagatesTrailerFailure(t *testing.T) {
+	for _, compression := range []Compression{CompressionNone, CompressionGzip, CompressionZstd, CompressionLz4} {
+		t.Run(string(compression), func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "state"), []byte("state"), 0600))
+			var complete bytes.Buffer
+			require.NoError(t, writeTarball(dir, &complete, compression))
+			failure := errors.New("trailer write failed")
+			writer := &trailerFailureWriter{remaining: complete.Len() - 1, err: failure}
+			err := writeTarball(dir, writer, compression)
+			require.ErrorIs(t, err, failure)
+			if compression == CompressionNone {
+				require.ErrorContains(t, err, "close tar writer")
+			} else {
+				require.ErrorContains(t, err, "close "+string(compression)+" writer")
 			}
 		})
 	}

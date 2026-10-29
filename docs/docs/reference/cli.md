@@ -10,7 +10,7 @@ Most users never set these directly. The Helm chart maps the relevant manager
 settings to friendly values — see [Configuration](../getting-started/configuration).
 :::
 
-Each flag has an equivalent environment variable. When both are set, the **flag wins**.
+Where listed, environment variables provide flag defaults. When both are set, the **flag wins**.
 
 ## manager
 
@@ -115,6 +115,7 @@ Persistent flag (all subcommands):
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
 | `--compression` | `COMPRESSION` | `gzip` | Archive compression: `none`, `gzip`, `zstd`, or `lz4`. |
+| `--result-file` | None | Disabled | Write a validated upload result to the given path after successful upload; maximum 3,072 JSON bytes. |
 | `--chunk-size` | `CHUNK_SIZE` | `250MB` | Chunk size for multi-part uploads. |
 | `--part-size` | `PART_SIZE` | `500GB` | Part size for multi-part uploads (used when the size limit is crossed). |
 | `--size-limit` | `SIZE_LIMIT` | `5TB` | Size limit for a single file. |
@@ -142,3 +143,64 @@ roles.
 
 The `s3 upload` flags match `gcs upload`, except its default `--chunk-size` is
 `64MB`. The `s3 delete` command supports `--concurrent-jobs`.
+
+
+### Upload results
+
+Both upload commands support an explicit result path:
+
+```bash
+dataexporter s3 upload /data snapshots chain/attempt-123 --compression zstd --result-file /tmp/upload-result.json
+```
+
+Without `--result-file`, uploads retain their existing error-only behavior and create no result
+file. With the flag, the command calls the context-aware `UploadWithResult` API and writes exactly
+one JSON object after acknowledged completion. An empty path, unsupported result, oversized JSON,
+upload failure, or file-write failure makes the command unsuccessful. The limit applies to encoded
+UTF-8 JSON, including escaped characters; fields are never truncated. Use a fresh result path for
+each invocation and accept it only when the command exits successfully. A file-write failure does
+not roll back completed remote output.
+
+Version 1 has the following exact fields:
+
+| JSON key | Type | Contract |
+| --- | --- | --- |
+| `version` | Integer | Required; `1`. |
+| `layout` | String | Required; `single` or `split`. |
+| `objectCount` | Integer | Required; positive count of acknowledged final objects, excluding temporary chunks. Must be `1` for `single`. |
+| `compression` | String | Required; exactly `none`, `gzip`, `zstd`, or `lz4`. |
+| `objectKey` | String | Required and nonempty for `single`; exact completed key, including prefix and archive extension. Absent for `split`. |
+| `sha256` | String | Required for `single`; 64 lowercase hexadecimal characters hashing the complete stored bytes. Absent for `split`. |
+| `sizeBytes` | Integer | Required and positive for `single`; complete stored byte count after compression. Absent for `split`. |
+| `cleanupRequired` | Boolean | Always present; temporary GCS objects could not all be deleted after final output was acknowledged. |
+
+For example, a single-object result has this shape:
+
+```json
+{"version":1,"layout":"single","objectCount":1,"compression":"zstd","objectKey":"chain/attempt-123.tar.zst","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sizeBytes":1234,"cleanupRequired":false}
+```
+
+A conservative split path can produce just one final object and still reports `split`:
+
+```json
+{"version":1,"layout":"split","objectCount":1,"compression":"gzip","cleanupRequired":false}
+```
+
+The digest includes tar padding and compression trailers. It is independent of S3 multipart ETags,
+GCS checksums, and export identity hashes. Multipart S3 uploads can produce a `single` result only
+after successful multipart completion; GCS requires successful final composition or copy. A failed
+or lost completion acknowledgement returns no successful result, even if remote output exists.
+Split results make no single-object restoration claim, regardless of their actual object count.
+
+The result API and result-file command treat `cleanupRequired: true` as completed output with
+remaining cleanup; they do not upload or compose the final object again to retry cleanup. Legacy
+GCS uploads retain their error-only cleanup-failure behavior. Results contain no raw provider errors
+or credentials.
+
+GCS retains each composition round's temporary inputs until the final output is acknowledged.
+Large uploads requiring several rounds therefore need storage for those intermediate objects as
+well as the final archive.
+
+This result identifies archive bytes. It does not attest the source snapshot, mounted volume,
+worker, Job, Pod, or signing history. It is not a provenance-backed restore descriptor and does not
+change the operator's export/controller contract.

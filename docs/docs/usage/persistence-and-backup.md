@@ -316,6 +316,12 @@ split restoration remains unsupported. Restores can discover this height automat
 it with `persistence.restore.height`. Older objects and dataexporter images retain the existing
 behavior without a known height.
 
+Manual uploads can optionally write a bounded JSON [upload result](../reference/cli#upload-results)
+with `--result-file <path>`. A completed single-object result records the exact object key and the
+SHA-256 and size of the stored compressed bytes. Split results remain unsuitable for single-object
+restoration, including an estimated split that produces only one object. This result does not prove
+snapshot or worker provenance or change the operator's export status.
+
 To enable this functionality, configure the `.persistence.snapshots.exportTarball` field.
 
 ### Configuration
