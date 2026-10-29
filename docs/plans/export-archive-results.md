@@ -6,7 +6,7 @@ The exporter returns only an error, so neither callers nor the native controller
 
 Start from `main` commit `c987b34481b334005e9abae30e61e1cfdf0db95c` on `feat/export-archive-results`. The existing five untracked beta test documents are unrelated and must remain untouched. Preserve the newer dependency changes on this base. Do not change operator API/CRDs, native snapshot controllers, image defaults, release workflows or Nodezi in this slice.
 
-The full read-only native provenance proposal is retained by the coordinator at `/tmp/nodezi-delivery-20261029/backups/native-export-attempt-plan.md`. A later native PR must add permanent attempt authority, source holds, mounted-worker authorization and descriptor publication; a finalizer and a digest alone cannot prove the source incarnation.
+A later native PR must add permanent attempt authority, source holds, mounted-worker authorization and descriptor publication; a finalizer and a digest alone cannot prove the source incarnation.
 
 ## Approach and interfaces
 
@@ -23,10 +23,10 @@ The full read-only native provenance proposal is retained by the coordinator at 
 
 ## Critical files and ownership
 
-- `pkg/dataexporter/exporter.go`: compatible result types and production result-uploader interface.
+- `pkg/dataexporter/exporter.go`: compatible result types.
 - `pkg/dataexporter/s3.go`, `gcs.go`: serial byte accounting, context cancellation, actual completion/error handling and worker joins.
 - `pkg/dataexporter/compress.go`, `options.go`, `utils.go` only when required to propagate the real byte-stream/compression contract; avoid unrelated refactoring.
-- `cmd/dataexporter/cmd/upload.go`: optional result-file path, passed context, bounded successful result output.
+- `cmd/dataexporter/cmd/upload.go`: consumed result-uploader interface, optional result-file path, passed context, bounded successful result output.
 - `cmd/dataexporter/cmd/root.go`, `s3.go`, `gcs.go` only for concrete factory/CLI integration needs; preserve legacy standalone provider settings.
 - Existing exporter/CLI tests and focused new result tests: use current HTTP/byte fixtures and real completed object bytes.
 - Current, unversioned backup/CLI documentation: describe result semantics and their provenance limitation. Do not rewrite historical versioned docs.

@@ -53,7 +53,8 @@ func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) e
 	return nil
 }
 
-// UploadWithResult distinguishes acknowledged output from temporary cleanup still required.
+// UploadWithResult returns fully acknowledged output with CleanupRequired when cleanup fails.
+// Cancellation waits for kernel-blocked source filesystem calls to return.
 func (gcs *GcsExporter) UploadWithResult(ctx context.Context, dir, bucket, name string, opts ...UploadOption) (UploadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return UploadResult{}, err

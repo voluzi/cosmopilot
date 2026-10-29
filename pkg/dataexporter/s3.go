@@ -116,6 +116,7 @@ func (exporter *S3Exporter) Upload(dir, bucket, name string, opts ...UploadOptio
 }
 
 // UploadWithResult returns archive byte identity only after acknowledged completion.
+// Cancellation waits for kernel-blocked source filesystem calls to return.
 func (exporter *S3Exporter) UploadWithResult(ctx context.Context, dir, bucket, name string, opts ...UploadOption) (UploadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return UploadResult{}, err
@@ -453,14 +454,20 @@ func monitorUploadProgress(
 		defer close(done)
 		ticker := time.NewTicker(period)
 		defer ticker.Stop()
+		var lastArchived, lastUploaded uint64
 		for {
 			select {
 			case <-progressCtx.Done():
 				return
 			case <-ticker.C:
+				archived, uploaded := archivedBytes.Load(), uploadedBytes.Load()
+				if archived == lastArchived && uploaded == lastUploaded {
+					continue
+				}
+				lastArchived, lastUploaded = archived, uploaded
 				log.WithFields(log.Fields{
-					"archived": datasize.ByteSize(archivedBytes.Load()).HumanReadable(),
-					"uploaded": datasize.ByteSize(uploadedBytes.Load()).HumanReadable(),
+					"archived": datasize.ByteSize(archived).HumanReadable(),
+					"uploaded": datasize.ByteSize(uploaded).HumanReadable(),
 					"dir-size": totalSize.HumanReadable(),
 				}).Info("archiving and uploading")
 			}

@@ -458,7 +458,7 @@ func TestGcsLegacyUploadRetainsCleanupFailure(t *testing.T) {
 }
 
 func TestGcsUploadCancellationStopsRequests(t *testing.T) {
-	for _, stage := range []string{"part", "intermediate", "final"} {
+	for _, stage := range []string{"part", "intermediate", "final", "cleanup"} {
 		t.Run(stage, func(t *testing.T) {
 			fixture := newGCSFixture(t)
 			started := make(chan struct{})
@@ -467,7 +467,8 @@ func TestGcsUploadCancellationStopsRequests(t *testing.T) {
 			fixture.before = func(r *http.Request) {
 				match := stage == "part" && !strings.Contains(r.URL.Path, "/o/") ||
 					stage == "intermediate" && strings.Contains(r.URL.Path, "-temp-") ||
-					stage == "final" && strings.HasSuffix(r.URL.Path, "/snapshot.tar/compose")
+					stage == "final" && strings.HasSuffix(r.URL.Path, "/snapshot.tar/compose") ||
+					stage == "cleanup" && r.Method == http.MethodDelete
 				if !match {
 					return
 				}
@@ -502,8 +503,21 @@ func TestGcsUploadCancellationStopsRequests(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("upload did not stop")
 			}
-			require.ErrorIs(t, err, context.Canceled)
-			require.Equal(t, UploadResult{}, result)
+			if stage == "cleanup" {
+				require.NoError(t, err)
+				require.True(t, result.CleanupRequired)
+				require.NoError(t, result.Validate())
+				completed := 0
+				for _, name := range fixture.composed {
+					if name == "snapshot.tar" {
+						completed++
+					}
+				}
+				require.Equal(t, 1, completed)
+			} else {
+				require.ErrorIs(t, err, context.Canceled)
+				require.Equal(t, UploadResult{}, result)
+			}
 			require.Eventually(t, func() bool { return active.Load() == 0 }, 3*time.Second, 10*time.Millisecond)
 		})
 	}
