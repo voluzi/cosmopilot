@@ -54,13 +54,19 @@ func TestUploadHeightFlagOverridesEnvironment(t *testing.T) {
 
 type resultTestExporter struct {
 	*uploadTestExporter
-	result dataexporter.UploadResult
-	err    error
-	ctx    context.Context
+	result    dataexporter.UploadResult
+	err       error
+	ctx       context.Context
+	arguments [3]string
+	options   dataexporter.UploadOptions
 }
 
-func (e *resultTestExporter) UploadWithResult(ctx context.Context, _, _, _ string, _ ...dataexporter.UploadOption) (dataexporter.UploadResult, error) {
+func (e *resultTestExporter) UploadWithResult(ctx context.Context, dir, bucket, name string, opts ...dataexporter.UploadOption) (dataexporter.UploadResult, error) {
 	e.ctx = ctx
+	e.arguments = [3]string{dir, bucket, name}
+	for _, opt := range opts {
+		opt(&e.options)
+	}
 	if err := ctx.Err(); err != nil {
 		return dataexporter.UploadResult{}, err
 	}
@@ -83,12 +89,15 @@ func TestUploadResultFile(t *testing.T) {
 			exporter = recorder
 			destination := filepath.Join(t.TempDir(), "result.json")
 			command := newUploadCmd(dataexporter.DefaultChunkSize)
-			command.SetArgs([]string{"dir", "bucket", "snapshot", "--result-file", destination})
+			command.SetArgs([]string{"dir", "bucket", "snapshot", "--result-file", destination, "--height", "123", "--compression", string(result.Compression)})
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			require.NoError(t, command.ExecuteContext(ctx))
 			require.Same(t, ctx, recorder.ctx)
 			require.False(t, recorder.legacyCalled)
+			require.Equal(t, [3]string{"dir", "bucket", "snapshot"}, recorder.arguments)
+			require.Equal(t, "123", recorder.options.Height)
+			require.Equal(t, result.Compression, recorder.options.Compression)
 			data, err := os.ReadFile(destination)
 			require.NoError(t, err)
 			require.LessOrEqual(t, len(data), 3072)
