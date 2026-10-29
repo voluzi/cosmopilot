@@ -3,9 +3,11 @@ package dataexporter
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,12 +16,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/c2h5oh/datasize"
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewS3ExporterUsesPathStyleAndDefaultCredentials(t *testing.T) {
@@ -350,20 +354,23 @@ func TestS3DeleteReportsPerObjectFailures(t *testing.T) {
 }
 
 type fakeS3Client struct {
-	mu            sync.Mutex
-	parts         map[string]map[int32][]byte
-	metadata      map[string]map[string]string
-	contentTypes  map[string]string
-	completed     map[string][]byte
-	listedObjects []types.Object
-	deletedKeys   []string
-	batchCalls    int
-	singleCalls   int
-	uploadErr     error
-	deleteErr     error
-	abortCount    int
-	nextUploadID  int
-	diskBacked    bool
+	mu              sync.Mutex
+	parts           map[string]map[int32][]byte
+	metadata        map[string]map[string]string
+	contentTypes    map[string]string
+	completed       map[string][]byte
+	listedObjects   []types.Object
+	deletedKeys     []string
+	batchCalls      int
+	singleCalls     int
+	uploadErr       error
+	completeErr     error
+	lostCompleteAck bool
+	retryReads      bool
+	deleteErr       error
+	abortCount      int
+	nextUploadID    int
+	diskBacked      bool
 }
 
 func newFakeS3Client() *fakeS3Client {
@@ -396,6 +403,14 @@ func (f *fakeS3Client) UploadPart(_ context.Context, input *s3.UploadPartInput, 
 		f.diskBacked = false
 		f.mu.Unlock()
 	}
+	if f.retryReads {
+		if _, err := io.Copy(io.Discard, input.Body); err != nil {
+			return nil, err
+		}
+		if _, err := input.Body.(io.Seeker).Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
 	content, err := io.ReadAll(input.Body)
 	if err != nil {
 		return nil, err
@@ -409,17 +424,18 @@ func (f *fakeS3Client) UploadPart(_ context.Context, input *s3.UploadPartInput, 
 func (f *fakeS3Client) CompleteMultipartUpload(_ context.Context, input *s3.CompleteMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	parts := f.parts[aws.ToString(input.UploadId)]
-	numbers := make([]int, 0, len(parts))
-	for number := range parts {
-		numbers = append(numbers, int(number))
+	if f.completeErr != nil {
+		return nil, f.completeErr
 	}
-	sort.Ints(numbers)
+	parts := f.parts[aws.ToString(input.UploadId)]
 	var object []byte
-	for _, number := range numbers {
-		object = append(object, parts[int32(number)]...)
+	for _, part := range input.MultipartUpload.Parts {
+		object = append(object, parts[aws.ToInt32(part.PartNumber)]...)
 	}
 	f.completed[aws.ToString(input.Key)] = object
+	if f.lostCompleteAck {
+		return nil, errors.New("completion acknowledgement lost")
+	}
 	return &s3.CompleteMultipartUploadOutput{}, nil
 }
 
@@ -566,4 +582,130 @@ func TestS3UploadHeightMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestS3UploadResultMatchesCompletedBytes(t *testing.T) {
+	payload := make([]byte, 6*1024*1024)
+	_, err := rand.New(rand.NewSource(42)).Read(payload)
+	require.NoError(t, err)
+	for _, compression := range []Compression{CompressionNone, CompressionGzip, CompressionZstd, CompressionLz4} {
+		t.Run(string(compression), func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "state"), payload, 0600))
+			client := newFakeS3Client()
+			client.retryReads = true
+			result, err := newS3Exporter(client).UploadWithResult(t.Context(), dir, "bucket", "prefix/snapshot", WithCompression(compression), WithChunkSize("5MB"), WithBufferSize("64KB"), WithConcurrentUploadJobs(2))
+			require.NoError(t, err)
+			require.NoError(t, result.Validate())
+			key := "prefix/snapshot" + compression.Extension()
+			stored := client.mustCompletedObject(t, key)
+			sum := sha256.Sum256(stored)
+			require.Equal(t, UploadResult{Version: 1, Layout: "single", ObjectCount: 1, ObjectKey: key, SHA256: fmt.Sprintf("%x", sum), SizeBytes: int64(len(stored)), Compression: compression}, result)
+			require.GreaterOrEqual(t, len(client.parts["upload-1"]), 2)
+			decoded, closeDecoder, err := restoreDecoder(bytes.NewReader(stored), compression)
+			require.NoError(t, err)
+			require.Equal(t, string(payload), readTarFiles(t, decoded)["state"])
+			_, err = io.Copy(io.Discard, decoded)
+			require.NoError(t, err)
+			require.NoError(t, closeDecoder())
+		})
+	}
+}
+
+func TestS3SplitResultNeverClaimsSingleObject(t *testing.T) {
+	for _, size := range []int{1, 7 * 1024 * 1024} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "state"), bytes.Repeat([]byte("x"), size), 0600))
+			client := newFakeS3Client()
+			result, err := newS3Exporter(client).UploadWithResult(t.Context(), dir, "bucket", "snapshot", WithCompression(CompressionNone), WithSizeLimit("1B"), WithPartSize("5MB"), WithChunkSize("5MB"), WithBufferSize("64KB"))
+			require.NoError(t, err)
+			require.Equal(t, UploadResult{Version: 1, Layout: "split", ObjectCount: len(client.completedNames()), Compression: CompressionNone}, result)
+			require.NoError(t, result.Validate())
+			require.Equal(t, (size+512+1024+5*1024*1024-1)/(5*1024*1024), result.ObjectCount)
+		})
+	}
+}
+
+func TestS3UploadRejectsArchiveReadFailure(t *testing.T) {
+	for _, readErr := range []error{io.ErrUnexpectedEOF, fmt.Errorf("archive interrupted: %w", io.ErrUnexpectedEOF)} {
+		t.Run(readErr.Error(), func(t *testing.T) {
+			client := newFakeS3Client()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			reader := io.MultiReader(bytes.NewReader(make([]byte, 1024)), failedArchiveReader{err: readErr})
+			_, err := newS3Exporter(client).uploadObject(ctx, cancel, reader, "bucket", "snapshot.tar", defaultS3UploadOptions(), 1024)
+			require.ErrorIs(t, err, readErr)
+			require.Empty(t, client.completedNames())
+			require.Equal(t, 1, client.abortCount)
+		})
+	}
+}
+
+func TestS3UploadResultRequiresCompletionAcknowledgement(t *testing.T) {
+	for _, failure := range []string{"part", "complete", "lost acknowledgement"} {
+		t.Run(failure, func(t *testing.T) {
+			client := newFakeS3Client()
+			switch failure {
+			case "part":
+				client.uploadErr = errors.New("part rejected")
+			case "complete":
+				client.completeErr = errors.New("completion rejected")
+			case "lost acknowledgement":
+				client.lostCompleteAck = true
+			}
+			result, err := newS3Exporter(client).UploadWithResult(t.Context(), t.TempDir(), "bucket", "snapshot", WithChunkSize("5MB"), WithBufferSize("64KB"))
+			require.Error(t, err)
+			require.Equal(t, UploadResult{}, result)
+			require.Equal(t, 1, client.abortCount)
+			require.Equal(t, failure == "lost acknowledgement", len(client.completedNames()) == 1)
+		})
+	}
+}
+
+type cancellingS3Client struct {
+	*fakeS3Client
+	started chan struct{}
+	done    chan struct{}
+}
+
+func (f *cancellingS3Client) UploadPart(ctx context.Context, _ *s3.UploadPartInput, _ ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	close(f.started)
+	<-ctx.Done()
+	defer close(f.done)
+	return nil, ctx.Err()
+}
+
+func TestS3UploadCancellationJoinsWorker(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "state"), bytes.Repeat([]byte("x"), 12*1024*1024), 0600))
+	client := &cancellingS3Client{fakeS3Client: newFakeS3Client(), started: make(chan struct{}), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	finished := make(chan struct{})
+	var result UploadResult
+	var err error
+	go func() {
+		defer close(finished)
+		result, err = newS3Exporter(client).UploadWithResult(ctx, dir, "bucket", "snapshot", WithCompression(CompressionNone), WithChunkSize("5MB"), WithBufferSize("64KB"), WithConcurrentUploadJobs(1))
+	}()
+	select {
+	case <-client.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upload did not start")
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upload did not stop")
+	}
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, UploadResult{}, result)
+	select {
+	case <-client.done:
+	default:
+		t.Fatal("worker survived upload return")
+	}
+	require.Empty(t, client.completedNames())
 }

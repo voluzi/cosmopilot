@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -10,6 +13,10 @@ import (
 	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
 	"github.com/voluzi/cosmopilot/v5/pkg/environ"
 )
+
+type resultUploader interface {
+	UploadWithResult(context.Context, string, string, string, ...dataexporter.UploadOption) (dataexporter.UploadResult, error)
+}
 
 func newUploadCmd(defaultChunkSize string) *cobra.Command {
 	var partSize string
@@ -20,6 +27,7 @@ func newUploadCmd(defaultChunkSize string) *cobra.Command {
 	var bufferSize string
 	var compressionName string
 	var height string
+	var resultFile string
 
 	command := &cobra.Command{
 		Use:   "upload <dir> <bucket> <name>",
@@ -32,7 +40,7 @@ func newUploadCmd(defaultChunkSize string) *cobra.Command {
 			}
 			dir, bucket, name := args[0], args[1], args[2]
 			start := time.Now()
-			if err := exporter.Upload(dir, bucket, name,
+			options := []dataexporter.UploadOption{
 				dataexporter.WithCompression(compression),
 				dataexporter.WithHeight(height),
 				dataexporter.WithChunkSize(chunkSize),
@@ -41,7 +49,33 @@ func newUploadCmd(defaultChunkSize string) *cobra.Command {
 				dataexporter.WithReportPeriod(reportPeriod),
 				dataexporter.WithConcurrentUploadJobs(concurrentUploadJobs),
 				dataexporter.WithBufferSize(bufferSize),
-			); err != nil {
+			}
+			if cmd.Flags().Changed("result-file") {
+				if resultFile == "" {
+					return fmt.Errorf("result file path must not be empty")
+				}
+				uploader, ok := exporter.(resultUploader)
+				if !ok {
+					return fmt.Errorf("exporter does not support upload results")
+				}
+				result, err := uploader.UploadWithResult(cmd.Context(), dir, bucket, name, options...)
+				if err != nil {
+					return err
+				}
+				if err := result.Validate(); err != nil {
+					return fmt.Errorf("invalid upload result: %w", err)
+				}
+				data, err := json.Marshal(result)
+				if err != nil {
+					return fmt.Errorf("encode upload result: %w", err)
+				}
+				if len(data) > 3072 {
+					return fmt.Errorf("upload result exceeds 3072 bytes")
+				}
+				if err := os.WriteFile(resultFile, data, 0600); err != nil {
+					return fmt.Errorf("write upload result: %w", err)
+				}
+			} else if err := exporter.Upload(dir, bucket, name, options...); err != nil {
 				return err
 			}
 			log.WithField("time-elapsed", time.Since(start)).Info("upload successful")
@@ -49,6 +83,7 @@ func newUploadCmd(defaultChunkSize string) *cobra.Command {
 		},
 	}
 
+	command.Flags().StringVar(&resultFile, "result-file", "", "Write acknowledged upload result JSON to this path (maximum 3072 bytes)")
 	command.Flags().StringVar(&height, "height", environ.GetString("DATA_HEIGHT", ""), "Archived dataset block height")
 	command.Flags().StringVar(&compressionName, "compression",
 		environ.GetString("COMPRESSION", string(dataexporter.CompressionGzip)),

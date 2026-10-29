@@ -9,7 +9,6 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/c2h5oh/datasize"
@@ -44,363 +43,288 @@ func (gcs *GcsExporter) Provider() Provider {
 }
 
 func (gcs *GcsExporter) Upload(dir, bucket, name string, opts ...UploadOption) error {
+	result, err := gcs.UploadWithResult(context.Background(), dir, bucket, name, opts...)
+	if err != nil {
+		return err
+	}
+	if result.CleanupRequired {
+		return errors.New("upload completed; temporary object cleanup required")
+	}
+	return nil
+}
+
+// UploadWithResult distinguishes acknowledged output from temporary cleanup still required.
+func (gcs *GcsExporter) UploadWithResult(ctx context.Context, dir, bucket, name string, opts ...UploadOption) (UploadResult, error) {
+	if err := ctx.Err(); err != nil {
+		return UploadResult{}, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	options := defaultUploadOptions()
 	for _, opt := range opts {
 		opt(options)
 	}
 	if err := validateUploadOptions(options); err != nil {
-		return err
+		return UploadResult{}, err
 	}
-
-	// Check directory existence
 	fi, err := os.Stat(dir)
 	if err != nil {
-		return fmt.Errorf("cannot stat directory %q: %v", dir, err)
+		return UploadResult{}, fmt.Errorf("cannot stat directory %q: %w", dir, err)
 	}
 	if !fi.IsDir() {
-		return fmt.Errorf("%q is not a directory", dir)
+		return UploadResult{}, fmt.Errorf("%q is not a directory", dir)
 	}
-
-	// Calculate total size (for progress % and composition)
 	totalSize, err := GetDirSize(dir)
 	if err != nil {
-		return fmt.Errorf("failed to calculate directory size: %v", err)
+		return UploadResult{}, err
 	}
 	estimatedArchiveSize, err := estimateArchiveUpperBound(dir, totalSize, options.Compression)
 	if err != nil {
-		return err
+		return UploadResult{}, err
 	}
 	if estimatedArchiveSize > options.SizeLimit && options.ChunkSize > options.PartSize {
-		return errors.New("on multi-part, chunk size cannot be greater than part size")
+		return UploadResult{}, errors.New("on multi-part, chunk size cannot be greater than part size")
 	}
-
-	log.WithFields(map[string]interface{}{
-		"size":        datasize.ByteSize(totalSize).HumanReadable(),
+	log.WithFields(log.Fields{
+		"size":        totalSize.HumanReadable(),
 		"source":      dir,
 		"target":      fmt.Sprintf("gs://%s/%s%s", bucket, name, options.Compression.Extension()),
 		"compression": options.Compression,
 	}).Info("start archiving and uploading")
-
-	pr, pw := io.Pipe()
-	defer pr.Close()
-
-	go func() {
-		if err := writeTarball(dir, pw, options.Compression); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		_ = pw.Close()
-	}()
-
-	return gcs.uploadChunks(context.Background(), pr, bucket, name, totalSize, estimatedArchiveSize, options)
+	reader, closeStream := newArchiveStream(ctx, dir, options.Compression)
+	defer closeStream()
+	return gcs.uploadChunks(ctx, cancel, reader, bucket, name, totalSize, estimatedArchiveSize, options)
 }
 
-func (gcs *GcsExporter) uploadChunks(ctx context.Context, reader io.Reader, bucket, objectName string, totalSize, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) error {
-	partIndex := 0
-	partNames := []string{}
-	var bytesArchived atomic.Uint64
-	var bytesUploaded atomic.Uint64
-
-	// Progress
-	progressCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func(ctx context.Context) {
-		ticker := time.NewTicker(opts.ReportPeriod)
-		defer ticker.Stop()
-
-		var lastArchived, lastUploaded uint64
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				currentArchived := bytesArchived.Load()
-				currentUploaded := bytesUploaded.Load()
-				if lastArchived != currentArchived || lastUploaded != currentUploaded {
-					log.WithFields(map[string]interface{}{
-						"archived": datasize.ByteSize(currentArchived).HumanReadable(),
-						"uploaded": datasize.ByteSize(currentUploaded).HumanReadable(),
-						"dir-size": totalSize.HumanReadable(),
-					}).Info("archiving and uploading")
-				}
-				lastArchived, lastUploaded = currentArchived, currentUploaded
-			}
-		}
-	}(progressCtx)
-
+func (gcs *GcsExporter) uploadChunks(ctx context.Context, cancelUploads context.CancelFunc, reader io.Reader, bucket, objectName string, totalSize, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) (UploadResult, error) {
+	var bytesArchived, bytesUploaded atomic.Uint64
+	stopProgress := monitorUploadProgress(ctx, opts.ReportPeriod, totalSize, &bytesArchived, &bytesUploaded)
+	defer stopProgress()
+	digest := newUploadDigest()
+	reader = io.TeeReader(reader, digest)
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, opts.ConcurrentJobs)
 	buf := make([]byte, opts.ChunkSize)
-	// Part uploads use their own context so the first failure cancels the ones in flight. The first
-	// error is kept under a mutex: cancelled uploads fail with errors of other concrete types.
-	uploadCtx, cancelUploads := context.WithCancel(ctx)
-	defer cancelUploads()
 	var errMu sync.Mutex
 	var uploadErr error
-	firstUploadErr := func() error {
+	setError := func(err error) {
+		errMu.Lock()
+		defer errMu.Unlock()
+		if uploadErr == nil {
+			uploadErr = err
+			cancelUploads()
+		}
+	}
+	firstError := func() error {
 		errMu.Lock()
 		defer errMu.Unlock()
 		return uploadErr
 	}
-
+	var partNames []string
+readChunks:
 	for {
-		semaphore <- struct{}{}
-		if firstUploadErr() != nil {
-			<-semaphore
-			break // A part failed: stop reading the archive.
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			setError(ctx.Err())
+			break readChunks
 		}
-
-		log.WithFields(map[string]interface{}{
-			"part-index": partIndex,
-			"max-size":   opts.ChunkSize.HumanReadable(),
-		}).Trace("reading chunk")
-		n, err := io.ReadFull(reader, buf)
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-			return fmt.Errorf("error reading chunk: %v", err)
-		}
-		if firstUploadErr() != nil {
+		if firstError() != nil {
 			<-semaphore
-			break // A part failed while this chunk was read: do not upload it.
+			break
+		}
+		n, err := readArchiveChunk(reader, buf)
+		if err != nil && !errors.Is(err, io.EOF) {
+			<-semaphore
+			setError(fmt.Errorf("read archive chunk: %w", err))
+			break
+		}
+		if firstError() != nil {
+			<-semaphore
+			break
 		}
 		bytesArchived.Add(uint64(n))
 		if n == 0 {
-			break // Done reading
-		}
-		chunk := make([]byte, n)
-		copy(chunk, buf[:n])
-		log.WithFields(map[string]interface{}{
-			"part-index": partIndex,
-			"size":       datasize.ByteSize(len(chunk)).HumanReadable(),
-		}).Trace("got chunk")
-
-		partName := fmt.Sprintf("%s-part-%08d", objectName, partIndex)
-		partIndex++
-		partNames = append(partNames, partName)
-
-		// Start upload in a goroutine
-		wg.Add(1)
-		go func(partData []byte, partName string, semaphore chan struct{}) {
-			defer wg.Done()
-
-			log.WithFields(map[string]interface{}{
-				"part": partName,
-				"size": datasize.ByteSize(len(partData)).HumanReadable(),
-			}).Debug("starting part upload")
-			if err := gcs.uploadToGCS(uploadCtx,
-				bucket,
-				partName,
-				newReaderWithBytesCounter(bytes.NewReader(partData), &bytesUploaded),
-				opts.BufferSize.Bytes(),
-			); err != nil {
-				log.Errorf("failed to upload part %s: %v", partName, err)
-				errMu.Lock()
-				if uploadErr == nil {
-					uploadErr = err
-					cancelUploads()
-				}
-				errMu.Unlock()
-			}
-			log.WithFields(map[string]interface{}{
-				"part": partName,
-				"size": datasize.ByteSize(len(partData)).HumanReadable(),
-			}).Debug("finish uploading part")
 			<-semaphore
-		}(chunk, partName, semaphore)
-
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			break // Last chunk
+			break
+		}
+		chunk := append([]byte(nil), buf[:n]...)
+		partName := fmt.Sprintf("%s-part-%08d", objectName, len(partNames))
+		partNames = append(partNames, partName)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+			if err := gcs.uploadToGCS(ctx, bucket, partName, newReaderWithBytesCounter(bytes.NewReader(chunk), &bytesUploaded), opts.BufferSize.Bytes()); err != nil {
+				setError(fmt.Errorf("upload failed for %q: %w", partName, err))
+			}
+		}()
+		if errors.Is(err, io.EOF) {
+			break
 		}
 	}
-
 	wg.Wait()
-
-	// Check if any upload failed
-	if err := firstUploadErr(); err != nil {
-		return fmt.Errorf("upload failed: %w", err)
+	if err := firstError(); err != nil {
+		return UploadResult{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return UploadResult{}, err
+	}
+	count, cleanup, err := gcs.composeParts(ctx, bucket, partNames, objectName, estimatedArchiveSize, opts)
+	if err != nil {
+		return UploadResult{}, err
+	}
+	layout := "single"
+	if estimatedArchiveSize > opts.SizeLimit {
+		layout = "split"
+	}
+	result := digest.result(opts.Compression, layout, count, objectName+opts.Compression.Extension())
+	result.CleanupRequired = cleanup
+	return result, nil
+}
 
-	return gcs.composeParts(ctx, bucket, partNames, objectName, estimatedArchiveSize, opts)
+func readArchiveChunk(reader io.Reader, buf []byte) (int, error) {
+	total := 0
+	for total < len(buf) {
+		n, err := reader.Read(buf[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }
 
 func (gcs *GcsExporter) uploadToGCS(ctx context.Context, bucket, objName string, r io.Reader, bufferSize uint64) error {
-	w := gcs.client.Bucket(bucket).Object(objName).NewWriter(ctx)
-
+	writer := gcs.client.Bucket(bucket).Object(objName).NewWriter(ctx)
 	buf := make([]byte, bufferSize)
-	if _, err := io.CopyBuffer(w, r, buf); err != nil {
-		_ = w.Close()
+	if _, err := io.CopyBuffer(writer, r, buf); err != nil {
+		_ = writer.Close()
 		return err
 	}
-	return w.Close()
+	return writer.Close()
 }
 
-func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects []string, objectName string, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) error {
+func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects []string, objectName string, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) (int, bool, error) {
 	extension := opts.Compression.Extension()
-
 	if estimatedArchiveSize <= opts.SizeLimit {
-		log.WithFields(map[string]interface{}{
-			"parts": len(objects),
-			"name":  objectName + extension,
-		}).Info("composing final file")
-		return gcs.composeIntoSingleObject(ctx, bucket, objects, objectName+extension, opts)
+		cleanup, err := gcs.composeIntoSingleObject(ctx, bucket, objects, objectName+extension, opts)
+		return 1, cleanup, err
 	}
-
-	if estimatedArchiveSize > opts.SizeLimit && opts.ChunkSize == opts.PartSize {
-		log.WithFields(map[string]interface{}{
-			"parts":     len(objects),
-			"part-size": opts.PartSize.HumanReadable(),
-			"name":      fmt.Sprintf("%s-part-N%s", objectName, extension),
-		}).Info("composing final file parts")
-		return gcs.renameToFinalNames(ctx, objects, bucket, objectName, opts)
+	if opts.ChunkSize == opts.PartSize {
+		cleanup, err := gcs.renameToFinalNames(ctx, objects, bucket, objectName, opts)
+		return len(objects), cleanup, err
 	}
-
 	partSize := opts.PartSize
-
-	// Adjust part-size if needed
-	if opts.PartSize%opts.ChunkSize != 0 {
-		partSize = opts.PartSize + (opts.ChunkSize - opts.PartSize%opts.ChunkSize)
-		log.WithFields(map[string]interface{}{
-			"part-size": opts.PartSize,
-			"new-size":  partSize,
-		}).Warn("adjusting part size to be a multiple of chunk-size")
+	if partSize%opts.ChunkSize != 0 {
+		partSize += opts.ChunkSize - partSize%opts.ChunkSize
 	}
 	chunksPerPart := int(partSize / opts.ChunkSize)
-
 	digits := getDigitCount(len(objects) / chunksPerPart)
-	formatString := fmt.Sprintf("%%s-part-%%0%dd%s", digits, extension)
-
-	log.WithFields(map[string]interface{}{
-		"parts":     len(objects) / chunksPerPart,
-		"part-size": partSize.HumanReadable(),
-		"name":      fmt.Sprintf("%s-part-N%s", objectName, extension),
-	}).Info("composing final file parts")
-
+	format := fmt.Sprintf("%%s-part-%%0%dd%s", digits, extension)
+	count := 0
+	cleanupRequired := false
 	for i := 0; i < len(objects); i += chunksPerPart {
-		partName := fmt.Sprintf(formatString, objectName, i/chunksPerPart)
-		end := min(i+chunksPerPart, len(objects))
-		part := make([]string, len(objects[i:end]))
-		copy(part, objects[i:end])
-
-		if err := gcs.composeIntoSingleObject(ctx, bucket, part, partName, opts); err != nil {
-			return err
+		partName := fmt.Sprintf(format, objectName, i/chunksPerPart)
+		cleanup, err := gcs.composeIntoSingleObject(ctx, bucket, objects[i:min(i+chunksPerPart, len(objects))], partName, opts)
+		if err != nil {
+			return 0, false, err
 		}
+		cleanupRequired = cleanupRequired || cleanup
+		count++
 	}
-
-	return nil
+	return count, cleanupRequired, nil
 }
 
-func (gcs *GcsExporter) renameToFinalNames(ctx context.Context, objects []string, bucket, objectName string, opts *UploadOptions) error {
-	extension := opts.Compression.Extension()
-	log.Infof("renaming %d objects to have %s extension", len(objects), extension)
-
-	if len(objects) == 0 {
-		return nil
-	}
-
-	if len(objects) == 1 {
-		return gcs.renameObject(ctx, bucket, objects[0], objectName+extension, opts)
-	}
-
+func (gcs *GcsExporter) renameToFinalNames(ctx context.Context, objects []string, bucket, objectName string, opts *UploadOptions) (bool, error) {
+	cleanupRequired := false
 	digits := getDigitCount(len(objects) - 1)
-	formatString := fmt.Sprintf("%%s-part-%%0%dd%s", digits, extension)
-
 	for i, object := range objects {
-		finalName := fmt.Sprintf(formatString, objectName, i)
-		if err := gcs.renameObject(ctx, bucket, object, finalName, opts); err != nil {
-			return err
+		finalName := fmt.Sprintf("%s-part-%0*d%s", objectName, digits, i, opts.Compression.Extension())
+		if len(objects) == 1 {
+			finalName = objectName + opts.Compression.Extension()
 		}
+		cleanup, err := gcs.renameObject(ctx, bucket, object, finalName, opts)
+		if err != nil {
+			return false, err
+		}
+		cleanupRequired = cleanupRequired || cleanup
 	}
-	return nil
+	return cleanupRequired, nil
 }
 
-func (gcs *GcsExporter) renameObject(ctx context.Context, bucket, oldName, newName string, opts *UploadOptions) error {
-	log.Debugf("renaming %s to %s", oldName, newName)
+func (gcs *GcsExporter) renameObject(ctx context.Context, bucket, oldName, newName string, opts *UploadOptions) (bool, error) {
 	src := gcs.client.Bucket(bucket).Object(oldName)
 	copier := gcs.client.Bucket(bucket).Object(newName).CopierFrom(src)
 	if opts.Height != "" {
 		copier.Metadata = map[string]string{HeightMetadataKey: opts.Height}
 	}
 	if _, err := copier.Run(ctx); err != nil {
-		return fmt.Errorf("failed to rename object %s -> %s: %v", oldName, newName, err)
+		return false, fmt.Errorf("rename object %q to %q: %w", oldName, newName, err)
 	}
-	return src.Delete(ctx)
+	return src.Delete(ctx) != nil, nil
 }
 
-func (gcs *GcsExporter) composeIntoSingleObject(ctx context.Context, bucket string, objects []string, objectName string, opts *UploadOptions) error {
-	log.Debugf("composing %d objects into %s", len(objects), objectName)
-
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, opts.ConcurrentJobs) // Limit concurrent compositions
-
-	// While there are more than 32 parts, keep composing
-	round := 0
-	for len(objects) > CompositionBatchLimit {
-		numBatches := (len(objects) + 31) / CompositionBatchLimit
-		newParts := make([]string, numBatches)
-		partMutex := sync.Mutex{}          // Protect newParts slice
-		batchObjectsToDelete := []string{} // Keep track of intermediate batch files
-
+func (gcs *GcsExporter) composeIntoSingleObject(ctx context.Context, bucket string, objects []string, objectName string, opts *UploadOptions) (bool, error) {
+	var temporary []string
+	for round := 0; len(objects) > CompositionBatchLimit; round++ {
+		newParts := make([]string, (len(objects)+CompositionBatchLimit-1)/CompositionBatchLimit)
+		roundCtx, cancel := context.WithCancel(ctx)
+		var wg sync.WaitGroup
+		semaphore := make(chan struct{}, opts.ConcurrentJobs)
+		var firstErr error
+		var errMu sync.Mutex
+	composeBatches:
 		for i := 0; i < len(objects); i += CompositionBatchLimit {
-			semaphore <- struct{}{}
+			select {
+			case semaphore <- struct{}{}:
+			case <-roundCtx.Done():
+				break composeBatches
+			}
+			if roundCtx.Err() != nil {
+				<-semaphore
+				break
+			}
+			index := i / CompositionBatchLimit
+			batch := objects[i:min(i+CompositionBatchLimit, len(objects))]
+			tempName := fmt.Sprintf("%s-temp-%d-%d", objectName, round, index)
 			wg.Add(1)
-
-			end := min(i+CompositionBatchLimit, len(objects))
-			batch := make([]string, len(objects[i:end]))
-			copy(batch, objects[i:end])
-
-			go func(batchIndex int, batch []string, totalBatches int) {
+			go func() {
 				defer wg.Done()
 				defer func() { <-semaphore }()
-
-				tempObjectName := fmt.Sprintf("%s-temp-%d-%d", objectName, round, batchIndex)
-
-				log.WithFields(map[string]interface{}{
-					"batch":      batchIndex,
-					"total":      totalBatches,
-					"object":     tempObjectName,
-					"batch-size": len(batch),
-				}).Debug("composing batch")
-				tempObject := gcs.client.Bucket(bucket).Object(tempObjectName)
-				composer := tempObject.ComposerFrom(objectsToHandles(gcs.client, bucket, batch)...)
-
-				if _, err := composer.Run(ctx); err != nil {
-					log.Errorf("failed to compose batch %d: %v", batchIndex, err)
+				composer := gcs.client.Bucket(bucket).Object(tempName).ComposerFrom(objectsToHandles(gcs.client, bucket, batch)...)
+				if _, err := composer.Run(roundCtx); err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("compose intermediate object %q: %w", tempName, err)
+						cancel()
+					}
+					errMu.Unlock()
 					return
 				}
-
-				// Safely append new composed part
-				partMutex.Lock()
-				newParts[batchIndex] = tempObjectName
-				batchObjectsToDelete = append(batchObjectsToDelete, batch...) // Add batch parts for deletion
-				partMutex.Unlock()
-			}(i/CompositionBatchLimit, batch, len(objects)/CompositionBatchLimit)
+				newParts[index] = tempName
+			}()
 		}
-
 		wg.Wait()
-		log.Debugf("finished composing a round, %d parts remain", len(newParts))
-
-		// Delete all composed intermediate parts from previous batch
-		if err := gcs.batchDelete(ctx, bucket, batchObjectsToDelete, opts.ConcurrentJobs*10); err != nil {
-			log.Warnf("failed to delete intermediate parts: %v", err)
+		cancel()
+		if firstErr != nil {
+			return false, firstErr
 		}
-		batchObjectsToDelete = []string{}
-
-		// Move to next round
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		temporary = append(temporary, objects...)
 		objects = newParts
-		round += 1
 	}
-
-	finalObject := gcs.client.Bucket(bucket).Object(objectName)
-	composer := finalObject.ComposerFrom(objectsToHandles(gcs.client, bucket, objects)...)
+	composer := gcs.client.Bucket(bucket).Object(objectName).ComposerFrom(objectsToHandles(gcs.client, bucket, objects)...)
 	if opts.Height != "" {
 		composer.Metadata = map[string]string{HeightMetadataKey: opts.Height}
 	}
 	if _, err := composer.Run(ctx); err != nil {
-		return fmt.Errorf("failed to compose final object: %v", err)
+		return false, fmt.Errorf("compose final object %q: %w", objectName, err)
 	}
-
-	// Cleanup final composed parts
-	return gcs.batchDelete(ctx, bucket, objects, opts.ConcurrentJobs*10)
+	temporary = append(temporary, objects...)
+	return gcs.batchDelete(ctx, bucket, temporary, opts.ConcurrentJobs*10) != nil, nil
 }
 
 func objectsToHandles(client *storage.Client, bucket string, names []string) []*storage.ObjectHandle {

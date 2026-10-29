@@ -111,32 +111,43 @@ func (exporter *S3Exporter) Provider() Provider {
 }
 
 func (exporter *S3Exporter) Upload(dir, bucket, name string, opts ...UploadOption) error {
+	_, err := exporter.UploadWithResult(context.Background(), dir, bucket, name, opts...)
+	return err
+}
+
+// UploadWithResult returns archive byte identity only after acknowledged completion.
+func (exporter *S3Exporter) UploadWithResult(ctx context.Context, dir, bucket, name string, opts ...UploadOption) (UploadResult, error) {
+	if err := ctx.Err(); err != nil {
+		return UploadResult{}, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	options := defaultS3UploadOptions()
 	for _, opt := range opts {
 		opt(options)
 	}
 	if err := validateS3UploadOptions(options); err != nil {
-		return err
+		return UploadResult{}, err
 	}
 
 	info, err := os.Stat(dir)
 	if err != nil {
-		return fmt.Errorf("cannot stat directory %q: %w", dir, err)
+		return UploadResult{}, fmt.Errorf("cannot stat directory %q: %w", dir, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%q is not a directory", dir)
+		return UploadResult{}, fmt.Errorf("%q is not a directory", dir)
 	}
 	totalSize, err := GetDirSize(dir)
 	if err != nil {
-		return fmt.Errorf("calculate directory size: %w", err)
+		return UploadResult{}, fmt.Errorf("calculate directory size: %w", err)
 	}
 	estimatedArchiveSize, err := estimateArchiveUpperBound(dir, totalSize, options.Compression)
 	if err != nil {
-		return err
+		return UploadResult{}, err
 	}
 	splitArchive, err := s3ArchiveRequiresSplit(estimatedArchiveSize, options)
 	if err != nil {
-		return err
+		return UploadResult{}, err
 	}
 
 	extension := options.Compression.Extension()
@@ -147,41 +158,38 @@ func (exporter *S3Exporter) Upload(dir, bucket, name string, opts ...UploadOptio
 		"compression": options.Compression,
 	}).Info("start archiving and uploading")
 
-	reader, writer := io.Pipe()
-	defer reader.Close()
-	go func() {
-		if err := writeTarball(dir, writer, options.Compression); err != nil {
-			_ = writer.CloseWithError(err)
-			return
-		}
-		_ = writer.Close()
-	}()
-
-	ctx := context.Background()
+	pipe, closeStream := newArchiveStream(ctx, dir, options.Compression)
+	defer closeStream()
+	digest := newUploadDigest()
+	reader := io.TeeReader(pipe, digest)
 	if !splitArchive {
-		_, err := exporter.uploadObject(ctx, reader, bucket, name+extension, options, totalSize)
-		return err
+		key := name + extension
+		if _, err := exporter.uploadObject(ctx, cancel, reader, bucket, key, options, totalSize); err != nil {
+			return UploadResult{}, err
+		}
+		return digest.result(options.Compression, "single", 1, key), nil
 	}
-
+	objectCount := 0
 	splitReader := bufio.NewReaderSize(reader, int(options.BufferSize.Bytes()))
 	for index := 0; ; index++ {
 		if _, err := splitReader.Peek(1); err != nil {
 			if errors.Is(err, io.EOF) {
-				return nil
+				return digest.result(options.Compression, "split", objectCount, ""), nil
 			}
-			return fmt.Errorf("read archive: %w", err)
+			return UploadResult{}, fmt.Errorf("read archive: %w", err)
 		}
 		partName := fmt.Sprintf("%s-part-%08d%s", name, index, extension)
 		partReader := &io.LimitedReader{R: splitReader, N: int64(options.PartSize.Bytes())}
-		read, err := exporter.uploadObject(ctx, partReader, bucket, partName, options, totalSize)
+		read, err := exporter.uploadObject(ctx, cancel, partReader, bucket, partName, options, totalSize)
 		if err != nil {
-			return err
+			return UploadResult{}, err
 		}
 		if read == 0 {
-			return nil
+			return digest.result(options.Compression, "split", objectCount, ""), nil
 		}
+		objectCount++
 		if read < int64(options.PartSize.Bytes()) {
-			return nil
+			return digest.result(options.Compression, "split", objectCount, ""), nil
 		}
 	}
 }
@@ -224,6 +232,7 @@ func validateS3UploadOptions(options *UploadOptions) error {
 
 func (exporter *S3Exporter) uploadObject(
 	ctx context.Context,
+	cancelUpload context.CancelFunc,
 	reader io.Reader,
 	bucket string,
 	objectName string,
@@ -260,11 +269,9 @@ func (exporter *S3Exporter) uploadObject(
 		}
 	}()
 
-	uploadCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	var archivedBytes atomic.Uint64
 	var uploadedBytes atomic.Uint64
-	stopProgress := monitorS3Progress(uploadCtx, options.ReportPeriod, totalSize, &archivedBytes, &uploadedBytes)
+	stopProgress := monitorUploadProgress(ctx, options.ReportPeriod, totalSize, &archivedBytes, &uploadedBytes)
 	defer stopProgress()
 
 	semaphore := make(chan struct{}, options.ConcurrentJobs)
@@ -277,14 +284,20 @@ func (exporter *S3Exporter) uploadObject(
 		defer errMu.Unlock()
 		if firstErr == nil {
 			firstErr = uploadErr
-			cancel()
+			cancelUpload()
 		}
 	}
 
 	var totalRead int64
 	spoolBuffer := make([]byte, int(options.BufferSize.Bytes()))
 	for partNumber := int32(1); ; partNumber++ {
-		semaphore <- struct{}{}
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			setError(ctx.Err())
+			wg.Wait()
+			return totalRead, firstErr
+		}
 		errMu.Lock()
 		hasError := firstErr != nil
 		errMu.Unlock()
@@ -326,7 +339,7 @@ func (exporter *S3Exporter) uploadObject(
 			defer wg.Done()
 			defer func() { <-semaphore }()
 			defer closeAndRemoveS3Part(file)
-			output, uploadErr := exporter.client.UploadPart(uploadCtx, &s3.UploadPartInput{
+			output, uploadErr := exporter.client.UploadPart(ctx, &s3.UploadPartInput{
 				Bucket:        aws.String(bucket),
 				Key:           aws.String(objectName),
 				UploadId:      aws.String(uploadID),
@@ -391,7 +404,7 @@ func spoolS3Part(reader io.Reader, maximumSize uint64, buffer []byte) (*os.File,
 	remaining := maximumSize
 	for remaining > 0 {
 		readSize := min(remaining, uint64(len(buffer)))
-		n, readErr := io.ReadFull(reader, buffer[:int(readSize)])
+		n, readErr := reader.Read(buffer[:int(readSize)])
 		if n > 0 {
 			written, writeErr := file.Write(buffer[:n])
 			if writeErr != nil {
@@ -406,7 +419,7 @@ func spoolS3Part(reader io.Reader, maximumSize uint64, buffer []byte) (*os.File,
 		switch {
 		case readErr == nil:
 			continue
-		case errors.Is(readErr, io.EOF), errors.Is(readErr, io.ErrUnexpectedEOF):
+		case errors.Is(readErr, io.EOF):
 			remaining = 0
 		default:
 			return fail(readErr)
@@ -427,7 +440,7 @@ func closeAndRemoveS3Part(file *os.File) {
 	_ = os.Remove(name)
 }
 
-func monitorS3Progress(
+func monitorUploadProgress(
 	ctx context.Context,
 	period time.Duration,
 	totalSize datasize.ByteSize,
@@ -435,7 +448,9 @@ func monitorS3Progress(
 	uploadedBytes *atomic.Uint64,
 ) func() {
 	progressCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(period)
 		defer ticker.Stop()
 		for {
@@ -451,7 +466,7 @@ func monitorS3Progress(
 			}
 		}
 	}()
-	return cancel
+	return func() { cancel(); <-done }
 }
 
 func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) error {

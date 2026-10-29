@@ -2,6 +2,7 @@ package dataexporter
 
 import (
 	"archive/tar"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -72,6 +73,10 @@ func (c Compression) ContentType() string {
 }
 
 func writeTarball(dir string, out io.Writer, compression Compression) error {
+	return writeTarballContext(context.Background(), dir, out, compression)
+}
+
+func writeTarballContext(ctx context.Context, dir string, out io.Writer, compression Compression) error {
 	compressed, err := newCompressionWriter(out, compression)
 	if err != nil {
 		return err
@@ -80,6 +85,9 @@ func writeTarball(dir string, out io.Writer, compression Compression) error {
 
 	err = filepath.Walk(dir, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if info.IsDir() {
@@ -118,7 +126,7 @@ func writeTarball(dir string, out io.Writer, compression Compression) error {
 		if err != nil {
 			return fmt.Errorf("open %q: %w", path, err)
 		}
-		_, copyErr := io.Copy(tw, f)
+		_, copyErr := io.Copy(tw, contextReader{ctx: ctx, reader: f})
 		closeErr := f.Close()
 		if copyErr != nil {
 			return fmt.Errorf("archive %q: %w", path, copyErr)
@@ -141,6 +149,43 @@ func writeTarball(dir string, out io.Writer, compression Compression) error {
 		return fmt.Errorf("close %s writer: %w", compression, err)
 	}
 	return nil
+}
+
+func newArchiveStream(ctx context.Context, dir string, compression Compression) (*io.PipeReader, func()) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	reader, writer := io.Pipe()
+	produced := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(produced)
+		_ = writer.CloseWithError(writeTarballContext(streamCtx, dir, writer, compression))
+	}()
+	go func() {
+		defer close(stopped)
+		select {
+		case <-streamCtx.Done():
+			_ = reader.CloseWithError(streamCtx.Err())
+		case <-produced:
+		}
+	}()
+	return reader, func() {
+		cancel()
+		_ = reader.Close()
+		<-produced
+		<-stopped
+	}
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func newCompressionWriter(out io.Writer, compression Compression) (io.WriteCloser, error) {
