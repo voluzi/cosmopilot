@@ -47,6 +47,7 @@ import (
 	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
 	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
 	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
 	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
@@ -188,7 +189,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		c, a, _ := seed(t, template.Namespace, "Uploading", nil)
 		c.Spec.Persistence.Snapshots.ExportTarball.Protocol = ""
 		require.NoError(t, admin.Update(ctx, c))
-		local := &Reconciler{Client: admin, APIReader: admin, RestConfig: r.RestConfig, Scheme: r.Scheme, opts: r.opts}
+		local := &Reconciler{Client: admin, APIReader: admin, RestConfig: r.RestConfig, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 		s := source.DeepCopy()
 		err := local.exportTarball(ctx, c, s)
 		_, fatal := local.handleNativeSnapshotOutcome(ctx, c, s, s.Name, err)
@@ -430,7 +431,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			}
 			reader, err := client.New(racing, client.Options{Scheme: r.Scheme})
 			require.NoError(t, err)
-			local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts}
+			local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 			before := posts.Load()
 			err = local.recoverNativeAttempt(ctx, c, a, boundary.stopping, false)
 			var operation *nativeOperationError
@@ -512,7 +513,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		})
 	}
 	t.Run("orphan snapshot read errors remain failures", func(t *testing.T) {
-		local := &Reconciler{Client: r.Client, Scheme: r.Scheme, opts: r.opts}
+		local := &Reconciler{Client: r.Client, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 		var faults *atomic.Int32
 		local.APIReader, faults = nativeFaultReader(t, r.RestConfig, "/volumesnapshots", 503, 0)
 		_, err := local.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: template.Namespace, Name: "absent-owner"}})
@@ -606,7 +607,10 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(snapshot), snapshot))
 			require.Empty(t, snapshot.Annotations[controllers.AnnotationExportingTarball], "recovery precedes the normal retry loop")
 			require.Empty(t, snapshot.Annotations[controllers.AnnotationTarballExportAttempts])
-			refresh(t, c)
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			if acknowledged {
+				require.Empty(t, c.Status.SnapshotExportAuthority.Attempts, "acknowledgement releases the attempt slot")
+			}
 			c.Status.LatestHeight, c.Status.PvcSize = 1, "1Gi"
 			require.NoError(t, admin.Status().Update(ctx, c))
 			clients, err := kubernetes.NewForConfig(r.RestConfig)
@@ -614,8 +618,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			local := &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts, recorder: record.NewFakeRecorder(100), ClientSet: clients}
 			require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
 			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
-			require.Len(t, c.Status.SnapshotExportAuthority.Attempts, 2)
-			next := &c.Status.SnapshotExportAuthority.Attempts[1]
+			next := &c.Status.SnapshotExportAuthority.Attempts[len(c.Status.SnapshotExportAuthority.Attempts)-1]
 			require.Greater(t, next.Sequence, old.Sequence)
 			require.NotEqual(t, old.ID, next.ID)
 			nextRecipe, err := exportprotocol.DecodeRecipe(next)
@@ -623,7 +626,10 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.NotEqual(t, recipe.ObjectName, nextRecipe.ObjectName)
 			require.EqualValues(t, 1, next.UploadAttempt, "removing both markers requests a new manual cycle")
 			require.Equal(t, next.ExportID, snapshotExportFor(c, snapshot).ID)
-			require.Equal(t, old, exportprotocol.FindAttempt(c, old.Sequence, old.ID))
+			if !acknowledged {
+				require.Equal(t, old, exportprotocol.FindAttempt(c, old.Sequence, old.ID), "retry does not erase unacknowledged uncertainty")
+			}
+			require.Equal(t, "Required", snapshotExportByID(c, old.ExportID).RemoteCleanupState)
 			require.NoError(t, r.cleanupNativeAttempt(ctx, c, old, recipe))
 			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(snapshot), snapshot))
 			require.Equal(t, "true", snapshot.Annotations[controllers.AnnotationExportingTarball], "old attempt must preserve the new retry marker")
@@ -669,7 +675,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		}
 		raced, err := client.New(raceConfig, client.Options{Scheme: r.Scheme})
 		require.NoError(t, err)
-		local := &Reconciler{Client: raced, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts}
+		local := &Reconciler{Client: raced, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 		require.True(t, apierrors.IsConflict(local.cleanupNativeAttempt(ctx, c, a, recipe)))
 		require.True(t, changed.Load())
 		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(snapshot), snapshot))
@@ -893,7 +899,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 					name = recipe.ServiceAccount.Name
 				}
 				reader, fired := nativeFaultReader(t, r.RestConfig, "/"+resource+"/"+name, 403, 0)
-				local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts}
+				local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 				before := posts.Load()
 				require.Error(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
 				require.Positive(t, fired.Load())
@@ -987,7 +993,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 	t.Run("owner and reconcile context failures remain fatal", func(t *testing.T) {
 		c, a, _ := seed(t, template.Namespace, "Uploading", nil)
 		reader, fired := nativeFaultReader(t, r.RestConfig, "/chainnodes/"+c.Name, 403, 0)
-		local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts}
+		local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 		err := local.recoverNativeExports(ctx, c)
 		require.Error(t, err)
 		require.Positive(t, fired.Load())
@@ -1048,7 +1054,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				a = refresh(t, c)
 			}
 			reader, fired := nativeFaultReader(t, r.RestConfig, "/volumesnapshots/"+snapshot.Name, 503, 1)
-			local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts}
+			local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 			before := posts.Load()
 			require.Error(t, local.recoverNativeExports(ctx, c))
 			require.Positive(t, fired.Load())
@@ -1157,7 +1163,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		denied, err := client.New(deniedConfig, client.Options{Scheme: r.Scheme})
 		require.NoError(t, err)
 		clock := time.Now()
-		local := &Reconciler{Client: denied, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, snapshotDeleteNow: func() time.Time { return clock }}
+		local := &Reconciler{Client: denied, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder, snapshotDeleteNow: func() time.Time { return clock }}
 		require.Error(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
 		a = refresh(t, c)
 		require.EqualValues(t, 1, rejected.Load())
@@ -1310,7 +1316,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", deleting)
 		clock := time.Now()
 		restart := func() *Reconciler {
-			return &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, snapshotDeleteNow: func() time.Time { return clock }}
+			return &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder, snapshotDeleteNow: func() time.Time { return clock }}
 		}
 		issuers := map[string]bool{}
 		before := posts.Load()
@@ -1372,7 +1378,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 	t.Run("late retired cleanup cannot publish or disturb the current ordinal", func(t *testing.T) {
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", deleting)
 		clock := time.Now()
-		local := &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, snapshotDeleteNow: func() time.Time { return clock }}
+		local := &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder, snapshotDeleteNow: func() time.Time { return clock }}
 		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
 		a = refresh(t, c)
 		retiredAttempt := a.DeepCopy()
@@ -1674,7 +1680,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				require.NoError(t, admin.Delete(ctx, ns))
 			}
 			require.NoError(t, admin.Delete(ctx, c))
-			local := &Reconciler{Client: admin, APIReader: admin, Scheme: r.Scheme, opts: r.opts}
+			local := &Reconciler{Client: admin, APIReader: admin, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 			for range 5 {
 				_, err := local.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(c)})
 				require.NoError(t, err)
@@ -1778,6 +1784,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 	})
 	t.Run("twenty nine retained archives admit a thirtieth reservation", func(t *testing.T) {
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", nil)
+		completedAt := c.Status.SnapshotExports[0].Archive.CompletedAt
 		c.Status.SnapshotExportAuthority.Attempts = nil
 		c.Status.SnapshotExports = nil
 		for i := int64(1); i <= 29; i++ {
@@ -1802,7 +1809,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			body, err := exportprotocol.EncodeEnvelope(envelope)
 			require.NoError(t, err)
 			copy.CompletedEnvelope = string(body)
-			archive, err := exportprotocol.NewArchive(copy, rec, envelope, metav1.Now())
+			archive, err := exportprotocol.NewArchive(copy, rec, envelope, completedAt)
 			require.NoError(t, err)
 			c.Status.SnapshotExportAuthority.Attempts = append(c.Status.SnapshotExportAuthority.Attempts, *copy)
 			c.Status.SnapshotExports = append(c.Status.SnapshotExports, appsv1.SnapshotExportStatus{ID: copy.ExportID, SnapshotName: source.Name, SnapshotUID: source.UID, ObjectName: copy.ExportID, Destination: rec.Destination, ProvenanceVersion: 1, Phase: appsv1.SnapshotExportPhaseUploaded, Archive: archive, DeleteOnExpire: true, RemoteCleanupState: "Complete"})
@@ -1859,6 +1866,346 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.Equal(t, int64(math.MaxInt64), exhausted.Status.SnapshotExportAuthority.LastSequence)
 	})
 
+	// history fills an owner with count terminal records, oldest first: the oldest has its own live source, the rest share one.
+	history := func(t *testing.T, count, padding int, record func(int, *appsv1.SnapshotExportAttempt, *appsv1.SnapshotExportStatus) bool) (*appsv1.ChainNode, *snapshotv1.VolumeSnapshot, *snapshotv1.VolumeSnapshot) {
+		t.Helper()
+		oldest, oldestContent := nativeReviewSource(t, admin, source, original.Driver)
+		shared, sharedContent := nativeReviewSource(t, admin, source, original.Driver)
+		c, prototype, recipe := seed(t, template.Namespace, "Succeeded", nil)
+		prior, err := exportprotocol.DecodeEnvelope([]byte(prototype.CompletedEnvelope))
+		require.NoError(t, err)
+		if padding > 0 {
+			recipe.Destination.Endpoint = "https://store.example/" + strings.Repeat("p", padding)
+		}
+		recipe.DeleteOnExpire = false
+		c.Status.SnapshotExportAuthority.Attempts = []appsv1.SnapshotExportAttempt{}
+		c.Status.SnapshotExports = nil
+		require.NoError(t, admin.Status().Update(ctx, c))
+		first := c.Status.SnapshotExportAuthority.LastSequence + 1
+		for i := range count {
+			a := prototype.DeepCopy()
+			a.Sequence = first + int64(i)
+			a.ID = string(uuid.NewUUID())
+			a.ExportID = "export-" + a.ID
+			rec := recipe
+			rec.ExportID, rec.ResourceName, rec.ObjectName = a.ExportID, a.ExportID, a.ExportID
+			rec.Snapshot, rec.Content = identity(shared), identity(sharedContent)
+			if i == 0 {
+				rec.Snapshot, rec.Content = identity(oldest), identity(oldestContent)
+			}
+			a.Recipe, a.RecipeSHA256, err = exportprotocol.EncodeRecipe(rec)
+			require.NoError(t, err)
+			envelope := exportprotocol.EnvelopeFor(a, rec)
+			envelope.Result = prior.Result
+			envelope.Result.ObjectKey = rec.ObjectName + rec.Compression.Extension()
+			body, err := exportprotocol.EncodeEnvelope(envelope)
+			require.NoError(t, err)
+			a.CompletedEnvelope = string(body)
+			archive, err := exportprotocol.NewArchive(a, rec, envelope, metav1.Now())
+			require.NoError(t, err)
+			e := appsv1.SnapshotExportStatus{ID: a.ExportID, SnapshotName: rec.Snapshot.Name, SnapshotUID: rec.Snapshot.UID, ObjectName: rec.ObjectName, Destination: rec.Destination, Phase: appsv1.SnapshotExportPhaseUploaded, ProvenanceVersion: 1, Archive: archive, RemoteCleanupState: "Complete"}
+			if record != nil && record(i, a, &e) {
+				c.Status.SnapshotExportAuthority.Attempts = append(c.Status.SnapshotExportAuthority.Attempts, *a)
+			}
+			c.Status.SnapshotExports = append(c.Status.SnapshotExports, e)
+		}
+		c.Status.SnapshotExportAuthority.LastSequence = first + int64(count) - 1
+		require.NoError(t, admin.Status().Update(ctx, c))
+		return c, oldest, shared
+	}
+	withEvents := func(r *Reconciler) (*Reconciler, *record.FakeRecorder) {
+		events := record.NewFakeRecorder(64)
+		return &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts, recorder: events}, events
+	}
+	requireFits := func(t *testing.T, c *appsv1.ChainNode) {
+		t.Helper()
+		size, err := nativeProjectedStatusSize(c)
+		require.NoError(t, err)
+		require.LessOrEqual(t, size, exportprotocol.MaxNativeStatus)
+	}
+	smallRecord := func(_ int, _ *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) bool {
+		e.Archive = nil
+		e.Phase = appsv1.SnapshotExportPhaseCleanupRequired
+		return false
+	}
+	t.Run("retained exports keep reserving past the history count with live sources", func(t *testing.T) {
+		c, oldest, _ := history(t, nativeHistoryLimit, 0, smallRecord)
+		evicted := c.Status.SnapshotExports[0]
+		retainedNext := c.Status.SnapshotExports[1].ID
+		local, events := withEvents(r)
+		before := posts.Load()
+		watermark := c.Status.SnapshotExportAuthority.LastSequence
+		for i := range 4 {
+			next, _ := nativeReviewSource(t, admin, source, original.Driver)
+			require.NoError(t, local.reserveNativeAttempt(ctx, c, next))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			require.EqualValues(t, watermark+int64(i)+1, c.Status.SnapshotExportAuthority.LastSequence, "the watermark stays monotone")
+			require.Len(t, c.Status.SnapshotExports, nativeHistoryLimit)
+			requireFits(t, c)
+			if i == 0 {
+				require.Nil(t, snapshotExportByID(c, evicted.ID))
+				require.NotNil(t, snapshotExportByID(c, retainedNext), "eviction is oldest first")
+				event := <-events.Events
+				require.Contains(t, event, evicted.ID)
+				require.Contains(t, event, evicted.ObjectName)
+				require.Contains(t, event, evicted.Destination.Bucket)
+			}
+			latest := c.Status.SnapshotExportAuthority.Attempts[len(c.Status.SnapshotExportAuthority.Attempts)-1].DeepCopy()
+			require.NoError(t, local.invalidateNativeAttempt(ctx, c, latest, "WorkerFailed"))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			latest = exportprotocol.FindAttempt(c, latest.Sequence, latest.ID).DeepCopy()
+			rec, err := exportprotocol.DecodeRecipe(latest)
+			require.NoError(t, err)
+			require.NoError(t, local.cleanupNativeAttempt(ctx, c, latest, rec))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		}
+		require.Equal(t, before, posts.Load(), "status release never issues remote work")
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(oldest), oldest))
+		require.Equal(t, tarballNativeFailed, oldest.Annotations[controllers.AnnotationExportingTarball], "an evicted source keeps its terminal bookkeeping")
+		require.True(t, nativeRetryDue(c, oldest), "eviction keeps the retry budget")
+	})
+	t.Run("bytes release history below the count limit without touching retained objects", func(t *testing.T) {
+		const records, padding = 24, 3000
+		c, oldest, _ := history(t, records, padding, nil)
+		before, err := nativeProjectedStatusSize(c)
+		require.NoError(t, err)
+		require.Greater(t, before, exportprotocol.MaxNativeStatus)
+		local, events := withEvents(r)
+		next, _ := nativeReviewSource(t, admin, source, original.Driver)
+		require.NoError(t, local.reserveNativeAttempt(ctx, c, next))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Less(t, len(c.Status.SnapshotExports), records)
+		require.Len(t, c.Status.SnapshotExportAuthority.Attempts, 1)
+		requireFits(t, c)
+		require.False(t, apiMeta.IsStatusConditionTrue(c.Status.Conditions, appsv1.ConditionSnapshotExportCapacityExceeded))
+		event := <-events.Events
+		require.Contains(t, event, corev1.EventTypeNormal)
+		require.Contains(t, event, "retained in place")
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(oldest), oldest))
+		require.Equal(t, tarballNativeFinished, oldest.Annotations[controllers.AnnotationExportingTarball])
+	})
+	t.Run("acknowledged uncertainty releases its slot without claiming deletion", func(t *testing.T) {
+		acknowledged := func(_ int, a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) bool {
+			a.Phase, a.CompletedEnvelope, a.AuthorizedAt = "Invalidated", "", ptr.To(metav1.Now())
+			a.RemoteCleanupState, a.CleanupState, a.CleanupReason = "Required", "Acknowledged", "OperatorAcknowledgedWithoutDeletionProof"
+			e.Archive, e.Phase, e.RemoteCleanupState = nil, appsv1.SnapshotExportPhaseAcknowledged, "Required"
+			return true
+		}
+		c, oldest, _ := history(t, nativeHistoryLimit, 0, acknowledged)
+		evicted := c.Status.SnapshotExports[0].ID
+		local, events := withEvents(r)
+		next, _ := nativeReviewSource(t, admin, source, original.Driver)
+		require.NoError(t, local.reserveNativeAttempt(ctx, c, next))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Len(t, c.Status.SnapshotExportAuthority.Attempts, 1, "acknowledgement frees every attempt slot")
+		require.Nil(t, snapshotExportByID(c, evicted))
+		for _, e := range c.Status.SnapshotExports[:len(c.Status.SnapshotExports)-1] {
+			require.Equal(t, "Required", e.RemoteCleanupState, "release never rewrites uncertainty to Complete")
+		}
+		event := <-events.Events
+		require.Contains(t, event, corev1.EventTypeWarning)
+		require.Contains(t, event, "never proven deleted")
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(oldest), oldest))
+		require.Equal(t, tarballNativeFailed, oldest.Annotations[controllers.AnnotationExportingTarball])
+	})
+	t.Run("exhausted cleanup holds capacity until acknowledged", func(t *testing.T) {
+		exhausted := func(_ int, a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) bool {
+			a.CleanupAttempt = exportprotocol.MaxCleanupAttempts
+			a.CleanupIssuer, a.CleanupIssuedAt = string(uuid.NewUUID()), ptr.To(metav1.Now())
+			a.CleanupState, a.CleanupReason, a.RemoteCleanupState = "Failed", "CleanupJobFailed", "Required"
+			e.Archive, e.Phase, e.RemoteCleanupState = nil, appsv1.SnapshotExportPhaseDeleting, "Required"
+			return true
+		}
+		c, _, _ := history(t, nativeHistoryLimit, 0, exhausted)
+		watermark := c.Status.SnapshotExportAuthority.LastSequence
+		next, _ := nativeReviewSource(t, admin, source, original.Driver)
+		var deferred *nativeDeferred
+		require.ErrorAs(t, r.reserveNativeAttempt(ctx, c, next), &deferred)
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Len(t, c.Status.SnapshotExportAuthority.Attempts, nativeHistoryLimit)
+		condition := apiMeta.FindStatusCondition(c.Status.Conditions, appsv1.ConditionSnapshotExportCapacityExceeded)
+		require.NotNil(t, condition)
+		require.Equal(t, "AttemptLimit", condition.Reason)
+		c.Annotations = map[string]string{exportprotocol.CleanupAckAnnotation: c.Status.SnapshotExports[0].ID}
+		require.NoError(t, admin.Update(ctx, c))
+		require.NoError(t, r.reconcileNativeAcknowledgements(ctx, c))
+		require.NoError(t, r.reserveNativeAttempt(ctx, c, next))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Equal(t, watermark+1, c.Status.SnapshotExportAuthority.LastSequence)
+		require.Nil(t, apiMeta.FindStatusCondition(c.Status.Conditions, appsv1.ConditionSnapshotExportCapacityExceeded))
+	})
+	for name, duty := range map[string]func(*appsv1.SnapshotExportStatus){
+		"delete on expire": func(e *appsv1.SnapshotExportStatus) { e.DeleteOnExpire = true },
+		"pending deletion": func(e *appsv1.SnapshotExportStatus) {
+			e.DeleteOnExpire, e.Phase, e.RemoteCleanupState = true, appsv1.SnapshotExportPhaseDeleting, "Required"
+		},
+		"unacknowledged uncertainty": func(e *appsv1.SnapshotExportStatus) {
+			e.Archive, e.Phase, e.RemoteCleanupState = nil, appsv1.SnapshotExportPhaseCleanupRequired, "Required"
+		},
+		"active upload": func(e *appsv1.SnapshotExportStatus) {
+			e.Archive, e.Phase, e.RemoteCleanupState = nil, appsv1.SnapshotExportPhaseUploading, ""
+		},
+	} {
+		t.Run("history with a remaining duty is never evicted "+name, func(t *testing.T) {
+			c, _, _ := history(t, nativeHistoryLimit, 0, func(_ int, _ *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) bool {
+				e.Archive = nil
+				duty(e)
+				return false
+			})
+			watermark := c.Status.SnapshotExportAuthority.LastSequence
+			next, _ := nativeReviewSource(t, admin, source, original.Driver)
+			var deferred *nativeDeferred
+			require.ErrorAs(t, r.reserveNativeAttempt(ctx, c, next), &deferred)
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			require.Len(t, c.Status.SnapshotExports, nativeHistoryLimit)
+			require.Equal(t, watermark, c.Status.SnapshotExportAuthority.LastSequence)
+		})
+	}
+	t.Run("local resource lag protects an acknowledged record from eviction", func(t *testing.T) {
+		c, _, _ := history(t, nativeHistoryLimit, 0, func(_ int, a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) bool {
+			a.RemoteCleanupState, a.CleanupState = "Required", "Acknowledged"
+			e.Phase, e.RemoteCleanupState = appsv1.SnapshotExportPhaseAcknowledged, "Required"
+			return true
+		})
+		lagging := c.Status.SnapshotExportAuthority.Attempts[0].DeepCopy()
+		recipe, err := exportprotocol.DecodeRecipe(lagging)
+		require.NoError(t, err)
+		lagging.CleanupAttempt = 1
+		late := datasnapshot.NativeCleanupJob(lagging, recipe)
+		require.NoError(t, admin.Create(ctx, late))
+		released := c.Status.SnapshotExports[1].ID
+		next, _ := nativeReviewSource(t, admin, source, original.Driver)
+		require.NoError(t, r.reserveNativeAttempt(ctx, c, next))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.NotNil(t, snapshotExportByID(c, lagging.ExportID))
+		require.NotNil(t, exportprotocol.FindAttempt(c, lagging.Sequence, lagging.ID))
+		require.Nil(t, snapshotExportByID(c, released))
+	})
+	t.Run("retained success keeps its authority until the source marker is durable", func(t *testing.T) {
+		c, oldest, _ := history(t, 1, 0, func(_ int, _ *appsv1.SnapshotExportAttempt, _ *appsv1.SnapshotExportStatus) bool { return true })
+		a := c.Status.SnapshotExportAuthority.Attempts[0].DeepCopy()
+		oldest.Annotations[controllers.AnnotationExportingTarball] = "true"
+		require.NoError(t, admin.Update(ctx, oldest))
+		require.NoError(t, r.compactNativeAttempts(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.NotNil(t, exportprotocol.FindAttempt(c, a.Sequence, a.ID))
+		oldest.Annotations[controllers.AnnotationExportingTarball] = tarballNativeFinished
+		require.NoError(t, admin.Update(ctx, oldest))
+		require.NoError(t, r.compactNativeAttempts(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Nil(t, exportprotocol.FindAttempt(c, a.Sequence, a.ID))
+		require.NotNil(t, snapshotExportByID(c, a.ExportID).Archive, "compaction keeps the retained descriptor")
+	})
+	t.Run("failed marker write defers release", func(t *testing.T) {
+		c, oldest, _ := history(t, nativeHistoryLimit, 0, smallRecord)
+		var failed atomic.Bool
+		failed.Store(true)
+		faulty := rest.CopyConfig(r.RestConfig)
+		faulty.WrapTransport = func(base http.RoundTripper) http.RoundTripper {
+			return nativeRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if failed.Load() && req.Method == http.MethodPut && strings.HasSuffix(req.URL.Path, "/volumesnapshots/"+oldest.Name) {
+					return nil, fmt.Errorf("test marker write unavailable")
+				}
+				return base.RoundTrip(req)
+			})
+		}
+		writer, err := client.New(faulty, client.Options{Scheme: r.Scheme})
+		require.NoError(t, err)
+		local := &Reconciler{Client: writer, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
+		next, _ := nativeReviewSource(t, admin, source, original.Driver)
+		require.ErrorContains(t, local.reserveNativeAttempt(ctx, c, next), "marker write unavailable")
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Len(t, c.Status.SnapshotExports, nativeHistoryLimit, "history is never dropped before its marker is durable")
+		failed.Store(false)
+		require.NoError(t, local.reserveNativeAttempt(ctx, c, next))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(oldest), oldest))
+		require.Equal(t, tarballNativeFailed, oldest.Annotations[controllers.AnnotationExportingTarball])
+	})
+	t.Run("retained record of a replaced source releases without touching the replacement", func(t *testing.T) {
+		c, oldest, _ := history(t, 2, 0, nil)
+		require.NoError(t, admin.Delete(ctx, oldest))
+		replacement := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: oldest.Name, Namespace: oldest.Namespace}, Spec: *oldest.Spec.DeepCopy()}
+		require.NoError(t, admin.Create(ctx, replacement))
+		released := c.Status.SnapshotExports[0].ID
+		local, events := withEvents(r)
+		require.NoError(t, local.compactNativeAttempts(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Nil(t, snapshotExportByID(c, released))
+		require.Len(t, c.Status.SnapshotExports, 1)
+		require.Contains(t, <-events.Events, released)
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(replacement), replacement))
+		require.Empty(t, replacement.Annotations[controllers.AnnotationExportingTarball])
+	})
+	t.Run("split retained output releases once its source is gone", func(t *testing.T) {
+		split := func(_ int, a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) bool {
+			recipe, err := exportprotocol.DecodeRecipe(a)
+			require.NoError(t, err)
+			envelope := exportprotocol.EnvelopeFor(a, recipe)
+			envelope.Result = dataexporter.UploadResult{Version: 1, Layout: "split", ObjectCount: 2, Compression: recipe.Compression}
+			body, err := exportprotocol.EncodeEnvelope(envelope)
+			require.NoError(t, err)
+			a.CompletedEnvelope, e.Archive = string(body), nil
+			return true
+		}
+		c, oldest, _ := history(t, 1, 0, split)
+		a := c.Status.SnapshotExportAuthority.Attempts[0].DeepCopy()
+		oldest.Annotations[controllers.AnnotationExportingTarball] = tarballNativeFinished
+		require.NoError(t, admin.Update(ctx, oldest))
+		require.NoError(t, r.compactNativeAttempts(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.NotNil(t, exportprotocol.FindAttempt(c, a.Sequence, a.ID), "a split result keeps its only layout evidence while the source lives")
+		require.NoError(t, admin.Delete(ctx, oldest))
+		require.NoError(t, r.compactNativeAttempts(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Empty(t, c.Status.SnapshotExportAuthority.Attempts)
+		require.Empty(t, c.Status.SnapshotExports)
+		require.Equal(t, a.Sequence, c.Status.SnapshotExportAuthority.LastSequence)
+	})
+	t.Run("acknowledged catalog record without authority allows CSI retention", func(t *testing.T) {
+		c, oldest, _ := history(t, 1, 0, func(_ int, _ *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) bool {
+			e.DeleteOnExpire, e.Phase, e.RemoteCleanupState = true, appsv1.SnapshotExportPhaseAcknowledged, "Required"
+			return false
+		})
+		require.NoError(t, r.retainNativeSnapshot(ctx, c, oldest, &c.Status.SnapshotExports[0]))
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(oldest), &snapshotv1.VolumeSnapshot{})))
+	})
+	for _, marker := range []string{tarballNativeFinished, tarballNativeFailed} {
+		t.Run("protocol switch after eviction stays away from legacy cloud paths "+marker, func(t *testing.T) {
+			s, _ := nativeReviewSource(t, admin, source, original.Driver)
+			c := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{GenerateName: "evicted-", Namespace: template.Namespace}, Spec: *template.Spec.DeepCopy()}
+			c.Spec.Persistence.Snapshots.ExportTarball.Protocol = ""
+			c.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+			require.NoError(t, admin.Create(ctx, c))
+			c.Status.LatestHeight, c.Status.PvcSize = 1, "1Gi"
+			require.NoError(t, admin.Status().Update(ctx, c))
+			s.Labels = map[string]string{controllers.LabelChainNode: c.Name}
+			s.Annotations[controllers.AnnotationExportingTarball] = marker
+			s.Annotations[controllers.AnnotationTarballExportAttempts] = "1"
+			require.NoError(t, admin.Update(ctx, s))
+			clients, err := kubernetes.NewForConfig(r.RestConfig)
+			require.NoError(t, err)
+			local := &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts, recorder: record.NewFakeRecorder(100), ClientSet: clients}
+			requireNoJobs := func() {
+				t.Helper()
+				jobs := &batchv1.JobList{}
+				require.NoError(t, admin.List(ctx, jobs, client.InNamespace(c.Namespace)))
+				for i := range jobs.Items {
+					require.False(t, metav1.IsControlledBy(&jobs.Items[i], c), "legacy cloud work started: %s", jobs.Items[i].Name)
+				}
+				require.Empty(t, c.Status.SnapshotExports)
+			}
+			require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+			requireNoJobs()
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(s), s))
+			require.Equal(t, marker, s.Annotations[controllers.AnnotationExportingTarball])
+			s.Annotations[controllers.AnnotationSnapshotRetention] = "1ns"
+			require.NoError(t, admin.Update(ctx, s))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+			requireNoJobs()
+			require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(s), &snapshotv1.VolumeSnapshot{})), "retention deletes only the local CSI snapshot")
+		})
+	}
 	for _, authorized := range []bool{false, true} {
 		for _, countRetention := range []bool{false, true} {
 			remote := "Complete"
@@ -2132,8 +2479,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				a.RemoteCleanupState = "Required"
 				e.RemoteCleanupState = "Required"
 				if capacity {
-					a.CleanupState = "Acknowledged"
-					e.Phase = appsv1.SnapshotExportPhaseAcknowledged
+					e.Phase = appsv1.SnapshotExportPhaseCleanupRequired
 				} else {
 					a.CleanupAttempt = exportprotocol.MaxCleanupAttempts
 					a.CleanupIssuer = string(uuid.NewUUID())
@@ -2360,7 +2706,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				require.Len(t, node.Status.SnapshotExports, 32)
 				for _, e := range node.Status.SnapshotExports {
 					require.Equal(t, "Required", e.RemoteCleanupState)
-					require.Equal(t, appsv1.SnapshotExportPhaseAcknowledged, e.Phase)
+					require.Equal(t, appsv1.SnapshotExportPhaseCleanupRequired, e.Phase)
 				}
 			}
 		}

@@ -402,7 +402,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					return err
 				}
 				if expired {
-					if nativeConfigured(chainNode) && snapshotExportFor(chainNode, &snapshot) == nil && snapshot.Annotations[controllers.AnnotationExportingTarball] == "" {
+					if nativeRetentionOnly(chainNode, &snapshot) {
 						uid, rv := snapshot.UID, snapshot.ResourceVersion
 						if err := r.Delete(ctx, &snapshot, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil {
 							return err
@@ -500,7 +500,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				logger.Info("skipping retain-count deletion while tarball export is in flight", "snapshot", snapshot.GetName())
 				continue
 			}
-			if nativeConfigured(chainNode) && snapshotExportFor(chainNode, &snapshot) == nil && snapshot.Annotations[controllers.AnnotationExportingTarball] == "" {
+			if nativeRetentionOnly(chainNode, &snapshot) {
 				uid, rv := snapshot.UID, snapshot.ResourceVersion
 				if err := r.Delete(ctx, &snapshot, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil {
 					return err
@@ -2239,7 +2239,7 @@ func (r *Reconciler) retainNativeSnapshot(ctx context.Context, c *appsv1.ChainNo
 		if !gone {
 			return nil
 		}
-	} else if e.DeleteOnExpire && e.Phase != appsv1.SnapshotExportPhaseDeleted && !safePreauthorization {
+	} else if e.DeleteOnExpire && e.Phase != appsv1.SnapshotExportPhaseDeleted && e.Phase != appsv1.SnapshotExportPhaseAcknowledged && !safePreauthorization {
 		return nil
 	}
 	uid, rv := s.UID, s.ResourceVersion
@@ -2262,7 +2262,7 @@ func (r *Reconciler) handleNativeSnapshotOutcome(ctx context.Context, c *appsv1.
 		_, fatal := r.handleNativeOutcome(ctx, c, nativeLocal("RecoveryDeferred", e.ID, r.retainNativeSnapshot(ctx, c, s, e)))
 		return true, fatal
 	}
-	if nativeConfigured(c) && snapshotExportFor(c, s) == nil && s.Annotations[controllers.AnnotationExportingTarball] == "" {
+	if nativeRetentionOnly(c, s) {
 		uid, rv := s.UID, s.ResourceVersion
 		return true, r.Delete(ctx, s, client.Preconditions{UID: &uid, ResourceVersion: &rv})
 	}

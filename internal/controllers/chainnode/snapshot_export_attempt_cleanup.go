@@ -777,84 +777,235 @@ func (r *Reconciler) compactNativeAttempts(ctx context.Context, c *appsv1.ChainN
 		return nil
 	}
 	kept := make([]appsv1.SnapshotExportAttempt, 0, len(auth.Attempts))
-	prune := map[string]bool{}
 	changed := false
 	for _, a := range auth.Attempts {
 		recipe, err := exportprotocol.DecodeRecipe(&a)
 		if err != nil {
 			return err
 		}
-		e := snapshotExportByID(fresh, a.ExportID)
-		removable := exportprotocol.Terminal(&a) && a.LocalCleanupState == "Complete" && a.RemoteCleanupState == "Complete" && a.CleanupState == ""
-		sourceGone, err := r.nativeSourceGone(ctx, recipe.Namespace, recipe.Snapshot)
+		source, err := r.nativeExactSource(ctx, recipe.Namespace, recipe.Snapshot.Name, recipe.Snapshot.UID)
 		if err != nil {
 			return err
 		}
-		if a.Phase == "Succeeded" {
-			removable = removable && e != nil && (e.Archive != nil || a.CleanupComplete) && (!recipe.DeleteOnExpire || a.CleanupComplete && sourceGone)
-		}
+		removable := nativeAttemptCompactable(&a, snapshotExportByID(fresh, a.ExportID), recipe, source)
 		if removable {
-			if a.Phase == "Invalidated" && !sourceGone {
+			if a.Phase == "Invalidated" && source != nil {
 				if err := r.failNativeSnapshotMarker(ctx, c, &a, recipe); err != nil {
 					return err
 				}
 			}
-			gone, err := r.nativeCleanupResourcesGone(ctx, c, &a)
-			if err != nil {
+			if removable, err = r.nativeCleanupResourcesGone(ctx, c, &a); err != nil {
 				return err
 			}
-			removable = removable && gone
 		}
 		if removable {
 			changed = true
-			if sourceGone && (a.Phase == "Invalidated" || a.CleanupComplete) {
-				prune[a.ExportID] = true
-			}
 		} else {
 			kept = append(kept, a)
 		}
 	}
 	exports := make([]appsv1.SnapshotExportStatus, 0, len(fresh.Status.SnapshotExports))
+	var released []appsv1.SnapshotExportStatus
 	for _, e := range fresh.Status.SnapshotExports {
-		if e.ProvenanceVersion == 1 && e.Archive == nil && e.RemoteCleanupState == "Complete" && e.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
-			hasAttempt := false
-			for _, a := range kept {
-				if a.ExportID == e.ID {
-					hasAttempt = true
-					break
-				}
+		a := nativeAttemptFor(kept, e.ID)
+		release := nativeHistoryReleasable(&e, a)
+		if release {
+			source, err := r.nativeExactSource(ctx, c.Namespace, e.SnapshotName, e.SnapshotUID)
+			if err != nil {
+				return err
 			}
-			if !hasAttempt {
-				gone, err := r.nativeSourceGone(ctx, c.Namespace, appsv1.ExportResourceIdentity{Name: e.SnapshotName, UID: e.SnapshotUID})
-				if err != nil {
-					return err
-				}
-				if gone {
-					prune[e.ID] = true
-				}
+			release = source == nil
+		}
+		if release && a != nil {
+			if release, err = r.nativeCleanupResourcesGone(ctx, c, a); err != nil {
+				return err
 			}
 		}
-		if prune[e.ID] {
-			changed = true
-		} else {
+		if !release {
 			exports = append(exports, e)
+			continue
 		}
+		released = append(released, e)
+		kept = nativeWithoutAttempt(kept, e.ID)
+		changed = true
 	}
 	if !changed {
 		return nil
 	}
 	auth.Attempts = kept
 	fresh.Status.SnapshotExports = exports
-	return r.nativeSave(ctx, c, fresh)
-}
-func (r *Reconciler) nativeSourceGone(ctx context.Context, namespace string, ref appsv1.ExportResourceIdentity) (bool, error) {
-	s := &snapshotv1.VolumeSnapshot{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, s); apierrors.IsNotFound(err) {
-		return true, nil
-	} else if err != nil {
-		return false, err
+	if err := r.nativeSave(ctx, c, fresh); err != nil {
+		return err
 	}
-	return s.UID != ref.UID, nil
+	for i := range released {
+		r.recordNativeRelease(c, &released[i])
+	}
+	return nil
+}
+
+// nativeAttemptCompactable reports whether authority has no future automatic duty; its catalog entry may stay.
+func nativeAttemptCompactable(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus, recipe exportprotocol.Recipe, source *snapshotv1.VolumeSnapshot) bool {
+	if !exportprotocol.Terminal(a) || a.LocalCleanupState != "Complete" {
+		return false
+	}
+	if a.CleanupState == "Acknowledged" {
+		return true
+	}
+	if a.CleanupState != "" {
+		return false
+	}
+	if a.Phase == "Invalidated" {
+		return a.RemoteCleanupState == "Complete"
+	}
+	if e == nil {
+		return false
+	}
+	if a.CleanupComplete {
+		return source == nil
+	}
+	// A split result has no descriptor, so its envelope stays until the whole history entry is released.
+	if a.RemoteCleanupState != "Complete" || recipe.DeleteOnExpire || e.Archive == nil {
+		return false
+	}
+	return source == nil || source.Annotations[controllers.AnnotationExportingTarball] == tarballNativeFinished
+}
+
+// nativeHistoryReleasable reports whether a catalog entry carries no remaining deletion, retry or acknowledgement duty.
+func nativeHistoryReleasable(e *appsv1.SnapshotExportStatus, a *appsv1.SnapshotExportAttempt) bool {
+	if e.ProvenanceVersion != 1 {
+		return false
+	}
+	if a != nil {
+		if !exportprotocol.Terminal(a) || a.LocalCleanupState != "Complete" {
+			return false
+		}
+		switch {
+		case a.CleanupState == "Acknowledged", a.CleanupComplete:
+			return true
+		case a.CleanupState != "":
+			return false
+		case a.Phase == "Invalidated":
+			return a.RemoteCleanupState == "Complete"
+		}
+		return !e.DeleteOnExpire && a.RemoteCleanupState == "Complete"
+	}
+	switch e.Phase {
+	case appsv1.SnapshotExportPhaseAcknowledged, appsv1.SnapshotExportPhaseDeleted:
+		return true
+	case appsv1.SnapshotExportPhaseUploaded:
+		return !e.DeleteOnExpire && e.RemoteCleanupState == "Complete"
+	case appsv1.SnapshotExportPhaseCleanupRequired:
+		return e.Archive == nil && e.RemoteCleanupState == "Complete"
+	}
+	return false
+}
+
+// evictNativeHistory drops the oldest entry without duties; its bucket objects stay untouched.
+func (r *Reconciler) evictNativeHistory(ctx context.Context, c, fresh *appsv1.ChainNode) (bool, error) {
+	auth := fresh.Status.SnapshotExportAuthority
+	for i := range fresh.Status.SnapshotExports {
+		e := fresh.Status.SnapshotExports[i]
+		a := nativeAttemptFor(auth.Attempts, e.ID)
+		if !nativeHistoryReleasable(&e, a) {
+			continue
+		}
+		if a != nil {
+			gone, err := r.nativeCleanupResourcesGone(ctx, c, a)
+			if err != nil {
+				return false, err
+			}
+			if !gone {
+				continue
+			}
+		}
+		// The marker is written first: a crash here leaves extra history, never an unmarked source.
+		if err := r.persistNativeProgress(ctx, fresh, &e, a); err != nil {
+			return false, err
+		}
+		auth.Attempts = nativeWithoutAttempt(auth.Attempts, e.ID)
+		fresh.Status.SnapshotExports = append(fresh.Status.SnapshotExports[:i:i], fresh.Status.SnapshotExports[i+1:]...)
+		if err := r.nativeSave(ctx, c, fresh); err != nil {
+			return false, err
+		}
+		r.recordNativeRelease(c, &e)
+		return true, nil
+	}
+	return false, nil
+}
+
+// persistNativeProgress records a source's terminal bookkeeping before its last status record disappears.
+func (r *Reconciler) persistNativeProgress(ctx context.Context, fresh *appsv1.ChainNode, e *appsv1.SnapshotExportStatus, a *appsv1.SnapshotExportAttempt) error {
+	s, err := r.nativeExactSource(ctx, fresh.Namespace, e.SnapshotName, e.SnapshotUID)
+	if err != nil || s == nil || !s.DeletionTimestamp.IsZero() {
+		return err
+	}
+	if latest := snapshotExportFor(fresh, s); latest == nil || latest.ID != e.ID {
+		return nil
+	}
+	marker, failures := tarballNativeFailed, nativeFailedAttempts(s)
+	if e.Archive != nil || (a != nil && a.Phase == "Succeeded") {
+		marker = tarballNativeFinished
+	} else if a != nil {
+		failures = max(failures, int(a.UploadAttempt))
+	}
+	if s.Annotations[controllers.AnnotationExportingTarball] == marker && failures == nativeFailedAttempts(s) {
+		return nil
+	}
+	if s.Annotations == nil {
+		s.Annotations = map[string]string{}
+	}
+	s.Annotations[controllers.AnnotationExportingTarball] = marker
+	if marker == tarballNativeFailed {
+		s.Annotations[controllers.AnnotationTarballExportAttempts] = strconv.Itoa(failures)
+	}
+	return r.Update(ctx, s)
+}
+func (r *Reconciler) recordNativeRelease(c *appsv1.ChainNode, e *appsv1.SnapshotExportStatus) {
+	object := e.ObjectName
+	if e.Archive != nil {
+		object = e.Archive.ObjectKey
+	}
+	kind, outcome := corev1.EventTypeNormal, "retained in place"
+	switch {
+	case e.RemoteCleanupState == "Required":
+		kind, outcome = corev1.EventTypeWarning, "never proven deleted"
+	case e.Phase == appsv1.SnapshotExportPhaseDeleted:
+		outcome = "deleted"
+	case e.Archive == nil && e.Phase != appsv1.SnapshotExportPhaseUploaded:
+		outcome = "never uploaded"
+	}
+	r.recorder.Eventf(c, kind, appsv1.ReasonSnapshotExportHistoryReleased, "Released export history %s: object %s in %s bucket %s %s", e.ID, object, e.Destination.Provider, e.Destination.Bucket, outcome)
+}
+func nativeAttemptFor(attempts []appsv1.SnapshotExportAttempt, exportID string) *appsv1.SnapshotExportAttempt {
+	for i := range attempts {
+		if attempts[i].ExportID == exportID {
+			return &attempts[i]
+		}
+	}
+	return nil
+}
+func nativeWithoutAttempt(attempts []appsv1.SnapshotExportAttempt, exportID string) []appsv1.SnapshotExportAttempt {
+	kept := make([]appsv1.SnapshotExportAttempt, 0, len(attempts))
+	for _, a := range attempts {
+		if a.ExportID != exportID {
+			kept = append(kept, a)
+		}
+	}
+	return kept
+}
+
+// nativeExactSource returns the live source incarnation, or nil once it is gone or replaced.
+func (r *Reconciler) nativeExactSource(ctx context.Context, namespace, name string, uid types.UID) (*snapshotv1.VolumeSnapshot, error) {
+	s := &snapshotv1.VolumeSnapshot{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, s); apierrors.IsNotFound(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if s.UID != uid {
+		return nil, nil
+	}
+	return s, nil
 }
 
 func (r *Reconciler) nativeOrphanAuthority(ctx context.Context, key client.ObjectKey) (*appsv1.ChainNode, error) {
@@ -915,6 +1066,20 @@ func nativeFailedAttempts(s *snapshotv1.VolumeSnapshot) int {
 		return 0
 	}
 	return attempts
+}
+
+// nativeRetentionOnly reports a source with no export record and no cloud duty, so retention deletes only its CSI snapshot.
+func nativeRetentionOnly(c *appsv1.ChainNode, s *snapshotv1.VolumeSnapshot) bool {
+	if snapshotExportFor(c, s) != nil {
+		return false
+	}
+	switch s.Annotations[controllers.AnnotationExportingTarball] {
+	case tarballNativeFinished, tarballNativeFailed:
+		return true
+	case "":
+		return nativeConfigured(c)
+	}
+	return false
 }
 
 // nativeRetryDue reports whether a failed native export still has automatic attempts left.

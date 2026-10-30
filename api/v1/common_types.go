@@ -53,6 +53,7 @@ const (
 	ReasonTarballDeleteAttemptsExhausted   = "TarballDeleteAttemptsExhausted"
 	ReasonTarballCleanupRequired           = "TarballCleanupRequired"
 	ReasonTarballCleanupAcknowledged       = "TarballCleanupAcknowledged"
+	ReasonSnapshotExportHistoryReleased    = "SnapshotExportHistoryReleased"
 	ReasonSnapshotJobReplaced              = "SnapshotJobReplaced"
 	ReasonSnapshotIntegrityStart           = "IntegrityCheckStart"
 	ReasonUpgradeCompleted                 = "UpgradeCompleted"
@@ -1250,8 +1251,8 @@ type SnapshotExportDestination struct {
 }
 
 // SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is
-// persisted before its upload Job is created and retained until remote deletion succeeds or an
-// operator explicitly acknowledges cleanup.
+// persisted before its upload Job is created. Native records are a bounded working catalog: once no
+// duty remains they are released, oldest first, without touching retained bucket objects.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.archive) || has(self.archive)",message="published archive cannot disappear"
 type SnapshotExportStatus struct {
 	// +optional

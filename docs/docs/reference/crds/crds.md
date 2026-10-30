@@ -1177,7 +1177,7 @@ SnapshotExportSecretReference is a local Secret reference used by snapshot expor
 
 #### SnapshotExportStatus
 
-SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is persisted before its upload Job is created and retained until remote deletion succeeds or an operator explicitly acknowledges cleanup.
+SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is persisted before its upload Job is created. Native records are a bounded working catalog: once no duty remains they are released, oldest first, without touching retained bucket objects.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |

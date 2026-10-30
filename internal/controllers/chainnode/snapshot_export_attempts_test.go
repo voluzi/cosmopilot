@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -171,7 +172,7 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 	require.NoError(t, err)
 	controlled, err := client.New(transportCfg, client.Options{Scheme: scheme.Scheme})
 	require.NoError(t, err)
-	r := &Reconciler{Client: controlled, APIReader: authorityReader, RestConfig: cfg, Scheme: scheme.Scheme, opts: &controllers.ControllerRunOptions{DataExporterImage: "exporter:test"}}
+	r := &Reconciler{Client: controlled, APIReader: authorityReader, RestConfig: cfg, Scheme: scheme.Scheme, opts: &controllers.ControllerRunOptions{DataExporterImage: "exporter:test"}, recorder: &record.FakeRecorder{}}
 	refresh := func() { require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c)) }
 	attempt := func() *appsv1.SnapshotExportAttempt {
 		refresh()
@@ -305,7 +306,7 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 		for _, path := range []string{"/volumesnapshots/" + s.Name, "/volumesnapshotcontents/" + content.Name, "/secrets/" + recipe.Credentials.Name, "/serviceaccounts/" + recipe.ServiceAccount.Name} {
 			t.Run(path, func(t *testing.T) {
 				reader, fired := nativeFaultReader(t, cfg, path, 503, 1)
-				local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts}
+				local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts, recorder: r.recorder}
 				require.Error(t, local.recoverNativeExports(ctx, c))
 				require.Positive(t, fired.Load())
 				require.Equal(t, a, attempt())
@@ -396,7 +397,7 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 		} {
 			if !t.Run(fault.name, func(t *testing.T) {
 				reader, fired := nativeFaultReader(t, cfg, fault.path, fault.code, fault.skip)
-				local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts}
+				local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts, recorder: r.recorder}
 				before := posts.Load()
 				err := local.recoverNativeExports(ctx, c)
 				require.Positive(t, fired.Load(), "the selected wire read must be reached")

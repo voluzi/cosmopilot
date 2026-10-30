@@ -246,6 +246,10 @@ func (r *Reconciler) reserveNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 	if s.UID != snapshot.UID || s.Status == nil || s.Status.BoundVolumeSnapshotContentName == nil || s.Status.RestoreSize == nil {
 		return fmt.Errorf("native snapshot is not bound")
 	}
+	// The cached list can predate a marker that outlived its evicted status record.
+	if s.Annotations[controllers.AnnotationExportingTarball] == tarballNativeFinished {
+		return nil
+	}
 	uploadAttempt := nativeFailedAttempts(s) + 1
 	if uploadAttempt > tarballExportMaxAttempts {
 		return &nativeDeferred{reason: "AttemptsExhausted"}
@@ -327,9 +331,6 @@ func (r *Reconciler) reserveNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 	if auth.Version != 1 {
 		return nativeLocal("InvalidAuthority", "", fmt.Errorf("unsupported native authority"))
 	}
-	if len(auth.Attempts) >= 32 {
-		return r.deferNativeCapacity(ctx, c, "AttemptLimit")
-	}
 	if auth.LastSequence == math.MaxInt64 {
 		return r.deferNativeCapacity(ctx, c, "SequenceExhausted")
 	}
@@ -341,16 +342,16 @@ func (r *Reconciler) reserveNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 	if err := exportprotocol.CheckEnvelopeBudget(&a, recipe); err != nil {
 		return err
 	}
+	if fresh, err = r.ensureNativeCapacity(ctx, c, fresh, &a, base); err != nil {
+		return err
+	}
+	if fresh.Status.SnapshotExportAuthority == nil {
+		fresh.Status.SnapshotExportAuthority = &appsv1.SnapshotExportAuthority{Version: 1, Attempts: []appsv1.SnapshotExportAttempt{}}
+	}
+	auth = fresh.Status.SnapshotExportAuthority
 	auth.LastSequence = a.Sequence
 	auth.Attempts = append(auth.Attempts, a)
 	fresh.Status.SnapshotExports = append(fresh.Status.SnapshotExports, base)
-	budget, err := nativeProjectedStatusSize(fresh)
-	if err != nil {
-		return err
-	}
-	if budget > exportprotocol.MaxNativeStatus {
-		return r.deferNativeCapacity(ctx, c, "StatusBudget")
-	}
 	apiMeta.RemoveStatusCondition(&fresh.Status.Conditions, appsv1.ConditionSnapshotExportCapacityExceeded)
 	return r.nativeSave(ctx, c, fresh)
 }
@@ -817,6 +818,63 @@ func (r *Reconciler) nativeCondition(ctx context.Context, c *appsv1.ChainNode, k
 		return nil
 	}
 	return r.nativeSave(ctx, c, fresh)
+}
+
+// ensureNativeCapacity compacts, then releases the oldest terminal history until the reservation fits.
+func (r *Reconciler) ensureNativeCapacity(ctx context.Context, c, fresh *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, base appsv1.SnapshotExportStatus) (*appsv1.ChainNode, error) {
+	compacted := false
+	for {
+		reason, err := nativeCapacityShortfall(fresh, a, base)
+		if err != nil || reason == "" {
+			return fresh, err
+		}
+		if compacted {
+			released, err := r.evictNativeHistory(ctx, c, fresh)
+			if err != nil {
+				return nil, err
+			}
+			if !released {
+				return nil, r.deferNativeCapacity(ctx, c, reason)
+			}
+		} else {
+			compacted = true
+			if err := r.compactNativeAttempts(ctx, c); err != nil {
+				return nil, err
+			}
+		}
+		if fresh, err = r.nativeRead(ctx, c); err != nil {
+			return nil, err
+		}
+	}
+}
+func nativeCapacityShortfall(c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, base appsv1.SnapshotExportStatus) (string, error) {
+	projected := c.DeepCopy()
+	if projected.Status.SnapshotExportAuthority == nil {
+		projected.Status.SnapshotExportAuthority = &appsv1.SnapshotExportAuthority{Version: 1, Attempts: []appsv1.SnapshotExportAttempt{}}
+	}
+	auth := projected.Status.SnapshotExportAuthority
+	if len(auth.Attempts) >= nativeHistoryLimit {
+		return "AttemptLimit", nil
+	}
+	records := 0
+	for i := range projected.Status.SnapshotExports {
+		if projected.Status.SnapshotExports[i].ProvenanceVersion == 1 {
+			records++
+		}
+	}
+	if records >= nativeHistoryLimit {
+		return "HistoryLimit", nil
+	}
+	auth.Attempts = append(auth.Attempts, *a)
+	projected.Status.SnapshotExports = append(projected.Status.SnapshotExports, base)
+	budget, err := nativeProjectedStatusSize(projected)
+	if err != nil {
+		return "", err
+	}
+	if budget > exportprotocol.MaxNativeStatus {
+		return "StatusBudget", nil
+	}
+	return "", nil
 }
 func (r *Reconciler) deferNativeCapacity(ctx context.Context, c *appsv1.ChainNode, reason string) error {
 	if err := r.nativeCondition(ctx, c, appsv1.ConditionSnapshotExportCapacityExceeded, reason, "Native export reservation declined: "+reason); err != nil {
