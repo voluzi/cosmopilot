@@ -295,7 +295,7 @@ func (r *Reconciler) recoverNativeExports(ctx context.Context, c *appsv1.ChainNo
 			if err := r.Update(ctx, fresh); err != nil {
 				return nativeLocal("RecoveryDeferred", "", err)
 			}
-			*c = *fresh
+			mergeNativeFinalizerWrite(c, fresh)
 		}
 	}
 	if pending != nil {

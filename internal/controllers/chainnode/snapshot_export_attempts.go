@@ -91,6 +91,17 @@ func (r *Reconciler) nativeTransition(ctx context.Context, c *appsv1.ChainNode, 
 	}
 	return r.nativeSave(ctx, c, fresh)
 }
+
+// mergeNativeFinalizerWrite carries only what a metadata write changed into the caller, whose core status may be unpersisted.
+func mergeNativeFinalizerWrite(c, fresh *appsv1.ChainNode) {
+	mergeSnapshotExportOwnedStatus(c, fresh)
+	if controllerutil.ContainsFinalizer(fresh, exportprotocol.AuthorityFinalizer) {
+		controllerutil.AddFinalizer(c, exportprotocol.AuthorityFinalizer)
+	} else {
+		controllerutil.RemoveFinalizer(c, exportprotocol.AuthorityFinalizer)
+	}
+	refreshSnapshotExportResourceVersion(c, fresh)
+}
 func (r *Reconciler) ensureNativeIdentity(ctx context.Context, c *appsv1.ChainNode) (appsv1.ExportResourceIdentity, error) {
 	name := "export-" + string(c.UID)
 	owner := []metav1.OwnerReference{{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode", Name: c.Name, UID: c.UID, Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true)}}
@@ -187,7 +198,7 @@ func (r *Reconciler) reserveNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 		if err := r.Update(ctx, fresh); err != nil {
 			return err
 		}
-		*c = *fresh
+		mergeNativeFinalizerWrite(c, fresh)
 		return &nativeDeferred{reason: "RecoveryDeferred"}
 	}
 	if fresh.Status.SnapshotExportAuthority != nil {

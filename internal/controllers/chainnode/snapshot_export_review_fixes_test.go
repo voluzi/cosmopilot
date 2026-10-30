@@ -425,6 +425,77 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.Equal(t, before, posts.Load())
 		})
 	}
+	pendingStatus := func(c *appsv1.ChainNode) {
+		c.Status.SeedMode = true
+		c.Status.LatestHeight = 42
+		c.Status.Phase = appsv1.PhaseChainNodeRunning
+		apiMeta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{Type: "Unrelated", Status: metav1.ConditionTrue, Reason: "Pending"})
+	}
+	requirePendingStatus := func(t *testing.T, c *appsv1.ChainNode) {
+		t.Helper()
+		require.True(t, c.Status.SeedMode)
+		require.EqualValues(t, 42, c.Status.LatestHeight)
+		require.Equal(t, appsv1.PhaseChainNodeRunning, c.Status.Phase)
+		require.True(t, apiMeta.IsStatusConditionTrue(c.Status.Conditions, "Unrelated"))
+	}
+	t.Run("native status writes keep the caller's full Update valid", func(t *testing.T) {
+		c := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{GenerateName: "status-write-", Namespace: template.Namespace}, Spec: *template.Spec.DeepCopy()}
+		require.NoError(t, admin.Create(ctx, c))
+		require.NoError(t, r.nativeCondition(ctx, c, appsv1.ConditionSnapshotExportDegraded, "RecoveryDeferred", "test recovery deferred"))
+		pendingStatus(c)
+		require.NoError(t, admin.Update(ctx, c), "a status write the caller merged must not fail its next spec or metadata write")
+		c.Annotations = map[string]string{"test.example/pending": "true"}
+		require.NoError(t, r.nativeCondition(ctx, c, appsv1.ConditionSnapshotExportDegraded, "", ""))
+		server := &appsv1.ChainNode{}
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), server))
+		require.NotEqual(t, server.ResourceVersion, c.ResourceVersion, "pending metadata keeps the stale version")
+		require.True(t, apierrors.IsConflict(admin.Update(ctx, c.DeepCopy())))
+	})
+	for _, pending := range []string{"none", "annotation", "spec"} {
+		t.Run("authority finalizer writes preserve pending state "+pending, func(t *testing.T) {
+			mutate := func(c *appsv1.ChainNode) {
+				pendingStatus(c)
+				switch pending {
+				case "annotation":
+					c.Annotations = map[string]string{"test.example/pending": "true"}
+				case "spec":
+					c.Spec.OverrideImage = ptr.To("application:pending")
+				}
+			}
+			requireWritable := func(t *testing.T, c *appsv1.ChainNode, server *appsv1.ChainNode) {
+				t.Helper()
+				requirePendingStatus(t, c)
+				if pending == "none" {
+					require.Equal(t, server.ResourceVersion, c.ResourceVersion)
+					require.NoError(t, admin.Update(ctx, c))
+					return
+				}
+				require.NotEqual(t, server.ResourceVersion, c.ResourceVersion)
+				require.True(t, apierrors.IsConflict(admin.Update(ctx, c.DeepCopy())), "a later full Update must not overwrite the newer object")
+			}
+			added := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{GenerateName: "finalizer-add-", Namespace: template.Namespace}, Spec: *template.Spec.DeepCopy()}
+			require.NoError(t, admin.Create(ctx, added))
+			mutate(added)
+			var deferred *nativeDeferred
+			require.ErrorAs(t, r.reserveNativeAttempt(ctx, added, source), &deferred)
+			require.Contains(t, added.Finalizers, exportprotocol.AuthorityFinalizer)
+			server := &appsv1.ChainNode{}
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(added), server))
+			require.Contains(t, server.Finalizers, exportprotocol.AuthorityFinalizer)
+			requireWritable(t, added, server)
+
+			removed := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{GenerateName: "finalizer-remove-", Namespace: template.Namespace, Finalizers: []string{exportprotocol.AuthorityFinalizer, "test.example/observe"}}, Spec: *template.Spec.DeepCopy()}
+			require.NoError(t, admin.Create(ctx, removed))
+			require.NoError(t, admin.Delete(ctx, removed))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(removed), removed))
+			mutate(removed)
+			require.NoError(t, r.recoverNativeExports(ctx, removed))
+			require.NotContains(t, removed.Finalizers, exportprotocol.AuthorityFinalizer)
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(removed), server))
+			require.NotContains(t, server.Finalizers, exportprotocol.AuthorityFinalizer)
+			requireWritable(t, removed, server)
+		})
+	}
 	t.Run("orphan snapshot read errors remain failures", func(t *testing.T) {
 		local := &Reconciler{Client: r.Client, Scheme: r.Scheme, opts: r.opts}
 		var faults *atomic.Int32

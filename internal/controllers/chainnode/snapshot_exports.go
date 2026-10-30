@@ -649,11 +649,12 @@ func refreshSnapshotExportResourceVersion(chainNode, latest *appsv1.ChainNode) {
 	// retain the stale version and must conflict on a later full Update.
 	callerMeta := chainNode.ObjectMeta.DeepCopy()
 	latestMeta := latest.ObjectMeta.DeepCopy()
-	callerMeta.ResourceVersion = ""
-	latestMeta.ResourceVersion = ""
+	callerMeta.ResourceVersion, callerMeta.ManagedFields = "", nil
+	latestMeta.ResourceVersion, latestMeta.ManagedFields = "", nil
 	if apiequality.Semantic.DeepEqual(callerMeta, latestMeta) &&
 		apiequality.Semantic.DeepEqual(chainNode.Spec, latest.Spec) {
 		chainNode.ResourceVersion = latest.ResourceVersion
+		chainNode.ManagedFields = latest.ManagedFields
 	}
 }
 
