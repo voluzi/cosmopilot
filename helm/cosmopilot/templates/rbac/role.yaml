@@ -25,7 +25,6 @@ rules:
   resources:
   - endpoints
   - namespaces
-  - persistentvolumes
   verbs:
   - get
   - list
@@ -47,16 +46,17 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumes
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - pods/attach
   - pods/exec
   verbs:
   - create
-- apiGroups:
-  - ""
-  resources:
-  - pods/log
-  verbs:
-  - get
 - apiGroups:
   - ""
   resources:
@@ -224,8 +224,6 @@ rules:
   - volumesnapshotcontents
   verbs:
   - get
-  - list
-  - watch
 - apiGroups:
   - snapshot.storage.k8s.io
   resources:
@@ -243,6 +241,4 @@ rules:
   resources:
   - storageclasses
   verbs:
-  - get
   - list
-  - watch
