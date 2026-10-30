@@ -30,7 +30,7 @@ func (r *Reconciler) nativeExportRequests(ctx context.Context, o client.Object) 
 		}
 		for _, holder := range holders {
 			parts := strings.Split(holder, "/")
-			if len(parts) == 5 && parts[0] == s.Namespace && parts[2] != "" {
+			if len(parts) == 5 && parts[0] == s.Namespace && parts[1] != "" && parts[2] != "" {
 				requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: parts[0], Name: parts[1]}})
 			}
 		}
