@@ -36,8 +36,12 @@ func TestNativeUploadDeniesBeforeArchiveOrStoreAccess(t *testing.T) {
 		cleanup     bool
 		stopped     string
 		deleting    bool
+		ordinal     int32
+		bound       bool
 		wantErr     string
 	}{
+		{name: "retired cleanup ordinal before binding", phase: "Succeeded", ownerUID: "owner", cleanup: true, ordinal: 2, wantErr: "native authority denied"},
+		{name: "retired cleanup ordinal after binding", phase: "Succeeded", ownerUID: "owner", cleanup: true, ordinal: 2, bound: true, wantErr: "native cleanup authority denied"},
 		{name: "stopped cleanup before pod selection", phase: "Succeeded", ownerUID: "owner", cleanup: true, stopped: "Failed", wantErr: "native authority denied"},
 		{name: "acknowledged cleanup", phase: "Succeeded", ownerUID: "owner", cleanup: true, stopped: "Acknowledged", wantErr: "native authority denied"},
 		{name: "abandoned cleanup", phase: "Succeeded", ownerUID: "owner", cleanup: true, stopped: "Abandoned", wantErr: "native authority denied"},
@@ -51,7 +55,12 @@ func TestNativeUploadDeniesBeforeArchiveOrStoreAccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			authority := appsv1.ChainNode{TypeMeta: metav1.TypeMeta{APIVersion: appsv1.GroupVersion.String(), Kind: "ChainNode"}, ObjectMeta: metav1.ObjectMeta{Name: "authority", Namespace: "ns", UID: types.UID(tc.ownerUID)}, Status: appsv1.ChainNodeStatus{SnapshotExportAuthority: &appsv1.SnapshotExportAuthority{Version: 1, LastSequence: 1, Attempts: []appsv1.SnapshotExportAttempt{}}}}
 			if tc.phase != "" {
-				authority.Status.SnapshotExportAuthority.Attempts = append(authority.Status.SnapshotExportAuthority.Attempts, appsv1.SnapshotExportAttempt{ID: "attempt", Sequence: 1, Phase: tc.phase, CleanupState: tc.stopped})
+				authority.Status.SnapshotExportAuthority.Attempts = append(authority.Status.SnapshotExportAuthority.Attempts, appsv1.SnapshotExportAttempt{ID: "attempt", Sequence: 1, Phase: tc.phase, CleanupAttempt: max(tc.ordinal, 1), CleanupState: tc.stopped})
+			}
+			if tc.bound {
+				attempt := &authority.Status.SnapshotExportAuthority.Attempts[0]
+				attempt.CleanupJob = &appsv1.ExportResourceIdentity{Name: "delete-attempt-2", UID: "job"}
+				attempt.CleanupPod = &appsv1.ExportResourceIdentity{Name: "worker", UID: "pod"}
 			}
 			if tc.deleting {
 				now := metav1.Now()
@@ -90,11 +99,13 @@ func TestNativeUploadDeniesBeforeArchiveOrStoreAccess(t *testing.T) {
 			t.Cleanup(server.Close)
 			config := filepath.Join(t.TempDir(), "config")
 			require.NoError(t, os.WriteFile(config, []byte("apiVersion: v1\nkind: Config\nclusters:\n- name: test\n  cluster:\n    server: "+server.URL+"\ncontexts:\n- name: test\n  context:\n    cluster: test\n    user: test\ncurrent-context: test\nusers:\n- name: test\n  user: {}\n"), 0600))
+			args := []string{"--namespace", "ns", "--owner", "authority", "--owner-uid", "owner", "--attempt-id", "attempt", "--attempt-sequence", "1", "--pod-uid", "pod", "--kubeconfig", config}
 			command := newNativeUploadCmd()
 			if tc.cleanup {
 				command = newNativeCleanupCmd()
+				args = append(args, "--cleanup-attempt", "1")
 			}
-			command.SetArgs([]string{"--namespace", "ns", "--owner", "authority", "--owner-uid", "owner", "--attempt-id", "attempt", "--attempt-sequence", "1", "--pod-uid", "pod", "--kubeconfig", config})
+			command.SetArgs(args)
 			err := command.ExecuteContext(t.Context())
 			require.Error(t, err)
 			require.Positive(t, authorityRequests.Load())

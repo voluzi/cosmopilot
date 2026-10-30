@@ -564,7 +564,7 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 		original = exportprotocol.FindAttempt(c, a.Sequence, a.ID).DeepCopy()
 		require.NotNil(t, original.CleanupJob)
 		cleanupJob := &batchv1.Job{}
-		cleanupKey := client.ObjectKey{Namespace: ns.Name, Name: "delete-" + original.ID}
+		cleanupKey := client.ObjectKey{Namespace: ns.Name, Name: exportprotocol.CleanupJobName(original.ID, 1)}
 		require.NoError(t, admin.Get(ctx, cleanupKey, cleanupJob))
 		cleanupPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: cleanupJob.Name + "-pod", Namespace: ns.Name, Labels: cleanupJob.Spec.Template.Labels, OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: cleanupJob.Name, UID: cleanupJob.UID, Controller: ptr.To(true)}}}, Spec: *cleanupJob.Spec.Template.Spec.DeepCopy()}
 		require.NoError(t, admin.Create(ctx, cleanupPod))
@@ -572,15 +572,17 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 		refresh()
 		original = exportprotocol.FindAttempt(c, a.Sequence, a.ID).DeepCopy()
 		require.NotNil(t, original.CleanupPod)
-		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, original.Sequence, original.ID, cleanupPod.UID)
+		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, original.Sequence, original.ID, 1, cleanupPod.UID)
 		require.NoError(t, err)
-		_, _, _, err = exportprotocol.AuthorizeCleanup(c, "replaced-owner", original.Sequence, original.ID, cleanupPod.UID)
+		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, original.Sequence, original.ID, 2, cleanupPod.UID)
 		require.Error(t, err)
-		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, original.Sequence, original.ID, "stale-pod")
+		_, _, _, err = exportprotocol.AuthorizeCleanup(c, "replaced-owner", original.Sequence, original.ID, 1, cleanupPod.UID)
+		require.Error(t, err)
+		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, original.Sequence, original.ID, 1, "stale-pod")
 		require.Error(t, err)
 		deleting := c.DeepCopy()
 		deleting.DeletionTimestamp = ptr.To(metav1.Now())
-		_, _, _, err = exportprotocol.AuthorizeCleanup(deleting, c.UID, original.Sequence, original.ID, cleanupPod.UID)
+		_, _, _, err = exportprotocol.AuthorizeCleanup(deleting, c.UID, original.Sequence, original.ID, 1, cleanupPod.UID)
 		require.Error(t, err)
 		cleanupPod.Status.Phase = corev1.PodSucceeded
 		cleanupPod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "exporter", Image: recipe.Image, ImageID: "fixture", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}}}

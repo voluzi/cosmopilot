@@ -364,7 +364,7 @@ func (r *Reconciler) recoverNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 			return err
 		}
 	}
-	if stopping && !a.CleanupComplete && a.CleanupState == "" {
+	if stopping && !a.CleanupComplete && (a.CleanupState == "" || a.CleanupState == "Failed") {
 		reason := "OwnerDeleting"
 		if namespaceStopping {
 			reason = "NamespaceTerminating"
@@ -383,13 +383,13 @@ func (r *Reconciler) recoverNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 		return err
 	}
 	if stopping {
-		return r.cleanupNativeDeletionResources(ctx, c, a, recipe)
+		return r.cleanupNativeDeletionResources(ctx, c, a, a.CleanupAttempt)
 	}
 	if err := r.reconcileNativeDeletion(ctx, c, a, recipe); err != nil {
 		return err
 	}
 	if current := exportprotocol.FindAttempt(c, a.Sequence, a.ID); current != nil && current.CleanupState == "Failed" {
-		return nativeLocal("CleanupFailed", a.ExportID, fmt.Errorf("%s", current.CleanupReason))
+		return nativeCleanupFailure(current)
 	}
 	return nil
 }
@@ -441,7 +441,7 @@ func (r *Reconciler) cleanupNativeOrphans(ctx context.Context, key client.Object
 			if c != nil && labels[exportprotocol.OwnerUIDLabel] == string(c.UID) && c.Status.SnapshotExportAuthority != nil {
 				for _, a := range c.Status.SnapshotExportAuthority.Attempts {
 					if a.ID == labels[exportprotocol.AttemptLabel] {
-						active = true
+						active = !nativeRetiredCleanupJob(&a, obj.GetName())
 						break
 					}
 				}
@@ -551,19 +551,20 @@ func (r *Reconciler) nativeDeletionRequired(ctx context.Context, c *appsv1.Chain
 	return export != nil && export.Phase == appsv1.SnapshotExportPhaseDeleting, nil
 }
 func (r *Reconciler) reconcileNativeDeletion(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, recipe exportprotocol.Recipe) error {
-	if a.CleanupComplete || a.CleanupState != "" {
-		if err := r.cleanupNativeDeletionResources(ctx, c, a, recipe); err != nil {
-			return err
-		}
-		if a.CleanupState == "Failed" {
-			return nativeLocal("CleanupFailed", a.ExportID, fmt.Errorf("%s", a.CleanupReason))
-		}
-		return nil
-	}
-	if !c.DeletionTimestamp.IsZero() {
-		return nil
+	if a.CleanupComplete || a.CleanupState == "Acknowledged" || a.CleanupState == "Abandoned" {
+		return r.cleanupNativeDeletionResources(ctx, c, a, a.CleanupAttempt)
 	}
 	if a.Phase != "Succeeded" {
+		return nil
+	}
+	retired := a.CleanupAttempt - 1
+	if a.CleanupState == "Failed" {
+		retired = a.CleanupAttempt
+	}
+	if err := r.cleanupNativeDeletionResources(ctx, c, a, retired); err != nil {
+		return err
+	}
+	if !c.DeletionTimestamp.IsZero() {
 		return nil
 	}
 	namespace := &corev1.Namespace{}
@@ -573,60 +574,111 @@ func (r *Reconciler) reconcileNativeDeletion(ctx context.Context, c *appsv1.Chai
 	if !namespace.DeletionTimestamp.IsZero() {
 		return nil
 	}
-	key := client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}
+	if a.CleanupState == "Failed" {
+		return r.retryNativeCleanup(ctx, c, a, recipe)
+	}
+	if a.CleanupAttempt > 0 {
+		return r.observeNativeCleanup(ctx, c, a, recipe)
+	}
 	required, err := r.nativeDeletionRequired(ctx, c, a, recipe)
 	if err != nil || !required {
 		return err
 	}
-	if err := r.nativeCredentialIdentity(ctx, recipe); err != nil {
-		var unavailable *nativeIdentityError
-		if errors.As(err, &unavailable) {
-			if stopErr := r.stopNativeCleanup(ctx, c, a, "Failed", "ExecutionIdentityUnavailable"); stopErr != nil {
-				return stopErr
-			}
+	return r.issueNativeCleanup(ctx, c, a, recipe)
+}
+func (r *Reconciler) retryNativeCleanup(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, recipe exportprotocol.Recipe) error {
+	if a.CleanupAttempt >= exportprotocol.MaxCleanupAttempts || r.snapshotDeleteTime().Before(a.CleanupIssuedAt.Add(snapshotDeleteRetryDelay(a.CleanupAttempt))) {
+		return nativeCleanupFailure(a)
+	}
+	gone, err := r.nativeCleanupResourcesGone(ctx, c, a)
+	if err != nil {
+		return err
+	}
+	if !gone {
+		return nativeCleanupFailure(a)
+	}
+	return r.issueNativeCleanup(ctx, c, a, recipe)
+}
+func nativeCleanupFailure(a *appsv1.SnapshotExportAttempt) error {
+	if a.CleanupAttempt >= exportprotocol.MaxCleanupAttempts {
+		return nativeLocal("CleanupFailed", a.ExportID, fmt.Errorf("%s; %d cleanup attempts exhausted, acknowledge to release", a.CleanupReason, a.CleanupAttempt))
+	}
+	return nativeLocal("CleanupFailed", a.ExportID, errors.New(a.CleanupReason))
+}
+
+// issueNativeCleanup persists the next numbered issuance, then performs its single Job POST.
+func (r *Reconciler) issueNativeCleanup(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, recipe exportprotocol.Recipe) error {
+	if err := r.nativeCleanupIdentity(ctx, c, recipe); err != nil {
+		if requestErr := r.requestNativeCleanup(ctx, c, a); requestErr != nil {
+			return requestErr
 		}
 		return nativeLocal("ExecutionIdentityUnavailable", a.ExportID, err)
 	}
-	if a.CleanupIssuer == "" {
-		issuer := string(uuid.NewUUID())
-		err := r.nativeTransition(ctx, c, a, func(current *appsv1.SnapshotExportAttempt, fresh *appsv1.ChainNode) error {
-			if current.CleanupIssuer != "" || current.CleanupState != "" || current.Phase != "Succeeded" || !fresh.DeletionTimestamp.IsZero() {
-				return fmt.Errorf("native cleanup issuance denied")
-			}
-			e := snapshotExportByID(fresh, current.ExportID)
-			if e == nil {
-				return fmt.Errorf("native cleanup catalog missing")
-			}
-			current.CleanupIssuer = issuer
-			now := metav1.Now()
-			current.CleanupIssuedAt = &now
-			current.RemoteCleanupState = "Required"
-			e.RemoteCleanupState = "Required"
-			e.Phase = appsv1.SnapshotExportPhaseDeleting
-			return nil
-		})
-		if err != nil {
-			return err
+	issued := a.DeepCopy()
+	issued.CleanupAttempt++
+	issuer := string(uuid.NewUUID())
+	err := r.nativeTransition(ctx, c, a, func(current *appsv1.SnapshotExportAttempt, fresh *appsv1.ChainNode) error {
+		if current.Phase != "Succeeded" || current.CleanupComplete || (current.CleanupState != "" && current.CleanupState != "Failed") || !fresh.DeletionTimestamp.IsZero() {
+			return fmt.Errorf("native cleanup issuance denied")
 		}
-		err = r.Create(ctx, datasnapshot.NativeCleanupJob(a, recipe))
-		if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
-			current, readErr := r.nativeCurrentAttempt(ctx, c, a)
-			if readErr != nil {
-				return readErr
-			}
-			if stopErr := r.stopNativeCleanup(ctx, c, current, "Failed", "CleanupCreateRejected"); stopErr != nil {
-				return stopErr
-			}
-			return nativeLocal("CleanupFailed", a.ExportID, err)
+		e := snapshotExportByID(fresh, current.ExportID)
+		if e == nil {
+			return fmt.Errorf("native cleanup catalog missing")
 		}
-		if apierrors.IsAlreadyExists(err) {
-			return nil
-		}
+		now := metav1.NewTime(r.snapshotDeleteTime())
+		current.CleanupAttempt = issued.CleanupAttempt
+		current.CleanupIssuer = issuer
+		current.CleanupIssuedAt = &now
+		current.CleanupJob, current.CleanupPod = nil, nil
+		current.CleanupState, current.CleanupReason = "", ""
+		current.RemoteCleanupState = "Required"
+		e.RemoteCleanupState = "Required"
+		e.Phase = appsv1.SnapshotExportPhaseDeleting
+		return nil
+	})
+	if err != nil {
 		return err
 	}
+	// Only this caller owns the freshly persisted random issuance witness.
+	err = r.Create(ctx, datasnapshot.NativeCleanupJob(issued, recipe))
+	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
+		current, readErr := r.nativeCurrentAttempt(ctx, c, a)
+		if readErr != nil {
+			return readErr
+		}
+		if stopErr := r.stopNativeCleanup(ctx, c, current, "Failed", "CleanupCreateRejected"); stopErr != nil {
+			return stopErr
+		}
+		return nativeLocal("CleanupFailed", a.ExportID, err)
+	}
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+// requestNativeCleanup records a deletion duty whose prerequisites are unavailable, without consuming an issuance.
+func (r *Reconciler) requestNativeCleanup(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt) error {
+	if e := snapshotExportByID(c, a.ExportID); e != nil && e.Phase == appsv1.SnapshotExportPhaseDeleting && e.RemoteCleanupState == "Required" && a.RemoteCleanupState == "Required" {
+		return nil
+	}
+	return r.nativeTransition(ctx, c, a, func(current *appsv1.SnapshotExportAttempt, fresh *appsv1.ChainNode) error {
+		e := snapshotExportByID(fresh, current.ExportID)
+		if e == nil {
+			return fmt.Errorf("native cleanup catalog missing")
+		}
+		current.RemoteCleanupState = "Required"
+		e.RemoteCleanupState = "Required"
+		e.Phase = appsv1.SnapshotExportPhaseDeleting
+		e.Message = current.ExportID + ": cleanup deferred; deletion remains unproven"
+		return nil
+	})
+}
+func (r *Reconciler) observeNativeCleanup(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, recipe exportprotocol.Recipe) error {
+	unobserved := func() bool { return r.snapshotDeleteTime().Sub(a.CleanupIssuedAt.Time) >= 2*time.Minute }
 	j := &batchv1.Job{}
-	if err := r.APIReader.Get(ctx, key, j); apierrors.IsNotFound(err) {
-		if a.CleanupIssuedAt != nil && time.Since(a.CleanupIssuedAt.Time) >= 2*time.Minute {
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, a.CleanupAttempt)}, j); apierrors.IsNotFound(err) {
+		if unobserved() {
 			return r.stopNativeCleanup(ctx, c, a, "Failed", "IssuedCleanupMissing")
 		}
 		return nil
@@ -665,7 +717,13 @@ func (r *Reconciler) reconcileNativeDeletion(ctx context.Context, c *appsv1.Chai
 			selected = p
 		}
 	}
+	if a.CleanupPod == nil && (nativeJobTerminal(j) || selected != nil && nativePodTerminated(selected)) {
+		return r.stopNativeCleanup(ctx, c, a, "Failed", "CleanupWorkerTerminated")
+	}
 	if selected == nil {
+		if unobserved() {
+			return r.stopNativeCleanup(ctx, c, a, "Failed", "IssuedCleanupMissing")
+		}
 		return nil
 	}
 	if !selected.DeletionTimestamp.IsZero() || datasnapshot.ValidateNativeCleanupPodSpec(&selected.Spec, a, recipe) != nil {
@@ -683,9 +741,6 @@ func (r *Reconciler) reconcileNativeDeletion(ctx context.Context, c *appsv1.Chai
 	}
 	complete := false
 	for _, cond := range j.Status.Conditions {
-		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-			return r.stopNativeCleanup(ctx, c, a, "Failed", "CleanupJobFailed")
-		}
 		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
 			complete = true
 		}
@@ -871,7 +926,8 @@ func nativeRetryDue(c *appsv1.ChainNode, s *snapshotv1.VolumeSnapshot) bool {
 	return err == nil && !expired
 }
 func (r *Reconciler) stopNativeCleanup(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, state, reason string) error {
-	if a.CleanupComplete || a.CleanupState != "" {
+	escalating := a.CleanupState == "Failed" && state != "Failed"
+	if a.CleanupComplete || (a.CleanupState != "" && !escalating) {
 		return nil
 	}
 	return r.nativeTransition(ctx, c, a, func(current *appsv1.SnapshotExportAttempt, fresh *appsv1.ChainNode) error {
@@ -895,26 +951,34 @@ func (r *Reconciler) stopNativeCleanup(ctx context.Context, c *appsv1.ChainNode,
 		return nil
 	})
 }
-func (r *Reconciler) cleanupNativeDeletionResources(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, recipe exportprotocol.Recipe) error {
-	key := client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}
-	j := &batchv1.Job{}
-	if err := r.APIReader.Get(ctx, key, j); err == nil {
-		if a.CleanupJob != nil && a.CleanupJob.UID != j.UID {
-			return fmt.Errorf("cleanup refuses substituted Job")
+
+// cleanupNativeDeletionResources removes issuances 1..through. Retired ordinals keep no recorded identity, so attribution labels bind them.
+func (r *Reconciler) cleanupNativeDeletionResources(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, through int32) error {
+	if through < 1 {
+		return nil
+	}
+	names := map[string]bool{}
+	for attempt := int32(1); attempt <= through; attempt++ {
+		name := exportprotocol.CleanupJobName(a.ID, attempt)
+		names[name] = true
+		j := &batchv1.Job{}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: name}, j); apierrors.IsNotFound(err) {
+			continue
+		} else if err != nil {
+			return err
 		}
-		if a.CleanupJob == nil {
-			if err := datasnapshot.ValidateNativeCleanupJob(j, a, recipe); err != nil {
-				return err
-			}
+		if j.Labels[exportprotocol.OwnerUIDLabel] != string(c.UID) || j.Labels[exportprotocol.AttemptLabel] != a.ID {
+			return fmt.Errorf("native cleanup resource attribution changed")
+		}
+		if a.CleanupJob != nil && a.CleanupJob.Name == name && a.CleanupJob.UID != j.UID {
+			return fmt.Errorf("cleanup refuses substituted Job")
 		}
 		if err := r.deleteNativeObject(ctx, j); err != nil {
 			return err
 		}
-	} else if !apierrors.IsNotFound(err) {
-		return err
 	}
-	if a.CleanupPod != nil && a.CleanupJob != nil {
-		if err := r.deleteNativeSelectedPod(ctx, c.Namespace, a.CleanupPod, key.Name, a.CleanupJob.UID); err != nil {
+	if a.CleanupPod != nil && a.CleanupJob != nil && names[a.CleanupJob.Name] {
+		if err := r.deleteNativeSelectedPod(ctx, c.Namespace, a.CleanupPod, a.CleanupJob.Name, a.CleanupJob.UID); err != nil {
 			return err
 		}
 	}
@@ -925,14 +989,10 @@ func (r *Reconciler) cleanupNativeDeletionResources(ctx context.Context, c *apps
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		owner := metav1.GetControllerOf(p)
-		if owner == nil || owner.APIVersion != "batch/v1" || owner.Kind != "Job" || owner.Name != key.Name {
+		if owner == nil || owner.APIVersion != "batch/v1" || owner.Kind != "Job" || !names[owner.Name] {
 			continue
 		}
-		uid := j.UID
-		if a.CleanupJob != nil {
-			uid = a.CleanupJob.UID
-		}
-		if uid == "" || owner.UID != uid {
+		if a.CleanupJob != nil && a.CleanupJob.Name == owner.Name && a.CleanupJob.UID != owner.UID {
 			return fmt.Errorf("cleanup refuses unverified Pod owner")
 		}
 		if a.CleanupPod != nil && a.CleanupPod.Name == p.Name && a.CleanupPod.UID != p.UID {
@@ -943,6 +1003,14 @@ func (r *Reconciler) cleanupNativeDeletionResources(ctx context.Context, c *apps
 		}
 	}
 	return nil
+}
+func nativeRetiredCleanupJob(a *appsv1.SnapshotExportAttempt, name string) bool {
+	for attempt := int32(1); attempt < a.CleanupAttempt; attempt++ {
+		if name == exportprotocol.CleanupJobName(a.ID, attempt) {
+			return true
+		}
+	}
+	return false
 }
 func (r *Reconciler) nativeCleanupResourcesGone(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt) (bool, error) {
 	recipe, err := exportprotocol.DecodeRecipe(a)
@@ -969,11 +1037,13 @@ func (r *Reconciler) nativeCleanupResourcesGone(ctx context.Context, c *appsv1.C
 			return false, err
 		}
 	}
-	job := &batchv1.Job{}
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}, job); err == nil {
-		return false, nil
-	} else if !apierrors.IsNotFound(err) {
-		return false, err
+	for attempt := int32(1); attempt <= exportprotocol.MaxCleanupAttempts; attempt++ {
+		job := &batchv1.Job{}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, attempt)}, job); err == nil {
+			return false, nil
+		} else if !apierrors.IsNotFound(err) {
+			return false, err
+		}
 	}
 	pods := &corev1.PodList{}
 	if err := r.APIReader.List(ctx, pods, client.InNamespace(c.Namespace), client.MatchingLabels{exportprotocol.OwnerUIDLabel: string(c.UID), exportprotocol.AttemptLabel: a.ID}); err != nil {
@@ -1009,7 +1079,7 @@ func (r *Reconciler) reconcileNativeAcknowledgements(ctx context.Context, c *app
 				applied[id] = true
 				continue
 			}
-			eligible := a.CleanupState == "Failed" || (a.Phase == "Invalidated" && a.RemoteCleanupState == "Required" && a.CleanupState == "")
+			eligible := exportprotocol.Terminal(a) && !a.CleanupComplete && a.RemoteCleanupState == "Required" && (a.CleanupState == "" || a.CleanupState == "Failed")
 			if !eligible {
 				continue
 			}

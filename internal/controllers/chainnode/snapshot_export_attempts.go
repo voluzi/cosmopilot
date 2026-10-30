@@ -121,6 +121,9 @@ func (r *Reconciler) ensureNativeIdentity(ctx context.Context, c *appsv1.ChainNo
 		if !metav1.IsControlledBy(o, c) {
 			return appsv1.ExportResourceIdentity{}, fmt.Errorf("native execution identity is not owned")
 		}
+		if !o.GetDeletionTimestamp().IsZero() {
+			return appsv1.ExportResourceIdentity{}, fmt.Errorf("native execution identity is deleting")
+		}
 		switch actual := o.(type) {
 		case *corev1.ServiceAccount:
 			sa = actual
@@ -593,6 +596,19 @@ func (r *Reconciler) nativeCredentialIdentity(ctx context.Context, recipe export
 	}
 	return nil
 }
+
+// nativeCleanupIdentity requires the frozen names, not their upload-time UIDs: a recreated same-name Secret or owned ServiceAccount may run cleanup.
+func (r *Reconciler) nativeCleanupIdentity(ctx context.Context, c *appsv1.ChainNode, recipe exportprotocol.Recipe) error {
+	secret := &corev1.Secret{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: recipe.Namespace, Name: recipe.Credentials.Name}, secret); err != nil {
+		return err
+	}
+	if !secret.DeletionTimestamp.IsZero() || len(secret.Data["AWS_ACCESS_KEY_ID"]) == 0 || len(secret.Data["AWS_SECRET_ACCESS_KEY"]) == 0 {
+		return fmt.Errorf("native credential Secret lacks explicit credentials")
+	}
+	_, err := r.ensureNativeIdentity(ctx, c)
+	return err
+}
 func (r *Reconciler) publishNativeArchive(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, recipe exportprotocol.Recipe) error {
 	if _, err := r.nativeSource(ctx, recipe, true, a); err != nil {
 		var lost *nativeIdentityError
@@ -888,6 +904,7 @@ func nativeProjectedStatusSize(c *appsv1.ChainNode) (int, error) {
 		a.Reason = strings.Repeat("r", 256)
 		a.LocalCleanupState = "Complete"
 		a.RemoteCleanupState = "Required"
+		a.CleanupAttempt = exportprotocol.MaxCleanupAttempts
 		if a.CleanupIssuer == "" {
 			a.CleanupIssuer = strings.Repeat("i", 36)
 		}
@@ -896,7 +913,7 @@ func nativeProjectedStatusSize(c *appsv1.ChainNode) (int, error) {
 			a.CleanupIssuedAt = &now
 		}
 		if a.CleanupJob == nil {
-			a.CleanupJob = &appsv1.ExportResourceIdentity{Name: "delete-" + a.ID, UID: types.UID(strings.Repeat("u", 128))}
+			a.CleanupJob = &appsv1.ExportResourceIdentity{Name: exportprotocol.CleanupJobName(a.ID, a.CleanupAttempt), UID: types.UID(strings.Repeat("u", 128))}
 		}
 		if a.CleanupPod == nil {
 			a.CleanupPod = &appsv1.ExportResourceIdentity{Name: strings.Repeat("p", 253), UID: types.UID(strings.Repeat("u", 128))}

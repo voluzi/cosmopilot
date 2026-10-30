@@ -1707,18 +1707,27 @@ type SnapshotExportAuthority struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.scratchPV) || (has(self.scratchPV) && self.scratchPV == oldSelf.scratchPV)",message="PV identity is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="pod identity is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.completedEnvelope) || (has(self.completedEnvelope) && self.completedEnvelope == oldSelf.completedEnvelope)",message="completed result is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupIssuer) || (has(self.cleanupIssuer) && self.cleanupIssuer == oldSelf.cleanupIssuer)",message="cleanup issuance is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupJob) || (has(self.cleanupJob) && self.cleanupJob == oldSelf.cleanupJob)",message="cleanup Job identity is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupPod) || (has(self.cleanupPod) && self.cleanupPod == oldSelf.cleanupPod)",message="cleanup Pod identity is immutable"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt == oldSelf.cleanupAttempt || self.cleanupAttempt == oldSelf.cleanupAttempt + 1",message="cleanup attempt advances by one"
+// +kubebuilder:validation:XValidation:rule="(self.cleanupAttempt > 0) == has(self.cleanupIssuer)",message="cleanup attempt requires its issuer"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt == 0 || self.phase == 'Succeeded'",message="cleanup attempt requires a succeeded upload"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt == oldSelf.cleanupAttempt || ((oldSelf.cleanupAttempt == 0 ? !has(oldSelf.cleanupState) : (has(oldSelf.cleanupState) && oldSelf.cleanupState == 'Failed')) && (!has(oldSelf.cleanupComplete) || !oldSelf.cleanupComplete) && !has(self.cleanupState) && !has(self.cleanupReason) && !has(self.cleanupJob) && !has(self.cleanupPod) && (!has(oldSelf.cleanupIssuer) || self.cleanupIssuer != oldSelf.cleanupIssuer) && (!has(oldSelf.cleanupIssuedAt) || self.cleanupIssuedAt > oldSelf.cleanupIssuedAt))",message="cleanup retry requires a fresh issuance after failure"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupIssuer) || (has(self.cleanupIssuer) && self.cleanupIssuer == oldSelf.cleanupIssuer)",message="cleanup issuance is immutable"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupJob) || (has(self.cleanupJob) && self.cleanupJob == oldSelf.cleanupJob)",message="cleanup Job identity is immutable"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupPod) || (has(self.cleanupPod) && self.cleanupPod == oldSelf.cleanupPod)",message="cleanup Pod identity is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupComplete) || !oldSelf.cleanupComplete || (has(self.cleanupComplete) && self.cleanupComplete)",message="cleanup acknowledgement cannot revert"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupIssuedAt) || (has(self.cleanupIssuedAt) && self.cleanupIssuedAt == oldSelf.cleanupIssuedAt)",message="cleanup timestamp is immutable"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupIssuedAt) || (has(self.cleanupIssuedAt) && self.cleanupIssuedAt == oldSelf.cleanupIssuedAt)",message="cleanup timestamp is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.cleanupIssuer) || has(self.cleanupIssuedAt)",message="cleanup issuance requires timestamp"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupState) || (has(self.cleanupState) && (self.cleanupState == oldSelf.cleanupState || (oldSelf.cleanupState == 'Failed' && self.cleanupState == 'Acknowledged')))",message="stopped cleanup cannot reopen"
+// +kubebuilder:validation:XValidation:rule="self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupState) || (has(self.cleanupState) && (self.cleanupState == oldSelf.cleanupState || (oldSelf.cleanupState == 'Failed' && self.cleanupState in ['Acknowledged','Abandoned'])))",message="stopped cleanup cannot reopen"
 // +kubebuilder:validation:XValidation:rule="!has(self.cleanupState) || (self.phase in ['Succeeded','Invalidated'] && (!has(self.cleanupComplete) || !self.cleanupComplete))",message="stopped cleanup requires terminal unresolved authority"
 // +kubebuilder:validation:XValidation:rule="oldSelf.phase != 'Invalidated' || !has(oldSelf.remoteCleanupState) || oldSelf.remoteCleanupState != 'Required' || (has(self.remoteCleanupState) && self.remoteCleanupState == 'Required')",message="invalidated remote uncertainty is permanent"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.authorizedAt) || (has(self.authorizedAt) && self.authorizedAt == oldSelf.authorizedAt)",message="authorization timestamp is immutable"
 // +kubebuilder:validation:XValidation:rule="self.phase != 'Uploading' || has(self.authorizedAt)",message="uploading requires authorization timestamp"
 type SnapshotExportAttempt struct {
+	// CleanupAttempt is the ordinal of the current numbered cleanup issuance; 0 means none was issued.
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3
+	CleanupAttempt int32 `json:"cleanupAttempt"`
 	// +optional
 	CleanupIssuedAt *metav1.Time `json:"cleanupIssuedAt,omitempty"`
 	// +optional

@@ -26,10 +26,12 @@ func newNativeCleanupCmd() *cobra.Command { return newNativeCommand(true) }
 func newNativeCommand(cleanup bool) *cobra.Command {
 	var namespace, owner, uid, id, pod, kubeconfig string
 	var sequence int64
+	var cleanupAttempt int32
 	c := &cobra.Command{Use: "native-upload", Short: "Export an authorized mounted snapshot clone", Args: cobra.NoArgs}
 	if cleanup {
 		c.Use = "native-cleanup"
 		c.Short = "Delete acknowledged native archive output"
+		c.Flags().Int32Var(&cleanupAttempt, "cleanup-attempt", 0, "Cleanup issuance ordinal")
 	}
 	c.Flags().StringVar(&namespace, "namespace", "", "Authority namespace")
 	c.Flags().StringVar(&owner, "owner", "", "Authority ChainNode name")
@@ -39,7 +41,7 @@ func newNativeCommand(cleanup bool) *cobra.Command {
 	c.Flags().StringVar(&pod, "pod-uid", os.Getenv("EXPORT_POD_UID"), "Mounted worker Pod UID")
 	c.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Kubernetes client configuration")
 	c.RunE = func(cmd *cobra.Command, _ []string) error {
-		if namespace == "" || owner == "" || uid == "" || id == "" || sequence < 1 || pod == "" {
+		if namespace == "" || owner == "" || uid == "" || id == "" || sequence < 1 || pod == "" || (cleanup && cleanupAttempt < 1) {
 			return fmt.Errorf("native authority invocation is incomplete")
 		}
 		var cfg *rest.Config
@@ -76,13 +78,13 @@ func newNativeCommand(cleanup bool) *cobra.Command {
 			}
 			a := exportprotocol.FindAttempt(authority, sequence, id)
 			if cleanup && a != nil && a.Phase == "Succeeded" && a.CleanupJob != nil && a.CleanupPod != nil {
-				attempt, recipe, completed, err = exportprotocol.AuthorizeCleanup(authority, types.UID(uid), sequence, id, types.UID(pod))
+				attempt, recipe, completed, err = exportprotocol.AuthorizeCleanup(authority, types.UID(uid), sequence, id, cleanupAttempt, types.UID(pod))
 				if err != nil {
 					return err
 				}
 				break
 			}
-			if a == nil || (cleanup && (a.CleanupState != "" || a.CleanupComplete)) || (!cleanup && exportprotocol.Terminal(a)) || (cleanup && a.Phase != "Succeeded") {
+			if a == nil || (cleanup && (a.CleanupState != "" || a.CleanupComplete || a.CleanupAttempt != cleanupAttempt)) || (!cleanup && exportprotocol.Terminal(a)) || (cleanup && a.Phase != "Succeeded") {
 				return fmt.Errorf("native authority denied")
 			}
 			if !cleanup && a.Phase == "Uploading" {

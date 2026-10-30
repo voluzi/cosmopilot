@@ -1088,6 +1088,7 @@ SnapshotExportAttempt is the controller-owned mounted-worker authorization.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
+| cleanupAttempt | CleanupAttempt is the ordinal of the current numbered cleanup issuance; 0 means none was issued. | int32 | true |
 | cleanupIssuedAt |  | *metav1.Time | false |
 | cleanupState |  | string | false |
 | cleanupReason |  | string | false |

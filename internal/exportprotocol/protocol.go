@@ -34,7 +34,13 @@ const (
 	MaxEnvelope          = 3072
 	MaxDocument          = 16384
 	MaxNativeStatus      = 256 * 1024
+	MaxCleanupAttempts   = 3
 )
+
+// CleanupJobName is the single-use Job name of one numbered cleanup issuance.
+func CleanupJobName(id string, attempt int32) string {
+	return "delete-" + id + "-" + strconv.Itoa(int(attempt))
+}
 
 type Recipe struct {
 	Version          int                              `json:"version"`
@@ -351,11 +357,11 @@ func checkValue(d *json.Decoder) error {
 	return err
 }
 
-func AuthorizeCleanup(c *appsv1.ChainNode, uid types.UID, seq int64, id string, pod types.UID) (*appsv1.SnapshotExportAttempt, Recipe, Envelope, error) {
+func AuthorizeCleanup(c *appsv1.ChainNode, uid types.UID, seq int64, id string, attempt int32, pod types.UID) (*appsv1.SnapshotExportAttempt, Recipe, Envelope, error) {
 	a := FindAttempt(c, seq, id)
 	var r Recipe
 	var e Envelope
-	if c.UID != uid || !c.DeletionTimestamp.IsZero() || a == nil || a.CleanupState != "" || a.Phase != "Succeeded" || a.CleanupComplete || a.CleanupIssuer == "" || a.CleanupJob == nil || a.CleanupPod == nil || a.CleanupPod.UID != pod {
+	if c.UID != uid || !c.DeletionTimestamp.IsZero() || a == nil || a.CleanupState != "" || a.Phase != "Succeeded" || a.CleanupComplete || a.CleanupIssuer == "" || attempt < 1 || a.CleanupAttempt != attempt || a.CleanupJob == nil || a.CleanupJob.Name != CleanupJobName(id, attempt) || a.CleanupPod == nil || a.CleanupPod.UID != pod {
 		return nil, r, e, fmt.Errorf("native cleanup authority denied")
 	}
 	r, err := DecodeRecipe(a)

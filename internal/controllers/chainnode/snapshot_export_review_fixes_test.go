@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -534,31 +535,41 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
 		require.True(t, apiMeta.IsStatusConditionTrue(c.Status.Conditions, appsv1.ConditionSnapshotExportDegraded))
 	})
-	t.Run("credential loss before cleanup issuance retains deletion obligation", func(t *testing.T) {
+	t.Run("credential loss before cleanup issuance defers until the same name returns", func(t *testing.T) {
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", nil)
-		before := a.DeepCopy()
 		archive := c.Status.SnapshotExports[0].Archive.DeepCopy()
 		postCount := posts.Load()
 		require.NoError(t, r.retainNativeSnapshot(ctx, c, source, &c.Status.SnapshotExports[0]))
 		a = refresh(t, c)
 		require.Equal(t, appsv1.SnapshotExportPhaseDeleting, c.Status.SnapshotExports[0].Phase)
 		require.NoError(t, admin.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: recipe.Namespace, Name: recipe.Credentials.Name}}))
-		err := r.reconcileNativeDeletion(ctx, c, a, recipe)
-		require.Error(t, err)
+		for range 2 {
+			err := r.reconcileNativeDeletion(ctx, c, a, recipe)
+			var operation *nativeOperationError
+			require.ErrorAs(t, err, &operation)
+			require.Equal(t, "ExecutionIdentityUnavailable", operation.reason)
+			a = refresh(t, c)
+			require.Empty(t, a.CleanupState, "a missing prerequisite is never a permanent failure")
+			require.Zero(t, a.CleanupAttempt)
+			require.Empty(t, a.CleanupIssuer)
+			require.Equal(t, "Required", a.RemoteCleanupState)
+			require.Equal(t, "Required", c.Status.SnapshotExports[0].RemoteCleanupState)
+			require.Contains(t, c.Status.SnapshotExports[0].Message, "deletion remains unproven")
+			require.True(t, apiMeta.IsStatusConditionTrue(c.Status.Conditions, appsv1.ConditionSnapshotExportCleanup))
+			require.Equal(t, postCount, posts.Load())
+			require.Equal(t, archive, c.Status.SnapshotExports[0].Archive)
+		}
+		replacement := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: recipe.Namespace, Name: recipe.Credentials.Name}, Data: map[string][]byte{"AWS_ACCESS_KEY_ID": []byte("key"), "AWS_SECRET_ACCESS_KEY": []byte("secret")}}
+		require.NoError(t, admin.Create(ctx, replacement))
+		require.NotEqual(t, recipe.Credentials.UID, replacement.UID)
+		require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
 		a = refresh(t, c)
-		require.Equal(t, "Failed", a.CleanupState)
-		require.Equal(t, "ExecutionIdentityUnavailable", a.CleanupReason)
-		require.Equal(t, "Required", a.RemoteCleanupState)
-		require.Equal(t, "Required", c.Status.SnapshotExports[0].RemoteCleanupState)
-		require.Contains(t, c.Status.SnapshotExports[0].Message, "deletion remains unproven")
-		require.True(t, apiMeta.IsStatusConditionTrue(c.Status.Conditions, appsv1.ConditionSnapshotExportCleanup))
-		require.Empty(t, a.CleanupIssuer)
-		require.Nil(t, a.CleanupIssuedAt)
-		require.False(t, a.CleanupComplete)
-		require.Equal(t, postCount, posts.Load())
-		require.Equal(t, archive, c.Status.SnapshotExports[0].Archive)
-		a.CleanupState, a.CleanupReason, a.RemoteCleanupState = before.CleanupState, before.CleanupReason, before.RemoteCleanupState
-		require.Equal(t, before, a, "completed evidence and issuance witnesses must survive cleanup failure")
+		require.EqualValues(t, 1, a.CleanupAttempt)
+		require.Empty(t, a.CleanupState)
+		require.Equal(t, postCount+1, posts.Load())
+		job := &batchv1.Job{}
+		require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, job))
+		require.NoError(t, datasnapshot.ValidateNativeCleanupJob(job, a, recipe))
 	})
 	for _, acknowledged := range []bool{false, true} {
 		t.Run(fmt.Sprintf("manual retry survives recovery acknowledged %v", acknowledged), func(t *testing.T) {
@@ -865,15 +876,18 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		})
 	}
 	for _, resource := range []string{"secrets", "serviceaccounts"} {
-		for _, issued := range []bool{false, true} {
-			t.Run(fmt.Sprintf("cleanup read defers %s issued %v", resource, issued), func(t *testing.T) {
+		for _, retrying := range []bool{false, true} {
+			t.Run(fmt.Sprintf("cleanup read defers %s retrying %v", resource, retrying), func(t *testing.T) {
 				c, a, recipe := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+					a.RemoteCleanupState, e.RemoteCleanupState = "Required", "Required"
 					e.Phase = appsv1.SnapshotExportPhaseDeleting
+					if retrying {
+						a.CleanupAttempt = 1
+						a.CleanupIssuer = string(uuid.NewUUID())
+						a.CleanupIssuedAt = ptr.To(metav1.NewTime(time.Now().Add(-time.Hour)))
+						a.CleanupState, a.CleanupReason = "Failed", "CleanupJobFailed"
+					}
 				})
-				if issued {
-					require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
-					a = refresh(t, c)
-				}
 				name := recipe.Credentials.Name
 				if resource == "serviceaccounts" {
 					name = recipe.ServiceAccount.Name
@@ -883,18 +897,14 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				before := posts.Load()
 				require.Error(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
 				require.Positive(t, fired.Load())
-				require.Equal(t, a, refresh(t, c))
+				require.Equal(t, a, refresh(t, c), "a transient read never consumes an ordinal")
 				require.Equal(t, before, posts.Load())
 				require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
 				current := refresh(t, c)
 				require.Empty(t, current.CleanupState)
-				require.NotEmpty(t, current.CleanupIssuer)
-				if issued {
-					require.Equal(t, a.CleanupIssuer, current.CleanupIssuer)
-					require.Equal(t, before, posts.Load())
-				} else {
-					require.Equal(t, before+1, posts.Load())
-				}
+				require.Equal(t, a.CleanupAttempt+1, current.CleanupAttempt)
+				require.NotEqual(t, a.CleanupIssuer, current.CleanupIssuer)
+				require.Equal(t, before+1, posts.Load())
 			})
 		}
 	}
@@ -1126,7 +1136,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.Nil(t, c.Status.SnapshotExports[0].Archive)
 		})
 	}
-	t.Run("rejected cleanup POST remains stopped without reissuance", func(t *testing.T) {
+	t.Run("rejected cleanup POST fails its ordinal and retries after backoff", func(t *testing.T) {
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
 			e.Phase = appsv1.SnapshotExportPhaseDeleting
 		})
@@ -1146,19 +1156,27 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		}
 		denied, err := client.New(deniedConfig, client.Options{Scheme: r.Scheme})
 		require.NoError(t, err)
-		local := &Reconciler{Client: denied, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts}
+		clock := time.Now()
+		local := &Reconciler{Client: denied, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, snapshotDeleteNow: func() time.Time { return clock }}
 		require.Error(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
 		a = refresh(t, c)
 		require.EqualValues(t, 1, rejected.Load())
+		require.EqualValues(t, 1, a.CleanupAttempt)
 		require.Equal(t, "Failed", a.CleanupState)
 		require.Equal(t, "CleanupCreateRejected", a.CleanupReason)
 		require.Equal(t, "Required", a.RemoteCleanupState)
 		require.NotEmpty(t, a.CleanupIssuer)
 		require.NotNil(t, a.CleanupIssuedAt)
+		clock = clock.Add(snapshotDeleteRetryDelay(1) / 2)
 		require.Error(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
-		require.Equal(t, a, refresh(t, c))
+		require.Equal(t, a, refresh(t, c), "backoff holds the failed ordinal")
 		require.EqualValues(t, 1, rejected.Load())
-		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}, &batchv1.Job{})))
+		clock = clock.Add(snapshotDeleteRetryDelay(1) / 2)
+		require.Error(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		require.EqualValues(t, 2, rejected.Load())
+		require.EqualValues(t, 2, a.CleanupAttempt)
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, &batchv1.Job{})))
 	})
 	t.Run("failed cleanup stops and exact acknowledgement retains uncertainty", func(t *testing.T) {
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
@@ -1174,7 +1192,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.Equal(t, before+1, posts.Load())
 		require.NotNil(t, a.CleanupIssuedAt)
 		job := &batchv1.Job{}
-		require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}, job))
+		require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, job))
 		job.Status.StartTime = ptr.To(metav1.Now())
 		job.Status.Failed = 1
 		job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue}, {Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
@@ -1185,10 +1203,10 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.True(t, apiMeta.IsStatusConditionTrue(c.Status.Conditions, appsv1.ConditionSnapshotExportDegraded))
 		gated := c.DeepCopy()
 		gated.Status.SnapshotExportAuthority.Attempts[0].CleanupPod = &appsv1.ExportResourceIdentity{Name: "late-pod", UID: "late-pod"}
-		_, _, _, gateErr := exportprotocol.AuthorizeCleanup(gated, gated.UID, a.Sequence, a.ID, "late-pod")
+		_, _, _, gateErr := exportprotocol.AuthorizeCleanup(gated, gated.UID, a.Sequence, a.ID, 1, "late-pod")
 		require.Error(t, gateErr)
 		gated.Status.SnapshotExportAuthority.Attempts[0].CleanupState = ""
-		_, _, _, gateErr = exportprotocol.AuthorizeCleanup(gated, gated.UID, a.Sequence, a.ID, "late-pod")
+		_, _, _, gateErr = exportprotocol.AuthorizeCleanup(gated, gated.UID, a.Sequence, a.ID, 1, "late-pod")
 		require.NoError(t, gateErr, "otherwise-valid late cleanup is denied specifically by stopped state")
 		require.Equal(t, "Required", a.RemoteCleanupState)
 		require.False(t, a.CleanupComplete)
@@ -1213,7 +1231,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.Contains(t, c.Status.SnapshotExports[0].Message, "without deletion proof")
 		require.NotNil(t, c.Status.SnapshotExports[0].Archive)
 		require.NoError(t, r.reconcileNativeAcknowledgements(ctx, c))
-		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, a.Sequence, a.ID, "late-pod")
+		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, a.Sequence, a.ID, 1, "late-pod")
 		require.Error(t, err)
 		for _, mutate := range []func(*appsv1.SnapshotExportAttempt){
 			func(a *appsv1.SnapshotExportAttempt) { a.CleanupState = "" },
@@ -1235,31 +1253,321 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(late), preserved))
 		require.Equal(t, late.UID, preserved.UID)
 	})
-	t.Run("missing issued cleanup stops without reissuance", func(t *testing.T) {
+	t.Run("missing issued cleanup fails its ordinal and never repeats the POST", func(t *testing.T) {
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+			a.CleanupAttempt = 1
 			a.CleanupIssuer = string(uuid.NewUUID())
 			a.CleanupIssuedAt = ptr.To(metav1.NewTime(time.Now().Add(-3 * time.Minute)))
 			a.RemoteCleanupState = "Required"
 			e.RemoteCleanupState = "Required"
 			e.Phase = appsv1.SnapshotExportPhaseDeleting
 		})
+		before := posts.Load()
 		require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
 		a = refresh(t, c)
 		require.Equal(t, "Failed", a.CleanupState)
 		require.Equal(t, "IssuedCleanupMissing", a.CleanupReason)
-		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}, &batchv1.Job{})))
+		require.Equal(t, before, posts.Load())
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, &batchv1.Job{})))
 		late := datasnapshot.NativeCleanupJob(a, recipe)
 		require.NoError(t, admin.Create(ctx, late))
-		err := r.recoverNativeExports(ctx, c)
-		require.Error(t, err)
-		handled, fatal := r.handleNativeOutcome(ctx, c, err)
-		require.True(t, handled)
-		require.NoError(t, fatal)
+		require.NoError(t, r.recoverNativeExports(ctx, c))
 		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(late), &batchv1.Job{})))
 		current := refresh(t, c)
-		require.Equal(t, "Failed", current.CleanupState)
-		require.Equal(t, a.CleanupIssuer, current.CleanupIssuer)
-		require.Equal(t, a.CleanupIssuedAt, current.CleanupIssuedAt)
+		require.Empty(t, current.CleanupState)
+		require.EqualValues(t, 2, current.CleanupAttempt)
+		require.NotEqual(t, a.CleanupIssuer, current.CleanupIssuer)
+		require.Equal(t, before+1, posts.Load())
+		require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 2)}, &batchv1.Job{}))
+	})
+	cleanupWorker := func(t *testing.T, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt) (*batchv1.Job, *corev1.Pod) {
+		t.Helper()
+		job := &batchv1.Job{}
+		require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, a.CleanupAttempt)}, job))
+		return job, workerPod(t, job, corev1.PodStatus{Phase: corev1.PodRunning})
+	}
+	failJob := func(t *testing.T, job *batchv1.Job) {
+		t.Helper()
+		job.Status.StartTime = ptr.To(metav1.Now())
+		job.Status.Failed = 1
+		job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue}, {Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+		require.NoError(t, admin.Status().Update(ctx, job))
+	}
+	completeJob := func(t *testing.T, job *batchv1.Job, pod *corev1.Pod, image string) {
+		t.Helper()
+		pod.Status.Phase = corev1.PodSucceeded
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "exporter", Image: image, ImageID: "fixture", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}}}
+		require.NoError(t, admin.Status().Update(ctx, pod))
+		job.Status.StartTime, job.Status.CompletionTime = ptr.To(metav1.Now()), ptr.To(metav1.Now())
+		job.Status.Succeeded = 1
+		job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue}, {Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+		require.NoError(t, admin.Status().Update(ctx, job))
+	}
+	deleting := func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+		e.Phase = appsv1.SnapshotExportPhaseDeleting
+	}
+	t.Run("numbered cleanup survives restarts and replaced identities then stops after three", func(t *testing.T) {
+		c, a, recipe := seed(t, template.Namespace, "Succeeded", deleting)
+		clock := time.Now()
+		restart := func() *Reconciler {
+			return &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, snapshotDeleteNow: func() time.Time { return clock }}
+		}
+		issuers := map[string]bool{}
+		before := posts.Load()
+		for ordinal := int32(1); ordinal <= exportprotocol.MaxCleanupAttempts; ordinal++ {
+			require.NoError(t, restart().reconcileNativeDeletion(ctx, c, a, recipe))
+			a = refresh(t, c)
+			require.Equal(t, ordinal, a.CleanupAttempt)
+			require.Empty(t, a.CleanupState)
+			require.Nil(t, a.CleanupJob)
+			require.Nil(t, a.CleanupPod)
+			require.False(t, issuers[a.CleanupIssuer])
+			issuers[a.CleanupIssuer] = true
+			require.Equal(t, before+int32(ordinal), posts.Load())
+			require.NoError(t, restart().reconcileNativeDeletion(ctx, c, a, recipe))
+			a = refresh(t, c)
+			job, _ := cleanupWorker(t, c, a)
+			failJob(t, job)
+			require.NoError(t, restart().reconcileNativeDeletion(ctx, c, a, recipe))
+			a = refresh(t, c)
+			require.Equal(t, "Failed", a.CleanupState)
+			require.Equal(t, "Required", a.RemoteCleanupState)
+			require.Error(t, restart().reconcileNativeDeletion(ctx, c, a, recipe), "the failed ordinal holds through its backoff")
+			require.Equal(t, a, refresh(t, c))
+			require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(job), &batchv1.Job{})), "authority is revoked before local teardown")
+			switch ordinal {
+			case 1:
+				require.NoError(t, admin.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: recipe.Namespace, Name: recipe.Credentials.Name}}))
+				require.NoError(t, admin.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: recipe.Namespace, Name: recipe.Credentials.Name}, Data: map[string][]byte{"AWS_ACCESS_KEY_ID": []byte("key"), "AWS_SECRET_ACCESS_KEY": []byte("secret")}}))
+			case 2:
+				require.NoError(t, admin.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: recipe.Namespace, Name: recipe.ServiceAccount.Name}}))
+			}
+			clock = clock.Add(snapshotDeleteRetryDelay(ordinal))
+		}
+		recreated := &corev1.ServiceAccount{}
+		require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: recipe.Namespace, Name: recipe.ServiceAccount.Name}, recreated))
+		require.NotEqual(t, recipe.ServiceAccount.UID, recreated.UID)
+		for range 2 {
+			err := restart().reconcileNativeDeletion(ctx, c, a, recipe)
+			var operation *nativeOperationError
+			require.ErrorAs(t, err, &operation)
+			require.Equal(t, "CleanupFailed", operation.reason)
+			require.ErrorContains(t, err, a.ExportID)
+			require.ErrorContains(t, err, "exhausted")
+			require.Equal(t, a, refresh(t, c), "recreated credentials do not reset the bound")
+			clock = clock.Add(time.Hour)
+		}
+		require.Equal(t, before+exportprotocol.MaxCleanupAttempts, posts.Load())
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, exportprotocol.MaxCleanupAttempts+1)}, &batchv1.Job{})))
+		require.NoError(t, r.retainNativeSnapshot(ctx, c, source, &c.Status.SnapshotExports[0]))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(source), &snapshotv1.VolumeSnapshot{}), "exhausted deletion holds CSI retention until acknowledged")
+		c.Annotations = map[string]string{exportprotocol.CleanupAckAnnotation: a.ExportID}
+		require.NoError(t, admin.Update(ctx, c))
+		require.NoError(t, r.reconcileNativeAcknowledgements(ctx, c))
+		a = refresh(t, c)
+		require.Equal(t, "Acknowledged", a.CleanupState)
+		require.Equal(t, "Required", a.RemoteCleanupState)
+		require.False(t, a.CleanupComplete)
+	})
+	t.Run("late retired cleanup cannot publish or disturb the current ordinal", func(t *testing.T) {
+		c, a, recipe := seed(t, template.Namespace, "Succeeded", deleting)
+		clock := time.Now()
+		local := &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, opts: r.opts, snapshotDeleteNow: func() time.Time { return clock }}
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		retiredAttempt := a.DeepCopy()
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		job, _ := cleanupWorker(t, c, a)
+		failJob(t, job)
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		require.Error(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		clock = clock.Add(snapshotDeleteRetryDelay(1))
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		require.EqualValues(t, 2, a.CleanupAttempt)
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		currentJob, currentPod := cleanupWorker(t, c, a)
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		require.NotNil(t, a.CleanupPod)
+
+		late := datasnapshot.NativeCleanupJob(retiredAttempt, recipe)
+		require.NoError(t, admin.Create(ctx, late))
+		latePod := workerPod(t, late, corev1.PodStatus{Phase: corev1.PodRunning})
+		completeJob(t, late, latePod, recipe.Image)
+		_, _, _, err := exportprotocol.AuthorizeCleanup(c, c.UID, a.Sequence, a.ID, 1, currentPod.UID)
+		require.Error(t, err, "a retired ordinal is denied even with the current Pod UID")
+		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, a.Sequence, a.ID, 2, latePod.UID)
+		require.Error(t, err, "a retired worker is denied by its Pod UID")
+		_, _, _, err = exportprotocol.AuthorizeCleanup(c, c.UID, a.Sequence, a.ID, 2, currentPod.UID)
+		require.NoError(t, err)
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		require.Equal(t, a, refresh(t, c), "a retired success never completes a later ordinal")
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(late), &batchv1.Job{})))
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(latePod), &corev1.Pod{})))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(currentJob), currentJob))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(currentPod), currentPod))
+
+		orphaned := datasnapshot.NativeCleanupJob(retiredAttempt, recipe)
+		require.NoError(t, admin.Create(ctx, orphaned))
+		require.NoError(t, local.cleanupNativeOrphans(ctx, client.ObjectKeyFromObject(c)))
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(orphaned), &batchv1.Job{})), "the live upload attempt does not protect a retired Job")
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(currentJob), currentJob))
+
+		completeJob(t, currentJob, currentPod, recipe.Image)
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
+		require.True(t, a.CleanupComplete)
+		require.Equal(t, "Complete", a.RemoteCleanupState)
+		require.Equal(t, appsv1.SnapshotExportPhaseDeleted, c.Status.SnapshotExports[0].Phase)
+		require.NotNil(t, c.Status.SnapshotExports[0].Archive)
+		require.NoError(t, local.reconcileNativeDeletion(ctx, c, a, recipe))
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(currentJob), &batchv1.Job{})))
+	})
+	t.Run("concurrent reconcilers issue one POST per numbered name", func(t *testing.T) {
+		c, a, recipe := seed(t, template.Namespace, "Succeeded", deleting)
+		_, err := r.ensureNativeIdentity(ctx, c)
+		require.NoError(t, err)
+		before := posts.Load()
+		var wg sync.WaitGroup
+		errs := make(chan error, 2)
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs <- r.reconcileNativeDeletion(ctx, c.DeepCopy(), a.DeepCopy(), recipe)
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		failures := 0
+		for err := range errs {
+			if err != nil {
+				failures++
+			}
+		}
+		require.Equal(t, 1, failures)
+		require.Equal(t, before+1, posts.Load())
+		require.EqualValues(t, 1, refresh(t, c).CleanupAttempt)
+	})
+	for name, status := range map[string]corev1.PodStatus{"failed": {Phase: corev1.PodFailed}, "succeeded": {Phase: corev1.PodSucceeded}} {
+		t.Run("cleanup worker terminal before binding is never authorized "+name, func(t *testing.T) {
+			c, a, recipe := seed(t, template.Namespace, "Succeeded", deleting)
+			require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
+			a = refresh(t, c)
+			require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
+			a = refresh(t, c)
+			job := &batchv1.Job{}
+			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, job))
+			workerPod(t, job, status)
+			require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
+			a = refresh(t, c)
+			require.Equal(t, "Failed", a.CleanupState)
+			require.Equal(t, "CleanupWorkerTerminated", a.CleanupReason)
+			require.Nil(t, a.CleanupPod)
+		})
+	}
+	t.Run("acknowledgement accepts unresolved deletion before any issuance", func(t *testing.T) {
+		c, a, recipe := seed(t, template.Namespace, "Succeeded", deleting)
+		require.NoError(t, admin.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: recipe.Namespace, Name: recipe.Credentials.Name}}))
+		require.Error(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
+		refresh(t, c)
+		c.Annotations = map[string]string{exportprotocol.CleanupAckAnnotation: a.ExportID}
+		require.NoError(t, admin.Update(ctx, c))
+		require.NoError(t, r.reconcileNativeAcknowledgements(ctx, c))
+		a = refresh(t, c)
+		require.Equal(t, "Acknowledged", a.CleanupState)
+		require.Zero(t, a.CleanupAttempt)
+		require.Equal(t, "Required", a.RemoteCleanupState)
+		before := posts.Load()
+		require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
+		require.Equal(t, before, posts.Load())
+	})
+	t.Run("acknowledgement accepts retained output with leftover temporary objects", func(t *testing.T) {
+		c, a, _ := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+			a.RemoteCleanupState, e.RemoteCleanupState = "Required", "Required"
+		})
+		c.Annotations = map[string]string{exportprotocol.CleanupAckAnnotation: a.ExportID}
+		require.NoError(t, admin.Update(ctx, c))
+		require.NoError(t, r.reconcileNativeAcknowledgements(ctx, c))
+		a = refresh(t, c)
+		require.Equal(t, "Acknowledged", a.CleanupState)
+		require.Equal(t, "Required", a.RemoteCleanupState)
+		require.Equal(t, appsv1.SnapshotExportPhaseAcknowledged, c.Status.SnapshotExports[0].Phase)
+	})
+	t.Run("cleanup ordinal schema", func(t *testing.T) {
+		failedAt := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+		failed := func(ordinal int32) (*appsv1.ChainNode, string) {
+			c, a, _ := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+				a.CleanupAttempt = ordinal
+				a.CleanupIssuer = string(uuid.NewUUID())
+				a.CleanupIssuedAt = &failedAt
+				a.CleanupJob = &appsv1.ExportResourceIdentity{Name: "cleanup-job", UID: "cleanup-job"}
+				a.CleanupPod = &appsv1.ExportResourceIdentity{Name: "cleanup-pod", UID: "cleanup-pod"}
+				a.CleanupState, a.CleanupReason = "Failed", "CleanupJobFailed"
+				a.RemoteCleanupState, e.RemoteCleanupState = "Required", "Required"
+				e.Phase = appsv1.SnapshotExportPhaseDeleting
+			})
+			return c, a.CleanupIssuer
+		}
+		retry := func(a *appsv1.SnapshotExportAttempt) {
+			a.CleanupAttempt++
+			a.CleanupIssuer = string(uuid.NewUUID())
+			a.CleanupIssuedAt = ptr.To(metav1.Now())
+			a.CleanupJob, a.CleanupPod = nil, nil
+			a.CleanupState, a.CleanupReason = "", ""
+		}
+		c, issuer := failed(1)
+		for _, tc := range []struct {
+			name, message string
+			mutate        func(*appsv1.SnapshotExportAttempt)
+		}{
+			{"issuer", "cleanup issuance is immutable", func(a *appsv1.SnapshotExportAttempt) { a.CleanupIssuer = string(uuid.NewUUID()) }},
+			{"Job", "cleanup Job identity is immutable", func(a *appsv1.SnapshotExportAttempt) { a.CleanupJob.UID = "other" }},
+			{"Pod", "cleanup Pod identity is immutable", func(a *appsv1.SnapshotExportAttempt) { a.CleanupPod = nil }},
+			{"timestamp", "cleanup timestamp is immutable", func(a *appsv1.SnapshotExportAttempt) { a.CleanupIssuedAt = ptr.To(metav1.Now()) }},
+			{"reopen within ordinal", "stopped cleanup cannot reopen", func(a *appsv1.SnapshotExportAttempt) { a.CleanupState = "" }},
+			{"skipped ordinal", "cleanup attempt advances by one", func(a *appsv1.SnapshotExportAttempt) { retry(a); a.CleanupAttempt = 3 }},
+			{"decreased ordinal", "cleanup attempt advances by one", func(a *appsv1.SnapshotExportAttempt) { a.CleanupAttempt, a.CleanupIssuer = 0, "" }},
+			{"reused issuer", "fresh issuance", func(a *appsv1.SnapshotExportAttempt) { retry(a); a.CleanupIssuer = issuer }},
+			{"reused timestamp", "fresh issuance", func(a *appsv1.SnapshotExportAttempt) { retry(a); a.CleanupIssuedAt = &failedAt }},
+			{"retained Job", "fresh issuance", func(a *appsv1.SnapshotExportAttempt) {
+				retry(a)
+				a.CleanupJob = &appsv1.ExportResourceIdentity{Name: "cleanup-job", UID: "cleanup-job"}
+			}},
+			{"retained stop", "fresh issuance", func(a *appsv1.SnapshotExportAttempt) { retry(a); a.CleanupState = "Failed" }},
+			{"recipe on increment", "attempt identity and recipe are immutable", func(a *appsv1.SnapshotExportAttempt) { retry(a); a.Recipe += " " }},
+			{"upload witness on increment", "job issuance cannot revert", func(a *appsv1.SnapshotExportAttempt) { retry(a); a.JobCreateIssuer = string(uuid.NewUUID()) }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				invalid := c.DeepCopy()
+				tc.mutate(&invalid.Status.SnapshotExportAuthority.Attempts[0])
+				err := admin.Status().Update(ctx, invalid)
+				require.True(t, apierrors.IsInvalid(err), "%v", err)
+				require.ErrorContains(t, err, tc.message)
+			})
+		}
+		valid := c.DeepCopy()
+		retry(&valid.Status.SnapshotExportAuthority.Attempts[0])
+		require.NoError(t, admin.Status().Update(ctx, valid))
+
+		exhausted, _ := failed(exportprotocol.MaxCleanupAttempts)
+		fourth := exhausted.DeepCopy()
+		retry(&fourth.Status.SnapshotExportAuthority.Attempts[0])
+		require.True(t, apierrors.IsInvalid(admin.Status().Update(ctx, fourth)))
+		for _, state := range []string{"Acknowledged", "Abandoned"} {
+			stopped, _ := failed(1)
+			stopped.Status.SnapshotExportAuthority.Attempts[0].CleanupState = state
+			require.NoError(t, admin.Status().Update(ctx, stopped))
+			reopened := stopped.DeepCopy()
+			retry(&reopened.Status.SnapshotExportAuthority.Attempts[0])
+			err := admin.Status().Update(ctx, reopened)
+			require.True(t, apierrors.IsInvalid(err), "%s: %v", state, err)
+			require.ErrorContains(t, err, "fresh issuance")
+		}
 	})
 	t.Run("postauthorization uncertainty cannot be erased", func(t *testing.T) {
 		c, a, _ := seed(t, template.Namespace, "Uploading", nil)
@@ -1275,6 +1583,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			t.Run(fmt.Sprintf("owner deletion preserves archive missing credentials %v prior cleanup failure %v", missing, priorFailure), func(t *testing.T) {
 				c, _, recipe := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
 					if priorFailure {
+						a.CleanupAttempt = 1
 						a.CleanupState = "Failed"
 						a.CleanupReason = "IssuedCleanupMissing"
 						a.CleanupIssuer = string(uuid.NewUUID())
@@ -1291,18 +1600,16 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				refresh(t, c)
 				require.NoError(t, r.recoverNativeExports(ctx, c))
 				a := refresh(t, c)
+				require.Equal(t, "Abandoned", a.CleanupState)
+				require.Equal(t, "OwnerDeleting", a.CleanupReason)
 				if priorFailure {
-					require.Equal(t, "Failed", a.CleanupState)
-					require.Equal(t, "IssuedCleanupMissing", a.CleanupReason)
 					require.Equal(t, "Required", a.RemoteCleanupState)
 				} else {
-					require.Equal(t, "Abandoned", a.CleanupState)
-					require.Equal(t, "OwnerDeleting", a.CleanupReason)
 					require.Equal(t, "Complete", a.RemoteCleanupState)
 				}
 				require.NotNil(t, c.Status.SnapshotExports[0].Archive)
 				require.NotContains(t, c.Finalizers, exportprotocol.AuthorityFinalizer)
-				require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}, &batchv1.Job{})))
+				require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, &batchv1.Job{})))
 			})
 		}
 	}
@@ -1311,6 +1618,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "native-terminating-"}}
 			require.NoError(t, admin.Create(ctx, ns))
 			c, _, recipe := seed(t, ns.Name, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+				a.CleanupAttempt = 1
 				a.CleanupIssuer = string(uuid.NewUUID())
 				a.CleanupIssuedAt = ptr.To(metav1.Now())
 				a.RemoteCleanupState = "Required"
@@ -1329,7 +1637,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.Equal(t, "NamespaceTerminating", a.CleanupReason)
 			require.Equal(t, "Required", a.RemoteCleanupState)
 			require.NotContains(t, c.Finalizers, exportprotocol.AuthorityFinalizer)
-			require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}, &batchv1.Job{})))
+			require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, &batchv1.Job{})))
 		})
 	}
 
@@ -1633,6 +1941,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.NoError(t, err)
 			a.Recipe = text
 			a.RecipeSHA256 = digest
+			a.CleanupAttempt = 1
 			a.CleanupState = "Acknowledged"
 			a.CleanupIssuer = string(uuid.NewUUID())
 			a.CleanupIssuedAt = ptr.To(metav1.Now())
@@ -1719,7 +2028,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
 			a = refresh(t, c)
 			job := &batchv1.Job{}
-			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: "delete-" + a.ID}, job))
+			require.NoError(t, admin.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: exportprotocol.CleanupJobName(a.ID, 1)}, job))
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: job.Name + "-pod", Namespace: c.Namespace, Labels: job.Spec.Template.Labels, OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: ptr.To(true)}}}, Spec: *job.Spec.Template.Spec.DeepCopy()}
 			require.NoError(t, admin.Create(ctx, pod))
 			require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
@@ -1826,6 +2135,9 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 					a.CleanupState = "Acknowledged"
 					e.Phase = appsv1.SnapshotExportPhaseAcknowledged
 				} else {
+					a.CleanupAttempt = exportprotocol.MaxCleanupAttempts
+					a.CleanupIssuer = string(uuid.NewUUID())
+					a.CleanupIssuedAt = ptr.To(metav1.Now())
 					a.CleanupState = "Failed"
 					a.CleanupReason = "CleanupJobFailed"
 					e.Phase = appsv1.SnapshotExportPhaseDeleting

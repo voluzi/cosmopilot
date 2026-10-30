@@ -74,6 +74,16 @@ func TestNativeWorkerRejectsAdmittedArchiveChanges(t *testing.T) {
 			}
 		})
 	}
+	numbered := a.DeepCopy()
+	numbered.CleanupAttempt = 2
+	second := NativeCleanupJob(numbered, r)
+	require.Equal(t, exportprotocol.CleanupJobName(a.ID, 2), second.Name)
+	require.Equal(t, []string{"--cleanup-attempt", "2"}, second.Spec.Template.Spec.Containers[0].Args[len(second.Spec.Template.Spec.Containers[0].Args)-2:])
+	require.NoError(t, ValidateNativeCleanupJob(second, numbered, r))
+	retired := a.DeepCopy()
+	retired.CleanupAttempt = 1
+	require.Error(t, ValidateNativeCleanupJob(second, retired, r), "a retired ordinal must not validate the current Job")
+	require.Error(t, ValidateNativeCleanupPodSpec(&second.Spec.Template.Spec, retired, r), "a Pod carries its issuance ordinal")
 	pvc := NativePVC(a, r, types.UID("job-uid"))
 	require.Contains(t, pvc.Finalizers, exportprotocol.AttemptFinalizer)
 	require.Equal(t, types.UID("job-uid"), pvc.OwnerReferences[0].UID)

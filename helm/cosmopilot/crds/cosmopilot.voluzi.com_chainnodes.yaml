@@ -9879,6 +9879,14 @@ spec:
                         authorizedAt:
                           format: date-time
                           type: string
+                        cleanupAttempt:
+                          default: 0
+                          description: CleanupAttempt is the ordinal of the current
+                            numbered cleanup issuance; 0 means none was issued.
+                          format: int32
+                          maximum: 3
+                          minimum: 0
+                          type: integer
                         cleanupComplete:
                           type: boolean
                         cleanupIssuedAt:
@@ -10088,6 +10096,7 @@ spec:
                           minimum: 1
                           type: integer
                       required:
+                      - cleanupAttempt
                       - createdAt
                       - exportID
                       - id
@@ -10135,27 +10144,45 @@ spec:
                       - message: completed result is immutable
                         rule: '!has(oldSelf.completedEnvelope) || (has(self.completedEnvelope)
                           && self.completedEnvelope == oldSelf.completedEnvelope)'
+                      - message: cleanup attempt advances by one
+                        rule: self.cleanupAttempt == oldSelf.cleanupAttempt || self.cleanupAttempt
+                          == oldSelf.cleanupAttempt + 1
+                      - message: cleanup attempt requires its issuer
+                        rule: (self.cleanupAttempt > 0) == has(self.cleanupIssuer)
+                      - message: cleanup attempt requires a succeeded upload
+                        rule: self.cleanupAttempt == 0 || self.phase == 'Succeeded'
+                      - message: cleanup retry requires a fresh issuance after failure
+                        rule: 'self.cleanupAttempt == oldSelf.cleanupAttempt || ((oldSelf.cleanupAttempt
+                          == 0 ? !has(oldSelf.cleanupState) : (has(oldSelf.cleanupState)
+                          && oldSelf.cleanupState == ''Failed'')) && (!has(oldSelf.cleanupComplete)
+                          || !oldSelf.cleanupComplete) && !has(self.cleanupState)
+                          && !has(self.cleanupReason) && !has(self.cleanupJob) &&
+                          !has(self.cleanupPod) && (!has(oldSelf.cleanupIssuer) ||
+                          self.cleanupIssuer != oldSelf.cleanupIssuer) && (!has(oldSelf.cleanupIssuedAt)
+                          || self.cleanupIssuedAt > oldSelf.cleanupIssuedAt))'
                       - message: cleanup issuance is immutable
-                        rule: '!has(oldSelf.cleanupIssuer) || (has(self.cleanupIssuer)
-                          && self.cleanupIssuer == oldSelf.cleanupIssuer)'
+                        rule: self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupIssuer)
+                          || (has(self.cleanupIssuer) && self.cleanupIssuer == oldSelf.cleanupIssuer)
                       - message: cleanup Job identity is immutable
-                        rule: '!has(oldSelf.cleanupJob) || (has(self.cleanupJob) &&
-                          self.cleanupJob == oldSelf.cleanupJob)'
+                        rule: self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupJob)
+                          || (has(self.cleanupJob) && self.cleanupJob == oldSelf.cleanupJob)
                       - message: cleanup Pod identity is immutable
-                        rule: '!has(oldSelf.cleanupPod) || (has(self.cleanupPod) &&
-                          self.cleanupPod == oldSelf.cleanupPod)'
+                        rule: self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupPod)
+                          || (has(self.cleanupPod) && self.cleanupPod == oldSelf.cleanupPod)
                       - message: cleanup acknowledgement cannot revert
                         rule: '!has(oldSelf.cleanupComplete) || !oldSelf.cleanupComplete
                           || (has(self.cleanupComplete) && self.cleanupComplete)'
                       - message: cleanup timestamp is immutable
-                        rule: '!has(oldSelf.cleanupIssuedAt) || (has(self.cleanupIssuedAt)
-                          && self.cleanupIssuedAt == oldSelf.cleanupIssuedAt)'
+                        rule: self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupIssuedAt)
+                          || (has(self.cleanupIssuedAt) && self.cleanupIssuedAt ==
+                          oldSelf.cleanupIssuedAt)
                       - message: cleanup issuance requires timestamp
                         rule: '!has(self.cleanupIssuer) || has(self.cleanupIssuedAt)'
                       - message: stopped cleanup cannot reopen
-                        rule: '!has(oldSelf.cleanupState) || (has(self.cleanupState)
-                          && (self.cleanupState == oldSelf.cleanupState || (oldSelf.cleanupState
-                          == ''Failed'' && self.cleanupState == ''Acknowledged'')))'
+                        rule: self.cleanupAttempt != oldSelf.cleanupAttempt || !has(oldSelf.cleanupState)
+                          || (has(self.cleanupState) && (self.cleanupState == oldSelf.cleanupState
+                          || (oldSelf.cleanupState == 'Failed' && self.cleanupState
+                          in ['Acknowledged','Abandoned'])))
                       - message: stopped cleanup requires terminal unresolved authority
                         rule: '!has(self.cleanupState) || (self.phase in [''Succeeded'',''Invalidated'']
                           && (!has(self.cleanupComplete) || !self.cleanupComplete))'

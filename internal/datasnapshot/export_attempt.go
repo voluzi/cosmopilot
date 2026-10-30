@@ -116,8 +116,9 @@ func containsFinalizer(fs []string, f string) bool {
 
 func NativeCleanupJob(a *appsv1.SnapshotExportAttempt, r exportprotocol.Recipe) *batchv1.Job {
 	j := NativeJob(a, r)
-	j.Name = "delete-" + a.ID
+	j.Name = exportprotocol.CleanupJobName(a.ID, a.CleanupAttempt)
 	j.Spec.Template.Spec.Containers[0].Args[0] = "native-cleanup"
+	j.Spec.Template.Spec.Containers[0].Args = append(j.Spec.Template.Spec.Containers[0].Args, "--cleanup-attempt", strconv.Itoa(int(a.CleanupAttempt)))
 	j.Spec.Template.Spec.Containers[0].WorkingDir = "/app"
 	j.Spec.Template.Spec.Containers[0].VolumeMounts = j.Spec.Template.Spec.Containers[0].VolumeMounts[1:]
 	j.Spec.Template.Spec.Volumes = j.Spec.Template.Spec.Volumes[1:]
@@ -148,7 +149,7 @@ func ValidateNativeCleanupPodSpec(actual *corev1.PodSpec, a *appsv1.SnapshotExpo
 	return ValidateNativePodSpec(normalized, a, r)
 }
 func ValidateNativeCleanupJob(j *batchv1.Job, a *appsv1.SnapshotExportAttempt, r exportprotocol.Recipe) error {
-	if j.Name != "delete-"+a.ID {
+	if j.Name != exportprotocol.CleanupJobName(a.ID, a.CleanupAttempt) {
 		return fmt.Errorf("native cleanup Job name changed")
 	}
 	if err := ValidateNativeCleanupPodSpec(&j.Spec.Template.Spec, a, r); err != nil {
