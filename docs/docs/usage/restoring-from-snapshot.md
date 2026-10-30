@@ -235,3 +235,38 @@ Make sure to set the [initTimeout](../reference/crds#persistence) long enough to
 - The application’s home directory is located at `/home/app`.
 - The data directory is located at `/home/app/data`.
 - A temporary shared volume is available for all initialization containers at `/temp`.
+
+## Restoring a native export descriptor
+
+For a source-v1 single archive, map the accepted descriptor in
+`status.snapshotExports[].archive` to the restore configuration:
+
+| Descriptor field | Restore field |
+| --- | --- |
+| `archive.objectKey` | `persistence.restore.snapshot.name` |
+| `archive.destination.provider` | `persistence.restore.snapshot.provider` |
+| `archive.destination.bucket` | `persistence.restore.snapshot.bucket` |
+| `archive.destination.region` | `persistence.restore.snapshot.region` |
+| `archive.destination.endpoint` | `persistence.restore.snapshot.endpoint` |
+| `archive.destination.forcePathStyle` | `persistence.restore.snapshot.forcePathStyle` |
+| `archive.sha256` | `persistence.restore.verification.sha256` |
+
+Copy the exact object key and digest. Requiring the SHA-256 is a rule of this
+descriptor-verification workflow; the generic restore API permits its omission
+and has no separate descriptor admission mode. The digest covers the stored
+compressed bytes. The descriptor's canonical recipe records the original
+snapshot/content identity, destination, credential reference, clone binding and
+optional `CaptureObserved` height. That observed height is advisory and does not
+independently establish exact dataset height or safe validator signing history.
+Split native output has no single-archive descriptor and is not accepted by the
+single-object restore path.
+
+The descriptor's `readIdentity` records how the export ran; it does not authorize
+reuse of that identity during initialization. Select a separate least-privileged
+read identity and a compatible application. In particular, do not give privileged
+export workload identity to application-controlled initialization commands. Retain
+the descriptor and any unresolved-cleanup evidence outside its ChainNode before
+owner deletion. Owner deletion does not start remote archive deletion; it closes
+native execution authority and removes the CR's status evidence. A worker authorized
+before cancellation can still complete remote I/O. `Acknowledged` cleanup retains
+uncertainty and never substitutes for remote deletion proof.

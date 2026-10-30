@@ -33,7 +33,7 @@ var _ = Describe("Exported snapshot restore E2E", func() {
 		configureSnapshotPersistence(source)
 		source.Spec.Persistence.Snapshots.Frequency = "1h"
 		source.Spec.Persistence.Snapshots.StopNode = ptr.To(true)
-		source.Spec.Persistence.Snapshots.ExportTarball = &appsv1.ExportTarballConfig{S3: &appsv1.S3ExportConfig{
+		source.Spec.Persistence.Snapshots.ExportTarball = &appsv1.ExportTarballConfig{Protocol: "source-v1", S3: &appsv1.S3ExportConfig{
 			Bucket: "backups", Region: "us-east-1", Endpoint: ptr.To(endpoint), ForcePathStyle: ptr.To(true), CredentialsSecret: &corev1.LocalObjectReference{Name: credentials}, ChunkSize: ptr.To("5MB"), ConcurrentJobs: ptr.To(1), BufferSize: ptr.To("1MB"),
 		}}
 		snapshotConfig := source.Spec.Persistence.Snapshots
@@ -47,23 +47,33 @@ var _ = Describe("Exported snapshot restore E2E", func() {
 			source.Spec.Persistence.Snapshots = snapshotConfig
 			return c.Update(ctx, source)
 		})).To(Succeed())
-		var object, snapshotName string
+		var object, snapshotName, descriptorDigest string
+		var nativeArchive *appsv1.SnapshotExportArchive
 		Eventually(func() string {
 			RefreshChainNode(source)
 			for _, export := range source.Status.SnapshotExports {
-				if export.Phase == appsv1.SnapshotExportPhaseUploaded {
-					return export.ObjectName + ".tar.gz"
+				if export.Phase == appsv1.SnapshotExportPhaseUploaded && export.Archive != nil {
+					return export.Archive.ObjectKey
 				}
 			}
 			return ""
 		}, 5*time.Minute, 5*time.Second).ShouldNot(BeEmpty())
 		for _, export := range source.Status.SnapshotExports {
-			if export.Phase == appsv1.SnapshotExportPhaseUploaded {
-				object = export.ObjectName + ".tar.gz"
+			if export.Phase == appsv1.SnapshotExportPhaseUploaded && export.Archive != nil {
+				object = export.Archive.ObjectKey
+				descriptorDigest = export.Archive.SHA256
+				nativeArchive = export.Archive.DeepCopy()
+				Expect(nativeArchive.SourceHeightKind).To(Equal("CaptureObserved"))
+				Expect(export.Archive.AuthorityOwner.UID).To(Equal(source.UID))
+				Expect(export.Archive.Job.UID).NotTo(BeEmpty())
+				Expect(export.Archive.Pod.UID).NotTo(BeEmpty())
+				Expect(export.Archive.ScratchPVC.UID).NotTo(BeEmpty())
+				Expect(export.Archive.ScratchPV.UID).NotTo(BeEmpty())
 				snapshotName = export.SnapshotName
 				break
 			}
 		}
+		assertTerminalNativeWorkerDeniedOnCSIClone(source, nativeArchive)
 		snapshot := &snapshotv1.VolumeSnapshot{}
 		Expect(c.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: snapshotName}, snapshot)).To(Succeed())
 		height, err := strconv.ParseInt(snapshot.Annotations[controllers.AnnotationDataHeight], 10, 64)
@@ -84,8 +94,9 @@ var _ = Describe("Exported snapshot restore E2E", func() {
 		Expect(storedHeight).To(Equal(strconv.FormatInt(height, 10)))
 		digestOutput, err := Framework().PodExec(ns.Name, "restore-store", "server", "sh", "-c", `mc cp local/backups/"$1" /tmp/export.tar.gz >/dev/null && sha256sum /tmp/export.tar.gz`, "sh", object)
 		Expect(err).NotTo(HaveOccurred())
-		digest := strings.Fields(digestOutput)[0]
-		Expect(digest).To(MatchRegexp("^[0-9a-f]{64}$"))
+		measuredDigest := strings.Fields(digestOutput)[0]
+		Expect(measuredDigest).To(Equal(descriptorDigest))
+		digest := descriptorDigest
 		restore := app.BuildChainNode(ns.Name)
 		restore.Spec.Validator = nil
 		genesisName := source.Spec.Genesis.GetConfigMapName(source.Status.ChainID)

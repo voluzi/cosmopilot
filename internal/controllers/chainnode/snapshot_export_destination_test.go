@@ -1917,3 +1917,13 @@ func TestTarballProviderForExportAppliesConfiguredExportResources(t *testing.T) 
 	require.True(t, ok)
 	assert.Equal(t, resources, gcs.ExportConfig.Resources)
 }
+
+func TestSnapshotExportForPreservesLegacySelectionAndLatestNativeAttempt(t *testing.T) {
+	snapshot := destinationTestSnapshot()
+	legacy := []appsv1.SnapshotExportStatus{{ID: "first", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID}, {ID: "second", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID}}
+	node := destinationTestChainNode(nil)
+	node.Status.SnapshotExports = legacy
+	require.Equal(t, "first", snapshotExportFor(node, snapshot).ID)
+	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{ID: "invalidated", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ProvenanceVersion: 1, Phase: appsv1.SnapshotExportPhaseCleanupRequired}, {ID: "retry", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ProvenanceVersion: 1, Phase: appsv1.SnapshotExportPhaseUploading}}
+	require.Equal(t, "retry", snapshotExportFor(node, snapshot).ID)
+}
