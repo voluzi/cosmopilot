@@ -68,7 +68,7 @@ Add bounded CEL rules:
 - `self.attempts.all(a, a.sequence <= self.lastSequence)`.
 - `cleanupIssuedAt`, once present, cannot change or disappear.
 - New cleanup issuance requires its timestamp in the same update.
-- `cleanupState` cannot disappear or return to the open state. Permit only `Failed → Acknowledged`; `Acknowledged` and `Abandoned` remain stopped.
+- `cleanupState` cannot disappear or return to the open state. An absent state may enter any stopped state; among stopped states permit only `Failed → Acknowledged`. `Acknowledged` and `Abandoned` remain stopped.
 - Nonempty `cleanupState` requires a terminal upload phase and cannot coexist with successful `cleanupComplete`.
 - Once an `Invalidated` attempt has `remoteCleanupState=Required`, it cannot become `Complete`.
 - Preserve `authorizedAt` once set; require it for `Uploading`. This supports reliable preauthorization classification.

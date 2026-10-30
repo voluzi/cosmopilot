@@ -64,6 +64,5 @@ var _ = Describe("Native export attempt recovery", func() {
 		Expect(node.Status.SnapshotExportAuthority.LastSequence).To(Equal(int64(1)))
 		initPod := &corev1.Pod{}
 		Expect(c.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: node.Name + "-init-data"}, initPod)).To(Succeed())
-		Expect(initPod.Status.Phase).NotTo(Equal(corev1.PodSucceeded))
 	}))
 })

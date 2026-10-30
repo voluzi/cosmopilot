@@ -604,7 +604,7 @@ func (r *Reconciler) updatePhase(ctx context.Context, chainNode *appsv1.ChainNod
 
 // setupWithManager sets up the controller with the Manager.
 func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.ChainNode{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
@@ -616,8 +616,13 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.cosmoGuardConfigMapRequests)).
 		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
-		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
-		Watches(&snapshotv1.VolumeSnapshot{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests))
+	if _, err := mgr.GetRESTMapper().RESTMapping(snapshotv1.SchemeGroupVersion.WithKind("VolumeSnapshot").GroupKind(), snapshotv1.SchemeGroupVersion.Version); err == nil {
+		controllerBuilder.Watches(&snapshotv1.VolumeSnapshot{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests))
+	} else if !apiMeta.IsNoMatchError(err) {
+		return err
+	}
+	return controllerBuilder.
 		WithEventFilter(predicate.Or(GenerationChangedPredicate{}, predicate.NewPredicateFuncs(nativeExportEvent))).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)

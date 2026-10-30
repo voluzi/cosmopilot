@@ -208,8 +208,10 @@ change the operator's export/controller contract.
 ### `dataexporter native-upload` and `native-cleanup`
 
 These fixed worker commands implement `exportTarball.protocol: source-v1`. They take
-`--namespace`, `--owner`, `--owner-uid`, `--attempt-id`, and `--attempt-sequence`.
-The operator supplies `EXPORT_POD_UID` through the downward API. `--kubeconfig` is
+`--namespace`, `--owner`, `--owner-uid`, `--attempt-id`, `--attempt-sequence`, and
+`--pod-uid`. The latter defaults to `EXPORT_POD_UID`, supplied by the operator
+through the downward API. Diagnostic invocations can set `--pod-uid` explicitly
+to identify the already-selected worker; it does not grant authority. `--kubeconfig` is
 available for diagnostic execution; workers use the projected Kubernetes token.
 Destination, credentials reference, compression and sizing come from the immutable
 canonical recipe in ChainNode status. These commands do not accept archive paths

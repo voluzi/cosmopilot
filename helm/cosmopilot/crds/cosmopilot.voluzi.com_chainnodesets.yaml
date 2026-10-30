@@ -12719,6 +12719,8 @@ spec:
                                   - bucket
                                   type: object
                                 protocol:
+                                  description: Protocol defaults to legacy when omitted;
+                                    source-v1 requires S3 with Secret credentials.
                                   enum:
                                   - legacy
                                   - source-v1
@@ -17976,6 +17978,9 @@ spec:
                                       - bucket
                                       type: object
                                     protocol:
+                                      description: Protocol defaults to legacy when
+                                        omitted; source-v1 requires S3 with Secret
+                                        credentials.
                                       enum:
                                       - legacy
                                       - source-v1
@@ -23753,6 +23758,8 @@ spec:
                                 - bucket
                                 type: object
                               protocol:
+                                description: Protocol defaults to legacy when omitted;
+                                  source-v1 requires S3 with Secret credentials.
                                 enum:
                                 - legacy
                                 - source-v1

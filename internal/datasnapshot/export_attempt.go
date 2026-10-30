@@ -71,6 +71,9 @@ func ValidateNativePodSpec(actual *corev1.PodSpec, a *appsv1.SnapshotExportAttem
 	return nil
 }
 func ValidateNativeJob(j *batchv1.Job, a *appsv1.SnapshotExportAttempt, r exportprotocol.Recipe) error {
+	if !hasNativeLabels(j.Labels, a, r) || !hasNativeLabels(j.Spec.Template.Labels, a, r) {
+		return fmt.Errorf("native Job attribution changed")
+	}
 	if j.Name != r.ResourceName || j.Namespace != r.Namespace || !j.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(j.OwnerReferences, NativeJob(a, r).OwnerReferences) || !containsFinalizer(j.Finalizers, exportprotocol.AttemptFinalizer) || ptr.Deref(j.Spec.Completions, 1) != 1 || ptr.Deref(j.Spec.Parallelism, 1) != 1 || ptr.Deref(j.Spec.BackoffLimit, 6) != 0 || j.Spec.TTLSecondsAfterFinished != nil || !apiequality.Semantic.DeepEqual(j.Spec.PodFailurePolicy, NativeJob(a, r).Spec.PodFailurePolicy) || ptr.Deref(j.Spec.PodReplacementPolicy, batchv1.TerminatingOrFailed) != batchv1.Failed || j.Spec.CompletionMode != nil && *j.Spec.CompletionMode != batchv1.NonIndexedCompletion || ptr.Deref(j.Spec.Suspend, false) {
 		return fmt.Errorf("native Job identity or execution policy changed")
 	}
@@ -78,7 +81,7 @@ func ValidateNativeJob(j *batchv1.Job, a *appsv1.SnapshotExportAttempt, r export
 }
 func ValidateNativePVC(p *corev1.PersistentVolumeClaim, a *appsv1.SnapshotExportAttempt, r exportprotocol.Recipe, jobUID types.UID) error {
 	expected := NativePVC(a, r, jobUID)
-	if p.Name != r.ResourceName || p.Namespace != r.Namespace || !p.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(p.OwnerReferences, expected.OwnerReferences) || !containsFinalizer(p.Finalizers, exportprotocol.AttemptFinalizer) {
+	if p.Name != r.ResourceName || p.Namespace != r.Namespace || !p.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(p.OwnerReferences, expected.OwnerReferences) || !containsFinalizer(p.Finalizers, exportprotocol.AttemptFinalizer) || !hasNativeLabels(p.Labels, a, r) {
 		return fmt.Errorf("native PVC identity changed")
 	}
 	if ref := p.Spec.DataSourceRef; ref != nil {
@@ -93,6 +96,14 @@ func ValidateNativePVC(p *corev1.PersistentVolumeClaim, a *appsv1.SnapshotExport
 		return fmt.Errorf("native PVC recipe changed")
 	}
 	return nil
+}
+func hasNativeLabels(labels map[string]string, a *appsv1.SnapshotExportAttempt, r exportprotocol.Recipe) bool {
+	for key, value := range NativeLabels(a, r) {
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
 }
 func containsFinalizer(fs []string, f string) bool {
 	for _, v := range fs {
