@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/c2h5oh/datasize"
@@ -751,14 +752,19 @@ func TestNativeS3CleanupUsesOnlyAcknowledgedExactKeys(t *testing.T) {
 				remaining[key] = true
 			}
 			var unexpected atomic.Int32
+			acknowledged := map[string]bool{}
+			for _, key := range tc.keys {
+				acknowledged[key] = true
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodDelete || r.URL.Query().Get("list-type") != "" {
+				key := strings.TrimPrefix(r.URL.Path, "/bucket/")
+				if r.Method != http.MethodDelete || r.URL.Query().Get("list-type") != "" || !acknowledged[key] {
 					unexpected.Add(1)
-					http.Error(w, "only exact deletes permitted", 400)
+					http.Error(w, "only acknowledged exact deletes permitted", 400)
 					return
 				}
 				mu.Lock()
-				delete(remaining, strings.TrimPrefix(r.URL.Path, "/bucket/"))
+				delete(remaining, key)
 				mu.Unlock()
 				w.WriteHeader(http.StatusNoContent)
 			}))
@@ -778,4 +784,21 @@ func TestNativeS3CleanupUsesOnlyAcknowledgedExactKeys(t *testing.T) {
 			require.Equal(t, map[string]bool{"export-attempt-unrelated.tar.gz": true, "export-attempt-part-00000009.tar.gz": true, "export-other.tar.gz": true}, remaining)
 		})
 	}
+}
+
+func TestNativeS3CleanupErrorsNameTheExactObject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `<Error><Code>AccessDenied</Code><Message>denied</Message></Error>`)
+	}))
+	t.Cleanup(server.Close)
+	exporter, err := NewS3Exporter(t.Context(), S3Config{Region: "test", Endpoint: server.URL, ForcePathStyle: true, ExplicitCredentials: &aws.Credentials{AccessKeyID: "key", SecretAccessKey: "secret"}})
+	require.NoError(t, err)
+	err = exporter.DeleteExact(t.Context(), "bucket", "export-attempt.tar.gz")
+	require.ErrorContains(t, err, "bucket")
+	require.ErrorContains(t, err, "export-attempt.tar.gz")
+	var response *awshttp.ResponseError
+	require.ErrorAs(t, err, &response, "the provider error stays inspectable")
+	require.Equal(t, http.StatusForbidden, response.HTTPStatusCode())
 }

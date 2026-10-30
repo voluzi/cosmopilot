@@ -494,8 +494,10 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 
 // DeleteExact removes one acknowledged object without listing or basename matching.
 func (exporter *S3Exporter) DeleteExact(ctx context.Context, bucket, key string) error {
-	_, err := exporter.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
-	return err
+	if _, err := exporter.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}); err != nil {
+		return fmt.Errorf("delete s3://%s/%s: %w", bucket, key, err)
+	}
+	return nil
 }
 
 func (exporter *S3Exporter) deleteWithContext(ctx context.Context, bucket, name string, opts ...DeleteOption) error {
