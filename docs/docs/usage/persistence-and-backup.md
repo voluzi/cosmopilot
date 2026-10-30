@@ -584,3 +584,123 @@ new data volumes from one unsplit S3 or GCS export. To restore an existing node,
 source, request deletion of its data PVC, then delete the node Pod and any other Pods mounting that
 claim so PVC protection can release it. Choose storage large enough for the extracted data and a compatible
 application image; changing the source only takes effect when the volume is recreated.
+
+## Native source provenance
+
+`persistence.snapshots.exportTarball.protocol: source-v1` selects the native S3
+protocol with Secret credentials. Omitted protocol and `legacy` preserve the legacy
+export lifecycle. Native GCS and cloud ServiceAccount/ambient authentication are
+not supported. A compatible exporter must be selected through the existing
+`dataExporterImage` override; the default image pin is unchanged. An older binary
+fails on the native command instead of uploading through the legacy path.
+
+Install the additive CRDs before the compatible controller. Stop legacy controller
+writers before activating native exports; mixed legacy/new writers over active
+authority are unsupported. Before a downgrade, drain or invalidate active attempts
+and retain the additive authority schema.
+
+The ChainNode authority permanently retains a monotonic sequence watermark. The
+hard limit is 32 attempts, with a separate 256 KiB status reservation budget that
+can impose a lower limit. Existing non-native status consumes the same budget.
+Each recipe is strict canonical JSON, bounded to 16 KiB of UTF-8 contents, with a
+SHA-256 over those exact contents. Reservations count current serialized evidence
+once and reserve only missing lifecycle growth, including escaped JSON overhead.
+Thirty ordinary retained archives can fit; 32 maximum-sized records are not
+promised. `SnapshotExportCapacityExceeded` explains `AttemptLimit`, `StatusBudget`
+or `SequenceExhausted` without advancing the watermark or creating a partial record.
+Normal node configuration, Pod reconciliation and image changes continue.
+
+Confirmed-deleted native history is pruned only after local cleanup and exact source
+absence. Retained archive descriptors and unresolved or acknowledged uncertainty
+remain. These can eventually exhaust capacity; automatic evidence eviction and
+external history storage are not provided. With the default `deleteOnExpire: false`,
+retained archives have no release path. A retention/release decision is required
+before P2 provider expansion or Nodezi C adoption.
+A source snapshot UID/resource-version hold precedes durable resource issuance.
+Jobs and scratch PVCs carry finalizers in their initial POST. Each attempt may issue
+one POST per resource; a missing issued resource is recovered or invalidated, never
+recreated under that attempt. A new attempt uses a new UUID and object basename.
+
+The actual worker mounts its clone read-only. Its dedicated ServiceAccount can GET
+only the exact ChainNode and cannot read Secrets or mutate status. Publication checks
+snapshot/content reverse binding, clone PVC/PV UIDs, the actual admitted Job/Pod and
+the strict result. Descriptor and terminal success are published together before
+source protection or local resources are released. Descriptors remain in
+`snapshotExports[].archive` after snapshot removal. Cleanup state is separate from
+the immutable descriptor. ChainNode deletion still removes its status; retain
+accepted descriptors externally when they must outlive that owner.
+
+Disabling export policy, source loss, owner deletion and initialization early returns
+all run native recovery. A worker gated before invalidation may finish remote work;
+its output cannot be published after invalidation. Such uncertain attempts retain
+`remoteCleanupState: Required`, even after an empty listing or a delete response.
+A preauthorization invalidation retains `remoteCleanupState: Complete`: its worker
+gate proves zero remote upload I/O. Invalidation after authorization permanently
+retains `Required`. Terminal upload failure marks the exact source snapshot's export
+as `failed`; ordinary CSI retention may proceed after local cleanup. No automatic
+upload retry reopens that attempt. For a still-existing, ready and eligible snapshot,
+remove its `cosmopilot.voluzi.com/exporting-tarball` annotation to request a manual
+retry:
+
+```sh
+kubectl annotate volumesnapshot <snapshot> cosmopilot.voluzi.com/exporting-tarball-
+```
+
+The next snapshot reconciliation reserves a fresh sequence, UUID and object basename.
+The old attempt's terminal state, frozen recipe, issuance witnesses and any `Required`
+uncertainty remain unchanged, including after cleanup acknowledgement. An old attempt
+cannot overwrite the new retry's progress marker.
+
+Successful exports honor their frozen `deleteOnExpire` policy on snapshot expiry
+or removal through dedicated exact-key cleanup. Owner deletion alone does not start
+remote archive deletion. Cleanup has one immutable issuance and a timestamp. A failed
+Job, rejected execution identity, or issued Job missing for two minutes durably stops
+cleanup as `Failed` with `remoteCleanupState: Required`, including failure before
+issuance. Returning credentials or a late Job cannot reopen it.
+`SnapshotExportDegraded` identifies blocked native work with a bounded retry cadence;
+native progress also uses Job, Pod and PVC watches. Owner identity/authorization
+failures still stop reconciliation. Non-owner API read failures, including throttling,
+server errors and Secret/ServiceAccount read denials, defer native work without
+invalidating its attempt or issuing replacement resources. Temporarily unavailable
+snapshot readiness also defers authorization and publication. A fresh NotFound,
+UID replacement, deletion or contradictory binding/hold remains definitive identity
+loss. Native Jobs do not ignore disruption failures.
+
+After inspecting or manually handling unresolved output, acknowledge exact complete
+export IDs through a separate annotation:
+
+```sh
+kubectl annotate chainnode <name> \
+  cosmopilot.voluzi.com/native-export-cleanup-ack=<export-ID>[,<export-ID>...]
+```
+
+Only invalidated attempts with unresolved output and failed cleanup attempts are
+eligible. Applied tokens are consumed; unknown tokens grant no authority. The durable
+`Acknowledged` state permits local CSI retention after local resources are handled.
+It preserves `SnapshotExportCleanup`, `remoteCleanupState: Required`, the descriptor
+and capacity usage. It does not set `cleanupComplete` or claim remote deletion proof.
+A retained archive's `Complete` state means no unresolved cleanup, not archive deletion.
+
+Owner or namespace deletion invalidates active uploads and durably abandons incomplete
+cleanup as `Abandoned`, before exact local teardown and source-hold release. Native
+finalizer release does not require cloud credentials or a new cleanup Job. It still
+waits for durable terminal authority and protected local resources. Retain accepted
+descriptors and unresolved-cleanup evidence externally before deleting the owner,
+because its status disappears. Never forcibly remove export finalizers as routine
+maintenance.
+Admission may add CPU, memory and ephemeral-storage resources or raise explicit
+requests/limits; frozen explicit values cannot be lowered or removed. Archive-affecting
+execution fields remain strict. Resource recovery uses a conservative two-minute
+window measured from attempt creation; a slow source hold can consume that window
+and cost one logical attempt.
+
+Local filesystem calls can delay cancellation; the upload joins its workers before
+returning.
+
+An archive descriptor proves provenance from the recorded snapshot incarnation to
+acknowledged compressed bytes under the frozen recipe. It does not prove the node's
+entire signing history, cloud IAM identity, application compatibility or exact
+application database height. `sourceHeightKind: CaptureObserved` in the recipe is an
+advisory observation before capture. CSI behavior and Kubernetes storage binding
+remain assumptions; forced finalizer removal or privileged storage tampering are
+outside this guarantee.

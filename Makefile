@@ -108,8 +108,13 @@ test.integration: FOCUS?=
 test.integration: SKIP?=
 test.integration: TEST_TIMEOUT?=10m
 test.integration: manifests generate fmt vet envtest ## Run integration tests (envtest-based, no cluster needed).
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-	go test -v ./test/integration/... -timeout $(TEST_TIMEOUT) \
+	@assets="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)"; \
+	test -n "$$assets"; \
+	test -x "$$assets/kube-apiserver"; \
+	test -x "$$assets/etcd"; \
+	KUBEBUILDER_ASSETS="$$assets" go test -v ./internal/controllers/chainnode \
+		-run '^TestNativeExportAttemptAPIBoundary$$' -count=1 -timeout $(TEST_TIMEOUT); \
+	KUBEBUILDER_ASSETS="$$assets" go test -v ./test/integration/... -timeout $(TEST_TIMEOUT) \
 		--ginkgo.v \
 		--ginkgo.focus="$(FOCUS)" \
 		--ginkgo.skip="$(SKIP)"

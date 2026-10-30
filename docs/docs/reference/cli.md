@@ -204,3 +204,33 @@ well as the final archive.
 This result identifies archive bytes. It does not attest the source snapshot, mounted volume,
 worker, Job, Pod, or signing history. It is not a provenance-backed restore descriptor and does not
 change the operator's export/controller contract.
+
+### `dataexporter native-upload` and `native-cleanup`
+
+These fixed worker commands implement `exportTarball.protocol: source-v1`. They take
+`--namespace`, `--owner`, `--owner-uid`, `--attempt-id`, and `--attempt-sequence`.
+The operator supplies `EXPORT_POD_UID` through the downward API. `--kubeconfig` is
+available for diagnostic execution; workers use the projected Kubernetes token.
+Destination, credentials reference, compression and sizing come from the immutable
+canonical recipe in ChainNode status. These commands do not accept archive paths
+or destination overrides.
+
+An uncached authority GET must authorize the exact selected mounted Pod before an
+S3 client is constructed or the archive directory is inspected. Pending authority
+may wait for two minutes. Missing, terminal, substituted or unsupported upload
+authority fails closed. Secret mode exposes only `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and optional `AWS_SESSION_TOKEN`; SDK environment or shared
+configuration endpoint overrides are ignored.
+
+The upload writes a separate provenance envelope to `/dev/termination-log`, bounded
+to 3,072 UTF-8 bytes. The controller requires a successful exact Job and selected Pod,
+strict envelope validation and unchanged source/clone binding before publishing an
+archive descriptor. Standalone provider `upload --result-file` keeps its existing
+result schema. Split output completes without a single-archive descriptor.
+
+Native cleanup authorizes a selected cleanup Pod against a succeeded attempt and
+its deleting catalog entry. Deleting owners and every stopped cleanup state
+(`Failed`, `Acknowledged`, `Abandoned`) deny authorization immediately, including
+before a cleanup Pod has been selected. It deletes
+the acknowledged exact key, or the exact generated keys for acknowledged split
+output, with bounded concurrent workers. It never lists by prefix.
