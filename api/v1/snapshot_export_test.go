@@ -42,6 +42,7 @@ func TestExportTarballConfigValidate(t *testing.T) {
 		Bucket: "s3-snapshots",
 		Region: "eu-west-1",
 	}
+	secret := &corev1.LocalObjectReference{Name: "s3-credentials"}
 
 	tests := []struct {
 		name        string
@@ -74,6 +75,44 @@ func TestExportTarballConfigValidate(t *testing.T) {
 			config:      &ExportTarballConfig{S3: s3, Compression: ptr.To(TarballCompression("brotli"))},
 			wantErr:     true,
 			errContains: "unsupported compression",
+		},
+		{
+			name:   "explicit legacy protocol",
+			config: &ExportTarballConfig{Protocol: "legacy", GCS: gcs},
+		},
+		{
+			name:   "source-v1 with S3 Secret credentials",
+			config: &ExportTarballConfig{Protocol: "source-v1", S3: &S3ExportConfig{Bucket: "s3-snapshots", Region: "eu-west-1", CredentialsSecret: secret}},
+		},
+		{
+			name:        "source-v1 on gcs",
+			config:      &ExportTarballConfig{Protocol: "source-v1", GCS: gcs},
+			wantErr:     true,
+			errContains: "source-v1 requires S3 Secret credentials",
+		},
+		{
+			name:        "source-v1 without a Secret",
+			config:      &ExportTarballConfig{Protocol: "source-v1", S3: s3},
+			wantErr:     true,
+			errContains: "source-v1 requires S3 Secret credentials",
+		},
+		{
+			name:        "source-v1 with a service account",
+			config:      &ExportTarballConfig{Protocol: "source-v1", S3: &S3ExportConfig{Bucket: "s3-snapshots", Region: "eu-west-1", ServiceAccountName: ptr.To("s3-exporter")}},
+			wantErr:     true,
+			errContains: "source-v1 requires S3 Secret credentials",
+		},
+		{
+			name:        "source-v1 with a Secret and a service account",
+			config:      &ExportTarballConfig{Protocol: "source-v1", S3: &S3ExportConfig{Bucket: "s3-snapshots", Region: "eu-west-1", CredentialsSecret: secret, ServiceAccountName: ptr.To("s3-exporter")}},
+			wantErr:     true,
+			errContains: "source-v1 requires S3 Secret credentials",
+		},
+		{
+			name:        "unknown protocol",
+			config:      &ExportTarballConfig{Protocol: "source-v2", S3: s3},
+			wantErr:     true,
+			errContains: "unsupported protocol",
 		},
 	}
 
