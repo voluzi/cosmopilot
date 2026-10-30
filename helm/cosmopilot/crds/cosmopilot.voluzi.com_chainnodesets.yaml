@@ -12718,6 +12718,11 @@ spec:
                                   required:
                                   - bucket
                                   type: object
+                                protocol:
+                                  enum:
+                                  - legacy
+                                  - source-v1
+                                  type: string
                                 resources:
                                   description: |-
                                     Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
@@ -12871,6 +12876,9 @@ spec:
                               x-kubernetes-validations:
                               - message: exactly one of gcs or s3 must be set
                                 rule: has(self.gcs) != has(self.s3)
+                              - message: source-v1 requires S3 Secret credentials
+                                rule: '!has(self.protocol) || self.protocol == ''legacy''
+                                  || (has(self.s3) && has(self.s3.credentialsSecret))'
                             frequency:
                               description: How often a snapshot should be created.
                               format: duration
@@ -17967,6 +17975,11 @@ spec:
                                       required:
                                       - bucket
                                       type: object
+                                    protocol:
+                                      enum:
+                                      - legacy
+                                      - source-v1
+                                      type: string
                                     resources:
                                       description: |-
                                         Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
@@ -18121,6 +18134,9 @@ spec:
                                   x-kubernetes-validations:
                                   - message: exactly one of gcs or s3 must be set
                                     rule: has(self.gcs) != has(self.s3)
+                                  - message: source-v1 requires S3 Secret credentials
+                                    rule: '!has(self.protocol) || self.protocol ==
+                                      ''legacy'' || (has(self.s3) && has(self.s3.credentialsSecret))'
                                 frequency:
                                   description: How often a snapshot should be created.
                                   format: duration
@@ -23736,6 +23752,11 @@ spec:
                                 required:
                                 - bucket
                                 type: object
+                              protocol:
+                                enum:
+                                - legacy
+                                - source-v1
+                                type: string
                               resources:
                                 description: |-
                                   Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
@@ -23888,6 +23909,9 @@ spec:
                             x-kubernetes-validations:
                             - message: exactly one of gcs or s3 must be set
                               rule: has(self.gcs) != has(self.s3)
+                            - message: source-v1 requires S3 Secret credentials
+                              rule: '!has(self.protocol) || self.protocol == ''legacy''
+                                || (has(self.s3) && has(self.s3.credentialsSecret))'
                           frequency:
                             description: How often a snapshot should be created.
                             format: duration

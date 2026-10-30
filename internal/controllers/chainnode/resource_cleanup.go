@@ -13,12 +13,21 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
 	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
 // finalizeResources stops every signing workload before applying durable-resource policy. Consensus
 // key reservations are deliberately outside this workflow; issue #86 owns their safe release.
 func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	if err := r.recoverNativeExports(ctx, chainNode); err != nil {
+		if _, fatal := r.handleNativeOutcome(ctx, chainNode, err); fatal != nil {
+			return false, fatal
+		}
+	}
+	if controllerutil.ContainsFinalizer(chainNode, exportprotocol.AuthorityFinalizer) {
+		return false, nil
+	}
 	deletionPolicy, err := r.effectiveDeletionPolicy(ctx, chainNode)
 	if err != nil {
 		return false, err
@@ -274,6 +283,14 @@ func (r *Reconciler) namespaceTerminating(ctx context.Context, namespace string)
 }
 
 func (r *Reconciler) finalizeTerminatingNamespace(ctx context.Context, chainNode *appsv1.ChainNode) (bool, error) {
+	if err := r.recoverNativeExports(ctx, chainNode); err != nil {
+		if _, fatal := r.handleNativeOutcome(ctx, chainNode, err); fatal != nil {
+			return false, fatal
+		}
+	}
+	if controllerutil.ContainsFinalizer(chainNode, exportprotocol.AuthorityFinalizer) {
+		return false, nil
+	}
 	nodeQuiesced, err := r.quiesceNodePod(ctx, chainNode)
 	if err != nil || !nodeQuiesced {
 		return false, err

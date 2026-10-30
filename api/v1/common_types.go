@@ -1069,7 +1069,12 @@ type TarballCompression string
 
 // ExportTarballConfig holds config options for tarball upload.
 // +kubebuilder:validation:XValidation:rule="has(self.gcs) != has(self.s3)",message="exactly one of gcs or s3 must be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.protocol) || self.protocol == 'legacy' || (has(self.s3) && has(self.s3.credentialsSecret))",message="source-v1 requires S3 Secret credentials"
 type ExportTarballConfig struct {
+	// +optional
+	// +kubebuilder:validation:Enum=legacy;source-v1
+	Protocol string `json:"protocol,omitempty"`
+
 	// Suffix to add to archive name. The name of the tarball will be `<chain-id>-<timestamp>-<suffix>`.
 	// +optional
 	Suffix *string `json:"suffix,omitempty"`
@@ -1246,7 +1251,16 @@ type SnapshotExportDestination struct {
 // SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarball. A record is
 // persisted before its upload Job is created and retained until remote deletion succeeds or an
 // operator explicitly acknowledges cleanup.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.archive) || has(self.archive)",message="published archive cannot disappear"
 type SnapshotExportStatus struct {
+	// +optional
+	ProvenanceVersion int `json:"provenanceVersion,omitempty"`
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="archive is immutable"
+	Archive *SnapshotExportArchive `json:"archive,omitempty"`
+	// +optional
+	RemoteCleanupState string `json:"remoteCleanupState,omitempty"`
+
 	ID           string `json:"id"`
 	SnapshotName string `json:"snapshotName"`
 	// +optional
@@ -1651,4 +1665,165 @@ type SnapshotRestoreVerification struct {
 	// +optional
 	// +kubebuilder:validation:Pattern="^[a-fA-F0-9]{64}$"
 	SHA256 string `json:"sha256,omitempty"`
+}
+
+// ExportResourceIdentity identifies one Kubernetes resource incarnation.
+type ExportResourceIdentity struct {
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9_.-]+$"
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:MinLength=1
+	UID types.UID `json:"uid"`
+}
+
+// +kubebuilder:validation:XValidation:rule="self.attempts.all(a, a.sequence <= self.lastSequence)",message="attempt sequence exceeds watermark"
+// SnapshotExportAuthority retains the sequence watermark after attempt compaction.
+// +kubebuilder:validation:XValidation:rule="self.lastSequence >= oldSelf.lastSequence",message="export sequence cannot decrease"
+// +kubebuilder:validation:XValidation:rule="self.attempts.all(a, oldSelf.attempts.exists(o, o.sequence == a.sequence) || a.sequence > oldSelf.lastSequence)",message="attempt cannot resurrect below watermark"
+// +kubebuilder:validation:XValidation:rule="oldSelf.attempts.all(o, self.attempts.exists(a, a.sequence == o.sequence) || o.phase in ['Succeeded','Invalidated'])",message="active attempt cannot be removed"
+type SnapshotExportAuthority struct {
+	// +kubebuilder:validation:Enum=1
+	Version int `json:"version"`
+	// +kubebuilder:validation:Minimum=0
+	LastSequence int64 `json:"lastSequence"`
+	// +listType=map
+	// +listMapKey=sequence
+	// +kubebuilder:validation:MaxItems=32
+	Attempts []SnapshotExportAttempt `json:"attempts"`
+}
+
+// SnapshotExportAttempt is the controller-owned mounted-worker authorization.
+// +kubebuilder:validation:XValidation:rule="self.sequence == oldSelf.sequence && self.id == oldSelf.id && self.exportID == oldSelf.exportID && self.recipe == oldSelf.recipe && self.recipeSHA256 == oldSelf.recipeSHA256",message="attempt identity and recipe are immutable"
+// +kubebuilder:validation:XValidation:rule="!oldSelf.jobCreateIssued || (self.jobCreateIssued && self.jobCreateIssuer == oldSelf.jobCreateIssuer)",message="job issuance cannot revert"
+// +kubebuilder:validation:XValidation:rule="!oldSelf.pvcCreateIssued || (self.pvcCreateIssued && self.pvcCreateIssuer == oldSelf.pvcCreateIssuer)",message="PVC issuance cannot revert"
+// +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Succeeded','Invalidated']) || self.phase == oldSelf.phase",message="terminal attempt cannot reactivate"
+// +kubebuilder:validation:XValidation:rule="size(oldSelf.sourceHoldResourceVersion) == 0 || self.sourceHoldResourceVersion == oldSelf.sourceHoldResourceVersion",message="hold witness is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.job) || (has(self.job) && self.job == oldSelf.job)",message="job identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.scratchPVC) || (has(self.scratchPVC) && self.scratchPVC == oldSelf.scratchPVC)",message="PVC identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.scratchPV) || (has(self.scratchPV) && self.scratchPV == oldSelf.scratchPV)",message="PV identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.pod) || (has(self.pod) && self.pod == oldSelf.pod)",message="pod identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.completedEnvelope) || (has(self.completedEnvelope) && self.completedEnvelope == oldSelf.completedEnvelope)",message="completed result is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupIssuer) || (has(self.cleanupIssuer) && self.cleanupIssuer == oldSelf.cleanupIssuer)",message="cleanup issuance is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupJob) || (has(self.cleanupJob) && self.cleanupJob == oldSelf.cleanupJob)",message="cleanup Job identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupPod) || (has(self.cleanupPod) && self.cleanupPod == oldSelf.cleanupPod)",message="cleanup Pod identity is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupComplete) || !oldSelf.cleanupComplete || (has(self.cleanupComplete) && self.cleanupComplete)",message="cleanup acknowledgement cannot revert"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupIssuedAt) || (has(self.cleanupIssuedAt) && self.cleanupIssuedAt == oldSelf.cleanupIssuedAt)",message="cleanup timestamp is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.cleanupIssuer) || has(self.cleanupIssuedAt)",message="cleanup issuance requires timestamp"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cleanupState) || (has(self.cleanupState) && (self.cleanupState == oldSelf.cleanupState || (oldSelf.cleanupState == 'Failed' && self.cleanupState == 'Acknowledged')))",message="stopped cleanup cannot reopen"
+// +kubebuilder:validation:XValidation:rule="!has(self.cleanupState) || (self.phase in ['Succeeded','Invalidated'] && (!has(self.cleanupComplete) || !self.cleanupComplete))",message="stopped cleanup requires terminal unresolved authority"
+// +kubebuilder:validation:XValidation:rule="oldSelf.phase != 'Invalidated' || !has(oldSelf.remoteCleanupState) || oldSelf.remoteCleanupState != 'Required' || (has(self.remoteCleanupState) && self.remoteCleanupState == 'Required')",message="invalidated remote uncertainty is permanent"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.authorizedAt) || (has(self.authorizedAt) && self.authorizedAt == oldSelf.authorizedAt)",message="authorization timestamp is immutable"
+// +kubebuilder:validation:XValidation:rule="self.phase != 'Uploading' || has(self.authorizedAt)",message="uploading requires authorization timestamp"
+type SnapshotExportAttempt struct {
+	// +optional
+	CleanupIssuedAt *metav1.Time `json:"cleanupIssuedAt,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Enum=Failed;Acknowledged;Abandoned
+	CleanupState string `json:"cleanupState,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	CleanupReason string `json:"cleanupReason,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=3072
+	CompletedEnvelope string `json:"completedEnvelope,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MinLength=36
+	// +kubebuilder:validation:MaxLength=36
+	CleanupIssuer string `json:"cleanupIssuer,omitempty"`
+	// +optional
+	CleanupJob *ExportResourceIdentity `json:"cleanupJob,omitempty"`
+	// +optional
+	CleanupPod *ExportResourceIdentity `json:"cleanupPod,omitempty"`
+	// +optional
+	CleanupComplete bool `json:"cleanupComplete,omitempty"`
+
+	// +kubebuilder:validation:Minimum=1
+	Sequence int64 `json:"sequence"`
+	// +kubebuilder:validation:MaxLength=36
+	ID string `json:"id"`
+	// +kubebuilder:validation:MaxLength=128
+	ExportID string `json:"exportID"`
+	// Recipe is canonical versioned JSON, bounded before reservation and decoded strictly.
+	// +kubebuilder:validation:MaxLength=16384
+	Recipe string `json:"recipe"`
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[a-f0-9]{64}$"
+	RecipeSHA256 string `json:"recipeSHA256"`
+	// +kubebuilder:validation:Enum=Reserved;Held;ResourcesRequested;Uploading;Succeeded;Invalidated
+	Phase string `json:"phase"`
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	Reason string `json:"reason,omitempty"`
+	// +kubebuilder:validation:MaxLength=128
+	SourceHoldResourceVersion string `json:"sourceHoldResourceVersion"`
+	// +kubebuilder:validation:MaxLength=36
+	JobCreateIssuer string `json:"jobCreateIssuer"`
+	// +kubebuilder:validation:MaxLength=36
+	PVCCreateIssuer string `json:"pvcCreateIssuer"`
+	JobCreateIssued bool   `json:"jobCreateIssued"`
+	PVCCreateIssued bool   `json:"pvcCreateIssued"`
+	// +optional
+	Job *ExportResourceIdentity `json:"job,omitempty"`
+	// +optional
+	ScratchPVC *ExportResourceIdentity `json:"scratchPVC,omitempty"`
+	// +optional
+	ScratchPV *ExportResourceIdentity `json:"scratchPV,omitempty"`
+	// +optional
+	Pod       *ExportResourceIdentity `json:"pod,omitempty"`
+	CreatedAt metav1.Time             `json:"createdAt"`
+	// +optional
+	AuthorizedAt *metav1.Time `json:"authorizedAt,omitempty"`
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+	// +optional
+	LocalCleanupState string `json:"localCleanupState,omitempty"`
+	// +optional
+	RemoteCleanupState string `json:"remoteCleanupState,omitempty"`
+}
+
+// SnapshotExportArchive binds acknowledged bytes to a frozen native recipe.
+type SnapshotExportArchive struct {
+	SourceSnapshot ExportResourceIdentity     `json:"sourceSnapshot"`
+	SourceContent  ExportResourceIdentity     `json:"sourceContent"`
+	CSIDriver      string                     `json:"csiDriver"`
+	Destination    SnapshotExportDestination  `json:"destination"`
+	ReadIdentity   SnapshotExportReadIdentity `json:"readIdentity"`
+	// +optional
+	SourceHeight string `json:"sourceHeight,omitempty"`
+	// +optional
+	SourceHeightKind string `json:"sourceHeightKind,omitempty"`
+
+	Version         int                    `json:"version"`
+	Namespace       string                 `json:"namespace"`
+	AuthorityOwner  ExportResourceIdentity `json:"authorityOwner"`
+	ExportID        string                 `json:"exportID"`
+	AttemptID       string                 `json:"attemptID"`
+	AttemptSequence int64                  `json:"attemptSequence"`
+	RecipeSHA256    string                 `json:"recipeSHA256"`
+	// +kubebuilder:validation:MaxLength=16384
+	Recipe                    string                 `json:"recipe"`
+	ObjectKey                 string                 `json:"objectKey"`
+	SHA256                    string                 `json:"sha256"`
+	SizeBytes                 int64                  `json:"sizeBytes"`
+	Compression               TarballCompression     `json:"compression"`
+	SourceHoldResourceVersion string                 `json:"sourceHoldResourceVersion"`
+	Job                       ExportResourceIdentity `json:"job"`
+	Pod                       ExportResourceIdentity `json:"pod"`
+	ScratchPVC                ExportResourceIdentity `json:"scratchPVC"`
+	ScratchPV                 ExportResourceIdentity `json:"scratchPV"`
+	CompletedAt               metav1.Time            `json:"completedAt"`
+}
+
+// SnapshotExportReadIdentity records references, without promising an immutable cloud principal.
+type SnapshotExportReadIdentity struct {
+	// +kubebuilder:validation:Enum=Secret
+	Mode              string                 `json:"mode"`
+	Namespace         string                 `json:"namespace"`
+	CredentialsSecret ExportResourceIdentity `json:"credentialsSecret"`
+	// +kubebuilder:validation:Enum=AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY+AWS_SESSION_TOKEN
+	KeySet                  string                 `json:"keySet"`
+	ExecutionServiceAccount ExportResourceIdentity `json:"executionServiceAccount"`
 }

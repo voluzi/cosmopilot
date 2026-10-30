@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -22,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
@@ -29,6 +32,7 @@ import (
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
 	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
 	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 	"github.com/voluzi/cosmopilot/v5/pkg/nodeutils"
 )
@@ -169,11 +173,15 @@ func (r *Reconciler) reservationReader() client.Reader {
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=chainnodesets/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cosmopilot.voluzi.com,resources=consensuskeyreservations,verbs=get;list;watch;create;delete
 //+kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims;configmaps;secrets;services,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=pods/exec;pods/attach,verbs=create
 //+kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 //+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
+//+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshotcontents,verbs=get;list;watch
+//+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;create;delete
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;patch;create;update;delete
@@ -196,7 +204,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	chainNode := &appsv1.ChainNode{}
 	if err := r.Get(ctx, req.NamespacedName, chainNode); err != nil {
 		if errors.IsNotFound(err) {
-			// Request object not found, could have been deleted after reconcile request.
+			if r.APIReader != nil {
+				live := &appsv1.ChainNode{}
+				err := r.APIReader.Get(ctx, req.NamespacedName, live)
+				if err == nil {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				if !errors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{}, r.cleanupNativeOrphans(ctx, req.NamespacedName)
+			}
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "unable to fetch chainnode")
@@ -205,6 +223,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !r.opts.MatchesWorker(chainNode.Labels) {
 		logger.V(1).Info("skipping chainnode due to worker-name mismatch.")
 		return ctrl.Result{}, nil
+	}
+	if err := r.recoverNativeExports(ctx, chainNode); err != nil {
+		if _, fatal := r.handleNativeOutcome(ctx, chainNode, err); fatal != nil {
+			return ctrl.Result{}, fatal
+		}
 	}
 	if !chainNode.GetDeletionTimestamp().IsZero() {
 		if !controllerutil.ContainsFinalizer(chainNode, cosmosigner.ReservationOwnerFinalizer) {
@@ -540,6 +563,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 func normalRequeueResult(chainNode *appsv1.ChainNode) ctrl.Result {
 	period := chainNode.GetReconcilePeriod()
+	if auth := chainNode.Status.SnapshotExportAuthority; auth != nil {
+		for _, a := range auth.Attempts {
+			if !exportprotocol.Terminal(&a) || a.LocalCleanupState != "Complete" || (a.CleanupIssuer != "" && !a.CleanupComplete && a.CleanupState == "") {
+				if period <= 0 || period > 30*time.Second {
+					period = 30 * time.Second
+				}
+				break
+			}
+		}
+	}
+	if (apiMeta.IsStatusConditionTrue(chainNode.Status.Conditions, appsv1.ConditionSnapshotExportDegraded) || apiMeta.IsStatusConditionTrue(chainNode.Status.Conditions, appsv1.ConditionSnapshotExportCapacityExceeded)) && (period <= 0 || period > 30*time.Second) {
+		period = 30 * time.Second
+	}
 	// Status-only updates are filtered, so a deferred replacement needs a bounded poll.
 	if apiMeta.IsStatusConditionTrue(chainNode.Status.Conditions, appsv1.ConditionPodRecreationDeferred) &&
 		(period <= 0 || period > 15*time.Second) {
@@ -578,7 +614,11 @@ func (r *Reconciler) setupWithManager(mgr ctrl.Manager) error {
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.cosmoGuardConfigMapRequests)).
-		WithEventFilter(GenerationChangedPredicate{}).
+		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
+		Watches(&snapshotv1.VolumeSnapshot{}, handler.EnqueueRequestsFromMapFunc(r.nativeExportRequests)).
+		WithEventFilter(predicate.Or(GenerationChangedPredicate{}, predicate.NewPredicateFuncs(nativeExportEvent))).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.opts.WorkerCount}).
 		Complete(r)
 }

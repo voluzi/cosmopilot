@@ -37,6 +37,8 @@ type S3Config struct {
 	Region         string
 	Endpoint       string
 	ForcePathStyle bool
+	// ExplicitCredentials bypasses ambient SDK configuration, including endpoint overrides.
+	ExplicitCredentials *aws.Credentials
 }
 
 type s3API interface {
@@ -76,9 +78,19 @@ func NewS3Exporter(ctx context.Context, cfg S3Config) (*S3Exporter, error) {
 	if cfg.Region != "" {
 		loadOptions = append(loadOptions, awsconfig.WithRegion(cfg.Region))
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
-	if err != nil {
-		return nil, fmt.Errorf("load AWS configuration: %w", err)
+	var awsCfg aws.Config
+	if cfg.ExplicitCredentials != nil {
+		credentials := *cfg.ExplicitCredentials
+		if credentials.AccessKeyID == "" || credentials.SecretAccessKey == "" || cfg.Region == "" {
+			return nil, fmt.Errorf("explicit S3 credentials and region are required")
+		}
+		awsCfg = aws.Config{Region: cfg.Region, Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) { return credentials, nil })}
+	} else {
+		var err error
+		awsCfg, err = awsconfig.LoadDefaultConfig(ctx, loadOptions...)
+		if err != nil {
+			return nil, fmt.Errorf("load AWS configuration: %w", err)
+		}
 	}
 	if cfg.Endpoint != "" {
 		awsCfg.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
@@ -477,6 +489,16 @@ func monitorUploadProgress(
 }
 
 func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) error {
+	return exporter.deleteWithContext(context.Background(), bucket, name, opts...)
+}
+
+// DeleteExact removes one acknowledged object without listing or basename matching.
+func (exporter *S3Exporter) DeleteExact(ctx context.Context, bucket, key string) error {
+	_, err := exporter.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	return err
+}
+
+func (exporter *S3Exporter) deleteWithContext(ctx context.Context, bucket, name string, opts ...DeleteOption) error {
 	options := defaultDeleteOptions()
 	for _, opt := range opts {
 		opt(options)
@@ -484,7 +506,6 @@ func (exporter *S3Exporter) Delete(bucket, name string, opts ...DeleteOption) er
 	if options.ConcurrentJobs < 1 {
 		return fmt.Errorf("concurrent jobs must be greater than zero")
 	}
-	ctx := context.Background()
 	var continuationToken *string
 	keys := make([]string, 0)
 	for {
@@ -599,4 +620,54 @@ func (exporter *S3Exporter) Read(ctx context.Context, bucket, name string) (io.R
 		return nil, nil, fmt.Errorf("read S3 object %q from bucket %q: %w", name, bucket, err)
 	}
 	return object.Body, object.Metadata, nil
+}
+
+// DeleteResult deletes only the exact S3 keys identified by acknowledged output.
+func (exporter *S3Exporter) DeleteResult(ctx context.Context, bucket, name string, result UploadResult, concurrency int) error {
+	if err := result.Validate(); err != nil {
+		return err
+	}
+	if concurrency < 1 {
+		return fmt.Errorf("invalid native cleanup concurrency")
+	}
+	if result.Layout == "single" {
+		if result.ObjectKey != name+result.Compression.Extension() {
+			return fmt.Errorf("native cleanup key mismatch")
+		}
+		return exporter.DeleteExact(ctx, bucket, result.ObjectKey)
+	}
+	concurrency = min(concurrency, 128)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var first error
+	var once sync.Once
+	for range concurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				key := fmt.Sprintf("%s-part-%08d%s", name, index, result.Compression.Extension())
+				if err := exporter.DeleteExact(ctx, bucket, key); err != nil {
+					once.Do(func() { first = err; cancel() })
+					return
+				}
+			}
+		}()
+	}
+loop:
+	for index := 0; index < result.ObjectCount; index++ {
+		select {
+		case <-ctx.Done():
+			break loop
+		case jobs <- index:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if first != nil {
+		return first
+	}
+	return ctx.Err()
 }

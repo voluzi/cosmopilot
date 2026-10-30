@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -99,6 +100,7 @@ func (h *TestHelpers) SimulateSnapshotReady(namespace, snapshotName string, rest
 	// Update snapshot status
 	snapshot.Status = &snapshotv1.VolumeSnapshotStatus{
 		BoundVolumeSnapshotContentName: ptr.To(contentName),
+		RestoreSize:                    ptr.To(resource.MustParse(restoreSize)),
 		ReadyToUse:                     ptr.To(true),
 		CreationTime:                   ptr.To(metav1.Now()),
 	}

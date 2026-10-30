@@ -46,6 +46,7 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [CreateValidatorConfig](#createvalidatorconfig)
 * [DeletionPolicy](#deletionpolicy)
 * [DiscoveryResourceRequirements](#discoveryresourcerequirements)
+* [ExportResourceIdentity](#exportresourceidentity)
 * [ExportTarballConfig](#exporttarballconfig)
 * [ExposeConfig](#exposeconfig)
 * [ExposeGatewayConfig](#exposegatewayconfig)
@@ -71,7 +72,11 @@ This page provides a detailed reference for the available Custom Resource Defini
 * [SdkOptions](#sdkoptions)
 * [SeedStatus](#seedstatus)
 * [SidecarSpec](#sidecarspec)
+* [SnapshotExportArchive](#snapshotexportarchive)
+* [SnapshotExportAttempt](#snapshotexportattempt)
+* [SnapshotExportAuthority](#snapshotexportauthority)
 * [SnapshotExportDestination](#snapshotexportdestination)
+* [SnapshotExportReadIdentity](#snapshotexportreadidentity)
 * [SnapshotExportSecretReference](#snapshotexportsecretreference)
 * [SnapshotExportStatus](#snapshotexportstatus)
 * [SnapshotRestoreConfig](#snapshotrestoreconfig)
@@ -149,6 +154,7 @@ ChainNodeStatus defines the observed state of ChainNode
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
+| snapshotExportAuthority |  | *[SnapshotExportAuthority](#snapshotexportauthority) | false |
 | phase | Indicates the current phase for this ChainNode. | ChainNodePhase | false |
 | conditions | Conditions to track state of the ChainNode. | []metav1.Condition | false |
 | nodeID | Indicates this node's ID. | string | false |
@@ -795,12 +801,24 @@ DiscoveryResourceRequirements describes compute resources for the remote-signer 
 
 [Back to Custom Resources](#custom-resources)
 
+#### ExportResourceIdentity
+
+ExportResourceIdentity identifies one Kubernetes resource incarnation.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| name |  | string | true |
+| uid |  | types.UID | true |
+
+[Back to Custom Resources](#custom-resources)
+
 #### ExportTarballConfig
 
 ExportTarballConfig holds config options for tarball upload.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
+| protocol |  | string | false |
 | suffix | Suffix to add to archive name. The name of the tarball will be `<chain-id>-<timestamp>-<suffix>`. | *string | false |
 | deleteOnExpire | Whether to delete the tarball when the snapshot expires. Default is `false`. | *bool | false |
 | compression | Compression applied to the tar archive. Defaults to `gzip` for compatibility with existing exports. | *TarballCompression | false |
@@ -1030,6 +1048,90 @@ SidecarSpec allows configuring additional containers to run alongside the node.
 
 [Back to Custom Resources](#custom-resources)
 
+#### SnapshotExportArchive
+
+SnapshotExportArchive binds acknowledged bytes to a frozen native recipe.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| sourceSnapshot |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| sourceContent |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| csiDriver |  | string | true |
+| destination |  | [SnapshotExportDestination](#snapshotexportdestination) | true |
+| readIdentity |  | [SnapshotExportReadIdentity](#snapshotexportreadidentity) | true |
+| sourceHeight |  | string | false |
+| sourceHeightKind |  | string | false |
+| version |  | int | true |
+| namespace |  | string | true |
+| authorityOwner |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| exportID |  | string | true |
+| attemptID |  | string | true |
+| attemptSequence |  | int64 | true |
+| recipeSHA256 |  | string | true |
+| recipe |  | string | true |
+| objectKey |  | string | true |
+| sha256 |  | string | true |
+| sizeBytes |  | int64 | true |
+| compression |  | TarballCompression | true |
+| sourceHoldResourceVersion |  | string | true |
+| job |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| pod |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| scratchPVC |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| scratchPV |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| completedAt |  | metav1.Time | true |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportAttempt
+
+SnapshotExportAttempt is the controller-owned mounted-worker authorization.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| cleanupIssuedAt |  | *metav1.Time | false |
+| cleanupState |  | string | false |
+| cleanupReason |  | string | false |
+| completedEnvelope |  | string | false |
+| cleanupIssuer |  | string | false |
+| cleanupJob |  | *[ExportResourceIdentity](#exportresourceidentity) | false |
+| cleanupPod |  | *[ExportResourceIdentity](#exportresourceidentity) | false |
+| cleanupComplete |  | bool | false |
+| sequence |  | int64 | true |
+| id |  | string | true |
+| exportID |  | string | true |
+| recipe | Recipe is canonical versioned JSON, bounded before reservation and decoded strictly. | string | true |
+| recipeSHA256 |  | string | true |
+| phase |  | string | true |
+| reason |  | string | false |
+| sourceHoldResourceVersion |  | string | true |
+| jobCreateIssuer |  | string | true |
+| pvcCreateIssuer |  | string | true |
+| jobCreateIssued |  | bool | true |
+| pvcCreateIssued |  | bool | true |
+| job |  | *[ExportResourceIdentity](#exportresourceidentity) | false |
+| scratchPVC |  | *[ExportResourceIdentity](#exportresourceidentity) | false |
+| scratchPV |  | *[ExportResourceIdentity](#exportresourceidentity) | false |
+| pod |  | *[ExportResourceIdentity](#exportresourceidentity) | false |
+| createdAt |  | metav1.Time | true |
+| authorizedAt |  | *metav1.Time | false |
+| completedAt |  | *metav1.Time | false |
+| localCleanupState |  | string | false |
+| remoteCleanupState |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportAuthority
+
+SnapshotExportAuthority retains the sequence watermark after attempt compaction.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| version |  | int | true |
+| lastSequence |  | int64 | true |
+| attempts |  | [][SnapshotExportAttempt](#snapshotexportattempt) | true |
+
+[Back to Custom Resources](#custom-resources)
+
 #### SnapshotExportDestination
 
 SnapshotExportDestination contains the routing and authentication references required to reach the object store used by an upload. The namespace is always the owning ChainNode's namespace.
@@ -1043,6 +1145,20 @@ SnapshotExportDestination contains the routing and authentication references req
 | forcePathStyle |  | bool | false |
 | credentialsSecret |  | *[SnapshotExportSecretReference](#snapshotexportsecretreference) | false |
 | serviceAccountName |  | string | false |
+
+[Back to Custom Resources](#custom-resources)
+
+#### SnapshotExportReadIdentity
+
+SnapshotExportReadIdentity records references, without promising an immutable cloud principal.
+
+| Field | Description | Scheme | Required |
+| ----- | ----------- | ------ | -------- |
+| mode |  | string | true |
+| namespace |  | string | true |
+| credentialsSecret |  | [ExportResourceIdentity](#exportresourceidentity) | true |
+| keySet |  | string | true |
+| executionServiceAccount |  | [ExportResourceIdentity](#exportresourceidentity) | true |
 
 [Back to Custom Resources](#custom-resources)
 
@@ -1063,6 +1179,9 @@ SnapshotExportStatus is the controller-owned record for one VolumeSnapshot tarba
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
+| provenanceVersion |  | int | false |
+| archive |  | *[SnapshotExportArchive](#snapshotexportarchive) | false |
+| remoteCleanupState |  | string | false |
 | id |  | string | true |
 | snapshotName |  | string | true |
 | snapshotUID |  | types.UID | false |
