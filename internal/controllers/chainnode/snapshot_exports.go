@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,8 +19,6 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -97,16 +96,22 @@ func newSnapshotExportStatus(chainNode *appsv1.ChainNode, snapshot *snapshotv1.V
 }
 
 func snapshotExportFor(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) *appsv1.SnapshotExportStatus {
+	var legacy, native *appsv1.SnapshotExportStatus
 	for i := range chainNode.Status.SnapshotExports {
 		export := &chainNode.Status.SnapshotExports[i]
-		if export.SnapshotName != snapshot.Name {
+		if export.SnapshotName != snapshot.Name || (export.SnapshotUID != "" && snapshot.UID != "" && export.SnapshotUID != snapshot.UID) {
 			continue
 		}
-		if export.SnapshotUID == "" || snapshot.UID == "" || export.SnapshotUID == snapshot.UID {
-			return export
+		if export.ProvenanceVersion == 1 {
+			native = export
+		} else if legacy == nil {
+			legacy = export
 		}
 	}
-	return nil
+	if native != nil {
+		return native
+	}
+	return legacy
 }
 
 func tarballNameForSnapshot(chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) string {
@@ -452,7 +457,7 @@ func (r *Reconciler) pruneRetainedSnapshotExports(
 				export.Phase == appsv1.SnapshotExportPhaseAcknowledged
 			_, uploadResolved := resolvedUploads[export.ID]
 			unresolvedUpload := snapshotExportPhaseHoldsUpload(export.Phase) && !uploadResolved
-			if snapshotPresent(&export) || unresolvedUpload || (export.DeleteOnExpire && !terminalDeletion) {
+			if export.ProvenanceVersion == 1 || snapshotPresent(&export) || unresolvedUpload || (export.DeleteOnExpire && !terminalDeletion) {
 				kept = append(kept, export)
 			}
 		}
@@ -573,6 +578,9 @@ func snapshotExportByID(chainNode *appsv1.ChainNode, id string) *appsv1.Snapshot
 }
 
 func (r *Reconciler) removeSnapshotExport(ctx context.Context, chainNode *appsv1.ChainNode, id string) error {
+	if e := snapshotExportByID(chainNode, id); e != nil && e.ProvenanceVersion == 1 {
+		return nil
+	}
 	_, err := r.mutateSnapshotExportStatus(ctx, chainNode, func(fresh *appsv1.ChainNode) (bool, error) {
 		kept := make([]appsv1.SnapshotExportStatus, 0, len(fresh.Status.SnapshotExports))
 		for _, export := range fresh.Status.SnapshotExports {
@@ -602,8 +610,11 @@ func (r *Reconciler) mutateSnapshotExportStatus(
 	var latest *appsv1.ChainNode
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &appsv1.ChainNode{}
-		if err := r.Get(ctx, key, fresh); err != nil {
+		if err := r.reservationReader().Get(ctx, key, fresh); err != nil {
 			return err
+		}
+		if chainNode.UID != "" && fresh.UID != chainNode.UID {
+			return fmt.Errorf("snapshot export owner UID changed")
 		}
 		mutated, err := mutate(fresh)
 		if err != nil {
@@ -649,29 +660,20 @@ func refreshSnapshotExportResourceVersion(chainNode, latest *appsv1.ChainNode) {
 func mergeSnapshotExportOwnedStatus(chainNode, latest *appsv1.ChainNode) {
 	latestCopy := latest.DeepCopy()
 	chainNode.Status.SnapshotExports = latestCopy.Status.SnapshotExports
-	cleanupCondition := apiMeta.FindStatusCondition(latestCopy.Status.Conditions, appsv1.ConditionSnapshotExportCleanup)
-	conditions := make([]metav1.Condition, 0, len(chainNode.Status.Conditions)+1)
-	insertedCleanupCondition := false
-	for _, condition := range chainNode.Status.Conditions {
-		if condition.Type != appsv1.ConditionSnapshotExportCleanup {
-			conditions = append(conditions, condition)
-			continue
-		}
-		if cleanupCondition != nil && !insertedCleanupCondition {
-			conditions = append(conditions, *cleanupCondition.DeepCopy())
-			insertedCleanupCondition = true
+	chainNode.Status.SnapshotExportAuthority = latestCopy.Status.SnapshotExportAuthority
+	for _, kind := range []string{appsv1.ConditionSnapshotExportCleanup, appsv1.ConditionSnapshotExportDegraded, appsv1.ConditionSnapshotExportCapacityExceeded} {
+		condition := apiMeta.FindStatusCondition(latestCopy.Status.Conditions, kind)
+		apiMeta.RemoveStatusCondition(&chainNode.Status.Conditions, kind)
+		if condition != nil {
+			apiMeta.SetStatusCondition(&chainNode.Status.Conditions, *condition.DeepCopy())
 		}
 	}
-	if cleanupCondition != nil && !insertedCleanupCondition {
-		conditions = append(conditions, *cleanupCondition.DeepCopy())
-	}
-	chainNode.Status.Conditions = conditions
 }
 
 func syncSnapshotExportCleanupCondition(chainNode *appsv1.ChainNode) {
 	pending := make([]appsv1.SnapshotExportStatus, 0)
 	for _, export := range chainNode.Status.SnapshotExports {
-		if export.Phase == appsv1.SnapshotExportPhaseCleanupRequired {
+		if (export.ProvenanceVersion != 1 && export.Phase == appsv1.SnapshotExportPhaseCleanupRequired) || (export.ProvenanceVersion == 1 && export.RemoteCleanupState == "Required") {
 			pending = append(pending, export)
 		}
 	}
@@ -689,6 +691,9 @@ func syncSnapshotExportCleanupCondition(chainNode *appsv1.ChainNode) {
 	reason := appsv1.ReasonTarballCleanupRequired
 	if snapshotExportDeleteTerminal(primary) {
 		reason = appsv1.ReasonTarballDeleteAttemptsExhausted
+	}
+	if primary.ProvenanceVersion == 1 && primary.Phase == appsv1.SnapshotExportPhaseAcknowledged {
+		reason = "NativeCleanupAcknowledged"
 	}
 	message := primary.Message
 	if len(pending) > 1 {
@@ -790,6 +795,9 @@ func (r *Reconciler) tarballProviderForExport(
 	chainNode *appsv1.ChainNode,
 	export *appsv1.SnapshotExportStatus,
 ) (datasnapshot.SnapshotProvider, error) {
+	if export.ProvenanceVersion == 1 {
+		return nil, fmt.Errorf("native exports require dedicated lifecycle")
+	}
 	cfg, err := exportConfigForStatus(export)
 	if err != nil {
 		return nil, err
@@ -905,7 +913,7 @@ func (r *Reconciler) reconcileSnapshotExportAcknowledgements(ctx context.Context
 		mutated := false
 		for i := range fresh.Status.SnapshotExports {
 			export := &fresh.Status.SnapshotExports[i]
-			if _, ok := requested[export.ID]; !ok {
+			if _, ok := requested[export.ID]; !ok || export.ProvenanceVersion == 1 {
 				continue
 			}
 			switch export.Phase {
@@ -933,7 +941,7 @@ func (r *Reconciler) reconcileSnapshotExportAcknowledgements(ctx context.Context
 func (r *Reconciler) completeAcknowledgedSnapshotExports(ctx context.Context, chainNode *appsv1.ChainNode) error {
 	for i := len(chainNode.Status.SnapshotExports) - 1; i >= 0; i-- {
 		export := chainNode.Status.SnapshotExports[i]
-		if export.Phase != appsv1.SnapshotExportPhaseAcknowledged {
+		if export.ProvenanceVersion == 1 || export.Phase != appsv1.SnapshotExportPhaseAcknowledged {
 			continue
 		}
 		if export.Destination.Provider != appsv1.SnapshotExportProviderUnknown {

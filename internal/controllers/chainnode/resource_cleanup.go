@@ -13,6 +13,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
 	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
@@ -40,6 +41,9 @@ func (r *Reconciler) finalizeResources(ctx context.Context, chainNode *appsv1.Ch
 	)
 	if err != nil || !signerDone {
 		return false, err
+	}
+	if controllerutil.ContainsFinalizer(chainNode, exportprotocol.AuthorityFinalizer) {
+		return false, nil
 	}
 	if err := r.attributeControlledLegacyDataVolumes(ctx, chainNode); err != nil {
 		return false, err
@@ -281,6 +285,9 @@ func (r *Reconciler) finalizeTerminatingNamespace(ctx context.Context, chainNode
 	signerQuiesced, err := cosmosigner.QuiesceOwnerForNamespaceTermination(ctx, r.Client, chainNode, chainNode.GetNamespace())
 	if err != nil || !signerQuiesced {
 		return false, err
+	}
+	if controllerutil.ContainsFinalizer(chainNode, exportprotocol.AuthorityFinalizer) {
+		return false, nil
 	}
 	if err := cosmosigner.ReleaseOwnerStateFinalizers(ctx, r.Client, chainNode, chainNode.GetNamespace()); err != nil {
 		return false, err

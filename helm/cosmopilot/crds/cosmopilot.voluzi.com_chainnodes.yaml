@@ -8425,6 +8425,13 @@ spec:
                             required:
                             - bucket
                             type: object
+                          protocol:
+                            description: Protocol defaults to legacy when omitted;
+                              source-v1 requires S3 with Secret credentials.
+                            enum:
+                            - legacy
+                            - source-v1
+                            type: string
                           resources:
                             description: |-
                               Compute resources for the export upload job pod. When unset, the pod requests chunkSize ×
@@ -8575,6 +8582,9 @@ spec:
                         x-kubernetes-validations:
                         - message: exactly one of gcs or s3 must be set
                           rule: has(self.gcs) != has(self.s3)
+                        - message: source-v1 requires S3 Secret credentials
+                          rule: '!has(self.protocol) || self.protocol == ''legacy''
+                            || (has(self.s3) && has(self.s3.credentialsSecret))'
                       frequency:
                         description: How often a snapshot should be created.
                         format: duration
@@ -9857,6 +9867,327 @@ spec:
               seedMode:
                 description: Indicates if this node is running with seed mode enabled.
                 type: boolean
+              snapshotExportAuthority:
+                description: SnapshotExportAuthority retains the sequence watermark
+                  after attempt compaction.
+                properties:
+                  attempts:
+                    items:
+                      description: SnapshotExportAttempt is the controller-owned mounted-worker
+                        authorization.
+                      properties:
+                        authorizedAt:
+                          format: date-time
+                          type: string
+                        cleanupComplete:
+                          type: boolean
+                        cleanupIssuedAt:
+                          format: date-time
+                          type: string
+                        cleanupIssuer:
+                          maxLength: 36
+                          minLength: 36
+                          type: string
+                        cleanupJob:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        cleanupPod:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        cleanupReason:
+                          maxLength: 256
+                          type: string
+                        cleanupState:
+                          enum:
+                          - Failed
+                          - Acknowledged
+                          - Abandoned
+                          type: string
+                        completedAt:
+                          format: date-time
+                          type: string
+                        completedEnvelope:
+                          maxLength: 3072
+                          type: string
+                        createdAt:
+                          format: date-time
+                          type: string
+                        exportID:
+                          maxLength: 128
+                          type: string
+                        id:
+                          maxLength: 36
+                          type: string
+                        job:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        jobCreateIssued:
+                          type: boolean
+                        jobCreateIssuer:
+                          maxLength: 36
+                          type: string
+                        localCleanupState:
+                          type: string
+                        phase:
+                          enum:
+                          - Reserved
+                          - Held
+                          - ResourcesRequested
+                          - Uploading
+                          - Succeeded
+                          - Invalidated
+                          type: string
+                        pod:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        pvcCreateIssued:
+                          type: boolean
+                        pvcCreateIssuer:
+                          maxLength: 36
+                          type: string
+                        reason:
+                          maxLength: 256
+                          type: string
+                        recipe:
+                          description: Recipe is canonical versioned JSON, bounded
+                            before reservation and decoded strictly.
+                          maxLength: 16384
+                          type: string
+                        recipeSHA256:
+                          maxLength: 64
+                          pattern: ^[a-f0-9]{64}$
+                          type: string
+                        remoteCleanupState:
+                          type: string
+                        scratchPV:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        scratchPVC:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        sequence:
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        sourceHoldResourceVersion:
+                          maxLength: 128
+                          type: string
+                      required:
+                      - createdAt
+                      - exportID
+                      - id
+                      - jobCreateIssued
+                      - jobCreateIssuer
+                      - phase
+                      - pvcCreateIssued
+                      - pvcCreateIssuer
+                      - recipe
+                      - recipeSHA256
+                      - sequence
+                      - sourceHoldResourceVersion
+                      type: object
+                      x-kubernetes-validations:
+                      - message: attempt identity and recipe are immutable
+                        rule: self.sequence == oldSelf.sequence && self.id == oldSelf.id
+                          && self.exportID == oldSelf.exportID && self.recipe == oldSelf.recipe
+                          && self.recipeSHA256 == oldSelf.recipeSHA256
+                      - message: job issuance cannot revert
+                        rule: '!oldSelf.jobCreateIssued || (self.jobCreateIssued &&
+                          self.jobCreateIssuer == oldSelf.jobCreateIssuer)'
+                      - message: PVC issuance cannot revert
+                        rule: '!oldSelf.pvcCreateIssued || (self.pvcCreateIssued &&
+                          self.pvcCreateIssuer == oldSelf.pvcCreateIssuer)'
+                      - message: terminal attempt cannot reactivate
+                        rule: '!(oldSelf.phase in [''Succeeded'',''Invalidated''])
+                          || self.phase == oldSelf.phase'
+                      - message: hold witness is immutable
+                        rule: size(oldSelf.sourceHoldResourceVersion) == 0 || self.sourceHoldResourceVersion
+                          == oldSelf.sourceHoldResourceVersion
+                      - message: job identity is immutable
+                        rule: '!has(oldSelf.job) || (has(self.job) && self.job ==
+                          oldSelf.job)'
+                      - message: PVC identity is immutable
+                        rule: '!has(oldSelf.scratchPVC) || (has(self.scratchPVC) &&
+                          self.scratchPVC == oldSelf.scratchPVC)'
+                      - message: PV identity is immutable
+                        rule: '!has(oldSelf.scratchPV) || (has(self.scratchPV) &&
+                          self.scratchPV == oldSelf.scratchPV)'
+                      - message: pod identity is immutable
+                        rule: '!has(oldSelf.pod) || (has(self.pod) && self.pod ==
+                          oldSelf.pod)'
+                      - message: completed result is immutable
+                        rule: '!has(oldSelf.completedEnvelope) || (has(self.completedEnvelope)
+                          && self.completedEnvelope == oldSelf.completedEnvelope)'
+                      - message: cleanup issuance is immutable
+                        rule: '!has(oldSelf.cleanupIssuer) || (has(self.cleanupIssuer)
+                          && self.cleanupIssuer == oldSelf.cleanupIssuer)'
+                      - message: cleanup Job identity is immutable
+                        rule: '!has(oldSelf.cleanupJob) || (has(self.cleanupJob) &&
+                          self.cleanupJob == oldSelf.cleanupJob)'
+                      - message: cleanup Pod identity is immutable
+                        rule: '!has(oldSelf.cleanupPod) || (has(self.cleanupPod) &&
+                          self.cleanupPod == oldSelf.cleanupPod)'
+                      - message: cleanup acknowledgement cannot revert
+                        rule: '!has(oldSelf.cleanupComplete) || !oldSelf.cleanupComplete
+                          || (has(self.cleanupComplete) && self.cleanupComplete)'
+                      - message: cleanup timestamp is immutable
+                        rule: '!has(oldSelf.cleanupIssuedAt) || (has(self.cleanupIssuedAt)
+                          && self.cleanupIssuedAt == oldSelf.cleanupIssuedAt)'
+                      - message: cleanup issuance requires timestamp
+                        rule: '!has(self.cleanupIssuer) || has(self.cleanupIssuedAt)'
+                      - message: stopped cleanup cannot reopen
+                        rule: '!has(oldSelf.cleanupState) || (has(self.cleanupState)
+                          && (self.cleanupState == oldSelf.cleanupState || (oldSelf.cleanupState
+                          == ''Failed'' && self.cleanupState == ''Acknowledged'')))'
+                      - message: stopped cleanup requires terminal unresolved authority
+                        rule: '!has(self.cleanupState) || (self.phase in [''Succeeded'',''Invalidated'']
+                          && (!has(self.cleanupComplete) || !self.cleanupComplete))'
+                      - message: invalidated remote uncertainty is permanent
+                        rule: oldSelf.phase != 'Invalidated' || !has(oldSelf.remoteCleanupState)
+                          || oldSelf.remoteCleanupState != 'Required' || (has(self.remoteCleanupState)
+                          && self.remoteCleanupState == 'Required')
+                      - message: authorization timestamp is immutable
+                        rule: '!has(oldSelf.authorizedAt) || (has(self.authorizedAt)
+                          && self.authorizedAt == oldSelf.authorizedAt)'
+                      - message: uploading requires authorization timestamp
+                        rule: self.phase != 'Uploading' || has(self.authorizedAt)
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - sequence
+                    x-kubernetes-list-type: map
+                  lastSequence:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  version:
+                    enum:
+                    - 1
+                    type: integer
+                required:
+                - attempts
+                - lastSequence
+                - version
+                type: object
+                x-kubernetes-validations:
+                - message: attempt sequence exceeds watermark
+                  rule: self.attempts.all(a, a.sequence <= self.lastSequence)
+                - message: export sequence cannot decrease
+                  rule: self.lastSequence >= oldSelf.lastSequence
+                - message: attempt cannot resurrect below watermark
+                  rule: self.attempts.all(a, oldSelf.attempts.exists(o, o.sequence
+                    == a.sequence) || a.sequence > oldSelf.lastSequence)
+                - message: active attempt cannot be removed
+                  rule: oldSelf.attempts.all(o, self.attempts.exists(a, a.sequence
+                    == o.sequence) || o.phase in ['Succeeded','Invalidated'])
               snapshotExports:
                 description: |-
                   SnapshotExports records the controller-owned destination and lifecycle state of snapshot tarballs.
@@ -9867,6 +10198,332 @@ spec:
                     persisted before its upload Job is created and retained until remote deletion succeeds or an
                     operator explicitly acknowledges cleanup.
                   properties:
+                    archive:
+                      description: SnapshotExportArchive binds acknowledged bytes
+                        to a frozen native recipe.
+                      properties:
+                        attemptID:
+                          type: string
+                        attemptSequence:
+                          format: int64
+                          type: integer
+                        authorityOwner:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        completedAt:
+                          format: date-time
+                          type: string
+                        compression:
+                          description: TarballCompression identifies the compression
+                            applied to exported tar archives.
+                          enum:
+                          - none
+                          - gzip
+                          - zstd
+                          - lz4
+                          type: string
+                        csiDriver:
+                          type: string
+                        destination:
+                          description: |-
+                            SnapshotExportDestination contains the routing and authentication references required to reach the
+                            object store used by an upload. The namespace is always the owning ChainNode's namespace.
+                          properties:
+                            bucket:
+                              description: Bucket is omitted for unknown legacy destinations
+                                that require explicit operator cleanup.
+                              type: string
+                            credentialsSecret:
+                              description: |-
+                                SnapshotExportSecretReference is a local Secret reference used by snapshot export Jobs. Key is set
+                                for GCS credentials and empty for S3 credentials exposed with envFrom. Secret contents are never
+                                copied into status.
+                              properties:
+                                key:
+                                  type: string
+                                name:
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            endpoint:
+                              type: string
+                            forcePathStyle:
+                              type: boolean
+                            provider:
+                              description: SnapshotExportProvider identifies an exported
+                                tarball's object store.
+                              enum:
+                              - s3
+                              - gcs
+                              - unknown
+                              type: string
+                            region:
+                              type: string
+                            serviceAccountName:
+                              type: string
+                          required:
+                          - provider
+                          type: object
+                        exportID:
+                          type: string
+                        job:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        namespace:
+                          type: string
+                        objectKey:
+                          type: string
+                        pod:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        readIdentity:
+                          description: SnapshotExportReadIdentity records references,
+                            without promising an immutable cloud principal.
+                          properties:
+                            credentialsSecret:
+                              description: ExportResourceIdentity identifies one Kubernetes
+                                resource incarnation.
+                              properties:
+                                name:
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                uid:
+                                  description: |-
+                                    UID is a type that holds unique ID values, including UUIDs.  Because we
+                                    don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                    intent and helps make sure that UIDs and names do not get conflated.
+                                  maxLength: 128
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9_.-]+$
+                                  type: string
+                              required:
+                              - name
+                              - uid
+                              type: object
+                            executionServiceAccount:
+                              description: ExportResourceIdentity identifies one Kubernetes
+                                resource incarnation.
+                              properties:
+                                name:
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                uid:
+                                  description: |-
+                                    UID is a type that holds unique ID values, including UUIDs.  Because we
+                                    don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                    intent and helps make sure that UIDs and names do not get conflated.
+                                  maxLength: 128
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9_.-]+$
+                                  type: string
+                              required:
+                              - name
+                              - uid
+                              type: object
+                            keySet:
+                              enum:
+                              - AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY+AWS_SESSION_TOKEN
+                              type: string
+                            mode:
+                              enum:
+                              - Secret
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - credentialsSecret
+                          - executionServiceAccount
+                          - keySet
+                          - mode
+                          - namespace
+                          type: object
+                        recipe:
+                          maxLength: 16384
+                          type: string
+                        recipeSHA256:
+                          type: string
+                        scratchPV:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        scratchPVC:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        sha256:
+                          type: string
+                        sizeBytes:
+                          format: int64
+                          type: integer
+                        sourceContent:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        sourceHeight:
+                          type: string
+                        sourceHeightKind:
+                          type: string
+                        sourceHoldResourceVersion:
+                          type: string
+                        sourceSnapshot:
+                          description: ExportResourceIdentity identifies one Kubernetes
+                            resource incarnation.
+                          properties:
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            uid:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[A-Za-z0-9_.-]+$
+                              type: string
+                          required:
+                          - name
+                          - uid
+                          type: object
+                        version:
+                          type: integer
+                      required:
+                      - attemptID
+                      - attemptSequence
+                      - authorityOwner
+                      - completedAt
+                      - compression
+                      - csiDriver
+                      - destination
+                      - exportID
+                      - job
+                      - namespace
+                      - objectKey
+                      - pod
+                      - readIdentity
+                      - recipe
+                      - recipeSHA256
+                      - scratchPV
+                      - scratchPVC
+                      - sha256
+                      - sizeBytes
+                      - sourceContent
+                      - sourceHoldResourceVersion
+                      - sourceSnapshot
+                      - version
+                      type: object
+                      x-kubernetes-validations:
+                      - message: archive is immutable
+                        rule: self == oldSelf
                     bufferSize:
                       type: string
                     chunkSize:
@@ -9966,6 +10623,10 @@ spec:
                       - Deleted
                       - Acknowledged
                       type: string
+                    provenanceVersion:
+                      type: integer
+                    remoteCleanupState:
+                      type: string
                     sizeLimit:
                       type: string
                     snapshotName:
@@ -9983,7 +10644,13 @@ spec:
                   - phase
                   - snapshotName
                   type: object
+                  x-kubernetes-validations:
+                  - message: published archive cannot disappear
+                    rule: '!has(oldSelf.archive) || has(self.archive)'
                 type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
               upgrades:
                 description: All scheduled/completed upgrades performed by cosmopilot
                   on this ChainNode.
@@ -10028,6 +10695,9 @@ spec:
             required:
             - validator
             type: object
+            x-kubernetes-validations:
+            - message: export authority watermark cannot disappear
+              rule: '!has(oldSelf.snapshotExportAuthority) || has(self.snapshotExportAuthority)'
         type: object
     served: true
     storage: true

@@ -25,6 +25,7 @@ import (
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
 	"github.com/voluzi/cosmopilot/v5/internal/k8s"
 	"github.com/voluzi/cosmopilot/v5/pkg/images"
 	"github.com/voluzi/cosmopilot/v5/pkg/nodeutils"
@@ -236,6 +237,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			} else if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() {
 				logger.Info("starting tarball export", "snapshot", snapshot.GetName())
 				if err = r.exportTarball(ctx, chainNode, &snapshot); err != nil {
+					if deferred, fatal := r.handleNativeSnapshotOutcome(ctx, chainNode, &snapshot, protectedSnapshot, err); fatal != nil {
+						return fatal
+					} else if deferred {
+						continue
+					}
 					return err
 				}
 				snapshot.ObjectMeta.Annotations[controllers.AnnotationExportingTarball] = strconv.FormatBool(true)
@@ -280,6 +286,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 				if chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() && snapshot.Annotations[controllers.AnnotationExportingTarball] == "" {
 					logger.Info("starting tarball export", "snapshot", snapshot.GetName())
 					if err = r.exportTarball(ctx, chainNode, &snapshot); err != nil {
+						if deferred, fatal := r.handleNativeSnapshotOutcome(ctx, chainNode, &snapshot, protectedSnapshot, err); fatal != nil {
+							return fatal
+						} else if deferred {
+							continue
+						}
 						return err
 					}
 					snapshot.ObjectMeta.Annotations[controllers.AnnotationExportingTarball] = strconv.FormatBool(true)
@@ -336,6 +347,11 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == "":
 			logger.Info("starting tarball export", "snapshot", snapshot.GetName())
 			if err = r.exportTarball(ctx, chainNode, &snapshot); err != nil {
+				if deferred, fatal := r.handleNativeSnapshotOutcome(ctx, chainNode, &snapshot, protectedSnapshot, err); fatal != nil {
+					return fatal
+				} else if deferred {
+					continue
+				}
 				return err
 			}
 			snapshot.ObjectMeta.Annotations[controllers.AnnotationExportingTarball] = strconv.FormatBool(true)
@@ -353,7 +369,12 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			snapshot.Annotations[controllers.AnnotationExportingTarball] == strconv.FormatBool(true):
 			ready, err := r.isTarballReady(ctx, chainNode, &snapshot)
 			if err != nil {
-				r.recordTarballExportError(chainNode, err)
+				if deferred, fatal := r.handleNativeSnapshotOutcome(ctx, chainNode, &snapshot, protectedSnapshot, err); fatal != nil {
+					r.recordTarballExportError(chainNode, fatal)
+					return fatal
+				} else if deferred {
+					continue
+				}
 				return err
 			}
 			if ready {
@@ -381,6 +402,21 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 					return err
 				}
 				if expired {
+					if nativeConfigured(chainNode) && snapshotExportFor(chainNode, &snapshot) == nil && snapshot.Annotations[controllers.AnnotationExportingTarball] == "" {
+						uid, rv := snapshot.UID, snapshot.ResourceVersion
+						if err := r.Delete(ctx, &snapshot, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil {
+							return err
+						}
+						continue
+					}
+					if e := snapshotExportFor(chainNode, &snapshot); e != nil && e.ProvenanceVersion == 1 {
+						if err := r.retainNativeSnapshot(ctx, chainNode, &snapshot, e); err != nil {
+							if _, fatal := r.handleNativeOutcome(ctx, chainNode, nativeLocal("RecoveryDeferred", e.ID, err)); fatal != nil {
+								return fatal
+							}
+						}
+						continue
+					}
 					deleteTarball := shouldDeleteSnapshotTarballOnExpire(chainNode, &snapshot)
 					cleanupAcknowledged := snapshotExportCleanupAcknowledged(chainNode, &snapshot)
 					tarballName := ""
@@ -462,6 +498,21 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 			// deleted mid-flight and its Job is later mistaken for an orphan.
 			if snapshotExportInFlight(chainNode, &snapshot) {
 				logger.Info("skipping retain-count deletion while tarball export is in flight", "snapshot", snapshot.GetName())
+				continue
+			}
+			if nativeConfigured(chainNode) && snapshotExportFor(chainNode, &snapshot) == nil && snapshot.Annotations[controllers.AnnotationExportingTarball] == "" {
+				uid, rv := snapshot.UID, snapshot.ResourceVersion
+				if err := r.Delete(ctx, &snapshot, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil {
+					return err
+				}
+				continue
+			}
+			if e := snapshotExportFor(chainNode, &snapshot); e != nil && e.ProvenanceVersion == 1 {
+				if err := r.retainNativeSnapshot(ctx, chainNode, &snapshot, e); err != nil {
+					if _, fatal := r.handleNativeOutcome(ctx, chainNode, nativeLocal("RecoveryDeferred", e.ID, err)); fatal != nil {
+						return fatal
+					}
+				}
 				continue
 			}
 			deleteTarball := shouldDeleteSnapshotTarballOnExpire(chainNode, &snapshot)
@@ -667,6 +718,9 @@ func (r *Reconciler) reconcilePendingTarballDeletions(ctx context.Context, chain
 	pendingExports := append([]appsv1.SnapshotExportStatus(nil), chainNode.Status.SnapshotExports...)
 	for i := range pendingExports {
 		export := pendingExports[i]
+		if export.ProvenanceVersion == 1 {
+			continue
+		}
 		if export.Phase != appsv1.SnapshotExportPhaseDeleting &&
 			(export.Phase != appsv1.SnapshotExportPhaseCleanupRequired || export.DeleteExhausted) {
 			continue
@@ -1170,6 +1224,13 @@ func (r *Reconciler) tarballProviderForConfig(
 }
 
 func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
+	existing := snapshotExportFor(chainNode, snapshot)
+	if nativeConfigured(chainNode) && (existing == nil || existing.ProvenanceVersion == 1) {
+		return nativeLocal("RecoveryDeferred", snapshot.Name, r.reserveNativeAttempt(ctx, chainNode, snapshot))
+	}
+	if existing != nil && existing.ProvenanceVersion == 1 {
+		return &nativeDeferred{reason: "RecoveryDeferred"}
+	}
 	export, err := r.ensureSnapshotExportStatus(ctx, chainNode, snapshot)
 	if err != nil {
 		if stderrors.Is(err, errSnapshotExportStatusUnavailable) {
@@ -1194,6 +1255,12 @@ func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainN
 
 func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
 	export := snapshotExportFor(chainNode, snapshot)
+	if export != nil && export.ProvenanceVersion == 1 {
+		return export.Phase == appsv1.SnapshotExportPhaseUploaded, nil
+	}
+	if export == nil && nativeConfigured(chainNode) {
+		return false, nativeLocal("RecoveryDeferred", snapshot.Name, r.reserveNativeAttempt(ctx, chainNode, snapshot))
+	}
 	if export == nil {
 		if r.Client == nil {
 			return r.isTarballReadyLegacy(ctx, chainNode, snapshot)
@@ -1360,6 +1427,9 @@ func tarballFailureAction(retry bool) string {
 }
 
 func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
+	if e := snapshotExportFor(chainNode, snapshot); e != nil && e.ProvenanceVersion == 1 {
+		return r.finishNativeSnapshotMarker(ctx, chainNode, snapshot)
+	}
 	if snapshot.Annotations[controllers.AnnotationExportingTarball] != tarballUploaded {
 		snapshot.Annotations[controllers.AnnotationExportingTarball] = tarballUploaded
 		delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
@@ -1380,6 +1450,9 @@ func (r *Reconciler) finishTarballExport(ctx context.Context, chainNode *appsv1.
 }
 
 func (r *Reconciler) cleanUpTarballExport(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
+	if e := snapshotExportFor(chainNode, snapshot); e != nil && e.ProvenanceVersion == 1 {
+		return nil
+	}
 	export := snapshotExportFor(chainNode, snapshot)
 	if export == nil {
 		exporter, err := r.getTarballExportProvider(chainNode)
@@ -1423,6 +1496,21 @@ func (r *Reconciler) reconcileSnapshotExportDeletion(
 	chainNode *appsv1.ChainNode,
 	export *appsv1.SnapshotExportStatus,
 ) (datasnapshot.SnapshotStatus, error) {
+	if export.ProvenanceVersion == 1 {
+		if export.Phase != appsv1.SnapshotExportPhaseUploaded && export.Phase != appsv1.SnapshotExportPhaseDeleted && export.Phase != appsv1.SnapshotExportPhaseDeleting {
+			return datasnapshot.SnapshotActive, nil
+		}
+		if export.Phase == appsv1.SnapshotExportPhaseDeleted {
+			return datasnapshot.SnapshotSucceeded, nil
+		}
+		if export.Phase != appsv1.SnapshotExportPhaseDeleting {
+			_, err := r.setSnapshotExportPhase(ctx, chainNode, export.ID, appsv1.SnapshotExportPhaseDeleting, "")
+			if err != nil {
+				return "", err
+			}
+		}
+		return datasnapshot.SnapshotActive, nil
+	}
 	exporter, err := r.tarballProviderForExport(chainNode, export)
 	if err != nil {
 		return "", err
@@ -1653,6 +1741,9 @@ func (r *Reconciler) isTarballDeleted(ctx context.Context, chainNode *appsv1.Cha
 			return false, err
 		}
 	}
+	if export.ProvenanceVersion == 1 {
+		return false, nativeLocal("InvalidAuthority", export.ID, fmt.Errorf("native retention requires dedicated lifecycle"))
+	}
 	if export.Phase == appsv1.SnapshotExportPhaseAcknowledged {
 		return true, nil
 	}
@@ -1782,6 +1873,9 @@ func snapshotExportPreAttemptCleanup(export *appsv1.SnapshotExportStatus) bool {
 }
 
 func (r *Reconciler) cleanUpTarballDeletion(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
+	if e := snapshotExportFor(chainNode, snapshot); e != nil && e.ProvenanceVersion == 1 {
+		return nil
+	}
 	export := snapshotExportFor(chainNode, snapshot)
 	if export == nil {
 		exporter, err := r.getTarballExportProvider(chainNode)
@@ -2114,4 +2208,63 @@ func (r *Reconciler) getSnapshotIntegrityCheckStatus(ctx context.Context, chainN
 		return snapshotIntegrityOk, nil
 	}
 	return snapshotIntegrityChecking, nil
+}
+
+func (r *Reconciler) retainNativeSnapshot(ctx context.Context, c *appsv1.ChainNode, s *snapshotv1.VolumeSnapshot, e *appsv1.SnapshotExportStatus) error {
+	var a *appsv1.SnapshotExportAttempt
+	if auth := c.Status.SnapshotExportAuthority; auth != nil {
+		for i := range auth.Attempts {
+			if auth.Attempts[i].ExportID == e.ID {
+				a = &auth.Attempts[i]
+				break
+			}
+		}
+	}
+	safePreauthorization := e.Phase == appsv1.SnapshotExportPhaseCleanupRequired && e.Archive == nil && e.RemoteCleanupState == "Complete"
+	if a != nil {
+		if !exportprotocol.Terminal(a) || a.LocalCleanupState != "Complete" {
+			return nil
+		}
+		if a.Phase == "Succeeded" && e.DeleteOnExpire && !a.CleanupComplete && a.CleanupState != "Acknowledged" {
+			if a.CleanupState == "Failed" || a.CleanupState == "Abandoned" {
+				return nil
+			}
+			_, err := r.setSnapshotExportPhase(ctx, c, e.ID, appsv1.SnapshotExportPhaseDeleting, "")
+			return err
+		}
+		gone, err := r.nativeCleanupResourcesGone(ctx, c, a)
+		if err != nil {
+			return err
+		}
+		if !gone {
+			return nil
+		}
+	} else if e.DeleteOnExpire && e.Phase != appsv1.SnapshotExportPhaseDeleted && !safePreauthorization {
+		return nil
+	}
+	uid, rv := s.UID, s.ResourceVersion
+	return r.Delete(ctx, s, client.Preconditions{UID: &uid, ResourceVersion: &rv})
+}
+
+func (r *Reconciler) handleNativeSnapshotOutcome(ctx context.Context, c *appsv1.ChainNode, s *snapshotv1.VolumeSnapshot, protected string, err error) (bool, error) {
+	deferred, fatal := r.handleNativeOutcome(ctx, c, err)
+	if fatal != nil || !deferred || s.Name == protected {
+		return deferred, fatal
+	}
+	expired, err := isSnapshotExpired(s)
+	if err != nil {
+		return false, err
+	}
+	if !expired {
+		return true, nil
+	}
+	if e := snapshotExportFor(c, s); e != nil && e.ProvenanceVersion == 1 {
+		_, fatal := r.handleNativeOutcome(ctx, c, nativeLocal("RecoveryDeferred", e.ID, r.retainNativeSnapshot(ctx, c, s, e)))
+		return true, fatal
+	}
+	if nativeConfigured(c) && snapshotExportFor(c, s) == nil && s.Annotations[controllers.AnnotationExportingTarball] == "" {
+		uid, rv := s.UID, s.ResourceVersion
+		return true, r.Delete(ctx, s, client.Preconditions{UID: &uid, ResourceVersion: &rv})
+	}
+	return true, nil
 }

@@ -12,6 +12,9 @@ COPY cmd/dataexporter cmd/dataexporter
 COPY pkg/dataexporter pkg/dataexporter
 COPY pkg/environ pkg/environ
 COPY pkg/utils pkg/utils
+COPY pkg/images pkg/images
+COPY api api
+COPY internal/exportprotocol internal/exportprotocol
 
 ARG TARGETOS=linux
 ARG TARGETARCH
