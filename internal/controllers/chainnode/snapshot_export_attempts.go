@@ -436,6 +436,9 @@ func (r *Reconciler) bindNativeResources(ctx context.Context, c *appsv1.ChainNod
 	if a.Job.UID != j.UID {
 		return r.invalidateNativeAttempt(ctx, c, a, "JobUIDChanged")
 	}
+	if nativeJobTerminal(j) {
+		return r.invalidateNativeAttempt(ctx, c, a, "WorkerTerminatedBeforeAuthorization")
+	}
 	if !a.PVCCreateIssued {
 		return r.issueNativeResource(ctx, c, a, recipe, false)
 	}
@@ -516,6 +519,9 @@ func (r *Reconciler) bindNativeResources(ctx context.Context, c *appsv1.ChainNod
 	}
 	if a.Pod != nil && a.Pod.UID != selected.UID || !selected.DeletionTimestamp.IsZero() || datasnapshot.ValidateNativePodSpec(&selected.Spec, a, recipe) != nil {
 		return r.invalidateNativeAttempt(ctx, c, a, "AdmittedPodChanged")
+	}
+	if nativePodTerminated(selected) {
+		return r.invalidateNativeAttempt(ctx, c, a, "WorkerTerminatedBeforeAuthorization")
 	}
 	if _, err := r.nativeSource(ctx, recipe, true, a); err != nil {
 		var lost *nativeIdentityError
@@ -688,6 +694,27 @@ func (r *Reconciler) publishNativeArchive(ctx context.Context, c *appsv1.ChainNo
 		}
 		return nil
 	})
+}
+
+func nativeJobTerminal(j *batchv1.Job) bool {
+	for _, cond := range j.Status.Conditions {
+		if (cond.Type == batchv1.JobFailed || cond.Type == batchv1.JobComplete) && cond.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func nativePodTerminated(p *corev1.Pod) bool {
+	if p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded {
+		return true
+	}
+	for _, status := range p.Status.ContainerStatuses {
+		if status.State.Terminated != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeSerializedEqual(a, b any) bool {

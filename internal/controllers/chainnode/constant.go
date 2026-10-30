@@ -21,6 +21,9 @@ const (
 	tarballExportMaxAttempts       = 3
 	tarballDeleteMaxAttempts int32 = 3
 
+	// Cloning a large snapshot can legitimately take a long time before the worker Pod appears.
+	nativePreauthorizationDeadline = time.Hour
+
 	timeoutPodRunning              = 5 * time.Minute
 	timeoutPodDeleted              = 2 * time.Minute
 	timeoutWaitServiceIP           = 5 * time.Minute

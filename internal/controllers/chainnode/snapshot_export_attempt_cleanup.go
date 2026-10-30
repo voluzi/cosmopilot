@@ -322,6 +322,10 @@ func (r *Reconciler) recoverNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 			if err := r.invalidateNativeAttempt(ctx, c, a, "PolicyOrOwnerChanged"); err != nil {
 				return err
 			}
+		} else if a.Phase != "Uploading" && time.Since(a.CreatedAt.Time) > nativePreauthorizationDeadline {
+			if err := r.invalidateNativeAttempt(ctx, c, a, "AuthorizationDeadlineExceeded"); err != nil {
+				return err
+			}
 		} else if _, err := r.nativeSource(ctx, recipe, a.Phase != "Reserved", a); err != nil {
 			var lost *nativeIdentityError
 			if !errors.As(err, &lost) {

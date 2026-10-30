@@ -203,7 +203,137 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.False(t, metav1.IsControlledBy(&job, c))
 		}
 	})
-	for _, age := range []time.Duration{0, 3 * time.Minute} {
+	// issued seeds a held attempt whose Job and PVC exist, as recovery finds them after both POSTs.
+	issued := func(t *testing.T, age time.Duration) (*appsv1.ChainNode, *snapshotv1.VolumeSnapshot, *appsv1.SnapshotExportAttempt, exportprotocol.Recipe, *batchv1.Job, *corev1.PersistentVolumeClaim) {
+		t.Helper()
+		s, content := nativeReviewSource(t, admin, source, original.Driver)
+		c, a, recipe := seed(t, template.Namespace, "ResourcesRequested", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+			rec, err := exportprotocol.DecodeRecipe(a)
+			require.NoError(t, err)
+			rec.Snapshot, rec.Content = identity(s), identity(content)
+			a.Recipe, a.RecipeSHA256, err = exportprotocol.EncodeRecipe(rec)
+			require.NoError(t, err)
+			a.Job, a.ScratchPVC, a.ScratchPV, a.Pod = nil, nil, nil, nil
+			a.LocalCleanupState, a.RemoteCleanupState = "", ""
+			a.CreatedAt = metav1.NewTime(time.Now().Add(-age))
+			e.SnapshotName, e.SnapshotUID = s.Name, s.UID
+			e.RemoteCleanupState = ""
+		})
+		holders, err := json.Marshal(map[string]string{a.ID: nativeHolder(recipe, a)})
+		require.NoError(t, err)
+		s.Annotations[exportprotocol.HoldAnnotation] = string(holders)
+		s.Annotations[controllers.AnnotationExportingTarball] = "true"
+		s.Finalizers = append(s.Finalizers, exportprotocol.SourceFinalizer)
+		require.NoError(t, admin.Update(ctx, s))
+		job := datasnapshot.NativeJob(a, recipe)
+		require.NoError(t, admin.Create(ctx, job))
+		pvc := datasnapshot.NativePVC(a, recipe, job.UID)
+		require.NoError(t, admin.Create(ctx, pvc))
+		return c, s, a, recipe, job, pvc
+	}
+	bindScratch := func(t *testing.T, recipe exportprotocol.Recipe, pvc *corev1.PersistentVolumeClaim, createPV bool) {
+		t.Helper()
+		pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: recipe.ResourceName}, Spec: corev1.PersistentVolumeSpec{StorageClassName: recipe.StorageClass, Capacity: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}, AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain, PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: recipe.Driver, VolumeHandle: recipe.ResourceName}}, ClaimRef: &corev1.ObjectReference{Namespace: pvc.Namespace, Name: pvc.Name, UID: pvc.UID}}}
+		if createPV {
+			require.NoError(t, admin.Create(ctx, pv))
+			pv.Status.Phase = corev1.VolumeBound
+			require.NoError(t, admin.Status().Update(ctx, pv))
+		}
+		pvc.Spec.VolumeName = pv.Name
+		require.NoError(t, admin.Update(ctx, pvc))
+		pvc.Status.Phase = corev1.ClaimBound
+		require.NoError(t, admin.Status().Update(ctx, pvc))
+	}
+	workerPod := func(t *testing.T, job *batchv1.Job, status corev1.PodStatus) *corev1.Pod {
+		t.Helper()
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: job.Name + "-pod", Namespace: job.Namespace, Labels: job.Spec.Template.Labels, OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID, Controller: ptr.To(true)}}}, Spec: *job.Spec.Template.Spec.DeepCopy()}
+		require.NoError(t, admin.Create(ctx, pod))
+		pod.Status = status
+		require.NoError(t, admin.Status().Update(ctx, pod))
+		return pod
+	}
+	// requireSafeInvalidation asserts zero S3 authority was ever granted and local authority is released.
+	requireSafeInvalidation := func(t *testing.T, c *appsv1.ChainNode, s *snapshotv1.VolumeSnapshot, reason string, recipe exportprotocol.Recipe) {
+		t.Helper()
+		if err := r.recoverNativeExports(ctx, c); err != nil {
+			_, fatal := r.handleNativeOutcome(ctx, c, err)
+			require.NoError(t, fatal)
+		}
+		a := refresh(t, c)
+		require.Equal(t, "Invalidated", a.Phase)
+		require.Equal(t, reason, a.Reason)
+		require.Nil(t, a.AuthorizedAt)
+		require.Equal(t, "Complete", a.RemoteCleanupState)
+		require.Equal(t, "Complete", c.Status.SnapshotExports[0].RemoteCleanupState)
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(s), s))
+		require.NotContains(t, s.Finalizers, exportprotocol.SourceFinalizer)
+		require.Equal(t, tarballFailed, s.Annotations[controllers.AnnotationExportingTarball])
+		require.False(t, snapshotExportInFlight(c, s), "count retention must not stay pinned")
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, nativeKey(recipe), &batchv1.Job{})))
+	}
+	recoverUntil := func(t *testing.T, c *appsv1.ChainNode, ready func() bool) {
+		t.Helper()
+		for range 6 {
+			if err := r.recoverNativeExports(ctx, c); err != nil {
+				_, fatal := r.handleNativeOutcome(ctx, c, err)
+				require.NoError(t, fatal)
+			}
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			if ready() {
+				return
+			}
+		}
+		require.True(t, ready(), "recovery did not settle: %+v", c.Status.SnapshotExportAuthority)
+	}
+	for name, status := range map[string]corev1.PodStatus{
+		"pod failed":             {Phase: corev1.PodFailed},
+		"pod succeeded":          {Phase: corev1.PodSucceeded},
+		"exporter already ended": {Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "exporter", Image: original.Image, ImageID: "fixture", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}}}},
+	} {
+		t.Run("terminal worker never reaches authorization "+name, func(t *testing.T) {
+			c, s, _, recipe, job, pvc := issued(t, 0)
+			bindScratch(t, recipe, pvc, true)
+			workerPod(t, job, status)
+			recoverUntil(t, c, func() bool { return c.Status.SnapshotExportAuthority.Attempts[0].Phase == "Invalidated" })
+			requireSafeInvalidation(t, c, s, "WorkerTerminatedBeforeAuthorization", recipe)
+		})
+	}
+	for name, condition := range map[string]batchv1.JobConditionType{"job failed": batchv1.JobFailed, "job complete": batchv1.JobComplete} {
+		t.Run("terminal worker never reaches authorization "+name, func(t *testing.T) {
+			c, s, _, recipe, job, _ := issued(t, 0)
+			job.Status.StartTime = ptr.To(metav1.Now())
+			if condition == batchv1.JobFailed {
+				job.Status.Failed = 1
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue}, {Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+			} else {
+				job.Status.Succeeded = 1
+				job.Status.CompletionTime = ptr.To(metav1.Now())
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue}, {Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			}
+			require.NoError(t, admin.Status().Update(ctx, job))
+			recoverUntil(t, c, func() bool { return c.Status.SnapshotExportAuthority.Attempts[0].Phase == "Invalidated" })
+			requireSafeInvalidation(t, c, s, "WorkerTerminatedBeforeAuthorization", recipe)
+		})
+	}
+	for _, wait := range []string{"never bound PVC", "unobserved PV", "unobserved Pod", "unready source"} {
+		t.Run("preauthorization deadline expires "+wait, func(t *testing.T) {
+			c, s, _, recipe, job, pvc := issued(t, nativePreauthorizationDeadline+time.Minute)
+			switch wait {
+			case "unobserved PV":
+				bindScratch(t, recipe, pvc, false)
+			case "unobserved Pod":
+				bindScratch(t, recipe, pvc, true)
+			case "unready source":
+				bindScratch(t, recipe, pvc, true)
+				workerPod(t, job, corev1.PodStatus{Phase: corev1.PodPending})
+				s.Status.ReadyToUse = ptr.To(false)
+				require.NoError(t, admin.Status().Update(ctx, s))
+			}
+			recoverUntil(t, c, func() bool { return c.Status.SnapshotExportAuthority.Attempts[0].Phase == "Invalidated" })
+			requireSafeInvalidation(t, c, s, "AuthorizationDeadlineExceeded", recipe)
+		})
+	}
+	for _, age := range []time.Duration{0, 3 * time.Minute, nativePreauthorizationDeadline - time.Minute} {
 		t.Run(fmt.Sprintf("pending issued PVC keeps authority age %s", age), func(t *testing.T) {
 			s, content := nativeReviewSource(t, admin, source, original.Driver)
 			c, a, recipe := seed(t, template.Namespace, "ResourcesRequested", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
