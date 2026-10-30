@@ -414,59 +414,60 @@ func (r *Reconciler) cleanupNativeOrphans(ctx context.Context, key client.Object
 	if r.APIReader == nil {
 		return fmt.Errorf("native orphan recovery requires uncached reader")
 	}
-	var pending error
-	// Labels attribute cleanup; they never reconstruct worker authority.
+	var candidates []client.Object
 	for _, list := range []client.ObjectList{&batchv1.JobList{}, &corev1.PersistentVolumeClaimList{}} {
 		if err := r.APIReader.List(ctx, list, client.InNamespace(key.Namespace), client.MatchingLabels{exportprotocol.OwnerNameLabel: key.Name}); err != nil {
 			return err
 		}
-		var objects []client.Object
 		switch l := list.(type) {
 		case *batchv1.JobList:
 			for i := range l.Items {
-				objects = append(objects, &l.Items[i])
+				candidates = append(candidates, &l.Items[i])
 			}
 		case *corev1.PersistentVolumeClaimList:
 			for i := range l.Items {
-				objects = append(objects, &l.Items[i])
-			}
-		}
-		for _, obj := range objects {
-			labels := obj.GetLabels()
-			c, err := r.nativeOrphanAuthority(ctx, key)
-			if err != nil {
-				return err
-			}
-			active := false
-			if c != nil && labels[exportprotocol.OwnerUIDLabel] == string(c.UID) && c.Status.SnapshotExportAuthority != nil {
-				for _, a := range c.Status.SnapshotExportAuthority.Attempts {
-					if a.ID == labels[exportprotocol.AttemptLabel] {
-						active = !nativeRetiredCleanupJob(&a, obj.GetName())
-						break
-					}
-				}
-			}
-			if !active {
-				if controllerutil.ContainsFinalizer(obj, exportprotocol.AttemptFinalizer) {
-					if err := r.deleteNativeObject(ctx, obj); err != nil {
-						return err
-					}
-				}
-				remaining := obj.DeepCopyObject().(client.Object)
-				if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(obj), remaining); err == nil {
-					pending = nativeLocal("RecoveryDeferred", "export-"+labels[exportprotocol.AttemptLabel], fmt.Errorf("native orphan %s remains after local cleanup", obj.GetName()))
-				} else if !apierrors.IsNotFound(err) {
-					return err
-				}
+				candidates = append(candidates, &l.Items[i])
 			}
 		}
 	}
 	snapshots := &snapshotv1.VolumeSnapshotList{}
-	if err := r.APIReader.List(ctx, snapshots, client.InNamespace(key.Namespace)); err != nil {
-		if apiMeta.IsNoMatchError(err) {
-			return pending
-		}
+	if err := r.APIReader.List(ctx, snapshots, client.InNamespace(key.Namespace)); err != nil && !apiMeta.IsNoMatchError(err) {
 		return err
+	}
+	// Authority is read after listing: a reservation visible in any candidate is also visible here.
+	c, err := r.nativeOrphanAuthority(ctx, key)
+	if err != nil {
+		return err
+	}
+	var pending error
+	// Labels attribute cleanup; they never reconstruct worker authority.
+	for _, obj := range candidates {
+		labels := obj.GetLabels()
+		active := false
+		if c != nil && labels[exportprotocol.OwnerUIDLabel] == string(c.UID) && c.Status.SnapshotExportAuthority != nil {
+			for _, a := range c.Status.SnapshotExportAuthority.Attempts {
+				if a.ID == labels[exportprotocol.AttemptLabel] {
+					active = !nativeRetiredCleanupJob(&a, obj.GetName())
+					break
+				}
+			}
+		}
+		if active {
+			continue
+		}
+		if controllerutil.ContainsFinalizer(obj, exportprotocol.AttemptFinalizer) {
+			if err := r.deleteNativeObject(ctx, obj); err != nil {
+				return err
+			}
+		}
+		remaining := obj.DeepCopyObject().(client.Object)
+		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(obj), remaining); err == nil {
+			if pending == nil {
+				pending = nativeLocal("RecoveryDeferred", "export-"+labels[exportprotocol.AttemptLabel], fmt.Errorf("native orphan %s remains after local cleanup", obj.GetName()))
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
 	}
 	for i := range snapshots.Items {
 		s := &snapshots.Items[i]
@@ -482,10 +483,6 @@ func (r *Reconciler) cleanupNativeOrphans(ctx context.Context, key client.Object
 			parts := strings.Split(holder, "/")
 			if len(parts) != 5 || parts[0] != key.Namespace || parts[1] != key.Name {
 				continue
-			}
-			c, err := r.nativeOrphanAuthority(ctx, key)
-			if err != nil {
-				return err
 			}
 			active := false
 			if c != nil && parts[2] == string(c.UID) {

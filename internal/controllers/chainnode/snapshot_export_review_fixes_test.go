@@ -512,6 +512,85 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			requireWritable(t, removed, server)
 		})
 	}
+	t.Run("orphan recovery judges every candidate against one owner view read after listing", func(t *testing.T) {
+		c, a, recipe := seed(t, template.Namespace, "Succeeded", nil)
+		reserved := a.DeepCopy()
+		reserved.Sequence, reserved.ID = a.Sequence+1, string(uuid.NewUUID())
+		reserved.ExportID = "export-" + reserved.ID
+		reservedRecipe := recipe
+		reservedRecipe.ExportID, reservedRecipe.ResourceName, reservedRecipe.ObjectName = reserved.ExportID, reserved.ExportID, reserved.ExportID
+		var err error
+		reserved.Recipe, reserved.RecipeSHA256, err = exportprotocol.EncodeRecipe(reservedRecipe)
+		require.NoError(t, err)
+		reserved.Phase, reserved.CompletedEnvelope, reserved.CompletedAt, reserved.AuthorizedAt = "Reserved", "", nil, nil
+		reserved.LocalCleanupState, reserved.RemoteCleanupState = "", ""
+		reserved.Job, reserved.ScratchPVC, reserved.ScratchPV, reserved.Pod = nil, nil, nil, nil
+		reserved.JobCreateIssued, reserved.PVCCreateIssued, reserved.JobCreateIssuer, reserved.PVCCreateIssuer, reserved.SourceHoldResourceVersion = false, false, "", "", ""
+		job := datasnapshot.NativeJob(reserved, reservedRecipe)
+		require.NoError(t, admin.Create(ctx, job))
+		other := datasnapshot.NativeJob(a, recipe)
+		other.Name = recipe.ResourceName + "-other"
+		require.NoError(t, admin.Create(ctx, other))
+		var ownerReads atomic.Int32
+		var once sync.Once
+		racing := rest.CopyConfig(r.RestConfig)
+		racing.WrapTransport = func(base http.RoundTripper) http.RoundTripper {
+			return nativeRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/chainnodes/"+c.Name) {
+					ownerReads.Add(1)
+				}
+				if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/volumesnapshots") {
+					var writeErr error
+					once.Do(func() {
+						latest := &appsv1.ChainNode{}
+						if writeErr = admin.Get(ctx, client.ObjectKeyFromObject(c), latest); writeErr != nil {
+							return
+						}
+						latest.Status.SnapshotExportAuthority.LastSequence = reserved.Sequence
+						latest.Status.SnapshotExportAuthority.Attempts = append(latest.Status.SnapshotExportAuthority.Attempts, *reserved)
+						writeErr = admin.Status().Update(ctx, latest)
+					})
+					if writeErr != nil {
+						return nil, writeErr
+					}
+				}
+				return base.RoundTrip(req)
+			})
+		}
+		reader, err := client.New(racing, client.Options{Scheme: r.Scheme})
+		require.NoError(t, err)
+		local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
+		require.NoError(t, local.cleanupNativeOrphans(ctx, client.ObjectKeyFromObject(c)))
+		require.EqualValues(t, 1, ownerReads.Load())
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(job), job))
+		require.True(t, job.DeletionTimestamp.IsZero(), "a reservation completed during listing is not an orphan")
+		for _, obj := range []client.Object{job, other} {
+			controllerutil.RemoveFinalizer(obj, exportprotocol.AttemptFinalizer)
+			require.NoError(t, admin.Update(ctx, obj))
+			require.NoError(t, admin.Delete(ctx, obj, client.PropagationPolicy(metav1.DeletePropagationBackground)))
+		}
+	})
+	t.Run("deferred orphans keep the first diagnostic and all get processed", func(t *testing.T) {
+		c, a, recipe := seed(t, template.Namespace, "Succeeded", nil)
+		replaced := recipe
+		replaced.Owner.UID = "previous-owner"
+		held := []*batchv1.Job{}
+		for _, suffix := range []string{"-a", "-b"} {
+			job := datasnapshot.NativeJob(a, replaced)
+			job.Name = recipe.ResourceName + suffix
+			job.Finalizers = append(job.Finalizers, "test.example/hold")
+			require.NoError(t, admin.Create(ctx, job))
+			held = append(held, job)
+		}
+		err := r.cleanupNativeOrphans(ctx, client.ObjectKeyFromObject(c))
+		require.ErrorContains(t, err, held[0].Name+" remains")
+		for _, job := range held {
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(job), job))
+			require.False(t, job.DeletionTimestamp.IsZero(), "both orphans are processed under a recreated owner")
+			controllerutil.RemoveFinalizer(job, "test.example/hold")
+			require.NoError(t, admin.Update(ctx, job))
+		}
+	})
 	t.Run("orphan snapshot read errors remain failures", func(t *testing.T) {
 		local := &Reconciler{Client: r.Client, Scheme: r.Scheme, opts: r.opts, recorder: r.recorder}
 		var faults *atomic.Int32
