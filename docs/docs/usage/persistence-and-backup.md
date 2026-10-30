@@ -590,36 +590,61 @@ application image; changing the source only takes effect when the volume is recr
 `persistence.snapshots.exportTarball.protocol: source-v1` selects the native S3
 protocol with Secret credentials. Omitted protocol and `legacy` preserve the legacy
 export lifecycle. Native GCS and cloud ServiceAccount/ambient authentication are
-not supported. A compatible exporter must be selected through the existing
-`dataExporterImage` override; the default image pin is unchanged. An older binary
-fails on the native command instead of uploading through the legacy path.
+not supported. The default exporter image is `ghcr.io/voluzi/dataexporter:2.3.0`, the
+first with the native commands; publishing that image belongs to the release process.
+An older image selected through `dataExporterImage` fails on the native command
+instead of uploading through the legacy path.
 
 Install the additive CRDs before the compatible controller. Stop legacy controller
 writers before activating native exports; mixed legacy/new writers over active
-authority are unsupported. Before a downgrade, drain or invalidate active attempts
-and retain the additive authority schema.
+authority are unsupported.
+
+Downgrading the operator is unsupported once a ChainNode has ever used `source-v1`.
+Its permanent `snapshotExportAuthority` watermark remains even after every attempt
+compacts, and an older operator's typed status updates omit that field and are
+rejected. Disabling `source-v1`, acknowledging cleanup or emptying the attempt list
+does not make such a downgrade safe. Stay on a `source-v1`-aware operator and roll
+forward to a fix. Nodes that never used `source-v1` carry no authority and are
+unaffected by this restriction.
 
 VolumeSnapshot CRDs are optional for ordinary nodes. If they are absent at startup,
 the operator omits their watches. Restart the operator after installing them to
 register snapshot watches.
 
-The ChainNode authority permanently retains a monotonic sequence watermark. The
-hard limit is 32 attempts, with a separate 256 KiB status reservation budget that
-can impose a lower limit. Existing non-native status consumes the same budget.
+The ChainNode authority permanently retains a monotonic sequence watermark. Its
+status is a bounded working catalog, not permanent archive storage: at most 32 native
+attempts, 32 native catalog records, and a 256 KiB projected status budget that can
+impose a lower limit. Existing non-native status consumes the same budget.
 Each recipe is strict canonical JSON, bounded to 16 KiB of UTF-8 contents, with a
 SHA-256 over those exact contents. Reservations count current serialized evidence
 once and reserve only missing lifecycle growth, including escaped JSON overhead.
-Thirty ordinary retained archives can fit; 32 maximum-sized records are not
-promised. `SnapshotExportCapacityExceeded` explains `AttemptLimit`, `StatusBudget`
-or `SequenceExhausted` without advancing the watermark or creating a partial record.
-Normal node configuration, Pod reconciliation and image changes continue.
 
-Confirmed-deleted native history is pruned only after local cleanup and exact source
-absence. Retained archive descriptors and unresolved or acknowledged uncertainty
-remain. These can eventually exhaust capacity; automatic evidence eviction and
-external history storage are not provided. With the default `deleteOnExpire: false`,
-retained archives have no release path. A retention/release decision is required
-before adding more providers or a restore consumer.
+Before declining a reservation, the operator compacts finished authority and then
+releases the oldest native records with no remaining duty, so the default retained
+configuration keeps exporting indefinitely, even while CSI snapshots are retained
+indefinitely. A record is releasable once its local resources are gone and it is one
+of: a retained success with nothing left to clean, a confirmed deletion, an attempt
+invalidated before authorization, or acknowledged uncertainty. Active uploads,
+pending deletions, unacknowledged `Required` uncertainty and exhausted unacknowledged
+cleanup are never released. If only those remain, `SnapshotExportCapacityExceeded`
+explains `AttemptLimit`, `HistoryLimit`, `StatusBudget` or `SequenceExhausted` without
+advancing the watermark, and the next successful reservation clears it. Normal node
+configuration, Pod reconciliation and image changes continue.
+
+Records also release automatically once their exact source snapshot is gone. Before
+a current source's last record is removed, its `native-finished` or `native-failed`
+marker and failure count are written to that snapshot, so the source is not exported
+again and never falls into a legacy path after a protocol change. A failed marker
+write defers the release.
+
+Releasing a record never deletes bucket objects; retained archives stay in place.
+It does remove the recipe, descriptor and digest, worker identities, result envelope,
+cleanup diagnostics and acknowledgement evidence from status. A
+`SnapshotExportHistoryReleased` event names the export ID, object, bucket and whether
+retained output (Normal) or acknowledged uncertainty (Warning) was released. Events
+are transient notifications, not a durable ledger: save accepted descriptors
+externally before they are released if you need durable provenance.
+
 A source snapshot UID/resource-version hold precedes durable resource issuance.
 Jobs and scratch PVCs carry finalizers in their initial POST. Each attempt may issue
 one POST per resource; a missing issued resource is recovered or invalidated, never
@@ -629,10 +654,11 @@ The actual worker mounts its clone read-only. Its dedicated ServiceAccount can G
 only the exact ChainNode and cannot read Secrets or mutate status. Publication checks
 snapshot/content reverse binding, clone PVC/PV UIDs, the actual admitted Job/Pod and
 the strict result. Descriptor and terminal success are published together before
-source protection or local resources are released. Descriptors remain in
-`snapshotExports[].archive` after snapshot removal. Cleanup state is separate from
-the immutable descriptor. ChainNode deletion still removes its status; retain
-accepted descriptors externally when they must outlive that owner.
+source protection or local resources are released. A descriptor stays immutable in
+`snapshotExports[].archive` while its record exists, and is removed with the whole
+record on release. Cleanup state is separate from the descriptor. ChainNode deletion
+also removes its status; retain accepted descriptors externally when they must
+outlive either.
 
 The operator watches across namespaces. Its ClusterRole therefore permits creating
 and deleting namespaced Roles and RoleBindings across managed namespaces, to give
@@ -644,28 +670,43 @@ all run native recovery. A worker gated before invalidation may finish remote wo
 its output cannot be published after invalidation. Such uncertain attempts retain
 `remoteCleanupState: Required`, even after an empty listing or a delete response.
 A preauthorization invalidation retains `remoteCleanupState: Complete`: its worker
-gate proves zero remote upload I/O. Invalidation after authorization permanently
-retains `Required`. Terminal upload failure marks the exact source snapshot's export
-as `failed`; ordinary CSI retention may proceed after local cleanup. No automatic
-upload retry reopens that attempt. For a still-existing, ready and eligible snapshot,
-remove its `cosmopilot.voluzi.com/exporting-tarball` annotation to request a manual
-retry:
+gate proves zero remote upload I/O. A Job or worker already terminal when the operator
+would authorize it is invalidated this way. Invalidation after authorization
+permanently retains `Required`; an automatic retry does not erase it.
+
+A failed upload retries automatically, up to three logical attempts per source. After
+local resources are gone, its marker and the
+`cosmopilot.voluzi.com/tarball-export-attempts` count are repaired on the exact source,
+and the next snapshot reconciliation reserves a fresh sequence, UUID and object
+basename while the policy stays enabled and the snapshot is eligible and unexpired.
+The old attempt is never restarted, and it cannot overwrite a newer retry's progress
+marker. After the third failure the marker stays `native-failed`, a warning event
+reports exhaustion, and ordinary CSI retention may proceed. To request another cycle
+for a still-existing, ready snapshot, remove both annotations:
 
 ```sh
-kubectl annotate volumesnapshot <snapshot> cosmopilot.voluzi.com/exporting-tarball-
+kubectl annotate volumesnapshot <snapshot> \
+  cosmopilot.voluzi.com/exporting-tarball- cosmopilot.voluzi.com/tarball-export-attempts-
 ```
-
-The next snapshot reconciliation reserves a fresh sequence, UUID and object basename.
-The old attempt's terminal state, frozen recipe, issuance witnesses and any `Required`
-uncertainty remain unchanged, including after cleanup acknowledgement. An old attempt
-cannot overwrite the new retry's progress marker.
 
 Successful exports honor their frozen `deleteOnExpire` policy on snapshot expiry
 or removal through dedicated exact-key cleanup. Owner deletion alone does not start
-remote archive deletion. Cleanup has one immutable issuance and a timestamp. A failed
-Job, rejected execution identity, or issued Job missing for two minutes durably stops
-cleanup as `Failed` with `remoteCleanupState: Required`, including failure before
-issuance. Returning credentials or a late Job cannot reopen it.
+remote archive deletion. A requested deletion whose credentials or execution identity
+are missing or temporarily unreadable reports `SnapshotExportDegraded` with reason
+`ExecutionIdentityUnavailable`, and consumes no attempt. Restoring a Secret of the
+same name continues it: cleanup uses the frozen Secret name and destination, not the
+upload-time Secret UID, and the owned ServiceAccount is recreated when missing.
+
+Cleanup runs up to three numbered issuances, `delete-<attempt-ID>-<N>`, each with a
+fresh witness and exactly one Job POST. A failed Job or worker, a rejected create, an
+invalid admitted resource, or an issuance whose Job or worker is missing for two
+minutes durably fails that ordinal with `remoteCleanupState: Required`. Its Jobs and
+Pods are removed, and after the existing deletion backoff the next ordinal is issued.
+Late Jobs and Pods of retired ordinals are removed and cannot acknowledge a later
+ordinal. Success requires the exact Job and selected Pod of the current ordinal.
+After the third failure, `CleanupFailed` reports exhaustion with the export ID,
+ordinary `deleteOnExpire: true` CSI retention stays held, and recreating credentials
+does not reset the bound; only acknowledgement resolves it.
 `SnapshotExportDegraded` identifies blocked native work with a bounded retry cadence;
 native progress also uses Job, Pod and PVC watches. Owner identity/authorization
 failures still stop reconciliation. Non-owner API read failures, including throttling,
@@ -683,12 +724,15 @@ kubectl annotate chainnode <name> \
   cosmopilot.voluzi.com/native-export-cleanup-ack=<export-ID>[,<export-ID>...]
 ```
 
-Only invalidated attempts with unresolved output and failed cleanup attempts are
-eligible. Applied tokens are consumed; unknown tokens grant no authority. The durable
-`Acknowledged` state permits local CSI retention after local resources are handled.
-It preserves `SnapshotExportCleanup`, `remoteCleanupState: Required`, the descriptor
-and capacity usage. It does not set `cleanupComplete` or claim remote deletion proof.
-A retained archive's `Complete` state means no unresolved cleanup, not archive deletion.
+Any terminal attempt with `remoteCleanupState: Required` is eligible: invalidated
+attempts, failed or exhausted cleanup, a deletion deferred before its first issuance,
+and retained output with leftover temporary objects. Acknowledging stops any current
+cleanup authority before local teardown. Applied tokens are consumed; unknown tokens
+grant no authority. The durable `Acknowledged` state permits local CSI retention after
+local resources are handled and makes the record releasable under capacity pressure.
+It keeps `remoteCleanupState: Required` while the record exists, never sets
+`cleanupComplete` and never claims remote deletion proof. A retained archive's
+`Complete` state means no unresolved cleanup, not archive deletion.
 
 Owner or namespace deletion invalidates active uploads and durably abandons incomplete
 cleanup as `Abandoned`, before exact local teardown and source-hold release. Native
@@ -699,17 +743,20 @@ because its status disappears. Never forcibly remove export finalizers as routin
 maintenance.
 Admission may add CPU, memory and ephemeral-storage resources or raise explicit
 requests/limits; frozen explicit values cannot be lowered or removed. Archive-affecting
-execution fields remain strict. Resource recovery uses a conservative two-minute
-window measured from attempt creation; a slow source hold can consume that window
-and cost one logical attempt.
+execution fields remain strict. Scheduler-assigned `nodeName` and admission scheduling
+fields are not frozen archive inputs, because they do not change archive content; the
+actual CSI source and clone bindings and the execution identity remain checked.
 
-An issued PVC awaiting binding, an initially unobserved PV, or an unselected worker
-Pod remains eligible to progress indefinitely. After two minutes from attempt
-creation, pending provisioning reports `SnapshotExportDegraded` with reason
-`RecoveryDeferred`; it does not invalidate the attempt or reset issuance. Unavailable
-snapshot readiness also keeps the attempt deferred. These stalls pin the source
-snapshot and consume capacity. Fix the storage or readiness problem, or disable
-the export policy to cancel the attempt through normal recovery.
+An issued Job or PVC missing after a conservative two-minute window from attempt
+creation is invalidated, never recreated under that attempt. An issued PVC awaiting
+binding, an initially unobserved PV, an unselected worker Pod, or unavailable snapshot
+readiness keeps the attempt pending; after two minutes it reports
+`SnapshotExportDegraded` with reason `RecoveryDeferred`. An attempt not authorized one
+hour after creation is invalidated with `AuthorizationDeadlineExceeded` and
+`remoteCleanupState: Complete`, which releases its retention exemption and uses one
+of its three upload attempts. The deadline is fixed, covers cloning a large snapshot,
+and moving between these waits does not reset it. There is no time limit once the
+upload is authorized.
 
 Local filesystem calls can delay cancellation; the upload joins its workers before
 returning.

@@ -251,6 +251,9 @@ For a source-v1 single archive, map the accepted descriptor in
 | `archive.destination.forcePathStyle` | `persistence.restore.snapshot.forcePathStyle` |
 | `archive.sha256` | `persistence.restore.verification.sha256` |
 
+Native records are released from status under capacity pressure, so save a descriptor
+you depend on before then.
+
 Copy the exact object key and digest. Requiring the SHA-256 is a rule of this
 descriptor-verification workflow; the generic restore API permits its omission
 and has no separate descriptor admission mode. The digest covers the stored

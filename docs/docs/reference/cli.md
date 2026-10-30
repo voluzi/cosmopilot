@@ -230,9 +230,10 @@ strict envelope validation and unchanged source/clone binding before publishing 
 archive descriptor. Standalone provider `upload --result-file` keeps its existing
 result schema. Split output completes without a single-archive descriptor.
 
-Native cleanup authorizes a selected cleanup Pod against a succeeded attempt and
-its deleting catalog entry. Deleting owners and every stopped cleanup state
-(`Failed`, `Acknowledged`, `Abandoned`) deny authorization immediately, including
-before a cleanup Pod has been selected. It deletes
+Native cleanup additionally takes `--cleanup-attempt`, the numbered issuance it belongs
+to, and authorizes a selected cleanup Pod against that exact ordinal of a succeeded
+attempt and its deleting catalog entry. A retired ordinal, deleting owners and every
+stopped cleanup state (`Failed`, `Acknowledged`, `Abandoned`) deny authorization
+immediately, including before a cleanup Pod has been selected. It deletes
 the acknowledged exact key, or the exact generated keys for acknowledged split
 output, with bounded concurrent workers. It never lists by prefix.
