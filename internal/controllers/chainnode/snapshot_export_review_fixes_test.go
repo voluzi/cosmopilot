@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -255,19 +256,32 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 	// requireSafeInvalidation asserts zero S3 authority was ever granted and local authority is released.
 	requireSafeInvalidation := func(t *testing.T, c *appsv1.ChainNode, s *snapshotv1.VolumeSnapshot, reason string, recipe exportprotocol.Recipe) {
 		t.Helper()
-		if err := r.recoverNativeExports(ctx, c); err != nil {
-			_, fatal := r.handleNativeOutcome(ctx, c, err)
-			require.NoError(t, fatal)
-		}
 		a := refresh(t, c)
 		require.Equal(t, "Invalidated", a.Phase)
 		require.Equal(t, reason, a.Reason)
 		require.Nil(t, a.AuthorizedAt)
 		require.Equal(t, "Complete", a.RemoteCleanupState)
+		for range 2 {
+			if err := r.recoverNativeExports(ctx, c); err != nil {
+				_, fatal := r.handleNativeOutcome(ctx, c, err)
+				require.NoError(t, fatal)
+			}
+			// Envtest has no PVC-protection controller; release the unused fixture claim.
+			pvc := &corev1.PersistentVolumeClaim{}
+			if err := admin.Get(ctx, nativeKey(recipe), pvc); err == nil {
+				controllerutil.RemoveFinalizer(pvc, "kubernetes.io/pvc-protection")
+				require.NoError(t, admin.Update(ctx, pvc))
+			}
+		}
+		if err := r.recoverNativeExports(ctx, c); err != nil {
+			_, fatal := r.handleNativeOutcome(ctx, c, err)
+			require.NoError(t, fatal)
+		}
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
 		require.Equal(t, "Complete", c.Status.SnapshotExports[0].RemoteCleanupState)
 		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(s), s))
 		require.NotContains(t, s.Finalizers, exportprotocol.SourceFinalizer)
-		require.Equal(t, tarballFailed, s.Annotations[controllers.AnnotationExportingTarball])
+		require.Equal(t, tarballNativeFailed, s.Annotations[controllers.AnnotationExportingTarball])
 		require.False(t, snapshotExportInFlight(c, s), "count retention must not stay pinned")
 		require.True(t, apierrors.IsNotFound(admin.Get(ctx, nativeKey(recipe), &batchv1.Job{})))
 	}
@@ -566,7 +580,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.NoError(t, r.recoverNativeExports(ctx, c))
 			a := refresh(t, c)
 			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(snapshot), snapshot))
-			require.Equal(t, tarballFailed, snapshot.Annotations[controllers.AnnotationExportingTarball])
+			require.Equal(t, tarballNativeFailed, snapshot.Annotations[controllers.AnnotationExportingTarball])
 			if acknowledged {
 				c.Annotations = map[string]string{exportprotocol.CleanupAckAnnotation: a.ExportID}
 				require.NoError(t, admin.Update(ctx, c))
@@ -575,10 +589,12 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			}
 			old := a.DeepCopy()
 			delete(snapshot.Annotations, controllers.AnnotationExportingTarball)
+			delete(snapshot.Annotations, controllers.AnnotationTarballExportAttempts)
 			require.NoError(t, admin.Update(ctx, snapshot))
 			require.NoError(t, r.recoverNativeExports(ctx, c))
 			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(snapshot), snapshot))
 			require.Empty(t, snapshot.Annotations[controllers.AnnotationExportingTarball], "recovery precedes the normal retry loop")
+			require.Empty(t, snapshot.Annotations[controllers.AnnotationTarballExportAttempts])
 			refresh(t, c)
 			c.Status.LatestHeight, c.Status.PvcSize = 1, "1Gi"
 			require.NoError(t, admin.Status().Update(ctx, c))
@@ -594,6 +610,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			nextRecipe, err := exportprotocol.DecodeRecipe(next)
 			require.NoError(t, err)
 			require.NotEqual(t, recipe.ObjectName, nextRecipe.ObjectName)
+			require.EqualValues(t, 1, next.UploadAttempt, "removing both markers requests a new manual cycle")
 			require.Equal(t, next.ExportID, snapshotExportFor(c, snapshot).ID)
 			require.Equal(t, old, exportprotocol.FindAttempt(c, old.Sequence, old.ID))
 			require.NoError(t, r.cleanupNativeAttempt(ctx, c, old, recipe))
@@ -662,6 +679,191 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(replacement), replacement))
 		require.Equal(t, "true", replacement.Annotations[controllers.AnnotationExportingTarball])
 	})
+	failedExport := func(t *testing.T) (*appsv1.ChainNode, *snapshotv1.VolumeSnapshot, *Reconciler) {
+		t.Helper()
+		snapshot, content := nativeReviewSource(t, admin, source, original.Driver)
+		c, _, _ := seed(t, template.Namespace, "Invalidated", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+			rec, err := exportprotocol.DecodeRecipe(a)
+			require.NoError(t, err)
+			rec.Snapshot, rec.Content = identity(snapshot), identity(content)
+			a.Recipe, a.RecipeSHA256, err = exportprotocol.EncodeRecipe(rec)
+			require.NoError(t, err)
+			a.LocalCleanupState = ""
+			a.Job, a.ScratchPVC, a.ScratchPV, a.Pod = nil, nil, nil, nil
+			e.SnapshotName, e.SnapshotUID = snapshot.Name, snapshot.UID
+			e.Phase = appsv1.SnapshotExportPhaseCleanupRequired
+		})
+		snapshot.Labels = map[string]string{controllers.LabelChainNode: c.Name}
+		snapshot.Annotations[controllers.AnnotationExportingTarball] = "true"
+		require.NoError(t, admin.Update(ctx, snapshot))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		c.Status.LatestHeight, c.Status.PvcSize = 1, "1Gi"
+		require.NoError(t, admin.Status().Update(ctx, c))
+		clients, err := kubernetes.NewForConfig(r.RestConfig)
+		require.NoError(t, err)
+		return c, snapshot, &Reconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, RestConfig: r.RestConfig, opts: r.opts, recorder: record.NewFakeRecorder(100), ClientSet: clients}
+	}
+	requireMarker := func(t *testing.T, s *snapshotv1.VolumeSnapshot, marker string, failures int) {
+		t.Helper()
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(s), s))
+		require.Equal(t, marker, s.Annotations[controllers.AnnotationExportingTarball])
+		require.Equal(t, strconv.Itoa(failures), s.Annotations[controllers.AnnotationTarballExportAttempts])
+	}
+	t.Run("failed uploads retry with fresh attempts until exhausted", func(t *testing.T) {
+		c, s, local := failedExport(t)
+		used := map[string]bool{}
+		for ordinal := 1; ordinal <= tarballExportMaxAttempts; ordinal++ {
+			for range 2 {
+				require.NoError(t, local.recoverNativeExports(ctx, c))
+				requireMarker(t, s, tarballNativeFailed, ordinal)
+			}
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			require.Empty(t, c.Status.SnapshotExportAuthority.Attempts, "the retry budget outlives compacted authority")
+			require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			if ordinal == tarballExportMaxAttempts {
+				require.Empty(t, c.Status.SnapshotExportAuthority.Attempts, "no fourth attempt")
+				require.EqualValues(t, tarballExportMaxAttempts, c.Status.SnapshotExportAuthority.LastSequence)
+				requireMarker(t, s, tarballNativeFailed, tarballExportMaxAttempts)
+				events := local.recorder.(*record.FakeRecorder).Events
+				close(events)
+				warnings := []string{}
+				for event := range events {
+					if strings.Contains(event, corev1.EventTypeWarning) {
+						warnings = append(warnings, event)
+					}
+				}
+				require.Len(t, warnings, 1)
+				require.Contains(t, warnings[0], "retry limit reached")
+				break
+			}
+			require.Len(t, c.Status.SnapshotExportAuthority.Attempts, 1)
+			next := c.Status.SnapshotExportAuthority.Attempts[0].DeepCopy()
+			require.EqualValues(t, ordinal+1, next.UploadAttempt)
+			require.EqualValues(t, ordinal+1, next.Sequence)
+			rec, err := exportprotocol.DecodeRecipe(next)
+			require.NoError(t, err)
+			require.False(t, used[rec.ObjectName], "an upload retry never reuses an object prefix")
+			used[rec.ObjectName] = true
+			requireMarker(t, s, "true", ordinal)
+			require.NoError(t, local.invalidateNativeAttempt(ctx, c, next, "WorkerFailed"))
+		}
+	})
+	t.Run("retry after failure publishes and is never exported again", func(t *testing.T) {
+		c, s, local := failedExport(t)
+		require.NoError(t, local.recoverNativeExports(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		a := c.Status.SnapshotExportAuthority.Attempts[0].DeepCopy()
+		require.EqualValues(t, 2, a.UploadAttempt)
+		recipe, err := exportprotocol.DecodeRecipe(a)
+		require.NoError(t, err)
+		recoverUntil(t, c, func() bool {
+			return c.Status.SnapshotExportAuthority.Attempts[0].ScratchPVC != nil
+		})
+		job, pvc := &batchv1.Job{}, &corev1.PersistentVolumeClaim{}
+		require.NoError(t, admin.Get(ctx, nativeKey(recipe), job))
+		require.NoError(t, admin.Get(ctx, nativeKey(recipe), pvc))
+		bindScratch(t, recipe, pvc, true)
+		pod := workerPod(t, job, corev1.PodStatus{Phase: corev1.PodRunning})
+		recoverUntil(t, c, func() bool { return c.Status.SnapshotExportAuthority.Attempts[0].Phase == "Uploading" })
+		a = c.Status.SnapshotExportAuthority.Attempts[0].DeepCopy()
+		previous, err := exportprotocol.DecodeEnvelope([]byte(completed.CompletedEnvelope))
+		require.NoError(t, err)
+		envelope := exportprotocol.EnvelopeFor(a, recipe)
+		envelope.Result = previous.Result
+		envelope.Result.ObjectKey = recipe.ObjectName + recipe.Compression.Extension()
+		body, err := exportprotocol.EncodeEnvelope(envelope)
+		require.NoError(t, err)
+		pod.Status.Phase = corev1.PodSucceeded
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "exporter", Image: recipe.Image, ImageID: "fixture", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: string(body)}}}}
+		require.NoError(t, admin.Status().Update(ctx, pod))
+		job.Status.StartTime, job.Status.CompletionTime = ptr.To(metav1.Now()), ptr.To(metav1.Now())
+		job.Status.Succeeded = 1
+		job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue}, {Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+		require.NoError(t, admin.Status().Update(ctx, job))
+		recoverUntil(t, c, func() bool { return c.Status.SnapshotExportAuthority.Attempts[0].Phase == "Succeeded" })
+		for range 2 {
+			require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		}
+		requireMarker(t, s, tarballNativeFinished, 1)
+		require.EqualValues(t, 2, c.Status.SnapshotExportAuthority.LastSequence)
+		require.Equal(t, a.ExportID, snapshotExportFor(c, s).ID)
+	})
+	t.Run("lost first marker counts once and removing both markers restarts the cycle", func(t *testing.T) {
+		c, s, local := failedExport(t)
+		delete(s.Annotations, controllers.AnnotationExportingTarball)
+		require.NoError(t, admin.Update(ctx, s))
+		for range 2 {
+			require.NoError(t, local.recoverNativeExports(ctx, c))
+			requireMarker(t, s, tarballNativeFailed, 1)
+		}
+		delete(s.Annotations, controllers.AnnotationExportingTarball)
+		delete(s.Annotations, controllers.AnnotationTarballExportAttempts)
+		require.NoError(t, admin.Update(ctx, s))
+		require.NoError(t, local.recoverNativeExports(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(s), s))
+		require.Empty(t, s.Annotations[controllers.AnnotationExportingTarball])
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.Len(t, c.Status.SnapshotExportAuthority.Attempts, 1)
+		require.EqualValues(t, 1, c.Status.SnapshotExportAuthority.Attempts[0].UploadAttempt)
+	})
+	t.Run("retry waits for the failed attempt's local resources", func(t *testing.T) {
+		c, s, local := failedExport(t)
+		a := c.Status.SnapshotExportAuthority.Attempts[0].DeepCopy()
+		recipe, err := exportprotocol.DecodeRecipe(a)
+		require.NoError(t, err)
+		job := datasnapshot.NativeJob(a, recipe)
+		require.NoError(t, admin.Create(ctx, job))
+		pvc := datasnapshot.NativePVC(a, recipe, job.UID)
+		pvc.Finalizers = append(pvc.Finalizers, "test.example/hold")
+		require.NoError(t, admin.Create(ctx, pvc))
+		require.NoError(t, local.recoverNativeExports(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(s), s))
+		require.Equal(t, "true", s.Annotations[controllers.AnnotationExportingTarball], "marker repair follows local teardown")
+		s.Annotations[controllers.AnnotationExportingTarball] = tarballNativeFailed
+		s.Annotations[controllers.AnnotationTarballExportAttempts] = "1"
+		require.NoError(t, admin.Update(ctx, s))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.EqualValues(t, 1, c.Status.SnapshotExportAuthority.LastSequence)
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(pvc), pvc))
+		controllerutil.RemoveFinalizer(pvc, "test.example/hold")
+		controllerutil.RemoveFinalizer(pvc, "kubernetes.io/pvc-protection")
+		require.NoError(t, admin.Update(ctx, pvc))
+		require.NoError(t, local.recoverNativeExports(ctx, c))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+		require.EqualValues(t, 2, c.Status.SnapshotExportAuthority.LastSequence)
+	})
+	for _, reason := range []string{"policy disabled", "source expired"} {
+		t.Run("retry does not start when "+reason, func(t *testing.T) {
+			c, s, local := failedExport(t)
+			require.NoError(t, local.recoverNativeExports(ctx, c))
+			requireMarker(t, s, tarballNativeFailed, 1)
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			c.Spec.Persistence.Snapshots.PreserveLastSnapshot = ptr.To(false)
+			if reason == "policy disabled" {
+				c.Spec.Persistence.Snapshots.ExportTarball.Protocol = ""
+			} else {
+				s.Annotations[controllers.AnnotationSnapshotRetention] = "1ns"
+				require.NoError(t, admin.Update(ctx, s))
+			}
+			require.NoError(t, admin.Update(ctx, c))
+			require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
+			require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
+			require.EqualValues(t, 1, c.Status.SnapshotExportAuthority.LastSequence)
+			if reason == "source expired" {
+				require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(s), s)))
+			}
+		})
+	}
 	for _, resource := range []string{"secrets", "serviceaccounts"} {
 		for _, issued := range []bool{false, true} {
 			t.Run(fmt.Sprintf("cleanup read defers %s issued %v", resource, issued), func(t *testing.T) {
@@ -1359,6 +1561,8 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				ownedSource := &snapshotv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{GenerateName: "a-retention-", Namespace: template.Namespace, Annotations: map[string]string{controllers.AnnotationPvcSnapshotReady: "true", controllers.AnnotationExportingTarball: "true"}}, Spec: source.Spec}
 				if !countRetention {
 					ownedSource.Annotations[controllers.AnnotationSnapshotRetention] = "1ns"
+				} else {
+					ownedSource.Annotations[controllers.AnnotationTarballExportAttempts] = strconv.Itoa(tarballExportMaxAttempts)
 				}
 				require.NoError(t, admin.Create(ctx, ownedSource))
 				ownedSource.Status = source.Status.DeepCopy()
@@ -1403,7 +1607,7 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 				require.NoError(t, local.recoverNativeExports(ctx, c))
 				require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))
 				require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(ownedSource), ownedSource))
-				require.Equal(t, tarballFailed, ownedSource.Annotations[controllers.AnnotationExportingTarball])
+				require.Equal(t, tarballNativeFailed, ownedSource.Annotations[controllers.AnnotationExportingTarball])
 				require.NoError(t, local.ensureVolumeSnapshots(ctx, c, false))
 				require.True(t, apierrors.IsNotFound(admin.Get(ctx, client.ObjectKeyFromObject(ownedSource), &snapshotv1.VolumeSnapshot{})))
 				require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(c), c))

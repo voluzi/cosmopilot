@@ -124,11 +124,6 @@ func (r *Reconciler) cleanupNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 	if !exportprotocol.Terminal(a) {
 		return fmt.Errorf("native cleanup requires terminal authority")
 	}
-	if a.Phase == "Invalidated" {
-		if err := r.failNativeSnapshotMarker(ctx, c, a, recipe); err != nil {
-			return err
-		}
-	}
 	// Terminal authority is durable before source protection is released.
 	if err := r.releaseNativeHold(ctx, recipe, a); err != nil {
 		return err
@@ -190,6 +185,12 @@ func (r *Reconciler) cleanupNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 		owner := metav1.GetControllerOf(p)
 		if owner != nil && owner.APIVersion == "batch/v1" && owner.Kind == "Job" && owner.Name == recipe.ResourceName && a.Job != nil && owner.UID == a.Job.UID {
 			return nil
+		}
+	}
+	// Repair precedes LocalCleanupState: a reservation requires it and then reads the durable failure count.
+	if a.Phase == "Invalidated" {
+		if err := r.failNativeSnapshotMarker(ctx, c, a, recipe); err != nil {
+			return err
 		}
 	}
 	if a.LocalCleanupState != "Complete" {
@@ -521,10 +522,10 @@ func (r *Reconciler) finishNativeSnapshotMarker(ctx context.Context, c *appsv1.C
 	if s.Annotations == nil {
 		s.Annotations = map[string]string{}
 	}
-	if s.Annotations[controllers.AnnotationExportingTarball] == tarballFinished {
+	if s.Annotations[controllers.AnnotationExportingTarball] == tarballNativeFinished {
 		return nil
 	}
-	s.Annotations[controllers.AnnotationExportingTarball] = tarballFinished
+	s.Annotations[controllers.AnnotationExportingTarball] = tarballNativeFinished
 	return r.Update(ctx, s)
 }
 
@@ -820,7 +821,7 @@ func (r *Reconciler) failNativeSnapshotMarker(ctx context.Context, c *appsv1.Cha
 	} else if err != nil {
 		return err
 	}
-	if s.UID != recipe.Snapshot.UID || !s.DeletionTimestamp.IsZero() || s.Annotations[controllers.AnnotationExportingTarball] != "true" {
+	if s.UID != recipe.Snapshot.UID || !s.DeletionTimestamp.IsZero() {
 		return nil
 	}
 	// Read authority after the marker so a newer retry cannot inherit an older catalog view.
@@ -833,8 +834,41 @@ func (r *Reconciler) failNativeSnapshotMarker(ctx context.Context, c *appsv1.Cha
 	if current == nil || current.Phase != "Invalidated" || current.ExportID != a.ExportID || e == nil || e.ProvenanceVersion != 1 || e.SnapshotUID != s.UID || e.ID != current.ExportID {
 		return nil
 	}
-	s.Annotations[controllers.AnnotationExportingTarball] = tarballFailed
-	return r.Update(ctx, s)
+	marker, failures := s.Annotations[controllers.AnnotationExportingTarball], nativeFailedAttempts(s)
+	// Repair precedes LocalCleanupState, so an empty marker after it is an operator reset, not a lost write.
+	lostMarker := marker == "" && current.LocalCleanupState != "Complete"
+	staleCount := marker == tarballNativeFailed && failures < int(current.UploadAttempt)
+	if marker != "true" && !lostMarker && !staleCount {
+		return nil
+	}
+	if s.Annotations == nil {
+		s.Annotations = map[string]string{}
+	}
+	s.Annotations[controllers.AnnotationExportingTarball] = tarballNativeFailed
+	s.Annotations[controllers.AnnotationTarballExportAttempts] = strconv.Itoa(max(failures, int(current.UploadAttempt)))
+	if err := r.Update(ctx, s); err != nil {
+		return err
+	}
+	if current.UploadAttempt >= tarballExportMaxAttempts {
+		r.recorder.Eventf(c, corev1.EventTypeWarning, appsv1.ReasonTarballExportError, "Native export of snapshot %s failed %d times; %s", s.Name, current.UploadAttempt, tarballFailureAction(false))
+	}
+	return nil
+}
+func nativeFailedAttempts(s *snapshotv1.VolumeSnapshot) int {
+	attempts, err := strconv.Atoi(s.Annotations[controllers.AnnotationTarballExportAttempts])
+	if err != nil || attempts < 0 {
+		return 0
+	}
+	return attempts
+}
+
+// nativeRetryDue reports whether a failed native export still has automatic attempts left.
+func nativeRetryDue(c *appsv1.ChainNode, s *snapshotv1.VolumeSnapshot) bool {
+	if s.Annotations[controllers.AnnotationExportingTarball] != tarballNativeFailed || !nativeConfigured(c) || nativeFailedAttempts(s) >= tarballExportMaxAttempts {
+		return false
+	}
+	expired, err := isSnapshotExpired(s)
+	return err == nil && !expired
 }
 func (r *Reconciler) stopNativeCleanup(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt, state, reason string) error {
 	if a.CleanupComplete || a.CleanupState != "" {

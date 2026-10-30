@@ -262,6 +262,9 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 		fresh = c.DeepCopy()
 		fresh.Status.SnapshotExportAuthority.Attempts[0].Recipe += " "
 		require.Error(t, admin.Status().Update(ctx, fresh))
+		fresh = c.DeepCopy()
+		fresh.Status.SnapshotExportAuthority.Attempts[0].UploadAttempt = 2
+		require.Error(t, admin.Status().Update(ctx, fresh))
 	})
 	// Envtest simulates CSI binding, kubelet execution and Job completion; no physical mount is claimed.
 	pvc := &corev1.PersistentVolumeClaim{}

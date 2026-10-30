@@ -344,7 +344,7 @@ func (r *Reconciler) ensureVolumeSnapshots(ctx context.Context, chainNode *appsv
 		case (chainNode.Spec.Persistence.Snapshots.ShouldExportTarballs() || snapshotExportUploading(chainNode, &snapshot)) &&
 			(!chainNode.Spec.Persistence.Snapshots.ShouldVerify() || snapshot.Annotations[controllers.AnnotationSnapshotIntegrityStatus] == string(snapshotIntegrityOk)) &&
 			snapshot.Annotations[controllers.AnnotationPvcSnapshotReady] == strconv.FormatBool(true) &&
-			snapshot.Annotations[controllers.AnnotationExportingTarball] == "":
+			(snapshot.Annotations[controllers.AnnotationExportingTarball] == "" || nativeRetryDue(chainNode, &snapshot)):
 			logger.Info("starting tarball export", "snapshot", snapshot.GetName())
 			if err = r.exportTarball(ctx, chainNode, &snapshot); err != nil {
 				if deferred, fatal := r.handleNativeSnapshotOutcome(ctx, chainNode, &snapshot, protectedSnapshot, err); fatal != nil {

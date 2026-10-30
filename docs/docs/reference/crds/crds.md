@@ -1099,6 +1099,7 @@ SnapshotExportAttempt is the controller-owned mounted-worker authorization.
 | sequence |  | int64 | true |
 | id |  | string | true |
 | exportID |  | string | true |
+| uploadAttempt | UploadAttempt is this attempt's ordinal within the source snapshot's automatic upload cycle. | int32 | true |
 | recipe | Recipe is canonical versioned JSON, bounded before reservation and decoded strictly. | string | true |
 | recipeSHA256 |  | string | true |
 | phase |  | string | true |

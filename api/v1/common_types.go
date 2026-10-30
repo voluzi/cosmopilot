@@ -1697,7 +1697,7 @@ type SnapshotExportAuthority struct {
 }
 
 // SnapshotExportAttempt is the controller-owned mounted-worker authorization.
-// +kubebuilder:validation:XValidation:rule="self.sequence == oldSelf.sequence && self.id == oldSelf.id && self.exportID == oldSelf.exportID && self.recipe == oldSelf.recipe && self.recipeSHA256 == oldSelf.recipeSHA256",message="attempt identity and recipe are immutable"
+// +kubebuilder:validation:XValidation:rule="self.sequence == oldSelf.sequence && self.id == oldSelf.id && self.exportID == oldSelf.exportID && self.uploadAttempt == oldSelf.uploadAttempt && self.recipe == oldSelf.recipe && self.recipeSHA256 == oldSelf.recipeSHA256",message="attempt identity and recipe are immutable"
 // +kubebuilder:validation:XValidation:rule="!oldSelf.jobCreateIssued || (self.jobCreateIssued && self.jobCreateIssuer == oldSelf.jobCreateIssuer)",message="job issuance cannot revert"
 // +kubebuilder:validation:XValidation:rule="!oldSelf.pvcCreateIssued || (self.pvcCreateIssued && self.pvcCreateIssuer == oldSelf.pvcCreateIssuer)",message="PVC issuance cannot revert"
 // +kubebuilder:validation:XValidation:rule="!(oldSelf.phase in ['Succeeded','Invalidated']) || self.phase == oldSelf.phase",message="terminal attempt cannot reactivate"
@@ -1747,6 +1747,10 @@ type SnapshotExportAttempt struct {
 	ID string `json:"id"`
 	// +kubebuilder:validation:MaxLength=128
 	ExportID string `json:"exportID"`
+	// UploadAttempt is this attempt's ordinal within the source snapshot's automatic upload cycle.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3
+	UploadAttempt int32 `json:"uploadAttempt"`
 	// Recipe is canonical versioned JSON, bounded before reservation and decoded strictly.
 	// +kubebuilder:validation:MaxLength=16384
 	Recipe string `json:"recipe"`

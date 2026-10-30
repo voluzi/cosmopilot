@@ -49,7 +49,7 @@ var _ = Describe("Native export attempt recovery", func() {
 			if err := c.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
 				return err
 			}
-			node.Status.SnapshotExportAuthority = &appsv1.SnapshotExportAuthority{Version: 1, LastSequence: 1, Attempts: []appsv1.SnapshotExportAttempt{{Sequence: 1, ID: id, ExportID: recipe.ExportID, Recipe: encoded, RecipeSHA256: digest, Phase: "Reserved", CreatedAt: metav1.Now()}}}
+			node.Status.SnapshotExportAuthority = &appsv1.SnapshotExportAuthority{Version: 1, LastSequence: 1, Attempts: []appsv1.SnapshotExportAttempt{{Sequence: 1, ID: id, ExportID: recipe.ExportID, UploadAttempt: 1, Recipe: encoded, RecipeSHA256: digest, Phase: "Reserved", CreatedAt: metav1.Now()}}}
 			node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{ID: recipe.ExportID, SnapshotName: recipe.Snapshot.Name, SnapshotUID: recipe.Snapshot.UID, ObjectName: recipe.ObjectName, Destination: recipe.Destination, Phase: appsv1.SnapshotExportPhaseUploading, ProvenanceVersion: 1}}
 			return c.Status().Update(ctx, node)
 		})).To(Succeed())

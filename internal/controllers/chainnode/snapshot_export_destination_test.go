@@ -1924,6 +1924,6 @@ func TestSnapshotExportForPreservesLegacySelectionAndLatestNativeAttempt(t *test
 	node := destinationTestChainNode(nil)
 	node.Status.SnapshotExports = legacy
 	require.Equal(t, "first", snapshotExportFor(node, snapshot).ID)
-	node.Status.SnapshotExports = []appsv1.SnapshotExportStatus{{ID: "invalidated", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ProvenanceVersion: 1, Phase: appsv1.SnapshotExportPhaseCleanupRequired}, {ID: "retry", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ProvenanceVersion: 1, Phase: appsv1.SnapshotExportPhaseUploading}}
+	node.Status.SnapshotExports = append(legacy, appsv1.SnapshotExportStatus{ID: "invalidated", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ProvenanceVersion: 1, Phase: appsv1.SnapshotExportPhaseCleanupRequired}, appsv1.SnapshotExportStatus{ID: "retry", SnapshotName: snapshot.Name, SnapshotUID: snapshot.UID, ProvenanceVersion: 1, Phase: appsv1.SnapshotExportPhaseUploading})
 	require.Equal(t, "retry", snapshotExportFor(node, snapshot).ID)
 }

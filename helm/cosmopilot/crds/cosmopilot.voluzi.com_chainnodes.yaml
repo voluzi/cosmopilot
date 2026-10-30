@@ -10080,6 +10080,13 @@ spec:
                         sourceHoldResourceVersion:
                           maxLength: 128
                           type: string
+                        uploadAttempt:
+                          description: UploadAttempt is this attempt's ordinal within
+                            the source snapshot's automatic upload cycle.
+                          format: int32
+                          maximum: 3
+                          minimum: 1
+                          type: integer
                       required:
                       - createdAt
                       - exportID
@@ -10093,11 +10100,13 @@ spec:
                       - recipeSHA256
                       - sequence
                       - sourceHoldResourceVersion
+                      - uploadAttempt
                       type: object
                       x-kubernetes-validations:
                       - message: attempt identity and recipe are immutable
                         rule: self.sequence == oldSelf.sequence && self.id == oldSelf.id
-                          && self.exportID == oldSelf.exportID && self.recipe == oldSelf.recipe
+                          && self.exportID == oldSelf.exportID && self.uploadAttempt
+                          == oldSelf.uploadAttempt && self.recipe == oldSelf.recipe
                           && self.recipeSHA256 == oldSelf.recipeSHA256
                       - message: job issuance cannot revert
                         rule: '!oldSelf.jobCreateIssued || (self.jobCreateIssued &&

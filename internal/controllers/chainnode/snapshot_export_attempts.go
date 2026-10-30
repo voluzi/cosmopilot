@@ -207,8 +207,14 @@ func (r *Reconciler) reserveNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 			if err != nil {
 				return err
 			}
-			if rec.Snapshot.UID == snapshot.UID && a.Phase != "Invalidated" {
+			if rec.Snapshot.UID != snapshot.UID {
+				continue
+			}
+			if a.Phase != "Invalidated" {
 				return nil
+			}
+			if a.LocalCleanupState != "Complete" {
+				return &nativeDeferred{reason: "RecoveryDeferred"}
 			}
 		}
 	}
@@ -236,6 +242,10 @@ func (r *Reconciler) reserveNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 	}
 	if s.UID != snapshot.UID || s.Status == nil || s.Status.BoundVolumeSnapshotContentName == nil || s.Status.RestoreSize == nil {
 		return fmt.Errorf("native snapshot is not bound")
+	}
+	uploadAttempt := nativeFailedAttempts(s) + 1
+	if uploadAttempt > tarballExportMaxAttempts {
+		return &nativeDeferred{reason: "AttemptsExhausted"}
 	}
 	content := &snapshotv1.VolumeSnapshotContent{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: *s.Status.BoundVolumeSnapshotContentName}, content); err != nil {
@@ -324,7 +334,7 @@ func (r *Reconciler) reserveNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 	if err != nil {
 		return err
 	}
-	a := appsv1.SnapshotExportAttempt{Sequence: auth.LastSequence + 1, ID: id, ExportID: base.ID, Recipe: encoded, RecipeSHA256: digest, Phase: "Reserved", CreatedAt: metav1.Now()}
+	a := appsv1.SnapshotExportAttempt{Sequence: auth.LastSequence + 1, ID: id, ExportID: base.ID, UploadAttempt: int32(uploadAttempt), Recipe: encoded, RecipeSHA256: digest, Phase: "Reserved", CreatedAt: metav1.Now()}
 	if err := exportprotocol.CheckEnvelopeBudget(&a, recipe); err != nil {
 		return err
 	}
