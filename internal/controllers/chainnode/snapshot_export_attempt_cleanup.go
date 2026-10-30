@@ -359,15 +359,9 @@ func (r *Reconciler) recoverNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 				return nativeLocal("InvalidAuthority", a.ExportID, fmt.Errorf("unsupported native attempt phase"))
 			}
 		}
-		fresh, err := r.nativeRead(ctx, c)
-		if err != nil {
+		if a, err = r.nativeCurrentAttempt(ctx, c, a); err != nil {
 			return err
 		}
-		current := exportprotocol.FindAttempt(fresh, a.Sequence, a.ID)
-		if current == nil {
-			return nativeLocal("InvalidAuthority", a.ExportID, fmt.Errorf("terminal authority missing"))
-		}
-		a = current.DeepCopy()
 	}
 	if stopping && !a.CleanupComplete && a.CleanupState == "" {
 		reason := "OwnerDeleting"
@@ -377,20 +371,16 @@ func (r *Reconciler) recoverNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 		if err := r.stopNativeCleanup(ctx, c, a, "Abandoned", reason); err != nil {
 			return err
 		}
-		fresh, err := r.nativeRead(ctx, c)
-		if err != nil {
+		if a, err = r.nativeCurrentAttempt(ctx, c, a); err != nil {
 			return err
 		}
-		a = exportprotocol.FindAttempt(fresh, a.Sequence, a.ID).DeepCopy()
 	}
 	if err := r.cleanupNativeAttempt(ctx, c, a, recipe); err != nil {
 		return err
 	}
-	fresh, err := r.nativeRead(ctx, c)
-	if err != nil {
+	if a, err = r.nativeCurrentAttempt(ctx, c, a); err != nil {
 		return err
 	}
-	a = exportprotocol.FindAttempt(fresh, a.Sequence, a.ID).DeepCopy()
 	if stopping {
 		return r.cleanupNativeDeletionResources(ctx, c, a, recipe)
 	}
@@ -401,6 +391,17 @@ func (r *Reconciler) recoverNativeAttempt(ctx context.Context, c *appsv1.ChainNo
 		return nativeLocal("CleanupFailed", a.ExportID, fmt.Errorf("%s", current.CleanupReason))
 	}
 	return nil
+}
+func (r *Reconciler) nativeCurrentAttempt(ctx context.Context, c *appsv1.ChainNode, a *appsv1.SnapshotExportAttempt) (*appsv1.SnapshotExportAttempt, error) {
+	fresh, err := r.nativeRead(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	current := exportprotocol.FindAttempt(fresh, a.Sequence, a.ID)
+	if current == nil {
+		return nil, nativeLocal("InvalidAuthority", a.ExportID, fmt.Errorf("terminal authority missing"))
+	}
+	return current.DeepCopy(), nil
 }
 func nativeDestinationEqual(a, b appsv1.SnapshotExportDestination) bool {
 	aa, _ := json.Marshal(a)
@@ -608,11 +609,10 @@ func (r *Reconciler) reconcileNativeDeletion(ctx context.Context, c *appsv1.Chai
 		}
 		err = r.Create(ctx, datasnapshot.NativeCleanupJob(a, recipe))
 		if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
-			fresh, readErr := r.nativeRead(ctx, c)
+			current, readErr := r.nativeCurrentAttempt(ctx, c, a)
 			if readErr != nil {
 				return readErr
 			}
-			current := exportprotocol.FindAttempt(fresh, a.Sequence, a.ID)
 			if stopErr := r.stopNativeCleanup(ctx, c, current, "Failed", "CleanupCreateRejected"); stopErr != nil {
 				return stopErr
 			}

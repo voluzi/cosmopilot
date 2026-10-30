@@ -385,6 +385,46 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 			require.Equal(t, after.ScratchPVC.UID, pvc.UID)
 		})
 	}
+	for name, boundary := range map[string]struct {
+		phase    string
+		stopping bool
+		read     int32
+	}{
+		"after stopped cleanup": {"Succeeded", true, 2},
+		"after local cleanup":   {"Invalidated", false, 1},
+		"after invalidation":    {"ResourcesRequested", true, 2},
+	} {
+		t.Run("compacted authority is rejected "+name, func(t *testing.T) {
+			c, a, _ := seed(t, template.Namespace, boundary.phase, nil)
+			var reads atomic.Int32
+			racing := rest.CopyConfig(r.RestConfig)
+			racing.WrapTransport = func(base http.RoundTripper) http.RoundTripper {
+				return nativeRoundTripper(func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/chainnodes/"+c.Name) && reads.Add(1) == boundary.read {
+						raced := &appsv1.ChainNode{}
+						if err := admin.Get(ctx, client.ObjectKeyFromObject(c), raced); err != nil {
+							return nil, err
+						}
+						raced.Status.SnapshotExportAuthority.Attempts = []appsv1.SnapshotExportAttempt{}
+						if err := admin.Status().Update(ctx, raced); err != nil {
+							return nil, err
+						}
+					}
+					return base.RoundTrip(req)
+				})
+			}
+			reader, err := client.New(racing, client.Options{Scheme: r.Scheme})
+			require.NoError(t, err)
+			local := &Reconciler{Client: r.Client, APIReader: reader, Scheme: r.Scheme, opts: r.opts}
+			before := posts.Load()
+			err = local.recoverNativeAttempt(ctx, c, a, boundary.stopping, false)
+			var operation *nativeOperationError
+			require.ErrorAs(t, err, &operation)
+			require.Equal(t, "InvalidAuthority", operation.reason)
+			require.Equal(t, a.ExportID, operation.exportID)
+			require.Equal(t, before, posts.Load())
+		})
+	}
 	t.Run("orphan snapshot read errors remain failures", func(t *testing.T) {
 		local := &Reconciler{Client: r.Client, Scheme: r.Scheme, opts: r.opts}
 		var faults *atomic.Int32
