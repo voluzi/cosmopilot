@@ -1071,6 +1071,7 @@ type TarballCompression string
 // +kubebuilder:validation:XValidation:rule="has(self.gcs) != has(self.s3)",message="exactly one of gcs or s3 must be set"
 // +kubebuilder:validation:XValidation:rule="!has(self.protocol) || self.protocol == 'legacy' || (has(self.s3) && has(self.s3.credentialsSecret))",message="source-v1 requires S3 Secret credentials"
 type ExportTarballConfig struct {
+	// Protocol defaults to legacy when omitted; source-v1 requires S3 with Secret credentials.
 	// +optional
 	// +kubebuilder:validation:Enum=legacy;source-v1
 	Protocol string `json:"protocol,omitempty"`

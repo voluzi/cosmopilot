@@ -470,6 +470,9 @@ func (r *Reconciler) bindNativeResources(ctx context.Context, c *appsv1.ChainNod
 		return r.invalidateNativeAttempt(ctx, c, a, "PVBindingChanged")
 	}
 	if p.Status.Phase != corev1.ClaimBound || p.Spec.VolumeName == "" {
+		if time.Since(a.CreatedAt.Time) > 2*time.Minute {
+			return nativeLocal("RecoveryDeferred", a.ExportID, fmt.Errorf("native scratch PVC is awaiting binding"))
+		}
 		return nil
 	}
 	pv := &corev1.PersistentVolume{}
@@ -477,6 +480,9 @@ func (r *Reconciler) bindNativeResources(ctx context.Context, c *appsv1.ChainNod
 		if apierrors.IsNotFound(err) {
 			if a.ScratchPV != nil {
 				return r.invalidateNativeAttempt(ctx, c, a, "PVMissing")
+			}
+			if time.Since(a.CreatedAt.Time) > 2*time.Minute {
+				return nativeLocal("RecoveryDeferred", a.ExportID, fmt.Errorf("native scratch PV has not been observed"))
 			}
 			return nil
 		}
@@ -502,6 +508,9 @@ func (r *Reconciler) bindNativeResources(ctx context.Context, c *appsv1.ChainNod
 	if selected == nil {
 		if a.Pod != nil {
 			return r.invalidateNativeAttempt(ctx, c, a, "PodMissing")
+		}
+		if time.Since(a.CreatedAt.Time) > 2*time.Minute {
+			return nativeLocal("RecoveryDeferred", a.ExportID, fmt.Errorf("native worker Pod has not been observed"))
 		}
 		return nil
 	}

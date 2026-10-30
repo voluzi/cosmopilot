@@ -42,6 +42,14 @@ func TestNativeWorkerRejectsAdmittedArchiveChanges(t *testing.T) {
 	}{
 		{"writable mount", func(p *corev1.PodSpec) { p.Containers[0].VolumeMounts[0].ReadOnly = false }},
 		{"command", func(p *corev1.PodSpec) { p.Containers[0].Command = []string{"sh"} }},
+		{"arguments", func(p *corev1.PodSpec) { p.Containers[0].Args = []string{"s3", "delete"} }},
+		{"working directory", func(p *corev1.PodSpec) { p.Containers[0].WorkingDir = "/tmp" }},
+		{"API mount", func(p *corev1.PodSpec) {
+			p.Containers[0].VolumeMounts[len(p.Containers[0].VolumeMounts)-1].MountPath = "/tmp/api"
+		}},
+		{"API token", func(p *corev1.PodSpec) {
+			p.Volumes[len(p.Volumes)-1].Projected.Sources[0].ServiceAccountToken.Path = "other-token"
+		}},
 		{"sidecar", func(p *corev1.PodSpec) {
 			p.Containers = append(p.Containers, corev1.Container{Name: "sidecar", Image: "other"})
 		}},
@@ -51,12 +59,51 @@ func TestNativeWorkerRejectsAdmittedArchiveChanges(t *testing.T) {
 		{"replacement source", func(p *corev1.PodSpec) { p.Volumes[0].PersistentVolumeClaim.ClaimName = "replacement" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := job.Spec.Template.Spec.DeepCopy()
-			tc.change(p)
-			require.Error(t, ValidateNativePodSpec(p, a, r))
+			for _, cleanupMode := range []bool{false, true} {
+				if cleanupMode && tc.name == "replacement source" {
+					continue
+				}
+				p := job.Spec.Template.Spec.DeepCopy()
+				validate := ValidateNativePodSpec
+				if cleanupMode {
+					p = cleanup.Spec.Template.Spec.DeepCopy()
+					validate = ValidateNativeCleanupPodSpec
+				}
+				tc.change(p)
+				require.Error(t, validate(p, a, r), "cleanup=%v", cleanupMode)
+			}
 		})
 	}
 	pvc := NativePVC(a, r, types.UID("job-uid"))
 	require.Contains(t, pvc.Finalizers, exportprotocol.AttemptFinalizer)
 	require.Equal(t, types.UID("job-uid"), pvc.OwnerReferences[0].UID)
+	for _, cleanupMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "upload attribution", true: "cleanup attribution"}[cleanupMode], func(t *testing.T) {
+			candidate := job.DeepCopy()
+			validate := ValidateNativeJob
+			if cleanupMode {
+				candidate, validate = cleanup.DeepCopy(), ValidateNativeCleanupJob
+			}
+			candidate.Labels["admission.example/extra"] = "allowed"
+			candidate.Spec.Template.Labels["batch.kubernetes.io/job-name"] = candidate.Name
+			require.NoError(t, validate(candidate, a, r))
+			for _, key := range []string{exportprotocol.OwnerNameLabel, exportprotocol.OwnerUIDLabel, exportprotocol.AttemptLabel} {
+				for _, value := range []string{"", "replacement"} {
+					changed := candidate.DeepCopy()
+					changed.Labels[key] = value
+					require.Error(t, validate(changed, a, r), "Job label %s=%q", key, value)
+					changed = candidate.DeepCopy()
+					changed.Spec.Template.Labels[key] = value
+					require.Error(t, validate(changed, a, r), "template label %s=%q", key, value)
+				}
+			}
+		})
+	}
+	pvc.Labels["admission.example/extra"] = "allowed"
+	require.NoError(t, ValidateNativePVC(pvc, a, r, "job-uid"))
+	for _, key := range []string{exportprotocol.OwnerNameLabel, exportprotocol.OwnerUIDLabel, exportprotocol.AttemptLabel} {
+		changed := pvc.DeepCopy()
+		delete(changed.Labels, key)
+		require.Error(t, ValidateNativePVC(changed, a, r, "job-uid"))
+	}
 }

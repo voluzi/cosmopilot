@@ -540,6 +540,7 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 		require.Equal(t, "Invalidated", current.Phase)
 		require.Equal(t, "Complete", current.RemoteCleanupState)
 		require.NoError(t, r.cleanupNativeAttempt(ctx, c, current.DeepCopy(), lateRecipe))
+		require.True(t, apierrors.IsNotFound(admin.Get(ctx, nativeKey(lateRecipe), &batchv1.Job{})))
 		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(replacement), replacement))
 		require.NotContains(t, replacement.Finalizers, exportprotocol.SourceFinalizer)
 	})

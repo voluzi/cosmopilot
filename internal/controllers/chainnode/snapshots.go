@@ -1224,8 +1224,12 @@ func (r *Reconciler) tarballProviderForConfig(
 }
 
 func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) error {
-	if nativeConfigured(chainNode) {
+	existing := snapshotExportFor(chainNode, snapshot)
+	if nativeConfigured(chainNode) && (existing == nil || existing.ProvenanceVersion == 1) {
 		return nativeLocal("RecoveryDeferred", snapshot.Name, r.reserveNativeAttempt(ctx, chainNode, snapshot))
+	}
+	if existing != nil && existing.ProvenanceVersion == 1 {
+		return &nativeDeferred{reason: "RecoveryDeferred"}
 	}
 	export, err := r.ensureSnapshotExportStatus(ctx, chainNode, snapshot)
 	if err != nil {
@@ -1250,13 +1254,13 @@ func (r *Reconciler) exportTarball(ctx context.Context, chainNode *appsv1.ChainN
 }
 
 func (r *Reconciler) isTarballReady(ctx context.Context, chainNode *appsv1.ChainNode, snapshot *snapshotv1.VolumeSnapshot) (bool, error) {
-	if e := snapshotExportFor(chainNode, snapshot); e != nil && e.ProvenanceVersion == 1 {
-		return e.Phase == appsv1.SnapshotExportPhaseUploaded, nil
+	export := snapshotExportFor(chainNode, snapshot)
+	if export != nil && export.ProvenanceVersion == 1 {
+		return export.Phase == appsv1.SnapshotExportPhaseUploaded, nil
 	}
-	if nativeConfigured(chainNode) {
+	if export == nil && nativeConfigured(chainNode) {
 		return false, nativeLocal("RecoveryDeferred", snapshot.Name, r.reserveNativeAttempt(ctx, chainNode, snapshot))
 	}
-	export := snapshotExportFor(chainNode, snapshot)
 	if export == nil {
 		if r.Client == nil {
 			return r.isTarballReadyLegacy(ctx, chainNode, snapshot)
@@ -2255,7 +2259,8 @@ func (r *Reconciler) handleNativeSnapshotOutcome(ctx context.Context, c *appsv1.
 		return true, nil
 	}
 	if e := snapshotExportFor(c, s); e != nil && e.ProvenanceVersion == 1 {
-		return true, r.retainNativeSnapshot(ctx, c, s, e)
+		_, fatal := r.handleNativeOutcome(ctx, c, nativeLocal("RecoveryDeferred", e.ID, r.retainNativeSnapshot(ctx, c, s, e)))
+		return true, fatal
 	}
 	if nativeConfigured(c) && snapshotExportFor(c, s) == nil && s.Annotations[controllers.AnnotationExportingTarball] == "" {
 		uid, rv := s.UID, s.ResourceVersion

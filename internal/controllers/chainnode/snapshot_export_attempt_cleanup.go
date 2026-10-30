@@ -457,6 +457,9 @@ func (r *Reconciler) cleanupNativeOrphans(ctx context.Context, key client.Object
 	}
 	snapshots := &snapshotv1.VolumeSnapshotList{}
 	if err := r.APIReader.List(ctx, snapshots, client.InNamespace(key.Namespace)); err != nil {
+		if apiMeta.IsNoMatchError(err) {
+			return pending
+		}
 		return err
 	}
 	for i := range snapshots.Items {

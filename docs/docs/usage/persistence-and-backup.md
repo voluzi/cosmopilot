@@ -599,6 +599,10 @@ writers before activating native exports; mixed legacy/new writers over active
 authority are unsupported. Before a downgrade, drain or invalidate active attempts
 and retain the additive authority schema.
 
+VolumeSnapshot CRDs are optional for ordinary nodes. If they are absent at startup,
+the operator omits their watches. Restart the operator after installing them to
+register snapshot watches.
+
 The ChainNode authority permanently retains a monotonic sequence watermark. The
 hard limit is 32 attempts, with a separate 256 KiB status reservation budget that
 can impose a lower limit. Existing non-native status consumes the same budget.
@@ -615,7 +619,7 @@ absence. Retained archive descriptors and unresolved or acknowledged uncertainty
 remain. These can eventually exhaust capacity; automatic evidence eviction and
 external history storage are not provided. With the default `deleteOnExpire: false`,
 retained archives have no release path. A retention/release decision is required
-before P2 provider expansion or Nodezi C adoption.
+before adding more providers or a restore consumer.
 A source snapshot UID/resource-version hold precedes durable resource issuance.
 Jobs and scratch PVCs carry finalizers in their initial POST. Each attempt may issue
 one POST per resource; a missing issued resource is recovered or invalidated, never
@@ -629,6 +633,11 @@ source protection or local resources are released. Descriptors remain in
 `snapshotExports[].archive` after snapshot removal. Cleanup state is separate from
 the immutable descriptor. ChainNode deletion still removes its status; retain
 accepted descriptors externally when they must outlive that owner.
+
+The operator watches across namespaces. Its ClusterRole therefore permits creating
+and deleting namespaced Roles and RoleBindings across managed namespaces, to give
+each export worker GET access to its exact ChainNode name. This grants no mutation
+of ClusterRoles or ClusterRoleBindings and no `bind` or `escalate` permission.
 
 Disabling export policy, source loss, owner deletion and initialization early returns
 all run native recovery. A worker gated before invalidation may finish remote work;
@@ -693,6 +702,14 @@ requests/limits; frozen explicit values cannot be lowered or removed. Archive-af
 execution fields remain strict. Resource recovery uses a conservative two-minute
 window measured from attempt creation; a slow source hold can consume that window
 and cost one logical attempt.
+
+An issued PVC awaiting binding, an initially unobserved PV, or an unselected worker
+Pod remains eligible to progress indefinitely. After two minutes from attempt
+creation, pending provisioning reports `SnapshotExportDegraded` with reason
+`RecoveryDeferred`; it does not invalidate the attempt or reset issuance. Unavailable
+snapshot readiness also keeps the attempt deferred. These stalls pin the source
+snapshot and consume capacity. Fix the storage or readiness problem, or disable
+the export policy to cancel the attempt through normal recovery.
 
 Local filesystem calls can delay cancellation; the upload joins its workers before
 returning.

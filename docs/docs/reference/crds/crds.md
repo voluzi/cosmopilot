@@ -818,7 +818,7 @@ ExportTarballConfig holds config options for tarball upload.
 
 | Field | Description | Scheme | Required |
 | ----- | ----------- | ------ | -------- |
-| protocol |  | string | false |
+| protocol | Protocol defaults to legacy when omitted; source-v1 requires S3 with Secret credentials. | string | false |
 | suffix | Suffix to add to archive name. The name of the tarball will be `<chain-id>-<timestamp>-<suffix>`. | *string | false |
 | deleteOnExpire | Whether to delete the tarball when the snapshot expires. Default is `false`. | *bool | false |
 | compression | Compression applied to the tar archive. Defaults to `gzip` for compatibility with existing exports. | *TarballCompression | false |
