@@ -26,6 +26,7 @@ import (
 	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
 	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
@@ -344,6 +345,49 @@ func TestQuiesceAndDeleteChildrenUsesRootRetentionPolicyBeforeRemovingFinalizer(
 		assert.Nil(t, metav1.GetControllerOf(retained))
 		assert.True(t, resourcecleanup.IsAttributed(retained, resourcecleanup.RootOwnerFor(child), object.class))
 	}
+}
+
+func TestQuiesceAndDeleteChildrenWaitsForChildExportAuthority(t *testing.T) {
+	scheme := nodeSetCleanupScheme(t)
+	now := metav1.NewTime(time.Now())
+	nodeSet := &appsv1.ChainNodeSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "default", UID: "set-uid"},
+		Spec: appsv1.ChainNodeSetSpec{DeletionPolicy: &appsv1.DeletionPolicy{
+			DataVolumes:   ptr.To(appsv1.DeletionPolicyDelete),
+			GeneratedKeys: ptr.To(appsv1.DeletionPolicyDelete),
+		}},
+	}
+	child := ownedChild(t, scheme, nodeSet, "set-fullnodes-0")
+	child.DeletionTimestamp = &now
+	child.Finalizers = []string{resourcecleanup.Finalizer, exportprotocol.AuthorityFinalizer}
+	child.Spec.Validator = &appsv1.ValidatorConfig{}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: child.Name, Namespace: child.Namespace, UID: "pvc-uid"}}
+	key := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: child.Spec.Validator.GetPrivKeySecretName(child), Namespace: child.Namespace, UID: "key-uid"}}
+	for _, object := range []client.Object{pvc, key} {
+		require.NoError(t, controllerutil.SetControllerReference(child, object, scheme))
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodeSet, child, pvc, key).Build()
+	r := &Reconciler{Client: base, Scheme: scheme}
+	ctx := context.Background()
+
+	done, err := r.quiesceAndDeleteChildren(ctx, nodeSet)
+	require.NoError(t, err)
+	assert.False(t, done, "destructive parent cleanup waits for export authority")
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(pvc), pvc))
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(key), key))
+	stored := &appsv1.ChainNode{}
+	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(child), stored))
+	assert.Contains(t, stored.Finalizers, resourcecleanup.Finalizer)
+
+	controllerutil.RemoveFinalizer(stored, exportprotocol.AuthorityFinalizer)
+	require.NoError(t, base.Update(ctx, stored))
+	require.Eventually(t, func() bool {
+		done, err = r.quiesceAndDeleteChildren(ctx, nodeSet)
+		return err == nil && done
+	}, time.Second, time.Millisecond)
+	assert.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(pvc), pvc)))
+	assert.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(key), key)))
+	assert.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(child), stored)))
 }
 
 func TestQuiesceAndDeleteChildrenRetainsControlledLegacyVolumeRemovedFromSpec(t *testing.T) {
