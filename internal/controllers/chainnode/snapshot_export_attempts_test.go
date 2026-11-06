@@ -785,3 +785,10 @@ func nativeFaultReader(t *testing.T, cfg *rest.Config, path string, code, skip i
 	require.NoError(t, err)
 	return reader, &fired
 }
+
+func TestNativeHistoryEvictionWithoutAuthorityReleasesNothing(t *testing.T) {
+	c := &appsv1.ChainNode{Status: appsv1.ChainNodeStatus{SnapshotExports: []appsv1.SnapshotExportStatus{{ID: "legacy", SnapshotName: "old", Phase: appsv1.SnapshotExportPhaseUploaded}}}}
+	released, err := (&Reconciler{}).evictNativeHistory(context.Background(), c, c.DeepCopy())
+	require.NoError(t, err)
+	require.False(t, released)
+}

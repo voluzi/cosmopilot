@@ -900,6 +900,9 @@ func nativeHistoryReleasable(e *appsv1.SnapshotExportStatus, a *appsv1.SnapshotE
 // evictNativeHistory drops the oldest entry without duties; its bucket objects stay untouched.
 func (r *Reconciler) evictNativeHistory(ctx context.Context, c, fresh *appsv1.ChainNode) (bool, error) {
 	auth := fresh.Status.SnapshotExportAuthority
+	if auth == nil {
+		return false, nil
+	}
 	for i := range fresh.Status.SnapshotExports {
 		e := fresh.Status.SnapshotExports[i]
 		a := nativeAttemptFor(auth.Attempts, e.ID)
