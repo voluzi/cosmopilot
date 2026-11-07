@@ -25,7 +25,6 @@ rules:
   resources:
   - endpoints
   - namespaces
-  - serviceaccounts
   verbs:
   - get
   - list
@@ -47,6 +46,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumes
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - pods/attach
   - pods/exec
   verbs:
@@ -54,9 +60,13 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods/log
+  - serviceaccounts
   verbs:
+  - create
+  - delete
   - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:
@@ -200,6 +210,21 @@ rules:
   - update
   - watch
 - apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshotcontents
+  verbs:
+  - get
+- apiGroups:
   - snapshot.storage.k8s.io
   resources:
   - volumesnapshots
@@ -211,3 +236,9 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - list

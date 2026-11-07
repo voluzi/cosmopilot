@@ -18,6 +18,7 @@ import (
 	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
 	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
 )
 
@@ -259,6 +260,9 @@ func (r *Reconciler) finalizeChildDurableResources(
 	nodeSet *appsv1.ChainNodeSet,
 	child *appsv1.ChainNode,
 ) (bool, error) {
+	if controllerutil.ContainsFinalizer(child, exportprotocol.AuthorityFinalizer) {
+		return false, nil
+	}
 	if err := r.attributeControlledLegacyChildResources(ctx, child); err != nil {
 		return false, err
 	}

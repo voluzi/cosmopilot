@@ -7,12 +7,16 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v5/internal/controllers"
 	"github.com/voluzi/cosmopilot/v5/test/e2e/apps"
 )
 
@@ -42,18 +46,26 @@ var _ = Describe("Snapshot E2E", func() {
 			WithNamespace(func(app apps.TestApp, ns *corev1.Namespace) {
 				chainNode := app.BuildChainNode(ns.Name)
 				configureSnapshotPersistence(chainNode)
+				chainNode.Spec.Persistence.Snapshots.StopNode = ptr.To(true)
 
 				err := Framework().Client().Create(Framework().Context(), chainNode)
 				Expect(err).NotTo(HaveOccurred())
 
 				// Wait for node to generate some blocks
 				WaitForChainNodeHeight(chainNode, 5)
+				progressObserved := time.Now()
+				RefreshChainNode(chainNode)
+				genesis := &corev1.ConfigMap{}
+				Expect(Framework().Client().Get(Framework().Context(), client.ObjectKey{Namespace: ns.Name, Name: chainNode.Spec.Genesis.GetConfigMapName(chainNode.Status.ChainID)}, genesis)).To(Succeed())
+				Expect(genesis.Data[chainutils.GenesisFilename]).NotTo(BeEmpty())
+				restoreGenesis := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{GenerateName: "restore-genesis-", Namespace: ns.Name}, Data: genesis.Data, BinaryData: genesis.BinaryData}
+				Expect(Framework().Client().Create(Framework().Context(), restoreGenesis)).To(Succeed())
 
 				// Wait for cosmopilot to create at least one ready snapshot
 				By("Waiting for cosmopilot to create a snapshot")
 				var snapshotName string
 				Eventually(func() bool {
-					snapshotName = findReadySnapshotForPVC(ns.Name, chainNode.Name)
+					snapshotName = findReadySnapshotForPVC(ns.Name, chainNode.Name, progressObserved)
 					return snapshotName != ""
 				}, 2*time.Minute, 10*time.Second).Should(BeTrue())
 
@@ -64,7 +76,7 @@ var _ = Describe("Snapshot E2E", func() {
 				// Wait for ChainNode to be deleted
 				Eventually(func() bool {
 					err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(chainNode), chainNode)
-					return err != nil
+					return apierrors.IsNotFound(err)
 				}).Should(BeTrue())
 
 				// Create a new ChainNode that restores from the snapshot
@@ -78,17 +90,25 @@ var _ = Describe("Snapshot E2E", func() {
 				}
 				// Remove validator init since we're restoring from snapshot
 				restoredChainNode.Spec.Validator = nil
-				// Set genesis to use data volume since genesis is already in the snapshot
 				restoredChainNode.Spec.Genesis = &appsv1.GenesisConfig{
-					UseDataVolume: ptr.To(true),
-					ChainID:       ptr.To(app.ValidatorConfig.ChainID),
+					ConfigMap: ptr.To(restoreGenesis.Name),
 				}
 
 				err = Framework().Client().Create(Framework().Context(), restoredChainNode)
 				Expect(err).NotTo(HaveOccurred())
 
-				// Wait for restored node to start generating blocks
-				WaitForChainNodeHeight(restoredChainNode, 1)
+				Eventually(func() (int64, error) {
+					pod := &corev1.Pod{}
+					if err := Framework().Client().Get(Framework().Context(), client.ObjectKeyFromObject(restoredChainNode), pod); err != nil {
+						return 0, err
+					}
+					for _, status := range pod.Status.ContainerStatuses {
+						if status.Name == restoredChainNode.Spec.App.App && status.State.Running != nil && ptr.Deref(status.Started, false) {
+							return liveValidatorHeight(Framework().Context(), Framework().KubeClient(), ns.Name, restoredChainNode.Name)
+						}
+					}
+					return 0, fmt.Errorf("restored application container has not started")
+				}).Should(BeNumerically(">", 0))
 			}),
 		)
 	})
@@ -204,8 +224,7 @@ func snapshotNamesForPVC(namespace, pvcName string) []string {
 	return names
 }
 
-// findReadySnapshotForPVC finds a ready snapshot for a given PVC and returns its name
-func findReadySnapshotForPVC(namespace, pvcName string) string {
+func findReadySnapshotForPVC(namespace, pvcName string, after time.Time) string {
 	snapshotList := &snapshotv1.VolumeSnapshotList{}
 	if err := Framework().Client().List(Framework().Context(), snapshotList, &client.ListOptions{
 		Namespace: namespace,
@@ -216,6 +235,7 @@ func findReadySnapshotForPVC(namespace, pvcName string) string {
 	for _, snap := range snapshotList.Items {
 		if snap.Spec.Source.PersistentVolumeClaimName != nil &&
 			*snap.Spec.Source.PersistentVolumeClaimName == pvcName &&
+			snap.Labels[controllers.LabelChainNode] == pvcName && snap.CreationTimestamp.Time.After(after) &&
 			snap.Status != nil &&
 			snap.Status.ReadyToUse != nil &&
 			*snap.Status.ReadyToUse {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -62,6 +63,10 @@ func (h *TestHelpers) SimulateCertificateReady(namespace, secretName string, dns
 // SimulateSnapshotReady simulates a VolumeSnapshot becoming ready
 // This is useful for integration tests where the CSI driver is not running
 func (h *TestHelpers) SimulateSnapshotReady(namespace, snapshotName string, restoreSize string) error {
+	size, err := resource.ParseQuantity(restoreSize)
+	if err != nil {
+		return fmt.Errorf("parse restore size %q: %w", restoreSize, err)
+	}
 	snapshot := &snapshotv1.VolumeSnapshot{}
 	if err := h.client.Get(h.ctx, types.NamespacedName{
 		Namespace: namespace,
@@ -99,6 +104,7 @@ func (h *TestHelpers) SimulateSnapshotReady(namespace, snapshotName string, rest
 	// Update snapshot status
 	snapshot.Status = &snapshotv1.VolumeSnapshotStatus{
 		BoundVolumeSnapshotContentName: ptr.To(contentName),
+		RestoreSize:                    ptr.To(size),
 		ReadyToUse:                     ptr.To(true),
 		CreationTime:                   ptr.To(metav1.Now()),
 	}

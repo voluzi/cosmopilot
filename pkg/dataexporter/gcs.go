@@ -171,13 +171,9 @@ readChunks:
 	if err := ctx.Err(); err != nil {
 		return UploadResult{}, err
 	}
-	count, cleanup, err := gcs.composeParts(ctx, bucket, partNames, objectName, estimatedArchiveSize, opts)
+	layout, count, cleanup, err := gcs.composeParts(ctx, bucket, partNames, objectName, estimatedArchiveSize, opts)
 	if err != nil {
 		return UploadResult{}, err
-	}
-	layout := "single"
-	if estimatedArchiveSize > opts.SizeLimit {
-		layout = "split"
 	}
 	result := digest.result(opts.Compression, layout, count, objectName+opts.Compression.Extension())
 	result.CleanupRequired = cleanup
@@ -206,15 +202,18 @@ func (gcs *GcsExporter) uploadToGCS(ctx context.Context, bucket, objName string,
 	return writer.Close()
 }
 
-func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects []string, objectName string, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) (int, bool, error) {
+func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects []string, objectName string, estimatedArchiveSize datasize.ByteSize, opts *UploadOptions) (string, int, bool, error) {
 	extension := opts.Compression.Extension()
 	if estimatedArchiveSize <= opts.SizeLimit {
 		cleanup, err := gcs.composeIntoSingleObject(ctx, bucket, objects, objectName+extension, opts)
-		return 1, cleanup, err
+		return "single", 1, cleanup, err
 	}
 	if opts.ChunkSize == opts.PartSize {
 		cleanup, err := gcs.renameToFinalNames(ctx, objects, bucket, objectName, opts)
-		return len(objects), cleanup, err
+		if len(objects) == 1 {
+			return "single", 1, cleanup, err
+		}
+		return "split", len(objects), cleanup, err
 	}
 	partSize := opts.PartSize
 	if partSize%opts.ChunkSize != 0 {
@@ -229,12 +228,12 @@ func (gcs *GcsExporter) composeParts(ctx context.Context, bucket string, objects
 		partName := fmt.Sprintf(format, objectName, i/chunksPerPart)
 		cleanup, err := gcs.composeIntoSingleObject(ctx, bucket, objects[i:min(i+chunksPerPart, len(objects))], partName, opts)
 		if err != nil {
-			return 0, false, err
+			return "", 0, false, err
 		}
 		cleanupRequired = cleanupRequired || cleanup
 		count++
 	}
-	return count, cleanupRequired, nil
+	return "split", count, cleanupRequired, nil
 }
 
 func (gcs *GcsExporter) renameToFinalNames(ctx context.Context, objects []string, bucket, objectName string, opts *UploadOptions) (bool, error) {
