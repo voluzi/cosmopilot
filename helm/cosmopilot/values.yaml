@@ -17,7 +17,8 @@ workerName: ""
 labels: {}
 webHooksEnabled: true
 nodeSelector: {}
-# Resources of the manager container. Set to null to omit requests and limits.
+# Resources of the manager container. Set to null to omit requests and limits. Maps are deep-merged
+# with these defaults, so a partial override keeps the other defaults and {} keeps all of them.
 resources:
   limits:
     cpu: 250m
