@@ -1,0 +1,54 @@
+# Cosmoshub Mainnet Fullnode
+
+```yaml
+apiVersion: cosmopilot.voluzi.com/v1
+kind: ChainNodeSet
+metadata:
+  name: cosmoshub
+spec:
+  app:
+    image: ghcr.io/cosmos/gaia
+    version: v28.3.1
+    app: gaiad
+
+  genesis:
+    url: https://github.com/cosmos/mainnet/raw/master/genesis/genesis.cosmoshub-4.json.gz
+    chainID: cosmoshub-4
+    useDataVolume: true
+
+  nodes:
+    - name: fullnodes
+      instances: 1
+
+      peers:
+        # Polkachu Nodes
+        - id: ade4d8bc8cbe014af6ebdf3cb7b1e9ad36f412c0
+          address: seeds.polkachu.com
+          port: 14956
+
+      persistence:
+        size: 100Gi
+        initTimeout: 1h
+        additionalVolumes:
+          - name: wasm
+            size: 1Gi
+            path: /home/app/wasm
+        additionalInitCommands:
+          - image: ghcr.io/voluzi/node-tools
+            command: [ "sh" ]
+            args:
+              - "-c"
+              - |
+                SNAPSHOT_URL="https://snapshots.kjnodes.com/cosmoshub/snapshot_latest.tar.lz4" && \
+                echo "Downloading snapshot: $SNAPSHOT_URL" && \
+                wget -T 0 -qO- "$SNAPSHOT_URL" | lz4 -d | tar -C /home/app -xvf -
+
+      config:
+        override:
+          app.toml:
+            minimum-gas-prices: 0.025uatom
+            pruning: custom
+            pruning-keep-recent: "100"
+            pruning-interval: "10"
+
+```

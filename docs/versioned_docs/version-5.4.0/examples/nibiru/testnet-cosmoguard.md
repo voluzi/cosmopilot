@@ -1,0 +1,79 @@
+# Nibiru Testnet Cosmoguard
+
+```yaml
+# ChainNodeSet with a CosmoGuard-protected full node group.
+#
+# Cosmopilot deploys a standalone clustered CosmoGuard v6 StatefulSet per node group. It fronts every node in
+# the group (discovered through a headless Service), runs three replicas, and can optionally be autoscaled
+# by an HPA. The group Service is routed through the guard once it is ready.
+#
+# The rules ConfigMap is included below (rules only — Cosmopilot manages upstream/listener/metrics).
+apiVersion: cosmopilot.voluzi.com/v1
+kind: ChainNodeSet
+metadata:
+  name: nibiru-testnet
+spec:
+  app:
+    image: ghcr.io/nibiruchain/nibiru
+    version: 2.21.0
+    app: nibid
+    sdkVersion: v0.47
+
+  validator:
+    accountPrefix: nibi
+    valPrefix: nibivaloper
+    init:
+      chainID: nibiru-testnet-0
+      assets: ["100000000000000unibi"]
+      stakeAmount: 100000000unibi
+      additionalInitCommands:
+        - command: [ "sh", "-c" ]
+          args:
+            - |
+              nibid genesis add-sudo-root-account \
+                $(nibid keys show account -a --home=/home/app --keyring-backend test) \
+                --home=/home/app
+
+  nodes:
+    - name: fullnodes
+      instances: 3
+
+      config:
+        override:
+          app.toml:
+            minimum-gas-prices: 0.025unibi
+
+        cosmoGuard:
+          enable: true
+          config:
+            name: cosmoguard-config
+            key: cosmoguard.yaml
+
+          replicas: 3
+          # Alternative: autoscaling requires metrics-server.
+          # autoscaling:
+          #   enable: true
+          #   minReplicas: 2
+          #   maxReplicas: 8
+          #   targetCPUUtilizationPercentage: 75
+
+          # kubectl port-forward svc/nibiru-testnet-fullnodes-cg 8080:8080
+          dashboard:
+            enable: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cosmoguard-config
+data:
+  cosmoguard.yaml: |
+    lcd:
+      default: allow
+    rpc:
+      default: allow
+      jsonrpc:
+        default: allow
+    grpc:
+      default: allow
+
+```
