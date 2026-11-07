@@ -943,6 +943,12 @@ func (e *ExportTarballConfig) Validate(path string) error {
 	if e == nil {
 		return nil
 	}
+	if e.Protocol != "" && e.Protocol != "legacy" && e.Protocol != "source-v1" {
+		return fmt.Errorf("%s.protocol: unsupported protocol", path)
+	}
+	if e.Protocol == "source-v1" && (e.S3 == nil || e.S3.CredentialsSecret == nil || e.S3.ServiceAccountName != nil) {
+		return fmt.Errorf("%s: source-v1 requires S3 Secret credentials", path)
+	}
 	switch {
 	case e.GCS != nil && e.S3 != nil:
 		return fmt.Errorf("%s: gcs and s3 are mutually exclusive", path)

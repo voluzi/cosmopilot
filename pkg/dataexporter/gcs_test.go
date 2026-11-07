@@ -320,7 +320,6 @@ func TestGcsSplitResultNeverClaimsSingleObject(t *testing.T) {
 		{"composed", "1KB", "2KB", 7000},
 		{"copied", "2KB", "2KB", 7000},
 		{"estimate composed", "1KB", "1MB", 1},
-		{"estimate copied", "1MB", "1MB", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newGCSFixture(t)
@@ -332,6 +331,37 @@ func TestGcsSplitResultNeverClaimsSingleObject(t *testing.T) {
 			require.NoError(t, result.Validate())
 		})
 	}
+}
+
+func TestGcsEstimatedSplitCopyOfOneChunkReportsItsSingleObject(t *testing.T) {
+	for _, compression := range []Compression{CompressionNone, CompressionGzip, CompressionZstd, CompressionLz4} {
+		t.Run(string(compression), func(t *testing.T) {
+			fixture := newGCSFixture(t)
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "state"), []byte("x"), 0600))
+			result, err := fixture.exporter.UploadWithResult(t.Context(), dir, "bucket", "snapshot", WithCompression(compression), WithSizeLimit("1B"), WithChunkSize("1MB"), WithPartSize("1MB"), WithBufferSize("64KB"))
+			require.NoError(t, err)
+			require.NoError(t, result.Validate())
+			key := "snapshot" + compression.Extension()
+			require.Contains(t, fixture.objects, key)
+			stored := fixture.objects[key].Data
+			require.Equal(t, "single", result.Layout)
+			require.Equal(t, 1, result.ObjectCount)
+			require.Equal(t, key, result.ObjectKey)
+			require.Equal(t, fmt.Sprintf("%x", sha256.Sum256(stored)), result.SHA256)
+			require.EqualValues(t, len(stored), result.SizeBytes)
+		})
+	}
+}
+
+func TestGcsSinglePartComposeStaysSplit(t *testing.T) {
+	fixture := newGCSFixture(t)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "state"), []byte("x"), 0600))
+	result, err := fixture.exporter.UploadWithResult(t.Context(), dir, "bucket", "snapshot", WithCompression(CompressionNone), WithSizeLimit("1B"), WithChunkSize("1KB"), WithPartSize("1MB"), WithBufferSize("64KB"))
+	require.NoError(t, err)
+	require.Equal(t, UploadResult{Version: 1, Layout: "split", ObjectCount: 1, Compression: CompressionNone}, result)
+	require.Contains(t, fixture.objects, "snapshot-part-0.tar")
 }
 
 func TestGcsUploadResultSeparatesCleanupFromCompletion(t *testing.T) {

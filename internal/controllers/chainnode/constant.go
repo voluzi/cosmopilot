@@ -16,10 +16,17 @@ const (
 	tarballUploaded    = "uploaded"
 	tarballFinished    = "finished"
 	tarballFailed      = "failed"
-	upgradesConfigFile = "upgrades.json"
+	// Bookkeeping that outlives native status history; never cloud authorization or provenance proof.
+	tarballNativeFinished = "native-finished"
+	tarballNativeFailed   = "native-failed"
+	upgradesConfigFile    = "upgrades.json"
 
 	tarballExportMaxAttempts       = 3
 	tarballDeleteMaxAttempts int32 = 3
+
+	// Cloning a large snapshot can legitimately take a long time before the worker Pod appears.
+	nativePreauthorizationDeadline = time.Hour
+	nativeHistoryLimit             = 32
 
 	timeoutPodRunning              = 5 * time.Minute
 	timeoutPodDeleted              = 2 * time.Minute

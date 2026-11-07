@@ -15,10 +15,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/c2h5oh/datasize"
@@ -708,4 +710,95 @@ func TestS3UploadCancellationJoinsWorker(t *testing.T) {
 		t.Fatal("worker survived upload return")
 	}
 	require.Empty(t, client.completedNames())
+}
+
+func TestNativeS3UsesFrozenRouteAndCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "wrong-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wrong-secret")
+	var redirected atomic.Int32
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1); http.Error(w, "redirected", 500) }))
+	t.Cleanup(redirect.Close)
+	t.Setenv("AWS_ENDPOINT_URL", redirect.URL)
+	t.Setenv("AWS_ENDPOINT_URL_S3", redirect.URL)
+	var auth atomic.Value
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Store(r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte("<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>"))
+	}))
+	t.Cleanup(target.Close)
+	exporter, err := NewS3Exporter(t.Context(), S3Config{Region: "frozen-region", Endpoint: target.URL, ForcePathStyle: true, ExplicitCredentials: &aws.Credentials{AccessKeyID: "frozen-key", SecretAccessKey: "frozen-secret"}})
+	require.NoError(t, err)
+	require.NoError(t, exporter.Delete("bucket", "archive"))
+	require.Zero(t, redirected.Load())
+	require.Contains(t, auth.Load().(string), "frozen-key/")
+	require.Contains(t, auth.Load().(string), "/frozen-region/")
+}
+
+func TestNativeS3CleanupUsesOnlyAcknowledgedExactKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name, layout string
+		count        int
+		keys         []string
+	}{
+		{"single", "single", 1, []string{"export-attempt.tar.gz"}},
+		{"split one object", "split", 1, []string{"export-attempt-part-00000000.tar.gz"}},
+		{"split several objects", "split", 3, []string{"export-attempt-part-00000000.tar.gz", "export-attempt-part-00000001.tar.gz", "export-attempt-part-00000002.tar.gz"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			remaining := map[string]bool{"export-attempt-unrelated.tar.gz": true, "export-attempt-part-00000009.tar.gz": true, "export-other.tar.gz": true}
+			for _, key := range tc.keys {
+				remaining[key] = true
+			}
+			var unexpected atomic.Int32
+			acknowledged := map[string]bool{}
+			for _, key := range tc.keys {
+				acknowledged[key] = true
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				key := strings.TrimPrefix(r.URL.Path, "/bucket/")
+				if r.Method != http.MethodDelete || r.URL.Query().Get("list-type") != "" || !acknowledged[key] {
+					unexpected.Add(1)
+					http.Error(w, "only acknowledged exact deletes permitted", 400)
+					return
+				}
+				mu.Lock()
+				delete(remaining, key)
+				mu.Unlock()
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(server.Close)
+			exporter, err := NewS3Exporter(t.Context(), S3Config{Region: "test", Endpoint: server.URL, ForcePathStyle: true, ExplicitCredentials: &aws.Credentials{AccessKeyID: "key", SecretAccessKey: "secret"}})
+			require.NoError(t, err)
+			result := UploadResult{Version: 1, Layout: tc.layout, ObjectCount: tc.count, Compression: CompressionGzip}
+			if tc.layout == "single" {
+				result.ObjectKey = "export-attempt.tar.gz"
+				result.SHA256 = strings.Repeat("a", 64)
+				result.SizeBytes = 1
+			}
+			require.NoError(t, exporter.DeleteResult(t.Context(), "bucket", "export-attempt", result, 2))
+			require.Zero(t, unexpected.Load())
+			mu.Lock()
+			defer mu.Unlock()
+			require.Equal(t, map[string]bool{"export-attempt-unrelated.tar.gz": true, "export-attempt-part-00000009.tar.gz": true, "export-other.tar.gz": true}, remaining)
+		})
+	}
+}
+
+func TestNativeS3CleanupErrorsNameTheExactObject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `<Error><Code>AccessDenied</Code><Message>denied</Message></Error>`)
+	}))
+	t.Cleanup(server.Close)
+	exporter, err := NewS3Exporter(t.Context(), S3Config{Region: "test", Endpoint: server.URL, ForcePathStyle: true, ExplicitCredentials: &aws.Credentials{AccessKeyID: "key", SecretAccessKey: "secret"}})
+	require.NoError(t, err)
+	err = exporter.DeleteExact(t.Context(), "bucket", "export-attempt.tar.gz")
+	require.ErrorContains(t, err, "bucket")
+	require.ErrorContains(t, err, "export-attempt.tar.gz")
+	var response *awshttp.ResponseError
+	require.ErrorAs(t, err, &response, "the provider error stays inspectable")
+	require.Equal(t, http.StatusForbidden, response.HTTPStatusCode())
 }

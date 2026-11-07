@@ -52,7 +52,9 @@ const (
 	// ConditionUpgrade indicates an upgrade condition.
 	ConditionUpgrade = "Upgrade"
 	// ConditionSnapshotExportCleanup indicates that exported snapshot data requires operator cleanup.
-	ConditionSnapshotExportCleanup = "SnapshotExportCleanup"
+	ConditionSnapshotExportCleanup          = "SnapshotExportCleanup"
+	ConditionSnapshotExportDegraded         = "SnapshotExportDegraded"
+	ConditionSnapshotExportCapacityExceeded = "SnapshotExportCapacityExceeded"
 	// ConditionPodRecreationDeferred indicates that disruption coordination or capacity delayed replacement.
 	ConditionPodRecreationDeferred = "PodRecreationDeferred"
 
@@ -204,7 +206,11 @@ type ChainNodeSpec struct {
 }
 
 // ChainNodeStatus defines the observed state of ChainNode
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.snapshotExportAuthority) || has(self.snapshotExportAuthority)",message="export authority watermark cannot disappear"
 type ChainNodeStatus struct {
+	// +optional
+	SnapshotExportAuthority *SnapshotExportAuthority `json:"snapshotExportAuthority,omitempty"`
+
 	// Indicates the current phase for this ChainNode.
 	// +optional
 	Phase ChainNodePhase `json:"phase,omitempty"`
@@ -366,6 +372,8 @@ type ChainNodeStatus struct {
 	// SnapshotExports records the controller-owned destination and lifecycle state of snapshot tarballs.
 	// It is stored in status so VolumeSnapshot metadata cannot redirect privileged cleanup Jobs.
 	// +optional
+	// +listType=map
+	// +listMapKey=id
 	SnapshotExports []SnapshotExportStatus `json:"snapshotExports,omitempty"`
 
 	// CosmosignerServingIdentity records the effective signing identity of the rolled-out
