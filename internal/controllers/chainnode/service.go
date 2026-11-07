@@ -365,12 +365,14 @@ func (r *Reconciler) getInternalServiceSpec(ctx context.Context, chainNode *apps
 		})
 	}
 
-	if err := r.addStateSyncAnnotations(ctx, chainNode, svc); err != nil {
-		r.recorder.Event(chainNode,
-			corev1.EventTypeWarning,
-			appsv1.ReasonNoTrustHeight,
-			fmt.Sprintf("not adding state-sync details: %v", err),
-		)
+	if chainNode.Spec.Config != nil && chainNode.Spec.Config.StateSync.Enabled() {
+		if err := r.addStateSyncAnnotations(ctx, chainNode, svc); err != nil {
+			r.recorder.Event(chainNode,
+				corev1.EventTypeWarning,
+				appsv1.ReasonNoTrustHeight,
+				fmt.Sprintf("not adding state-sync details: %v", err),
+			)
+		}
 	}
 
 	return svc, controllerutil.SetControllerReference(chainNode, svc, r.Scheme)
