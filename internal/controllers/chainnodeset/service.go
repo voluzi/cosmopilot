@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -94,34 +92,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, nodeSet *appsv1.ChainNo
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {
-	logger := log.FromContext(ctx)
-
-	currentSvc := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(svc), currentSvc)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("creating service", "svc", svc.GetName())
-			return r.Create(ctx, svc)
-		}
-		return err
-	}
-
-	patchResult, err := patch.DefaultPatchMaker.Calculate(currentSvc, svc)
-	if err != nil {
-		return err
-	}
-
-	if !patchResult.IsEmpty() {
-		logger.Info("updating service", "svc", svc.GetName())
-
-		svc.ObjectMeta.ResourceVersion = currentSvc.ObjectMeta.ResourceVersion
-		if err := r.Update(ctx, svc); err != nil {
-			return err
-		}
-	}
-
-	*svc = *currentSvc
-	return nil
+	return controllers.EnsureService(ctx, r.Client, svc)
 }
 
 func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec) (*corev1.Service, error) {
