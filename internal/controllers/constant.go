@@ -19,6 +19,8 @@ const (
 	AnnotationStateSyncTrustHeight                 = "cosmopilot.voluzi.com/state-sync-trust-height"
 	AnnotationStateSyncTrustHash                   = "cosmopilot.voluzi.com/state-sync-trust-hash"
 	AnnotationDataHeight                           = "cosmopilot.voluzi.com/data-height"
+	AnnotationManagedAnnotations                   = "cosmopilot.voluzi.com/managed-annotations"
+	AnnotationManagedLabels                        = "cosmopilot.voluzi.com/managed-labels"
 	AnnotationSafeEvict                            = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 	AnnotationConfigHash                           = "cosmopilot.voluzi.com/config-hash"
 	AnnotationDataInitialized                      = "cosmopilot.voluzi.com/data-initialized"
