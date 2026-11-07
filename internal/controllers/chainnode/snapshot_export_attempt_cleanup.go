@@ -736,8 +736,13 @@ func (r *Reconciler) observeNativeCleanup(ctx context.Context, c *appsv1.ChainNo
 	if selected.UID != a.CleanupPod.UID {
 		return r.stopNativeCleanup(ctx, c, a, "Failed", "CleanupPodUIDChanged")
 	}
-	if selected.Status.Phase == corev1.PodPending && r.snapshotDeleteTime().Sub(a.CleanupIssuedAt.Time) >= nativePreauthorizationDeadline {
-		return r.stopNativeCleanup(ctx, c, a, "Failed", "CleanupWorkerNotStarted")
+	if selected.Status.Phase == corev1.PodPending {
+		if r.snapshotDeleteTime().Sub(a.CleanupIssuedAt.Time) >= nativePreauthorizationDeadline {
+			return r.stopNativeCleanup(ctx, c, a, "Failed", "CleanupWorkerNotStarted")
+		}
+		if unobserved() {
+			return nativeLocal("RecoveryDeferred", a.ExportID, fmt.Errorf("native cleanup worker Pod is not running"))
+		}
 	}
 	complete := false
 	for _, cond := range j.Status.Conditions {

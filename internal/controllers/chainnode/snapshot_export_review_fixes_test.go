@@ -1350,10 +1350,16 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		job := datasnapshot.NativeCleanupJob(a, recipe)
 		require.NoError(t, admin.Create(ctx, job))
 		workerPod(t, job, corev1.PodStatus{Phase: corev1.PodPending})
-		for range 3 {
+		for range 2 {
 			require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
 			a = refresh(t, c)
 		}
+		pending := c.DeepCopy()
+		pending.Status.SnapshotExportAuthority.Attempts[0].CleanupIssuedAt = ptr.To(metav1.NewTime(time.Now().Add(-5 * time.Minute)))
+		require.ErrorContains(t, r.reconcileNativeDeletion(ctx, pending, &pending.Status.SnapshotExportAuthority.Attempts[0], recipe), "RecoveryDeferred")
+		require.Empty(t, refresh(t, c).CleanupState, "a Pending worker within the deadline is reported, not failed")
+		require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
+		a = refresh(t, c)
 		require.Equal(t, "Failed", a.CleanupState)
 		require.Equal(t, "CleanupWorkerNotStarted", a.CleanupReason)
 		require.False(t, a.CleanupComplete)
