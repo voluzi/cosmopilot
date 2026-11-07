@@ -301,6 +301,13 @@ func TestNativeExportAttemptAPIBoundary(t *testing.T) {
 	}
 	pod.OwnerReferences[0] = originalController
 	require.NoError(t, admin.Update(ctx, pod))
+	// A worker that has not started, for example in ImagePullBackOff, is never authorized.
+	require.NoError(t, r.bindNativeResources(ctx, c, a, recipe))
+	a = attempt()
+	require.Equal(t, "ResourcesRequested", a.Phase)
+	require.Nil(t, a.AuthorizedAt)
+	pod.Status.Phase = corev1.PodRunning
+	require.NoError(t, admin.Status().Update(ctx, pod))
 
 	t.Run("later binding proofs defer without authorizing", func(t *testing.T) {
 		for _, path := range []string{"/volumesnapshots/" + s.Name, "/volumesnapshotcontents/" + content.Name, "/secrets/" + recipe.Credentials.Name, "/serviceaccounts/" + recipe.ServiceAccount.Name} {

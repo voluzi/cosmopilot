@@ -548,6 +548,13 @@ func (r *Reconciler) bindNativeResources(ctx context.Context, c *appsv1.ChainNod
 	if nativePodTerminated(selected) {
 		return r.invalidateNativeAttempt(ctx, c, a, "WorkerTerminatedBeforeAuthorization")
 	}
+	// A worker that never starts stays preauthorized, so the preauthorization deadline still applies.
+	if selected.Status.Phase != corev1.PodRunning {
+		if time.Since(a.CreatedAt.Time) > 2*time.Minute {
+			return nativeLocal("RecoveryDeferred", a.ExportID, fmt.Errorf("native worker Pod is not running"))
+		}
+		return nil
+	}
 	if _, err := r.nativeSource(ctx, recipe, true, a); err != nil {
 		var lost *nativeIdentityError
 		if !errors.As(err, &lost) {
