@@ -462,8 +462,18 @@ func startSnapshottingAtHeight(source *appsv1.ChainNode, height int64) {
 
 func restoreStoreHas(ns *corev1.Namespace, object string) bool {
 	GinkgoHelper()
-	_, err := Framework().PodExec(ns.Name, "restore-store", "server", "mc", "stat", "local/backups/"+object)
-	return err == nil
+	// mc stat falls back to prefix matches, so a deleted key would still be found through its sentinel.
+	output, err := Framework().PodExec(ns.Name, "restore-store", "server", "mc", "ls", "--json", "local/backups/")
+	Expect(err).NotTo(HaveOccurred())
+	for _, line := range strings.Split(output, "\n") {
+		var entry struct {
+			Key string `json:"key"`
+		}
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.Key == object {
+			return true
+		}
+	}
+	return false
 }
 
 func createRestoreObjectStore(ns *corev1.Namespace) (string, string) {
