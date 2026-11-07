@@ -17,6 +17,14 @@ workerName: ""
 labels: {}
 webHooksEnabled: true
 nodeSelector: {}
+# Resources of the manager container. Set to null to omit requests and limits.
+resources:
+  limits:
+    cpu: 250m
+    memory: 300Mi
+  requests:
+    cpu: 10m
+    memory: 150Mi
 debugMode: false
 probesEnabled: true
 disruptionChecksEnabled: true

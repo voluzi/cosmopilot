@@ -132,3 +132,7 @@ Exported-snapshot restore requires Data Exporter 2.1.0 or newer, which adds the 
 ### `nodeSelector`
 - **Description**: Node selectors to control where `Cosmopilot` components are scheduled.
 - **Default**: `{}` (no specific node selector)
+
+### `resources`
+- **Description**: CPU and memory requests and limits of the `cosmopilot` manager container. Set to `null` to omit them; an empty map `{}` keeps the defaults because Helm merges it with them.
+- **Default**: requests `cpu: 10m`, `memory: 150Mi`; limits `cpu: 250m`, `memory: 300Mi`

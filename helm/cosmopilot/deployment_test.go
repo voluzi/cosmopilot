@@ -242,6 +242,10 @@ func executeDeploymentTemplate(t *testing.T, releaseName string, values map[stri
 			prefix := strings.Repeat(" ", spaces)
 			return prefix + strings.ReplaceAll(value, "\n", "\n"+prefix)
 		},
+		"nindent": func(spaces int, value string) string {
+			prefix := strings.Repeat(" ", spaces)
+			return "\n" + prefix + strings.ReplaceAll(value, "\n", "\n"+prefix)
+		},
 		"randAlphaNum": func(int) string { return "abcde" },
 		"toString":     func(value any) string { return fmt.Sprint(value) },
 		"regexMatch":   func(pattern, value string) bool { return regexp.MustCompile(pattern).MatchString(value) },
@@ -401,5 +405,55 @@ func TestWebhookObjectSelectorQuotesWorkerName(t *testing.T) {
 			assert.Equal(t, tc.want, label.Value, "workerName %v", tc.workerName)
 			assert.Equal(t, "!!str", label.Tag)
 		}
+	}
+}
+
+func TestManagerResourcesComeFromValues(t *testing.T) {
+	valuesSource, err := os.ReadFile("values.yaml")
+	require.NoError(t, err)
+	var values map[string]any
+	require.NoError(t, yaml.Unmarshal(valuesSource, &values))
+
+	for _, tt := range []struct {
+		name      string
+		resources any
+		want      map[string]map[string]string
+	}{
+		{
+			name:      "values defaults",
+			resources: values["resources"],
+			want: map[string]map[string]string{
+				"limits":   {"cpu": "250m", "memory": "300Mi"},
+				"requests": {"cpu": "10m", "memory": "150Mi"},
+			},
+		},
+		{
+			name:      "custom",
+			resources: map[string]any{"requests": map[string]any{"cpu": "500m", "memory": "1Gi"}},
+			want:      map[string]map[string]string{"requests": {"cpu": "500m", "memory": "1Gi"}},
+		},
+		{name: "null", resources: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			chartValues := defaultChartValues()
+			chartValues["resources"] = tt.resources
+			rendered, err := executeDeploymentTemplate(t, "test", chartValues, "3.0.0-beta.7")
+			require.NoError(t, err)
+
+			var deployment struct {
+				Spec struct {
+					Template struct {
+						Spec struct {
+							Containers []struct {
+								Resources map[string]map[string]string `yaml:"resources"`
+							} `yaml:"containers"`
+						} `yaml:"spec"`
+					} `yaml:"template"`
+				} `yaml:"spec"`
+			}
+			require.NoErrorf(t, yaml.Unmarshal(rendered, &deployment), "%s", rendered)
+			require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
+			assert.Equal(t, tt.want, deployment.Spec.Template.Spec.Containers[0].Resources)
+		})
 	}
 }
