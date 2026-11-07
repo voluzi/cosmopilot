@@ -3,10 +3,8 @@ package chainnode
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strconv"
 
-	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -274,31 +272,7 @@ func (r *Reconciler) getP2pTCPRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {
-	logger := log.FromContext(ctx).WithValues("svc", svc.GetName())
-
-	currentSvc := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(svc), currentSvc)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("creating service")
-			return r.Create(ctx, svc)
-		}
-		return fmt.Errorf("failed to get service %s: %w", svc.GetName(), err)
-	}
-
-	patchResult, err := patch.DefaultPatchMaker.Calculate(currentSvc, svc)
-	if err != nil {
-		return fmt.Errorf("failed to calculate patch for service %s: %w", svc.GetName(), err)
-	}
-
-	if !patchResult.IsEmpty() || !reflect.DeepEqual(currentSvc.Annotations, svc.Annotations) {
-		logger.Info("updating service")
-		svc.ObjectMeta.ResourceVersion = currentSvc.ObjectMeta.ResourceVersion
-		return r.Update(ctx, svc)
-	}
-
-	*svc = *currentSvc
-	return nil
+	return controllers.EnsureService(ctx, r.Client, svc)
 }
 
 func (r *Reconciler) getServiceSpec(chainNode *appsv1.ChainNode) (*corev1.Service, error) {
