@@ -116,6 +116,7 @@ func TestEnsureServiceRecordsServiceCreatedWithoutRecords(t *testing.T) {
 	require.NotContains(t, live.Annotations, AnnotationStateSyncTrustHash)
 	require.Equal(t, "hand-added", live.Annotations["cosmopilot.voluzi.com/operator-note"])
 	require.Equal(t, "enabled", live.Labels["monitoring"], "without a record a label cannot be told apart from a foreign one")
+	require.Equal(t, "app", live.Annotations[AnnotationManagedLabels])
 	requireGKEFieldsKept(t, live)
 
 	require.NoError(t, EnsureService(ctx, c, desiredLoadBalancerService(t, nil, 26656)))
