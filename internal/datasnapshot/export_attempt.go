@@ -189,6 +189,8 @@ func normalizeNativeResources(actual, expected []corev1.Container) error {
 			}
 		}
 		*got = *want.DeepCopy()
+		// Admission such as AlwaysPullImages rewrites the pull policy without changing what runs.
+		actual[i].ImagePullPolicy = expected[i].ImagePullPolicy
 	}
 	return nil
 }

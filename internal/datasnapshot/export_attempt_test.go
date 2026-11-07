@@ -29,6 +29,7 @@ func TestNativeWorkerRejectsAdmittedArchiveChanges(t *testing.T) {
 		}
 		spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("128Mi")}
 		spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("100m")
+		spec.Containers[0].ImagePullPolicy = corev1.PullAlways
 		require.NoError(t, validate(spec, a, r))
 		spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("32Mi")
 		require.Error(t, validate(spec, a, r))

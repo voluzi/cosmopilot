@@ -742,8 +742,11 @@ descriptors and unresolved-cleanup evidence externally before deleting the owner
 because its status disappears. Never forcibly remove export finalizers as routine
 maintenance.
 Admission may add CPU, memory and ephemeral-storage resources or raise explicit
-requests/limits; frozen explicit values cannot be lowered or removed. Archive-affecting
-execution fields remain strict. Scheduler-assigned `nodeName` and admission scheduling
+requests/limits; frozen explicit values cannot be lowered or removed. Admission may also
+change the image pull policy, as `AlwaysPullImages` does. Archive-affecting execution
+fields remain strict: an injected sidecar, init container or environment variable, such as
+a service mesh or secrets webhook adds, invalidates the worker, so exclude export Pods
+from such injection. Scheduler-assigned `nodeName` and admission scheduling
 fields are not frozen archive inputs, because they do not change archive content; the
 actual CSI source and clone bindings and the execution identity remain checked.
 
@@ -755,7 +758,8 @@ readiness keeps the attempt pending; after two minutes it reports
 hour after creation is invalidated with `AuthorizationDeadlineExceeded` and
 `remoteCleanupState: Complete`, which releases its retention exemption and uses one
 of its three upload attempts. The deadline is fixed, covers cloning a large snapshot,
-and moving between these waits does not reset it. There is no time limit once the
+and moving between these waits does not reset it. A storage driver that needs more than
+an hour to provision a clone therefore cannot export natively. There is no time limit once the
 upload is authorized.
 
 Local filesystem calls can delay cancellation; the upload joins its workers before
