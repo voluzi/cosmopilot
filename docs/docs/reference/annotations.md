@@ -15,6 +15,8 @@ snapshot-export cleanup acknowledgement described below.
 | --- | --- | --- |
 | `cosmopilot.voluzi.com/state-sync-trust-height` | Node | Trusted block height used for state-sync. |
 | `cosmopilot.voluzi.com/state-sync-trust-hash` | Node | Trusted block hash used for state-sync. |
+| `cosmopilot.voluzi.com/managed-annotations` | Service | Comma-separated annotation keys the operator applied, so keys it stops setting are removed from the Service. |
+| `cosmopilot.voluzi.com/managed-labels` | Service | Comma-separated label keys the operator applied, so keys it stops setting are removed from the Service. |
 | `cosmopilot.voluzi.com/data-height` | Node / PVC | Block height of the data currently on disk. |
 | `cosmopilot.voluzi.com/data-initialized` | Node | Marks that the data volume has been initialized. |
 | `cosmopilot.voluzi.com/genesis-downloaded` | Node | Marks that the genesis file has been retrieved. |

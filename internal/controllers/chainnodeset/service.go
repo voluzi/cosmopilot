@@ -11,7 +11,6 @@ import (
 	"github.com/banzaicloud/k8s-objectmatcher/patch"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -376,7 +375,7 @@ func (r *Reconciler) ensureGrpcService(ctx context.Context, nodeSet *appsv1.Chai
 	if client.IgnoreNotFound(err) != nil {
 		return err
 	}
-	// ApplyOwned (unlike ensureService) tracks the last-applied state, so it also drops the Traefik
+	// ApplyOwned tracks the last-applied state, so it also drops the Traefik
 	// annotation when the ingress class changes.
 	return cosmoguard.ApplyOwned(ctx, r.Client, r.Scheme, nodeSet, svc)
 }
@@ -437,42 +436,7 @@ func grpcRouteWanted(nodeSet *appsv1.ChainNodeSet, route string) bool {
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, svc *corev1.Service) error {
-	logger := log.FromContext(ctx)
-
-	currentSvc := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(svc), currentSvc)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("creating service", "svc", svc.GetName())
-			return r.Create(ctx, svc)
-		}
-		return err
-	}
-	if err := controllers.RequireSameController(currentSvc, svc, "Service"); err != nil {
-		return err
-	}
-
-	patchResult, err := patch.DefaultPatchMaker.Calculate(currentSvc, svc)
-	if err != nil {
-		return err
-	}
-
-	if !patchResult.IsEmpty() {
-		logger.Info("updating service", "svc", svc.GetName())
-
-		svc.ObjectMeta.ResourceVersion = currentSvc.ObjectMeta.ResourceVersion
-		// ClusterIP(s) are immutable and API-allocated; a full Update that submits the freshly rendered
-		// Service (empty ClusterIP) is rejected. This matters for the CosmoGuard flip, which mutates an
-		// already-created Service's selector/target ports in place. Copy the live allocation forward.
-		svc.Spec.ClusterIP = currentSvc.Spec.ClusterIP
-		svc.Spec.ClusterIPs = currentSvc.Spec.ClusterIPs
-		if err := r.Update(ctx, svc); err != nil {
-			return err
-		}
-	}
-
-	*svc = *currentSvc
-	return nil
+	return controllers.EnsureService(ctx, r.Client, svc)
 }
 
 func (r *Reconciler) getServiceSpec(nodeSet *appsv1.ChainNodeSet, group appsv1.NodeGroupSpec, guardReady bool) (*corev1.Service, error) {
