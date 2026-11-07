@@ -736,6 +736,9 @@ func (r *Reconciler) observeNativeCleanup(ctx context.Context, c *appsv1.ChainNo
 	if selected.UID != a.CleanupPod.UID {
 		return r.stopNativeCleanup(ctx, c, a, "Failed", "CleanupPodUIDChanged")
 	}
+	if selected.Status.Phase == corev1.PodPending && r.snapshotDeleteTime().Sub(a.CleanupIssuedAt.Time) >= nativePreauthorizationDeadline {
+		return r.stopNativeCleanup(ctx, c, a, "Failed", "CleanupWorkerNotStarted")
+	}
 	complete := false
 	for _, cond := range j.Status.Conditions {
 		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {

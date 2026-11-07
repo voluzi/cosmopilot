@@ -1338,6 +1338,26 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		require.NoError(t, admin.Get(ctx, client.ObjectKeyFromObject(late), preserved))
 		require.Equal(t, late.UID, preserved.UID)
 	})
+	t.Run("cleanup worker that never starts fails its ordinal", func(t *testing.T) {
+		c, a, recipe := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
+			a.CleanupAttempt = 1
+			a.CleanupIssuer = string(uuid.NewUUID())
+			a.CleanupIssuedAt = ptr.To(metav1.NewTime(time.Now().Add(-2 * nativePreauthorizationDeadline)))
+			a.RemoteCleanupState = "Required"
+			e.RemoteCleanupState = "Required"
+			e.Phase = appsv1.SnapshotExportPhaseDeleting
+		})
+		job := datasnapshot.NativeCleanupJob(a, recipe)
+		require.NoError(t, admin.Create(ctx, job))
+		workerPod(t, job, corev1.PodStatus{Phase: corev1.PodPending})
+		for range 3 {
+			require.NoError(t, r.reconcileNativeDeletion(ctx, c, a, recipe))
+			a = refresh(t, c)
+		}
+		require.Equal(t, "Failed", a.CleanupState)
+		require.Equal(t, "CleanupWorkerNotStarted", a.CleanupReason)
+		require.False(t, a.CleanupComplete)
+	})
 	t.Run("missing issued cleanup fails its ordinal and never repeats the POST", func(t *testing.T) {
 		c, a, recipe := seed(t, template.Namespace, "Succeeded", func(a *appsv1.SnapshotExportAttempt, e *appsv1.SnapshotExportStatus) {
 			a.CleanupAttempt = 1

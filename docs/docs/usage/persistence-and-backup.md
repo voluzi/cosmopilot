@@ -699,8 +699,9 @@ upload-time Secret UID, and the owned ServiceAccount is recreated when missing.
 
 Cleanup runs up to three numbered issuances, `delete-<attempt-ID>-<N>`, each with a
 fresh witness and exactly one Job POST. A failed Job or worker, a rejected create, an
-invalid admitted resource, or an issuance whose Job or worker is missing for two
-minutes durably fails that ordinal with `remoteCleanupState: Required`. Its Jobs and
+invalid admitted resource, an issuance whose Job or worker is missing for two
+minutes, or a worker still Pending one hour after issuance durably fails that ordinal
+with `remoteCleanupState: Required`. Its Jobs and
 Pods are removed, and after the existing deletion backoff the next ordinal is issued.
 Late Jobs and Pods of retired ordinals are removed and cannot acknowledge a later
 ordinal. Success requires the exact Job and selected Pod of the current ordinal.
