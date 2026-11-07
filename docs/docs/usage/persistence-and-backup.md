@@ -744,9 +744,9 @@ maintenance.
 Admission may add CPU, memory and ephemeral-storage resources or raise explicit
 requests/limits; frozen explicit values cannot be lowered or removed. Admission may also
 change the image pull policy, as `AlwaysPullImages` does. Archive-affecting execution
-fields remain strict: an injected sidecar, init container or environment variable, such as
-a service mesh or secrets webhook adds, invalidates the worker, so exclude export Pods
-from such injection. Scheduler-assigned `nodeName` and admission scheduling
+fields remain strict. Service meshes and secrets webhooks that inject a sidecar, an init
+container or an environment variable therefore invalidate the worker, so exclude export
+Pods from such injection. Scheduler-assigned `nodeName` and admission scheduling
 fields are not frozen archive inputs, because they do not change archive content; the
 actual CSI source and clone bindings and the execution identity remain checked.
 
