@@ -19,7 +19,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gateway "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayalpha "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -58,7 +57,6 @@ func manualRecoveryFixture(t *testing.T, validator bool) (*Reconciler, *appsv1.C
 	t.Cleanup(func() { http.DefaultTransport = transport })
 	r, node := pkcs11TestNode(t, validator)
 	require.NoError(t, gateway.Install(r.Scheme))
-	require.NoError(t, gatewayalpha.Install(r.Scheme))
 	require.NoError(t, snapshot.AddToScheme(r.Scheme))
 	node.Spec.App = appsv1.AppSpec{Image: "image", App: "appd", Version: ptr.To("1.0.0")}
 	node.Spec.Genesis = &appsv1.GenesisConfig{ConfigMap: ptr.To("genesis")}

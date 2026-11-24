@@ -10,7 +10,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
 // Gateway API server-side defaults that the apiserver stamps onto routes when
@@ -102,15 +101,13 @@ func applyGRPCRouteDefaults(route *gwapiv1.GRPCRoute) {
 // applyTCPRouteDefaults mirrors the defaults the apiserver applies to a
 // TCPRoute. TCPRoute has no Matches field; only ParentRefs and BackendRefs
 // need defaulting.
-func applyTCPRouteDefaults(route *gwapiv1a2.TCPRoute) {
+func applyTCPRouteDefaults(route *gwapiv1.TCPRoute) {
 	for i := range route.Spec.ParentRefs {
 		if route.Spec.ParentRefs[i].Group == nil {
-			g := gwapiv1a2.Group(groupGateway)
-			route.Spec.ParentRefs[i].Group = &g
+			route.Spec.ParentRefs[i].Group = &groupGateway
 		}
 		if route.Spec.ParentRefs[i].Kind == nil {
-			k := gwapiv1a2.Kind(kindGateway)
-			route.Spec.ParentRefs[i].Kind = &k
+			route.Spec.ParentRefs[i].Kind = &kindGateway
 		}
 	}
 	for ri := range route.Spec.Rules {
@@ -118,12 +115,10 @@ func applyTCPRouteDefaults(route *gwapiv1a2.TCPRoute) {
 		for bi := range rule.BackendRefs {
 			br := &rule.BackendRefs[bi]
 			if br.Group == nil {
-				g := gwapiv1a2.Group(groupCore)
-				br.Group = &g
+				br.Group = &groupCore
 			}
 			if br.Kind == nil {
-				k := gwapiv1a2.Kind(kindService)
-				br.Kind = &k
+				br.Kind = &kindService
 			}
 			if br.Weight == nil {
 				br.Weight = defaultWeight
@@ -252,11 +247,11 @@ func EnsureGRPCRoute(ctx context.Context, c client.Client, route *gwapiv1.GRPCRo
 // EnsureTCPRoute creates or updates the given TCPRoute. See EnsureHTTPRoute
 // for the meaning of the bool return value and the defaulting/annotation
 // rationale.
-func EnsureTCPRoute(ctx context.Context, c client.Client, route *gwapiv1a2.TCPRoute) (bool, error) {
+func EnsureTCPRoute(ctx context.Context, c client.Client, route *gwapiv1.TCPRoute) (bool, error) {
 	logger := log.FromContext(ctx)
 	applyTCPRouteDefaults(route)
 
-	current := &gwapiv1a2.TCPRoute{}
+	current := &gwapiv1.TCPRoute{}
 	err := c.Get(ctx, client.ObjectKeyFromObject(route), current)
 	if err != nil {
 		if IsCRDNotInstalled(err) {

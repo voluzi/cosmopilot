@@ -16,7 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -30,7 +29,6 @@ func routingOwnershipReconciler(t *testing.T) (*Reconciler, *appsv1.ChainNodeSet
 	require.NoError(t, k8sappsv1.AddToScheme(scheme))
 	require.NoError(t, networkingv1.AddToScheme(scheme))
 	require.NoError(t, gwapiv1.Install(scheme))
-	require.NoError(t, gwapiv1a2.Install(scheme))
 	owner := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "ns", Namespace: "default", UID: "owner-uid"}}
 	// A ChainNodeSet with the same name in another namespace carries the same selector labels.
 	twin := &appsv1.ChainNodeSet{ObjectMeta: metav1.ObjectMeta{Name: "ns", Namespace: "other", UID: "twin-uid"}}
@@ -117,8 +115,8 @@ func TestSeedCleanupOnlyDeletesOwnedResources(t *testing.T) {
 	foreignSet := createControlled(t, r, &k8sappsv1.StatefulSet{ObjectMeta: routingObjectMeta("default", "ns-seed", nil)}, foreign)
 	foreignIngress := createControlled(t, r, &networkingv1.Ingress{ObjectMeta: routingObjectMeta("default", "ns-seed", nil)}, nil)
 	ownedRoute := createControlled(t, r, &gwapiv1.HTTPRoute{ObjectMeta: routingObjectMeta("default", "ns-seed", nil)}, owner)
-	ownedTCP := createControlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routingObjectMeta("default", "ns-seed-0-p2p", seed)}, owner)
-	foreignTCP := createControlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routingObjectMeta("default", "user-p2p", seed)}, nil)
+	ownedTCP := createControlled(t, r, &gwapiv1.TCPRoute{ObjectMeta: routingObjectMeta("default", "ns-seed-0-p2p", seed)}, owner)
+	foreignTCP := createControlled(t, r, &gwapiv1.TCPRoute{ObjectMeta: routingObjectMeta("default", "user-p2p", seed)}, nil)
 	ownedSvc := createControlled(t, r, &corev1.Service{ObjectMeta: routingObjectMeta("default", "ns-seed-0", seed)}, owner)
 	foreignSvc := createControlled(t, r, &corev1.Service{ObjectMeta: routingObjectMeta("default", "user-seed", seed)}, foreign)
 

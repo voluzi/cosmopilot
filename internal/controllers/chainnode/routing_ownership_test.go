@@ -14,7 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -27,7 +26,6 @@ func routingOwnershipReconciler(t *testing.T) (*Reconciler, *appsv1.ChainNode, *
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, networkingv1.AddToScheme(scheme))
 	require.NoError(t, gwapiv1.Install(scheme))
-	require.NoError(t, gwapiv1a2.Install(scheme))
 	owner := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "default", UID: "owner-uid"}}
 	foreign := &appsv1.ChainNode{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "foreign-uid"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.ChainNode{}).Build()
@@ -106,7 +104,7 @@ func TestGatewayCleanupKeepsRoutesItDoesNotControl(t *testing.T) {
 	ownedHTTP.Labels = routeLabels
 	controlled(t, r, ownedHTTP, owner)
 	foreignGRPC := controlled(t, r, &gwapiv1.GRPCRoute{ObjectMeta: routeMeta("node-grpc")}, foreign)
-	foreignTCP := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, foreign)
+	foreignTCP := controlled(t, r, &gwapiv1.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, foreign)
 
 	require.NoError(t, r.cleanupGatewayRoutes(context.Background(), owner))
 	require.NoError(t, r.cleanupTCPRoute(context.Background(), owner))
@@ -119,7 +117,7 @@ func TestGatewayCleanupKeepsRoutesItDoesNotControl(t *testing.T) {
 func TestGatewayCleanupDeletesOwnedRoutes(t *testing.T) {
 	r, owner, _ := routingOwnershipReconciler(t)
 	grpc := controlled(t, r, &gwapiv1.GRPCRoute{ObjectMeta: routeMeta("node-grpc")}, owner)
-	tcp := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, owner)
+	tcp := controlled(t, r, &gwapiv1.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, owner)
 
 	require.NoError(t, r.cleanupGatewayRoutes(context.Background(), owner))
 	require.NoError(t, r.cleanupTCPRoute(context.Background(), owner))
@@ -130,7 +128,7 @@ func TestGatewayCleanupDeletesOwnedRoutes(t *testing.T) {
 func TestDisabledExposeKeepsForeignP2PResources(t *testing.T) {
 	r, owner, foreign := routingOwnershipReconciler(t)
 	p2p := controlled(t, r, &corev1.Service{ObjectMeta: routeMeta("node-p2p")}, foreign)
-	tcp := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, nil)
+	tcp := controlled(t, r, &gwapiv1.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, nil)
 
 	desired, err := r.getP2pServiceSpec(owner)
 	require.NoError(t, err)
@@ -142,7 +140,7 @@ func TestDisabledExposeKeepsForeignP2PResources(t *testing.T) {
 func TestDisabledExposeDeletesOwnedP2PResources(t *testing.T) {
 	r, owner, _ := routingOwnershipReconciler(t)
 	p2p := controlled(t, r, &corev1.Service{ObjectMeta: routeMeta("node-p2p")}, owner)
-	tcp := controlled(t, r, &gwapiv1a2.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, owner)
+	tcp := controlled(t, r, &gwapiv1.TCPRoute{ObjectMeta: routeMeta("node-p2p")}, owner)
 
 	desired, err := r.getP2pServiceSpec(owner)
 	require.NoError(t, err)

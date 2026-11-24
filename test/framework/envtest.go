@@ -20,7 +20,6 @@ import (
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -104,9 +103,6 @@ func (f *EnvTestFramework) Setup(ctx context.Context) error {
 	}
 	if err := gwapiv1.AddToScheme(scheme.Scheme); err != nil {
 		return fmt.Errorf("failed to add gateway-api/v1 to scheme: %w", err)
-	}
-	if err := gwapiv1a2.AddToScheme(scheme.Scheme); err != nil {
-		return fmt.Errorf("failed to add gateway-api/v1alpha2 to scheme: %w", err)
 	}
 
 	// Create clients
