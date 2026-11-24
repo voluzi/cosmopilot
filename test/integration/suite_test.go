@@ -9,7 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"github.com/voluzi/cosmopilot/v5/test/framework"
+	"github.com/voluzi/cosmopilot/v6/test/framework"
 )
 
 var (

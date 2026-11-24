@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/utils"
+	"github.com/voluzi/cosmopilot/v6/pkg/utils"
 )
 
 // HasLegacyPerInstanceCosmosignerStatus reports whether status still records the pre-group-identity

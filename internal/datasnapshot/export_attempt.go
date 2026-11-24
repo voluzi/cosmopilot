@@ -13,10 +13,10 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
-	"github.com/voluzi/cosmopilot/v5/internal/k8s"
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
+	"github.com/voluzi/cosmopilot/v6/internal/k8s"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
 )
 
 func NativeLabels(a *appsv1.SnapshotExportAttempt, r exportprotocol.Recipe) map[string]string {

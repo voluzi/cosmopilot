@@ -40,14 +40,14 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
-	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
-	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
-	"github.com/voluzi/cosmopilot/v5/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v6/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
+	"github.com/voluzi/cosmopilot/v6/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v6/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v6/pkg/utils"
 )
 
 func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, template *appsv1.ChainNode, source *snapshotv1.VolumeSnapshot, completed *appsv1.SnapshotExportAttempt, original exportprotocol.Recipe, dropCleanupACK *atomic.Bool, posts *atomic.Int32, failStatusWrite *atomic.Bool, dropStatusACK *atomic.Bool) {

@@ -17,9 +17,9 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/voluzi/cosmopilot/v5/internal/chainutils/sdkcmd"
-	"github.com/voluzi/cosmopilot/v5/internal/k8s"
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v6/internal/chainutils/sdkcmd"
+	"github.com/voluzi/cosmopilot/v6/internal/k8s"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
 )
 
 type createValidatorResultReader interface {

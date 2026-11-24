@@ -15,10 +15,10 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v5/pkg/environ"
-	"github.com/voluzi/cosmopilot/v5/test/e2e/apps"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v6/pkg/environ"
+	"github.com/voluzi/cosmopilot/v6/test/e2e/apps"
 )
 
 var _ = Describe("PKCS11 SoftHSM", Label("cosmosigner", "pkcs11"), func() {

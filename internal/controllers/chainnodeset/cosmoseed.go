@@ -24,13 +24,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
-	"github.com/voluzi/cosmopilot/v5/internal/k8s"
-	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v5/pkg/utils"
+	"github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v6/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/k8s"
+	"github.com/voluzi/cosmopilot/v6/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v6/pkg/utils"
 )
 
 func (r *Reconciler) ensureSeedNodes(ctx context.Context, nodeSet *v1.ChainNodeSet) error {

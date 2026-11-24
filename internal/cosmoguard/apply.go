@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
 )
 
 // ApplyOwned creates or updates obj as a resource owned by owner. It refuses to overwrite a

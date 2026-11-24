@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
 )
 
 const LabelWorkerName = "worker-name"

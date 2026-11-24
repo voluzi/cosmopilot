@@ -8,7 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
 )
 
 func TestGenerationChangedPredicateAllowsChainNodeSetDeletionTimestamp(t *testing.T) {

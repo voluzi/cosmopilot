@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
 )
 
 func nativeExportEvent(o client.Object) bool {

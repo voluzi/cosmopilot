@@ -14,9 +14,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
 )
 
 var _ = Describe("P2P TCPRoute v1", func() {

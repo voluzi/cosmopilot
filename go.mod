@@ -1,4 +1,4 @@
-module github.com/voluzi/cosmopilot/v5
+module github.com/voluzi/cosmopilot/v6
 
 go 1.27.4
 

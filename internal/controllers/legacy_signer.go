@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
 )
 
 // LegacySignerGuard shares authoritative passes between the node and set controllers.

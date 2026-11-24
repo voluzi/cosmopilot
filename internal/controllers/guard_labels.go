@@ -3,7 +3,7 @@ package controllers
 import (
 	"strings"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/utils"
+	"github.com/voluzi/cosmopilot/v6/pkg/utils"
 )
 
 // CosmoGuardLabelDomain is the label-key domain CosmoGuard owns: the guard-private selector labels

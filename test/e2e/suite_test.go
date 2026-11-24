@@ -9,9 +9,9 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/environ"
-	"github.com/voluzi/cosmopilot/v5/test/e2e/apps"
-	"github.com/voluzi/cosmopilot/v5/test/framework"
+	"github.com/voluzi/cosmopilot/v6/pkg/environ"
+	"github.com/voluzi/cosmopilot/v6/test/e2e/apps"
+	"github.com/voluzi/cosmopilot/v6/test/framework"
 )
 
 var (
