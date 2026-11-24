@@ -274,18 +274,31 @@ func (f *KindFramework) LoadImage(image string) error {
 // That path is the one the tag-only image resolution bug lived on, and it is otherwise untestable
 // without publishing a second copy of an app image somewhere CI can reach.
 func (f *KindFramework) MirrorImage(src, dst string) error {
+	dir, err := os.MkdirTemp("", "cosmopilot-e2e-image-")
+	if err != nil {
+		return fmt.Errorf("create image archive directory: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	archive := filepath.Join(dir, "image.tar")
+	// Kind imports every platform listed in the archive, even when Docker only pulled one.
+	platform := "linux/" + runtime.GOARCH
 	for _, args := range [][]string{
-		{"pull", src},
+		{"pull", "--platform", platform, src},
 		{"tag", src, dst},
+		{"image", "save", "--platform", platform, "--output", archive, dst},
 	} {
 		cmd := exec.CommandContext(f.ctx, "docker", args...)
 		if output, err := cmd.CombinedOutput(); err != nil {
-			// Report the whole command: a `tag` failure is about the destination reference, which
-			// naming only the source would hide.
 			return fmt.Errorf("docker %s: %s: %w", strings.Join(args, " "), string(output), err)
 		}
 	}
-	return f.LoadImage(dst)
+
+	cmd := exec.CommandContext(f.ctx, f.kindPath, "load", "image-archive", archive, "--name", f.cfg.ClusterName)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("load image %s into Kind: %s: %w", dst, string(output), err)
+	}
+	return nil
 }
 
 // DeployController deploys the controller to the cluster using Helm.
